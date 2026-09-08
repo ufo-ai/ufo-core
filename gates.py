@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import re
 import sys
+import tokenize
 from collections import defaultdict
 from pathlib import Path
 from sys import stdlib_module_names
@@ -2111,6 +2113,170 @@ def _app_bundle_failures() -> list[str]:
     return _app_slug_failures(shipped, homes, built, entries, typechecked)
 
 
+COMMENT_CEILING = 2
+COMMENT_GATED_ROOTS = (
+    ".github",
+    "client",
+    "core",
+    "dev",
+    "extensions",
+    "infra",
+    "packs",
+    "sandbox",
+    "scripts",
+    "servers",
+    "testsupport",
+)
+COMMENT_GATED_SUFFIXES = (
+    ".css",
+    ".py",
+    ".rs",
+    ".sh",
+    ".tf",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".yaml",
+    ".yml",
+)
+COMMENT_ALIGNMENT_FILES = (
+    Path("infra/modules/platform/iam.tf"),
+    Path("infra/modules/platform/ses.tf"),
+)
+COMMENT_GENERATED = re.compile(r"_pb2\.py$|/page/kit/[^/]+-[A-Za-z0-9_]{8,}\.js$|\.tsbuildinfo$")
+COMMENT_KEPT = re.compile(
+    r"SPDX|Copyright|Licensed under|@license|@preserve|noqa|type:\s*ignore|mypy:|pyright|ruff:"
+    r"|flake8|pylint|eslint|@ts-|prettier-ignore|biome-ignore|(?:c8|istanbul|v8)\s+ignore"
+    r"|@vitest-environment|@jsxImportSource|sourceMappingURL|vite-ignore|webpackIgnore"
+    r"|\#region|\#endregion|rustfmt::skip|clippy::|shellcheck|tflint|checkov|yamllint|hadolint"
+    r"|@charset|-\*-\s*coding",
+    re.I,
+)
+HASH_COMMENT = ("#",)
+SLASH_COMMENT = ("//", "/*", "{/*")
+COMMENT_OPENERS = {
+    ".css": ("/*", "{/*"),
+    ".py": HASH_COMMENT,
+    ".rs": SLASH_COMMENT,
+    ".sh": HASH_COMMENT,
+    ".tf": (*HASH_COMMENT, "//"),
+    ".toml": HASH_COMMENT,
+    ".ts": SLASH_COMMENT,
+    ".tsx": SLASH_COMMENT,
+    ".yaml": HASH_COMMENT,
+    ".yml": HASH_COMMENT,
+}
+PUBLIC_DECLARATION = re.compile(r"^(?:export\b|pub\b|pub\(crate\)|#\[|@)")
+
+
+def _python_comment_lines(text: str) -> frozenset[int]:
+    """The lines Python's own tokenizer calls a whole-line comment, so a `#` inside a string
+    literal is a string — a test that holds a narrated module as a fixture would otherwise read as
+    a narrated module. A file that does not parse contributes nothing."""
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (SyntaxError, tokenize.TokenError):
+        return frozenset()
+    return frozenset(
+        token.start[0]
+        for token in tokens
+        if token.type == tokenize.COMMENT and not token.line[: token.start[1]].strip()
+    )
+
+
+def _comment_runs(text: str, suffix: str) -> list[tuple[int, list[str]]]:
+    """Every run of consecutive whole-line comments, as (first line number, lines). A comment
+    trailing code is not a run: it cannot grow into the paragraph this bounds."""
+    openers = COMMENT_OPENERS[suffix]
+    tokenized = _python_comment_lines(text) if suffix == ".py" else frozenset()
+    runs: list[tuple[int, list[str]]] = []
+    run: list[str] = []
+    start = 0
+    inside = False
+    for number, line in enumerate(text.split("\n"), start=1):
+        body = line.strip()
+        if number == 1 and body.startswith("#!"):
+            comment = False
+        elif suffix == ".py":
+            comment = number in tokenized
+        elif inside:
+            comment = True
+            if "*/" in line:
+                inside = False
+        elif body.startswith(openers):
+            comment = True
+            if body.startswith(("/*", "{/*")) and "*/" not in line:
+                inside = True
+        else:
+            comment = False
+        if comment:
+            if not run:
+                start = number
+            run.append(line)
+            continue
+        if run:
+            runs.append((start, run))
+            run = []
+    if run:
+        runs.append((start, run))
+    return runs
+
+
+def _is_public_docstring(run: list[str], after: str) -> bool:
+    """A docstring on a public API, which the comment rule allows at any length: `///` or `//!` in
+    Rust, `/** */` in TypeScript, standing immediately over the declaration it documents. `cargo
+    doc` and the kit catalogue publish these to a reader who never opens the file, so they are
+    documentation with an audience rather than commentary beside code. A doc comment floating over
+    nothing, and one over a private item, is commentary and takes the ceiling."""
+    opener = run[0].strip()
+    if opener.startswith("//!"):
+        return True
+    if not opener.startswith(("///", "/**")):
+        return False
+    return bool(PUBLIC_DECLARATION.match(after.strip()))
+
+
+def _overlong_comments(rel: Path, text: str) -> list[str]:
+    """A comment block past the ceiling. A docstring on a public API is exempt at any length, and so
+    is a licence or a tool pragma — deleting either breaks a build rather than a paragraph."""
+    lines = text.split("\n")
+    failures = []
+    for start, run in _comment_runs(text, rel.suffix):
+        if len(run) <= COMMENT_CEILING:
+            continue
+        block = "\n".join(run)
+        if COMMENT_KEPT.search(block):
+            continue
+        after = next((line for line in lines[start - 1 + len(run) :] if line.strip()), "")
+        if _is_public_docstring(run, after):
+            continue
+        failures.append(
+            f"{rel}:{start}: comment block of {len(run)} lines — a comment a reader could derive "
+            f"from the code it sits on is deleted, not shortened ({COMMENT_CEILING}-line ceiling)"
+        )
+    return failures
+
+
+def _comment_length_failures() -> list[str]:
+    """Two lines is the ceiling for a comment, because a paragraph is what a reader skips. The
+    exempt trees are the ones whose comments are input rather than commentary: a `skills/` folder is
+    text a model reads and ships only ablated, `evals/` holds fixtures pinned by digest and arms
+    that pin the bytes they replace, and the platform authorization files hand the deploy gate an
+    `=` column that a deleted comment realigns into a false grant contraction."""
+    trees = (path for root in COMMENT_GATED_ROOTS for path in (ROOT / root).rglob("*"))
+    failures = []
+    for path in sorted({*trees, *ROOT.glob("*")}):
+        if path.suffix not in COMMENT_GATED_SUFFIXES or not path.is_file():
+            continue
+        if _vendored(path) or _is_skill_content(path) or ".terraform" in path.parts:
+            continue
+        rel = path.relative_to(ROOT)
+        if rel in COMMENT_ALIGNMENT_FILES or COMMENT_GENERATED.search(str(rel)):
+            continue
+        failures.extend(_overlong_comments(rel, path.read_text()))
+    return failures
+
+
 def _kit_catalogue_failures() -> list[str]:
     """The catalogue is what an agent reads before it composes an app page — the one place the kit
     describes itself. It is generated from `kit.ts`, and it is committed because the agent reads it
@@ -2450,6 +2616,7 @@ def main() -> int:
     failures.extend(_portal_style_failures())
     failures.extend(_composition_rhythm_failures())
     failures.extend(_kit_catalogue_failures())
+    failures.extend(_comment_length_failures())
     failures.extend(_framed_stat_failures())
     failures.extend(_waiting_line_failures())
     failures.extend(_app_bundle_failures())

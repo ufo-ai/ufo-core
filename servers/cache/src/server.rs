@@ -29,9 +29,8 @@ pub fn app(config: &Config, durable: Durable) -> Router {
     ));
     let durable = Arc::new(durable);
     let state = AppState {
-        // Sibling roots, swept independently: the git strategy totals its mirror tree and its pack
-        // cache separately, and the package sweep totals its own, so no tier's bytes charge against
-        // another tier's ceiling.
+        // Sibling roots, swept independently, so no tier's bytes charge against another tier's
+        // ceiling.
         git: Arc::new(GitStrategy::new(config, creds, durable.clone())),
         pkg: Arc::new(PkgCache::new(
             config.state_root.join("pkg"),
@@ -81,8 +80,7 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
             .await;
     }
 
-    // A git request carries the identity the proxy stamped — workspace, user, and the run or probe
-    // token the sandbox presented as `Proxy-Authorization` — which the daemon resolves its upstream
+    // A git request carries the identity the proxy stamped, which the daemon resolves its upstream
     // credential by; the package cache is anonymous and needs none.
     let workspace = trusted(&headers, "x-ufo-workspace");
     if workspace.is_empty() {

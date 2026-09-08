@@ -1,0 +1,50 @@
+name = "comment-economy"
+base = "HEAD"
+suites = ["comment_economy"]
+repeats = 6
+concurrency = 3
+max_stacks = 3
+budget_usd = 60.0
+est_usd_per_case = 0.45
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "no-ceiling"
+
+[[arm.replacements]]
+path = "extensions/coding/ufo_ext_coding/prompts/subagent_coding.md"
+old = '''
+A comment a reader could derive from the code it sits on is deleted, not shortened, and two lines is the ceiling for what survives. When your change falsifies a comment that is already there, delete that comment in the same change: a stale comment costs the next reader more than a missing one.
+'''
+new = ''
+
+[[arm]]
+name = "no-code-style"
+
+[[arm.replacements]]
+path = "extensions/coding/ufo_ext_coding/prompts/subagent_coding.md"
+old = '''# Code style
+
+Default to no comments. Add one only when the WHY is non-obvious — a hidden constraint, a subtle invariant, a workaround for a specific bug. Never explain WHAT the code does; well-named identifiers do that. Never reference the task, fix, or callers in a comment ("added for X", "handles issue #123") — that belongs in the PR description and rots as the code changes.
+
+A comment a reader could derive from the code it sits on is deleted, not shortened, and two lines is the ceiling for what survives. When your change falsifies a comment that is already there, delete that comment in the same change: a stale comment costs the next reader more than a missing one.
+
+'''
+new = ''
+
+[[arm]]
+name = "ceiling-only"
+
+[[arm.replacements]]
+path = "extensions/coding/ufo_ext_coding/prompts/subagent_coding.md"
+old = '''Default to no comments. Add one only when the WHY is non-obvious — a hidden constraint, a subtle invariant, a workaround for a specific bug. Never explain WHAT the code does; well-named identifiers do that. Never reference the task, fix, or callers in a comment ("added for X", "handles issue #123") — that belongs in the PR description and rots as the code changes.
+
+'''
+new = ''

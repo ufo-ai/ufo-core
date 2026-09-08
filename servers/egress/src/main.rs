@@ -56,9 +56,8 @@ async fn main() {
         }
     };
     let result = proxy.serve(config.bind, shutdown).await;
-    // The connection drain is done; drop the proxy so every meter sink but the batcher's own is
-    // gone, then await the batcher so its last window posts before exit — a SIGTERM must not discard
-    // queued egress and token records.
+    // Drop the proxy so every meter sink but the batcher's own is gone, then await the batcher: a
+    // SIGTERM must not discard queued egress and token records.
     drop(proxy);
     meter.shutdown().await;
     if let Err(error) = result {

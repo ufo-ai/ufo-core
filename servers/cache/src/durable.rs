@@ -6,9 +6,8 @@ use tokio::io::AsyncWriteExt;
 
 static RESTORE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A temp path unique to this restore: appended (not `with_extension`, which would collapse
-/// `<hash>.meta` and `<hash>.body` onto one `<hash>.restoring`) and sequenced so two concurrent
-/// restores of the same key never share a temp file.
+/// Appended rather than `with_extension`, which would collapse `<hash>.meta` and `<hash>.body` onto
+/// one `<hash>.restoring`, and sequenced so two restores never share a temp.
 fn restore_temp(dest: &Path) -> PathBuf {
     let seq = RESTORE_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut name = dest.as_os_str().to_owned();

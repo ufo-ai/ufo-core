@@ -27,9 +27,8 @@ struct CallbackBody {
     principal: String,
 }
 
-/// TTL for a cached credential. The control plane is re-asked for the principal's connector OAuth
-/// token once this elapses; the principal is deterministic, so a re-resolve never moves a repo's
-/// mirror.
+/// The principal is deterministic, so re-asking the control plane for its OAuth token never moves a
+/// repo's mirror.
 const CREDENTIAL_TTL: Duration = Duration::from_secs(240);
 
 /// Asks the control plane's `/internal/git-credential` for the credential of the principal the

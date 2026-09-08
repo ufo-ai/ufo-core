@@ -48,9 +48,8 @@ pub async fn run(
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            // Any finite RLIMIT_AS makes macOS reject the exec of a dynamically linked
-            // binary with EINVAL (the dyld shared-cache reservation exceeds the limit); the
-            // deployed container is Linux, where the bound is real and enforced.
+            // Any finite RLIMIT_AS makes macOS reject the exec of a dynamically linked binary with
+            // EINVAL; the deployed container is Linux, where the bound is enforced.
             #[cfg(target_os = "linux")]
             if let Some(memory) = memory {
                 set_rlimit(libc::RLIMIT_AS, memory)?;

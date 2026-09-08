@@ -105,10 +105,8 @@ resource "datadog_monitor" "source_stream_refused_everywhere" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
-# A page a consumer's handler refuses on its own is parked: stepped over, recorded, and retried on
-# its own hour, so one page never holds the pages behind it. A parked page is still a page nothing
-# indexes, and it re-counts every hour it stays refused. Ten in six hours is two pages stuck for the
-# window or one burst of them, either of which is a provider or a handler that needs a person.
+# A parked page re-counts every hour it stays refused, so ten in six hours is two pages stuck for
+# the window or one burst of them — a provider or a handler that needs a person.
 resource "datadog_monitor" "page_change_parked" {
   name    = "ufo prod page change pages parked"
   type    = "query alert"
@@ -125,12 +123,8 @@ resource "datadog_monitor" "page_change_parked" {
   tags = ["env:prod", "managed-by:terraform"]
 }
 
-# A consumer refusing page after page is not a page's fault, so past PAGE_CHANGE_PARK_MAX parked
-# pages the drive stops at its cursor rather than stepping a workspace's whole backlog aside — and
-# every later tick stops in the same place, holding every page behind it. The threshold is what
-# separates the two faults this counts: a provider blip fails once or twice and then passes, while a
-# consumer that cannot run keeps stopping at the tick rate. Ten in fifteen minutes is only reachable
-# by the second.
+# A provider blip stops the drive once or twice and then passes; a consumer that cannot run stops
+# at the tick rate. Ten in fifteen minutes is only reachable by the second.
 resource "datadog_monitor" "page_change_stalled" {
   name    = "ufo prod page change consumer stalled"
   type    = "query alert"

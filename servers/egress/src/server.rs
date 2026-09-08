@@ -2,6 +2,35 @@
 //! resolve rules (cached by generation), and dispatch — opaque tunnel, TLS-terminated MITM
 //! (inject), cache-daemon relay, or live-turn tool bridge — metering off the relay path.
 //! This is the whole data plane; every policy decision comes from `Control`.
+//!
+//! Names resolve through the pod's own resolver (`/etc/resolv.conf` → CoreDNS), never the DNS
+//! library default's public servers: resolved sandbox hostnames stay inside the cluster,
+//! split-horizon and CoreDNS caching apply, and the OS resolver the cache connect uses answers the
+//! same way, so one name never resolves two ways. A box with no readable resolv.conf falls back to
+//! the default. The MITM resolves nothing at all — it connects to the address the pin vetted. An
+//! exact scope admits its hosts by name and resolves nothing, except a pinned one, whose host a
+//! workspace admin wrote rather than this deploy: that name is resolved as an internet host is and
+//! refused when it answers a private address, since an exact scope is otherwise the one path
+//! around the check.
+//!
+//! A service host that fronts real origins (the cache) re-originates by the request's own path
+//! when its daemon is down or unconfigured — the git host lives in `/git/<host>/…`. A service that
+//! IS the origin (preview) fronts nothing public and never re-originates: an absent daemon is
+//! answered 502 inside the tunnel the client already opened. Gating on the daemon rather than the
+//! path is what keeps the preview host from becoming a second, ungated route to `github.com`.
+//!
+//! A sentinel keeps its prefix through the swap only under the schemes `SWAPPABLE_SCHEMES` names,
+//! decided here and never by the sandbox; `keyed_connectors` declares the same set. `Basic` is not
+//! a prefix scheme: a sentinel rides as the password half of the encoded `user:password`, matched
+//! by its decoded password and re-encoded with the same user around the real secret, so the
+//! credential keeps its shape on any host, whichever client composed it.
+//!
+//! SIGTERM stops accepting, then lets in-flight tunnels finish within the deploy's
+//! `[serve] graceful_shutdown_seconds` (300s testing, 600s prod) before aborting any straggler, so
+//! a rollout drains sandbox egress as long as serve's own turns. The relay mirrors Python's
+//! FIRST_COMPLETED: the client-first branch hands the downstream its idle-timeout window, and the
+//! upstream-first branch abandons the client->upstream pump so a half-open client cannot park the
+//! connection.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -153,12 +182,8 @@ impl EgressProxy {
         listener: TcpListener,
         shutdown: impl Future<Output = ()>,
     ) -> anyhow::Result<()> {
-        // The DNS-pin resolves through the pod's own resolver (`/etc/resolv.conf` → CoreDNS hosted),
-        // not the library default's hardcoded public servers: that keeps every resolved sandbox
-        // hostname inside the cluster, uses CoreDNS caching and split-horizon, and matches the OS
-        // resolver the cache connect uses so one name never resolves two ways — the MITM resolves
-        // nothing at all, connecting to the address this pin vetted. A dev/test box with no
-        // readable resolv.conf falls back to the default so the proxy still comes up.
+        // Resolve through the pod's own resolver; the DNS library default's public servers would
+        // leave the cluster. See the module doc.
         let dns = self.dns.clone().unwrap_or_else(|| {
             Arc::new(Dns::System(Box::new(
                 TokioAsyncResolver::tokio_from_system_conf().unwrap_or_else(|error| {
@@ -196,10 +221,8 @@ impl EgressProxy {
                 }
             }
         }
-        // Stop accepting, then let in-flight tunnels finish within the grace window before aborting
-        // any straggler — a SIGTERM drains live sandbox egress rather than cutting it mid-stream.
-        // The window is the deploy's `[serve] graceful_shutdown_seconds` (300s testing, 600s prod),
-        // not a proxy-local constant, so a rollout drains egress as long as serve's own turns.
+        // Stop accepting, then drain in-flight tunnels within the deploy's grace window before
+        // aborting any straggler. See the module doc.
         let deadline = tokio::time::Instant::now() + self.graceful_shutdown;
         // Drain in-flight tunnels: each `Ok(Some)` is one finishing; `Ok(None)` (all done) or `Err`
         // (grace elapsed) ends the wait, after which `shutdown` aborts whatever is still live.
@@ -262,8 +285,7 @@ fn rule_key(principal: &Principal) -> RuleKey {
 }
 
 /// Global and per-workspace connection admission. Acquisition hands back a guard that releases the
-/// slot on drop, so a connection that returns by any path — refusal, fault, or clean close — frees
-/// what it took.
+/// slot on drop, so a connection frees what it took by any return path.
 struct Caps {
     active: AtomicUsize,
     per_workspace: Mutex<HashMap<Uuid, usize>>,
@@ -414,11 +436,8 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
         }
     };
 
-    // A matched service rule relays to the daemon that owns its host. The preview service is the
-    // origin of its own host, so it takes the service path whether or not a daemon is configured —
-    // an absent one answers 502 inside the tunnel rather than falling through to a public dispatch
-    // that would refuse the CONNECT. The cache fronts real origins, so with no cache daemon there is
-    // no service path at all and its host dispatches as ordinary egress.
+    // The preview service originates its own host, so it takes the service path with no daemon
+    // configured; the cache fronts real origins, so its host dispatches as ordinary egress.
     if host == TOOL_BRIDGE_HOST && find_service(&rules, &host).is_some() {
         tool_bridge(&shared, stream, &host, &proxy_auth).await;
         return;
@@ -456,9 +475,8 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
         }
     }
 
-    // An exact scope admits its hosts by name and resolves nothing — except a pinned one, whose host
-    // a workspace admin wrote rather than this deploy's own code: that name is resolved here as the
-    // internet path resolves one, and refused when it answers an address inside a private network.
+    // A pinned scope's host was written by a workspace admin, so it is resolved here and refused on
+    // a private address. See the module doc.
     let scopes: Vec<bool> = rules
         .iter()
         .filter_map(|r| match r {
@@ -489,9 +507,8 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
             }
         }
     }
-    // Every dimension this host is metered under, for the `sandbox_egress_total` counter: each
-    // matching `Meter` rule (a granted host's `requests`, a model host's `tokens`, a custom one) plus
-    // the synthetic `requests` the internet path adds when the host is not exactly scoped.
+    // Every dimension `sandbox_egress_total` meters this host under: each matching `Meter` rule,
+    // plus the `requests` the internet path adds when the host is not exactly scoped.
     let mut metric_dims: Vec<String> = rules
         .iter()
         .filter_map(|r| match r {
@@ -540,9 +557,8 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
     }
 }
 
-/// What one CONNECT is metered as: the egress `requests` ledger charge, the model-`tokens` ledger
-/// charge (accumulated off the wire), and the `sandbox_egress_total{host, dimension}` counter that
-/// fires once per metered CONNECT independent of either ledger charge.
+/// The egress `requests` ledger charge, the model-`tokens` charge accumulated off the wire, and the
+/// `sandbox_egress_total{host, dimension}` counter that fires once per metered CONNECT.
 struct Metering {
     egress: bool,
     tokens: bool,
@@ -885,12 +901,8 @@ async fn service(
         ReadHead::Closed => return,
     };
     let (daemon_line, billed_host, fallthrough) = match &daemon_prefix {
-        // A synthetic host that fronts real origins (the cache) re-originates by the request's own
-        // path when its daemon is down — the git host lives in `/git/<host>/…`, so the fall-through
-        // reads it from there. A host that IS the origin (the preview service) fronts nothing public,
-        // so it never re-originates: an absent daemon fails the request in the tunnel, and a
-        // path-shaped request through its host reaches no origin. Gating this on the daemon, not the
-        // path, is what keeps the preview host from becoming a second, ungated route to `github.com`.
+        // A host that fronts real origins re-originates by the request's own path; a host that IS
+        // the origin fails inside the tunnel. See the module doc.
         None if allow_origin_fallthrough => match service_origin(&line) {
             Some((origin_host, origin_line)) => {
                 let fall = CACHE_GIT_HOSTS
@@ -922,9 +934,8 @@ async fn service(
     let daemon_conn = match connected {
         Some(sock) => sock,
         None => {
-            // The cache fronts a public origin, so a daemon that is down or unconfigured
-            // re-originates; a service that IS the origin has nothing behind it and fails the
-            // request in the tunnel the client already opened.
+            // The cache fronts a public origin and re-originates; a service that IS the origin
+            // fails the request in the tunnel.
             match fallthrough {
                 Some(origin) => {
                     service_direct(shared, client, origin, &headers, leftover, principal).await
@@ -1143,13 +1154,8 @@ fn proxy_authorization(headers: &[Vec<u8>]) -> String {
 
 // --- header rewriting -------------------------------------------------------------------------
 
-/// The auth schemes a sentinel may ride behind and keep its prefix through the swap. Closed on
-/// purpose: what a request may prefix the real secret with is decided here, never by the sandbox.
-/// `keyed_connectors`' `SWAPPABLE_SCHEMES` declares the same set, and a row may name no other.
-/// `Basic` is not a prefix scheme here: a sentinel rides in it as the password half of the encoded
-/// `user:password`, so it is matched by its decoded password and re-encoded with the same user
-/// around the real secret — the credential keeps its shape on any host, whichever client composed
-/// it.
+/// The auth schemes a sentinel may ride behind and keep its prefix through the swap;
+/// `keyed_connectors` declares the same set. See the module doc for `Basic`.
 const SWAPPABLE_SCHEMES: [&str; 3] = ["bearer", "token", "api-key"];
 
 fn inject(headers: &[Vec<u8>], candidates: &[Inj<'_>]) -> Vec<u8> {
@@ -1546,9 +1552,7 @@ where
 {
     let (done_tx, done_rx) = oneshot::channel();
     let mut down = tokio::spawn(pump_down(upstream_read, client_write, usage, done_rx));
-    // Mirror Python's FIRST_COMPLETED relay: the client-first branch hands the downstream its
-    // idle-timeout window (pump_up signals `done`, then pump_down drains); the upstream-first
-    // branch abandons the client->upstream pump so a half-open client cannot park the connection.
+    // Mirror Python's FIRST_COMPLETED relay; the module doc names which branch abandons which pump.
     tokio::select! {
         _ = pump_up(client_read, upstream_write, done_tx) => down.await.ok().flatten(),
         result = &mut down => result.ok().flatten(),
@@ -1895,9 +1899,8 @@ mod tests {
 
     #[test]
     fn inject_swaps_a_sentinel_riding_as_a_basic_password() {
-        // `gh auth git-credential` hands git `x-access-token:<token>`, so the sentinel arrives as the
-        // password half of a Basic credential; the swap keeps the user and the scheme around the
-        // real secret, the same rule a `token`/`Bearer` request rides.
+        // `gh auth git-credential` hands git `x-access-token:<token>`, so the sentinel arrives as a
+        // Basic password and the swap keeps the user and scheme around the real secret.
         let headers = header_lines(&[
             "host: github.com",
             &format!("authorization: {}", basic("x-access-token:SENT")),
@@ -2003,8 +2006,7 @@ mod tests {
     #[test]
     fn direct_headers_strip_container_claims_and_rewrite_the_origin() {
         // The cache-down fall-through re-originates at the public host, so the identity stamps a
-        // service relay would carry — and anything the container forged in their place — never
-        // leave the proxy.
+        // service relay carries — and anything the container forged — never leave the proxy.
         let headers = header_lines(&[
             "host: cache.ufo.internal",
             "x-ufo-workspace: forged",
@@ -2050,9 +2052,8 @@ mod tests {
 
     #[test]
     fn ip_classifier_boundaries_track_python_is_global() {
-        // The address just outside each blocked range is admitted; the first inside is blocked —
-        // the exact edges `ipaddress.is_global` draws (CGNAT 100.64/10, 172.16/12, multicast,
-        // 198.18/15 benchmarking, and the whole 192.0.0.0/24).
+        // The address just outside each blocked range is admitted, the first inside blocked — the
+        // exact edges `ipaddress.is_global` draws.
         for admitted in [
             "100.63.255.255",
             "100.128.0.0",
@@ -2087,9 +2088,8 @@ mod tests {
 
     #[tokio::test]
     async fn relay_terminates_when_upstream_closes_while_the_client_lingers() {
-        // The upstream delivers its response and closes; the client reads it but never closes or
-        // sends again (a half-open peer). Python's `_relay` cancels the client->upstream pump once
-        // the downstream finishes, so the exchange ends. The relay must not park on the idle client.
+        // A half-open client that never closes after reading the response: the relay cancels the
+        // client->upstream pump so the exchange ends rather than parking.
         let (proxy_client, app) = tokio::io::duplex(1024);
         let (proxy_upstream, origin) = tokio::io::duplex(1024);
         let (client_read, client_write) = tokio::io::split(proxy_client);

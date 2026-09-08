@@ -1,3 +1,43 @@
+//! Per-principal bare git mirrors served over smart-HTTP, with a pack cache and an LFS tier.
+//!
+//! # The freshness window
+//!
+//! Ref discovery always refreshes the mirror from origin — the `info/refs` GET and the protocol-v2
+//! `ls-refs` POST alike; only the negotiation POSTs that follow it may be served inside the window,
+//! and only when the mirror already holds every object they want. So a clone that starts after a
+//! push sees the new head, and the negotiation it then sends costs no second upstream round trip.
+//! A window that covered either form of ref discovery would advertise the previous head to a clone
+//! that started after the push, and the client would check that head out with no error.
+//!
+//! `mirror_holds` is required as well as the window: the window proves the mirror is recent, not
+//! that it is the mirror whose advertisement this negotiation answers, and across replicas those
+//! differ. Requests are separate connections, so a negotiation can reach a replica whose window is
+//! open on an older mirror than the advertising replica's — the want that mirror cannot back forces
+//! its fetch, and the clone completes there too. A zero TTL is never fresh, so every request
+//! fetches: the behaviour before the window existed.
+//!
+//! An authenticated mirror is never served without a successful fetch inside the window, or a token
+//! the org has since revoked would keep reading a cached private history indefinitely; an anonymous
+//! mirror (a public repo) may serve stale through an upstream blip. What the window bounds is the
+//! object refresh, not the authorization decision: every request still resolves its credential
+//! through the control plane, which is what decides whether this principal may read this repo at
+//! all. Residual risk: an upstream revocation the control plane keeps granting is honoured up to
+//! `fresh_ttl` seconds late on the upload-pack POSTs of a clone whose ref discovery was still
+//! authorized. `UFO_CACHE_GIT_FRESH_TTL_SECS=0` removes the window.
+//!
+//! # Eviction races
+//!
+//! Every sweep reserves its victim with an atomic rename-aside taken only while `in_use` shows no
+//! holder, under the same lock a request bumps to claim one. So a request that races the sweep
+//! either wins the lock first (the sweep sees the claim and skips) or loses it (the path is already
+//! renamed away, and the request finds it missing and re-clones) — it never reads a directory being
+//! deleted underneath it. The recursive delete runs outside the lock, on the renamed-aside path, so
+//! the lock never covers I/O and the event loop never stalls behind it.
+//!
+//! The mirror tree and the pack cache are sibling roots, bounded and swept separately: a mirror is
+//! re-clonable and a cached pack is re-generable, but a pack replays whole while a mirror serves
+//! many different requests, so neither tier's bytes charge against the other's ceiling.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -70,9 +110,8 @@ enum Endpoint {
 #[derive(Default)]
 struct MirrorState {
     last_snapshot: Option<Instant>,
-    /// When this mirror last completed a successful upstream fetch (or clone). The bounded-freshness
-    /// window is measured from here, per mirror path — and the path carries the principal, so one
-    /// principal's fetch never marks another's mirror fresh.
+    /// Measured per mirror path, and the path carries the principal, so one principal's fetch never
+    /// marks another's mirror fresh.
     last_fetch: Option<Instant>,
 }
 
@@ -86,9 +125,8 @@ pub struct GitStrategy {
     lfs_root: PathBuf,
     creds: Arc<CredentialClient>,
     scheme: String,
-    /// Relays git-lfs API calls and fetches LFS content from the origin. Redirects are never
-    /// followed silently: an API 3xx passes through to the client, and a content 3xx is re-checked
-    /// against the same host guard as the href it came from.
+    /// Redirects are never followed silently: an API 3xx passes to the client, and a content 3xx is
+    /// re-checked against the same host guard as its href.
     http: reqwest::Client,
     allowed_hosts: Vec<String>,
     durable: Arc<Durable>,
@@ -147,13 +185,8 @@ impl GitStrategy {
         user: &str,
         proxy_auth: &str,
     ) -> Response {
-        // The git-lfs API rides the same remote URL as the wire protocol, so its calls arrive
-        // here: `<repo>.git/info/lfs/...`, JSON both ways. The daemon relays them with the
-        // principal's credential — and when the LFS tier is on, it rewrites each batch answer's
-        // download href onto its own content route, so the objects it fetches once (verified
-        // against their oid) serve every later pull from disk. Everything else — uploads, locks,
-        // verify — relays untouched, and object content is never read from a client-named URL:
-        // a miss re-batches against the allowlisted origin itself.
+        // git-lfs derives its endpoint from the same remote URL, so its calls arrive here. Object
+        // content is never read from a client-named URL: a miss re-batches against the origin.
         if let Some((repo, lfs_path)) = split_lfs(tail) {
             let resolved = match self
                 .creds
@@ -208,14 +241,8 @@ impl GitStrategy {
         // evict the directory this request is reading. Dropped when the response is built.
         let _in_use = self.in_use.guard(&mirror);
 
-        // Ref discovery always refreshes the mirror from origin — the `info/refs` GET and the
-        // protocol-v2 `ls-refs` POST alike; only the negotiation POSTs that follow it may be served
-        // inside the freshness window, and only when the mirror already holds every object they
-        // want. So a clone that starts after a push sees the new head, and the negotiation it then
-        // sends costs no second upstream round trip. Across replicas the requests are separate
-        // connections, so a negotiation can reach a replica whose window is open on an older mirror
-        // than the advertising replica's: the want that mirror cannot back forces its fetch, and the
-        // clone completes there too.
+        // Ref discovery always refreshes from origin; only the negotiation POSTs after it may be
+        // served inside the window, and only when the mirror holds every want. See the module doc.
         let wants = match endpoint {
             Endpoint::UploadPack => negotiation_wants(headers, &body),
             Endpoint::Info | Endpoint::LsRefs => None,
@@ -232,10 +259,8 @@ impl GitStrategy {
             Endpoint::Info => format!("/{repo}.git/info/refs"),
             Endpoint::LsRefs | Endpoint::UploadPack => format!("/{repo}.git/git-upload-pack"),
         };
-        // Only the `git-upload-pack` endpoint is cached. The `info/refs` GET is a few hundred bytes
-        // the backend builds from the refs it just refreshed, so replaying it would save nothing worth
-        // a lookup. (Under protocol v2 a client's `ls-refs` arrives as an upload-pack POST, so that
-        // one is cached — keyed by the same ref-state fingerprint, so moved refs miss.)
+        // Only `git-upload-pack` is cached: the `info/refs` GET is a few hundred bytes built from
+        // refs just refreshed. Under v2 an `ls-refs` arrives as an upload-pack POST.
         let served = match endpoint {
             Endpoint::LsRefs | Endpoint::UploadPack if self.pack_limit > 0 => {
                 self.serve_pack_cached(
@@ -314,10 +339,8 @@ impl GitStrategy {
             })
     }
 
-    /// Relay a batch call like `forward_lfs`, but rewrite each download href in the answer onto
-    /// this daemon's content route, so the client pulls objects through the cache. An answer that
-    /// cannot be rewritten — an error status, a non-basic transfer, no Host to build a base from —
-    /// relays untouched: correctness never rides on the rewrite, only the caching does.
+    /// An answer that cannot be rewritten — an error status, a non-basic transfer, no Host to build
+    /// a base from — relays untouched: correctness never rides on the rewrite.
     async fn serve_lfs_batch(
         &self,
         method: &Method,
@@ -383,13 +406,8 @@ impl GitStrategy {
             })
     }
 
-    /// Serve one LFS object from the per-principal content tier, restoring it from the durable
-    /// tier or fetching it from the origin on a miss. The client reached this route through a
-    /// rewritten batch answer, but nothing here trusts what it names beyond the oid and size: the
-    /// fetch re-batches against the allowlisted origin with the principal's own credential, and
-    /// bytes must hash to the oid before they are committed or served — restored bytes held to
-    /// the same proof as fetched ones. What the origin supplies is snapshotted to the durable
-    /// tier off the response path, so a rolled pod restores instead of re-downloading.
+    /// Nothing here trusts what the client names beyond the oid and size: the fetch re-batches
+    /// against the allowlisted origin, and bytes must hash to the oid before they are served.
     async fn serve_lfs_content(
         &self,
         host: &str,
@@ -475,10 +493,8 @@ impl GitStrategy {
         resp.unwrap_or_else(|| (StatusCode::BAD_GATEWAY, "lfs serve failed").into_response())
     }
 
-    /// Rebuild a missing object from the durable tier instead of the origin. The restored bytes
-    /// must hash to the oid and total the declared size before they are trusted: a corrupt durable
-    /// object is discarded and the caller fetches the origin as if it were never there — and the
-    /// snapshot that fetch spawns overwrites the bad copy.
+    /// Restored bytes must hash to the oid and total the declared size; a corrupt durable object is
+    /// discarded and the origin fetch that follows overwrites it.
     async fn restore_lfs(
         &self,
         dir: &Path,
@@ -512,11 +528,8 @@ impl GitStrategy {
         tokio::fs::rename(&tmp, body_path).await.is_ok()
     }
 
-    /// One streaming response for an LFS object, negotiated fresh with the origin: this daemon's
-    /// own batch call, then the download href it names. Without the cache the client fetches the
-    /// href through egress rules that stop at private addresses; the daemon takes that fetch over,
-    /// so it applies the same bar — every hop's host allowlisted or globally routable — and an
-    /// origin's batch answer can never steer the daemon's network position at the cluster.
+    /// The daemon takes over a fetch the client would make through egress rules, so it applies the
+    /// same bar: every hop's host allowlisted or globally routable.
     async fn fetch_lfs_object(
         &self,
         host: &str,
@@ -614,10 +627,8 @@ impl GitStrategy {
         Err("lfs content redirected too many times".into())
     }
 
-    /// A client pinned to the href host's own vetted address. The host passes when it is an
-    /// allowlisted git host, or when every address it resolves to is globally routable — so a
-    /// batch answer cannot point the daemon at loopback, a private range, or the cluster, and the
-    /// pinned resolution is the one that was checked.
+    /// The host passes when it is an allowlisted git host or resolves only to globally routable
+    /// addresses, so a batch answer cannot point the daemon at loopback or the cluster.
     async fn lfs_content_client(
         &self,
         target: &str,
@@ -678,17 +689,8 @@ impl GitStrategy {
         repo: &str,
         resolved: &Resolved,
     ) -> Result<(), String> {
-        // An authenticated mirror must never be served without a successful fetch inside the
-        // freshness window: a token the org has since revoked would otherwise keep reading a cached
-        // private history indefinitely. An anonymous mirror (public repo) may serve stale through an
-        // upstream blip.
-        //
-        // What the window bounds is the *object refresh*, not the authorization decision: every
-        // request still resolves its credential through the control plane
-        // (`/internal/git-credential`), which is what decides whether this principal may read this
-        // repo at all. Residual risk: an upstream revocation that the control plane keeps granting is
-        // honoured up to `fresh_ttl` seconds late on the upload-pack POSTs of a clone whose ref
-        // discovery was still authorized. `UFO_CACHE_GIT_FRESH_TTL_SECS=0` removes the window.
+        // An authenticated mirror is never served without a fetch inside the window: a revoked
+        // token would keep reading cached private history. The bounds are in the module header.
         let authenticated = resolved.token.is_some();
         let entry = {
             let mut map = self.mirrors.lock().await;
@@ -748,18 +750,8 @@ impl GitStrategy {
         Ok(())
     }
 
-    /// True when the freshness window applies to this request: a negotiation POST whose mirror
-    /// completed a successful fetch inside the window. The caller still requires the mirror to hold
-    /// every object the negotiation wants (`mirror_holds`) before it skips the fetch — the window
-    /// alone proves the mirror is recent, not that it is the mirror whose advertisement this
-    /// negotiation answers, and across replicas those differ.
-    ///
-    /// Both forms of ref discovery are excluded — the `info/refs` GET and the protocol-v2 `ls-refs`
-    /// POST — because that is where a client learns which head to ask for: a window that covered
-    /// either would advertise the previous head to a clone that started after the push, and the client
-    /// would check that head out with no error. Skipping only the negotiation still collapses the
-    /// refreshes of one clone into one. A zero TTL is never fresh, so every request fetches — the
-    /// behaviour before the window existed.
+    /// A negotiation POST whose mirror fetched inside the window. `mirror_holds` is still required
+    /// — the reasoning, and why ref discovery is excluded, are in the module header.
     fn is_fresh(&self, endpoint: Endpoint, state: &MirrorState) -> bool {
         matches!(endpoint, Endpoint::UploadPack)
             && !self.fresh_ttl.is_zero()
@@ -768,10 +760,8 @@ impl GitStrategy {
                 .is_some_and(|t| t.elapsed() < self.fresh_ttl)
     }
 
-    /// Rate-limited, off the request path: evict least-recently-used bare mirrors when the mirror
-    /// tree exceeds its ceiling. Mirrors are re-clonable (and restorable from the durable snapshot),
-    /// so eviction is safe; evicting the oldest first spares whatever a live turn just fetched, and
-    /// the sweep skips any mirror a request holds in use so it never deletes one mid-fetch.
+    /// Mirrors are re-clonable, so eviction is safe; the sweep skips any mirror a request holds in
+    /// use so it never deletes one mid-fetch.
     async fn maybe_sweep_mirrors(&self) {
         {
             let mut last = self.last_sweep.lock().await;
@@ -965,9 +955,8 @@ impl GitStrategy {
             .await
             .map_err(|e| format!("create pack cache dir: {e}"))?;
         let tmp = writing_temp(&body_path);
-        // The cap bounds the capture itself, not just what is committed: a response the tier cannot
-        // hold must never sit on the volume in full, or one clone of an outsized repo takes the cache
-        // volume past its `sizeLimit` and the kubelet evicts the pod that carries all sandbox egress.
+        // A response the tier cannot hold must never sit on the volume in full, or one outsized
+        // clone takes the volume past its `sizeLimit` and the kubelet evicts the pod.
         let cap = MAX_CACHED_PACK_BYTES.min(self.pack_limit);
         let captured = capture_body(&mut stdout, &head.leftover, &tmp, cap).await;
         match captured {
@@ -1009,9 +998,8 @@ impl GitStrategy {
         tokio::task::spawn_blocking(move || sweep_packs(&root, limit, &in_use));
     }
 
-    /// Spawn `git http-backend` over the principal's mirror tree with the request's CGI environment,
-    /// its negotiation body written to stdin. The caller decides what to do with the response: stream
-    /// it, or capture it for the pack cache.
+    /// The caller decides what to do with the response: stream it, or capture it for the pack
+    /// cache.
     async fn spawn_backend(
         &self,
         host_root: &Path,
@@ -1062,9 +1050,8 @@ impl GitStrategy {
     }
 }
 
-/// `acme/widget.git/info/lfs/objects/batch` → (safe repo, `objects/batch`). git-lfs derives its
-/// endpoint as `<remote>.git/info/lfs` whether or not the remote URL spells the `.git`, so the
-/// suffix is always present and nothing else on this path carries it.
+/// git-lfs derives its endpoint as `<remote>.git/info/lfs` whether or not the remote URL spells the
+/// `.git`, so the suffix is always present and nothing else on this path carries it.
 fn split_lfs(tail: &str) -> Option<(String, &str)> {
     let (repo, rest) = tail.split_once(".git/info/lfs/")?;
     Some((safe_repo(repo)?, rest))
@@ -1097,10 +1084,8 @@ async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Bytes, S
     Ok(Bytes::from(buf))
 }
 
-/// Rewrite a batch answer so each download lands on this daemon's content route, carrying the oid
-/// and declared size the content serve needs. Uploads and verifies keep their origin actions. None
-/// when the answer is not one this daemon can re-route — not JSON, or a negotiated transfer other
-/// than basic — and the caller then relays the origin's bytes untouched.
+/// None when the answer is not one this daemon can re-route — not JSON, or a transfer other than
+/// basic — and the caller then relays the origin's bytes untouched.
 fn rewrite_batch(answer: &[u8], base: &str, host: &str, repo: &str) -> Option<Vec<u8>> {
     let mut doc: serde_json::Value = serde_json::from_slice(answer).ok()?;
     if doc
@@ -1144,9 +1129,8 @@ fn is_oid(value: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The `size=<n>` a rewritten href carries: the batch's declared object size, which decides
-/// cacheability up front and pins the byte count the capture must verify.
-/// Durable key for one principal's object, isolated in the store as it is on disk.
+/// The batch's declared object size, which decides cacheability up front and pins the byte count
+/// the capture must verify.
 fn lfs_key(principal: &str, oid: &str) -> String {
     format!("lfs/{}/{oid}", sanitize(principal))
 }
@@ -1180,18 +1164,16 @@ fn lfs_size(query: Option<&str>) -> Option<u64> {
         .ok()
 }
 
-/// The absolute base the client reaches this daemon at, rebuilt from its request: the Host it
-/// addressed and the scheme the fronting proxy stamped (`x-forwarded-proto`; plain http when the
-/// daemon is dialed directly). None without a Host — then no href can be rewritten.
+/// Rebuilt from the request: the Host it addressed and the scheme the fronting proxy stamped. None
+/// without a Host, and then no href can be rewritten.
 fn public_base(headers: &HeaderMap) -> Option<String> {
     let host = header(headers, "host")?;
     let scheme = header(headers, "x-forwarded-proto").unwrap_or("http");
     Some(format!("{scheme}://{host}"))
 }
 
-/// The bar the sandbox's own egress applies to a public CONNECT: IPv4 that is not loopback,
-/// private, link-local, carrier-grade NAT, multicast, broadcast, unspecified, documentation,
-/// benchmarking, or reserved. IPv6 is refused outright, as the egress proxy refuses it.
+/// IPv4 that is not loopback, private, link-local, CGNAT, multicast, broadcast, unspecified,
+/// documentation, benchmarking or reserved. IPv6 is refused, as the egress proxy refuses it.
 fn globally_routable(ip: &std::net::IpAddr) -> bool {
     let std::net::IpAddr::V4(v4) = ip else {
         return false;
@@ -1210,9 +1192,8 @@ fn globally_routable(ip: &std::net::IpAddr) -> bool {
         || octets[0] >= 240)
 }
 
-/// Drain an LFS content response to `path`, verifying as it writes: the bytes must hash to the
-/// oid and total the declared size, or nothing is committed — a truncated or substituted object
-/// never enters the tier and never reaches the client.
+/// The bytes must hash to the oid and total the declared size, or nothing is committed: a truncated
+/// or substituted object never enters the tier.
 async fn capture_lfs(
     response: reqwest::Response,
     path: &Path,
@@ -1294,10 +1275,8 @@ fn is_ls_refs(body: &[u8]) -> bool {
     false
 }
 
-/// The object ids a `git-upload-pack` negotiation asks for — `want <oid>` pkt-lines, protocol v0
-/// and v2 alike — or None when they cannot be read positively: a compressed body, a `want-ref`, a
-/// malformed pkt-line, or no `want` at all. None means the freshness window cannot prove the mirror
-/// can back the request, so the caller fetches.
+/// `want <oid>` pkt-lines, v0 and v2 alike, or None when they cannot be read positively — a
+/// compressed body, a `want-ref`, a malformed pkt-line. None makes the caller fetch.
 fn negotiation_wants(headers: &HeaderMap, body: &[u8]) -> Option<Vec<String>> {
     if header(headers, "content-encoding").is_some() {
         return None;
@@ -1331,10 +1310,8 @@ fn negotiation_wants(headers: &HeaderMap, body: &[u8]) -> Option<Vec<String>> {
     Some(wants)
 }
 
-/// True when the mirror already holds every object the negotiation wants — the condition under
-/// which `upload-pack` can answer without a fetch, and exactly what it accepts under
-/// `allowAnySHA1InWant`. One `cat-file --batch-check` run answers all wants; unreadable wants or
-/// any failure to run the check reads as not held, so the caller fetches.
+/// Exactly what `upload-pack` accepts under `allowAnySHA1InWant`. One `cat-file --batch-check`
+/// answers all wants; any failure to run it reads as not held, so the caller fetches.
 async fn mirror_holds(mirror: &Path, wants: Option<&[String]>) -> bool {
     let Some(wants) = wants else {
         return false;
@@ -1371,10 +1348,8 @@ async fn mirror_holds(mirror: &Path, wants: Option<&[String]>) -> bool {
             .all(|line| !line.ends_with(b" missing"))
 }
 
-/// The canonical `org/repo` path, or None when it could escape its principal/host directory. A
-/// `..`, `.`, or empty segment is refused rather than sanitized: the repo joins the mirror path, the
-/// clone URL, and the http-backend `PATH_INFO`, and traversal there crosses into another workspace's
-/// mirrors or outside the state root entirely.
+/// A `..`, `.` or empty segment is refused rather than sanitized: the repo joins the mirror path,
+/// the clone URL and the http-backend `PATH_INFO`.
 fn safe_repo(repo: &str) -> Option<String> {
     let trimmed = repo.trim_matches('/').trim_end_matches(".git");
     if trimmed.is_empty()
@@ -1487,11 +1462,8 @@ impl PackMeta {
     }
 }
 
-/// Everything that decides the response bytes, hashed into one entry name: the principal (so no
-/// principal can address another's entry), the repo it came from, the mirror's ref state, the
-/// negotiation body (the wants and haves), and the request headers the backend reads.
-/// `accept-encoding` is keyed although the backend is not given it — keying it now means a future
-/// change that does forward it cannot replay a body in the wrong encoding.
+/// `accept-encoding` is keyed although the backend is not given it, so a future change that does
+/// forward it cannot replay a body in the wrong encoding.
 fn pack_key(
     principal: &str,
     host: &str,
@@ -1518,10 +1490,8 @@ fn pack_key(
     hex::encode(hasher.finalize())
 }
 
-/// An exact fingerprint of what the mirror can serve: every ref's target object, plus `HEAD`. Any ref
-/// movement — a new commit, a force-push, a deleted branch — changes it, so a cached pack is a miss
-/// rather than a replay of history the mirror no longer has. Never an mtime: a fetch that changes
-/// nothing still rewrites files, and a repack changes files without changing what is servable.
+/// Every ref's target plus `HEAD`, so any ref movement misses. Never an mtime: a fetch that changes
+/// nothing still rewrites files, and a repack rewrites without changing what is servable.
 async fn ref_fingerprint(mirror: &Path) -> Result<String, String> {
     let refs = git_output(
         &[
@@ -1548,9 +1518,8 @@ enum Capture {
     PastTheCap,
 }
 
-/// Drain the backend's remaining stdout into `path`. Fails loud on a read or write error so a truncated
-/// pack is never committed. Stops on the first chunk that takes the file past `cap`, so a response the
-/// tier could never hold is never written whole and the capture holds at most `cap` plus one chunk.
+/// Fails loud on a read or write error so a truncated pack is never committed, and stops on the
+/// first chunk past `cap`, so the capture holds at most `cap` plus one chunk.
 async fn capture_body(
     stdout: &mut tokio::process::ChildStdout,
     leftover: &Bytes,
@@ -1589,9 +1558,8 @@ async fn capture_body(
     }
 }
 
-/// Serve a response the pack tier cannot hold: the bytes already captured, then the rest straight from
-/// the backend's pipe. The capture is unlinked before the first byte goes out, so its disk is reclaimed
-/// when the response ends — including when the client drops mid-stream.
+/// The capture is unlinked before the first byte goes out, so its disk is reclaimed when the
+/// response ends, including when the client drops mid-stream.
 async fn stream_past_the_cap(
     head: CgiHead,
     capture: &Path,
@@ -1629,9 +1597,8 @@ async fn stream_past_the_cap(
         .map_err(|e| format!("build response: {e}"))
 }
 
-/// Rename the captured pack and its head into place. The body lands first and the meta commits the
-/// entry, so a crash between the two leaves a body no lookup can find rather than a meta pointing at
-/// nothing. False on any failure — the caller then serves the capture uncommitted.
+/// The body lands first and the meta commits the entry, so a crash between the two leaves a body no
+/// lookup can find rather than a meta pointing at nothing.
 async fn commit_pack(meta: &PackMeta, tmp: &Path, meta_path: &Path, body_path: &Path) -> bool {
     let Ok(meta_bytes) = serde_json::to_vec(meta) else {
         return false;
@@ -1676,13 +1643,8 @@ async fn serve_pack_file(
         .ok()
 }
 
-/// Evict least-recently-used cached packs until the pack tree is under `limit`. The LFS content
-/// tier keeps the same entry shape (`<key>.body`), so its sweep is this same function over its own
-/// root and ceiling. Mirrors the mirror
-/// sweep and the package sweep: reserve each victim with an atomic rename-aside taken only while
-/// `in_use` shows no holder, then delete the body and its meta outside the lock, so an entry a live
-/// request is replaying is never removed mid-serve. A cached pack is re-generable from the mirror, so
-/// eviction only costs one backend run.
+/// The LFS content tier keeps the same entry shape, so its sweep is this function over its own
+/// root. A cached pack is re-generable, so eviction costs one backend run.
 fn sweep_packs(root: &Path, limit: u64, in_use: &InUse) {
     let mut entries: Vec<(PathBuf, u64, u64)> = Vec::new();
     let mut total = 0u64;
@@ -1754,18 +1716,8 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Evict oldest bare mirrors until the whole tree is under `limit`. The size counted is the entire
-/// state tree — finished `*.git` mirrors *and* in-progress clones/bundles (`.tmp`, `.bundle`) — so a
-/// clone underway is charged against the ceiling and finished mirrors are evicted to make room for
-/// it. A mirror a live request holds in use is skipped; a single clone larger than the volume is
-/// inherent and cannot be swept.
-///
-/// Eviction reserves the mirror with an atomic rename-aside taken only while `in_use` shows no
-/// holder, under the same lock a request bumps to claim one. So a request that races the sweep
-/// either wins the lock first (the sweep sees the claim and skips) or loses it (the mirror is
-/// already renamed away, and the request finds it missing and re-clones) — it never fetches a
-/// directory being deleted underneath it. The recursive delete runs outside the lock, on the
-/// renamed-aside path, so the lock never covers I/O and the event loop never stalls behind it.
+/// The size counted is the whole state tree — finished mirrors and in-progress clones alike — so a
+/// clone underway is charged against the ceiling. The race is in the module header.
 fn sweep_mirrors(root: &Path, limit: u64, in_use: &InUse) {
     let (mut remaining, _) = dir_size_and_mtime(root);
     if remaining <= limit {
@@ -2122,9 +2074,8 @@ mod tests {
 
     #[test]
     fn sweep_counts_only_its_own_root_not_a_sibling_package_tree() {
-        // git mirrors live under `<state>/git` and the package cache under `<state>/pkg`. The git
-        // sweep must total only its own root — a package tree fat enough to blow the git ceiling must
-        // never make the sweep evict a mirror that fits under it.
+        // The git sweep must total only its own root: a package tree fat enough to blow the git
+        // ceiling must never make it evict a mirror that fits under it.
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path();
         plant_mirror(&state.join("git"), "repo", 4096, 1_000);

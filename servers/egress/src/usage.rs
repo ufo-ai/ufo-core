@@ -3,6 +3,12 @@
 //! arbitrary chunk boundaries; it parses the HTTP head, dechunks a `transfer-encoding: chunked`
 //! body, decompresses gzip/deflate, buffers SSE `data:` lines (or a bare JSON body), and reads the
 //! Anthropic and OpenAI usage shapes. `usage` returns the model and split only when a usage was seen.
+//!
+//! An OpenAI prompt count is inclusive of its cached prefix, so the cached and cache-write shares
+//! are carried out of `input` into their own dimensions. `cache_write_30m` lands un-gated: whether
+//! a model prices a 30m tier is a pricing fact core holds, and core folds it back into input when
+//! it does not, rather than the data plane carrying the price table. `cached` is clamped to the
+//! prompt, then `cached + cache_write` the same way — an impossible split is reshaped, not billed.
 
 use std::io::Write;
 
@@ -14,10 +20,8 @@ use crate::types::{Usage, ANTHROPIC_HOST, OPENAI_HOST};
 const MAX_HEADER_BYTES: usize = 65536;
 const MAX_SSE_BUFFER_BYTES: usize = 1_048_576;
 
-/// A streaming content-decoder: each fed chunk inflates whatever it can now, so SSE lines are
-/// consumed as they arrive and the buffer holds only the incomplete tail — a long compressed stream
-/// never accumulates its whole decoded body (and so is never wrongly refused past the buffer cap),
-/// while a compression bomb of one unbroken line still trips the cap in `feed_body`.
+/// A streaming content-decoder: each chunk inflates what it can now, so the buffer holds only the
+/// incomplete tail — a long stream is never refused past the cap, a one-line bomb still trips it.
 enum Decoder {
     Identity,
     Gzip(GzDecoder<Vec<u8>>),
@@ -387,13 +391,8 @@ impl HttpTokenUsage {
         // egress.tokens_usage_unparsed); a billable call is never silently zeroed here.
     }
 
-    /// An OpenAI prompt count is inclusive of its cached prefix, so the cached (and cache-write)
-    /// share is carried out of `input` into its own dimension. The cache-write share lands in
-    /// `cache_write_30m` un-gated: whether the model actually prices a 30m tier is a pricing fact
-    /// core holds, so core folds it back into input when it does not, rather than the data plane
-    /// carrying the price table. `cached` is clamped to the prompt (never a negative fresh input),
-    /// then `cached + cache_write` is clamped the same way — an impossible split is reshaped, not
-    /// billed as-is.
+    /// Carry the cached and cache-write shares out of the inclusive OpenAI prompt count, clamping
+    /// an impossible split. See the module doc.
     fn absorb_openai(&mut self, prompt: i64, output: i64, cached: i64, cache_write: i64) {
         let cached = if cached > prompt { prompt } else { cached };
         let cache_write = if cached + cache_write > prompt {
@@ -662,10 +661,8 @@ data: [DONE]\n\n";
 
     #[test]
     fn openai_cache_write_tokens_are_carried_out_of_input_ungated() {
-        // OpenAI reports a cache-write share inside prompt_tokens_details; the proxy carries it out
-        // of the inclusive prompt into cache_write_30m and lets core decide whether to price it as a
-        // 30m tier or fold it back into input. prompt 100000 = 90000 cached + 5000 cache-write +
-        // 5000 fresh input.
+        // prompt 100000 = 90000 cached + 5000 cache-write + 5000 fresh input; core decides whether
+        // to price the 30m tier or fold it back.
         let body = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-5.5\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":100000,\"completion_tokens\":500,\"total_tokens\":100500,\"prompt_tokens_details\":{\"cached_tokens\":90000,\"cache_write_tokens\":5000}}}";
         assert_eq!(
             feed_all(OPENAI_HOST, body),
@@ -786,9 +783,8 @@ data: [DONE]\n\n";
     fn a_large_gzipped_stream_is_metered_line_by_line_not_refused_as_overflow() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
-        // A long completion whose DECOMPRESSED body exceeds the buffer cap. A decoder that inflated
-        // the whole body before parsing would trip the cap and drop the bill; streaming consumes each
-        // line as it inflates, so the trailing usage still meters.
+        // A completion whose decompressed body exceeds the buffer cap: inflating it whole would
+        // drop the bill, streaming consumes each line so the trailing usage still meters.
         let filler = b"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.4\",\
 \"choices\":[{\"delta\":{\"content\":\"lorem ipsum dolor sit amet consectetur\"}}],\"usage\":null}\n\n";
         let mut body = Vec::new();

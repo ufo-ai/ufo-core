@@ -33,6 +33,7 @@ from evals.suites import (
     code_review,
     coding_caveat_completeness,
     coding_subagent,
+    comment_economy,
     completeness_inventory,
     connector_connections,
     connector_refs,
@@ -162,6 +163,7 @@ TASKS: tuple[EvalTask, ...] = (
         coding_caveat_completeness.CASES,
         agent="profile:coding",
     ),
+    capability_task("comment_economy", comment_economy.CASES, agent="profile:coding"),
     capability_task("scope_preservation", scope_preservation.CASES),
     capability_task("completeness_inventory", completeness_inventory.CASES),
     capability_task(

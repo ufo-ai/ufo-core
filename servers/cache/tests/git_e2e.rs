@@ -84,9 +84,8 @@ async fn seed_upstream(base: &Path) -> PathBuf {
     uproot
 }
 
-/// Both levers off: every request fetches upstream and no pack is cached. Each lever test overrides
-/// the one knob it exercises with struct-update syntax, so the tests that predate the levers keep
-/// asserting the behaviour the daemon had without them.
+/// Both levers off. Each lever test overrides the one knob it exercises, so tests that predate the
+/// levers keep asserting the behaviour the daemon had without them.
 fn config(state: PathBuf, control_url: String, allowed: &str) -> Config {
     Config {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -142,9 +141,8 @@ fn pkt(line: &str) -> String {
     format!("{:04x}{line}", line.len() + 4)
 }
 
-/// One `git-upload-pack` request body: protocol v0, a single `want` for `sha` and no `have`, then
-/// `done`. Built by hand so a test can send the exact same negotiation twice — which is what the pack
-/// cache keys on, and what two clones of one head really send.
+/// Protocol v0, one `want` and no `have`, then `done`. Built by hand so a test can send the byte-
+/// identical negotiation twice, which is what the pack cache keys on.
 fn upload_pack_body(sha: &str) -> String {
     format!("{}0000{}", pkt(&format!("want {sha}\n")), pkt("done\n"))
 }
@@ -540,9 +538,8 @@ async fn a_new_upstream_commit_misses_the_pack_cache_even_for_the_same_negotiati
         "HIT"
     );
 
-    // The refs move upstream. The negotiation bytes are unchanged, so only the mirror's ref-state
-    // fingerprint can tell the entry apart — it must, or a clone would replay a pack built against
-    // history the mirror no longer matches.
+    // The negotiation bytes are unchanged, so only the ref-state fingerprint can tell the entry
+    // apart — it must, or a clone replays a pack built against history the mirror lost.
     push_commit(&uproot_path, &tmp.path().join("wt"), "second.txt", "again").await;
     let after_push = post_upload_pack(&daemon, &host, "a", &body).await;
     assert_eq!(
@@ -602,9 +599,8 @@ async fn one_principal_is_never_served_another_principals_cached_pack() {
         "HIT"
     );
 
-    // Bob sends the byte-identical negotiation for the same repo at the same head. He must never be
-    // served from Alice's entry: his response is generated for him, and it lands in his own subtree
-    // under his own key.
+    // Bob must never be served from Alice's entry: his response is generated for him, and it lands
+    // in his own subtree under his own key.
     let bob = post_upload_pack(&daemon, &host, "bob", &body).await;
     assert_eq!(
         bob.cache, "MISS",
@@ -663,10 +659,8 @@ async fn an_upload_pack_post_inside_the_freshness_window_never_reaches_origin() 
     let after_cold = up_hits.load(std::sync::atomic::Ordering::SeqCst);
     assert!(after_cold > 0, "a cold clone must reach origin");
 
-    // A commit lands upstream, then one upload-pack POST arrives inside the window. It must not touch
-    // origin at all — which is the whole saving: the POSTs of a clone ride the fetch that the clone's
-    // own ref discovery already did. `UFO_CACHE_GIT_FRESH_TTL_SECS=0` gives that up for a refresh per
-    // request.
+    // One upload-pack POST inside the window must not touch origin at all, which is the whole
+    // saving: the POSTs of a clone ride the fetch its own ref discovery already did.
     push_commit(&uproot_path, &tmp.path().join("wt"), "second.txt", "again").await;
     let posted = post_upload_pack(
         &daemon.to_string(),
@@ -723,10 +717,8 @@ async fn a_protocol_v2_ls_refs_post_refreshes_the_mirror_inside_the_freshness_wi
     let after_cold = up_hits.load(std::sync::atomic::Ordering::SeqCst);
     assert!(after_cold > 0, "a cold clone must reach origin");
 
-    // Protocol v2 carries the ref advertisement on an upload-pack POST, not on the `info/refs` GET, and
-    // the two are separate connections: across replicas the POST can land on a pod whose window is open
-    // on a mirror that predates the push. So this POST must refresh like any other advertisement — a
-    // window that covered it would name the old head and the client would check it out with no error.
+    // Protocol v2 carries the advertisement on an upload-pack POST, so it must refresh like any
+    // other: a window covering it would name the old head and the client would use it.
     push_commit(&uproot_path, &tmp.path().join("wt"), "second.txt", "again").await;
     let new_head = upstream_head(&uproot_path).await;
     let advert = post_upload_pack_with(
@@ -774,9 +766,8 @@ async fn a_want_the_mirror_does_not_hold_fetches_inside_the_freshness_window() {
     clone_via_daemon(&repo_url, &tmp.path().join("dest1"), tmp.path()).await;
     let after_cold = up_hits.load(std::sync::atomic::Ordering::SeqCst);
 
-    // Another replica's ref discovery advertised the head this push created, and the balancer lands
-    // the negotiation here, where the window is open on a mirror that predates the push. The want
-    // this mirror cannot back must force its fetch and be answered with the pack — never refused.
+    // The balancer lands the negotiation on a replica whose window is open on a pre-push mirror.
+    // The want it cannot back must force a fetch and be answered with the pack, never refused.
     push_commit(&uproot_path, &tmp.path().join("wt"), "second.txt", "again").await;
     let new_head = upstream_head(&uproot_path).await;
     let posted = post_upload_pack(
@@ -808,9 +799,8 @@ async fn a_response_past_the_pack_cap_is_served_whole_and_leaves_nothing_on_the_
     let (cp_router, _) = common::control_plane(serde_json::json!({ "principal": "public" }));
     let cp_addr = common::spawn(cp_router).await;
 
-    // A one-byte ceiling puts every response past the cap, which is the outsized-pack path: the capture
-    // stops at the cap instead of writing a copy the tier could never hold, and the rest of the response
-    // comes straight from the backend's pipe.
+    // A one-byte ceiling puts every response past the cap: the capture stops there instead of
+    // writing a copy the tier could never hold, and the rest comes from the backend's pipe.
     let state = tmp.path().join("state");
     let daemon = common::spawn(ufo_cache::app(
         &Config {
@@ -1027,9 +1017,8 @@ async fn a_repeat_clone_of_one_head_replays_and_checks_out_identical_bytes() {
     .await;
     let repo_url = format!("http://{daemon}/git/{up_addr}/acme/widget");
 
-    // Both levers on, driven by the real git client rather than a hand-built request: a second clone
-    // of the same head must produce the identical checkout, which is the correctness gate any speedup
-    // has to pass.
+    // Both levers on, driven by the real git client: a second clone of the same head must produce
+    // the identical checkout, which is the correctness gate any speedup has to pass.
     let dest1 = tmp.path().join("dest1");
     clone_via_daemon(&repo_url, &dest1, tmp.path()).await;
     let after_cold = up_hits.load(std::sync::atomic::Ordering::SeqCst);
@@ -1185,8 +1174,7 @@ async fn an_lfs_api_call_is_relayed_with_the_principals_credential() {
     assert_eq!(resp.bytes().await.unwrap(), "lfs forbidden");
 }
 
-/// Push a commit that tracks `*.bin` with the lfs filter and adds `data.bin` as an LFS pointer to
-/// `oid`. The filter is neutralized on these commands so the pointer bytes land in git verbatim,
+/// The lfs filter is neutralized on these commands so the pointer bytes land in git verbatim,
 /// whatever git-lfs config the running machine carries.
 async fn push_lfs_pointer(uproot: &Path, workdir: &Path, oid: &str, size: usize) {
     let bare = uproot.join("acme").join("widget");
@@ -1235,10 +1223,8 @@ async fn push_lfs_pointer(uproot: &Path, workdir: &Path, oid: &str, size: usize)
     .await;
 }
 
-/// A git upstream that also answers the git-lfs batch API: real `git http-backend` for the wire
-/// protocol, a canned batch answer whose href names the server's own content route, and a counter
-/// of content downloads so a test can prove the cache fetched only once. Binds before building the
-/// router so the handler can spell its own address in that href.
+/// Binds before building the router so the handler can spell its own address in the batch href, and
+/// counts content downloads so a test can prove the cache fetched only once.
 async fn spawn_lfs_upstream(
     project_root: PathBuf,
     oid: String,
@@ -1815,9 +1801,8 @@ async fn a_restore_only_daemon_still_sweeps_the_lfs_tier() {
         .await
         .unwrap();
 
-    // A stale entry already holds the tier past its ceiling. Restore-only traffic must evict it
-    // exactly as origin fetches would — a rolled pod serving from the durable tier is the one
-    // workload that never takes the fetch path's sweep.
+    // Restore-only traffic must evict a stale entry exactly as origin fetches would: a rolled pod
+    // serving from the durable tier is the one workload that never takes the fetch path's sweep.
     let state = tmp.path().join("state");
     let stale = state.join("lfs").join("public").join("stale.body");
     tokio::fs::create_dir_all(stale.parent().unwrap())

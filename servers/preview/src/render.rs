@@ -414,9 +414,8 @@ impl Render {
     }
 }
 
-// Locates the `preview-worker` binary beside the running process. A deployed image places both
-// binaries in one directory, but `cargo test` builds the test binary one level deeper (in
-// `target/debug/deps/`) than the `[[bin]]` targets, so the parent directory is checked too.
+// Locates `preview-worker` beside the running process; `cargo test` builds one level deeper than
+// the `[[bin]]` targets, so the parent directory is checked too.
 async fn worker_exe() -> Result<PathBuf, Refusal> {
     let exe =
         std::env::current_exe().map_err(|e| Refusal::RenderTimeout(format!("current_exe: {e}")))?;

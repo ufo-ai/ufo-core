@@ -59,9 +59,8 @@ async fn an_immutable_artifact_is_fetched_once_then_served_from_cache() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_cold_misses_for_one_artifact_both_serve_the_correct_body() {
-    // Two overlapping cold misses for one URL used to share a fixed temp path: one truncated the
-    // other mid-write, committing a corrupt body and 502-ing the loser. Each download now writes a
-    // unique temp, so both complete and serve the full artifact.
+    // Two overlapping cold misses for one URL used to share a fixed temp path, so one truncated the
+    // other mid-write and committed a corrupt body. Each download now writes a unique temp.
     let tmp = tempfile::tempdir().unwrap();
     let (origin, _hits) = common::registry();
     let origin_addr = common::spawn(origin).await;

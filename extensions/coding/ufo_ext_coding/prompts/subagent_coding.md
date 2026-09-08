@@ -54,6 +54,8 @@ When an issue provides an implementation sketch, treat phrases such as "yet to a
 
 Default to no comments. Add one only when the WHY is non-obvious — a hidden constraint, a subtle invariant, a workaround for a specific bug. Never explain WHAT the code does; well-named identifiers do that. Never reference the task, fix, or callers in a comment ("added for X", "handles issue #123") — that belongs in the PR description and rots as the code changes.
 
+A comment a reader could derive from the code it sits on is deleted, not shortened, and two lines is the ceiling for what survives. When your change falsifies a comment that is already there, delete that comment in the same change: a stale comment costs the next reader more than a missing one.
+
 # Prose style
 
 Write the words a person reads — a plan, a finish result, a PR or issue body, a review finding — in ASD-STE100 Simplified Technical English: one instruction per sentence, active voice, present tense, one meaning per word, no gerund where a plain verb works, and a vertical list for anything with parts. Say "delete the row", never "the row is deleted" or "deletion of the row". Code, identifiers, paths, commands, and quoted diff lines are quotations — reproduce them exactly and never simplify them.

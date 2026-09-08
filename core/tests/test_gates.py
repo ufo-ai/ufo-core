@@ -27,6 +27,12 @@ EXT_MIGRATIONS = Path("extensions/probe/migrations")
 CORE_STAMPS = ("20260801000001", "20260801000002", "20260801000003", "20260801000004")
 INGRESS_FILE = Path("core/src/ufo/harness/sandbox/ingress.py")
 HARNESS_FILE = Path("core/src/ufo/harness/rounds.py")
+RUST_FILE = Path("servers/egress/src/server.rs")
+PY_FILE = Path("core/src/ufo/turn.py")
+TSX_FILE = Path("extensions/web/frontend/src/app.tsx")
+CSS_FILE = Path("extensions/web/frontend/src/theme.css")
+SH_FILE = Path("dev/stack.sh")
+DEPLOY_GATE = Path(".github/scripts/deploy_change_gate.py")
 
 
 def _migration(revision: str, down: str, depends: str = "None") -> ast.Module:
@@ -1035,6 +1041,98 @@ def _check_layering_gate_allows_the_named_boot_modules_and_the_host_itself() -> 
     assert gates._layering_failures(trees) == []
 
 
+def _check_comment_ceiling_flags_a_paragraph_and_leaves_two_lines_alone() -> None:
+    over = "\n".join(f"// line {n}" for n in range(3)) + "\nfn relay() {}\n"
+    under = "// line 0\n// line 1\nfn relay() {}\n"
+    failures = gates._overlong_comments(RUST_FILE, over)
+    assert len(failures) == 1
+    assert "comment block of 3 lines" in failures[0]
+    assert failures[0].startswith(f"{RUST_FILE}:1:")
+    assert gates._overlong_comments(RUST_FILE, under) == []
+
+
+def _check_comment_ceiling_reads_each_language_by_its_own_openers() -> None:
+    """A `#` opens a comment in Python and YAML and nothing in Rust; `//` the reverse. Reading one
+    language's opener in another is how `#[cfg(...)]` and `--custom-prop` first read as prose."""
+    paragraph = "one\ntwo\nthree"
+    for path, prefix in ((PY_FILE, "# "), (RUST_FILE, "// "), (TSX_FILE, "// ")):
+        text = "\n".join(prefix + line for line in paragraph.split("\n"))
+        assert len(gates._overlong_comments(path, text)) == 1, path
+    attributes = '#[cfg(test)]\n#[derive(Clone)]\n#[serde(rename = "a")]\nstruct A;\n'
+    assert gates._overlong_comments(RUST_FILE, attributes) == []
+    properties = ":root {\n  --ufo-a: 1;\n  --ufo-b: 2;\n  --ufo-c: 3;\n}\n"
+    assert gates._overlong_comments(CSS_FILE, properties) == []
+    fixture = 'NARRATED = """\n# one\n# two\n# three\n"""\n'
+    assert gates._overlong_comments(PY_FILE, fixture) == []
+    assert gates._python_comment_lines("x = 1  # trailing\n# whole\n") == frozenset({2})
+
+
+def _check_comment_ceiling_ignores_a_shebang_and_the_code_a_comment_trails() -> None:
+    script = "#!/usr/bin/env bash\nset -euo pipefail\ncurl -sS http://localhost\n"
+    assert gates._overlong_comments(SH_FILE, script) == []
+    trailing = "let a = 1; // one\nlet b = 2; // two\nlet c = 3; // three\n"
+    assert gates._overlong_comments(RUST_FILE, trailing) == []
+
+
+def _check_comment_ceiling_exempts_a_public_docstring_and_holds_a_private_one() -> None:
+    """`cargo doc` and the kit catalogue publish a doc comment to a reader who never opens the file,
+    so it is documentation with an audience. Over a private item it is commentary beside code."""
+    paragraph = "/// one\n/// two\n/// three\n"
+    assert gates._overlong_comments(RUST_FILE, paragraph + "pub fn relay() {}\n") == []
+    assert gates._overlong_comments(RUST_FILE, paragraph + "pub(crate) struct Caps;\n") == []
+    assert len(gates._overlong_comments(RUST_FILE, paragraph + "fn relay() {}\n")) == 1
+    assert len(gates._overlong_comments(RUST_FILE, paragraph + "\nlet a = 1;\n")) == 1
+    module = "//! one\n//! two\n//! three\n\nuse std::io;\n"
+    assert gates._overlong_comments(RUST_FILE, module) == []
+    doc = "/**\n * The button.\n * @param label its text\n */\nexport function Button() {}\n"
+    assert gates._overlong_comments(TSX_FILE, doc) == []
+    assert len(gates._overlong_comments(TSX_FILE, doc.replace("export ", ""))) == 1
+
+
+def _check_comment_ceiling_exempts_a_licence_header_and_a_tool_pragma() -> None:
+    licence = "// SPDX-License-Identifier: MIT\n// Copyright the authors\n// All rights reserved\n"
+    assert gates._overlong_comments(RUST_FILE, licence) == []
+    pragma = "# ruff: noqa: E501\n# a second line\n# a third line\n"
+    assert gates._overlong_comments(PY_FILE, pragma) == []
+
+
+def _check_comment_ceiling_ends_a_block_at_the_first_terminator() -> None:
+    """The first `*/` closes the block, so a one-line block comment is one run rather than the rest
+    of the file. A comment opener has to start the line: one inside a string literal opens nothing,
+    or every path and glob that contains `//` reads as prose."""
+    block = "/*\n * one\n * two\n */\nfn relay() {}\n"
+    assert len(gates._overlong_comments(RUST_FILE, block)) == 1
+    prose = "/* a member's file */\nlet a = 1;\nlet b = 2;\nlet c = 3;\n"
+    assert gates._comment_runs(prose, ".rs") == [(1, ["/* a member's file */"])]
+    literal = 'let a = "/* not a comment */";\nlet b = 1;\nlet c = 2;\n'
+    assert gates._comment_runs(literal, ".rs") == []
+
+
+def _check_comment_ceiling_exempts_the_files_the_deploy_gate_reads_for_alignment() -> None:
+    """Shortening a comment in an authorization file deletes lines, `terraform fmt` realigns the `=`
+    column of the block around them, and the deploy gate reads the realigned grants as a
+    contraction. The exemption therefore has to name exactly the files that gate reads."""
+    tree = ast.parse((_GATES_PATH.parent / DEPLOY_GATE).read_text())
+    guarded = next(
+        {element.value for element in node.value.args[0].elts}
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign) and node.targets[0].id == "AUTHORIZATION_PATHS"
+    )
+    assert {str(path) for path in gates.COMMENT_ALIGNMENT_FILES} == guarded
+    paragraph = "# one\n# two\n# three\n"
+    assert len(gates._overlong_comments(next(iter(gates.COMMENT_ALIGNMENT_FILES)), paragraph)) == 1
+
+
+def _check_comment_ceiling_holds_over_the_tree_it_gates() -> None:
+    """The walk itself, on the real repository. `servers/{cache,egress,preview}` carried ninety
+    blocks past the ceiling that no text sweep reached, and only this walk fails on them. A
+    `skills/` tree is text a model reads and ships only ablated, so it stays out of the walk."""
+    assert gates._comment_length_failures() == []
+    skill = _GATES_PATH.parent / "core/src/ufo/runtime/skills/ufo-style/references/tokens.css"
+    assert gates._is_skill_content(skill)
+    assert gates._overlong_comments(Path("tokens.css"), skill.read_text()) != []
+
+
 def test_repository_gates() -> None:
     for check in (
         _check_the_gate_walk_skips_vendored_dependency_trees,
@@ -1129,5 +1227,13 @@ def test_repository_gates() -> None:
         _check_census_period_gate_flags_a_board_that_declares_no_period,
         _check_layering_gate_rejects_a_host_import_from_runtime_or_harness,
         _check_layering_gate_allows_the_named_boot_modules_and_the_host_itself,
+        _check_comment_ceiling_flags_a_paragraph_and_leaves_two_lines_alone,
+        _check_comment_ceiling_reads_each_language_by_its_own_openers,
+        _check_comment_ceiling_ignores_a_shebang_and_the_code_a_comment_trails,
+        _check_comment_ceiling_exempts_a_public_docstring_and_holds_a_private_one,
+        _check_comment_ceiling_exempts_a_licence_header_and_a_tool_pragma,
+        _check_comment_ceiling_ends_a_block_at_the_first_terminator,
+        _check_comment_ceiling_exempts_the_files_the_deploy_gate_reads_for_alignment,
+        _check_comment_ceiling_holds_over_the_tree_it_gates,
     ):
         check()

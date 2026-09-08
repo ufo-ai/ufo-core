@@ -26,9 +26,8 @@ use ufo_egress::types::{MeterRecord, RunToken};
 const SECRET: &[u8] = b"proxy-it-signing-secret";
 const WORKSPACE: u128 = 0x1111;
 const TURN: u128 = 0x2222;
-/// An address the DNS pin vets as globally routable and no test origin serves: a connect there
-/// reaches nothing, which is how a test tells the pinned address apart from the private one the
-/// same name answers. No test waits on that connect, so the job still needs no network.
+/// An address the DNS pin vets as globally routable that no test origin serves, so a test can tell
+/// the pinned address from the private one the same name answers. No test waits on that connect.
 const VETTED_PUBLIC_ADDRESS: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);
 
 // --- fake control plane -----------------------------------------------------------------------
@@ -540,9 +539,8 @@ async fn a_scoped_host_tunnels_and_meters_one_egress_request() {
     sock.read_exact(&mut echoed).await.unwrap();
     assert_eq!(&echoed, b"ping", "tunnel did not relay opaquely");
 
-    // The wire posts both the `sandbox_egress_total{host, dimension}` counter (what the in-process
-    // Python proxy emitted directly) and the egress ledger charge — the counter carrying the billed
-    // host and dimension, the charge carrying the workspace and turn.
+    // The wire posts the `sandbox_egress_total{host, dimension}` counter and the egress ledger
+    // charge — the counter carrying host and dimension, the charge workspace and turn.
     let records = meter_records(&proxy.control).await;
     let metric = records
         .iter()
@@ -563,9 +561,8 @@ async fn a_scoped_host_tunnels_and_meters_one_egress_request() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pinned_scope_refuses_a_host_that_answers_a_private_address() {
-    // A workspace admin writes the host a workspace-declared credential slot rides to, so its scope
-    // arrives pinned: the same allowlist entry that tunnels unpinned is resolved here and refused,
-    // because an exact scope is otherwise the one path around the private-address check.
+    // An exact scope is otherwise the one path around the private-address check, so a pinned
+    // scope's host is resolved here and refused.
     let origin = spawn_echo().await;
     let target = format!("127.0.0.1:{}", origin.port());
     let pinned = r#"[{"kind":"scope","hosts":["127.0.0.1"],"pinned":true}]"#;
@@ -581,13 +578,8 @@ async fn a_pinned_scope_refuses_a_host_that_answers_a_private_address() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pinned_scope_with_an_injection_rule_mitms_the_vetted_address_alone() {
-    // The shape a workspace-declared credential slot emits: the scope arrives pinned *and* an
-    // injection rule swaps the secret onto the same host, so the dispatch takes the MITM path
-    // rather than the tunnel. The pin vets one address; a name whose A record is public and whose
-    // AAAA record is private answers the vetted address here and a private one to the system
-    // resolver, which is what a second lookup inside the MITM would take. `localhost` is that
-    // name on the box: the pin answers a public address, the system resolver answers loopback,
-    // where a TLS origin listens and records any secret it is handed.
+    // A pinned scope plus an injection rule takes the MITM path. `localhost` answers the pin a
+    // public address and the system resolver loopback, where a TLS origin records any secret.
     let (origin, origin_ca, seen) = spawn_tls_origin("localhost").await;
     let target = format!("localhost:{}", origin.port());
     let rules = r#"[{"kind":"scope","hosts":["localhost"],"pinned":true},{"kind":"injection","host":"localhost","header":"authorization","sentinel":"SENTINEL","real":"real-secret"}]"#;
@@ -774,9 +766,8 @@ async fn each_service_rule_relays_to_the_daemon_that_owns_its_host() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_preview_request_fails_in_the_tunnel_when_its_daemon_is_gone() {
-    // Nothing else serves the preview host, so there is no origin to fall through to: whether the
-    // deploy configured no preview daemon or configured one that is down, the sandbox's render call
-    // is answered 502 inside the tunnel it already opened.
+    // Nothing else serves the preview host, so a render call is answered 502 inside the tunnel
+    // whether no daemon is configured or the configured one is down.
     let rules = r#"[{"kind":"service","host":"preview.ufo.internal","daemon_prefix":null}]"#;
     let render =
         b"POST /render HTTP/1.1\r\nhost: preview.ufo.internal\r\ncontent-length: 0\r\n\r\n";
@@ -807,11 +798,8 @@ async fn a_preview_request_fails_in_the_tunnel_when_its_daemon_is_gone() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_git_path_through_the_preview_host_never_reaches_an_origin() {
-    // The cache re-originates a `/git/<host>/…` request when its daemon is down, reading the host
-    // from the path. The preview host must not inherit that: it fronts no public origin, so a
-    // request whose path names `github.com` sent through its tunnel with no daemon is answered 502
-    // inside the tunnel, never relayed to `github.com` — otherwise an agent held off the internet
-    // would hold a second, ungated route to it.
+    // The preview host must not inherit the cache's path-based re-origination: a path naming
+    // `github.com` is answered 502, never relayed to it.
     let rules = r#"[{"kind":"service","host":"preview.ufo.internal","daemon_prefix":null}]"#;
     let git =
         b"GET /git/github.com/owner/repo/info/refs HTTP/1.1\r\nhost: preview.ufo.internal\r\n\r\n";

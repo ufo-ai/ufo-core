@@ -218,10 +218,8 @@ pub async fn video_frame(
     let workdir_str = workdir
         .to_str()
         .ok_or_else(|| Refusal::UnsupportedType("workdir is not valid utf-8".into()))?;
-    // `thumbnail` buffers its whole window of decoded frames at source resolution before the
-    // scale runs, so the window sets the peak, not the output box: the filter's default 100
-    // frames of 3840x2160 yuv420p is 1.2 GiB and the child dies on FFMPEG_MEMORY_BYTES with no
-    // frame written.
+    // `thumbnail` buffers its whole frame window at source resolution before the scale runs, so 100
+    // frames of 3840x2160 yuv420p is 1.2 GiB and the child dies with no frame written.
     let vf = format!(
         "thumbnail=n={VIDEO_THUMBNAIL_FRAMES},scale='min({max_w},iw)':'min({max_h},ih)':force_original_aspect_ratio=decrease"
     );

@@ -46,13 +46,11 @@ pub struct Config {
 // must hold both plus headroom.
 const DEFAULT_DISK_LIMIT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const DEFAULT_PKG_DISK_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-// Long enough that one clone's `fetch` negotiation rides the fetch its own ref discovery just did, and
-// that a subagent fan-out cloning one repo pays one negotiation; short enough that a negotiation
-// arriving on its own is not far behind origin.
+// Long enough that one clone's negotiation rides the fetch its own ref discovery did; short enough
+// that a lone negotiation is not far behind origin.
 const DEFAULT_GIT_FRESH_TTL_SECS: u64 = 15;
-// The hosted cache volume is 24Gi against 4 GiB of mirrors and 8 GiB of packages, so the pack and
-// LFS tiers take the bound to 20 GiB and leave headroom: exceeding an `emptyDir` `sizeLimit`
-// evicts the proxy pod.
+// The hosted cache volume is 24Gi against 4 GiB of mirrors and 8 GiB of packages: exceeding an
+// `emptyDir` `sizeLimit` evicts the proxy pod.
 const DEFAULT_PACK_CACHE_MB: u64 = 4096;
 const DEFAULT_LFS_CACHE_MB: u64 = 4096;
 

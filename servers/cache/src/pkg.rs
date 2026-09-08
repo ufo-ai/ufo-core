@@ -35,14 +35,12 @@ const REPLAY_HEADERS: [&str; 7] = [
 /// A request carrying either of these is authenticated: never served from — nor written to — a cache
 /// shared across every workspace, so a private package on a shared host cannot leak.
 const PRIVATE_REQUEST_HEADERS: [&str; 2] = ["authorization", "cookie"];
-/// A `.writing` temp older than this had no writer for an hour — far past any real download — so the
-/// sweep reclaims it as a crashed download's orphan. A live download rewrites its temp continuously,
-/// keeping the mtime fresh.
+/// A live download rewrites its temp continuously, keeping the mtime fresh, so anything older than
+/// this had no writer for an hour and is a crashed download's orphan.
 const WRITING_ORPHAN_GRACE_SECS: u64 = 3600;
 
-/// A temp path unique to this write: `<path>.<pid>.<seq>.writing`, so two concurrent downloads of one
-/// key never share a file (one `File::create` would truncate the other's in-flight body). Mirrors
-/// `durable::restore_temp`.
+/// `<path>.<pid>.<seq>.writing`, so two concurrent downloads of one key never share a file: one
+/// `File::create` would truncate the other's in-flight body.
 static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn writing_temp(path: &Path) -> PathBuf {
@@ -102,10 +100,8 @@ impl PkgCache {
         };
         let url = format!("{}://{host}/{path_q}", self.scheme);
 
-        // Only an anonymous, whole-object GET is cacheable. A non-GET mutates; an authenticated
-        // request may carry a private artifact that must never enter a shared cache; a ranged request
-        // wants a slice this cache does not store. All three pass straight through to origin, headers
-        // and body intact, so authenticated publish and resumable downloads still work transparently.
+        // An authenticated request may carry a private artifact that must never enter a shared
+        // cache, and a ranged request wants a slice this cache does not store; both pass through.
         let authenticated = PRIVATE_REQUEST_HEADERS
             .iter()
             .any(|name| headers.contains_key(*name));
@@ -213,12 +209,8 @@ impl PkgCache {
         forward_headers(self.client.get(url), headers).send().await
     }
 
-    /// Cache the response if the origin marks it storable, then serve it. A storable body is written
-    /// to a temp file and committed — renamed into place with its meta — before the response returns,
-    /// so the very next request is a hit and a dropped download never leaves a half-written entry. A
-    /// non-storable body streams straight through, uncached. The cold miss pays a full download before
-    /// its first byte; every warm request streams from disk. The commit snapshots to the durable tier
-    /// off the response path.
+    /// A storable body is committed before the response returns, so the next request is a hit and a
+    /// dropped download never leaves a half-written entry.
     async fn store_or_relay(
         &self,
         resp: reqwest::Response,
@@ -448,10 +440,8 @@ fn build_response(
         })
 }
 
-/// The freshness lifetime the origin grants a shared cache, or None when the response must not be
-/// stored. Only a `200` with a positive lifetime (`s-maxage`/`max-age`) or `immutable` is stored;
-/// `no-store`/`private`, a `Vary` on anything but encoding, and a body with no freshness signal are
-/// all passed through instead of guessed at.
+/// Only a `200` with a positive lifetime or `immutable` is stored; `no-store`, a `Vary` on anything
+/// but encoding, and a body with no freshness signal pass through rather than being guessed at.
 fn storable(status: StatusCode, headers: &reqwest::header::HeaderMap) -> Option<u64> {
     if status != StatusCode::OK {
         return None;
@@ -491,10 +481,8 @@ fn storable(status: StatusCode, headers: &reqwest::header::HeaderMap) -> Option<
     }
 }
 
-/// Relay the sandbox's own request headers to origin, so an authenticated publish or a bespoke
-/// user-agent reaches the registry unchanged. Dropped: hop-by-hop controls, the `Host` (reqwest sets
-/// it from the URL), the proxy-stamped `x-ufo-*` identity, and the client's own cache validators —
-/// this cache manages revalidation itself.
+/// Dropped: hop-by-hop controls, the `Host` (reqwest sets it from the URL), the proxy-stamped
+/// `x-ufo-*` identity, and the client's own validators — this cache manages revalidation itself.
 fn forward_headers(req: reqwest::RequestBuilder, headers: &HeaderMap) -> reqwest::RequestBuilder {
     let mut req = req;
     for (name, value) in headers {
@@ -594,9 +582,8 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Evict least-recently-used cache entries until the pkg tree is under `limit`. Mirrors the git
-/// sweep: reserve each victim with an atomic rename-aside taken only while no request holds it, then
-/// delete the body and its meta outside the lock, so an in-use entry is never removed mid-serve.
+/// Reserve each victim with an atomic rename-aside taken only while no request holds it, then
+/// delete outside the lock, so an in-use entry is never removed mid-serve.
 fn sweep_pkg(root: &Path, limit: u64, in_use: &InUse) {
     let mut entries = Vec::new();
     let mut total = 0u64;

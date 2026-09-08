@@ -281,10 +281,8 @@ mod tests {
         assert!(!config.crypto_provider().kx_groups.is_empty());
     }
 
-    // The shared egress CA the hosted deploy provisions is an RSA key delivered as PKCS#8
-    // (`BEGIN PRIVATE KEY`) — the encoding rcgen's `KeyPair::from_pem` parses. A PKCS#1 `BEGIN RSA
-    // PRIVATE KEY` (terraform's default `private_key_pem`) is refused, so the deploy hands over
-    // `private_key_pem_pkcs8`; this fixture is exactly that shape.
+    // The hosted CA arrives as PKCS#8, the one encoding `KeyPair::from_pem` parses, so the deploy
+    // hands over `private_key_pem_pkcs8` rather than terraform's PKCS#1 default.
     const RSA_PKCS8_CA_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDmh+MtXuT2DwL2\n\
 wOOIepJ1K1DaJQ68i3jUiHW+hDIdmmqCi6zB3CBfMsSCzG6dBLS+5gIrcV5QNyqv\n\

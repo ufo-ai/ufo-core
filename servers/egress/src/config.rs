@@ -64,10 +64,8 @@ impl Config {
     }
 }
 
-/// A relay daemon's `host:port`, kept as a name and resolved at connect time: one daemon is a
-/// co-located address and the other a cluster DNS name whose address the proxy must not pin for the
-/// life of the process. Validated here, so a malformed value dies at boot rather than degrading
-/// silently to an unreachable daemon.
+/// A relay daemon's `host:port`, resolved at connect time so a cluster DNS name's address is never
+/// pinned for the life of the process. Validated here: a malformed value dies at boot.
 fn daemon_address(key: &str) -> Result<Option<String>, String> {
     let value = match std::env::var(key) {
         Ok(value) => value,
@@ -87,9 +85,8 @@ fn req(key: &str) -> Result<String, String> {
     std::env::var(key).map_err(|_| format!("{key} is required"))
 }
 
-/// The PEM behind `<key>`, or the contents of the file `<key>_FILE` names. Hosted passes the value
-/// straight from a secret; the dev rig mounts one shared CA and points both serve and the proxy at
-/// its path, so a multi-line PEM never has to ride an env value.
+/// The PEM behind `<key>`, or the contents of the file `<key>_FILE` names, so a multi-line PEM
+/// never has to ride an env value.
 fn pem_or_file(key: &str) -> Result<Option<String>, String> {
     if let Ok(path) = std::env::var(format!("{key}_FILE")) {
         return std::fs::read_to_string(&path)
