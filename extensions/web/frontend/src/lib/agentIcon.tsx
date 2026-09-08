@@ -100,6 +100,15 @@ type MarkPath = { d: string; fill?: string; stroke?: string; opacity?: string };
 const GLYPH = "size-(--size-glyph)";
 const MARK_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
+/** One app's mark, drawn at `--size-glyph` unless its caller sets another size, in the ink of
+ *  whatever it sits in. It is always hidden from assistive technology: the mark restates what the
+ *  row's own text and the picker's own label already say.
+ *
+ *  The picker's marks are the element pack's own paths, bundled and drawn at once, and the reserved
+ *  mark is the brand's own file; any other slug tabler draws is read from its letter's sprite, one
+ *  fetch per letter for the page's life. A slug no sprite answers is reported to the console and
+ *  drawn as the unknown mark, so the hole is visible and named while the row it sits in still lists
+ *  its app. */
 export function AgentIcon({ name, className }: { name: string; className?: string }) {
   if (!MARK_NAME.test(name)) return <UnknownMark name={name} className={className} />;
   if (name === RESERVED_MARK) return <BrandMark className={className} />;

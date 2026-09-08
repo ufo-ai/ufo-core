@@ -12,8 +12,21 @@ import { postAction } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { ActionView } from "@/lib/types";
 
-/** The press does not touch the rows the page is drawn from: it marks the work due, and the job that
- *  owns that text writes it minutes later. */
+/** Asking a job to write a page's text again.
+ *
+ *  The page a member is reading is drawn from rows a job wrote, and the act this offers does not
+ *  touch them: it marks the work due and the job that owns that text writes it minutes later. So
+ *  the dialog exists to say what the press will and will not reach before it is pressed — a control
+ *  named for the whole page while it redoes one band of it is a lie the member finds out months
+ *  later — and to state what was queued afterwards, because nothing on the screen changes when they
+ *  press it.
+ *
+ *  The acts are the ones `kind`'s collection projects from its declarations — the rebuild — posted
+ *  on the main agent's lane, so the page carries no rule about who may press it or what the rebuild
+ *  reaches. The outcome stays here rather than dismissing itself: it is the only account of an act
+ *  with no visible result, and a refusal — the action holds this to a workspace admin — is not
+ *  something any field on the page can answer. A queued dialog has nothing left to commit, so its
+ *  way out is named `Close` and the act itself is gone. */
 export function RebuildDialog({
   title,
   kind,

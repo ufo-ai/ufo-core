@@ -149,6 +149,8 @@ function ending(row: ObjectRow): string {
 export const OWNER_FIELD = "owner_email";
 const OWNER_HEADING = "Created By";
 
+/** Who made a row, in the member's words — the wire's `owner_email` never renders raw. A row
+ *  carrying no creator is the workspace's own. */
 export function creator(value: ObjectValue | undefined, viewer: string | null): string {
   return ownerLabel(typeof value === "string" && value ? value : null, viewer);
 }
@@ -158,10 +160,12 @@ export type ObjectAddress = { agent: string; kind: string; name: string };
 const SLOT_PREFIX = "object/";
 const SLOT_SEPARATOR = "/";
 
+/** The route id for one object in one app namespace. */
 export function slotOf(at: ObjectAddress): string {
   return SLOT_PREFIX + at.agent + SLOT_SEPARATOR + at.kind + SLOT_SEPARATOR + at.name;
 }
 
+/** The object named by a route id, or null when the id names another kind of view. */
 export function objectAt(id: string): ObjectAddress | null {
   if (!id.startsWith(SLOT_PREFIX)) return null;
   const [agent, kind, ...rest] = id.slice(SLOT_PREFIX.length).split(SLOT_SEPARATOR);
@@ -170,6 +174,7 @@ export function objectAt(id: string): ObjectAddress | null {
   return { agent, kind, name };
 }
 
+/** One object kind's index and selected record sheet. */
 export function ObjectPane({
   agentId,
   kind,
@@ -556,6 +561,7 @@ function NewObject({
   );
 }
 
+/** One object's record inside a sheet. */
 export function ObjectDetail({
   agentId,
   kind,

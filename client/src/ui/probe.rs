@@ -1,4 +1,3 @@
-
 use crossterm::event::KeyEvent;
 #[cfg(unix)]
 use crossterm::event::{KeyCode, KeyModifiers};

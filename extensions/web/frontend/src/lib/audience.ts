@@ -2,6 +2,7 @@ import { createContext, useContext } from "react";
 
 export const Viewer = createContext<string | null>(null);
 
+/** The signed-in member's email, from the provider mountApp installs. */
 export function useViewer(): string | null {
   return useContext(Viewer);
 }
@@ -17,6 +18,7 @@ export const SLACK_SURFACE = "slack";
 export const UFO_SURFACE = "ufo";
 export const IMESSAGE_SURFACE = "imessage";
 
+/** Whether a conversation's surface is the portal — the web surface or an extension's. */
 export function isPortalChat(surface: string): boolean {
   return surface === WEB_SURFACE || surface.startsWith("extension:");
 }
@@ -28,6 +30,8 @@ const SURFACE_WORDS: Record<string, string> = {
   [IMESSAGE_SURFACE]: "iMessage",
 };
 
+/** The member's word for a surface. A surface the map does not name reads as its own word rather
+ *  than breaking the screen. */
 export function surfaceWord(surface: string): string {
   return SURFACE_WORDS[surface] ?? surface;
 }
@@ -36,6 +40,11 @@ export function origin(entry: { surface: string; surface_label: string | null })
   return entry.surface_label || surfaceWord(entry.surface);
 }
 
+/** Where a conversation leads back out to in Slack: the source the surface reported for the message
+ *  it opened with, which for Slack is that message's permalink. The surface is the gate and never
+ *  the string: every surface defines its own source, and the portal's names the portal while the
+ *  CLI's is no URL at all. A conversation a surface reported no source for leads nowhere and draws
+ *  no link. */
 export function slackLink(
   surface: string | null | undefined,
   source: string | null | undefined,
@@ -46,6 +55,7 @@ export function slackLink(
 
 export const SHARED_SUBJECT = "shared";
 
+/** Whether a wire audience names one member rather than a room, the workspace, or another org. */
 export function isMemberAudience(audience: string): boolean {
   return audience.startsWith("member:");
 }
@@ -72,6 +82,8 @@ export function subjectLabel(subject: string | null): string {
   return "Unknown";
 }
 
+/** Whose a record is: `You`, another member's address verbatim, or the workspace where no member
+ *  created it. */
 export function ownerLabel(email: string | null, viewer: string | null): string {
   if (email === null) return "Workspace";
   return email === viewer ? "You" : email;

@@ -36,6 +36,8 @@ const TEXT_APPLICATION_MEDIA = new Set([
   "application/yaml",
 ]);
 
+/** Whether a media type is text the page can show as text — every `text/*` type, and the code and
+ *  data types `application/*` carries. */
 export function isTextMedia(mediaType: string): boolean {
   return mediaType.startsWith("text/") || TEXT_APPLICATION_MEDIA.has(mediaType);
 }
@@ -49,6 +51,12 @@ const SPREADSHEET_MEDIA_TYPES = new Set([
 const OFFICE_MEDIA_PREFIX = "application/vnd.openxmlformats-officedocument";
 const WORD_MEDIA_TYPE = "application/msword";
 
+/** What a file with no picture of its own is drawn as: one glyph for the family its media type
+ *  falls in. The families are the ones the listing narrows by — image, document, everything else —
+ *  so a member who filters to Documents sees the glyph they filtered on, and a spreadsheet and a
+ *  page are told apart inside that family rather than sharing one mark. A document is anything
+ *  readable as text, an office file, or a Word file, the same answer the listing files by. A file
+ *  the map does not place takes the plain sheet, which claims nothing about what is in it. */
 export function MediaIcon({ mediaType }: { mediaType: string }) {
   if (mediaType.startsWith("image/")) return <IconPhoto className="size-icon" aria-hidden />;
   if (mediaType === PDF_MEDIA_TYPE) return <IconFileTypePdf className="size-icon" aria-hidden />;
@@ -240,6 +248,8 @@ function FileDownload({ file }: { file: SharedFile }) {
   );
 }
 
+/** A shared file opened in a Sheet: its name, subject, type and size, a download act, and the
+ * file's body drawn by its media type. */
 export function FileSheet({
   file,
   onClose,
@@ -308,6 +318,10 @@ function csvRows(text: string): string[][] {
   return rows;
 }
 
+/** A shared text file's characters, read to the byte the fold is cut at: the read stops there and
+ *  `bounded` states that the file goes on past it, so a view can say what it is showing. A view
+ *  that draws the text itself — because it reads the document's own title off the first line —
+ *  takes the read from here rather than fetching the file a second way. */
 export function useTextArtifact(
   url: string | null,
   byteLimit: number = ARTIFACT_TEXT_BYTES,
@@ -360,6 +374,9 @@ export function useTextArtifact(
   return { body, bounded, message };
 }
 
+/** A shared text file, read to the fold. Markdown renders as the document it is — the same
+ *  renderer that draws an agent's reply — and every other text type stays preformatted, since a
+ *  `.txt` or a `.csv` means the characters it holds and a markdown pass would eat them. */
 export function ArtifactText({
   url,
   name,

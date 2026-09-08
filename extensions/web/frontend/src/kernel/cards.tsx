@@ -8,8 +8,39 @@ export type CardMark<Row> =
   | { shape: "band"; image?: (row: Row) => string | null; body?: (row: Row) => ReactNode }
   | { shape: "tile"; image?: (row: Row) => string | null; body?: (row: Row) => ReactNode };
 
-/** An act is laid beside the tile's own control rather than inside it, since a control inside a control
- *  is not markup a browser keeps. */
+/** A grid of cards holds its rhythm only while every card is the same height, so the text a row
+ *  supplies is cut to a fixed number of lines: one for the name, two for the description. A card
+ *  states enough to choose by; the whole of it is on the row's own screen. A phone's grid is one
+ *  column, where there is no second card on the line to keep level with — so the description runs
+ *  as long as it is, and a record with no screen of its own is still read in full.
+ *
+ *  A record that has no screen of its own at any width takes `whole`: the card is all there is to
+ *  read it on, so its description runs to the end of the sentence rather than to the second line.
+ *
+ *  A `tile` mark makes the grid dense and picture-first, the way a library of pictures is read:
+ *  the track fills with as many `--size-tile` columns as the width takes, at every width. The
+ *  picture is the tile, so it carries none of a card's chrome — a fill and a padding box drawn
+ *  around a picture only pad what already fills its own bounds. It keeps one hairline, which is
+ *  what gives a tile whose picture is missing or still loading a box to stand in, and which is
+ *  what strengthens under the pointer. The
+ *  name and the status sit under it as plain text; the description and the meta line are not
+ *  drawn, since a tile states its picture, its name and where it stands. An act the record carries
+ *  is laid over the corner of its picture — beside the tile's own control rather than inside it,
+ *  since a control inside a control is not markup a browser keeps, and above the tile rather than
+ *  under it, since only some records carry an act and a grid that gave those rows an extra line
+ *  would step down the page wherever one of them landed.
+ *
+ *  `open` makes the whole record the control that reaches it, drawn the way each shape can afford.
+ *  A card holds acts of its own, so it takes `rowControl` and a press on one of those acts never
+ *  also opens the record. A tile holds none, so it is a button outright and the `li` around it
+ *  keeps the role that makes the grid a list to a reader.
+ *
+ *  `current` names the row whose contents are standing beside the grid, and the mark is the row's
+ *  whole band — the `li` itself takes `aria-current` and the fill, so what is lit is the record
+ *  rather than the letters of its name. A card already draws a surface, so the fill replaces the
+ *  one it stands on; a tile draws none, so the fill is the band under its picture and its name,
+ *  ending on the picture's own edges and taking the same radius. Neither costs the row a pixel:
+ *  a mark that padded a tile would step the whole grid down as the member walked it. */
 export function CardGrid<Row>({
   rows,
   rowKey,

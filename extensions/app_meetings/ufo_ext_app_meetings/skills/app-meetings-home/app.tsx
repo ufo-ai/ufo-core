@@ -1,3 +1,10 @@
+// The meetings app's page: a static site built with the portal's app kit. Edit this file and
+// redeploy to change the page.
+//
+// It ships filled in. Every row below is placeholder written to read exactly like the real thing —
+// real names, real times, real amounts — because this file is the shape the app rebuilds against
+// its own sources on the first Build app. A page of empty bands would tell the app nothing about
+// what to draw, and a member nothing about what the app is for.
 
 import {
   AppConversations,
@@ -25,12 +32,18 @@ import type { Placement } from "ufo/kit";
 
 const APP = "Meetings";
 
+/** What the app is for, in the one sentence a member reads before anything else on the page. */
 const PURPOSE =
   "Briefs you before each meeting, and can turn what a meeting agreed into tracked follow-ups "
   + "and workspace notes.";
 
+/** The line under the title: when the app last ran, and the counts a member scans for. It is the
+ *  page's own status, so it says what happened rather than what the app could do. */
 const STANDING = "Last brief 08:05 · 3 meetings ahead · 5 follow-ups open · 2 late";
 
+/** The one feature the page offers rather than reports: follow-ups wait for the ask, so the band
+ *  above the meetings states what turning them on gives and carries the ask that does it. A member
+ *  who does not want them closes it. */
 const OFFER = "Follow-ups after each meeting";
 const OFFER_NOTE =
   "Turning this on writes down what each meeting committed to, with an owner and a date, and "
@@ -48,6 +61,9 @@ type Meeting = {
   attendees: Person[];
 };
 
+/** The next meetings: when, who is coming, and the one act. The brief itself — what last time
+ *  settled, what work is open, what to raise — is what Prep fetches into chat, so a row stays one
+ *  line and the card stays a schedule a member scans rather than reads. */
 const MEETINGS: Meeting[] = [
   {
     day: "27",
@@ -77,6 +93,8 @@ type FollowUp = {
   meeting: string;
 };
 
+/** What meetings committed to, and who owes it. `Late` is past its date and not done — the state a
+ *  member opens this page to find. */
 const FOLLOW_UPS: FollowUp[] = [
   {
     commitment: "Send Northstar the SSO timeline in writing",
@@ -119,6 +137,8 @@ type Note = { decision: string; meeting: string };
 
 type Decided = { day: string; on: string; notes: Note[] };
 
+/** Decisions written into the workspace record, so the wiki and every later turn read them. They
+ *  stand under the day the meeting reached them, because a decision is read by when it was made. */
 const NOTES: Decided[] = [
   {
     day: "24",
@@ -152,13 +172,19 @@ const NOTES_TITLE = "Notes";
 const CONVERSATIONS = "Conversations";
 const NO_CONVERSATIONS = "Your chats with this app, and every run it makes on its own, land here.";
 
+/** The date a row is about, drawn as the tile the row leads with: the same square the controls on
+ *  that row are tall, so the day, the faces and the act sit on one line. */
 const DAY_TILE = cn(
   "flex size-(--size-control) shrink-0 items-center justify-center rounded-avatar",
   "bg-fill text-label font-medium text-ink-quiet",
 );
 
+/** What a row outside a card leads with instead of a tile: one hairline standing the height of the
+ *  row, so a list of records reads down one left edge. */
 const LEAD = "w-(--spacing-hair) shrink-0 self-stretch rounded-row bg-fill-strong";
 
+/** The name of the record and the line under it. It holds a measure of its own, so the acts at the
+ *  row's far edge wrap under it on a phone rather than squeezing the name to nothing. */
 const NAME = "flex min-w-(--container-control-row) flex-1 flex-col gap-sm";
 
 const ROW = "flex flex-wrap items-center gap-2xl py-2xl";
@@ -225,6 +251,7 @@ function NoteRow({ note, on, ruled }: { note: Note; on: string; ruled: boolean }
   );
 }
 
+/** One day of decisions: the date it was, the day's own act, and a row per decision under it. */
 function Day({ decided }: { decided: Decided }) {
   return (
     <div className="flex flex-col">
@@ -248,6 +275,12 @@ function Day({ decided }: { decided: Decided }) {
   );
 }
 
+/** The meetings screen: what is coming and what the app found for it, what the last meetings
+ *  committed to, and what they decided.
+ *
+ *  It answers the questions a member has in the order they ask them — what happens next, what do I
+ *  owe, what did we settle — and every row is a record the app produced rather than a statement
+ *  about what the app could do. */
 function Home({
   agentId,
   place,
@@ -257,6 +290,7 @@ function Home({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
+  // The one record a row opens stands beside the page, and closing it clears the track.
   const held = place.opens?.at(-1) ?? null;
   const at = held === null ? null : objectAt(held);
   const [offered, setOffered] = useState(true);

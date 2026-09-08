@@ -4,8 +4,11 @@ import type { ComponentProps, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
+/** A modal dialog's root: holds whether it is open, for a confirmation or a form that takes the
+ * screen until it is answered. */
 export const Dialog = DialogPrimitive.Root;
 
+/** The control that opens the Dialog it stands in; `asChild` makes the child the trigger. */
 export const DialogTrigger = DialogPrimitive.Trigger;
 
 export function DialogContent({

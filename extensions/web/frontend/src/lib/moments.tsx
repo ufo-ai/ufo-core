@@ -10,6 +10,9 @@ export function isMoment(value: string): boolean {
   return ISO_MOMENT.test(value);
 }
 
+/** The one way a date reads in this portal: `Aug 7 2026`, the calendar day it names, in UTC as it
+ *  was sent. Read off the ISO string rather than through `Date`, so no reader's zone shifts a
+ *  stamp across midnight and no locale reorders the parts. */
 export function day(iso: string | null): string | null {
   if (iso == null) return null;
   const [year, month, date] = iso.slice(0, 10).split("-");
@@ -54,6 +57,9 @@ export function friendlyMoment(raw: string, now: Date): string {
   return day(raw) ?? raw;
 }
 
+/** A record's time wherever the portal draws one: friendly where it is read, and the whole stamp
+ *  under the pointer for the reader who came for the day and the minute. The element carries the
+ *  machine-readable stamp with it, so a reader that does not hover still reaches the moment. */
 export function Moment({ at }: { at: string | null }) {
   if (!at) return null;
   return (

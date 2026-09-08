@@ -109,8 +109,12 @@ window.addEventListener("message", (event: MessageEvent) => {
   }
 });
 
-/** The shell attaches its listener when the pane mounts, so a frame whose bundle evaluated first would
- *  lose a single `ready` — hence the bounded retries. An `init` after the last one still mounts the page. */
+/** The handshake: announce `ready` until the shell's `init` arrives. The shell attaches its
+ *  listener when the pane mounts, so a frame whose bundle evaluated first would lose a single
+ *  `ready` — hence the retries. They are bounded because a page nothing frames would otherwise
+ *  post forever, and the wait is not: an `init` arriving after the last `ready` still mounts the
+ *  page, so a shell slower than the budget costs a page nothing. A page nothing frames stays
+ *  unmounted, which is all there is to draw without a shell to read through. */
 export function connect(): Promise<AppInit> {
   return new Promise((resolve) => {
     if (init) {
@@ -128,18 +132,31 @@ export function connect(): Promise<AppInit> {
   });
 }
 
+/** Move the portal to an address: the page asks the shell framing it to go there, so a link inside
+ * an app lands on a portal screen rather than inside the frame. */
 export function navigate(to: string): void {
   send({ ufo: "navigate", to });
 }
 
+/** Hand words to the composer of a new chat with this app, unsent.
+
+ *  The member reads them and presses send themselves. A press that spends a turn without the member
+ *  reading it is a surprise, and an ask that turns a feature on binds what it grants to whoever
+ *  speaks it — so the member has to be in that conversation rather than merely the cause of one.
+ *  The frame could not send it anyway: the bridge admits `POST agents/{id}/chat` from the chat
+ *  surface alone, and that fence does not move for this. */
 export function compose(text: string): void {
   send({ ufo: "compose", text });
 }
 
+/** Tell the shell a send on this page founded a conversation, so its rail carries the row without
+ *  waiting for the next read. */
 export function founded(agentId: string, conversationId: string, title: string): void {
   send({ ufo: "founded", agent_id: agentId, conversation_id: conversationId, title });
 }
 
+/** The pane's place as it changes while the page stands — the live half of `init`'s `place`. Returns
+ *  the unsubscribe. */
 export function onPlaced(listener: (place: WorkspacePlace) => void): () => void {
   PLACE_LISTENERS.add(listener);
   return () => {
@@ -245,6 +262,9 @@ class BridgeEventSource extends EventTarget {
   }
 }
 
+/** Reroute the page's portal transport: a fetch of a `BASE`-prefixed path and a turn stream's
+ *  `EventSource` ride the bridge; everything else — the page's own assets, absolute signed
+ *  artifact links — keeps the native path. */
 export function installShims(): void {
   const native = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, options?: RequestInit): Promise<Response> => {

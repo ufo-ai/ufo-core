@@ -25,6 +25,7 @@ type ActionOutcome = {
   detail?: unknown;
 };
 
+/** Apply one connector-supplied prepared action and show its durable result. */
 export function ApplicationAction({
   action,
   className,

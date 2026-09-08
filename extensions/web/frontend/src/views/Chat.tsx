@@ -262,6 +262,14 @@ function readyToFound(chatKey: string): void {
   );
 }
 
+/** A screen standing over the box that founds a conversation: whatever it draws scrolls over the
+ *  box at the bottom. It is the chat screen's own shape — the same `TranscriptScroll` and the same
+ *  box with the same toolbar — with a caller's own content where the transcript would be.
+ *
+ *  The box is keyed on the agent's new chat, the key the start screen's box already uses, so words
+ *  a member leaves in one of them are the words the other opens holding. The send founds the
+ *  conversation and the draft moves to it, exactly as it does on the start screen — this draws the
+ *  box in a second place, never a second box. */
 export function FoundingChat({
   agent,
   member,

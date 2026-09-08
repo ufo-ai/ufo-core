@@ -1,4 +1,3 @@
-
 use ratatui::text::{Line, Span};
 
 use crate::ui::theme::Theme;

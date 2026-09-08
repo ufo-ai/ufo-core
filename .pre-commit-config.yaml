@@ -56,6 +56,24 @@ repos:
         language: system
         files: ^servers/preview/
         pass_filenames: false
+      - id: fmt-client
+        name: cargo fmt client
+        entry: sh -c 'cd client && cargo fmt --check'
+        language: system
+        files: ^client/
+        pass_filenames: false
+      - id: fmt-cache
+        name: cargo fmt cache
+        entry: sh -c 'cd servers/cache && cargo fmt --check'
+        language: system
+        files: ^servers/cache/
+        pass_filenames: false
+      - id: fmt-egress
+        name: cargo fmt egress
+        entry: sh -c 'cd servers/egress && cargo fmt --check'
+        language: system
+        files: ^servers/egress/
+        pass_filenames: false
       - id: clippy-preview
         name: cargo clippy preview
         entry: sh -c 'cd servers/preview && cargo clippy --all-targets -- -D warnings'

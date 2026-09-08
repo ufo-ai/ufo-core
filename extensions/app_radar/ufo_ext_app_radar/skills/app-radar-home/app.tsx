@@ -1,3 +1,5 @@
+// The radar app's page: a static site built with the portal's app kit. Edit this file and redeploy
+// to change the page.
 
 import {
   ARTIFACT_TEXT_BYTES,
@@ -40,16 +42,23 @@ import {
   useTextArtifact,
 } from "ufo/kit";
 import type { ObjectAddress, Placement, ReactMouseEvent } from "ufo/kit";
+// The tour's words, committed beside this file and taken into the bundle at build time. `?raw` is
+// vite's own: the same import resolves in the deploy's app build and in the build a member's
+// redeploy runs, so the document ships with the page rather than being fetched at runtime.
 import TOUR_DOCUMENT from "./tour.md?raw";
 
 const TASK_KIND = "scheduled_task";
 const RUN_PREFIX = "run/";
 const DONE = "done";
 
+/** Whether a slot in the place names a run of this page's own, which the drawer reads as a story
+ *  rather than as a record held at an object address. */
 function isRun(id: string): boolean {
   return id.startsWith(RUN_PREFIX) && id !== RUN_PREFIX;
 }
 
+/** What the drawer is titled until the report standing in it has named itself. The read may answer
+ *  no run at all, and a drawer the member can shut cannot wait on a name that is never coming. */
 const REPORT = "Report";
 
 type RadarArtifact = {
@@ -75,8 +84,12 @@ type RadarRun = {
   artifacts: RadarArtifact[];
 };
 
+/** One finding as the digest writer states it, and — where the report says who did the thing —
+ *  the person who did it. */
 type DigestPoint = { text: string; actor: string };
 
+/** What the report-digest skill wrote about one report. A report published since the job last ran
+ *  carries none yet, and stands on its task's name until it does. */
 type DigestWritten = { title: string; summary: string; points: DigestPoint[] };
 
 type ReportRow = {
@@ -95,8 +108,14 @@ type ReportRow = {
 
 type ReportsPayload = { objects: ReportRow[]; next_cursor: string | null };
 
+/** One report as the detail route answers it: the listing row's fields ride in `status`, beside
+ *  the name the permalink carries. The detail resolves the turn directly — a report older than
+ *  the feed's own window still answers its permalink — and its row names the firing agent. */
 type ReportDetail = { name: string; status: Omit<ReportRow, "name"> };
 
+/** One listing row as the feed reads it: the report kind's own fields, folded back into the run
+ *  the stories are written over — the digest rides whole in the row's `entry` field, because a
+ *  flat `summary` would collide with the listing row's own. */
 function toRun(row: ReportRow): RadarRun {
   return {
     turn_id: row.name,
@@ -113,24 +132,48 @@ function toRun(row: ReportRow): RadarRun {
   };
 }
 
+/** A run that ended well needs no mark beside its own reply; the other endings are stated. */
 const STATUS_NOTES: Record<string, string> = {
   failed: "Failed",
   cancelled: "Stopped",
 };
 
+/** The tour: the oldest entry on the rail, in every workspace. The feed runs newest first, so the
+ *  foot of the list is where the thing that came before all the work belongs — a new team reads it
+ *  because it is the only entry there, and a team already running reports keeps every report above
+ *  it untouched.
+ *
+ *  Its words are `tour.md` beside this file and nothing else — the summary and the points its
+ *  frontmatter states, the body under it. The document is committed, so the words are edited and
+ *  reviewed as prose and read from one place by anything else that wants them, and the build takes
+ *  it into the bundle the deploy serves: no per-workspace copy to migrate, no skill to load, and no
+ *  row to rewrite.
+ *
+ *  It is drawn and never stored: a report exists by a scheduled task running, so a canned row in
+ *  that table would be a run that never ran, and every reader of the report kind would have to know
+ *  to skip it. */
 const TOUR_SLOT = "tour";
 
+/** The tour as its document states it: a digest like every other entry on the rail, plus the line
+ *  above the title and the body the drawer reads. */
 type TourWritten = DigestWritten & { lead: string; body: string };
 
 const TOUR_FRONTMATTER = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
 const TOUR_POINT = /^ *- text: "(.*)"\n *actor: "(.*)"$/gm;
 
+/** A value as the frontmatter writes it: quoted, because every scalar there is quoted, and a
+ *  sentence in this document carries a colon. */
 function tourValue(front: string, key: string): string {
   const found = new RegExp(`^${key}: "(.*)"$`, "m").exec(front);
   if (found === null) throw new Error(`tour.md states no ${key}`);
   return found[1];
 }
 
+/** The document read: its frontmatter as the fields the entry draws, its body as the drawer's
+ *  prose. The frontmatter this reads is the one shape `tour.md` is written in — quoted scalars and
+ *  a `points` list of `text`/`actor` pairs — because a page resolves no import but `ufo/kit`, so a
+ *  YAML library is not one of its choices. The app's own tests read the same document with a YAML
+ *  parser, which is what holds the file to that shape. */
 function tourWritten(raw: string): TourWritten {
   const split = TOUR_FRONTMATTER.exec(raw);
   if (split === null) throw new Error("tour.md must open with a YAML frontmatter block");
@@ -225,6 +268,13 @@ function RecordSlot({
   );
 }
 
+/** The feed: every run the reader may read, newest first, and the tour under the oldest of them.
+ *  It stands whatever the place carries — a story opened from it is read in the drawer beside it, so
+ *  the list the member is walking is never taken away by the report they opened out of it.
+ *
+ *  The tour closes the rail rather than opening it, and closes it once: it stands on the page that
+ *  has no older reports behind it, which is the first page of a workspace that has never run and the
+ *  last page of one that walks its whole history. */
 function Feed({
   place,
   onPlace,
@@ -276,6 +326,10 @@ function Feed({
   );
 }
 
+/** The tour on the rail, shaped as an entry so a member reads it the way they read every report
+ *  above it: the app's own mark, a heading, and the points under it. It takes the rail's own line
+ *  and its last-entry rules from `Entry`, so the report before it joins down to the tour and the
+ *  tour closes the list. It opens the tour in the drawer beside the feed. */
 function TourEntry() {
   return (
     <li className="group/entry flex gap-2xl">
@@ -318,6 +372,9 @@ function TourEntry() {
   );
 }
 
+/** The tour opened: the shipped prose, and under it the screens it names — the same dateline of
+ *  ways out a report's story stands on, so a member leaves the tour for the work rather than for
+ *  the page they came from. */
 function TourSheet({
   opens,
   onPlace,
@@ -345,6 +402,17 @@ function TourSheet({
   );
 }
 
+/** An opened report, read in the drawer at the pane's edge — the one every record on this page is
+ *  opened in, so a report and an object are read and put away in the same place. The feed stands
+ *  behind it: the reader keeps the list they opened the story out of, and shutting the drawer is
+ *  the whole of the way back.
+ *
+ *  A file the story shared is read in this same drawer, in the story's place, and shutting it hands
+ *  the story back: the drawer slot holds one thing, so a second sheet raised here would stand over
+ *  the story and take its close control with it.
+ *
+ *  A pinned address that answers no run says so in the drawer rather than over the feed: the run is
+ *  gone or was never this reader's to read. */
 function StorySheet({
   id,
   title,
@@ -394,6 +462,12 @@ function StorySheet({
   );
 }
 
+/** Which picture stands for a run. Only a file with a rendered preview can stand for one at all —
+ *  the feed shows a picture or nothing, never a frame around a name. Among those, a picture the run
+ *  drew — a chart, a capture — says at a glance what the report is about, while the first page of a
+ *  document says only that a document exists, because every page of prose crops to the same grey
+ *  band. So a raster the run shared outranks a rendered page whatever order the two were shared in,
+ *  and only a run that drew nothing is represented by its paperwork. */
 function cover(artifacts: RadarArtifact[]): RadarArtifact | null {
   const pictures = artifacts.filter((artifact) => artifact.preview_url !== null);
   return (
@@ -401,6 +475,9 @@ function cover(artifacts: RadarArtifact[]): RadarArtifact | null {
   );
 }
 
+/** A markdown file the run shared is the run's own document: it reads inline as the story rather
+ *  than standing as a chip the member must download to open. One whose link is not minted cannot
+ *  be read here and stays a chip. */
 function isDocument(artifact: RadarArtifact): boolean {
   return (
     artifact.url !== null &&
@@ -408,6 +485,9 @@ function isDocument(artifact: RadarArtifact): boolean {
   );
 }
 
+/** One report on the rail: what it found, in the shortest form that earns a press. The app's own
+ *  mark is the node, so which app filed it is read before the entry is, and the rail runs between
+ *  the marks and stops under the last. The whole entry opens the report it describes. */
 function Entry({
   run,
   opens,
@@ -421,6 +501,9 @@ function Entry({
   const picture = cover(run.artifacts);
   const note = STATUS_NOTES[run.status];
   const heading = run.entry?.title ?? run.task ?? "Scheduled run";
+  /** A run that did not end well says why, whatever else was written about it: the reason it
+   *  stopped is the whole of what the member can act on, and an entry drawn over the partial
+   *  report it left would read as though the run had delivered. */
   const summary = run.status === DONE ? (run.entry?.summary ?? null) : run.text || null;
   return (
     <li className="group/entry flex gap-2xl">
@@ -495,6 +578,22 @@ function Entry({
   );
 }
 
+/** One run as a story: the report it published is the headline, so the story is titled the way the
+ *  document titles itself. The drawer's own band states that same name on one line and cuts what
+ *  will not fit, and a report titles itself in prose that often will not — so the story states it
+ *  whole under that band, and the document's own title line is dropped from the body so the report
+ *  never says it three times.
+ *
+ *  Under the heading stands the byline — the agent the task belongs to, reached at its page, and the
+ *  task itself, pressed to open the record where the prompt and schedule are read — and under that
+ *  the dateline of ways out: when it ran, the conversation it reported into, the thread on the
+ *  surface it came from, and any outcome. The body is what the run made, never what it said: files
+ *  with their pictures where one exists, markdown documents read inline. Only a run that did not end
+ *  well speaks in text, because a failure explains itself; the reply a successful run posted lives
+ *  in its conversation, one link away.
+ *
+ *  A run that published no document, or one whose document opens on no title, is headed by the task
+ *  that fired it — every story states what it is before it states what it did. */
 function Story({
   run,
   opens,
@@ -629,12 +728,21 @@ function TaskName({
   );
 }
 
+/** A document's own title and the body under it: a report opens with the one `# Title` line that
+ *  names it, which the story states as its heading instead. */
 function titled(text: string): { title: string | null; body: string } {
   const opening = /^\s*#[ \t]+(\S.*?)[ \t]*(?:\n|$)/.exec(text);
   if (!opening) return { title: null, body: text };
   return { title: opening[1], body: text.slice(opening[0].length) };
 }
 
+/** The report the run published, read as the story's own body: a member standing on one report's own
+ *  address came for that report, so the document flows whole down the page with nothing to press —
+ *  neither a fold to open nor a box that scrolls inside a page that scrolls, which would trap the
+ *  wheel over the very thing the member came to read. The title line is dropped where the story
+ *  already stands under it, and a second document — which titles nothing above it — keeps its own.
+ *  The story is told the title before the frame is painted, so no reader ever catches a report
+ *  saying its own name twice. */
 function Report({
   artifact,
   heading,
@@ -672,6 +780,9 @@ function Report({
   );
 }
 
+/** A file the run shared: its picture where one exists, else its name and size — pressing either
+ *  reads the file full in the drawer the story stands in, with its download, and a file whose link
+ *  is not minted is named without one. */
 function Shared({ artifact, onOpen }: { artifact: RadarArtifact; onOpen: () => void }) {
   const card = artifact.preview_url ? (
     <img

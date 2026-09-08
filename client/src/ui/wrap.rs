@@ -1,4 +1,3 @@
-
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn width(text: &str) -> usize {

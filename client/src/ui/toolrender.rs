@@ -1,4 +1,3 @@
-
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine as _;
 use ratatui::style::Modifier;

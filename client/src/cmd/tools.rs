@@ -1,4 +1,3 @@
-
 use std::io::{IsTerminal, Read, Write};
 use std::time::Duration;
 

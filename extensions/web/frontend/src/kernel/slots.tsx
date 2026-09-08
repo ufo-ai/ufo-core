@@ -40,6 +40,24 @@ export type SlotKind = "index" | "reading" | "panel";
 
 type Entry = { id: string; kind: SlotKind; title: string | undefined };
 
+/** The track after an act taken in `from` opened `id`: every lane after `from` shuts and `id`
+ *  stands at its right. The track is the path the member walked, not a shelf of everything they
+ *  have pressed — three documents opened one after another from the same list are three tries at
+ *  one question, and the two they left behind are what makes the third hard to read.
+ *
+ *  `from` undefined is the pane's own list, the root, so an act taken there leaves exactly one lane
+ *  standing. A `from` that no longer stands is the root too: a lane that has been shut raised
+ *  nothing. A lane already standing further up the path moves rather than doubling — the track is
+ *  keyed by id, and the same id twice is two hosts fighting over one record.
+ *
+ *  Re-opening the lane that already stands to `from`'s right hands back the very array it was
+ *  given, not a copy of it. The caller places what comes back, and a fresh array of the same ids
+ *  is a new placement: a history entry for a press that changed nothing, and a remount of the
+ *  record the member is in the middle of reading.
+ *
+ *  A press from the lane at the far end grows the track, so it stops at `TRACK_MAX_SLOTS` like any
+ *  other: the track comes back untouched, and the member reaches the record by pressing from a lane
+ *  further up the path, which shortens the track before it stands. */
 export function opened(track: string[], id: string, from?: string): string[] {
   const at = from === undefined ? -1 : track.indexOf(from);
   if (track[at + 1] === id) return track;
@@ -47,11 +65,21 @@ export function opened(track: string[], id: string, from?: string): string[] {
   return next.length > TRACK_MAX_SLOTS ? track : next;
 }
 
+/** The track after a deliberate open-beside: `id` stands at the far end and nothing shuts. This is
+ *  how a member holds two unrelated things at once, having asked for it.
+ *
+ *  Nothing shuts here, so a full track has nowhere to put the lane and comes back untouched. The
+ *  press cannot be answered by dropping the lane at the head: that lane is what the path was opened
+ *  from, and an act whose whole meaning is that nothing shuts cannot shut the one lane the rest of
+ *  the row was reached through. The row says it is full while it is, so the press that does nothing
+ *  is a press the member can already see the answer to. */
 export function appended(track: string[], id: string): string[] {
   if (track.includes(id) || track.length >= TRACK_MAX_SLOTS) return track;
   return [...track, id];
 }
 
+/** The track after `id` is shut, which shuts what was opened from it: a lane reached through
+ *  another says nothing once the lane it was reached through is gone. */
 export function closed(track: string[], id: string): string[] {
   const at = track.indexOf(id);
   if (at < 0) return track;
@@ -70,6 +98,11 @@ function lifted(track: string[], id: string, onto: string): string[] {
 
 const MIDDLE_BUTTON = 1;
 
+/** Whether a press asked for its target to stand beside the track rather than replace the path
+ *  under the lane it was raised in. It is the gesture the browser already handed the member for a
+ *  second tab — command or control held, or the middle button — so there is nothing here to teach.
+ *  A plain press and this one arrive as the same kind of event, so a call site that never reads it
+ *  throws away the distinction the member drew with their hand. */
 export function beside(event: { metaKey: boolean; ctrlKey: boolean; button?: number }): boolean {
   return event.metaKey || event.ctrlKey || event.button === MIDDLE_BUTTON;
 }

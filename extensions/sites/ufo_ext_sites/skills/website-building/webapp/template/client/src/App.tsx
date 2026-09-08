@@ -9,6 +9,8 @@ import NotFound from "@/pages/not-found";
 function AppRouter() {
   return (
     <Switch>
+      {/* Register a <Route path="..." component={...} /> for EVERY page linked in your sidebar/nav. Missing routes cause 404. */}
+      {/* <Route path="/" component={Home}/> */}
       <Route component={NotFound} />
     </Switch>
   );

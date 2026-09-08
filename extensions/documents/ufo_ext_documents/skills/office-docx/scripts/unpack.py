@@ -121,6 +121,10 @@ def _replace_curly_quotes(xml_file: Path) -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Run merging: consolidate adjacent <w:r> elements with identical <w:rPr>
+# ---------------------------------------------------------------------------
+
 
 def _merge_adjacent_runs(doc_xml: Path) -> int:
     if not doc_xml.exists():
@@ -216,6 +220,10 @@ def _join_adjacent_text(run: etree._Element) -> None:
         else:
             idx += 1
 
+
+# ---------------------------------------------------------------------------
+# Tracked-change coalescing: merge adjacent ins/del from the same author
+# ---------------------------------------------------------------------------
 
 
 def _coalesce_tracked_changes(doc_xml: Path) -> int:

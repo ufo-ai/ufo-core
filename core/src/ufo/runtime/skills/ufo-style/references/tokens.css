@@ -1,5 +1,9 @@
-/* Copy this file and the skill's assets/fonts directory into the project with the same relative
-   layout, import it before any other stylesheet, and name only these variables afterwards. */
+/* The house tokens, as the portal declares them apart from the one text step noted below. Copy this
+ * file and the skill's assets/fonts directory into the project with the same relative layout,
+ * import it before any other stylesheet, and name only these variables afterwards.
+ *
+ * A page that has to pin a scheme against the member's preference re-declares the eight palette
+ * steps under its own class and leaves everything below untouched. Nothing else is ever restated. */
 
 @font-face {
   font-family: "Inter";
@@ -18,8 +22,12 @@
 :root {
   color-scheme: light dark;
 
-  /* `--text-secondary` is the word step: `#676767` measures 5.4:1 on `#FAF9F7`. `--mark-secondary`
-     stays `#919090`, for a hairline or a mark and never a word. */
+  /* The palette: three background steps, two text steps, the soft mark step, two accents.
+   * `light-dark()` picks the pair from the scheme, so a scheme is these eight declarations and no
+   * rule is written twice.
+   *
+   * `--text-secondary` is the word step: `#676767` measures 5.4:1 on `#FAF9F7`.
+   * `--mark-secondary` stays `#919090`, for a hairline or a mark and never a word. */
   --bkgd-100: light-dark(#FAF9F7, #191A1A);
   --bkgd-200: light-dark(#F4F3F2, #262929);
   --bkgd-300: light-dark(#EBEAE9, #323535);
@@ -29,6 +37,9 @@
   --accent-primary: #0095FF;
   --accent-secondary: #FF6700;
 
+  /* The roles. A pane is `surface`, anything the pointer fills is `fill`, every hairline is `edge`.
+   * `link` and `attention-ink` hold their accents towards the text step so a word clears 4.5:1.
+   * `attention` is the second accent tinted over the pane. */
   --color-surface: var(--bkgd-100);
   --color-ink: var(--text-primary);
   --color-ink-soft: var(--text-secondary);
@@ -45,8 +56,13 @@
   --color-attention: color-mix(in srgb, var(--accent-secondary) 15%, var(--bkgd-100));
   --color-attention-ink: color-mix(in srgb, var(--accent-secondary) 70%, var(--text-primary));
 
+  /* A word sitting on an accent or a semantic fill is the dark text step in either scheme — the
+   * fill does not change with the scheme, so neither does the label on it. */
   --color-fill-ink: #191A1A;
 
+  /* Type. The display face is Georgia: the portal's own display face is licensed to the portal and
+   * belongs to `theme.css` alone — never add it to this stack or load it with an `@font-face` rule.
+   */
   --font-sans: "Inter", system-ui, sans-serif;
   --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-display: Georgia, "Times New Roman", serif;
@@ -58,12 +74,14 @@
   --text-body: 15px;
   --text-subtitle: 16px;
   --text-title: 24px;
+  /* The one step above the chrome scale: a screen's own title, once per screen and nowhere else. */
   --text-display: 32px;
 
   --leading-chrome: 1.5;
   --leading-reading: 1.65;
   --font-weight-strong: 600;
 
+  /* Spacing: a 2px hair, then a 2px-step ramp to the page's own gaps. */
   --spacing-hair: 2px;
   --spacing-2xs: 4px;
   --spacing-xs: 6px;
@@ -79,6 +97,9 @@
   --spacing-7xl: 40px;
   --spacing-8xl: 64px;
 
+  /* A control and a panel take the base radius; a card and the plot inside it take their own,
+     which is softer because a card is a unit a member acts on rather than a surface. A row is
+     the one pill. */
   --radius: 0.25rem;
   --radius-card: 12px;
   --radius-row: calc(infinity * 1px);
@@ -94,6 +115,7 @@
   --opacity-muted: 0.6;
   --disabled: 0.4;
 
+  /* The reading column and the breakpoint below which a page stacks. */
   --container-section: 728px;
   --breakpoint-narrow: 720px;
 }

@@ -1,4 +1,3 @@
-
 pub mod conversations;
 pub mod editor;
 pub mod history;
@@ -141,10 +140,7 @@ pub enum Reply {
     Send(String),
     Clipboard(ClipEntry),
     Attach(std::path::PathBuf),
-    Recall {
-        text: String,
-        arrival_id: String,
-    },
+    Recall { text: String, arrival_id: String },
     Choice(String),
     ChoiceCancelled,
     Secret(String),

@@ -166,6 +166,7 @@ const REMARK_PLUGINS = [...Object.values(defaultRemarkPlugins), remarkBreaks, li
 const REHYPE_PLUGINS = [defaultRehypePlugins.raw, defaultRehypePlugins.sanitize];
 const ARRIVING_PLUGINS = [...REHYPE_PLUGINS, arrive];
 
+/** A settled document: what it holds is all it will ever hold, so no block is completed for it. */
 export function Markdown({ text }: { text: string }) {
   return (
     <Streamdown

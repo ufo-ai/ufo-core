@@ -1,3 +1,9 @@
+// The Code app's page: a static site built with the portal's app kit. Edit this file and redeploy
+// to change the page.
+//
+// It ships filled in. Every row below is placeholder written to read exactly like the real thing,
+// because this file is the shape the app rebuilds against its own repository on the first Build
+// app.
 
 import {
   AppConversations,
@@ -23,6 +29,8 @@ const STANDING = "Last review 08:21 · 4 open · 2 reviewed at head · 3 finding
 
 type Person = { name: string; email: string };
 
+/** The impacts a finding may carry, exactly as the review procedure lists them. A reviewer that
+ *  cannot name one of these does not report the defect at all. */
 type Impact =
   | "Security or workspace-boundary breach"
   | "Data loss, corruption, or wrong-target mutation"
@@ -41,6 +49,9 @@ type Review = {
   findings: Finding[];
 };
 
+/** The pull requests this app is tracking, newest head first. One conversation tracks one pull
+ *  request, and a review runs per head SHA — a revision caused only by timestamps or a base merge
+ *  starts nothing. */
 const REVIEWS: Review[] = [
   {
     ref: "#2077",
@@ -141,6 +152,7 @@ function Home({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
+  // The one record a row opens stands beside the page, and closing it clears the track.
   const held = place.opens?.at(-1) ?? null;
   const at = held === null ? null : objectAt(held);
   const band = usePageHead(

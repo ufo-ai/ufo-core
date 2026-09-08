@@ -84,21 +84,32 @@ const CELL = cn(
   "text-label text-ink-soft",
 );
 
+/** One table cell: the ruled, truncating cell every column is drawn with. */
 export function Td({ className, ...props }: ComponentProps<"td">) {
   return <td data-slot="table-cell" className={cn(CELL, "truncate", className)} {...props} />;
 }
 
+/** A cell whose value is read entire — the name a member finds a record by. It holds one line, like
+ *  every other cell, but the line is not cut: the column it stands in is measured from the rows, so
+ *  the cell is as wide as it needs and the container scrolls sideways to reach the rest of the
+ *  table. It drops `truncate` rather than overriding it, for the reason `TdActs` does. */
 export function TdWhole({ className, ...props }: ComponentProps<"td">) {
   return (
     <td data-slot="table-cell" className={cn(CELL, "whitespace-nowrap", className)} {...props} />
   );
 }
 
-/** The bound rides an inner block because `max-width` does not apply to a cell. */
+/** Prose a measured table still cuts. A measured track is the widest thing in its column, so a cell
+ *  left to say as much as it likes would make the Details column the table's width; bounding the run
+ *  of prose itself is what keeps that column the track every other table gives it. The bound rides
+ *  an inner block because `max-width` does not apply to a cell. */
 export function Clip({ children }: { children: ReactNode }) {
   return <span className="block max-w-(--size-prose-column) truncate">{children}</span>;
 }
 
+/** A column holding one short fact the eye compares straight down — a model id, a state. It is
+ *  sized rather than left to the content, so the same fact lands on the same line in every row and
+ *  the two flexible columns beside it take whatever is left. */
 export function TdFact({ className, ...props }: ComponentProps<"td">) {
   return <Td className={cn("w-(--size-fact-column)", className)} {...props} />;
 }
@@ -111,6 +122,12 @@ export function TdActs({ className, ...props }: ComponentProps<"td">) {
 
 export const ACTS = "flex flex-nowrap items-center justify-end gap-xs";
 
+/** What a record's first cell holds: the mark the record is recognised by, then its name. The mark
+ *  box keeps its size whether or not the record has a picture to draw in it — a record with none
+ *  shows the glyph for its kind in the same square — so every name down the column starts on one
+ *  line rather than sliding left in the rows that have nothing to show. The name is cut to the
+ *  track instead of wrapping, because a row is one pitch tall and a second line would be drawn
+ *  behind the row's own edge. */
 export function Lede({
   mark,
   whole,

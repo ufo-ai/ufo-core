@@ -82,7 +82,20 @@ function Act({ verb }: { verb: string | null }) {
   );
 }
 
-/** The band is square-cornered because collapsed borders drop a radius on every part of one. */
+/** `note` is what a *narrowed* table says when nothing is left: the card and its header hold, so
+ *  the control the member is pressing does not move under them. `empty` is the other case — the
+ *  records were never there — and it takes the blank card instead.
+ *
+ *  The act column is the table's own, never a caller's: every screen that drew its own trailing
+ *  chevron drew it at a different width, so one table's rows ended where the next one's did not.
+ *  `act` names the verb a row's own act commits, and the head above it is blank because the column
+ *  holds acts rather than a fact the records share.
+ *
+ *  `current` names the row whose contents are standing in the column beside the table, and the mark
+ *  is the `tr` itself: `aria-current` on the row a reader already navigates as a row, and the same
+ *  fill the row takes under the pointer, so the band reaches the rules that divide the records
+ *  rather than stopping at a cell. The band is square-cornered because it is the whole width of the
+ *  table and because collapsed borders drop a radius on every part of one. */
 export function DataTable<Row>({
   columns,
   rows,

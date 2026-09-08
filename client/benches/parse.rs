@@ -1,4 +1,3 @@
-
 use ufo::wire::parse_line;
 
 const FIXTURE: &str = include_str!("../tests/fixtures/directives.jsonl");

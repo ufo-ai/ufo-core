@@ -14,6 +14,16 @@ type ConversationRow = { name: string; summary: string; surface: string; last_at
 
 type ConversationsPayload = { objects: ConversationRow[]; next_cursor: string | null };
 
+/** What the app has done: the conversations it holds, its own runs among them.
+ *
+ *  It is the last band because it is the last question — what is this, what is it armed to do, what
+ *  does it need from me, what has it been doing — and a member who has just met an app has no
+ *  answer to read here yet, and it says so in a line rather than standing rows of made-up work in
+ *  their place.
+ *
+ *  It draws the newest few and says so where there are more. The whole set is the conversations
+ *  screen's answer, not this one: a band that paged would be a second listing with its own state
+ *  in a page whose only channel for state is the place. */
 export function AppConversations({
   agentId,
   title,

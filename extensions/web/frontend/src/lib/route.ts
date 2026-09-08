@@ -406,6 +406,9 @@ const ROUTES: readonly RouteReader[] = [
   SECTION,
 ];
 
+/** What the address says, read off the table. One answer covers every address the portal cannot
+ *  read — a name no screen carries, a mis-cased permalink, a mangled track — so a member holding
+ *  a broken link is told it is broken rather than stood in front of the home composer. */
 export function parseHash(hash: string): Route {
   for (const route of ROUTES) {
     const match = hash.match(route.pattern);
@@ -414,6 +417,9 @@ export function parseHash(hash: string): Route {
   return { kind: "bad-link" };
 }
 
+/** Whether a route is of a kind, and the narrowing that goes with it. An app page is compiled in
+ *  the browser against the kit, so this is the one test it asks with rather than re-deriving the
+ *  kinds the table declares. */
 export function routeIs<Kind extends RouteKind>(
   route: Route,
   kind: Kind,
@@ -492,14 +498,23 @@ export function bootRoute(hash: string, search: string): Route {
   return route;
 }
 
+/** The address of the workspace home at a place. */
 export const homeHash = HOME.write;
+/** The address of one conversation, optionally at a slot. */
 export const chatHash = CHAT.write;
+/** The address of one slot in a conversation. */
 export const conversationSlotHash = CONVERSATION_SLOT.write;
+/** The address of a fresh chat with an agent. */
 export const newChatHash = NEW_CHAT.write;
+/** The address of an agent's screen at a place. */
 export const agentHash = AGENT.write;
+/** The address of an agent's setup screen. */
 export const agentSetupHash = AGENT_SETUP.write;
+/** The address of a workspace tab, optionally at a place. */
 export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): string {
   return view === "apps" ? APPS.write(place) : WORKSPACE.write(view, place);
 }
+/** The address of a section, optionally at a place. */
 export const sectionHash = SECTION.write;
+/** The address of the first run, at a step or at its welcome. */
 export const firstRunHash = FIRST_RUN.write;

@@ -12,8 +12,22 @@ export type PanelState<T> =
 
 const POLL_MS = 30_000;
 
-/** What a read holds is one path's answer, so another path shows the skeleton: a pane handed one path's
- *  payload under another's frame draws a record nobody asked for. A read that answered keeps its interval. */
+/** A read holds its answer until the next one lands. What it holds is that one path's answer, so a
+ *  read of another path shows the skeleton rather than the answer to the question before it: a pane
+ *  handed one path's payload under another path's frame draws a record the member did not ask for.
+ *  The visible pane re-reads on its own interval, while a hidden tab does not poll. Only a first
+ *  read, which has nothing to hold, shows the skeleton.
+ *
+ *  A read that has never answered waits for the member's next move once it fails: there is nothing
+ *  on the screen for a retry to correct, and a route that refused the first ask will refuse the
+ *  next. A read that has answered keeps its interval, because what failed there is a refresh of
+ *  something the member is already looking at — the deploy that dropped one poll is over by the
+ *  next one, and a pane that gave up would state the workspace had gone quiet.
+ *
+ *  A tab that is looked at again reads at once rather than serving what it held until the next
+ *  tick: the member left to do something the answer depends on, and coming back is the move that
+ *  asks for it. That is what `everyMs` is for — a pane waiting on an act taking place off the page
+ *  reads at its own rate until the act lands, and states the wait rather than a stale answer. */
 export function usePanelRead<T>(
   path: string | null,
   reloads: number = 0,
@@ -90,6 +104,10 @@ const SKELETON_ROWS = 5;
 const SKELETON_CARDS = 4;
 const SKELETON_FIELDS = 3;
 
+/** The one line a screen states while it has nothing else, and the only place the words are
+ *  written. It reserves its line from the first frame and appears on the theme's threshold, so a
+ *  read that answers before then leaves no trace on the way past — the timing is the theme's, and
+ *  the same threshold governs every placeholder on the surface. */
 export function Loading() {
   return (
     <div
@@ -142,6 +160,8 @@ export function PanelSkeleton({ shape }: { shape: PanelShape }) {
   );
 }
 
+/** Draws a read by its phase: a skeleton while loading, the refusal when failed, the empty
+ * sentence when the payload holds nothing, and `children(payload)` once it is ready. */
 export function Panel<T>({
   state,
   shape = "table",
@@ -165,6 +185,10 @@ export function Panel<T>({
   return children(state.payload);
 }
 
+/** A sentence standing where records would: centred, bounded to a measure a line reads at, and in
+ *  the register a fact is stated in. Every screen that answers with a sentence draws this one, so a
+ *  loading note, a refusal and a screen with nothing on it read alike wherever the member meets
+ *  them. `className` is the space around it, which is the page's to set and not the note's. */
 export function Empty({ className, children }: { className?: string; children: ReactNode }) {
   return (
     <div className={cn("m-auto max-w-empty text-center text-ink-soft", className)}>
@@ -173,10 +197,18 @@ export function Empty({ className, children }: { className?: string; children: R
   );
 }
 
+/** The empty sentence at a section's own height: what a section holding no records says. */
 export function PanelEmpty({ children }: { children: ReactNode }) {
   return <Empty className="my-7xl mx-auto block">{children}</Empty>;
 }
 
+/** A section that holds no records yet takes a card on the section's own left edge. A table states
+ *  its extent in the rules between its records; a blank section has none, and a centred line in an
+ *  unbounded gap reads as an orphan of the heading rather than as the place records will stand.
+ *  Nothing is aligned to, so the line and its one act sit in the middle of the card. The section
+ *  heading already names
+ *  what is absent, so the card states only what fills it. `PanelEmpty` stays the centred note for a
+ *  passing condition: loading, a failed read, a search that matched nothing. */
 export function PanelBlank({ body, action }: { body: string; action?: ReactNode }) {
   return (
     <div className="rounded-panel border border-edge bg-surface px-xl py-4xl text-center">
@@ -221,6 +253,22 @@ export function Notice({
   );
 }
 
+/** A band of records inside a page, stacked at the page's own rhythm: `Page` sets the gap between
+ *  bands, so a section carries no margin of its own — a block that spaced itself would add to that
+ *  gap rather than sit in it, and the distance between two sections would become a sum of whatever
+ *  bands each happened to hold. It takes the full measure the page leaves for the same reason the
+ *  page does: the act on each row sits at one right edge, and a section that stayed narrow while
+ *  its pane grew would strand that edge in the middle of the screen.
+ *
+ *  A heading is drawn only where it names something the pane does not already say. A screen reached
+ *  by pressing a tab has been named by that tab, and a second heading repeating the word under it
+ *  states there are two things where there is one.
+ *
+ *  `action` is one act on what the heading names, held at the band's far edge and centred against
+ *  the heading and its note together — so a column of bands puts every act on one right edge the eye
+ *  runs down, whether or not the band above carried a note. It is one act, where `bar` is for the
+ *  controls that narrow the records under it. The heading takes the width the act leaves and the act
+ *  never shrinks, so a long heading is what gives way. */
 export function Section({
   title,
   note,

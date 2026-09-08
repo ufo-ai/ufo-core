@@ -1,4 +1,3 @@
-
 use ratatui::style::{Color, Modifier, Style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

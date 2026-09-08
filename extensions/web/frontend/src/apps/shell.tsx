@@ -35,6 +35,8 @@ import { TabbedPane } from "@/views/TabbedPane";
 import type { PaneView } from "@/views/registry";
 
 
+/** Route every in-page link: a route the app claims changes its own place; anything else the shell
+ *  may take goes over the bridge. Either way the click never mutates the frame's address. */
 export function useAppLinks(claim: (route: Route) => boolean, portal: string): void {
   useEffect(() => {
     const onClick = (event: MouseEvent) => {
@@ -59,6 +61,26 @@ export function useAppLinks(claim: (route: Route) => boolean, portal: string): v
   }, [claim, portal]);
 }
 
+/** One section screen standing as the whole page, its place in page state and seeded by the place the
+ *  pane was opened at — the whole place, so the screen inside the frame stands where the address
+ *  outside it says. A link back into the same section is a place change here, never a trip through
+ *  the portal.
+ *
+ *  Under a band the page's place is its own: the address the member holds names the lane, not the
+ *  page's state. A lane hands the page no place to begin with, and a filter, a search, a page step
+ *  or a record opened beside the listing is a move inside the lane — reported to the portal it would
+ *  land the member on this page's own full screen, which is the track torn up to answer a press that
+ *  never asked to leave it. So a banded place change is `setPlace` and nothing else, and the record
+ *  lane it opens is drawn by the shell's own track inside the frame. Standing on its own screen the
+ *  page reports every such change, because there the address is what the member holds.
+ *
+ *  This page's own app address is one of its links too — the crumb the shell hands a page standing
+ *  one step deeper names it — so it is claimed the same way: pressed under a band it is the page
+ *  coming back to its own head inside the lane, not the portal standing that head full screen.
+ *
+ *  A link out of this section is not a place change either way: it names an app or a section this
+ *  page cannot draw, so it rides the bridge's navigate verb and the portal moves — banded too, where
+ *  the lane is what the member left. */
 export function SectionApp({
   tab,
   view,
@@ -164,6 +186,9 @@ function ApplicationLifecycleBoundary({
   return children;
 }
 
+/** Mount an app page: connects to the portal over the bridge, waits for its `init`, and renders
+ * `render(init, agents)` into `root` inside the kit's providers. The one call a page's entry
+ * makes. */
 export function mountApp(
   root: HTMLElement,
   render: (init: AppInit, agents: Agent[]) => ReactNode,

@@ -1,4 +1,3 @@
-
 use std::process::{Command, Stdio};
 
 use syntect::highlighting::ThemeSet;

@@ -1,4 +1,3 @@
-
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 

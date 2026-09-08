@@ -152,6 +152,18 @@ as a review gate:
   alternative that was tried and the failure it caused, or an invariant held in another file. Design
   taste, restated signatures, narrated steps, and per-case test rationale are none of those. Two
   lines is the ceiling for what survives, and nine in ten do not.
+  **Five kinds of comment are input, not commentary, and none of them is yours to touch:**
+  a docstring over anything `src/apps/kit.ts` exports — `kit-catalogue.mjs` builds the page an
+  agent reads before composing an app out of each one's *first sentence*, so rewording that
+  sentence changes what a model is told and deleting it fails the build; anything under a
+  `skills/` directory, which is text a model reads and so ships only ablated — a committed arm
+  pins the exact bytes it replaces, and `test_ablate.py` fails when an arm stops matching the
+  tree; a byte in `evals/fixtures/`, whose `provenance.json` pins its SHA-256; a line in
+  `infra/modules/platform/iam.tf` or `ses.tf`, where deleting one lets `terraform fmt` realign
+  the `=` column and the deploy gate reads the realigned grant lines as an authorization
+  contraction; and a leading comment in a Rust file, whose removal leaves a blank first line
+  that only `cargo fmt` clears — every crate's `cargo fmt --check` is a pre-commit hook because
+  this one reached CI.
 - **Constants over magic values** — top-level `SCREAMING_SNAKE_CASE`.
 - **Absolute imports, top-level imports, pathlib, guard clauses, built-ins over hand-rolled loops,
   match/case over isinstance chains, no `hasattr`/`getattr`.**

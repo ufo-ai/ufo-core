@@ -101,6 +101,17 @@ export const BRAND_MARKS: ReadonlySet<string> = new Set([
 
 const INK_MARKS: ReadonlySet<string> = new Set(["github", "slack"]);
 
+/** A provider's mark where the portal offers it, drawn as the square the theme hands over: the art
+ *  is a brand's own picture and a round edge would cut it, so the mark takes no mask of its own and
+ *  whatever holds it owns the shape. The slug is data, so the token it names resolves through the
+ *  `style` object rather than through a class.
+ *
+ *  A provider with no vendored mark takes its glyph at the same square, so a grid of tiles holds
+ *  one rhythm whichever it draws.
+ *
+ *  `onInk` draws the mark for a filled act instead of for the pane. That act is ink on the pane, so
+ *  its ground is the scheme's other end: a mark of one ink reads on exactly one of the two, and the
+ *  one it reads on is not the button. */
 export function BrandMark({
   provider,
   onInk,
