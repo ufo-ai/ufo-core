@@ -19,14 +19,7 @@ To change it:
 
 1. Copy this skill's `app.tsx`, `index.html`, and `tour.md` into a directory of their own —
    `cp "$UFO_HOME/skills/app-radar-home/app.tsx" "$UFO_HOME/skills/app-radar-home/index.html" "$UFO_HOME/skills/app-radar-home/tour.md" radar-home/`.
-2. Edit `app.tsx`. `read` `$UFO_HOME/skills/ufo-style/references/kit.md` first — every
-   component the kit publishes and what each is — and reach for one before composing a
-   shape out of `div`s. Space the page with `gap-2xs` inside a word, `gap-sm` between the
-   parts of one thing, `gap-2xl` between things in one group and `gap-6xl` between groups,
-   and no other step. Import only from `ufo/kit` — React and its hooks, the portal's components,
-   `SectionApp`, `mountApp`, `getJson`, `navigate`. Any other bare import fails the deploy with
-   `failed to resolve import`; never install it, because a local `node_modules` makes that build
-   pass and ships a second React whose hooks break in the page.
+2. Edit `app.tsx`. Build it from the kit, in the house style `ufo-style` states.
 3. The `site` collection's `deploy_website` action (`object_action` with kind `site`) with that directory and `site_name` `radar-home`. It builds the page against
    the deploy's own kit and hosts what the build wrote — do not run a build yourself, and do not
    pass a `dist` directory.

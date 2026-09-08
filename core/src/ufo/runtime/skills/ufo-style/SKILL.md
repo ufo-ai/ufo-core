@@ -30,6 +30,14 @@ shape out of `div`s. A measure is a `Stat`, a state a `Badge`, a unit a member a
 named share a `Breakdown`, a series a `Chart`, and a graphic in more than one colour carries a
 `Legend`.
 
+Space such a page with `gap-2xs` inside a word, `gap-sm` between the parts of one thing, `gap-2xl`
+between things in one group and `gap-6xl` between groups, and no other step.
+
+Import only from `ufo/kit` — React and its hooks, the portal's components, `SectionApp`, `mountApp`,
+`getJson`, `navigate`. Any other bare import fails the deploy with `failed to resolve import`; never
+install it, because a local `node_modules` makes that build pass and ships a second React whose
+hooks break in the page.
+
 Such a page takes no stylesheet of its own: the tokens below are for a build that has no kit — a
 deck, a document, a public site.
 
