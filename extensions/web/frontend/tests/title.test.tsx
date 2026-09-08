@@ -42,7 +42,7 @@ beforeEach(() => {
 test("every page names where the member is, innermost first, then the product", () => {
   expect(titled({ kind: "home", ...PLACE })).toBe("Home · ufo");
   expect(titled({ kind: "new-chat", agentId: SECOND_ID })).toBe("New conversation · Second · ufo");
-  expect(titled({ kind: "builder" })).toBe("App Builder · Apps · Workspace · ufo");
+  expect(titled({ kind: "builder" })).toBe("App Creator · Apps · Workspace · ufo");
   expect(titled({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBe("Assistant · ufo");
   expect(titled({ kind: "workspace", view: "team", ...PLACE })).toBe("Team · Workspace · ufo");
   expect(titled({ kind: "workspace", view: "credentials", ...PLACE })).toBe(

@@ -14,8 +14,37 @@
     "isolatedModules": true,
     "resolveJsonModule": true,
     "baseUrl": ".",
-    "paths": { "@/*": ["./src/*"], "@brand/*": ["../../../../assets/brand/*"] },
+    "paths": {
+      "@/App": ["./src/App.tsx"],
+      "@/components/Sidebar": ["./src/components/Sidebar.tsx"],
+      "@/lib/rail": ["./src/lib/rail.ts"],
+      "@/lib/railStore": ["./src/lib/railStore.ts"],
+      "@/lib/route": ["./src/lib/route.ts"],
+      "@/lib/router": ["./src/lib/router.ts"],
+      "@/lib/title": ["./src/lib/title.ts"],
+      "@/views/Agents": ["./src/views/Agents.tsx"],
+      "@/views/FirstRun": ["./src/views/FirstRun.tsx"],
+      "@/views/Spotlight": ["./src/views/Spotlight.tsx"],
+      "@/views/Store": ["./src/views/Store.tsx"],
+      "@/*": ["../src/*"],
+      "@brand/*": ["../../../../assets/brand/*"]
+    },
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "tests", "vite.config.ts"]
+  "include": [
+    "src/App.tsx",
+    "src/main.tsx",
+    "src/components/Sidebar.tsx",
+    "src/lib/rail.ts",
+    "src/lib/railStore.ts",
+    "src/lib/route.ts",
+    "src/lib/router.ts",
+    "src/lib/title.ts",
+    "src/views/Agents.tsx",
+    "src/views/FirstRun.tsx",
+    "src/views/Spotlight.tsx",
+    "src/views/Store.tsx",
+    "tests",
+    "vite.config.ts"
+  ]
 }

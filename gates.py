@@ -148,10 +148,7 @@ SLACK_SURFACE_MODULE = Path("extensions/slack/ufo_ext_slack/surface.py")
 REDIS_HUB_MODULE = Path("extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py")
 TURNSTREAM_MODULE = Path("extensions/web/frontend/src/lib/turnStream.ts")
 CALLBACK_PAGE_MODULE = Path("core/src/ufo/sdk/callback_page.py")
-CONSENT_MODULES = (
-    Path("extensions/web/frontend/src/lib/consent.tsx"),
-    Path("extensions/web/frontend/sidebar/src/lib/consent.tsx"),
-)
+CONSENT_MODULES = (Path("extensions/web/frontend/src/lib/consent.tsx"),)
 CONSENT_MARK_NAME = "CONSENT_WINDOW_MARK"
 DEBUGGER_TAIL_MODULE = Path("extensions/debugger/frontend/src/Tail.tsx")
 FRAME_EXEMPTIONS: dict[str, frozenset[str]] = {

@@ -11,12 +11,50 @@ export default defineConfig({
   base: BASE,
   plugins: [react(), tailwindcss(), tablerMarks()],
   resolve: {
-    alias: {
-      "@": new URL("./src", import.meta.url).pathname,
+    alias: [
+      { find: "@/App", replacement: new URL("./src/App.tsx", import.meta.url).pathname },
+      {
+        find: "@/components/Sidebar",
+        replacement: new URL("./src/components/Sidebar.tsx", import.meta.url).pathname,
+      },
+      { find: "@/lib/rail", replacement: new URL("./src/lib/rail.ts", import.meta.url).pathname },
+      {
+        find: "@/lib/railStore",
+        replacement: new URL("./src/lib/railStore.ts", import.meta.url).pathname,
+      },
+      { find: "@/lib/route", replacement: new URL("./src/lib/route.ts", import.meta.url).pathname },
+      {
+        find: "@/lib/router",
+        replacement: new URL("./src/lib/router.ts", import.meta.url).pathname,
+      },
+      { find: "@/lib/title", replacement: new URL("./src/lib/title.ts", import.meta.url).pathname },
+      {
+        find: "@/views/Agents",
+        replacement: new URL("./src/views/Agents.tsx", import.meta.url).pathname,
+      },
+      {
+        find: "@/views/FirstRun",
+        replacement: new URL("./src/views/FirstRun.tsx", import.meta.url).pathname,
+      },
+      {
+        find: "@/views/Spotlight",
+        replacement: new URL("./src/views/Spotlight.tsx", import.meta.url).pathname,
+      },
+      {
+        find: "@/views/Store",
+        replacement: new URL("./src/views/Store.tsx", import.meta.url).pathname,
+      },
+      {
+        find: "@",
+        replacement: new URL("../src", import.meta.url).pathname,
+      },
       // The brand's own artwork, drawn once and worn by every surface. The portal reads it where
       // the brand keeps it, so no copy of a mark can drift from the one the favicons are cut from.
-      "@brand": new URL("../../../../assets/brand", import.meta.url).pathname,
-    },
+      {
+        find: "@brand",
+        replacement: new URL("../../../../assets/brand", import.meta.url).pathname,
+      },
+    ],
   },
   build: {
     // The lanes shell's own build empties this tree first; this one lands `sidebar.html` and its
@@ -57,13 +95,13 @@ export default defineConfig({
   test: {
     name: "sidebar",
     environment: "jsdom",
-    setupFiles: ["./tests/setup.ts"],
+    setupFiles: ["../tests/setup.ts"],
     // An app page's whole dependency surface, resolved for the suite that imports the real
     // pages as modules. Only `vite.apps.config.ts` and the SDK build carry it otherwise; the
     // portal's own bundle names neither.
     alias: {
-      "ufo/kit/jsx-runtime": new URL("./src/apps/kit.ts", import.meta.url).pathname,
-      "ufo/kit": new URL("./src/apps/kit.ts", import.meta.url).pathname,
+      "ufo/kit/jsx-runtime": new URL("../src/apps/kit.ts", import.meta.url).pathname,
+      "ufo/kit": new URL("../src/apps/kit.ts", import.meta.url).pathname,
     },
     include: ["tests/**/*.test.ts", "tests/**/*.test.tsx"],
     // A half-hour offset with no daylight rule: a run under it proves a wall clock is converted

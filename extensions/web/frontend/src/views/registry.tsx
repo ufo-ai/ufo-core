@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Listing, type ListingSpec } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import type { Section, WorkspaceTab } from "@/lib/route";
-import { WorkspaceConnectors } from "@/views/Connectors";
+import { Connectors } from "@/views/Connectors";
 import { WorkspaceMessaging } from "@/views/Surfaces";
 import { Apps } from "@/views/Apps";
 import { Memory } from "@/views/Memory";
@@ -46,7 +46,7 @@ export const CONNECTORS: PaneView = {
   label: "Connectors",
   remountOnPlace: false,
   search: "Search connectors",
-  render: (place, onPlace) => <WorkspaceConnectors place={place} onPlace={onPlace} />,
+  render: (place, onPlace) => <Connectors place={place} onPlace={onPlace} />,
 };
 
 export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
@@ -78,7 +78,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     search: "Search memory",
     render: (place, onPlace) => <Memory place={place} onPlace={onPlace} />,
   },
-  connectors: CONNECTORS,
   credentials: declared("Credentials", CREDENTIALS),
   usage: {
     label: "Usage",

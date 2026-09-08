@@ -508,7 +508,7 @@ function openChatApp(hash: string, homepage: unknown = SET) {
 }
 
 /** The chat app's page lists the conversations it holds and opens them itself, so the shell puts no
- *  act of its own over it: neither the Edit toggle every other app wears nor a History act beside
+ *  act of its own over it: neither the Chat toggle every other app wears nor a History act beside
  *  it. */
 test("the chat app's page wears no shell act", async () => {
   openChatApp("#/agents/" + CHAT_APP_ID + "?open=" + CONVO_ID);
@@ -516,7 +516,7 @@ test("the chat app's page wears no shell act", async () => {
 
   expect(screen.queryByRole("button", { name: "History for Chat" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Edit Chat" })).toBeNull();
-  expect(await screen.findByRole("button", { name: "Menu for Chat" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Menu for Chat" })).toBeNull();
   // One column still: the list is the page's, never a panel the portal draws beside it.
   expect(screen.queryByRole("region", { name: CHAT_ROW.title })).toBeNull();
 });

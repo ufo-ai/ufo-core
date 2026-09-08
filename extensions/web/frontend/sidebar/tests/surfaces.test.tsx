@@ -89,12 +89,14 @@ test("the skills tab stands while either of its two panels is offered", async ()
   expect(screen.queryByRole("tab", { name: "Memory" })).toBeNull();
 });
 
-test("an offered workspace screen keeps its tab", async () => {
+test("offered workspace screens keep their tabs and connectors keeps its section row", async () => {
   location.hash = "#/workspace/team";
   render(<App agents={[AGENT]} member={MEMBER} surfaces={ALL_SURFACES} onAgents={() => {}} />);
 
   expect(await screen.findByRole("tab", { name: "Memory" })).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Connectors" })).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Connectors" }));
+  await waitFor(() => expect(location.hash).toBe("#/connectors"));
   expect(screen.queryByRole("tab", { name: "Sources" })).toBeNull();
 });
 

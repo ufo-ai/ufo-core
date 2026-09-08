@@ -492,8 +492,8 @@ function arrivedToast(): ToastState {
   return named ? { title: named + " connected." } : SILENT;
 }
 
-/** The workspace's available and connected accounts. */
-export function WorkspaceConnectors({
+/** The available and connected accounts. */
+export function Connectors({
   place,
   onPlace,
 }: {

@@ -84,7 +84,7 @@ function serve() {
         });
       }
       if (url.includes("/workspace/memory")) {
-        return json({ available: true, kinds: ["fact", "profile"], matches: [] });
+        return json({ available: true, actions: [], kinds: ["fact", "profile"], matches: [] });
       }
       if (url.includes("/workspace/credentials")) {
         return json({
@@ -151,15 +151,9 @@ test("a screen moved off the workspace tabs still answers at the address it had"
   expect(parseHash("#/workspace/nothing")).toEqual({ kind: "bad-link" });
 });
 
-/** The screen the tab was named after keeps the section address held links spell, and the tab reads
- *  at the workspace prefix; the name the tab carried before this one answers nothing. */
-test("the connectors name reads as the tab under the workspace prefix", () => {
+test("connectors has one section address", () => {
   expect(parseHash("#/workspace/sources")).toEqual({ kind: "bad-link" });
-  expect(parseHash("#/workspace/connectors")).toEqual({
-    kind: "workspace",
-    view: "connectors",
-    place: {},
-  });
+  expect(parseHash("#/workspace/connectors")).toEqual({ kind: "bad-link" });
   expect(parseHash("#/connectors")).toEqual({ kind: "section", section: "connectors", place: {} });
 });
 
@@ -659,7 +653,7 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
     vi.fn(async (url: string) => {
       if (url.includes("after=")) return new Response("malformed listing cursor", { status: 400 });
       if (url.includes("/workspace/memory")) {
-        return json({ available: true, kinds: ["fact"], matches: [] });
+        return json({ available: true, actions: [], kinds: ["fact"], matches: [] });
       }
       if (url.includes("/workspace/surfaces")) return json({ surfaces: [] });
       if (url.includes("/objects/conversation")) return json({ objects: [] });

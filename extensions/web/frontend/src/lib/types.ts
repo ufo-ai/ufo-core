@@ -90,6 +90,11 @@ export type ArchivedApp = {
   /** The durable name the archived agent object answers to — what a restore targets. */
   object: string;
   icon: string;
+  purpose?: string | null;
+  /** The slug the extension shipped this agent under, absent for an app a member built. */
+  app?: string | null;
+  /** Whether the deploy withholds this app. */
+  hidden?: boolean;
   archived_at: string;
 };
 
@@ -103,6 +108,7 @@ export type Surfaces = {
   memory: boolean;
   "community-skills": boolean;
   "installed-skills": boolean;
+  "app-store": boolean;
 };
 
 export type AgentsPayload = {

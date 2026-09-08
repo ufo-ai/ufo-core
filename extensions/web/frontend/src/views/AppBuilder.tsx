@@ -14,7 +14,7 @@ import type { Agent, Member } from "@/lib/types";
  *  the business and answers with a proposal. */
 const OPENING_MESSAGE = "Build me a new app.";
 
-export const APP_BUILDER_TITLE = "App Builder";
+export const APP_CREATOR_TITLE = "App Creator";
 
 /** The wizard's own founding key — not the chat screen's `new:<agentId>`, so neither pane's
  *  founding send can ever hold the other's busy, and a wizard mount finds nothing on the key it
@@ -38,7 +38,7 @@ export type AppBuilderProps = {
  *
  *  Unlike the panel-to-chat precedent (`pendingAsk`, which hands the composer words the member
  *  presses send on), the wizard opens speaking: the member already stated their intent by pressing
- *  `New application`, and what they want back is the proposal, not a prompt to type. Which
+ *  `App Creator`, and what they want back is the proposal, not a prompt to type. Which
  *  conversation the run is lives in the store, not in this component: whichever send founds it —
  *  the opening send, or the composer's after that send failed — `migrateChat` leaves the founding
  *  record on the wizard's key, and this pane binds by reading the key it watches, so a mount holds
@@ -65,8 +65,8 @@ export function AppBuilder({ agent, member, onSettled, onClose }: AppBuilderProp
   }, [key, agent.id]);
 
   return (
-    <section aria-label={APP_BUILDER_TITLE} className="flex min-h-0 min-w-0 flex-col">
-      <Header heading={2} title="New application" onClose={onClose} pinned />
+    <section aria-label={APP_CREATOR_TITLE} className="flex min-h-0 min-w-0 flex-col">
+      <Header heading={2} title={APP_CREATOR_TITLE} onClose={onClose} pinned />
       <Phases conversationId={conversationId} agentId={agent.id} reloads={settles} />
       <Chat
         agent={agent}
@@ -117,7 +117,7 @@ function Phases({
     <div className={cn(COLUMN, "flex shrink-0 flex-col gap-xs px-2xl pt-lg")}>
       <div
         role="progressbar"
-        aria-label={APP_BUILDER_TITLE}
+        aria-label={APP_CREATOR_TITLE}
         aria-valuemin={0}
         aria-valuemax={total}
         aria-valuenow={done}

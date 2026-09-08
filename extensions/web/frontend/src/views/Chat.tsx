@@ -869,7 +869,7 @@ function Composer({
       }
     >
       {starting ? (
-        <div className={cn(COLUMN, "px-2xl pt-lg")}>
+        <div data-chat-start-line className={cn(COLUMN, "px-2xl pt-lg")}>
           <p className="m-0 text-ui text-ink-soft">{START_INTRO}</p>
         </div>
       ) : null}

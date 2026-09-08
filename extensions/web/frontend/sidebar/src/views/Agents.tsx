@@ -188,7 +188,7 @@ const TASK_KIND = "scheduled_task";
  *  width, one band, one way out, so a member reads an app's settings where they read everything
  *  else. The band names the app, and the read showing stands beside it under a chevron that reaches
  *  the other two — a member switches reads without going back to the band they came from. */
-function AppSettings({
+export function AppSettings({
   agent,
   tab,
   open,

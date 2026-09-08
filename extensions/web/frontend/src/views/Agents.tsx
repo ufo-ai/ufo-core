@@ -36,7 +36,7 @@ import {
   SettingsTabItems,
   type SettingsTab,
 } from "@/views/AgentPane";
-import { APP_BUILDER_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
+import { APP_CREATOR_TITLE, AppBuilder, wizardKey } from "@/views/AppBuilder";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
@@ -398,7 +398,7 @@ export function AppsIndex({
                   className="flex min-w-0 flex-1 flex-col gap-2xs px-sm py-xs"
                 >
                   <span className="min-w-0 truncate text-label">
-                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                    {runTitle ? APP_CREATOR_TITLE + ": " + runTitle : APP_CREATOR_TITLE}
                   </span>
                   <span className="w-full truncate font-mono text-small text-ink-soft">
                     Building
@@ -414,7 +414,7 @@ export function AppsIndex({
                   )}
                 >
                   <span className="min-w-0 max-w-full truncate text-label">
-                    {runTitle ? APP_BUILDER_TITLE + ": " + runTitle : APP_BUILDER_TITLE}
+                    {runTitle ? APP_CREATOR_TITLE + ": " + runTitle : APP_CREATOR_TITLE}
                   </span>
                   <span className="w-full truncate font-mono text-small text-ink-soft">
                     Building

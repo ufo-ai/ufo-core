@@ -5,7 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { BRAND_MARKS } from "@/lib/brandMark";
 import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
-import { HOME_CONNECTORS_LANE, HOME_NEW_LANE, homeHash, parseHash, sectionHash } from "@/lib/route";
+import { HOME_CONNECTORS_LANE, HOME_NEW_LANE, homeHash, sectionHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -287,28 +287,13 @@ test("a second pick of the connectors screen keeps the one lane", async () => {
   await waitFor(() => expect(track()).toEqual([HOME_CONNECTORS_LANE, AGENT_ID]));
 });
 
-/** The screen stands on a workspace tab of its own, beside the other workspace-wide screens, so a
- *  member reaches the pool from the strip rather than from a link alone. */
-test("the connectors tab stands in the workspace strip", async () => {
+test("connectors stays out of the workspace strip", async () => {
   location.hash = "#/workspace/team";
   connectors();
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("tab", { name: "Connectors" }));
-
-  expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "connectors", place: {} });
-  expect(await screen.findByText("github")).toBeTruthy();
-});
-
-test("the connectors workspace address stands the pool on its tab", async () => {
-  location.hash = "#/workspace/connectors";
-  connectors();
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-
-  expect(await screen.findByText("github")).toBeTruthy();
-  expect(screen.getByRole("tab", { name: "Connectors" }).getAttribute("aria-selected")).toBe(
-    "true",
-  );
+  expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
 });
 
 /** The two legs are GitHub's own, so they are read in GitHub's record and stand nowhere on the

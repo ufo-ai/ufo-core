@@ -27,7 +27,7 @@ import {
   SidebarRow,
   SidebarTooltip,
   type Chord,
-} from "@/components/Sidebar";
+} from "./components/Sidebar";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,7 +49,7 @@ import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
 import { FirstRun } from "@/views/FirstRun";
 import { SignIn } from "@/views/SignIn";
-import { Store } from "@/views/Store";
+import { Store } from "./views/Store";
 import { ConnectSurfaces, SURFACES_READ, type SurfacesPayload } from "@/views/Surfaces";
 import { SearchRow, Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";

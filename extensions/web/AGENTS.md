@@ -4,10 +4,12 @@
 
 `frontend/` builds two portal shells into one static tree: the lanes shell (`src/`, built to
 `static/index.html`) and the sidebar shell (`sidebar/`, apps and chats in one sidebar, built to
-`static/sidebar.html`). `portal_page` serves the sidebar shell unless `enable-lanes-shell` answers
-true for the workspace; every silence of the flag read serves the sidebar shell. The two trees
-share `package.json` and its lockfile; each carries its own `src`, `tests`, and vite config, and
-`pnpm test` runs both suites as vitest projects (`lanes`, `sidebar`).
+`static/sidebar.html`). `src/` owns their portal, theme, components, kernel, views, assets, and
+entry point. `sidebar/src/` holds only the sidebar's navigation and route seams; its config resolves
+every other `@/` import to `src/`. `portal_page` serves the sidebar shell unless
+`enable-lanes-shell` answers true for the workspace; every silence of the flag read serves the
+sidebar shell. Both shells share `package.json` and its lockfile, and `pnpm test` runs their suites
+as vitest projects (`lanes`, `sidebar`).
 
 ## Local development
 

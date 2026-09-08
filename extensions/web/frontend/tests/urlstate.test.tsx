@@ -171,15 +171,9 @@ test("a screen moved off the workspace tabs still answers at the address it had"
   expect(parseHash("#/workspace/nothing")).toEqual({ kind: "bad-link" });
 });
 
-/** The screen the tab was named after keeps the section address held links spell, and the tab reads
- *  at the workspace prefix; the name the tab carried before this one answers nothing. */
-test("the connectors name reads as the tab under the workspace prefix", () => {
+test("connectors has one section address", () => {
   expect(parseHash("#/workspace/sources")).toEqual({ kind: "bad-link" });
-  expect(parseHash("#/workspace/connectors")).toEqual({
-    kind: "workspace",
-    view: "connectors",
-    place: {},
-  });
+  expect(parseHash("#/workspace/connectors")).toEqual({ kind: "bad-link" });
   expect(parseHash("#/connectors")).toEqual({ kind: "section", section: "connectors", place: {} });
 });
 

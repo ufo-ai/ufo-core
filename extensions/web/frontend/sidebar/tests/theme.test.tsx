@@ -82,7 +82,7 @@ const AUTHORED = new RegExp(
 );
 
 const PALETTE_STEP =
-  /--(?:bkgd-\d+|text-(?:primary|secondary)|accent-(?:primary|secondary)|color-fill-ink):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
+  /--(?:bkgd-\d+|text-(?:primary|secondary|tertiary)|accent-(?:primary|secondary)|color-fill-ink|color-(?:live|blocked)):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
 
 const authoredColours = (css: string) =>
   css.replace(PROBES, "").replace(HUELESS, "").match(AUTHORED) ?? [];
@@ -95,7 +95,7 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("every colour the portal paints resolves through the palette's seven steps", () => {
+test("every colour the portal paints resolves through the palette's eight steps", () => {
   const css = builtStyles();
 
   expect(authoredColours(outsideThePalette(css))).toEqual([]);
@@ -106,6 +106,7 @@ test("every colour the portal paints resolves through the palette's seven steps"
     "--bkgd-300": "light-dark(#ebeae9,#323535)",
     "--text-primary": "light-dark(#191a1a,#f5f5f5)",
     "--text-secondary": "light-dark(#676767,#a7a9a9)",
+    "--text-tertiary": "light-dark(#919090,#7d7f7f)",
     "--accent-primary": "#0095ff",
     "--accent-secondary": "#ff6700",
   };
@@ -116,17 +117,23 @@ test("every colour the portal paints resolves through the palette's seven steps"
     "--color-surface": String.raw`var\(--bkgd-100\)`,
     "--color-ink": String.raw`var\(--text-primary\)`,
     "--color-ink-soft": String.raw`var\(--text-secondary\)`,
+    "--color-ink-quiet": String.raw`var\(--text-tertiary\)`,
     "--color-field": String.raw`var\(--bkgd-200\)`,
     "--color-edge": String.raw`var\(--bkgd-300\)`,
     "--color-fill": String.raw`var\(--bkgd-200\)`,
     "--color-fill-ink": "#191a1a",
     "--color-link": String.raw`color-mix\(in srgb, var\(--accent-primary\) 70%, var\(--text-primary\)\)`,
     "--color-attention-ink": String.raw`color-mix\(in srgb, var\(--accent-secondary\) 70%, var\(--text-primary\)\)`,
-    "--color-live": String.raw`var\(--accent-primary\)`,
-    "--color-blocked": String.raw`var\(--accent-secondary\)`,
   };
   for (const [token, step] of Object.entries(basis)) {
     expect(new RegExp(`${token}:\\s*${step}`).test(css)).toBe(true);
+  }
+  const hues = {
+    "--color-live": "#16a34a",
+    "--color-blocked": "#eab308",
+  };
+  for (const [token, value] of Object.entries(hues)) {
+    expect(packedStyles()).toContain(`${token}:${value}`);
   }
 });
 
@@ -285,7 +292,7 @@ test("stillness shortens the waiting fade and leaves its threshold standing", ()
   expect(css).toContain("[data-part=skeleton]{animation:var(--animate-waiting)}");
 });
 
-const BRANDS = join(import.meta.dirname, "..", "src", "assets", "brands");
+const BRANDS = join(import.meta.dirname, "..", "..", "src", "assets", "brands");
 
 /** Tailwind scans this directory, so a mark's own words reach the compiler as class candidates and
  *  a colour-bearing utility name emits a literal the palette does not own. A colour function
@@ -345,7 +352,7 @@ test("one sans face carries the chrome, and no rule names a second family", () =
 });
 
 test("the shadcn contract carries the theme, and names nothing no component reads", () => {
-  const css = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8").replace(
+  const css = readFileSync(join(import.meta.dirname, "..", "..", "src", "theme.css"), "utf8").replace(
     /\s+/g,
     "",
   );
@@ -448,7 +455,7 @@ test("a control answers the pointer, and reduced motion cuts the answer short", 
 });
 
 test("the field surface is drawn by the field primitives and by nothing else", () => {
-  const src = join(import.meta.dirname, "..", "src");
+  const src = join(import.meta.dirname, "..", "..", "src");
   const drawn = readdirSync(src, { recursive: true, encoding: "utf8" })
     .filter((name) => name.endsWith(".tsx") && !name.startsWith("components/ui/"))
     .filter((name) => readFileSync(join(src, name), "utf8").includes("bg-field"));
@@ -509,6 +516,29 @@ test("the wordmark is the drawn ufo mark in the top bar", async () => {
   const brand = await screen.findByRole("img", { name: "ufo" });
   expect(brand.getAttribute("class")).not.toContain("tracking");
   expect(brand.getAttribute("style")).toContain("ufo-logo.svg");
+  expect(readFileSync(join(STATIC, "sidebar.html"), "utf8")).toContain(
+    '<body data-shell="sidebar">',
+  );
+  expect(packedStyles()).toContain(
+    'body[data-shell=sidebar]{--size-wordmark:18px;--size-logo:72px}',
+  );
+  const startLine = /body\[data-shell=sidebar\]\[data-chat-start-line\]\{([^}]*)\}/.exec(
+    packedStyles(),
+  );
+  if (!startLine) throw new Error("the shared sheet has no sidebar start line");
+  for (const declaration of [
+    "display:flex",
+    "height:var(--size-row)",
+    "flex-shrink:0",
+    "align-items:center",
+    "margin-top:var(--spacing-xl)",
+    "padding-top:0",
+  ]) {
+    expect(startLine[1]).toContain(declaration);
+  }
+  expect(
+    screen.getByText("What can UFO do for you?").parentElement?.hasAttribute("data-chat-start-line"),
+  ).toBe(true);
 });
 
 test("the favicons use the exact light and dark brand marks", () => {
@@ -541,7 +571,7 @@ test("a placeholder is muted rather than mistaken for a value", () => {
 });
 
 test("muted text is the palette's second tone, never ink held back by opacity", () => {
-  const src = join(import.meta.dirname, "..", "src");
+  const src = join(import.meta.dirname, "..", "..", "src");
   const dimmed = readdirSync(src, { recursive: true, encoding: "utf8" })
     .filter((name) => name.endsWith(".tsx") || name.endsWith(".ts"))
     .filter((name) => /opacity-\(--opacity-muted/.test(readFileSync(join(src, name), "utf8")));

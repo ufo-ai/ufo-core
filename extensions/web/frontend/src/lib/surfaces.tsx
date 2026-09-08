@@ -12,6 +12,7 @@ export const ALL_SURFACES: Surfaces = {
   memory: true,
   "community-skills": true,
   "installed-skills": true,
+  "app-store": true,
 };
 
 export function SurfacesProvider({

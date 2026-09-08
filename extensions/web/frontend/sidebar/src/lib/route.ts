@@ -6,7 +6,6 @@ export const WORKSPACE_TABS = [
   "tasks",
   "skills",
   "memory",
-  "connectors",
   "credentials",
   "usage",
   "billing",
@@ -15,7 +14,7 @@ export const WORKSPACE_TABS = [
 /** Every top-level screen name the address codec reads and writes. The portal itself hosts only
  *  `connectors`; the rest are screens shipped as apps, and a section address naming one lands on
  *  that app with its place carried — the name outlives who renders it, so links keep working. */
-export const SECTIONS = ["wiki", "artifacts", "radar", "connectors"] as const;
+export const SECTIONS = ["wiki", "artifacts", "radar", "connectors", "messaging"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
@@ -375,9 +374,6 @@ const AGENT = row(
     AGENT_PREFIX + agentId + serializePlace(place),
 );
 
-/* The connectors screen is a workspace tab and a section both: the tab is where a member finds it,
-   and the section name is the address held links carry. So the workspace prefix reads that one name
-   as the tab, and every other section name at this prefix stays the section's. */
 const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
   "workspace",
   new RegExp(`^${WORKSPACE_PREFIX}(${TAB_NAME})${PLACE_TAIL}`),
@@ -385,7 +381,8 @@ const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
     const name = match[1];
     const place = parsePlace(match[2]);
     if (!place) return null;
-    if (isSection(name) && name !== "connectors") {
+    if (name === "connectors") return null;
+    if (isSection(name)) {
       return { kind: "section", section: name, place };
     }
     const tab = WORKSPACE_TABS.find((candidate) => candidate === name);
@@ -568,6 +565,7 @@ export function bootRoute(hash: string, search: string): Route {
 /** The builders, each one its row's own `write`: the address a screen hands the browser is written
  *  by the row whose pattern reads it back. */
 export const chatHash = CHAT.write;
+export const homeHash = HOME.write;
 export const conversationSlotHash = CONVERSATION_SLOT.write;
 export const newChatHash = NEW_CHAT.write;
 export const agentHash = AGENT.write;

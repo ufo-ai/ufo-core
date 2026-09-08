@@ -1,4 +1,5 @@
 @import "tailwindcss" source(".");
+@source "../sidebar/src";
 @source "../node_modules/streamdown/dist/*.js";
 /* The app pages live in their extensions and compile in the browser against the kit, so the
    sheet must carry their classes the way it carries every view's — a utility only an app page
@@ -346,6 +347,7 @@
   /* The column opening the shell on the left: one glyph wide, so the marks it stacks sit on the
      page's edge rather than in a column the pane could have used. */
   --container-minirail: 40px;
+  --container-rail: 48px;
   /* The slot an app's own list of things is read down, beside whatever that list opens: enough for
      a name and the one fact that tells two rows apart, and no more, because every pixel the list
      holds is one the record beside it does without. */
@@ -508,6 +510,20 @@
   --size-logo: 48px;
   --size-notice: 1em;
   --marker-width: 2px;
+}
+
+body[data-shell="sidebar"] {
+  --size-wordmark: 18px;
+  --size-logo: 72px;
+}
+
+body[data-shell="sidebar"] [data-chat-start-line] {
+  display: flex;
+  height: var(--size-row);
+  flex-shrink: 0;
+  align-items: center;
+  margin-top: var(--spacing-xl);
+  padding-top: 0;
 }
 
 /* The vendored provider marks a first-run tile and a connector row are drawn by, each in its own

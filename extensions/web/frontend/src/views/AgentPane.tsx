@@ -4,7 +4,7 @@ import {
   IconDots,
   IconHistory,
   IconLayoutSidebarRight,
-  IconMessage,
+  IconMessageDots,
   IconPlug,
   IconPlus,
   IconSettings,
@@ -572,21 +572,21 @@ export function AgentPane({
               it never had. The two acts that are the shell's own stand on the band line at its
               right end, and the page's band makes room for them: the frame inherits the inset the
               shell's acts occupy, so its own band-right controls end where these begin. */}
-          <div className="absolute top-lg right-2xl z-10 flex items-center gap-xs">
-            <AppMenu
-              name={agentName(agent.name)}
-              onPick={onSettings}
-              className="rounded-full border border-edge bg-surface"
-            />
-            {/* The act opens the app's editing chat in the lane beside its page. The chat app's page
-                is that conversation, so the act names nothing there and the shell draws none: the
-                page holds every way into the conversations it lists. */}
-            {speaks ? null : (
+          {/* The act opens the app's editing chat in the lane beside its page. The chat app's page
+              is that conversation, so the shell draws no acts over it: the page holds every way
+              into the conversations it lists. */}
+          {speaks ? null : (
+            <div className="absolute top-lg right-2xl z-10 flex items-center gap-xs">
+              <AppMenu
+                name={agentName(agent.name)}
+                onPick={onSettings}
+                className="rounded-full border border-edge bg-surface"
+              />
               <Button
                 variant="quiet"
-                size={held !== undefined ? "icon" : "bar"}
+                size="icon"
                 aria-label={
-                  (held !== undefined ? "Close chat with " : "Chat with ") + agentName(agent.name)
+                  (held !== undefined ? "Close edit of " : "Edit ") + agentName(agent.name)
                 }
                 aria-pressed={held !== undefined}
                 className={cn(
@@ -605,14 +605,11 @@ export function AgentPane({
                 {held !== undefined ? (
                   <IconLayoutSidebarRight aria-hidden />
                 ) : (
-                  <>
-                    <IconMessage className="size-(--size-glyph)" aria-hidden />
-                    Chat
-                  </>
+                  <IconMessageDots aria-hidden />
                 )}
               </Button>
-            )}
-          </div>
+            </div>
+          )}
           <HomepageFrame
             agent={agent}
             member={member}

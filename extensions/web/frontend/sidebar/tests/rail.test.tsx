@@ -472,7 +472,7 @@ test("opening the group at the foot leaves the run above it standing", async () 
 });
 
 test("the query holding the narrow rail's groups open is the theme's own breakpoint", () => {
-  const theme = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
+  const theme = readFileSync(join(import.meta.dirname, "..", "..", "src", "theme.css"), "utf8");
   const declared = /--breakpoint-narrow:\s*(\d+)px/.exec(theme);
   expect(declared).not.toBeNull();
   expect(NARROW).toBe("(width < " + declared![1] + "px)");

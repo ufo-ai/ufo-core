@@ -1,6 +1,6 @@
 // @vitest-environment node
 // Loading the config runs esbuild, which needs the real platform globals jsdom replaces.
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { expect, test } from "vitest";
@@ -51,6 +51,43 @@ test("the sidebar shell's page is named under the base the server publishes", as
     "/surface/web/static/src/main.tsx"
   );
   expect(routed("GET", "/surface/web/api/agents")).toBeUndefined();
+});
+
+test("the sidebar shell contains only its entry, navigation, and route seams", async () => {
+  const source = join(import.meta.dirname, "..", "sidebar", "src");
+  expect(
+    readdirSync(source, { recursive: true, encoding: "utf8" })
+      .filter((path) => /\.[tj]sx?$/.test(path))
+      .sort()
+  ).toEqual([
+    "App.tsx",
+    "components/Sidebar.tsx",
+    "lib/rail.ts",
+    "lib/railStore.ts",
+    "lib/route.ts",
+    "lib/router.ts",
+    "lib/title.ts",
+    "main.tsx",
+    "views/Agents.tsx",
+    "views/FirstRun.tsx",
+    "views/Spotlight.tsx",
+    "views/Store.tsx",
+  ]);
+
+  const loaded = await loadConfigFromFile(
+    { command: "build", mode: "production" },
+    join(import.meta.dirname, "..", "sidebar", "vite.config.ts")
+  );
+  if (!loaded) throw new Error("sidebar/vite.config.ts did not load");
+  const aliases = loaded.config.resolve?.alias;
+  if (!Array.isArray(aliases)) throw new Error("the sidebar declares no ordered aliases");
+  expect(aliases.find(({ find }) => find === "@")?.replacement).toBe(
+    join(import.meta.dirname, "..", "src")
+  );
+  expect(readFileSync(join(import.meta.dirname, "..", "sidebar", "sidebar.html"), "utf8")).toContain(
+    'src="/src/main.tsx"'
+  );
+  expect(readFileSync(join(source, "main.tsx"), "utf8")).toBe('import "../../src/main";\n');
 });
 
 test("both shells send their reads to the stack origin UFO_STACK_ORIGIN names", async () => {

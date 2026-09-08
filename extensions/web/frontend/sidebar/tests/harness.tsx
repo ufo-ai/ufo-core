@@ -492,7 +492,7 @@ export async function viewCard(name: string): Promise<HTMLElement> {
  *  states what a desktop is. */
 const DESKTOP = 1280;
 
-const TOKENS = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
+const TOKENS = readFileSync(join(import.meta.dirname, "..", "..", "src", "theme.css"), "utf8");
 
 function token(name: string): number {
   const declared = new RegExp("^\\s*" + name + ":\\s*(\\d+)px;", "m").exec(TOKENS);

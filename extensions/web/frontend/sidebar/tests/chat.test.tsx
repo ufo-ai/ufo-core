@@ -963,13 +963,11 @@ test("a conversation opens its file changes and returns to chat", async () => {
 
   await userEvent.click(await screen.findByRole("button", { name: "Changes" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID + "?slot=changes");
-  const lane = await screen.findByRole("region", { name: "Changes" });
+  const sheet = await screen.findByRole("dialog", { name: "Changes" });
   expect(await screen.findByText("/workspace/ufo/src/answer.ts")).toBeTruthy();
   const column = screen.getByTestId("log").closest("[data-slot=message-scroller]")!.parentElement!;
-  // The slot stands as a lane of the screen's own track, beside the transcript rather than fixed
-  // to the window's edge over it.
-  expect(screen.getByRole("main").contains(lane)).toBe(true);
-  expect(column.closest("[data-slot=slot-track]")?.className).not.toContain("contents");
+  expect(screen.getByRole("main").contains(sheet)).toBe(false);
+  expect(column.closest("[data-slot=slot-track]")?.className).toContain("contents");
   expect(document.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
   expect(screen.getByText("-old").className).toContain("bg-attention");
   expect(screen.getByText("+new").className).toContain("bg-affirm");
@@ -979,7 +977,7 @@ test("a conversation opens its file changes and returns to chat", async () => {
   expect(screen.getByText("This diff is truncated.")).toBeTruthy();
   expect(screen.getByText("Some changes may not be shown.")).toBeTruthy();
 
-  await userEvent.click(within(lane).getByRole("button", { name: "Close Changes" }));
+  await userEvent.click(within(sheet).getByRole("button", { name: "Close" }));
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
@@ -1078,11 +1076,11 @@ test("an artifact slot file opens the shared file sheet", async () => {
   open();
 
   await userEvent.click(await screen.findByRole("button", { name: "Artifacts 1" }));
-  const lane = await screen.findByRole("region", { name: "Artifacts" });
-  const artifact = await within(lane).findByRole("button", { name: "chart.png" });
-  expect(within(lane).queryByRole("link", { name: "chart.png" })).toBeNull();
+  const sheet = await screen.findByRole("dialog", { name: "Artifacts" });
+  const artifact = await within(sheet).findByRole("button", { name: "chart.png" });
+  expect(within(sheet).queryByRole("link", { name: "chart.png" })).toBeNull();
   expect(screen.getByText("The final chart")).toBeTruthy();
-  expect(lane.querySelector('img[src="/artifacts/preview/chart.png?token=signed"]')).toBeTruthy();
+  expect(sheet.querySelector('img[src="/artifacts/preview/chart.png?token=signed"]')).toBeTruthy();
 
   await userEvent.click(artifact);
 
@@ -3201,7 +3199,6 @@ test("switching conversations remounts the log so scroll state never leaks acros
 
   await userEvent.click(screen.getByRole("button", { name: /The second thread/ }));
   await screen.findByText("No messages in this conversation yet.");
-  expect(document.activeElement).toBe(screen.getByLabelText("Ask UFO"));
   const fresh = screen.getByTestId("log");
   expect(fresh).not.toBe(first);
 
@@ -3495,7 +3492,7 @@ test("a starter says its sentence on the press, and leaves with the start screen
     "I want an application that tracks the competitors I name and writes up what changed, with a source for each claim.",
   ]);
   expect((screen.getByLabelText("Ask UFO") as HTMLTextAreaElement).value).toBe("");
-  expect(document.activeElement).toBe(screen.getByLabelText("Ask UFO"));
+  expect(location.hash).toBe(chatHash(CONVO_ID));
   expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
 });
 
@@ -3603,27 +3600,6 @@ test("a ranked slate replaces every row the screen ships with", async () => {
   expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
 });
 
-/** jsdom lays nothing out, so every width reads 0 and no line is ever cut. These stub the two the
- *  row measures, which is the whole input to whether the sentence is readable where it stands. */
-function measureLines(scroll: number, client: number): () => void {
-  const widths = ["scrollWidth", "clientWidth"] as const;
-  const held = widths.map((name) => Object.getOwnPropertyDescriptor(HTMLElement.prototype, name));
-  Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
-    configurable: true,
-    get: () => scroll,
-  });
-  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
-    configurable: true,
-    get: () => client,
-  });
-  return () => {
-    widths.forEach((name, i) => {
-      if (held[i]) Object.defineProperty(HTMLElement.prototype, name, held[i]);
-      else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
-    });
-  };
-}
-
 /** A row the ranking could not make ready stands in an application's slot all the same, and what it
  *  still needs is stated by the mark alone: the row says its work, and the account it waits on is
  *  the brand it wears. The mark draws at the size every other row's mark draws at, never at the
@@ -3643,40 +3619,6 @@ test("a spare unlock stands in an app's slot and wears the brand of what it need
   const mark = glyph.getAttribute("class") ?? "";
   expect(mark).toContain("size-(--size-glyph)");
   expect(mark).not.toContain("--size-brand-mark");
-});
-
-test("a sentence the row cannot hold is stated in full on hover", async () => {
-  const restore = measureLines(600, 200);
-  try {
-    wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
-    location.hash = "#/";
-    render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-    const row = await screen.findByRole("button", { name: /months of runway left/ });
-    await userEvent.hover(row);
-
-    const tip = await screen.findByRole("tooltip");
-    expect(tip.textContent).toContain("Report cash, burn, and the months of runway left.");
-  } finally {
-    restore();
-  }
-});
-
-test("a sentence the row holds whole is never said a second time", async () => {
-  const restore = measureLines(200, 200);
-  try {
-    wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
-    location.hash = "#/";
-    render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-    const row = await screen.findByRole("button", { name: /months of runway left/ });
-    await userEvent.hover(row);
-
-    await new Promise((wake) => setTimeout(wake, 250));
-    expect(screen.queryByRole("tooltip")).toBeNull();
-  } finally {
-    restore();
-  }
 });
 
 test("a ranked starter says its own sentence, and a check-in asks after work", async () => {

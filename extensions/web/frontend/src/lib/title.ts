@@ -3,7 +3,7 @@ import { isPortalChat } from "@/lib/audience";
 import type { ChatRow } from "@/lib/rail";
 import { agentHash, workspaceHash, type Route } from "@/lib/route";
 import type { Agent, OwnedConversation } from "@/lib/types";
-import { APP_BUILDER_TITLE } from "@/views/AppBuilder";
+import { APP_CREATOR_TITLE } from "@/views/AppBuilder";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 
 const PRODUCT = "ufo";
@@ -110,7 +110,7 @@ function where(
       return [{ label: route.slot }, named(route.agentId)];
     case "builder":
       return [
-        { label: APP_BUILDER_TITLE },
+        { label: APP_CREATOR_TITLE },
         { label: APPS, at: workspaceHash("apps") },
         { label: WORKSPACE },
       ];
