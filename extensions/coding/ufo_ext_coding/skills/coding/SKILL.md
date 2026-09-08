@@ -11,9 +11,11 @@ description: Load when asked to inspect or change source code, fix bugs, produce
 Call `spawn(target="coding", ...)` immediately after this skill loads. Do not call
 `update_todo_list`, shell, file, web, or any setup tool first.
 
-1. Choose the repository setup mode (below) and `spawn(target="coding", ...)` with the setup sentence as the objective's first line, followed by the task and any instructions the request carried for whoever does the work, verbatim.
+1. Choose the repository setup mode (below) and `spawn(target="coding", ...)` with the setup sentence as the objective's first line, followed by the task and any instructions the request carried for whoever does the work, verbatim. For a task that changes code, the objective also carries the landing clause (below).
 2. Read the child's report; `read` its deliverable if you must inspect it.
-3. Link the file the child wrote with Markdown under the shared delivery register, or use
+3. When the child opened a pull request, name the pull request and its branch in the reply and
+   attach nothing. Only when there is no pull request to deliver, or the member asked for a file,
+   link the file the child wrote with Markdown under the shared delivery register, or use
    `share_file` when the member's ask carries a share trigger, then reply.
 
 After a bare foreground `spawn` raises `TimeoutError`, do not infer the child stopped and do not
@@ -55,6 +57,8 @@ Before calling `spawn(target="coding", ...)`, choose exactly one setup mode and 
 - **Existing checkout:** Use for any later spawn after the child using that path has finished. Start the objective with: `Repository setup: use the existing checkout at /workspace/org-repo, from https://github.com/org/repo. Do not clone.` The URL is what the child falls back to if the path is not there.
 - **Local checkout:** Use for every spawn that overlaps another child. Start the objective with: `Repository setup: copy the committed tree at /workspace/org-repo to /workspace/org-repo-<slug> with git, base the work on <base>, keep the source as workspace, use https://github.com/org/repo as origin, then work inside it.` This copies from disk without a fetch, separates the source's branches from GitHub's, and keeps pushes pointed at GitHub.
 - **No repository:** Use only for coding-adjacent tasks that do not need repository files. Start the objective with: `Repository setup: no repository clone is needed.`
+
+A task that changes code lands as a pull request. After the setup sentence, add this sentence to the objective: `Land the change: commit it, push your branch, and open a pull request against <base>.` The child gates every push the objective does not ask for, so an objective without that sentence produces a file and no pull request. Leave the sentence out only for an investigation, a review, or a task the member scoped to a patch or a report.
 
 A coding subagent should not spend startup time deciding whether to clone.
 
@@ -104,7 +108,7 @@ connected GitHub account.
 spawn(
   target="coding",
   payload={
-    "objective": "Repository setup: clone https://github.com/acme/cobbledb into /workspace/acme-cobbledb with git, then work inside it.\n\nRust codebase. Ticket LIN-1234: Add cursor-based pagination to the /query endpoint. Requirements: support `cursor` and `limit` query params, default limit 50, max 200. Write tests."
+    "objective": "Repository setup: clone https://github.com/acme/cobbledb into /workspace/acme-cobbledb with git, then work inside it.\n\nRust codebase. Ticket LIN-1234: Add cursor-based pagination to the /query endpoint. Requirements: support `cursor` and `limit` query params, default limit 50, max 200. Write tests.\n\nLand the change: commit it, push your branch, and open a pull request against main."
   }
 )
 ```
