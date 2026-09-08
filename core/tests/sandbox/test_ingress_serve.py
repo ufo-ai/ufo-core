@@ -38,6 +38,13 @@ from ufo.harness.sandbox.ingress_serve import (
     FETCH_DESTINATION_HEADER,
     FOREIGN_ORIGIN,
     FRAME_ANCESTORS_DIRECTIVE,
+    HEARTBEAT_MEDIA_TYPE,
+    HEARTBEAT_PING_PATH,
+    HEARTBEAT_PING_SECONDS,
+    HEARTBEAT_RENEWAL_SECONDS,
+    HEARTBEAT_SCRIPT,
+    HEARTBEAT_SCRIPT_PATH,
+    HEARTBEAT_TAG,
     INGRESS_SESSION_COOKIE,
     INGRESS_SESSION_TTL_SECONDS,
     LINK_NOT_VALID,
@@ -122,6 +129,9 @@ REPORT_ONLY_POLICY = "frame-ancestors 'none'"
 FRAMING_ONLY_PATH = "/framing-only"
 FRAMING_ONLY_POLICY = "  frame-ancestors 'self' ;  "
 UPSTREAM_STATUS_PATH = "/upstream-status/"
+HTML_PAGE_PATH = "/page.html"
+HTML_PAGE_BYTES = b"<!doctype html><html><body><p>live</p></body></html>"
+"""A dialed site's own document, the one kind of response the heartbeat tag is appended to."""
 CARRIER_ERROR_BODY = '{"sandboxId":"sbx-1","message":"the sandbox is running but port is not open"}'
 """What a carrier's edge answers when the addressed port is not open: its own error, naming its own
 sandbox, under its own status — never anything the site wrote."""
@@ -131,6 +141,13 @@ pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 class _OriginHandler(BaseHTTPRequestHandler):
     def _respond(self) -> None:
         body = self.rfile.read(int(self.headers.get("content-length") or 0))
+        if self.path.startswith(HTML_PAGE_PATH):
+            self.send_response(200)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(HTML_PAGE_BYTES)))
+            self.end_headers()
+            self.wfile.write(HTML_PAGE_BYTES)
+            return
         if self.path.startswith(UPSTREAM_STATUS_PATH):
             self.send_response(int(self.path.removeprefix(UPSTREAM_STATUS_PATH)))
             self.send_header("content-type", "application/json")
@@ -181,7 +198,16 @@ class _OriginHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _describe(self) -> None:
+        """A HEAD of the page: the headers its GET carries and no body, which is what the ingress
+        must leave the origin's own `content-length` on — there is nothing to append a tag to."""
+        self.send_response(200)
+        self.send_header("content-type", "text/html; charset=utf-8")
+        self.send_header("content-length", str(len(HTML_PAGE_BYTES)))
+        self.end_headers()
+
     do_GET = do_POST = _respond
+    do_HEAD = _describe
 
     def log_message(self, *args: object) -> None: ...
 
@@ -2447,3 +2473,248 @@ async def test_a_shipped_bundle_whose_digest_is_gone_is_404(db, stored_ingress) 
     await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, "deadbeefdeadbeef")
     got = await client.get(f"{_origin(anchor)}/")
     assert got.status_code == 404
+
+
+@dataclass(frozen=True)
+class _CountingCarrier(_StubCarrier):
+    """The stub carrier, counting the dials the heartbeat makes. A renewal is a dial and nothing
+    else on the wire, so the count is the whole assertion: the ingress asks the carrier for an
+    address it throws away, and the carrier leases the box forward answering it."""
+
+    dials: list[int] = field(default_factory=list)
+
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        self.dials.append(port)
+        return await super().dial(handle, port)
+
+
+@dataclass(frozen=True)
+class _GoneCarrier(_CountingCarrier):
+    """A carrier whose sandbox is gone: every dial raises the one error `dial` promises."""
+
+    async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
+        self.dials.append(port)
+        raise SandboxUnreachable("sandbox is gone")
+
+
+@pytest.fixture
+async def heartbeat_ingress(
+    origin_port: int, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[httpx.AsyncClient, IngressServe, _CountingCarrier]]:
+    """The dial path with the carrier counted and the server itself in hand — the throttle's memory
+    lives on the instance, so a test that ages it needs the object the client is talking to."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    carrier = _CountingCarrier(port=origin_port)
+    async with upstream_client() as upstream:
+        server = _server(carrier, upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+            yield client, server, carrier
+
+
+async def test_a_dialed_html_page_carries_the_heartbeat_tag_once(db, heartbeat_ingress) -> None:
+    """The document a live site answers with, plus one script element after it. Appended rather
+    than woven in, so no site's markup is parsed or buffered to place it, and the origin's own
+    `content-length` goes with it — a relayed length would describe the body the origin sent and
+    cut the tag off the wire."""
+    client, _server_object, _carrier = heartbeat_ingress
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(client, workspace_id, conversation_id)
+    got = await client.get(f"{_origin(conversation_id)}{HTML_PAGE_PATH}")
+    assert got.status_code == 200
+    assert got.content == HTML_PAGE_BYTES + HEARTBEAT_TAG
+    assert got.content.count(HEARTBEAT_TAG) == 1
+    assert "content-length" not in got.headers
+
+
+async def test_a_dialed_json_response_carries_no_heartbeat_tag(db, heartbeat_ingress) -> None:
+    """A site's data call is bytes a caller parses, so a script element appended to it is a broken
+    response. Only an HTML document is tagged, and every other response keeps the origin's own
+    framing."""
+    client, _server_object, _carrier = heartbeat_ingress
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(client, workspace_id, conversation_id)
+    got = await client.get(f"{_origin(conversation_id)}/api/state")
+    assert got.status_code == 200
+    assert HEARTBEAT_TAG not in got.content
+    assert got.json()["path"] == "/api/state"
+    assert got.headers["content-length"] == str(len(got.content))
+
+
+async def test_a_head_of_an_html_page_carries_no_tag(db, heartbeat_ingress) -> None:
+    """A HEAD has no body to append to, so its length still describes the document the origin would
+    have sent."""
+    client, _server_object, _carrier = heartbeat_ingress
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(client, workspace_id, conversation_id)
+    got = await client.head(f"{_origin(conversation_id)}{HTML_PAGE_PATH}")
+    assert got.status_code == 200
+    assert got.content == b""
+    assert got.headers["content-length"] == str(len(HTML_PAGE_BYTES))
+
+
+async def test_the_heartbeat_script_is_served_by_the_ingress_and_gates_on_visibility(
+    db, heartbeat_ingress
+) -> None:
+    """The tag's target is this process's own script at the site's origin, never a path forwarded to
+    the site: the bytes are the module's own, typed as script, and stored by nothing. Visibility is
+    the whole gate the ping is behind, so the script reads `document.visibilityState` before every
+    periodic ping and once more when the page stops being visible."""
+    client, _server_object, carrier = heartbeat_ingress
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(client, workspace_id, conversation_id)
+    got = await client.get(f"{_origin(conversation_id)}{HEARTBEAT_SCRIPT_PATH}")
+    assert got.status_code == 200
+    assert got.text == HEARTBEAT_SCRIPT
+    assert got.headers["content-type"].startswith(HEARTBEAT_MEDIA_TYPE)
+    assert got.headers["cache-control"] == UNCACHEABLE
+    assert "document.visibilityState==='visible'" in got.text
+    assert "visibilitychange" in got.text
+    assert f"setInterval(tick,{HEARTBEAT_PING_SECONDS * 1000})" in got.text
+    assert HEARTBEAT_PING_PATH in got.text
+    assert carrier.dials == []
+
+
+async def test_a_ping_renews_the_lease_through_the_carrier(db, heartbeat_ingress) -> None:
+    """What the whole endpoint is for: a page open in front of a member renews the box its site
+    runs on, through the same session the page was loaded with and the same dial the proxy makes."""
+    client, _server_object, carrier = heartbeat_ingress
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(client, workspace_id, conversation_id)
+    got = await client.post(f"{_origin(conversation_id)}{HEARTBEAT_PING_PATH}")
+    assert got.status_code == 204
+    assert got.content == b""
+    assert carrier.dials == [8000]
+
+
+async def test_a_ping_without_a_session_renews_nothing(db, heartbeat_ingress) -> None:
+    """Knowing the path renews nothing. The ping runs the proxy's own gate, so a request carrying no
+    session is refused exactly as a page request is."""
+    client, _server_object, carrier = heartbeat_ingress
+    _workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    got = await client.post(f"{_origin(conversation_id)}{HEARTBEAT_PING_PATH}")
+    assert (got.status_code, got.text) == (403, SESSION_ENDED_PAGE)
+    assert carrier.dials == []
+
+
+async def test_a_ping_carrying_an_expired_session_renews_nothing(db, heartbeat_ingress) -> None:
+    """A tab left open past its session's hour keeps pinging, and every ping after the expiry is
+    refused: the lease is renewed for as long as the viewer is authorized to read the page and no
+    longer."""
+    client, _server_object, carrier = heartbeat_ingress
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    expired = _token(workspace_id, conversation_id, ttl=-1, kind=INGRESS_SESSION_KIND)
+    got = await client.post(
+        f"{_origin(conversation_id)}{HEARTBEAT_PING_PATH}",
+        headers={"cookie": f"{INGRESS_SESSION_COOKIE}={expired}"},
+    )
+    assert (got.status_code, got.text) == (403, SESSION_ENDED_PAGE)
+    assert carrier.dials == []
+
+
+async def test_a_ping_at_a_site_the_session_does_not_open_renews_nothing(
+    db, heartbeat_ingress
+) -> None:
+    """One site's session pings its own site or nothing: the claims must name the very origin the
+    ping arrived at, so a member holding one site's cookie cannot keep a neighbour's box awake."""
+    client, _server_object, carrier = heartbeat_ingress
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    _other_workspace, other_conversation = await _seed_conversation("stub:sbx-1")
+    session = _token(workspace_id, conversation_id, kind=INGRESS_SESSION_KIND)
+    got = await client.post(
+        f"{_origin(other_conversation)}{HEARTBEAT_PING_PATH}",
+        headers={"cookie": f"{INGRESS_SESSION_COOKIE}={session}"},
+    )
+    assert (got.status_code, got.text) == (403, WRONG_SITE)
+    assert carrier.dials == []
+
+
+async def test_a_ping_takes_no_method_but_post(db, heartbeat_ingress) -> None:
+    """The path is the ingress's on every method, so a GET of it answers 405 rather than being
+    forwarded to the site as a path of its own."""
+    client, _server_object, carrier = heartbeat_ingress
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(client, workspace_id, conversation_id)
+    got = await client.get(f"{_origin(conversation_id)}{HEARTBEAT_PING_PATH}")
+    assert got.status_code == 405
+    assert got.headers["allow"] == "POST"
+    assert carrier.dials == []
+
+
+async def test_a_burst_of_pings_renews_once_and_again_after_the_window(
+    db, heartbeat_ingress
+) -> None:
+    """Every tab on a site pings on its own clock, so the throttle is what turns a room full of them
+    into one carrier call per window. The recency map is this process's memory of when the site was
+    last renewed; aged past the window, the next ping renews again."""
+    client, server_object, carrier = heartbeat_ingress
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _open(client, workspace_id, conversation_id)
+    url = f"{_origin(conversation_id)}{HEARTBEAT_PING_PATH}"
+    for _ping in range(3):
+        assert (await client.post(url)).status_code == 204
+    assert carrier.dials == [8000]
+
+    key = (conversation_id, 8000)
+    server_object.renewals[key] -= HEARTBEAT_RENEWAL_SECONDS + 1
+    assert (await client.post(url)).status_code == 204
+    assert carrier.dials == [8000, 8000]
+
+
+async def test_a_ping_whose_dial_fails_answers_204_and_is_retried(
+    db, origin_port: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A site whose sandbox is gone is not this endpoint's news to break: the member's own page load
+    reports the site, and a ping that could not renew answers as quietly as one that did. The failed
+    attempt leaves no throttle entry behind, so the ping after it dials again rather than waiting
+    out a window on a box that may have come back."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    carrier = _GoneCarrier(port=origin_port)
+    workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    async with upstream_client() as upstream:
+        server = _server(carrier, upstream)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+            session = _token(workspace_id, conversation_id, kind=INGRESS_SESSION_KIND)
+            held = {"cookie": f"{INGRESS_SESSION_COOKIE}={session}"}
+            url = f"{_origin(conversation_id)}{HEARTBEAT_PING_PATH}"
+            first = await client.post(url, headers=held)
+            second = await client.post(url, headers=held)
+    assert (first.status_code, second.status_code) == (204, 204)
+    assert carrier.dials == [8000, 8000]
+    assert server.renewals == {}
+
+
+async def test_a_ping_for_a_stored_site_renews_nothing(db, stored_ingress) -> None:
+    """A stored site's bytes come off the blob store and there is no sandbox behind it to keep
+    awake, so its pings answer 204 having reached no carrier at all — the carrier here raises on any
+    dial, which is the assertion."""
+    client, blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
+    await _open(client, workspace_id, conversation_id)
+    got = await client.post(f"{_origin(conversation_id)}{HEARTBEAT_PING_PATH}")
+    assert got.status_code == 204
+    assert got.content == b""
+
+
+async def test_a_stored_page_carries_no_heartbeat_tag(db, stored_ingress) -> None:
+    """Nothing to renew, nothing to inject: a stored site's document is served byte for byte from
+    the store, under the length and digest its deploy measured."""
+    client, blobs = stored_ingress
+    workspace_id, conversation_id = await _seed_conversation(None)
+    await _seed_stored_site(blobs, workspace_id, conversation_id, STORED_FILES)
+    await _open(client, workspace_id, conversation_id)
+    got = await client.get(f"{_origin(conversation_id)}/")
+    assert got.content == INDEX_BYTES
+    assert HEARTBEAT_TAG not in got.content
+
+
+async def test_a_shipped_page_ping_renews_nothing(db, stored_ingress) -> None:
+    """A shipped app page's origin is a synthetic anchor with no conversation and no sandbox behind
+    it, so its ping short-circuits before any row is read."""
+    client, blobs = stored_ingress
+    workspace_id = uuid4()
+    anchor = uuid5(NAMESPACE_URL, f"{workspace_id}:{SHIPPED_SLUG}")
+    await _seed_shipped_bundle(blobs, SHIPPED_DIGEST, SHIPPED_FILES)
+    await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, SHIPPED_DIGEST)
+    got = await client.post(f"{_origin(anchor)}{HEARTBEAT_PING_PATH}")
+    assert got.status_code == 204

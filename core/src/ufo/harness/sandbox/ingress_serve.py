@@ -255,6 +255,56 @@ SITE_WAITING_POLICY = "default-src 'none'; style-src 'unsafe-inline'"
 """What the waiting page may reach: nothing but the style in its own head. It is this process's own
 document served at the site's origin, so it carries a policy of its own rather than the latitude a
 site is served under."""
+HEARTBEAT_PING_PATH = "/__ufo_heartbeat"
+HEARTBEAT_SCRIPT_PATH = "/__ufo_heartbeat.js"
+"""The two paths the viewer's heartbeat owns, reserved out of every site's own path space. Both are
+claimed on every proxied method for the reason the view path is: whatever these routes do not claim
+the catch-all forwards to the sandbox, and a site answering at either name would be asked to renew
+its own lease."""
+HEARTBEAT_PING_METHODS = ("POST",)
+HEARTBEAT_SCRIPT_METHODS = ("GET", "HEAD")
+HEARTBEAT_PING_SECONDS = 60
+"""How often an open page pings while it is the tab in front. Short next to the lease a ping renews,
+so a lease outlives several missed pings, and long enough that a page left open for an afternoon
+costs one request a minute."""
+HEARTBEAT_RENEWAL_SECONDS = 450
+"""The floor between two carrier renewals for one site, whatever a site's viewers ping. Half the
+span a dial leases on the e2b carrier (`DIAL_LEASE_SECONDS`, 900 seconds), which is the number this
+cannot import from an extension: at half the span every renewal lands with the previous lease still
+running, and a room full of tabs on one site costs the carrier one call rather than one per tab."""
+HEARTBEAT_SCRIPT = f"""(function(){{
+if(window.__ufoHeartbeat)return;
+window.__ufoHeartbeat=true;
+var ping=function(keepalive){{
+  fetch('{HEARTBEAT_PING_PATH}',{{method:'POST',credentials:'same-origin',keepalive:keepalive}})
+    .catch(function(){{}});
+}};
+var tick=function(){{if(document.visibilityState==='visible')ping(false);}};
+tick();
+setInterval(tick,{HEARTBEAT_PING_SECONDS * 1000});
+document.addEventListener('visibilitychange',function(){{
+  if(document.visibilityState!=='visible')ping(true);
+}});
+}})();
+"""
+"""What a dialed site's pages run: a ping now, a ping every interval, and one last ping the moment
+the page stops being visible.
+
+`document.visibilityState` is the whole gate, because the sandbox is paid for by the minute and a
+backgrounded tab is nobody watching: a page left open in a window behind other windows renews
+nothing, and the box pauses as it did before this existed. The ping on the way to hidden is what
+makes the last renewal the last one — the server's own clock then runs out on its own rather than
+being carried by a tab the member walked away from.
+
+The window flag is the guard against a second copy: the tag is appended once per document by
+`_body`, and a page that arrives with it twice — a document assembled from two proxied responses —
+still holds one interval.
+
+Carried as a file rather than inlined into the page: a site is agent-authored code and a site that
+sets `script-src 'self'` is being ordinary, which admits this and forbids an inline script."""
+HEARTBEAT_TAG = f'<script src="{HEARTBEAT_SCRIPT_PATH}" defer></script>'.encode()
+HEARTBEAT_MEDIA_TYPE = "text/javascript"
+IDENTITY_ENCODINGS = frozenset({"", "identity"})
 FOREIGN_ORIGIN = "This connection did not come from the site it addresses."
 NOT_FOUND = "Not found."
 SITE_HAS_NO_SOCKET = "This site is static and speaks no socket protocol."
@@ -360,6 +410,9 @@ class IngressServe:
     engine, so a dead site is reported to serve rather than acted on here, and only for a request
     reading a page — the member's frame is what makes it worth an agent's turn."""
     shipped_manifests: dict[ShippedClaim, dict[str, StoredFile]] = field(default_factory=dict)
+    renewals: dict[tuple[UUID, int], float] = field(default_factory=dict)
+    """When each dialed site last had its lease renewed by a viewer's ping, keyed by conversation
+    and port — what `_renew_lease` throttles on."""
     resume_carriers: Mapping[str, tuple[Carrier, CarrierSpec]] = field(default_factory=dict)
     """Backends kept live only for the stored handles bearing their scheme (`[sandbox]
     resume_backends`): a site whose conversation still runs on a prior provider dials through that
@@ -386,6 +439,10 @@ class IngressServe:
         application.add_api_route(
             f"{INGRESS_VIEW_PATH}/{{view_path:path}}", self._open, methods=PROXY_METHODS
         )
+        application.add_api_route(HEARTBEAT_PING_PATH, self._ping, methods=PROXY_METHODS)
+        application.add_api_route(
+            HEARTBEAT_SCRIPT_PATH, self._heartbeat_script, methods=PROXY_METHODS
+        )
         application.add_api_route("/{path:path}", self._proxy, methods=PROXY_METHODS)
         # A WebSocket handshake matches no HTTP route, so `/~t/{token}` over WebSocket would
         # otherwise reach the catch-all and be forwarded as a request path.
@@ -403,6 +460,66 @@ class IngressServe:
         if request.method not in VIEW_METHODS:
             return Response(status_code=405, headers={"allow": ", ".join(VIEW_METHODS)})
         return Response(LINK_NOT_VALID, status_code=403, media_type="text/plain")
+
+    async def _ping(self, request: Request) -> Response:
+        """One viewer saying the page is still open in front of them, and the one reason this
+        process ever renews a lease nobody's request is renewing: a dialed site's box pauses after
+        its idle span, and a loaded page that asks for nothing more would let it pause under a
+        member reading it. The gate is `_authorized`, exactly as the proxy's, so a ping carries the
+        session the page was loaded with and nothing else — no second credential, and no way to
+        renew a site this cookie does not already open.
+
+        A stored site answers the same 204 having renewed nothing: its bytes come off the blob
+        store and there is no sandbox behind it to keep awake. A dial that fails renews nothing
+        either and is not reported here — the member's own page load is the request that tells the
+        conversation its site is down."""
+        if request.method not in HEARTBEAT_PING_METHODS:
+            return Response(status_code=405, headers={"allow": ", ".join(HEARTBEAT_PING_METHODS)})
+        authorized = self._authorized(request)
+        if isinstance(authorized, SiteRefusal):
+            return Response(
+                authorized.message,
+                status_code=authorized.status,
+                media_type=authorized.media_type,
+            )
+        if authorized.shipped is not None or await self._stored_manifest(authorized) is not None:
+            return Response(status_code=204)
+        await self._renew_lease(authorized)
+        return Response(status_code=204)
+
+    async def _heartbeat_script(self, request: Request) -> Response:
+        """The heartbeat itself, served at the site's own origin so a site's own
+        `script-src 'self'` admits it. It is this process's code rather than the site's, so it is
+        served here whatever the addressed site is and whoever asks: it names one path of this
+        origin and reads nothing."""
+        if request.method not in HEARTBEAT_SCRIPT_METHODS:
+            return Response(status_code=405, headers={"allow": ", ".join(HEARTBEAT_SCRIPT_METHODS)})
+        return Response(
+            b"" if request.method == "HEAD" else HEARTBEAT_SCRIPT,
+            media_type=HEARTBEAT_MEDIA_TYPE,
+            headers={"cache-control": UNCACHEABLE, "x-content-type-options": "nosniff"},
+        )
+
+    async def _renew_lease(self, claims: IngressClaims) -> None:
+        """Renew the addressed sandbox's lease through the carrier, at most once every
+        `HEARTBEAT_RENEWAL_SECONDS` per site. A dial is the renewal: every inbound carrier call
+        leases the box forward, and dial is the cheapest one the ingress already makes, so this
+        asks for an address it throws away.
+
+        `renewals` is this process's memory of when each site last had one, held in memory because
+        the ingress runs as one process per deploy — a second replica would renew a site twice per
+        window, which costs one extra carrier call and keeps the same box awake. The time is
+        recorded before the dial so a burst of tabs collapses into one call rather than all of them
+        racing past an unwritten entry, and dropped again when the dial refused, so a site that
+        comes back is renewed by the next ping instead of waiting out the window."""
+        key = (claims.conversation_id, claims.port)
+        now = datetime.now(UTC).timestamp()
+        renewed = self.renewals.get(key)
+        if renewed is not None and now - renewed < HEARTBEAT_RENEWAL_SECONDS:
+            return
+        self.renewals[key] = now
+        if isinstance(await self._dial_site(claims), SiteRefusal):
+            self.renewals.pop(key, None)
 
     async def _open(self, request: Request, view_path: str) -> Response:
         """Trade the frame's view token for this origin's session. Only a *view* token opens this
@@ -645,9 +762,10 @@ class IngressServe:
                     http_status=upstream.status_code,
                 )
                 return self._not_answering(request, authorized)
+            tagged = self._heartbeat_tagged(request, upstream)
             try:
                 response = StreamingResponse(
-                    self._body(upstream),
+                    self._body(upstream, HEARTBEAT_TAG if tagged else b""),
                     status_code=upstream.status_code,
                     background=BackgroundTask(upstream.aclose),
                 )
@@ -659,6 +777,8 @@ class IngressServe:
                 for name, value in upstream.headers.multi_items():
                     lowered = name.lower()
                     if lowered in ORIGIN_RESPONSE_DROPPED_HEADERS:
+                        continue
+                    if tagged and lowered in BODY_FRAMING_HEADERS:
                         continue
                     if lowered == CONTENT_SECURITY_POLICY:
                         policy = self._unframed_policy(value)
@@ -675,6 +795,23 @@ class IngressServe:
                 await upstream.aclose()
                 raise
         return response
+
+    def _heartbeat_tagged(self, request: Request, upstream: httpx.Response) -> bool:
+        """Whether this dialed response carries the heartbeat tag: an HTML document, in bytes this
+        process can add to. The tag goes into the pages of a live site rather than into the waiting
+        page a stopped one answers with, because keeping a healthy site awake under a reader is the
+        whole job — the waiting page already reloads, and its reload renews on its own.
+
+        A coded body is left alone: appending plain bytes to a gzip stream is a truncated document,
+        and the origin's encoding is the viewer's own negotiation relayed untouched. A HEAD carries
+        no body to append to. Nothing else about the response is read, so a site's own bytes are
+        never parsed or buffered to find a place for the tag."""
+        if request.method == "HEAD":
+            return False
+        if upstream.headers.get("content-encoding", "").strip().lower() not in IDENTITY_ENCODINGS:
+            return False
+        media_type = upstream.headers.get("content-type", "").partition(";")[0].strip().lower()
+        return media_type == "text/html"
 
     def _not_answering(self, request: HTTPConnection, claims: IngressClaims) -> Response:
         """The site did not answer, said by this origin under a status the edge delivers. It stands
@@ -924,17 +1061,25 @@ class IngressServe:
         ]
         return ";".join([crumb, *kept])
 
-    async def _body(self, upstream: httpx.Response) -> AsyncIterator[bytes]:
+    async def _body(self, upstream: httpx.Response, appended: bytes) -> AsyncIterator[bytes]:
         """The origin's bytes, closing the upstream response whichever way the stream ends. A
         failure mid-stream — the origin dies, the read times out — escapes the response's task group
         before Starlette reaches its background task, so the pooled connection is released here or
         never; `aclose` is idempotent, so the background close still covers a client that
-        disconnects before the last chunk."""
+        disconnects before the last chunk.
+
+        `appended` is the heartbeat tag, written once after the document's last chunk: a script
+        element after `</html>` is parsed and run, while one put in front of the doctype would drop
+        the page into quirks mode, and appending is the only place that needs neither a buffer nor a
+        parse of a site's own markup. It follows the origin's bytes only when they all arrived, so a
+        stream that died carries no tag of ours past the failure."""
         try:
             async for chunk in upstream.aiter_raw():
                 yield chunk
         finally:
             await upstream.aclose()
+        if appended:
+            yield appended
 
     async def _no_socket_view(self, websocket: WebSocket) -> None:
         """The view path trades a token over HTTP and speaks no other protocol. Claimed for the
