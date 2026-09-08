@@ -89,6 +89,7 @@ METRICS = (
     "objective_step_dispatched_total",
     "product_stage_total",
     "product_attach_total",
+    "product_active_member_2d_7d_total",
     "onboarding_step_total",
     "admitted_turn_total",
     "balance_charged_micro_usd_total",

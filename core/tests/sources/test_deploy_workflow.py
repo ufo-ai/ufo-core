@@ -4504,11 +4504,12 @@ def _check_the_product_board_counts_a_workspace_out_of_one_census_bucket() -> No
     the whole board window, which reads the filling edge bucket and understates a growing count."""
     dashboard = (ROOT / "infra" / "envs" / "testing" / "dashboards.tf").read_text()
     census = re.findall(
-        r'(?:q|query)\s+=\s+"([^"]*ufo\.product_(?:stage|attach)_total[^"]*)"', dashboard
+        r'(?:q|query)\s+=\s+"([^"]*ufo\.product_(?:stage|attach|active_member_2d_7d)_total[^"]*)"',
+        dashboard,
     )
 
     assert f"product_census_seconds = {PRODUCT_CENSUS_SECONDS}" in dashboard
-    assert len(census) == 12
+    assert len(census) == 13
     assert "as_rate()" not in dashboard
     for query in census:
         assert ".as_count().rollup(sum, ${local.product_census_seconds})" in query
@@ -4527,13 +4528,17 @@ def _check_every_product_card_shows_its_count_and_history() -> None:
 
     product = dashboard.split('resource "datadog_dashboard" "product" {', 1)[1]
 
-    assert product.count("query_value_definition {") == 6
-    assert product.count('aggregator = "max"') == 7
-    assert product.count("timeseries_background {") == 6
-    assert product.count('timeseries_background {\n        type = "bars"\n      }') == 6
+    assert product.count("query_value_definition {") == 7
+    assert product.count('aggregator = "max"') == 8
+    assert product.count("timeseries_background {") == 7
+    assert product.count('timeseries_background {\n        type = "bars"\n      }') == 7
     assert "change_definition {" not in product
     for stage in ("seated", "connector", "invited", "chatted", "active_7d", "paid"):
         assert f"stage:{stage}" in product
+    assert (
+        "sum:ufo.product_active_member_2d_7d_total{$env}.as_count().rollup("
+        "sum, ${local.product_census_seconds})"
+    ) in product
 
 
 def _check_the_product_funnel_shows_count_and_relative_bar() -> None:

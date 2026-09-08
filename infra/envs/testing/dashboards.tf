@@ -1891,6 +1891,11 @@ resource "datadog_dashboard" "product" {
         and dollars are the other kind of number — events counted as they happen — so a range shows
         their volume over it rather than a standing count.
 
+        Member activity is direct work on any surface: a chat, a reply folded into a running turn,
+        or a prepared intent. The 2+ of 7 card counts members with activity on at least two distinct
+        UTC dates in the rolling seven-day window. Scheduled, internal, and subagent work do not
+        count.
+
         Each card shows the count and its history over the selected period. The funnel below shows
         each exact count and a bar scaled against the largest stage.
 
@@ -1972,6 +1977,19 @@ resource "datadog_dashboard" "product" {
       title = "chatted in the last 7 days"
       request {
         q          = "sum:ufo.product_stage_total{$env,stage:active_7d}.as_count().rollup(sum, ${local.product_census_seconds})"
+        aggregator = "max"
+      }
+      timeseries_background {
+        type = "bars"
+      }
+    }
+  }
+
+  widget {
+    query_value_definition {
+      title = "members active 2+ of 7 days"
+      request {
+        q          = "sum:ufo.product_active_member_2d_7d_total{$env}.as_count().rollup(sum, ${local.product_census_seconds})"
         aggregator = "max"
       }
       timeseries_background {

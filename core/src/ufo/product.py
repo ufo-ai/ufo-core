@@ -31,7 +31,9 @@ that leaves no row cannot be derived, so `record_onboarding_step` counts the two
 extension's onboarding step failing under `ufoctl init`, and a first-run screen a member skipped or
 walked out of. Neither a member nor a workspace is a tag anywhere here — a step, its status, the
 surface it happened on, and the provider it attached are the whole tag set, so the series stays one
-per step whatever the fleet's size."""
+per step whatever the fleet's size. The member-frequency count also stays aggregate: core combines
+direct turns and folded arrivals because extensions cannot read either runtime-owned table, then
+exports only the workspace's qualifying count."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -43,13 +45,14 @@ from ufo.harness.o11y import emit_histogram, emit_metric
 from ufo.runtime.access.credentials import MEMBER_SLOT_INFIX
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
-from ufo.schema.records import MEMBER_ADMISSION
+from ufo.schema.records import INTENT_ADMISSION, MEMBER_ADMISSION
 
 PRODUCT_CENSUS_JOB = "product_census"
 PRODUCT_CENSUS_SECONDS = 600
 PRODUCT_CENSUS_SCHEDULE = "0 */10 * * * *"
 PRODUCT_STAGE_METRIC = "product_stage_total"
 PRODUCT_ATTACH_METRIC = "product_attach_total"
+PRODUCT_ACTIVE_MEMBER_2D_7D_METRIC = "product_active_member_2d_7d_total"
 ONBOARDING_STEP_METRIC = "onboarding_step_total"
 ONBOARDING_LATENCY_HISTOGRAM = "onboarding_step_latency_ms"
 STEP_COMPLETED = "completed"
@@ -66,6 +69,7 @@ APP_BUILT_STEP = "app_built"
 INVITED_MEMBER_CHATTED_STEP = "invited_member_chatted"
 ACTIVE_DAY_DAYS = 1
 ACTIVE_WEEK_DAYS = 7
+ACTIVE_MEMBER_DAYS = 2
 SURFACE_KIND = "surface"
 ADDRESS_KIND = "address"
 CREDENTIAL_KIND = "credential"
@@ -92,6 +96,33 @@ async def product_census() -> None:
     workspace_id = ws_current().workspace_id
     now = datetime.now(UTC)
     member_turn = _member_turn(workspace_id)
+    activity = sa.union_all(
+        sa.select(
+            tables.turn.c.speaker_member_id.label("member_id"),
+            sa.func.date(tables.turn.c.created_at).label("day"),
+        ).where(
+            tables.turn.c.workspace_id == workspace_id,
+            tables.turn.c.admission_source.in_((MEMBER_ADMISSION, INTENT_ADMISSION)),
+            tables.turn.c.speaker_member_id.is_not(None),
+            tables.turn.c.parent_turn_id.is_(None),
+            tables.turn.c.created_at > now - timedelta(days=ACTIVE_WEEK_DAYS),
+        ),
+        sa.select(
+            tables.inbound_message.c.speaker_member_id,
+            sa.func.date(tables.inbound_message.c.created_at),
+        ).where(
+            tables.inbound_message.c.workspace_id == workspace_id,
+            tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+            tables.inbound_message.c.speaker_member_id.is_not(None),
+            tables.inbound_message.c.created_at > now - timedelta(days=ACTIVE_WEEK_DAYS),
+        ),
+    ).subquery()
+    active_members = (
+        sa.select(activity.c.member_id)
+        .group_by(activity.c.member_id)
+        .having(sa.func.count(sa.distinct(activity.c.day)) >= ACTIVE_MEMBER_DAYS)
+        .subquery()
+    )
     stages = sa.select(
         sa.exists(
             sa.select(tables.member.c.id).where(
@@ -140,6 +171,10 @@ async def product_census() -> None:
                 tables.balance_purchase.c.charged_micro_usd > 0,
             )
         ).label("paid"),
+        sa.select(sa.func.count())
+        .select_from(active_members)
+        .scalar_subquery()
+        .label(PRODUCT_ACTIVE_MEMBER_2D_7D_METRIC),
     )
     attached = sa.union_all(
         sa.select(
@@ -177,10 +212,12 @@ async def product_census() -> None:
         .distinct(),
     )
     async with workspace_tx() as connection:
-        reached = (await connection.execute(stages)).mappings().one()
+        reached = dict((await connection.execute(stages)).mappings().one())
         holdings = (await connection.execute(attached)).all()
+    active_member_count = reached.pop(PRODUCT_ACTIVE_MEMBER_2D_7D_METRIC)
     for stage, arrived in reached.items():
         emit_metric(PRODUCT_STAGE_METRIC, int(arrived), stage=stage)
+    emit_metric(PRODUCT_ACTIVE_MEMBER_2D_7D_METRIC, active_member_count)
     for holding in holdings:
         emit_metric(PRODUCT_ATTACH_METRIC, kind=holding.kind, name=holding.name)
 

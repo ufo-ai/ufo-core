@@ -33,6 +33,7 @@ from ufo.product import (
     NO_PROVIDER,
     ONBOARDING_LATENCY_HISTOGRAM,
     ONBOARDING_STEP_METRIC,
+    PRODUCT_ACTIVE_MEMBER_2D_7D_METRIC,
     PRODUCT_ATTACH_METRIC,
     PRODUCT_STAGE_METRIC,
     STEP_COMPLETED,
@@ -63,7 +64,14 @@ from ufo.runtime.turns.audience import (
 )
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
-from ufo.schema.records import MEMBER_ADMISSION, TerminalFrame, Usage
+from ufo.schema.records import (
+    INTENT_ADMISSION,
+    INTERNAL_ADMISSION,
+    MEMBER_ADMISSION,
+    SCHEDULED_ADMISSION,
+    TerminalFrame,
+    Usage,
+)
 
 FIRE_TIMEOUT_SECONDS = 25
 MARKER_KEY = "fired"
@@ -1415,6 +1423,124 @@ async def test_the_census_ages_a_workspace_out_of_the_active_window_it_left(
     assert stages["chatted"] == 1
     assert stages["active_7d"] == 1
     assert stages["active_1d"] == 0
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_census_counts_members_active_on_two_of_seven_days(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace_id = await _seeded_workspace(invited=True)
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        agent_id = (
+            await connection.execute(
+                sa.select(tables.agent.c.id).where(tables.agent.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.id).where(
+                    tables.conversation.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+        members = (
+            (
+                await connection.execute(
+                    sa.select(tables.member.c.id).where(
+                        tables.member.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        intent_member = uuid4()
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=intent_member,
+                workspace_id=workspace_id,
+                email="intent@work.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        turn_ids = [uuid4() for _ in range(9)]
+        await connection.execute(
+            sa.insert(tables.turn),
+            [
+                {
+                    "id": turn_id,
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation_id,
+                    "agent_id": agent_id,
+                    "seq": seq,
+                    "status": "done",
+                    "inbound": "activity",
+                    "terminal": TerminalFrame(status="done", text="done").model_dump(mode="json"),
+                    "admission_source": admission_source,
+                    "speaker_member_id": member_id,
+                    "parent_turn_id": parent_turn_id,
+                    "created_at": now - timedelta(days=days_ago),
+                    "updated_at": now,
+                }
+                for seq, (
+                    turn_id,
+                    member_id,
+                    admission_source,
+                    days_ago,
+                    parent_turn_id,
+                ) in enumerate(
+                    [
+                        (turn_ids[0], members[0], MEMBER_ADMISSION, 6, None),
+                        (turn_ids[1], members[1], MEMBER_ADMISSION, 6, None),
+                        (turn_ids[2], members[1], MEMBER_ADMISSION, 6, None),
+                        (turn_ids[3], members[1], MEMBER_ADMISSION, 8, None),
+                        (turn_ids[4], members[1], SCHEDULED_ADMISSION, 2, None),
+                        (turn_ids[5], members[1], INTERNAL_ADMISSION, 1, None),
+                        (turn_ids[6], intent_member, MEMBER_ADMISSION, 6, None),
+                        (turn_ids[7], intent_member, INTENT_ADMISSION, 2, None),
+                        (turn_ids[8], members[1], MEMBER_ADMISSION, 2, turn_ids[0]),
+                    ],
+                    start=1,
+                )
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.inbound_message),
+            [
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation_id,
+                    "seq": 1,
+                    "body": "more activity",
+                    "admission_source": MEMBER_ADMISSION,
+                    "speaker_member_id": members[0],
+                    "admitted_turn_id": turn_ids[0],
+                    "created_at": now - timedelta(days=2),
+                },
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation_id,
+                    "seq": 2,
+                    "body": "automatic work",
+                    "admission_source": INTERNAL_ADMISSION,
+                    "speaker_member_id": members[1],
+                    "admitted_turn_id": turn_ids[1],
+                    "created_at": now - timedelta(days=2),
+                },
+            ],
+        )
+    reader = _census_reader(monkeypatch)
+
+    with ws(workspace_id):
+        await product_census()
+
+    points = _census_points(reader)
+    active_members = points[f"ufo.{PRODUCT_ACTIVE_MEMBER_2D_7D_METRIC}"]
+    assert [point.value for point in active_members] == [2]
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
