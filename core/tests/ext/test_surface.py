@@ -63,6 +63,7 @@ from ufo.runtime.access.credentials import (
     CredentialSlotUnset,
     CredentialStore,
     DeclaredSlot,
+    declared_slot_fingerprint,
     open_credential_request,
     seal_credential_request,
 )
@@ -2717,6 +2718,48 @@ async def test_credential_fulfillment_uses_the_declared_merge(db: None, tmp_path
         await context.fulfill_credential_request(authorization, "provider", "one", member_id)
         await context.fulfill_credential_request(authorization, "provider", "two", member_id)
         assert await context._credentials.get(workspace_id, "provider") == "two"
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_credential_fulfillment_rejects_a_changed_workspace_declaration(
+    db: None, tmp_path
+) -> None:
+    workspace_id, _, member_id = await _seed(member_email="owner@example.com")
+    assert member_id is not None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=True).where(tables.member.c.id == member_id)
+        )
+    original = DeclaredSlot(
+        name="dynamic",
+        description="API key",
+        extension="workspace_credentials",
+        host="api.original.example",
+        env="DYNAMIC_API_KEY",
+        header="Authorization",
+    )
+    changed = replace(original, host="api.changed.example")
+    context = replace(
+        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
+        _declared_slots=(changed,),
+    )
+    sealed = seal_credential_request(
+        context._credentials.fernet,
+        CredentialRequestState(
+            workspace_id=workspace_id,
+            member_id=member_id,
+            slots=(original.name,),
+            workspace_declarations={
+                original.name: declared_slot_fingerprint(original),
+            },
+        ),
+    )
+
+    with ws(workspace_id), pytest.raises(CredentialRequestInvalid, match="changed after"):
+        await context.fulfill_credential_request(sealed, original.name, "secret", member_id)
+
+    with pytest.raises(CredentialSlotUnset):
+        await context._credentials.get(workspace_id, original.name)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

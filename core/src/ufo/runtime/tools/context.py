@@ -47,7 +47,7 @@ from base64 import b64encode
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
@@ -92,6 +92,9 @@ from ufo.runtime.turns.contracts import ValidatedJson
 from ufo.runtime.turns.subjects import member_subject
 from ufo.schema import tables
 from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn
+
+if TYPE_CHECKING:
+    from ufo.runtime.access.workspace_slots import WorkspaceSlots
 
 SHARED_BYTES_LIMIT = 256 * 1024
 SHARE_PREFLIGHT_TIMEOUT_SECONDS = 300
@@ -611,6 +614,10 @@ class ToolContext:
     connector_read_only: bool = False
     find: FindCompleter | None = None
     requestable_credentials: CredentialRequests | None = None
+    workspace_slots: "WorkspaceSlots | None" = None
+    """The slots an extension resolves for this workspace alone, which no manifest names — None
+    where no installed extension resolves any. A fill seals against the deploy's declarations and
+    these together, read live, so a slot declared earlier in this turn is fillable in it."""
     models: tuple[str, ...] = ()
     """The model ids this deploy serves, `auto` first — the closed set a write that stores a
     model must hold to, since an id the registry cannot answer fails at every later turn's

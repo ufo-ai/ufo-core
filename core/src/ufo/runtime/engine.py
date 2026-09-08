@@ -136,6 +136,7 @@ from ufo.harness.untrusted import wall
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialRequests
 from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.authority import (
     ExecutionAuthority,
     MemberAuthority,
@@ -1771,6 +1772,9 @@ class TurnEngine:
     sandbox_for: SandboxFor | None = None
     subagents_for: SubagentsFor | None = None
     requestable_credentials: CredentialRequests | None = None
+    workspace_slots: WorkspaceSlots | None = None
+    """The slots an extension resolves for this workspace alone, which no manifest names — None
+    where no installed extension resolves any."""
     memory: MemorySearch | None = None
     public_base_url: str | None = None
     billing_url: str | None = None
@@ -1863,6 +1867,7 @@ class TurnEngine:
             connector_read_only=self.connector_read_only,
             find=partial(self._rank_find, usage_events),
             requestable_credentials=self.requestable_credentials,
+            workspace_slots=self.workspace_slots,
             public_base_url=self.public_base_url,
             site_previewer=self.site_previewer,
             models=self.models,
@@ -2138,6 +2143,7 @@ class TurnEngine:
             connectors=self.connectors,
             connector_read_only=self.connector_read_only,
             requestable_credentials=self.requestable_credentials,
+            workspace_slots=self.workspace_slots,
             public_base_url=self.public_base_url,
             site_previewer=self.site_previewer,
             models=self.models,

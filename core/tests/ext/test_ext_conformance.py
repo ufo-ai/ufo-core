@@ -1179,12 +1179,14 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
         ext_by_tool[sample.TOOL_NAME],
     ):
         assert {name for name in dir(context.credentials) if not name.startswith("_")} == {
+            "clear",
             "get",
             "rotate",
             "stored",
             "stored_slots",
             "workspace_id",
             "declared",
+            "resolved",
         }
         with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
             await context.credentials.get(sample.UNDECLARED_SLOT)
@@ -1192,6 +1194,8 @@ async def test_context_confines_the_credential_handle(db: None) -> None:
             await context.credentials.rotate(sample.UNDECLARED_SLOT, "old", "new")
         with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
             await context.credentials.stored(sample.UNDECLARED_SLOT)
+        with pytest.raises(UndeclaredCredentialSlot, match=sample.UNDECLARED_SLOT):
+            await context.credentials.clear(sample.UNDECLARED_SLOT)
 
 
 def test_a_route_without_a_credential_key_fails_loud() -> None:

@@ -20,7 +20,7 @@ import asyncio
 import hashlib
 import importlib.util
 import os
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from importlib.machinery import ModuleSpec
 from importlib.metadata import EntryPoint, entry_points
@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ufo.blob import WorkspaceBlobStore
 from ufo.harness.o11y import log, warn
+from ufo.harness.sandbox.exec_env import sandbox_exported_env
 from ufo.host.ext.extension_kind import (
     EXTENSION_DESCRIPTION,
     EXTENSION_GUIDANCE,
@@ -61,8 +62,14 @@ from ufo.host.tools.builtins import BUILTIN_ACTIONS, BUILTIN_TOOLS
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.grants import ConnectionRecorded
+from ufo.runtime.access.workspace_slots import SlotProvider, WorkspaceSlots
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
-from ufo.runtime.ext.context import ExtensionContext, TurnInvoker, context_for
+from ufo.runtime.ext.context import (
+    DeployCredentials,
+    ExtensionContext,
+    TurnInvoker,
+    context_for,
+)
 from ufo.runtime.ext.hooks import (
     CONNECTION_RECORDED,
     HOOK_TIMEOUT_SECONDS,
@@ -105,6 +112,7 @@ from ufo.runtime.skills.runtime import (
 )
 from ufo.runtime.tools.registry import ToolDef, ToolRegistry
 from ufo.runtime.turns.audience import Audience
+from ufo.runtime.workspace import ws_current
 
 CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
@@ -321,6 +329,25 @@ def connector_clis(manifests: tuple[Manifest, ...]) -> dict[str, CliCredential]:
     }
 
 
+def exported_env(manifests: tuple[Manifest, ...]) -> frozenset[str]:
+    """Every sandbox variable this deploy exports — each connector CLI's, each injecting slot's
+    sentinel, each host choice's resolved host, and the ones core itself exports on every open
+    (the model-key sentinels, the proxy and CA variables, git's config channel). An extension
+    resolving a slot per workspace may claim none of them, since one variable carries one value
+    and the later export wins the merge."""
+    clis = connector_clis(manifests)
+    names: set[str | None] = {cli.env for cli in clis.values()}
+    names |= set(sandbox_exported_env(clis))
+    for manifest in manifests:
+        for slot in manifest.credentials:
+            if slot.injection is None:
+                continue
+            names.add(slot.injection.env)
+            if isinstance(slot.injection.host, HostChoice):
+                names.add(slot.injection.host.env)
+    return frozenset(name for name in names if name is not None)
+
+
 def injecting_slots(manifests: tuple[Manifest, ...]) -> tuple[CredentialSlot, ...]:
     """Every declared slot the egress proxy swaps onto the wire — the deploy's keyed providers, read
     live from the current manifests by the proxy's rule resolver and by the engine that exports each
@@ -397,6 +424,63 @@ def injecting_slots(manifests: tuple[Manifest, ...]) -> tuple[CredentialSlot, ..
     return slots
 
 
+def deploy_claims(manifests: tuple[Manifest, ...]) -> DeployCredentials:
+    """What this deploy's own declarations claim, as an extension resolving slots per workspace
+    reads it: the slot names installed manifests declare and the sandbox variables they export.
+    Both namespaces are shared, so a per-workspace declaration naming either is refused by the
+    extension that holds it rather than shadowed here."""
+    return DeployCredentials(
+        slots=frozenset(slot.name for manifest in manifests for slot in manifest.credentials),
+        env=exported_env(manifests),
+    )
+
+
+def workspace_slot_source(manifests: tuple[Manifest, ...]) -> WorkspaceSlots:
+    """Every injecting slot a workspace can hold: this deploy's own declarations, and the reader
+    each extension that resolves slots per workspace contributes. The proxy's rule derivation and
+    the sandbox's environment take this one source, so neither knows which half a slot came from.
+
+    A provider's reader runs under its extension's own workspace-scoped context — the handle its
+    tools and jobs receive — because the rows it reads are the extension's own."""
+    claims = deploy_claims(manifests)
+    return WorkspaceSlots(
+        deploy=injecting_slots(manifests),
+        providers=tuple(
+            SlotProvider(
+                extension=manifest.name,
+                ctx=_extension_context(manifest),
+                provider=manifest.workspace_credentials,
+            )
+            for manifest in manifests
+            if manifest.workspace_credentials is not None
+        ),
+        claimed_slots=claims.slots,
+        claimed_env=claims.env,
+    )
+
+
+def _resolved_slot_names(manifest: Manifest) -> Callable[[], Awaitable[frozenset[str]]] | None:
+    """The slot names this extension resolves for the bound workspace, or None where it resolves
+    none. The gate `ctx.credentials` holds a per-workspace slot to: a declaration the extension's
+    own rows carry is as much its declaration as a manifest's."""
+    provider = manifest.workspace_credentials
+    if provider is None:
+        return None
+
+    async def names() -> frozenset[str]:
+        workspace_id = ws_current().workspace_id
+        resolved = await provider.read(_extension_context(manifest), workspace_id)
+        return frozenset(slot.name for slot in resolved)
+
+    return names
+
+
+def _extension_context(manifest: Manifest) -> ExtensionContext:
+    """The plain workspace-scoped context for one manifest, with nothing wired that a credential
+    read does not reach."""
+    return context_for(manifest.name, frozenset(slot.name for slot in manifest.credentials))
+
+
 def turn_tools(
     manifests: tuple[Manifest, ...],
     credential_store: CredentialStore | None,
@@ -429,6 +513,7 @@ def turn_tools(
     the browser portal, so a tool answering with somewhere for the member to go renders it through
     `ctx.home_url` instead of assembling core's mount path itself."""
     tools: list[ToolDef] = list(BUILTIN_TOOLS)
+    deploy_credentials = deploy_claims(manifests)
     ext_by_tool: dict[str, ExtensionContext] = {}
     bound_kinds: list[BoundKind] = list(CORE_OBJECT_KINDS)
     bound_actions: list[BoundAction] = [
@@ -465,6 +550,8 @@ def turn_tools(
             member_context_authority=member_context_authority,
             member_context_blob=member_context_blob,
             invoker=invoker,
+            deploy_credentials=deploy_credentials,
+            workspace_credentials=_resolved_slot_names(manifest),
         )
         for tool in declared_tools:
             if tool.bound is not None:
@@ -517,6 +604,7 @@ def member_object_registry(
     build fails loud exactly where a turn build would, and ride out beside the kinds for the
     portal's action projection."""
     bound: list[BoundKind] = list(CORE_OBJECT_KINDS)
+    deploy_credentials = deploy_claims(manifests)
     actions: list[BoundAction] = [
         BoundAction(action=action, extension=None, context=None) for action in BUILTIN_ACTIONS
     ]
@@ -548,6 +636,8 @@ def member_object_registry(
             ),
             public_base_url=public_base_url,
             artifact_token_secret=artifact_token_secret,
+            deploy_credentials=deploy_credentials,
+            workspace_credentials=_resolved_slot_names(manifest),
         )
         actions.extend(
             BoundAction(action=tool, extension=manifest.name, context=context)
@@ -606,7 +696,11 @@ def core_object_kinds(
         description=CREDENTIAL_DESCRIPTION,
         guidance=CREDENTIAL_GUIDANCE,
         spec_model=CredentialSpec,
-        store=CredentialObjects(slots=declared_slots(manifests), credentials=credential_store),
+        store=CredentialObjects(
+            slots=declared_slots(manifests),
+            credentials=credential_store,
+            workspace=workspace_slot_source(manifests),
+        ),
         list_fields=frozenset({"slot", "extension", "filled"}),
     )
     extension = ObjectKind(

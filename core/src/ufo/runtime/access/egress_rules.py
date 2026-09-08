@@ -16,8 +16,9 @@ from ufo.harness.sandbox.session import SENTINEL_MODEL_KEY
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore, credential_host
 from ufo.runtime.access.grants import Grant, grant_sentinel
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.authority import ExecutionAuthority, authority_member_id
-from ufo.runtime.ext.manifest import CredentialSlot, Manifest, open_connector_namespace
+from ufo.runtime.ext.manifest import Manifest, open_connector_namespace
 
 REQUEST_METER_DIMENSION = "requests"
 
@@ -39,9 +40,16 @@ PROVIDER_AUTH = {
 
 @dataclass(frozen=True)
 class ScopeRule:
-    """An exact host allowlist for model and connector traffic."""
+    """An exact host allowlist for model and connector traffic.
+
+    `pinned` admits the host and still makes the proxy resolve it, refusing the CONNECT when the
+    name answers a private address. A host this deploy's own code names is admitted unpinned — it
+    is a provider these sources wrote down. A host a workspace admin wrote is pinned, because the
+    allowlist is otherwise the one path around the private-address check that guards the open
+    internet."""
 
     allowed_hosts: frozenset[str]
+    pinned: bool = False
 
 
 @dataclass(frozen=True)
@@ -142,9 +150,10 @@ async def derive_artifact_store_rules(blob: FilesystemBlobStore | S3BlobStore) -
 
 
 async def derive_credential_rules(
-    slots: tuple[CredentialSlot, ...], workspace_id: UUID, store: CredentialStore
+    slots: WorkspaceSlots, workspace_id: UUID, store: CredentialStore
 ) -> tuple[Rule, ...]:
-    """This workspace's keyed providers: each injecting slot holding a secret swaps that secret in
+    """This workspace's keyed providers — the deploy's declared slots and the ones this workspace
+    declares for itself: each injecting slot holding a secret swaps that secret in
     for the sentinel the sandbox sees, and every host so reached is admitted and metered. Resolved
     per workspace against the run token's own `workspace_id`, so one shared proxy serves every
     workspace and no workspace's secret enters a static base; a slot with nothing stored opens no
@@ -162,10 +171,18 @@ async def derive_credential_rules(
     safe: the public-internet rule and the grant rules are composed around this call, so a fault
     escaping here takes the workspace's whole egress with it — every host refused but the model
     provider, on every turn, over one slot's unreadable value. `error_class` carries which fault it
-    was."""
+    was.
+
+    A host a workspace declared for itself is admitted pinned: nobody on this deploy wrote it, so
+    the proxy resolves it and refuses a name that answers a private address, which an exact scope
+    otherwise skips."""
+    resolved = tuple((slot, False) for slot in slots.deploy) + tuple(
+        (slot, True) for slot in await slots.workspace(workspace_id)
+    )
     grouped: dict[str, list[InjectionRule]] = {}
     dimensions: dict[str, str] = {}
-    for slot in slots:
+    pinned: dict[str, bool] = {}
+    for slot, workspace_owned in resolved:
         target = slot.injection
         if target is None:
             continue
@@ -188,11 +205,12 @@ async def derive_credential_rules(
         grouped.setdefault(host, []).append(
             InjectionRule(host=host, header=target.header, sentinel=target.sentinel, real=real)
         )
+        pinned[host] = pinned.get(host, False) or workspace_owned
         if target.dimension is not None:
             dimensions[host] = target.dimension
     rules: list[Rule] = []
     for host, injections in sorted(grouped.items()):
-        rules.append(ScopeRule(allowed_hosts=frozenset({host})))
+        rules.append(ScopeRule(allowed_hosts=frozenset({host}), pinned=pinned[host]))
         rules.extend(injections)
         if host in dimensions:
             rules.append(MeterRule(host=host, dimension=dimensions[host]))

@@ -28,6 +28,7 @@ from ufo.runtime.access.egress_rules import (
     derive_grant_rules,
 )
 from ufo.runtime.access.grants import GrantStore, usable_cli_accounts
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import (
     ExecutionAuthority,
@@ -35,7 +36,6 @@ from ufo.runtime.authority import (
     WorkspaceAuthority,
     authority_member_id,
 )
-from ufo.runtime.ext.manifest import CredentialSlot
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_HOST
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -97,7 +97,7 @@ class PerAgentRules:
     base: tuple[Rule, ...]
     grants: GrantStore | None
     credentials: CredentialStore | None = None
-    slots: tuple[CredentialSlot, ...] = ()
+    slots: WorkspaceSlots = field(default_factory=WorkspaceSlots)
     internet: tuple[InternetRule, ...] = ()
     cache_host: str | None = None
     cache_pkg_hosts: tuple[str, ...] = ()

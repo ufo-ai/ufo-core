@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -46,6 +46,7 @@ from ufo.harness.sandbox.session import (
 )
 from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.authority import (
     WORKSPACE_AUTHORITY,
     ExecutionAuthority,
@@ -543,6 +544,13 @@ async def test_scoped_store_scopes_to_the_bound_workspace(db: None) -> None:
         assert await ScopedStore(extension="sample").get("k") is None
 
 
+def _resolves(slots: frozenset[str]) -> Callable[[], Awaitable[frozenset[str]]]:
+    async def read() -> frozenset[str]:
+        return slots
+
+    return read
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_credential_access_reads_declared_and_rejects_undeclared(db: None) -> None:
     workspace_id = await _workspace()
@@ -554,6 +562,27 @@ async def test_credential_access_reads_declared_and_rejects_undeclared(db: None)
         assert await access.get("sample_api") == "sk-real"
         with pytest.raises(UndeclaredCredentialSlot, match="undeclared_slot"):
             await access.get("undeclared_slot")
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_credential_access_gates_a_slot_the_extension_resolves_per_workspace(
+    db: None,
+) -> None:
+    """`clear` reaches a slot the extension resolves for this workspace, so dropping a declaration
+    drops its secret; a slot neither declared nor resolved is still refused, and reading the secret
+    stays with the manifest's own declarations."""
+    workspace_id = await _workspace()
+    store = _store()
+    await store.put(workspace_id, "acme_api_key", "sk-workspace")
+    init_workspace_credentials(store)
+    access = CredentialAccess(declared=frozenset(), resolved=_resolves(frozenset({"acme_api_key"})))
+    with ws(workspace_id):
+        await access.clear("acme_api_key")
+        assert await store.stored_slots(workspace_id) == frozenset()
+        with pytest.raises(UndeclaredCredentialSlot, match="undeclared_slot"):
+            await access.clear("undeclared_slot")
+        with pytest.raises(UndeclaredCredentialSlot, match="acme_api_key"):
+            await access.get("acme_api_key")
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -938,7 +967,7 @@ async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_
         ),
     )
     with ws(workspace_id):
-        exports = await ProbeEnv(credentials=store, slots=slots).exports(
+        exports = await ProbeEnv(credentials=store, slots=WorkspaceSlots(deploy=slots)).exports(
             uuid4(), uuid4(), WORKSPACE_AUTHORITY
         )
         bare = await ProbeEnv().exports(uuid4(), uuid4(), WORKSPACE_AUTHORITY)

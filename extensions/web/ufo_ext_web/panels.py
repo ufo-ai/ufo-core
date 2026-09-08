@@ -70,7 +70,9 @@ class ApplyIntent(BaseModel):
     disconnect the connect screen's per-account remove submits. The kind's own gate holds both to
     the connection's owner or a workspace admin. The
     `credential` kind pairs the other way: a slot's value is a secret a private prompt collects, so
-    only `delete` (clear) names it here. The `source_trigger` kind pairs that way too: a trigger IS
+    only `delete` (clear) names it here, while `credential_slot` — the declaration a workspace
+    writes for a provider no extension covers — takes the `apply` and the `delete` of the
+    declaration itself. The `source_trigger` kind pairs that way too: a trigger IS
     the conversation it wakes, and the lane runs on the member's intent conversation, so the portal
     can only ever end one. A delete names its object and carries no spec."""
 
@@ -85,6 +87,7 @@ class ApplyIntent(BaseModel):
         "source",
         "source_trigger",
         "credential",
+        "credential_slot",
     ]
     name: str
     spec: dict[str, JsonValue] | None = None

@@ -251,6 +251,7 @@ from ufo.sdk.manifest import (
     AgentSetup,
     AgentSpec,
     CredentialSlot,
+    InjectionTarget,
     Manifest,
     SetupCadence,
     SetupCredential,
@@ -315,7 +316,16 @@ SLOTTED = Manifest(
     name="stub",
     version="0",
     credentials=(
-        CredentialSlot(name="acme_api_key", description="ACME API key"),
+        CredentialSlot(
+            name="acme_api_key",
+            description="ACME API key",
+            injection=InjectionTarget(
+                host="api.acme.test",
+                header="Authorization",
+                sentinel="UFO_SENTINEL_ACME",
+                env="ACME_API_KEY",
+            ),
+        ),
         CredentialSlot(name="acme_signing_key", description="ACME signing key"),
         CredentialSlot(name="acme_install_seal", description="ACME install binding"),
     ),
@@ -2192,6 +2202,9 @@ async def test_credentials_view_reports_slots_and_never_values(
             "extension": "stub",
             "description": "ACME API key",
             "filled": True,
+            "host": "api.acme.test",
+            "env": "ACME_API_KEY",
+            "header": "Authorization",
         },
         {
             "slot": "acme_install_seal",
@@ -2199,6 +2212,9 @@ async def test_credentials_view_reports_slots_and_never_values(
             "extension": "stub",
             "description": "ACME install binding",
             "filled": False,
+            "host": "",
+            "env": "",
+            "header": "",
         },
         {
             "slot": "acme_signing_key",
@@ -2206,6 +2222,9 @@ async def test_credentials_view_reports_slots_and_never_values(
             "extension": "stub",
             "description": "ACME signing key",
             "filled": False,
+            "host": "",
+            "env": "",
+            "header": "",
         },
     ]
     assert "sealed" not in listed.text

@@ -16,6 +16,9 @@ from ufo.runtime.ext.context import (
     CredentialAccess as CredentialAccess,
 )
 from ufo.runtime.ext.context import (
+    DeployCredentials as DeployCredentials,
+)
+from ufo.runtime.ext.context import (
     ExtensionContext as ExtensionContext,
 )
 from ufo.runtime.ext.context import (

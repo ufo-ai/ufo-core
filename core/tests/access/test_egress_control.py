@@ -212,9 +212,12 @@ async def test_turn_runtime_config_can_disable_but_not_enable_public_egress(db: 
 def test_rule_json_matches_the_golden_contract() -> None:
     """The Rust proxy deserializes `rule_contract.json` to pin the wire shape; re-deriving it here
     from real Rule dataclasses proves the committed fixture is exactly what `rule_json` emits, so
-    the Rust contract cannot drift from what serve serializes."""
+    the Rust contract cannot drift from what serve serializes. Both scope shapes ride the fixture:
+    the deploy's own hosts admitted as they are, and a workspace-declared host admitted pinned, so
+    the proxy still resolves it and refuses a private answer."""
     rules = (
         ScopeRule(allowed_hosts=frozenset({"api.openai.com", "api.anthropic.com"})),
+        ScopeRule(allowed_hosts=frozenset({"api.acmekeys.com"}), pinned=True),
         InternetRule(),
         InjectionRule(
             host="api.anthropic.com",
@@ -411,7 +414,7 @@ async def test_resolve_returns_the_seeded_grant_and_injection_rules(db: None) ->
             },
         )
     rules = response.json()["rules"]
-    assert {"kind": "scope", "hosts": [HOST]} in rules
+    assert {"kind": "scope", "hosts": [HOST], "pinned": False} in rules
     assert {"kind": "meter", "host": HOST, "dimension": "requests"} in rules
     assert [rule for rule in rules if rule["kind"] == "injection"] == [
         {
@@ -582,7 +585,7 @@ async def test_resolve_forged_principal_yields_the_base(db: None) -> None:
             headers=_auth(),
             json={"proxy_auth": "Basic bm90LWEtdG9rZW4="},
         )
-    assert response.json() == {"rules": [{"kind": "scope", "hosts": [HOST]}]}
+    assert response.json() == {"rules": [{"kind": "scope", "hosts": [HOST], "pinned": False}]}
 
 
 async def test_the_bearer_gate_refuses_a_request_with_no_control_token(db: None) -> None:

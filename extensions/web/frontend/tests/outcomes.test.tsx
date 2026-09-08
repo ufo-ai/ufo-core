@@ -39,6 +39,17 @@ const HOST_SLOT = {
  *  rows it heads, and this slot is not one of them. */
 const EMPTY_SLOT = { ...HOST_SLOT, name: "apollo", slot: "APOLLO_API_KEY", filled: false };
 
+const WORKSPACE_SLOT = {
+  name: "acme-api-key",
+  slot: "acme_api_key",
+  extension: "workspace_credentials",
+  description: "Acme API key.",
+  filled: false,
+  host: "api.acme.com",
+  env: "ACME_API_KEY",
+  header: "Authorization",
+};
+
 /** The credential collection's projected act, which the listing's Set and Replace address. */
 const CREDENTIAL_ACTIONS = [
   {
@@ -215,6 +226,66 @@ test("credentials group and sort the filled slots, and render their literals", a
     "OPENAI_API_KEY",
     "DATADOG_API_KEY",
   ]);
+});
+
+test("workspace credential slots are visible and editable through prepared intents", async () => {
+  location.hash = "#/workspace/credentials";
+  const intents: unknown[] = [];
+  wire({
+    "/workspace/credentials": () =>
+      json({ actions: CREDENTIAL_ACTIONS, slots: [WORKSPACE_SLOT] }),
+    "/workspace/accounts": () => json({ accounts: [] }),
+    "/intents": (_url, init) => {
+      intents.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Saved." });
+    },
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  expect(await screen.findByText("Workspace keys")).toBeTruthy();
+  expect(screen.getByText("No value")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Set" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Add a credential" }));
+  await userEvent.type(screen.getByLabelText("Name"), "new_api_key");
+  await userEvent.type(screen.getByLabelText("Variable"), "NEW_API_KEY");
+  await userEvent.type(screen.getByLabelText("Host"), "api.new.example");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(intents).toHaveLength(1));
+  expect(intents[0]).toEqual({
+    verb: "apply",
+    kind: "credential_slot",
+    name: "new-api-key",
+    spec: {
+      slot: "new_api_key",
+      env: "NEW_API_KEY",
+      host: "api.new.example",
+      header: "Authorization",
+      description: "",
+    },
+  });
+
+  await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  const host = screen.getByLabelText("Host");
+  await userEvent.clear(host);
+  await userEvent.type(host, "api.eu.acme.com");
+  await userEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(intents).toHaveLength(2));
+  expect(intents[1]).toMatchObject({
+    verb: "apply",
+    kind: "credential_slot",
+    name: "acme-api-key",
+    spec: { host: "api.eu.acme.com" },
+  });
+
+  await userEvent.click(await screen.findByRole("button", { name: "Remove" }));
+  await userEvent.click(screen.getByRole("button", { name: "Confirm remove" }));
+  await waitFor(() => expect(intents).toHaveLength(3));
+  expect(intents[2]).toEqual({
+    verb: "delete",
+    kind: "credential_slot",
+    name: "acme-api-key",
+  });
 });
 
 /** Every row on this screen leads with a mark, the way a connector row does, so the names beside
@@ -620,4 +691,3 @@ test("a refused store states the reason the server gave and keeps the field", as
   expect(await screen.findByText("that seal has expired")).toBeTruthy();
   expect(screen.getByLabelText("the key")).toBeTruthy();
 });
-

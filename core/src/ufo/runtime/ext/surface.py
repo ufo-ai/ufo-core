@@ -80,6 +80,7 @@ from ufo.runtime.access.credentials import (
     CredentialSlotUnset,
     CredentialStore,
     DeclaredSlot,
+    declared_slot_fingerprint,
     member_slot,
     named_slots,
     open_credential_request,
@@ -192,6 +193,7 @@ from ufo.schema.records import (
 from ufo.sdk.http import cookie_secure
 
 if TYPE_CHECKING:
+    from ufo.runtime.access.workspace_slots import WorkspaceSlots
     from ufo.runtime.ext.context import ConversationProbes, SourceReader
     from ufo.runtime.ext.conversation_slots import (
         BoundConversationSlot,
@@ -1065,16 +1067,22 @@ class GithubCoverageView(BaseModel):
 
 class CredentialSlotView(BaseModel):
     """One declared BYOK slot and whether the workspace holds a value for it — never the value.
-    Slots come from installed manifests, the same declarations the `credential` object kind
-    projects. Deploy config (model keys, signing secrets) is not a slot at all and cannot appear.
+    Slots come from installed manifests and from extensions that resolve them per workspace, the
+    same declarations the `credential` object kind projects. Deploy config (model keys, signing
+    secrets) is not a slot at all and cannot appear.
     `name` is the `credential` object kind's name for the slot — the address a prepared intent
-    mutates."""
+    mutates. `host`, `env` and `header` are the wire the slot's value rides, carried so the panel
+    can render and re-submit a slot declared for this workspace alone; a slot that reaches no wire
+    carries none of them."""
 
     slot: str
     name: str
     extension: str
     description: str
     filled: bool
+    host: str = ""
+    env: str = ""
+    header: str = ""
 
 
 def _stream_name(config: dict[str, JsonValue]) -> str | None:
@@ -1799,6 +1807,9 @@ class SurfaceContext:
     _declared_slots: tuple[DeclaredSlot, ...]
     _ambient_reply: AmbientReplyClassifier
     _connectors: ConnectorRegistry
+    _workspace_slots: "WorkspaceSlots | None" = None
+    """The slots an extension resolves for one workspace, beside the deploy's own declarations —
+    None where no installed extension resolves any."""
     _runtime: RuntimeIdentity | None = None
     _ambient_reply_for: Callable[[str], AmbientReplyClassifier] | None = None
     _system_skill_bundle: SystemSkillBundle = field(
@@ -2027,9 +2038,18 @@ class SurfaceContext:
             )
         if slot not in state.slots:
             raise CredentialRequestInvalid(f"credential request does not name slot {slot!r}")
-        declared = next((entry for entry in self._declared_slots if entry.name == slot), None)
+        declared = next(
+            (entry for entry in await self._workspace_declared_slots() if entry.name == slot), None
+        )
         if declared is None:
             raise CredentialRequestInvalid(f"credential slot {slot!r} is not declared")
+        if (
+            slot in state.workspace_declarations
+            and declared_slot_fingerprint(declared) != state.workspace_declarations[slot]
+        ):
+            raise CredentialRequestInvalid(
+                f"credential slot {slot!r} changed after the request was sealed"
+            )
         private_prompt = state.payload is None
         marker = (
             _fulfilled_marker_key(_credential_request_id(state, sealed), slot)
@@ -4005,7 +4025,9 @@ class SurfaceContext:
             )
 
     async def list_credential_slots(self) -> tuple[CredentialSlotView, ...]:
-        """Every declared slot with its fill state — never a value."""
+        """Every declared slot with its fill state — never a value. The deploy's declarations and
+        this workspace's own, as the `credential` object kind lists them, so the panel's rows and a
+        chat listing name the same slots."""
         async with workspace_tx() as connection:
             filled = set(
                 (
@@ -4018,9 +4040,9 @@ class SurfaceContext:
                 .scalars()
                 .all()
             )
+        declared = await self._workspace_declared_slots()
         names = {
-            slot.extension + "/" + slot.name: name
-            for name, slot in named_slots(self._declared_slots).items()
+            slot.extension + "/" + slot.name: name for name, slot in named_slots(declared).items()
         }
         return tuple(
             CredentialSlotView(
@@ -4029,9 +4051,19 @@ class SurfaceContext:
                 extension=slot.extension,
                 description=slot.description,
                 filled=slot.name in filled,
+                host=slot.host if isinstance(slot.host, str) else "",
+                env=slot.env,
+                header=slot.header,
             )
-            for slot in sorted(self._declared_slots, key=lambda slot: (slot.extension, slot.name))
+            for slot in sorted(declared, key=lambda slot: (slot.extension, slot.name))
         )
+
+    async def _workspace_declared_slots(self) -> tuple[DeclaredSlot, ...]:
+        """Every slot this workspace holds: the deploy's declarations, and the ones an extension
+        resolves for this workspace alone."""
+        if self._workspace_slots is None:
+            return self._declared_slots
+        return (*self._declared_slots, *await self._workspace_slots.declared(self.workspace_id))
 
     async def workspace_domain(self) -> str | None:
         """The workspace's domain signup subject, which a chat-surface join may match.

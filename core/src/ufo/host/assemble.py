@@ -36,11 +36,11 @@ from ufo.host.environment import (
 )
 from ufo.host.ext.loader import (
     connector_clis,
-    injecting_slots,
     turn_hooks,
     turn_member_skills,
     turn_tools,
     turn_workspace_facts,
+    workspace_slot_source,
 )
 from ufo.host.spawn_catalog import (
     SpawnTarget,
@@ -51,10 +51,11 @@ from ufo.host.spawn_catalog import (
 from ufo.host.tools.builtins import SPAWN_TOOL
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
 from ufo.runtime.ext.context import ExtensionContext, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
-from ufo.runtime.ext.manifest import CredentialSlot, Manifest
+from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.objects import BoundAction, ObjectVerbs
@@ -293,8 +294,8 @@ class HostEnvironment:
     def clis(self) -> dict[str, CliCredential]:
         return connector_clis(self.manifests)
 
-    def slots(self) -> tuple[CredentialSlot, ...]:
-        return injecting_slots(self.manifests)
+    def slots(self) -> WorkspaceSlots:
+        return workspace_slot_source(self.manifests)
 
     def _document_blob(self) -> WorkspaceBlobStore:
         if self.blob is None:

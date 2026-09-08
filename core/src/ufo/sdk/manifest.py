@@ -214,6 +214,9 @@ from ufo.runtime.ext.manifest import (
     UserPromptSubmit as UserPromptSubmit,
 )
 from ufo.runtime.ext.manifest import (
+    WorkspaceCredentials as WorkspaceCredentials,
+)
+from ufo.runtime.ext.manifest import (
     WorkspaceFact as WorkspaceFact,
 )
 from ufo.runtime.kinds.agent_setup import (

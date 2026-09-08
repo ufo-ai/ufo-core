@@ -164,6 +164,8 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
             "description": "BYOK key the egress proxy swaps onto the sample host.",
             "extension": sample.NAME,
             "host": sample.INJECTION_HOST,
+            "env": "",
+            "header": "authorization",
             "host_slot": "",
             "host_options": [],
         }

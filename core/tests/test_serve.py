@@ -28,9 +28,11 @@ from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.models.catalog import CORE_PRICING
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import EGRESS_CA_CERT_ENV, RunTokenCodec
+from ufo.host.ext.loader import deploy_claims
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.egress_rules import InjectionRule, ScopeRule
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget, Manifest
 from ufo.runtime.ext.surface import SurfaceSpec
 
@@ -703,7 +705,10 @@ def test_the_proxy_resolver_reads_keyed_slots_per_workspace(
         FastAPI(), config, (manifest,), credentials, CORE_PRICING, RUN_TOKENS, _blob(), None
     )
     assert captured["credentials"] is credentials
-    assert captured["slots"] == (slot,)
+    claims = deploy_claims((manifest,))
+    assert captured["slots"] == WorkspaceSlots(
+        deploy=(slot,), claimed_slots=claims.slots, claimed_env=claims.env
+    )
     assert captured["base"] == model_rule_base(config)
 
 

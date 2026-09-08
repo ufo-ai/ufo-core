@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from uuid import UUID
 
 from ufo.harness.o11y import log, warn
+from ufo.harness.sandbox.session import ProxyEndpoint, egress_proxy_env
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import (
     CredentialSlotUnset,
@@ -23,8 +24,9 @@ from ufo.runtime.access.credentials import (
     credential_host,
 )
 from ufo.runtime.access.grants import Grant, GrantStore, grant_sentinel, usable_cli_accounts
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.authority import ExecutionAuthority, authority_member_id
-from ufo.runtime.ext.manifest import CredentialSlot
+from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL_ENV
 from ufo.runtime.workspace import ws_current
 
 GIT_PROXY_AUTH_CONFIG = (("http.proxyAuthMethod", "basic"),)
@@ -60,7 +62,7 @@ class ProbeEnv:
     grants: GrantStore | None = None
     clis: Mapping[str, CliCredential] = field(default_factory=dict)
     credentials: CredentialStore | None = None
-    slots: tuple[CredentialSlot, ...] = ()
+    slots: WorkspaceSlots = field(default_factory=WorkspaceSlots)
 
     async def exports(
         self,
@@ -105,12 +107,40 @@ def cli_git_config(clis: Mapping[str, CliCredential]) -> tuple[tuple[str, str], 
     return tuple(settings)
 
 
+_SAMPLE_PROXY = ProxyEndpoint(port=443, ca_cert="", public_url="https://proxy.invalid")
+"""A stand-in endpoint `sandbox_exported_env` reads the proxy environment's variable *names* off.
+The names are the same for every endpoint, and reading them from the export itself is what keeps
+one list: a variable added to `egress_proxy_env` is reserved without being written down again."""
+
+
+def sandbox_exported_env(clis: Mapping[str, CliCredential]) -> frozenset[str]:
+    """Every sandbox variable core itself exports on an open, whatever the carrier: the egress
+    proxy's environment (the model-key sentinels, the proxy URLs, the CA paths), git's config
+    channel including each connector CLI's credential helper, the conversation id, and the
+    committer identity a cloning grant sets.
+
+    One sandbox variable carries one value and the later export wins the merge, so this namespace
+    is claimed beside the deploy's declared slots: a workspace declaring a slot on one of these
+    names would replace a value core exported — a model-key sentinel the proxy holds no workspace
+    rule for, and every model call from the sandbox would carry a sentinel nothing swaps."""
+    return frozenset(
+        {
+            CONVERSATION_ID_ENV,
+            TOOL_BRIDGE_URL_ENV,
+            *GIT_IDENTITY_ENV,
+            *_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(clis))),
+            *egress_proxy_env(_SAMPLE_PROXY, "sample-run-token"),
+        }
+    )
+
+
 async def _keyed_provider_env(
     credentials: CredentialStore | None,
-    slots: tuple[CredentialSlot, ...],
+    slots: WorkspaceSlots,
     workspace_id: UUID,
 ) -> dict[str, str]:
-    """Each keyed provider this workspace has a secret for, as the sandbox sees it: the declared env
+    """Each keyed provider this workspace has a secret for — the deploy's declared slots and the
+    ones this workspace declares for itself — as the sandbox sees it: the declared env
     var set to the slot's sentinel — never the secret, which the egress proxy swaps in on the wire —
     and the resolved provider host, so the agent's own client authenticates and addresses the right
     region without holding or guessing either. A slot with nothing stored exports nothing, so the
@@ -125,7 +155,7 @@ async def _keyed_provider_env(
     if credentials is None:
         return {}
     env: dict[str, str] = {}
-    for slot in slots:
+    for slot in await slots.all(workspace_id):
         target = slot.injection
         if target is None:
             continue

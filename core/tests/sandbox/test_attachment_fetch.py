@@ -18,6 +18,7 @@ from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSand
 from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProbeTokenCodec, ProxyEndpoint, shell_path, workspace_path
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.context import ConversationProbes
 from ufo.runtime.workspace import ws
@@ -41,7 +42,7 @@ def _probes(sandboxes: ConversationSandbox) -> ConversationProbes:
     return ConversationProbes(
         sandboxes,
         ProbeTokenCodec(secret=b"attachment-fetch-test-secret"),
-        ProbeEnv(grants=None, clis={}, credentials=None, slots=()).exports,
+        ProbeEnv(grants=None, clis={}, credentials=None, slots=WorkspaceSlots()).exports,
     )
 
 

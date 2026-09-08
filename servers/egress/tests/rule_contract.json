@@ -5,7 +5,15 @@
       "hosts": [
         "api.anthropic.com",
         "api.openai.com"
-      ]
+      ],
+      "pinned": false
+    },
+    {
+      "kind": "scope",
+      "hosts": [
+        "api.acmekeys.com"
+      ],
+      "pinned": true
     },
     {
       "kind": "internet"

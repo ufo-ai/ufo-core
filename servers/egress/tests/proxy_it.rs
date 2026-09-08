@@ -3,7 +3,8 @@
 //! through `EgressProxy` and asserts the refusal code, the tunnelled/MITM'd bytes, the injected
 //! secret, and the metering the proxy posts back.
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use uuid::Uuid;
 
 use ufo_egress::control::Control;
 use ufo_egress::meter::Meter;
-use ufo_egress::server::{EgressProxy, ServiceDaemons};
+use ufo_egress::server::{Dns, EgressProxy, ServiceDaemons};
 use ufo_egress::tls::{generate_ca, LeafStore};
 use ufo_egress::token::RunTokenCodec;
 use ufo_egress::types::{MeterRecord, RunToken};
@@ -25,6 +26,10 @@ use ufo_egress::types::{MeterRecord, RunToken};
 const SECRET: &[u8] = b"proxy-it-signing-secret";
 const WORKSPACE: u128 = 0x1111;
 const TURN: u128 = 0x2222;
+/// An address the DNS pin vets as globally routable and no test origin serves: a connect there
+/// reaches nothing, which is how a test tells the pinned address apart from the private one the
+/// same name answers. No test waits on that connect, so the job still needs no network.
+const VETTED_PUBLIC_ADDRESS: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);
 
 // --- fake control plane -----------------------------------------------------------------------
 
@@ -166,6 +171,17 @@ async fn start_proxy_trusting(
     upstream_ca_pem: Option<String>,
     daemons: ServiceDaemons,
 ) -> Proxy {
+    start_proxy_pinning(state, upstream_ca_pem, daemons, None).await
+}
+
+/// `pinned` answers the DNS pin from a fixed map instead of the box's resolver, so a name can
+/// answer one address to the pin and another to the system resolver a connect-by-name would use.
+async fn start_proxy_pinning(
+    state: Arc<ControlState>,
+    upstream_ca_pem: Option<String>,
+    daemons: ServiceDaemons,
+    pinned: Option<(&str, Ipv4Addr)>,
+) -> Proxy {
     let control_url = spawn_control(state.clone()).await;
     let (ca_pem, ca_key) = generate_ca().unwrap();
     let leaves = Arc::new(LeafStore::new(&ca_pem, &ca_key).unwrap());
@@ -182,6 +198,12 @@ async fn start_proxy_trusting(
     );
     if let Some(pem) = upstream_ca_pem {
         proxy = proxy.trust_upstream(client_config_trusting(&pem));
+    }
+    if let Some((host, address)) = pinned {
+        proxy = proxy.resolve_with(Dns::Fixed(HashMap::from([(
+            host.to_string(),
+            vec![address],
+        )])));
     }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -537,6 +559,71 @@ async fn a_scoped_host_tunnels_and_meters_one_egress_request() {
         Uuid::from_u128(WORKSPACE).to_string()
     );
     assert_eq!(egress["turn_id"], Uuid::from_u128(TURN).to_string());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pinned_scope_refuses_a_host_that_answers_a_private_address() {
+    // A workspace admin writes the host a workspace-declared credential slot rides to, so its scope
+    // arrives pinned: the same allowlist entry that tunnels unpinned is resolved here and refused,
+    // because an exact scope is otherwise the one path around the private-address check.
+    let origin = spawn_echo().await;
+    let target = format!("127.0.0.1:{}", origin.port());
+    let pinned = r#"[{"kind":"scope","hosts":["127.0.0.1"],"pinned":true}]"#;
+    let proxy = start_proxy(ControlState::new(pinned)).await;
+    let auth = basic(&run_token(None));
+    let (_sock, head) = connect(&proxy, &target, Some(&auth)).await;
+    assert_eq!(
+        status_of(&head),
+        403,
+        "a pinned scope admitted a private address: {head}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pinned_scope_with_an_injection_rule_mitms_the_vetted_address_alone() {
+    // The shape a workspace-declared credential slot emits: the scope arrives pinned *and* an
+    // injection rule swaps the secret onto the same host, so the dispatch takes the MITM path
+    // rather than the tunnel. The pin vets one address; a name whose A record is public and whose
+    // AAAA record is private answers the vetted address here and a private one to the system
+    // resolver, which is what a second lookup inside the MITM would take. `localhost` is that
+    // name on the box: the pin answers a public address, the system resolver answers loopback,
+    // where a TLS origin listens and records any secret it is handed.
+    let (origin, origin_ca, seen) = spawn_tls_origin("localhost").await;
+    let target = format!("localhost:{}", origin.port());
+    let rules = r#"[{"kind":"scope","hosts":["localhost"],"pinned":true},{"kind":"injection","host":"localhost","header":"authorization","sentinel":"SENTINEL","real":"real-secret"}]"#;
+    let proxy = start_proxy_pinning(
+        ControlState::new(rules),
+        Some(origin_ca),
+        ServiceDaemons::default(),
+        Some(("localhost", VETTED_PUBLIC_ADDRESS)),
+    )
+    .await;
+    let auth = basic(&run_token(None));
+    let (sock, head) = connect(&proxy, &target, Some(&auth)).await;
+    assert_eq!(
+        status_of(&head),
+        200,
+        "a pinned scope with an injection rule was not accepted: {head}"
+    );
+
+    // The vetted address answers nothing here, so the re-originated request never completes — the
+    // test waits only long enough to see that no response came back from the private address.
+    let request = b"GET / HTTP/1.1\r\nhost: localhost\r\nauthorization: Bearer SENTINEL\r\n\r\n";
+    let answered = tokio::time::timeout(
+        Duration::from_secs(3),
+        mitm_response_head(&proxy, sock, "localhost", request),
+    )
+    .await
+    .unwrap_or_default();
+    assert!(
+        !answered.contains("200 OK"),
+        "the MITM answered from an address the pin never vetted: {answered}"
+    );
+    let handed = seen.lock().unwrap().clone();
+    assert_eq!(
+        handed, None,
+        "the injected secret reached the private address the name also answers"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

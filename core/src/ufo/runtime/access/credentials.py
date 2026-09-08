@@ -9,16 +9,17 @@ and fulfillment verifies the seal before writing — the plaintext travels membe
 never through the transcript or the sandbox."""
 
 import hashlib
+import json
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from cryptography.fernet import Fernet, InvalidToken
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -51,13 +52,14 @@ def member_slot(slot: str, member_id: UUID) -> str:
 
 def named_slots(slots: "tuple[DeclaredSlot, ...]") -> "dict[str, DeclaredSlot]":
     """The `credential` object kind's name for each declared slot — the one naming every read and
-    verb shares, so a portal row and an `object_delete` intent address the same instance. A slug
-    collision across extensions gains a stable digest qualifier."""
+    verb shares, so a portal row and an `object_delete` intent address the same instance. The name
+    is the slot's own name as a slug, which is how a portal row, a chat `object_apply` and an
+    `object_delete` intent all address one slot. A slug collision across extensions gains a stable
+    digest qualifier."""
     grouped: dict[str, list[DeclaredSlot]] = {}
     for slot in slots:
-        grouped.setdefault(re.sub(r"[^a-z0-9]+", "-", slot.name.lower()).strip("-"), []).append(
-            slot
-        )
+        slug = re.sub(r"[^a-z0-9]+", "-", slot.name.lower()).strip("-")
+        grouped.setdefault(slug, []).append(slot)
     named: dict[str, DeclaredSlot] = {}
     for plain, group in grouped.items():
         if len(group) == 1:
@@ -93,6 +95,7 @@ class CredentialRequestState(BaseModel):
     request_id: UUID | None = None
     issued_at: int | None = None
     payload: str | None = None
+    workspace_declarations: dict[str, str] = Field(default_factory=dict)
 
 
 def seal_credential_request(fernet: Fernet, state: CredentialRequestState) -> str:
@@ -125,8 +128,22 @@ class CredentialRequests:
     fernet: Fernet
     declared: frozenset[str]
 
-    def seal(self, workspace_id: UUID, member_id: UUID, slots: tuple[str, ...]) -> str:
-        undeclared = [slot for slot in slots if slot not in self.declared]
+    def seal(
+        self,
+        workspace_id: UUID,
+        member_id: UUID,
+        slots: tuple[str, ...],
+        also_declared: Mapping[str, str] | None = None,
+    ) -> str:
+        """Seal the slots this member will fill. `also_declared` carries the slots the workspace
+        declares for itself, which no manifest names — the caller reads them under the workspace it
+        is sealing for, so one workspace's declaration never admits another's."""
+        workspace_declarations = {} if also_declared is None else dict(also_declared)
+        undeclared = [
+            slot
+            for slot in slots
+            if slot not in self.declared and slot not in workspace_declarations
+        ]
         if undeclared:
             raise ValueError(f"no installed extension declares credential slot(s) {undeclared}")
         return seal_credential_request(
@@ -137,6 +154,11 @@ class CredentialRequests:
                 slots=slots,
                 request_id=uuid4(),
                 issued_at=int(time.time()),
+                workspace_declarations={
+                    slot: workspace_declarations[slot]
+                    for slot in slots
+                    if slot in workspace_declarations
+                },
             ),
         )
 
@@ -468,12 +490,38 @@ async def credential_host(
 @dataclass(frozen=True)
 class DeclaredSlot:
     """One declared BYOK slot as reads project it: the slot name, its documentation, the extension
-    that declares it, and `host` — the wire target when the slot carries one, either a fixed
-    hostname or the `HostChoice` a member selects within. `merge` updates a structured secret from
-    one private submission at the encrypted store boundary."""
+    that declares it, `host` — the wire target when the slot carries one, either a fixed hostname
+    or the `HostChoice` a member selects within — `env`, the sandbox variable the slot's
+    sentinel is exported as, empty for a slot the sandbox never sees, and `header`, the header the
+    secret rides in on the wire. `merge` updates a structured
+    secret from one private submission at the encrypted store boundary."""
 
     name: str
     description: str
     extension: str
     host: str | HostChoice | None = None
+    env: str = ""
+    header: str = ""
     merge: Callable[[str | None, str], str] | None = None
+
+
+def declared_slot_fingerprint(slot: DeclaredSlot) -> str:
+    """The immutable declaration a private credential prompt authorizes. Workspace-provided slots
+    may change while that prompt is open; binding the wire fields keeps its value from landing on a
+    host, header, or sandbox variable the member did not approve."""
+    match slot.host:
+        case HostChoice() as choice:
+            host: str | tuple[object, ...] | None = (
+                choice.slot,
+                choice.description,
+                choice.hosts,
+                choice.default,
+                choice.env,
+            )
+        case value:
+            host = value
+    encoded = json.dumps(
+        (slot.name, slot.description, slot.extension, host, slot.env, slot.header),
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()

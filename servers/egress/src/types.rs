@@ -40,6 +40,11 @@ pub enum Rule {
     Scope {
         #[serde(rename = "hosts")]
         allowed_hosts: BTreeSet<String>,
+        /// Admit these hosts, and still resolve the name and refuse an answer inside a private
+        /// network. Core pins a scope whose host a workspace admin wrote, because an exact scope is
+        /// otherwise the one path around the private-address check the internet rule applies.
+        #[serde(default)]
+        pinned: bool,
     },
     Internet,
     Injection {

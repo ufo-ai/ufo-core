@@ -65,6 +65,7 @@ from ufo.harness.sandbox.session import (
 from ufo.host.kinds.artifacts import artifact_object_names
 from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.host.kinds.members import ADD_MEMBER_TOOL_DEF
+from ufo.runtime.access.credentials import declared_slot_fingerprint
 from ufo.runtime.access.grants import installed_connect_flow
 from ufo.runtime.kinds.agents import RESTORE_APPLICATION_TOOL_DEF
 from ufo.runtime.media.artifact_url import (
@@ -1127,7 +1128,8 @@ async def request_credentials_handler(
     return the structured request so a capable surface prompts for the values privately and
     fulfills against the seal. Ends the turn like ask_user — the member returns once entered. Slots
     are workspace-global, so only an admin may fill them; a non-admin speaker, an undeclared slot,
-    or a deploy without a credential key raises, surfacing as a recoverable tool error."""
+    or a deploy without a credential key raises, surfacing as a recoverable tool error. A slot an
+    extension resolved for this workspace alone is fillable here exactly as a manifest's is."""
     speaker = ctx.require_speaker(CREDENTIAL_FILL_GATE)
     if ctx.requestable_credentials is None:
         raise ValueError("no credential key is configured — this deploy cannot store secrets")
@@ -1137,11 +1139,22 @@ async def request_credentials_handler(
         ctx.turn.workspace_id,
         speaker,
         tuple(prompt.slot for prompt in args.prompts),
+        await _workspace_declared(ctx),
     )
     request = CredentialRequest(reason=args.reason, prompts=args.prompts, sealed=sealed)
     return ToolResult(
         content=(TextContent(text=f"{REQUEST_CREDENTIALS_DIRECTIVE}\n{request.model_dump_json()}"),)
     )
+
+
+async def _workspace_declared(ctx: ToolContext) -> dict[str, str]:
+    """The declarations an extension resolves for this workspace alone, bound to the exact wire a
+    private prompt authorizes. Read under the turn's own workspace, so one workspace's declaration
+    never admits another's."""
+    if ctx.workspace_slots is None:
+        return {}
+    resolved = await ctx.workspace_slots.declared(ctx.turn.workspace_id)
+    return {slot.name: declared_slot_fingerprint(slot) for slot in resolved}
 
 
 async def cancel_spawn_handler(ctx: ToolContext, args: CancelSpawnInput) -> ToolResult:

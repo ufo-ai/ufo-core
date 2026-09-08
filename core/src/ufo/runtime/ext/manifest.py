@@ -85,6 +85,20 @@ class InjectionTarget:
 
 
 @dataclass(frozen=True)
+class WorkspaceCredentials:
+    """Credential slots an extension resolves per workspace, beside the ones its manifest declares
+    for the whole deploy. `read` answers one workspace's slots from the extension's own rows, and
+    core hands them to exactly the code a manifest's slot already drives: the egress proxy's
+    injection, the sandbox's exported sentinel, the `credential` object kind, and the portal panel.
+
+    The host such a slot names is written inside the workspace rather than by this deploy's own
+    code, so the scope core derives for it is pinned: the proxy resolves the name and refuses the
+    CONNECT when it answers a private address, which an exact scope otherwise skips."""
+
+    read: Callable[[ExtensionContext, UUID], Awaitable[tuple["CredentialSlot", ...]]]
+
+
+@dataclass(frozen=True)
 class CredentialSlot:
     """A named secret an extension needs. With an InjectionTarget the proxy swaps it onto the
     wire so the sandbox never holds it; without one it is readable only in-process.
@@ -865,6 +879,7 @@ class Manifest:
     flags: tuple[FlagSpec, ...] = ()
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()
     conversation_slots: tuple[ConversationSlotProvider, ...] = ()
+    workspace_credentials: WorkspaceCredentials | None = None
     member_context_read: bool = False
     sandbox_internet: bool = False
     requires: tuple[str, ...] = field(default_factory=tuple)
@@ -941,17 +956,26 @@ class Pack:
     prompt_sections: tuple[PromptSection, ...] = ()
 
 
+def declared_slot(slot: CredentialSlot, extension: str) -> DeclaredSlot:
+    """One declaration as every projection over the declarations reads it — the shape the
+    `credential` object kind and the portal's credentials panel render, whether the slot came from
+    a manifest or from an extension that resolves its slots per workspace."""
+    return DeclaredSlot(
+        name=slot.name,
+        description=slot.description,
+        extension=extension,
+        host=None if slot.injection is None else slot.injection.host,
+        env="" if slot.injection is None else slot.injection.env or "",
+        header="" if slot.injection is None else slot.injection.header,
+        merge=slot.merge,
+    )
+
+
 def declared_slots(manifests: tuple[Manifest, ...]) -> tuple[DeclaredSlot, ...]:
     """Every active manifest's declared BYOK slots, the one assembly every projection over the
     declarations shares — the `credential` object kind and the portal's credentials panel."""
     return tuple(
-        DeclaredSlot(
-            name=slot.name,
-            description=slot.description,
-            extension=manifest.name,
-            host=None if slot.injection is None else slot.injection.host,
-            merge=slot.merge,
-        )
+        declared_slot(slot, manifest.name)
         for manifest in manifests
         for slot in manifest.credentials
     )

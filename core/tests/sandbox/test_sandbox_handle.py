@@ -57,6 +57,7 @@ from ufo.harness.sandbox.terminal import TerminalCarrier, TerminalGone, Terminal
 from ufo.runtime.access.connectors import CliCredential, GitWire
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.grants import CommitIdentity, GrantStore, grant_sentinel
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
@@ -864,7 +865,7 @@ async def test_open_sandbox_exports_keyed_provider_sentinels_not_secrets(
             None,
             {},
             store,
-            DATADOG_SLOTS,
+            WorkspaceSlots(deploy=DATADOG_SLOTS),
         )
 
     assert _derived_env(carrier.specs[0]) == {
@@ -893,7 +894,7 @@ async def test_open_sandbox_exports_nothing_for_an_unfilled_keyed_slot(
             None,
             {},
             store,
-            DATADOG_SLOTS,
+            WorkspaceSlots(deploy=DATADOG_SLOTS),
         )
 
     assert _derived_env(carrier.specs[0]) == {
@@ -925,7 +926,7 @@ async def test_open_sandbox_withholds_and_warns_on_a_selection_the_row_does_not_
             None,
             {},
             store,
-            DATADOG_SLOTS,
+            WorkspaceSlots(deploy=DATADOG_SLOTS),
         )
 
     assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
@@ -977,7 +978,7 @@ async def test_open_sandbox_survives_a_keyed_slot_whose_host_will_not_decrypt(
             None,
             {},
             store,
-            (*DATADOG_SLOTS, PERPLEXITY_SLOT),
+            WorkspaceSlots(deploy=(*DATADOG_SLOTS, PERPLEXITY_SLOT)),
         )
 
     env = carrier.specs[0].env
@@ -1017,7 +1018,7 @@ async def test_open_sandbox_survives_a_keyed_slot_whose_secret_will_not_decrypt(
             None,
             {},
             store,
-            (*DATADOG_SLOTS, PERPLEXITY_SLOT),
+            WorkspaceSlots(deploy=(*DATADOG_SLOTS, PERPLEXITY_SLOT)),
         )
 
     env = carrier.specs[0].env

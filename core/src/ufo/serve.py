@@ -89,7 +89,6 @@ from ufo.host.ext.loader import (
     embed_backend,
     frame_admissible,
     index_backend,
-    injecting_slots,
     load_manifests,
     member_object_registry,
     member_skill_listing,
@@ -98,6 +97,7 @@ from ufo.host.ext.loader import (
     turn_subagent_grants,
     turn_subagents,
     validate_ext_tools,
+    workspace_slot_source,
 )
 from ufo.onboard.onboard_control import ONBOARD_CONTROL_TOKEN_ENV, OnboardControl
 from ufo.proxy_serve import OWNER_DSN_ENV, model_rule_base
@@ -498,7 +498,7 @@ def run(fleet: Fleet) -> None:
             grants=GrantStore() if runtime.credentials is not None else None,
             clis=connector_clis(runtime.manifests),
             credentials=runtime.credentials,
-            slots=injecting_slots(runtime.manifests),
+            slots=workspace_slot_source(runtime.manifests),
         ).exports,
     )
     _mount_shared_surfaces(
@@ -632,7 +632,7 @@ def _launch_jobs(
             grants=GrantStore() if runtime.credentials is not None else None,
             clis=connector_clis(runtime.manifests),
             credentials=runtime.credentials,
-            slots=injecting_slots(runtime.manifests),
+            slots=workspace_slot_source(runtime.manifests),
         ).exports,
     )
     page_change_runner = PageChangeRunner(
@@ -1233,6 +1233,7 @@ def _mount_shared_surfaces(
             _system_skill_bundle=system_skill_bundle,
             _member_skill_listing=member_skill_listing,
             _declared_slots=slots,
+            _workspace_slots=workspace_slot_source(manifests),
             _ambient_reply=ambient_reply,
             _ambient_reply_for=ambient_reply_for,
             _connectors=connectors,
@@ -1450,7 +1451,7 @@ def _proxy_endpoint(
         base=(*model_rule_base(config), *_one_shot(derive_artifact_store_rules(blob))),
         grants=GrantStore() if credentials is not None else None,
         credentials=credentials,
-        slots=injecting_slots(manifests),
+        slots=workspace_slot_source(manifests),
         internet=derive_manifest_rules(manifests),
         transfer_hosts=connector_transfer_hosts(manifests),
         clis=clis,

@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Field } from "@/components/ui/field";
+import { Field, Input } from "@/components/ui/field";
 import {
   Select,
   SelectContent,
@@ -39,9 +39,16 @@ type Slot = {
   description: string;
   extension: string;
   filled: boolean;
+  host: string;
+  env: string;
+  header: string;
 };
 
 type CredentialsPayload = { slots: Slot[] };
+
+const WORKSPACE_EXTENSION = "workspace_credentials";
+const SLOT_KIND = "credential_slot";
+const DEFAULT_HEADER = "Authorization";
 
 const MODEL_PROVIDER_SLOTS = [
   "anthropic_api_key",
@@ -62,8 +69,9 @@ const SERVICE_KEY_SLOTS = [
 
 const MCP_SLOTS = [MCP_SERVERS_SLOT] as const;
 
-const SECTION_ORDER = ["Model providers", "Service keys", "MCP"];
+const SECTION_ORDER = ["Model providers", "Service keys", "Workspace keys", "MCP"];
 const EXTENSION_SECTIONS: Record<string, string> = {
+  workspace_credentials: "Workspace keys",
   browser_use: "Service keys",
   browserbase: "Service keys",
   perplexity: "Service keys",
@@ -142,7 +150,7 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
      nothing to read and nothing to replace, and a member fills one by asking the agent for it. */
   rows: (payload) =>
     payload.slots
-      .filter((slot) => slot.filled)
+      .filter((slot) => slot.filled || slot.extension === WORKSPACE_EXTENSION)
       .sort((left, right) => {
         const leftRank = SECTION_ORDER.indexOf(credentialSection(left));
         const rightRank = SECTION_ORDER.indexOf(credentialSection(right));
@@ -156,7 +164,7 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
         return left.slot.localeCompare(right.slot);
       }),
   rowKey: (row) => row.name,
-  search: (row) => [row.slot, row.description, row.extension].join(" "),
+  search: (row) => [row.slot, row.description, row.extension, row.host, row.env].join(" "),
   list: {
     mark: (row) => (
       <MarkTile>
@@ -164,39 +172,62 @@ export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
       </MarkTile>
     ),
     primary: { field: "slot" },
-    meta: [{ field: "description", render: (description) => codeSpans(description) }],
+    meta: [
+      { field: "description", render: (description) => codeSpans(description) },
+      { field: "host", render: (host, row) => (host ? codeSpans(`${row.env} → ${host}`) : null) },
+    ],
   },
   empty: "No credential is set.",
   /* Every slot with a value has a row, and a slot with none has none — so the act that fills one
      stands here, for the member a surface sent to this screen to fill it. */
-  offer: (payload, { kindAct, busy }) => {
+  offer: (payload, { act, kindAct, busy }) => {
     const unset = payload.slots.filter((slot) => !slot.filled);
-    return unset.length ? (
-      <SetCredential
-        slots={unset}
-        busy={busy}
-        onPicked={(row) => kindAct("credential", "request_credentials", credentialRequest(row))}
-      />
-    ) : null;
+    return (
+      <div className="flex gap-sm">
+        {unset.length ? (
+          <SetCredential
+            slots={unset}
+            busy={busy}
+            onPicked={(row) => kindAct("credential", "request_credentials", credentialRequest(row))}
+          />
+        ) : null}
+        <DeclareCredential busy={busy} onDeclared={act} />
+      </div>
+    );
   },
   actions: (row, { act, kindAct, busy }) => (
     <div className={ACTS}>
-      <span data-part="status" className="flex items-center gap-xs text-label text-ink-soft">
-        <IconCheck role="img" aria-label={row.slot + " filled"} className="size-icon" />
-        Filled
-      </span>
+      {row.filled ? (
+        <span data-part="status" className="flex items-center gap-xs text-label text-ink-soft">
+          <IconCheck role="img" aria-label={row.slot + " filled"} className="size-icon" />
+          Filled
+        </span>
+      ) : (
+        <span data-part="status" className="text-label text-ink-soft">
+          No value
+        </span>
+      )}
+      {row.extension === WORKSPACE_EXTENSION ? (
+        <DeclareCredential busy={busy} onDeclared={act} slot={row} />
+      ) : null}
       <Button
         variant="row"
         disabled={busy}
         onClick={() => kindAct("credential", "request_credentials", credentialRequest(row))}
       >
-        {row.slot === MCP_SERVERS_SLOT ? "Update" : "Replace"}
+        {row.slot === MCP_SERVERS_SLOT ? "Update" : row.filled ? "Replace" : "Set"}
       </Button>
       <ConfirmButton
-        verb="Clear"
+        verb={row.extension === WORKSPACE_EXTENSION ? "Remove" : "Clear"}
         variant="row"
         disabled={busy}
-        onClick={() => act({ verb: "delete", kind: "credential", name: row.name })}
+        onClick={() =>
+          act({
+            verb: "delete",
+            kind: row.extension === WORKSPACE_EXTENSION ? SLOT_KIND : "credential",
+            name: row.name,
+          })
+        }
       />
     </div>
   ),
@@ -232,6 +263,128 @@ function PromptHeader({ provider, children }: { provider: string | null; childre
       </MarkTile>
       <div className="flex min-w-0 flex-col gap-2xs">{children}</div>
     </DialogHeader>
+  );
+}
+
+function slotName(slot: string) {
+  return slot
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function DeclareCredential({
+  busy,
+  onDeclared,
+  slot,
+}: {
+  busy: boolean;
+  onDeclared: (envelope: unknown) => void;
+  slot?: Slot;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState(slot?.slot ?? "");
+  const [env, setEnv] = useState(slot?.env ?? "");
+  const [host, setHost] = useState(slot?.host ?? "");
+  const [header, setHeader] = useState(slot?.header ?? DEFAULT_HEADER);
+  const [description, setDescription] = useState(slot?.description ?? "");
+  const ready = Boolean(name.trim() && env.trim() && host.trim());
+
+  function declare() {
+    setOpen(false);
+    onDeclared({
+      verb: "apply",
+      kind: SLOT_KIND,
+      name: slotName(name),
+      spec: {
+        slot: name.trim(),
+        env: env.trim(),
+        host: host.trim(),
+        header: header.trim() || DEFAULT_HEADER,
+        description: description.trim(),
+      },
+    });
+  }
+
+  return (
+    <>
+      {slot ? (
+        <Button variant="row" disabled={busy} onClick={() => setOpen(true)}>
+          Edit
+        </Button>
+      ) : (
+        <Button variant="outline" size="bar" disabled={busy} onClick={() => setOpen(true)}>
+          Add a credential
+        </Button>
+      )}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{slot ? "Edit Credential" : "Add Credential"}</DialogTitle>
+            <DialogDescription>
+              The sandbox gets the variable holding a placeholder. The proxy sends the real value to
+              this host alone, so the key never enters the sandbox. Set the value after saving.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-lg">
+            <Field label="Name" htmlFor="credential-name" description="Lower case, e.g. acme_api_key.">
+              <Input
+                id="credential-name"
+                autoComplete="off"
+                placeholder="acme_api_key"
+                required
+                disabled={slot !== undefined}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </Field>
+            <Field label="Variable" htmlFor="credential-env" description="What the sandbox exports.">
+              <Input
+                id="credential-env"
+                autoComplete="off"
+                placeholder="ACME_API_KEY"
+                required
+                value={env}
+                onChange={(event) => setEnv(event.target.value)}
+              />
+            </Field>
+            <Field label="Host" htmlFor="credential-host" description="Where the value is sent.">
+              <Input
+                id="credential-host"
+                autoComplete="off"
+                placeholder="api.acme.com"
+                required
+                value={host}
+                onChange={(event) => setHost(event.target.value)}
+              />
+            </Field>
+            <Field label="Header" htmlFor="credential-header" description="The header it rides in.">
+              <Input
+                id="credential-header"
+                autoComplete="off"
+                placeholder={DEFAULT_HEADER}
+                value={header}
+                onChange={(event) => setHeader(event.target.value)}
+              />
+            </Field>
+            <Field label="Description" htmlFor="credential-description">
+              <Input
+                id="credential-description"
+                autoComplete="off"
+                placeholder="Acme API key (Settings → API)."
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+              />
+            </Field>
+          </div>
+          <DialogFooter>
+            <Button variant="send" disabled={!ready || busy} onClick={declare}>
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

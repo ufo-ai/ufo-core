@@ -80,6 +80,7 @@ EXTENSIONS = (
     "connectors",
     "composio",
     "keyed_connectors",
+    "workspace_credentials",
     "pipedream",
     "sources",
     "gbrain",

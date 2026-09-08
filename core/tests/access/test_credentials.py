@@ -43,6 +43,7 @@ from ufo.runtime.access.egress_rules import (
     ScopeRule,
     derive_credential_rules,
 )
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.accounting import workspace_owns_the_key
 from ufo.runtime.ext.manifest import (
@@ -420,7 +421,9 @@ async def test_an_unfilled_slot_opens_no_egress_and_a_code_only_slot_never_rides
     workspace_id = await _workspace()
     store = _store()
     assert (
-        await derive_credential_rules(injecting_slots((_keyed_manifest(),)), workspace_id, store)
+        await derive_credential_rules(
+            WorkspaceSlots(deploy=injecting_slots((_keyed_manifest(),))), workspace_id, store
+        )
         == ()
     )
     code_only = Manifest(
@@ -437,7 +440,7 @@ async def test_one_workspace_never_derives_anothers_secret(db: None) -> None:
     first, second = await _workspace(), await _workspace()
     store = _store()
     await store.put(first, "datadog_api_key", "first-secret")
-    slots = injecting_slots((_keyed_manifest(),))
+    slots = WorkspaceSlots(deploy=injecting_slots((_keyed_manifest(),)))
     assert [
         rule.real
         for rule in await derive_credential_rules(slots, first, store)
@@ -553,7 +556,7 @@ async def test_the_proxy_withholds_every_rule_for_a_selection_the_row_does_not_o
     same proof, and this pair has drifted apart once already."""
     workspace_id = await _workspace()
     store = _store()
-    slots = injecting_slots((_keyed_manifest(),))
+    slots = WorkspaceSlots(deploy=injecting_slots((_keyed_manifest(),)))
     await store.put(workspace_id, "datadog_api_key", "dd-api-real")
     await store.put(workspace_id, "datadog_application_key", "dd-app-real")
     await store.put(workspace_id, "datadog_api_host", "169.254.169.254")
@@ -721,7 +724,7 @@ async def test_a_slot_fault_withholds_its_own_host_and_leaves_the_rest_deriving(
             ),
         ),
     )
-    slots = injecting_slots((_keyed_manifest(), fixed))
+    slots = WorkspaceSlots(deploy=injecting_slots((_keyed_manifest(), fixed)))
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
         rules = await derive_credential_rules(slots, workspace_id, store)
@@ -773,7 +776,7 @@ async def test_a_secret_row_this_deploy_cannot_decrypt_withholds_its_own_host_al
             ),
         ),
     )
-    slots = injecting_slots((_keyed_manifest(), fixed))
+    slots = WorkspaceSlots(deploy=injecting_slots((_keyed_manifest(), fixed)))
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
         rules = await derive_credential_rules(slots, workspace_id, store)

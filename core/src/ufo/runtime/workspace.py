@@ -326,6 +326,13 @@ class WorkspaceScope:
             raise RuntimeError("credential store is not configured")
         await _store.put(self.workspace_id, slot, plaintext)
 
+    async def clear_credential(self, slot: str) -> None:
+        """Drop this workspace's own stored value for a slot. A platform environment default has no
+        row and remains unchanged, so the slot falls back to it exactly as an unfilled one does."""
+        if _store is None:
+            return
+        await _store.clear(self.workspace_id, slot)
+
     @asynccontextmanager
     async def billable_event(self) -> AsyncIterator[BillableEvent]:
         """Book reported provider usage to this workspace when the block exits. A model-output

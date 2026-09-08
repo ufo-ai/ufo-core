@@ -267,13 +267,34 @@ class ScopedStore:
 
 
 @dataclass(frozen=True)
+class DeployCredentials:
+    """What this deploy's own declarations already claim in the two namespaces every extension
+    shares: `slots` are the credential slot names the installed manifests declare, and `env` the
+    sandbox variables they export. An extension that resolves slots per workspace refuses a
+    declaration naming either, because one variable carries one value and the later export silently
+    wins the sandbox's merge."""
+
+    slots: frozenset[str] = frozenset()
+    env: frozenset[str] = frozenset()
+
+
+NO_DEPLOY_CREDENTIALS = DeployCredentials()
+
+
+@dataclass(frozen=True)
 class CredentialAccess:
     """The declared-slot gate over the ambient workspace's secrets: a handler reads only the slots
     its manifest declared, and each resolves to the bound workspace's value through
     `ws_current().credential`. Workspace and secret both come from the scope the turn or job
-    bound, so a handler can read neither an undeclared slot nor a workspace it did not name."""
+    bound, so a handler can read neither an undeclared slot nor a workspace it did not name.
+
+    `resolved` names the slots the extension resolves per workspace, which no manifest carries. It
+    widens `clear` alone, read live under the bound workspace: an extension holding a workspace's
+    own declarations must drop the stored value with the declaration, and reading the secret stays
+    with what the manifest declares."""
 
     declared: frozenset[str]
+    resolved: Callable[[], Awaitable[frozenset[str]]] | None = None
 
     @property
     def workspace_id(self) -> UUID:
@@ -309,6 +330,15 @@ class CredentialAccess:
         if slot not in self.declared:
             raise UndeclaredCredentialSlot(slot)
         return await ws_current().rotate_credential(slot, expected, plaintext)
+
+    async def clear(self, slot: str) -> None:
+        """Drop the bound workspace's stored value for a slot this extension declares or resolves.
+        The verb an extension that resolves slots per workspace needs: dropping the declaration
+        leaves a value nothing declares, unreachable and still a secret the workspace holds."""
+        gated = self.declared if self.resolved is None else self.declared | await self.resolved()
+        if slot not in gated:
+            raise UndeclaredCredentialSlot(slot)
+        await ws_current().clear_credential(slot)
 
 
 @dataclass(frozen=True)
@@ -1187,6 +1217,7 @@ class ExtensionContext:
     public_base_url: str | None = None
     home_surface: str | None = None
     tailer: TurnTailer | None = None
+    deploy_credentials: DeployCredentials = field(default_factory=DeployCredentials)
     member_context_read_allowed: bool = False
     member_context_authority: ExecutionAuthority = WORKSPACE_AUTHORITY
     member_context_blob: WorkspaceBlobStore | None = None
@@ -2622,6 +2653,8 @@ def context_for(
     public_base_url: str | None = None,
     artifact_token_secret: str = "",
     home_surface: str | None = None,
+    deploy_credentials: DeployCredentials = NO_DEPLOY_CREDENTIALS,
+    workspace_credentials: Callable[[], Awaitable[frozenset[str]]] | None = None,
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
@@ -2641,7 +2674,7 @@ def context_for(
         raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     return ExtensionContext(
         store=ScopedStore(extension=extension),
-        credentials=CredentialAccess(declared=declared),
+        credentials=CredentialAccess(declared=declared, resolved=workspace_credentials),
         audience=audience,
         installations=SurfaceInstallationAccess(declared=surfaces, addressed=addressed_surfaces),
         index=index,
@@ -2664,4 +2697,5 @@ def context_for(
         member_context_authority=member_context_authority,
         member_context_blob=member_context_blob if member_context_read else None,
         artifact_token_secret=artifact_token_secret,
+        deploy_credentials=deploy_credentials,
     )

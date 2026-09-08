@@ -58,6 +58,7 @@ from ufo.runtime.access.credentials import (
     CredentialStore,
 )
 from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import (
     WORKSPACE_AUTHORITY,
@@ -78,7 +79,7 @@ from ufo.runtime.engine import (
 )
 from ufo.runtime.ext.context import ExtensionContext, ModelAccess, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
-from ufo.runtime.ext.manifest import CredentialSlot, Manifest, SubagentProfile
+from ufo.runtime.ext.manifest import Manifest, SubagentProfile
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.hub import Hub, Parked, Terminal
 from ufo.runtime.indexing import EmbedClient, IndexBackend
@@ -702,7 +703,7 @@ class TurnEnvironment(Protocol):
 
     def clis(self) -> dict[str, CliCredential]: ...
 
-    def slots(self) -> tuple[CredentialSlot, ...]: ...
+    def slots(self) -> WorkspaceSlots: ...
 
 
 @dataclass(frozen=True)
@@ -1212,6 +1213,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             connector_read_only=connector_read_only,
             tools=tools,
             tool_ext=tool_ext,
+            workspace_slots=runtime.environment.slots(),
             requestable_credentials=(
                 None
                 if runtime.credentials is None
@@ -1587,7 +1589,7 @@ async def _open_sandbox(
     grants: GrantStore | None,
     clis: Mapping[str, CliCredential],
     credentials: CredentialStore | None,
-    slots: tuple[CredentialSlot, ...],
+    slots: WorkspaceSlots,
     cache_rewrite: bool = False,
 ) -> SandboxSession:
     """Open the sandbox this turn runs in, under the turn's signed run token and the env its

@@ -21,6 +21,7 @@ from ufo.runtime.access.egress_rules import (
     ScopeRule,
     derive_credential_rules,
 )
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.workspace import ws
@@ -103,7 +104,9 @@ async def test_posthog_is_connectable_end_to_end_through_workspace_credentials(d
     await store.put(workspace_id, "posthog_api_key", "phx-real")
     await store.put(workspace_id, "posthog_api_host", "eu.posthog.com")
 
-    rules = await derive_credential_rules(injecting_slots((manifest(),)), workspace_id, store)
+    rules = await derive_credential_rules(
+        WorkspaceSlots(deploy=injecting_slots((manifest(),))), workspace_id, store
+    )
 
     assert [rule for rule in rules if isinstance(rule, ScopeRule)] == [
         ScopeRule(allowed_hosts=frozenset({"eu.posthog.com"}))
@@ -128,7 +131,9 @@ async def test_datadog_is_connectable_end_to_end_through_workspace_credentials(
     await store.put(workspace_id, "datadog_application_key", "dd-app-real")
     await store.put(workspace_id, "datadog_api_host", US5_HOST)
 
-    rules = await derive_credential_rules(injecting_slots((manifest(),)), workspace_id, store)
+    rules = await derive_credential_rules(
+        WorkspaceSlots(deploy=injecting_slots((manifest(),))), workspace_id, store
+    )
 
     assert [rule for rule in rules if isinstance(rule, ScopeRule)] == [
         ScopeRule(allowed_hosts=frozenset({US5_HOST}))
@@ -149,7 +154,10 @@ async def test_a_workspace_that_keyed_nothing_reaches_no_datadog_host(db: None) 
     filled it, so an unkeyed workspace's sandbox cannot reach Datadog at all."""
     empty: Manifest = manifest()
     assert (
-        await derive_credential_rules(injecting_slots((empty,)), await _workspace(), _store()) == ()
+        await derive_credential_rules(
+            WorkspaceSlots(deploy=injecting_slots((empty,))), await _workspace(), _store()
+        )
+        == ()
     )
 
 

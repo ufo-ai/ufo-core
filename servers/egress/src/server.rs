@@ -95,6 +95,7 @@ pub struct EgressProxy {
     public_url: Option<String>,
     graceful_shutdown: Duration,
     upstream_tls: Arc<ClientConfig>,
+    dns: Option<Arc<Dns>>,
 }
 
 impl EgressProxy {
@@ -116,6 +117,7 @@ impl EgressProxy {
             public_url,
             graceful_shutdown,
             upstream_tls: upstream_client_config(),
+            dns: None,
         }
     }
 
@@ -123,6 +125,13 @@ impl EgressProxy {
     /// origin's CA here; production keeps the webpki roots `new` installs.
     pub fn trust_upstream(mut self, config: Arc<ClientConfig>) -> EgressProxy {
         self.upstream_tls = config;
+        self
+    }
+
+    /// Answer the DNS pin from a caller-supplied source instead of the pod's resolver. Tests pin a
+    /// name to a fixed address here; production keeps the system resolver `serve_listener` builds.
+    pub fn resolve_with(mut self, dns: Dns) -> EgressProxy {
+        self.dns = Some(Arc::new(dns));
         self
     }
 
@@ -147,11 +156,16 @@ impl EgressProxy {
         // The DNS-pin resolves through the pod's own resolver (`/etc/resolv.conf` → CoreDNS hosted),
         // not the library default's hardcoded public servers: that keeps every resolved sandbox
         // hostname inside the cluster, uses CoreDNS caching and split-horizon, and matches the OS
-        // resolver the MITM and cache connects use so one name never resolves two ways. A dev/test
-        // box with no readable resolv.conf falls back to the default so the proxy still comes up.
-        let resolver = TokioAsyncResolver::tokio_from_system_conf().unwrap_or_else(|error| {
-            tracing::warn!(error = %error, "egress.resolv_conf_unreadable");
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+        // resolver the cache connect uses so one name never resolves two ways — the MITM resolves
+        // nothing at all, connecting to the address this pin vetted. A dev/test box with no
+        // readable resolv.conf falls back to the default so the proxy still comes up.
+        let dns = self.dns.clone().unwrap_or_else(|| {
+            Arc::new(Dns::System(Box::new(
+                TokioAsyncResolver::tokio_from_system_conf().unwrap_or_else(|error| {
+                    tracing::warn!(error = %error, "egress.resolv_conf_unreadable");
+                    TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+                }),
+            )))
         });
         let shared = Arc::new(Shared {
             control: self.control.clone(),
@@ -160,7 +174,7 @@ impl EgressProxy {
             token_secret: self.token_secret.clone(),
             daemons: self.daemons.clone(),
             upstream_tls: self.upstream_tls.clone(),
-            resolver,
+            dns,
             caps: Arc::new(Caps::new()),
             rule_cache: Mutex::new(HashMap::new()),
         });
@@ -204,7 +218,7 @@ struct Shared {
     token_secret: Vec<u8>,
     daemons: ServiceDaemons,
     upstream_tls: Arc<ClientConfig>,
-    resolver: TokioAsyncResolver,
+    dns: Arc<Dns>,
     caps: Arc<Caps>,
     rule_cache: Mutex<HashMap<RuleKey, CachedRules>>,
 }
@@ -442,16 +456,28 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
         }
     }
 
-    let exactly_scoped = rules
+    // An exact scope admits its hosts by name and resolves nothing — except a pinned one, whose host
+    // a workspace admin wrote rather than this deploy's own code: that name is resolved here as the
+    // internet path resolves one, and refused when it answers an address inside a private network.
+    let scopes: Vec<bool> = rules
         .iter()
-        .any(|r| matches!(r, Rule::Scope { allowed_hosts } if allowed_hosts.contains(&host)));
+        .filter_map(|r| match r {
+            Rule::Scope {
+                allowed_hosts,
+                pinned,
+            } if allowed_hosts.contains(&host) => Some(*pinned),
+            _ => None,
+        })
+        .collect();
+    let exactly_scoped = !scopes.is_empty();
+    let pinned_scope = scopes.iter().any(|pinned| *pinned);
     let mut connect_host = host.clone();
-    if !exactly_scoped {
-        if !rules.iter().any(|r| matches!(r, Rule::Internet)) {
+    if !exactly_scoped || pinned_scope {
+        if !exactly_scoped && !rules.iter().any(|r| matches!(r, Rule::Internet)) {
             let _ = respond(&mut stream, 403, &refused).await;
             return;
         }
-        match resolve_public(&shared.resolver, &host).await {
+        match resolve_public(&shared.dns, &host).await {
             Ok(pinned) => connect_host = pinned,
             Err(ResolveError::Forbidden) => {
                 let _ = respond(&mut stream, 403, &refused).await;
@@ -504,6 +530,7 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
             &shared,
             stream,
             &host,
+            &connect_host,
             port,
             &injections,
             principal,
@@ -648,10 +675,17 @@ async fn tunnel(
     .await;
 }
 
+/// `connect_host` is the address the dispatch vetted — a pinned scope's resolved public address,
+/// or the host itself where the rules admitted it by name. The TCP connect goes there and the TLS
+/// handshake still carries `host`, so re-originating never resolves the name a second time: a
+/// second lookup would take answers the pin never saw, an AAAA one included, and a private one
+/// among them would put the injected secret on a connection inside the deploy's own network.
+#[allow(clippy::too_many_arguments)]
 async fn mitm(
     shared: &Arc<Shared>,
     stream: TcpStream,
     host: &str,
+    connect_host: &str,
     port: u16,
     injections: &[Inj<'_>],
     principal: Principal,
@@ -693,7 +727,12 @@ async fn mitm(
     // host, before any usage is teed off the wire.
     emit_metrics(shared, host, &metering.metric_dims).await;
 
-    let tcp = match timeout(CONNECT_UPSTREAM_TIMEOUT, TcpStream::connect((host, port))).await {
+    let tcp = match timeout(
+        CONNECT_UPSTREAM_TIMEOUT,
+        TcpStream::connect((connect_host, port)),
+    )
+    .await
+    {
         Ok(Ok(sock)) => sock,
         _ => return,
     };
@@ -1417,17 +1456,34 @@ enum ResolveError {
     Unreachable,
 }
 
-async fn resolve_public(resolver: &TokioAsyncResolver, host: &str) -> Result<String, ResolveError> {
+/// Where the pin's A records come from. Production resolves through the pod's own resolver; a test
+/// pins fixed answers so one name can answer a public address here while the system resolver a
+/// connect-by-name would use answers a private one.
+pub enum Dns {
+    System(Box<TokioAsyncResolver>),
+    Fixed(HashMap<String, Vec<Ipv4Addr>>),
+}
+
+impl Dns {
+    async fn ipv4(&self, host: &str) -> Result<Vec<Ipv4Addr>, ResolveError> {
+        match self {
+            Dns::System(resolver) => match resolver.ipv4_lookup(host).await {
+                Ok(lookup) => Ok(lookup.iter().map(|a| a.0).collect()),
+                Err(_) => Err(ResolveError::Unreachable),
+            },
+            Dns::Fixed(answers) => answers.get(host).cloned().ok_or(ResolveError::Unreachable),
+        }
+    }
+}
+
+async fn resolve_public(dns: &Dns, host: &str) -> Result<String, ResolveError> {
     if host.contains(':') {
         return Err(ResolveError::Forbidden);
     }
     let addresses: Vec<Ipv4Addr> = if let Ok(ip) = host.parse::<Ipv4Addr>() {
         vec![ip]
     } else {
-        match resolver.ipv4_lookup(host).await {
-            Ok(lookup) => lookup.iter().map(|a| a.0).collect(),
-            Err(_) => return Err(ResolveError::Unreachable),
-        }
+        dns.ipv4(host).await?
     };
     if addresses.is_empty() || addresses.iter().any(|a| !is_globally_routable(a)) {
         return Err(ResolveError::Forbidden);

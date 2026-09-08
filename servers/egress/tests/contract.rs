@@ -17,19 +17,28 @@ fn python_rule_contract_deserializes_to_the_rust_rule_enum() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rule_contract.json");
     let json = std::fs::read_to_string(path).expect("read rule_contract.json");
     let fixture: Fixture = serde_json::from_str(&json).expect("deserialize the rule contract");
-    assert_eq!(fixture.rules.len(), 5, "one of each rule variant");
+    assert_eq!(
+        fixture.rules.len(),
+        6,
+        "one of each rule variant, and both scope shapes"
+    );
 
     assert!(matches!(
         &fixture.rules[0],
-        Rule::Scope { allowed_hosts }
-            if allowed_hosts == &BTreeSet::from([
+        Rule::Scope { allowed_hosts, pinned }
+            if !pinned && allowed_hosts == &BTreeSet::from([
                 "api.anthropic.com".to_string(),
                 "api.openai.com".to_string(),
             ])
     ));
-    assert!(matches!(&fixture.rules[1], Rule::Internet));
     assert!(matches!(
-        &fixture.rules[2],
+        &fixture.rules[1],
+        Rule::Scope { allowed_hosts, pinned }
+            if *pinned && allowed_hosts == &BTreeSet::from(["api.acmekeys.com".to_string()])
+    ));
+    assert!(matches!(&fixture.rules[2], Rule::Internet));
+    assert!(matches!(
+        &fixture.rules[3],
         Rule::Injection { host, header, sentinel, real }
             if host == "api.anthropic.com"
                 && header == "x-api-key"
@@ -37,11 +46,11 @@ fn python_rule_contract_deserializes_to_the_rust_rule_enum() {
                 && real == "sk-ant-real-key"
     ));
     assert!(matches!(
-        &fixture.rules[3],
+        &fixture.rules[4],
         Rule::Meter { host, dimension } if host == "api.anthropic.com" && dimension == "tokens"
     ));
     assert!(matches!(
-        &fixture.rules[4],
+        &fixture.rules[5],
         Rule::Service { host, daemon_prefix }
             if host == "registry.npmjs.org"
                 && daemon_prefix.as_deref() == Some("/pkg/registry.npmjs.org")

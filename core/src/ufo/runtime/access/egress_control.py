@@ -49,8 +49,8 @@ def rule_json(rule: Rule) -> dict[str, object]:
     `kind` tags the variant and the `hosts`/`daemon_prefix` field renames are load-bearing: a Rust
     `#[serde(tag="kind", rename_all="snake_case")]` enum reads exactly these names."""
     match rule:
-        case ScopeRule(allowed_hosts=allowed_hosts):
-            return {"kind": "scope", "hosts": sorted(allowed_hosts)}
+        case ScopeRule(allowed_hosts=allowed_hosts, pinned=pinned):
+            return {"kind": "scope", "hosts": sorted(allowed_hosts), "pinned": pinned}
         case InternetRule():
             return {"kind": "internet"}
         case InjectionRule(host=host, header=header, sentinel=sentinel, real=real):

@@ -1,11 +1,12 @@
 """The `credential` object kind: declared BYOK slots projected as workspace objects.
 
-Instances are the slots installed extensions declare, filled or not — the declaration lives in
-the manifest, the row holds only the sealed value, and an empty slot has no row (its envelope
-timestamps are null). The value appears in no read: spec is the declaration (slot, description,
-injection host), status says filled or empty — no value field, no value digest. Fill and rotate
-stay `request_credentials` (a secret
-and a private handoff, the speaker gating the act), so create and update refuse naming it;
+Instances are the slots installed extensions declare, filled or not — for the whole deploy from a
+manifest, or for this workspace alone from an extension that resolves them per workspace. The
+declaration lives in the extension either way, the row holds only the sealed value, and an empty
+slot has no row (its envelope timestamps are null). The value appears in no read: spec is the
+declaration (slot, description, injection host), status says filled or empty — no value field, no
+value digest. Fill and rotate stay `request_credentials` (a secret and a private handoff, the
+speaker gating the act), so create and update refuse naming it;
 delete clears the stored value, admin-gated in the handler, and the slot stays listed as empty.
 A signed-in member reads the same index and declaration in the portal: a declaration carries no
 member scope and no read discloses a value, so the workspace is the whole audience on both paths.
@@ -14,7 +15,7 @@ Core-registered: the loader builds the kind from every active manifest's declare
 it with no extension context — the handlers read the ambient workspace directly, exactly as
 `ScopedStore` does."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -28,6 +29,7 @@ from ufo.runtime.access.credentials import (
     credential_host,
     named_slots,
 )
+from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.ext.context import ExtensionContext, JsonValue
 from ufo.runtime.objects import (
     AdminRequired,
@@ -54,13 +56,17 @@ UNSET_GATE = "only a workspace admin can clear a credential slot"
 class CredentialSpec(BaseModel):
     """The declaration a read renders. `host` is the fixed injection host; a slot whose provider
     pins its host per account instead carries `host_slot` and the `host_options` a member may
-    select, so the agent asks with the real answers rather than inviting a hostname."""
+    select, so the agent asks with the real answers rather than inviting a hostname. `env` is the
+    sandbox variable the slot's sentinel is exported as and `header` the header it rides in on the
+    wire to `host`."""
 
     model_config = ConfigDict(extra="forbid")
     slot: str
     description: str = ""
     extension: str = ""
     host: str = ""
+    env: str = ""
+    header: str = ""
     host_slot: str = ""
     host_options: tuple[str, ...] = ()
 
@@ -69,10 +75,15 @@ class CredentialSpec(BaseModel):
 class CredentialObjects:
     """The kind's handlers over the declared slots and the sealed `credential` table: list shows
     every slot with its fill state, get renders the declaration beside filled-or-empty status,
-    delete clears the stored value. No handler reads the ciphertext column."""
+    delete clears the stored value. No handler reads the ciphertext column.
+
+    `slots` are the deploy's, read off the installed manifests. `workspace` resolves the slots an
+    extension holds per workspace, read per verb rather than at boot, so a slot declared inside a
+    live turn is listed by the next read."""
 
     slots: tuple[DeclaredSlot, ...]
     credentials: CredentialStore | None = None
+    workspace: WorkspaceSlots = field(default_factory=WorkspaceSlots)
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         return object_page(await self._rows(), query)
@@ -116,7 +127,7 @@ class CredentialObjects:
         *,
         expected_generation: UUID | None,
     ) -> dict[str, JsonValue] | None:
-        slot = self._named().get(name)
+        slot = (await self._named()).get(name)
         if slot is None:
             return None
         async with workspace_tx() as connection:
@@ -155,7 +166,7 @@ class CredentialObjects:
     ) -> None:
         if not await ctx.require_speaking_admin(UNSET_GATE):
             raise AdminRequired(UNSET_GATE)
-        slot = self._named()[name]
+        slot = (await self._named())[name]
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.delete(tables.credential).where(
@@ -166,6 +177,7 @@ class CredentialObjects:
 
     async def _rows(self) -> tuple[ObjectRow, ...]:
         filled = await self._filled_slots()
+        named = await self._named()
         return tuple(
             ObjectRow(
                 name=name,
@@ -179,11 +191,11 @@ class CredentialObjects:
                     "filled": slot.name in filled,
                 },
             )
-            for name, slot in sorted(self._named().items())
+            for name, slot in sorted(named.items())
         )
 
     async def _detail(self, name: str) -> ObjectDetail[CredentialSpec] | None:
-        slot = self._named().get(name)
+        slot = (await self._named()).get(name)
         if slot is None:
             return None
         async with workspace_tx() as connection:
@@ -201,6 +213,8 @@ class CredentialObjects:
                 description=slot.description,
                 extension=slot.extension,
                 host=slot.host if isinstance(slot.host, str) else "",
+                env=slot.env,
+                header=slot.header,
                 host_slot=slot.host.slot if isinstance(slot.host, HostChoice) else "",
                 host_options=slot.host.hosts if isinstance(slot.host, HostChoice) else (),
             ),
@@ -208,8 +222,9 @@ class CredentialObjects:
             updated_at=None if row is None else row.updated_at,
         )
 
-    def _named(self) -> dict[str, DeclaredSlot]:
-        return named_slots(self.slots)
+    async def _named(self) -> dict[str, DeclaredSlot]:
+        workspace_id = ws_current().workspace_id
+        return named_slots((*self.slots, *await self.workspace.declared(workspace_id)))
 
     async def _filled_slots(self) -> frozenset[str]:
         async with workspace_tx() as connection:
@@ -228,9 +243,10 @@ CREDENTIAL_DESCRIPTION = (
     "shown."
 )
 CREDENTIAL_GUIDANCE = (
-    "The BYOK secret slots installed extensions declare, filled or empty; values never appear "
-    "in any read. Listings filter and order on `extension` and `filled` — filter "
-    "`filled: false` for the slots still to fill, or `extension` for one extension's. "
+    "The BYOK secret slots installed extensions declare — for the whole deploy, or for this "
+    "workspace alone — filled or empty; values never appear in any read. Listings filter and "
+    "order on `extension` and `filled` — filter `filled: false` for the slots still to fill, or "
+    "`extension` for one extension's. "
     "Create and update are refused — filling or rotating a secret goes through the collection's "
     "request_credentials action, a private handoff a workspace admin authorizes. Delete clears a "
     "stored value (workspace admin only); the slot stays listed as empty because its "
