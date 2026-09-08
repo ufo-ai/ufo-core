@@ -98,6 +98,10 @@ BANNED_SLUG = "attio"
 CUSTOM_CONFIG_SLUG = "granola_mcp"
 CUSTOM_CONFIG_NAME = composio.CUSTOM_AUTH_CONFIGS[CUSTOM_CONFIG_SLUG]
 CUSTOM_CONFIG_ID = "ac_granola"
+COMPOSIO_AUTH_CONFIG_MAX_LIMIT = 50
+"""The page size Composio's v3.1 `/auth_configs` listing allows at most, pinned as the literal the
+API documents rather than read from the client — a client constant asserted against itself would
+let a page Composio refuses (its 400 is the connect request's Internal Server Error) pass here."""
 GRANOLA_SLUG = "GRANOLA_MCP_LIST_MEETINGS"
 TOOLKIT_CATALOG = {
     "github": ("GitHub", ["OAUTH2"], 871),
@@ -377,6 +381,45 @@ async def test_connect_link_rides_the_named_config_of_a_custom_credential_toolki
     assert redirect == COMPOSIO_CONSENT_URL
     assert lookups == [
         {"toolkit_slug": CUSTOM_CONFIG_SLUG, "limit": str(composio.AUTH_CONFIG_PAGE_LIMIT)}
+    ]
+
+
+async def test_named_config_lookup_pages_within_composios_limit() -> None:
+    """Composio caps an `/auth_configs` page at 50 and answers 400 to a larger one, so an oversized
+    page reads no config at all and the connect request dies before consent. The lookup asks for a
+    page Composio serves and follows `next_cursor`, so the named config is found wherever it sits
+    in the project's own order."""
+    lookups: list[dict[str, str]] = []
+    limit = composio.AUTH_CONFIG_PAGE_LIMIT
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/auth_configs"):
+            params = dict(request.url.params)
+            lookups.append(params)
+            if int(params["limit"]) > COMPOSIO_AUTH_CONFIG_MAX_LIMIT:
+                return httpx.Response(400, json={"error": "limit must be at most 50"})
+            if params.get("cursor") == SECOND_PAGE_CURSOR:
+                return httpx.Response(
+                    200, json={"items": [{"id": CUSTOM_CONFIG_ID, "name": CUSTOM_CONFIG_NAME}]}
+                )
+            filler = [
+                {"id": f"ac_other_{n}", "name": f"granola_mcp-other{n}"} for n in range(limit)
+            ]
+            return httpx.Response(200, json={"items": filler, "next_cursor": SECOND_PAGE_CURSOR})
+        if request.method == "POST" and request.url.path.endswith("/connected_accounts/link"):
+            assert json.loads(request.content)["auth_config_id"] == CUSTOM_CONFIG_ID
+            return httpx.Response(200, json={"redirect_url": COMPOSIO_CONSENT_URL})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    client = composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle))
+    redirect = await client.connect_link(
+        toolkit=CUSTOM_CONFIG_SLUG, user_id="ufo_ws", callback_url="https://ufo.example.com/back"
+    )
+    assert redirect == COMPOSIO_CONSENT_URL
+    assert limit <= COMPOSIO_AUTH_CONFIG_MAX_LIMIT
+    assert lookups == [
+        {"toolkit_slug": CUSTOM_CONFIG_SLUG, "limit": str(limit)},
+        {"toolkit_slug": CUSTOM_CONFIG_SLUG, "limit": str(limit), "cursor": SECOND_PAGE_CURSOR},
     ]
 
 
@@ -700,6 +743,32 @@ async def test_oauth_route_failed_consent_answers_loud_instead_of_reminting_cons
     body = response.body.decode()
     assert "was not connected" in body and "Close this tab" in body
     assert "chat" not in body and "agent" not in body
+
+
+async def test_oauth_route_answers_a_broker_failure_with_what_composio_said(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A start leg the broker cannot mint a link for answers the reason on the page: the deploy's
+    Composio project holds no config named for the toolkit, which an operator must create. An
+    unanswered `ComposioError` would reach the member as a bare Internal Server Error."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"items": []})
+
+    monkeypatch.setattr(
+        composio,
+        "composio_client",
+        lambda: composio.ComposioClient(api_key="test", transport=httpx.MockTransport(handle)),
+    )
+    ctx = context_for(composio_manifest.NAME, frozenset())
+    query = f"provider={CUSTOM_CONFIG_SLUG}&state=SEALED&callback={EXPECTED_REDIRECT_URI}"
+    with ws(uuid4()):
+        response = await provider.oauth_route(ctx, _request(query))
+    assert response.status_code == provider.NO_CONSENT_LINK_STATUS
+    assert "location" not in response.headers
+    body = response.body.decode()
+    assert CUSTOM_CONFIG_SLUG in body and CUSTOM_CONFIG_NAME in body
+    assert "Close this tab" in body
 
 
 def test_two_open_connector_namespaces_fail_loud() -> None:

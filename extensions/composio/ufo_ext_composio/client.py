@@ -39,7 +39,7 @@ ACTIVE_STATUS = "ACTIVE"
 TOOL_PAGE_LIMIT = 100
 MAX_LISTED_TOOLS = 500
 TOOLKIT_SEARCH_LIMIT = 10
-AUTH_CONFIG_PAGE_LIMIT = 100
+AUTH_CONFIG_PAGE_LIMIT = 50  # Composio's documented maximum page size on /auth_configs
 MAX_EXECUTE_ARGUMENTS_BYTES = 1024 * 1024
 IDEMPOTENCY_HEADER = "x-idempotency-key"
 TOOL_ROUTER_TIMEOUT_SECONDS = 30.0
@@ -397,18 +397,38 @@ class ComposioClient:
         """The id of the operator-created config called `name`, refusing loudly when the project
         holds no such config. The toolkit holds the member's own OAuth credentials in that one
         config, so neither another config for the toolkit nor a freshly created managed one
-        authenticates anything — a link minted against either dies at the provider's consent."""
-        listing = await self._get(
-            "/auth_configs",
-            params={"toolkit_slug": toolkit, "limit": str(AUTH_CONFIG_PAGE_LIMIT)},
-        )
-        items = listing.get("items")
-        for item in items if isinstance(items, list) else []:
-            if not isinstance(item, dict) or item.get("name") != name:
-                continue
-            config_id = item.get("id")
-            if isinstance(config_id, str) and config_id:
-                return config_id
+        authenticates anything — a link minted against either dies at the provider's consent.
+
+        The listing is walked page by page to its end: Composio caps a page at
+        `AUTH_CONFIG_PAGE_LIMIT` and answers 400 to a larger one, so a single oversized page reads
+        no config at all, and one page of the project's configs would hide the named one behind
+        Composio's own order."""
+        cursor = ""
+        while True:
+            params = {"toolkit_slug": toolkit, "limit": str(AUTH_CONFIG_PAGE_LIMIT)}
+            if cursor:
+                params["cursor"] = cursor
+            listing = await self._get("/auth_configs", params=params)
+            items = listing.get("items")
+            page = (
+                [item for item in items if isinstance(item, dict)]
+                if isinstance(items, list)
+                else []
+            )
+            for item in page:
+                if item.get("name") != name:
+                    continue
+                config_id = item.get("id")
+                if isinstance(config_id, str) and config_id:
+                    return config_id
+            next_cursor = listing.get("next_cursor")
+            if (
+                len(page) < AUTH_CONFIG_PAGE_LIMIT
+                or not isinstance(next_cursor, str)
+                or not next_cursor
+            ):
+                break
+            cursor = next_cursor
         raise ComposioError(
             404,
             f"toolkit {toolkit!r} connects through the auth config named {name!r}, which this "

@@ -23,6 +23,8 @@ COMPOSIO_ACCOUNT_PARAM = "connected_account_id"
 COMPOSIO_STATUS_PARAM = "status"
 REDIRECT_STATUS = 302
 FAILED_CONSENT_STATUS = 502
+NO_CONSENT_LINK_STATUS = 502
+BROKER_ERROR_CAP = 400
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,13 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
     the account id as the `code` core's `exchange` reads. A return leg carrying `status` but no
     account id is a consent that did not complete — answered loud, never by re-minting consent. The
     sealed `state` and core `callback` ride through untouched, so the grant still binds to the
-    member, agent, and conversation."""
+    member, agent, and conversation.
+
+    A broker that cannot mint the link answers with what Composio said, on the page the member is
+    already looking at: the failure names the toolkit and Composio's own words (the auth config the
+    project does not hold, a refused request), which is what an operator needs to repair the
+    deploy. An unanswered `ComposioError` reaches the member as a bare Internal Server Error that
+    names nothing."""
     params = request.query_params
     state = params.get("state", "")
     callback = params.get("callback", "")
@@ -89,11 +97,18 @@ async def oauth_route(ctx: ExtensionContext, request: Request) -> Response:
         f"{_origin(callback)}{OAUTH_ROUTE_MOUNT}"
         f"?{urlencode({'provider': provider, 'state': state, 'callback': callback})}"
     )
-    redirect = await composio.composio_client().connect_link(
-        toolkit=provider,
-        user_id=f"{composio.EXTERNAL_USER_PREFIX}{ctx.store.workspace_id}",
-        callback_url=return_url,
-    )
+    try:
+        redirect = await composio.composio_client().connect_link(
+            toolkit=provider,
+            user_id=f"{composio.EXTERNAL_USER_PREFIX}{ctx.store.workspace_id}",
+            callback_url=return_url,
+        )
+    except composio.ComposioError as error:
+        return Response(
+            status_code=NO_CONSENT_LINK_STATUS,
+            content=f"{provider} cannot be connected on this deploy: "
+            f"{error.body[:BROKER_ERROR_CAP]} Close this tab and tell an admin.",
+        )
     return Response(status_code=REDIRECT_STATUS, headers={"location": redirect})
 
 
