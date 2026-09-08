@@ -1,9 +1,16 @@
 import yaml
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
-from evals.suites.source_watch_offer import PR, watches, watches_nothing
+from evals.suites.source_watch_offer import (
+    PR,
+    SECOND_PR,
+    watches,
+    watches_each,
+    watches_nothing,
+)
 
 WATCHES = watches(PR)
+WATCHES_EACH = watches_each(PR, SECOND_PR)
 WATCHES_NOTHING = watches_nothing()
 
 
@@ -54,6 +61,22 @@ async def test_another_pull_request_is_not_this_one() -> None:
         _output(_apply("source_trigger", {"source": "github-ee65f064", "resource": other}))
     )
     assert not verdict.passed
+
+
+async def test_two_links_asked_for_need_a_landed_trigger_each() -> None:
+    first = _apply("source_trigger", {"source": "github-ee65f064", "resource": PR})
+    second = _apply("source_trigger", {"source": "github-ee65f064", "resource": SECOND_PR})
+    one = await WATCHES_EACH(_output(first))
+    assert not one.passed
+    assert SECOND_PR in one.reason
+    assert PR not in one.reason
+    refused = _apply(
+        "source_trigger", {"source": "github-ee65f064", "resource": SECOND_PR}, landed=False
+    )
+    assert not (await WATCHES_EACH(_output(first, refused))).passed
+    both = await WATCHES_EACH(_output(first, second))
+    assert both.passed
+    assert both.evidence == {"explains": 0, "applies": 2}
 
 
 async def test_a_verdict_carries_the_reads_the_agent_paid_first() -> None:

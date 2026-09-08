@@ -60,6 +60,17 @@ def resource_matches(provider: str, resource: str, body: str) -> bool:
     )
 
 
+def resource_keys(provider: str, resource: str) -> tuple[str, ...]:
+    """The keys a canonical resource is one thing under: two resources sharing a key are one thing
+    under two spellings, as GitHub's `pull/7` and `issues/7` are, since it numbers both in one
+    sequence. A resource a provider's rules do not read is keyed on itself, so it is one with its
+    own spelling and nothing else. Keys let a caller hold what it has seen in a set, where a
+    pairwise comparison would cost it a scan per resource."""
+    rules = RESOURCE_RULES.get(provider)
+    aliases = () if rules is None else rules.aliases(resource)
+    return aliases or (resource,)
+
+
 def resource_digest(resource: str) -> str:
     """A resource URL as one segment of an object name or a path, since the URL itself spells
     characters neither may carry."""

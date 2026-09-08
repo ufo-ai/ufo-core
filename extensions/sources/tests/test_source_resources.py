@@ -19,7 +19,12 @@ import pytest
 import sqlalchemy as sa
 from ufo_ext_sources.manifest import NAME
 from ufo_ext_sources.registry import CONNECTORS
-from ufo_ext_sources.resources import canonical_resource, resource_digest, resource_matches
+from ufo_ext_sources.resources import (
+    canonical_resource,
+    resource_digest,
+    resource_keys,
+    resource_matches,
+)
 from ufo_ext_sources.tools import _about_resource
 from ufo_ext_sources.triggers import SourceTrigger, SourceTriggerStore, source_trigger
 
@@ -83,6 +88,23 @@ def test_every_spelling_of_a_pull_request_link_canonicalizes_to_one_url() -> Non
         " https://github.com/metalcraftai/ufo/pull/1684 ",
     ):
         assert canonical_resource(GITHUB, spelling) == PR
+
+
+def test_a_pull_request_and_the_issue_of_its_number_share_a_key() -> None:
+    """GitHub numbers pull requests and issues in one sequence and files a pull request's comments
+    under `issues/<n>`, so the two canonical spellings of one number share a key; the next number
+    and another repository share none, and a provider without rules keys a resource on itself."""
+
+    def one(first: str, second: str, provider: str = GITHUB) -> bool:
+        return not set(resource_keys(provider, first)).isdisjoint(resource_keys(provider, second))
+
+    assert one(PR, PR)
+    assert one(PR, "https://github.com/metalcraftai/ufo/issues/1684")
+    assert not one(PR, "https://github.com/metalcraftai/ufo/pull/16840")
+    assert not one(PR, "https://github.com/metalcraftai/other/pull/1684")
+    linear = "https://linear.app/metalcraft/issue/UFO-1"
+    assert resource_keys("linear", linear) == (linear,)
+    assert not one(linear, "https://linear.app/metalcraft/issue/UFO-2", provider="linear")
 
 
 def test_an_issue_link_canonicalizes_under_its_own_path() -> None:

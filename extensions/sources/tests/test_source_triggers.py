@@ -15,6 +15,7 @@ import json
 from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from uuid import UUID, uuid4
 
 import pytest
@@ -1190,7 +1191,9 @@ async def test_a_link_to_a_synced_resource_is_offered_to_the_conversation(db: No
     assert f"{PR_URL}/files" not in said.text
     assert repr(feed.name) in said.text
     offer = said.text.removeprefix("<watch_offer>\n").removesuffix("\n</watch_offer>")
-    manifest_text = offer.split("call object_apply with this manifest:\n", 1)[1]
+    manifest_text = offer.split("call object_apply with this manifest:\n```yaml\n", 1)[1]
+    assert manifest_text.endswith("\n```")
+    manifest_text = manifest_text.removesuffix("\n```")
     assert manifest_text.splitlines()[0] == f"kind: {SOURCE_TRIGGER_KIND}"
     assert yaml.safe_load(manifest_text) == {
         "kind": SOURCE_TRIGGER_KIND,
@@ -1203,14 +1206,79 @@ async def test_a_link_to_a_synced_resource_is_offered_to_the_conversation(db: No
         assert await _watches(state, feed) == [PR_URL]
 
 
+async def test_each_offer_is_its_own_fenced_block(db: None) -> None:
+    """Two links earn two offers a reader tells apart: each manifest sits in its own yaml fence and
+    a blank line separates one offer from the next, so the second link's prose never reads as a
+    continuation of the first manifest."""
+    state = await _workspace()
+    await _github_feed(state)
+    other = f"{PR_URL.rsplit('/', 1)[0]}/9"
+    with ws(state.workspace_id), agent(state.agent_id):
+        offered = await _seen(state, UserPromptSubmit(text=f"Watch {PR_URL} and {other}."))
+
+    assert isinstance(offered, InjectContext)
+    body = offered.text.removeprefix("<watch_offer>\n").removesuffix("\n</watch_offer>")
+    offers = body.split("\n\n")
+    assert len(offers) == 2
+    assert [offer.split(" ", 1)[0] for offer in offers] == [PR_URL, other]
+    manifests = [offer.split("```yaml\n", 1)[1] for offer in offers]
+    assert all(manifest.endswith("\n```") for manifest in manifests)
+    assert [
+        yaml.safe_load(manifest.removesuffix("\n```"))["spec"]["resource"] for manifest in manifests
+    ] == [PR_URL, other]
+
+
+async def test_two_spellings_of_one_resource_earn_one_offer_spelled_as_its_page(db: None) -> None:
+    """GitHub's search payload names a pull request twice — `url` as an API issues link, `html_url`
+    as its page — and its comments file it under `issues/<n>`. One resource is one offer, and the
+    offer spells it the way the text spells its page, whichever spelling came first."""
+    state = await _workspace()
+    await _github_feed(state)
+    number = PR_URL.rsplit("/", 1)[1]
+    api_issue = f"https://api.github.com/repos/metalcraftai/ufo/issues/{number}"
+    payload = json.dumps({"url": api_issue, "html_url": PR_URL, "state": "open"})
+    with ws(state.workspace_id), agent(state.agent_id):
+        offered = await _seen(state, UserPromptSubmit(text=payload))
+
+    assert isinstance(offered, InjectContext)
+    body = offered.text.removeprefix("<watch_offer>\n").removesuffix("\n</watch_offer>")
+    assert body.count("call object_apply with this manifest:") == 1
+    assert body.startswith(f"{PR_URL} is a resource")
+
+
+async def test_a_message_of_thousands_of_links_costs_one_pass(db: None) -> None:
+    """The web surface admits a message holding thousands of links, and the hook body runs with no
+    await, so a duplicate check that compared each link with every link before it stalled the whole
+    event loop for tens of seconds. Each link costs a bounded set lookup, so the pass stays well
+    inside the hook's own timeout."""
+    state = await _workspace()
+    await _github_feed(state)
+    links = " ".join(
+        f"https://github.com/metalcraftai/ufo/pull/{number}" for number in range(1, 4001)
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        started = perf_counter()
+        offered = await _seen(state, UserPromptSubmit(text=links))
+        elapsed = perf_counter() - started
+
+    assert isinstance(offered, InjectContext)
+    assert offered.text.count("call object_apply with this manifest:\n") == WATCH_OFFER_MAX
+    assert elapsed < 10
+
+
 async def test_no_offer_repeats_for_a_resource_the_conversation_watches(db: None) -> None:
+    """Neither the link itself nor another spelling of the same number — the API issues form a
+    comment record carries for a pull request — is offered again."""
     state = await _workspace()
     feed, _ = await _github_feed(state)
+    number = PR_URL.rsplit("/", 1)[1]
+    api_issue = f"https://api.github.com/repos/metalcraftai/ufo/issues/{number}"
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(
             _context(state), _trigger_manifest(feed, state.conversation_id, resource=PR_URL)
         )
         assert await _seen(state, UserPromptSubmit(text=f"Any news on {PR_URL}?")) is None
+        assert await _seen(state, UserPromptSubmit(text=f"Comment filed at {api_issue}")) is None
 
 
 async def test_links_naming_nothing_synced_earn_no_offer(db: None) -> None:

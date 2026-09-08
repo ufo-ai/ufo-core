@@ -65,7 +65,12 @@ from ufo.sdk.sources import PageChange
 from ufo.sdk.subjects import SHARED_SUBJECT, subject_shared
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sources.pages import CONNECTION_OBJECT_KIND, PAGE_KIND
-from ufo_ext_sources.resources import canonical_resource, resource_digest, resource_matches
+from ufo_ext_sources.resources import (
+    canonical_resource,
+    resource_digest,
+    resource_keys,
+    resource_matches,
+)
 from ufo_ext_sources.triggers import (
     ListedTrigger,
     SourceTrigger,
@@ -84,6 +89,11 @@ WATCH_OFFER_MAX = 4
 list of things to watch, and every offer costs the turn context."""
 WATCH_OFFER_OPEN = "<watch_offer>"
 WATCH_OFFER_CLOSE = "</watch_offer>"
+MANIFEST_OPEN = "```yaml"
+MANIFEST_CLOSE = "```"
+OFFER_BREAK = "\n\n"
+"""Each offer's manifest sits in its own yaml fence and a blank line parts one offer from the next,
+so a second link's prose never reads as more of the first manifest."""
 LINK = re.compile(r"https://[^\s<>\"'`\\()\[\]{}]+")
 """A link ends where prose or markup around it begins: whitespace, a quote, an angle bracket, a
 backtick, a bracket, a brace, a parenthesis or a backslash. A coding child reports its pull request
@@ -459,7 +469,12 @@ async def on_link_seen(ctx: HookContext) -> HookOutcome:
     no standing waker, and the agent decides in the open whether the thread should hear about the
     resource. A conversation a member does not read — a spawned child's, a room this extension
     opened for an alert — is offered nothing, since a trigger applied there would wake nobody. Each
-    offer names the exact trigger to apply, so taking it is one call."""
+    offer names the exact trigger to apply, so taking it is one call.
+
+    One resource is one offer however many ways the text spells it — a provider's record names a
+    pull request as its page and again as an API link — and the offer spells it the way the text
+    spells its page, so a spelling read out of an API form never displaces the one a person would
+    write."""
     match ctx.payload:
         case UserPromptSubmit(text=text) | PostToolUse(output=text):
             pass
@@ -481,31 +496,45 @@ async def on_link_seen(ctx: HookContext) -> HookOutcome:
     feeds = await _reachable_feeds(ext, _shared_reader(ctx.turn.agent_id))
     if not feeds:
         return None
-    watched = await _require_triggers(ctx.ext).watched(conversation_id)
-    lines: list[str] = []
-    for link in links:
-        for feed in feeds:
-            resource = canonical_resource(feed.provider, link)
-            if resource is None or (feed.id, resource) in watched:
-                continue
-            watched |= {(feed.id, resource)}
-            manifest = yaml.safe_dump(
-                {
-                    "kind": SOURCE_TRIGGER_KIND,
-                    "name": trigger_name(_feed_name(feed), conversation_id, resource),
-                    "spec": {"connection": _feed_name(feed), "resource": resource},
-                },
-                sort_keys=False,
-            ).strip()
-            lines.append(
-                f"{resource} is a resource of the connection {_feed_name(feed)!r} "
-                f"({_feed_summary(feed)}) this workspace syncs. To hear its changes in this "
-                f"conversation, call object_apply with this manifest:\n{manifest}"
-            )
-    if not lines:
+    named = [
+        (feed, resource, link.lower().startswith(resource.lower()))
+        for link in links
+        for feed in feeds
+        if (resource := canonical_resource(feed.provider, link)) is not None
+    ]
+    providers = {feed.id: feed.provider for feed in feeds}
+    seen = {
+        (feed_id, key)
+        for feed_id, watched in await _require_triggers(ctx.ext).watched(conversation_id)
+        if feed_id in providers
+        for key in resource_keys(providers[feed_id], watched)
+    }
+    offers: list[str] = []
+    for feed, resource, _ in sorted(named, key=lambda spelled: not spelled[2]):
+        keys = {(feed.id, key) for key in resource_keys(feed.provider, resource)}
+        if seen & keys:
+            continue
+        seen |= keys
+        manifest = yaml.safe_dump(
+            {
+                "kind": SOURCE_TRIGGER_KIND,
+                "name": trigger_name(_feed_name(feed), conversation_id, resource),
+                "spec": {"connection": _feed_name(feed), "resource": resource},
+            },
+            sort_keys=False,
+        ).strip()
+        offers.append(
+            f"{resource} is a resource of the connection {_feed_name(feed)!r} "
+            f"({_feed_summary(feed)}) this workspace syncs. To hear its changes in this "
+            f"conversation, call object_apply with this manifest:\n"
+            f"{MANIFEST_OPEN}\n{manifest}\n{MANIFEST_CLOSE}"
+        )
+    if not offers:
         return None
     return InjectContext(
-        text="\n".join((WATCH_OFFER_OPEN, *lines[:WATCH_OFFER_MAX], WATCH_OFFER_CLOSE))
+        text="\n".join(
+            (WATCH_OFFER_OPEN, OFFER_BREAK.join(offers[:WATCH_OFFER_MAX]), WATCH_OFFER_CLOSE)
+        )
     )
 
 

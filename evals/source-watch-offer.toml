@@ -4,6 +4,7 @@ suites = ["source_watch_offer"]
 cases = [
   "watch-pr-from-message",
   "watch-pr-from-tool-output",
+  "watch-two-prs",
   "pr-mentioned-in-passing",
   "repository-link",
 ]
@@ -54,12 +55,38 @@ name = "prose-offer"
 [[arm.replacements]]
 path = "extensions/sources/ufo_ext_sources/tools.py"
 old = """
-                f"({_feed_summary(feed)}) this workspace syncs. To hear its changes in this "
-                f"conversation, call object_apply with this manifest:\\n{manifest}"
+            f"({_feed_summary(feed)}) this workspace syncs. To hear its changes in this "
+            f"conversation, call object_apply with this manifest:\\n"
+            f"{MANIFEST_OPEN}\\n{manifest}\\n{MANIFEST_CLOSE}"
 """
 new = """
-                f"({_feed_summary(feed)}) this workspace syncs. To hear its changes in this "
-                f"conversation, apply source_trigger "
-                f"{trigger_name(_feed_name(feed), conversation_id, resource)!r} with "
-                f"spec connection: {_feed_name(feed)}, resource: {resource}."
+            f"({_feed_summary(feed)}) this workspace syncs. To hear its changes in this "
+            f"conversation, apply source_trigger "
+            f"{trigger_name(_feed_name(feed), conversation_id, resource)!r} with "
+            f"spec connection: {_feed_name(feed)}, resource: {resource}."
+"""
+
+# Each manifest sits in its own yaml fence, and a blank line parts one offer from the next. This arm
+# spells the block the earlier way — manifests bare, offers joined by single newlines, so a second
+# link's prose follows the first manifest's last line directly. The two-link case is what it
+# measures; the one-link cases should hold in both arms.
+
+[[arm]]
+name = "unfenced-offer"
+[[arm.replacements]]
+path = "extensions/sources/ufo_ext_sources/tools.py"
+old = """
+            f"conversation, call object_apply with this manifest:\\n"
+            f"{MANIFEST_OPEN}\\n{manifest}\\n{MANIFEST_CLOSE}"
+"""
+new = """
+            f"conversation, call object_apply with this manifest:\\n{manifest}"
+"""
+[[arm.replacements]]
+path = "extensions/sources/ufo_ext_sources/tools.py"
+old = """
+            (WATCH_OFFER_OPEN, OFFER_BREAK.join(offers[:WATCH_OFFER_MAX]), WATCH_OFFER_CLOSE)
+"""
+new = """
+            (WATCH_OFFER_OPEN, "\\n".join(offers[:WATCH_OFFER_MAX]), WATCH_OFFER_CLOSE)
 """

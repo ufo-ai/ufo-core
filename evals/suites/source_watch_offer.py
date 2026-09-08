@@ -4,8 +4,9 @@ The sources extension offers a narrowed `source_trigger` for every such link the
 member's message, or in a tool result — as one `<watch_offer>` block naming the exact manifest. The
 offer is text; the agent applies the trigger, or does not. These cases grade that choice on the
 durable act alone: a successful `object_apply` of a `source_trigger` whose `resource` canonicalizes
-to the case's pull request. Two cases ask for the watch and should apply it, once from the member's
-own words and once from a file a tool read; two name a link in passing, or a repository, and should
+to the case's pull request. Three cases ask for the watch and should apply it, once from the
+member's own words, once from a file a tool read, and once for two pull requests in one message,
+which reads two offers out of one block; two name a link in passing, or a repository, and should
 apply nothing. The workspace holds one shared GitHub connection, seeded directly with its streams
 pinned far ahead so the sync driver never calls GitHub for it."""
 
@@ -41,6 +42,7 @@ GITHUB = "github"
 ACCOUNT = "metalcraftai"
 STREAMS = ("pull_requests", "workflow_runs")
 PR = "https://github.com/metalcraftai/ufo/pull/3112"
+SECOND_PR = "https://github.com/metalcraftai/ufo/pull/3113"
 REPOSITORY = "https://github.com/metalcraftai/ufo"
 NEVER = datetime(2100, 1, 1, tzinfo=UTC)
 PR_NOTE = WorkspaceFile(
@@ -176,6 +178,24 @@ def watches(resource: str) -> Grader:
     return DescribedGrader(f"applies a source_trigger narrowed to {resource}", grade)
 
 
+def watches_each(*resources: str) -> Grader:
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        landed = {_trigger_resource(call) for call in output.calls if call.succeeded}
+        evidence = _round_trips(output)
+        missing = [resource for resource in resources if resource not in landed]
+        if missing:
+            return CapabilityVerdict(
+                False, f"no source_trigger narrowed to {', '.join(missing)} landed", evidence
+            )
+        return CapabilityVerdict(
+            True, f"applied a source_trigger narrowed to each of {', '.join(resources)}", evidence
+        )
+
+    return DescribedGrader(
+        f"applies a source_trigger narrowed to each of {', '.join(resources)}", grade
+    )
+
+
 def watches_nothing() -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         applied = [
@@ -210,6 +230,14 @@ CASES = (
         workspace_files=(PR_NOTE,),
         seed=seed,
         digest_tag="source-watch-offer:watch-pr-from-tool-output:authored",
+    ),
+    CapabilityCase(
+        "watch-two-prs",
+        f"Two pull requests went up tonight, {PR} and {SECOND_PR}. Keep this thread posted on "
+        "both: their checks and their reviews.",
+        watches_each(PR, SECOND_PR),
+        seed=seed,
+        digest_tag="source-watch-offer:watch-two-prs:authored",
     ),
     CapabilityCase(
         "pr-mentioned-in-passing",
