@@ -3016,9 +3016,11 @@ async def test_list_conversations_orders_by_activity_and_scopes_to_the_workspace
     assert by_id[busy].turn_count == 2
     assert by_id[busy].last_turn_at == datetime(2026, 7, 3, tzinfo=UTC)
     assert by_id[busy].member_email is None
+    assert by_id[busy].opening_message == "ask 1"
     assert by_id[quiet].turn_count == 0
     assert by_id[quiet].last_turn_at is None
     assert by_id[quiet].member_email == "bee@example.com"
+    assert by_id[quiet].opening_message is None
     assert await context.list_conversations(limit=1) == (by_id[busy],)
 
 

@@ -377,6 +377,7 @@ async def test_ws_param_rescopes_to_any_workspace_by_uuid_or_domain(debug) -> No
     )
     assert by_uuid.status_code == 200
     assert [entry["id"] for entry in by_uuid.json()] == [str(conversation_id)]
+    assert [entry["opening_message"] for entry in by_uuid.json()] == ["ask 1"]
 
     by_domain = await client.get(
         "/surface/debug/api/conversations", params={"ws": "acme.com"}, headers=_auth(token)

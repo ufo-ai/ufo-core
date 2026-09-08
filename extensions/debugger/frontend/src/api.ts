@@ -6,6 +6,7 @@ export type ConversationSummary = {
   created_at: string;
   turn_count: number;
   last_turn_at: string | null;
+  opening_message: string | null;
 };
 
 export type TerminalFrame = {

@@ -1123,7 +1123,11 @@ class SourceView(BaseModel):
 class ConversationSummary(BaseModel):
     """One conversation as a read view lists it: identity and keying, the owning member's email,
     and its activity aggregates — deliberately spanning every surface in the workspace (the
-    context's own `surface` scopes keying and admission, never these reads)."""
+    context's own `surface` scopes keying and admission, never these reads).
+
+    `opening_message` is what the conversation's first turn came in with, bounded and unfenced by
+    `conversation_name`, so a listing states what a conversation is about without reading its
+    turns. A read view that does not carry it leaves it None."""
 
     id: UUID
     surface: str
@@ -1132,6 +1136,7 @@ class ConversationSummary(BaseModel):
     created_at: datetime
     turn_count: int
     last_turn_at: datetime | None
+    opening_message: str | None = None
 
     @field_validator("created_at", "last_turn_at")
     @classmethod
@@ -4181,7 +4186,19 @@ class SurfaceContext:
         self, limit: int = LIST_CONVERSATIONS_LIMIT
     ) -> tuple[ConversationSummary, ...]:
         """The workspace's conversations, newest activity first, across every surface — the read
-        half a debug view lists. Bounded, and RLS-scoped like every read on this context."""
+        half a debug view lists. Bounded, and RLS-scoped like every read on this context. Each row
+        carries the message its first turn came in with, so a listing reads as what its
+        conversations are about rather than as a column of keys."""
+        opening = (
+            sa.select(tables.turn.c.inbound)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+            )
+            .order_by(tables.turn.c.seq)
+            .limit(1)
+            .scalar_subquery()
+        )
         activity = (
             sa.select(
                 tables.turn.c.conversation_id,
@@ -4201,6 +4218,7 @@ class SurfaceContext:
                 tables.member.c.email,
                 activity.c.turn_count,
                 activity.c.last_turn_at,
+                opening.label("opening"),
             )
             .select_from(
                 tables.conversation.outerjoin(
@@ -4224,6 +4242,7 @@ class SurfaceContext:
                 created_at=row.created_at,
                 turn_count=row.turn_count or 0,
                 last_turn_at=row.last_turn_at,
+                opening_message=conversation_name(row.opening) if row.opening else None,
             )
             for row in rows
         )

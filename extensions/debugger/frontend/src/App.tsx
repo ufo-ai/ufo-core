@@ -10,10 +10,13 @@ export function App() {
   const [meta, setMeta] = useState<WorkspaceMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [picker, setPicker] = useState(params.ws ?? "");
+  const [convoPicker, setConvoPicker] = useState(params.c ?? "");
 
   const fleet = !params.ws && !params.c;
 
   useEffect(() => setPicker(params.ws ?? ""), [params.ws]);
+
+  useEffect(() => setConvoPicker(params.c ?? ""), [params.c]);
 
   useEffect(() => {
     document.title = (params.c ?? (fleet ? "Fleet" : "Conversations")) + " · ufo debugger";
@@ -42,6 +45,19 @@ export function App() {
             value={picker}
             onChange={(event) => setPicker(event.target.value)}
             placeholder="workspace domain or UUID"
+          />
+          <button type="submit">open</button>
+        </form>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            navigate({ c: convoPicker.trim() || null, t: null });
+          }}
+        >
+          <input
+            value={convoPicker}
+            onChange={(event) => setConvoPicker(event.target.value)}
+            placeholder="conversation UUID"
           />
           <button type="submit">open</button>
         </form>
