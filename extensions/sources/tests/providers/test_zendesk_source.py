@@ -181,3 +181,68 @@ async def test_attribute_definitions_lift_both_condition_lists_to_rows() -> None
         "attribute_definitions/att-1/all",
         "attribute_definitions/att-1/any",
     }
+
+
+async def test_article_comments_fan_out_over_articles() -> None:
+    """Zendesk publishes article comments only under their article — there is no flat collection to
+    ask for, and asking for one is a 404 the run cannot skip, so the stream never landed a row. The
+    walk enumerates articles, pages each one's comments, and follows the parent's own pages so an
+    article on page two is not missed."""
+    asked: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path == "/api/v2/help_center/articles.json":
+            if b"page=2" in request.url.query:
+                return httpx.Response(200, json={"articles": [{"id": 2}], "next_page": None})
+            return httpx.Response(
+                200,
+                json={
+                    "articles": [{"id": 1}],
+                    "next_page": "https://acme.zendesk.com/api/v2/help_center/articles.json?page=2",
+                },
+            )
+        if request.url.path == "/api/v2/help_center/articles/1/comments.json":
+            return httpx.Response(
+                200,
+                json={
+                    "comments": [{"id": 11, "body": "one", "updated_at": "2026-03-01T00:00:00Z"}],
+                    "next_page": None,
+                },
+            )
+        if request.url.path == "/api/v2/help_center/articles/2/comments.json":
+            return httpx.Response(
+                200,
+                json={
+                    "comments": [{"id": 22, "body": "two", "updated_at": "2026-03-02T00:00:00Z"}],
+                    "next_page": None,
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("article_comments", handle)
+
+    assert _refs(result) == {"article_comments/11", "article_comments/22"}
+    assert "/api/v2/help_center/article_comments.json" not in asked
+
+
+async def test_article_comment_votes_carry_every_id_they_were_reached_through() -> None:
+    """A vote sits two collections down, under a comment under an article. Each row carries both
+    ancestor ids because the record names neither, and that is what ties a vote back to its
+    article."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/help_center/articles.json":
+            return httpx.Response(200, json={"articles": [{"id": 5}], "next_page": None})
+        if request.url.path == "/api/v2/help_center/articles/5/comments.json":
+            return httpx.Response(200, json={"comments": [{"id": 50}], "next_page": None})
+        if request.url.path == "/api/v2/help_center/articles/5/comments/50/votes.json":
+            return httpx.Response(200, json={"votes": [{"id": 500, "value": 1}], "next_page": None})
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("article_comment_votes", handle)
+
+    assert _refs(result) == {"article_comment_votes/500"}
+    body = result.pages[0].body
+    assert '"article_id": 5' in body
+    assert '"comment_id": 50' in body

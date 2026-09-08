@@ -14,6 +14,7 @@ through the auth proxy the runner threads; this connector holds no token. The wr
 intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -51,6 +52,36 @@ _DATA_FIELD_OVERRIDES = {
     "ticket_activities": "activities",
     "schedules": "schedules",
     "deleted_tickets": "deleted_tickets",
+}
+
+
+@dataclass(frozen=True)
+class _Hop:
+    """One collection on the way to a child stream's rows: the path segment it sits at, the body key
+    holding its records, and — for a collection being walked as a parent — the field each descendant
+    row carries its id in."""
+
+    collection: str
+    records: str
+    stamp: str = ""
+
+
+# The Help Center and community collections Zendesk publishes only beneath a parent. Each stream is
+# the chain of collections leading to it, the last hop being its own rows: `article_comments` is
+# every article's comments, `article_comment_votes` every comment's votes. Only `articles`, `posts`
+# and the flat admin collections answer at a path of their own.
+_ARTICLES = _Hop("help_center/articles", "articles", "article_id")
+_POSTS = _Hop("community/posts", "posts", "post_id")
+_COMMENTS = _Hop("comments", "comments", "comment_id")
+
+_CHILD_COLLECTIONS: dict[str, tuple[_Hop, ...]] = {
+    "article_attachments": (_ARTICLES, _Hop("attachments", "article_attachments")),
+    "article_comments": (_ARTICLES, _Hop("comments", "comments")),
+    "article_votes": (_ARTICLES, _Hop("votes", "votes")),
+    "article_comment_votes": (_ARTICLES, _COMMENTS, _Hop("votes", "votes")),
+    "post_comments": (_POSTS, _Hop("comments", "comments")),
+    "post_votes": (_POSTS, _Hop("votes", "votes")),
+    "post_comment_votes": (_POSTS, _COMMENTS, _Hop("votes", "votes")),
 }
 
 # `routing/attributes/definitions` answers with the one nested body on this surface: two lists of
@@ -134,21 +165,15 @@ ZENDESK_STREAMS: list[StreamSpec] = [
     _stream("categories", source_object="help_center/categories"),
     _stream("sections", source_object="help_center/sections"),
     _stream("articles", source_object="help_center/articles", canonical=True),
-    _stream(
-        "article_attachments", source_object="help_center/article_attachments", cursor_field=None
-    ),
-    _stream("article_comments", source_object="help_center/article_comments", canonical=True),
-    _stream(
-        "article_comment_votes",
-        source_object="help_center/article_comment_votes",
-        cursor_field=None,
-    ),
-    _stream("article_votes", source_object="help_center/article_votes", cursor_field=None),
+    _stream("article_attachments", cursor_field=None),
+    _stream("article_comments", canonical=True),
+    _stream("article_comment_votes", cursor_field=None),
+    _stream("article_votes", cursor_field=None),
     _stream("topics", source_object="community/topics"),
     _stream("posts", source_object="community/posts"),
-    _stream("post_comments", source_object="community/post_comments"),
-    _stream("post_comment_votes", source_object="community/post_comment_votes", cursor_field=None),
-    _stream("post_votes", source_object="community/post_votes", cursor_field=None),
+    _stream("post_comments"),
+    _stream("post_comment_votes", cursor_field=None),
+    _stream("post_votes", cursor_field=None),
 ]
 
 
@@ -247,6 +272,12 @@ class ZendeskConnector(RestConnector):
                 async for page in self._paginate_attribute_definitions(client, stream):
                     yield page
                 return
+            if stream.name in _CHILD_COLLECTIONS:
+                async for page in self._walk_children(
+                    client, _CHILD_COLLECTIONS[stream.name], "/api/v2", {}
+                ):
+                    yield page
+                return
             async for page in self._paginate_default(client, stream):
                 yield page
         except httpx.HTTPStatusError as error:
@@ -279,6 +310,44 @@ class ZendeskConnector(RestConnector):
             if data.get("end_of_stream"):
                 return
             path = self._next_page_path(data.get("after_url") or data.get("next_page"))
+
+    async def _walk_children(
+        self,
+        client: httpx.AsyncClient,
+        hops: tuple[_Hop, ...],
+        base: str,
+        stamps: dict[str, Any],
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """One hop of a child collection's chain: page this collection, and either yield its rows as
+        the stream's own or descend per id to the next hop.
+
+        Zendesk publishes these only under their parent, so the chain is the whole read: there is
+        no flat collection to ask for, and asking for one is a 404 the run cannot skip. Each row
+        carries the ids it was reached through, because the record itself does not name every
+        ancestor and that provenance is what ties a comment's vote back to its article."""
+        hop, rest = hops[0], hops[1:]
+        collection = f"{base}/{hop.collection}"
+        path: str | None = f"{collection}.json?per_page={PAGE_SIZE}"
+        while path:
+            data = await self._get(client, path)
+            records = [record for record in data.get(hop.records) or [] if isinstance(record, dict)]
+            if not rest:
+                stamped = [{**record, **stamps} for record in records]
+                if stamped:
+                    yield stamped
+            else:
+                for record in records:
+                    identity = record.get("id")
+                    if identity is None:
+                        continue
+                    async for page in self._walk_children(
+                        client,
+                        rest,
+                        f"{collection}/{identity}",
+                        {**stamps, hop.stamp: identity},
+                    ):
+                        yield page
+            path = self._next_page_path(data.get("next_page"))
 
     async def _paginate_attribute_definitions(
         self, client: httpx.AsyncClient, stream: StreamSpec
