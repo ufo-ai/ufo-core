@@ -212,7 +212,11 @@ from ufo.runtime.tools.registry import (
     ToolRegistry,
 )
 from ufo.runtime.transcript import Transcript
-from ufo.runtime.turns.activity import SKILL_LOAD_TOOL, ActivitySummarizer
+from ufo.runtime.turns.activity import (
+    ACTIVITY_RECENT_LABELS,
+    SKILL_LOAD_TOOL,
+    ActivitySummarizer,
+)
 from ufo.runtime.turns.audience import Audience, audience_member, audience_subjects
 from ufo.runtime.turns.contracts import Contract, freeform_result_contract
 from ufo.runtime.turns.delivery_register import DIRECT_PROSE_RESULT_MAX_CHARS
@@ -3511,12 +3515,19 @@ class TurnEngine:
     def _start_activity(self, call: ToolUseBlock, goal: str) -> None:
         self._activity.sequence += 1
         sequence = self._activity.sequence
-        task = asyncio.create_task(self._generate_activity(call, goal, sequence))
+        recent = tuple(self._activity.labels.values())[-ACTIVITY_RECENT_LABELS:]
+        task = asyncio.create_task(self._generate_activity(call, goal, sequence, recent))
         self._activity.tasks.add(task)
         task.add_done_callback(self._activity.tasks.discard)
 
-    async def _generate_activity(self, call: ToolUseBlock, goal: str, sequence: int) -> None:
-        activity = await self.activity_summarizer.summarize(call, goal)
+    async def _generate_activity(
+        self,
+        call: ToolUseBlock,
+        goal: str,
+        sequence: int,
+        recent: tuple[str, ...],
+    ) -> None:
+        activity = await self.activity_summarizer.summarize(call, goal, recent)
         if activity is not None:
             self._activity.labels[call.id] = activity
         async with self._activity.lock:

@@ -19,6 +19,7 @@ from ufo.runtime.hub import (
 from ufo.runtime.turns.activity import (
     ACTIVITY_ARGUMENT_CHARS,
     ACTIVITY_GOAL_CHARS,
+    ACTIVITY_RECENT_LABELS,
     ActivitySummarizer,
     activity_line,
 )
@@ -61,6 +62,18 @@ async def _check_activity_summarizer_sends_only_bounded_tool_calls():
     assert len(payload["goal"]) == ACTIVITY_GOAL_CHARS
     assert payload["tool_call"]["name"] == "edit"
     assert len(payload["tool_call"]["arguments"]) == ACTIVITY_ARGUMENT_CHARS + 1
+
+
+async def _check_activity_summarizer_sends_the_labels_already_shown():
+    model = _ActivityModel()
+    await ActivitySummarizer(model).summarize(
+        ToolUseBlock(id="e", name="edit", input={}),
+        "Update the release notes",
+        tuple(f"Label {index}" for index in range(ACTIVITY_RECENT_LABELS + 2)),
+    )
+    assert model.request is not None
+    payload = json.loads(model.request.messages[0].content)
+    assert payload["recent_labels"] == ["Label 2", "Label 3", "Label 4", "Label 5", "Label 6"]
 
 
 def test_activity_line_normalizes_without_truncating():
@@ -369,6 +382,6 @@ async def _check_publish_from_another_loop_thread_delivers():
 
 async def test_hub_async_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 21
+    assert len(checks) == 22
     for check in checks:
         await check()

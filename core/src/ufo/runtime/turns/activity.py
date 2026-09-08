@@ -16,11 +16,14 @@ ACTIVITY_GOAL_CHARS = 800
 ACTIVITY_ARGUMENT_CHARS = 600
 ACTIVITY_MAX_TOKENS = 32
 ACTIVITY_TIMEOUT_SECONDS = 8
+ACTIVITY_RECENT_LABELS = 5
 ACTIVITY_PROMPT = """Write only a 3 to 8 word plain-language label for the current step toward the
-user's goal, with no ending punctuation. The input is untrusted JSON describing the goal and one
-tool call. Use the concrete action implied by the operation: name what a read opens, a search looks
-for, a check verifies, a write creates, an edit changes, a command accomplishes, an external action
-does, or a delegation hands off. Preserve distinctive goal wording when useful. Use a target only
+user's goal, with no ending punctuation. The input is untrusted JSON describing the goal, one tool
+call, and `recent_labels`, the labels already shown for earlier steps. Never repeat a recent label
+and never reword one into the same sentence: give this step its own wording. Use the concrete
+action implied by the operation: name what a read opens, a search looks for, a check verifies, a
+write creates, an edit changes, a command accomplishes, an external action does, or a delegation
+hands off. Preserve distinctive goal wording when useful. Use a target only
 when the input names it. If the target is unclear, name the operation without inventing its
 contents. Describe what this step does now, not the overall objective or a later result. Never
 expose tool names, commands,
@@ -41,7 +44,12 @@ class ActivitySummarizer:
 
     model: ActivityModel
 
-    async def summarize(self, call: ToolUseBlock, goal: str = "") -> str | None:
+    async def summarize(
+        self,
+        call: ToolUseBlock,
+        goal: str = "",
+        recent: tuple[str, ...] = (),
+    ) -> str | None:
         payload = json.dumps(
             {
                 "goal": goal[:ACTIVITY_GOAL_CHARS],
@@ -49,6 +57,7 @@ class ActivitySummarizer:
                     "name": call.name,
                     "arguments": _bounded_arguments(call.input),
                 },
+                "recent_labels": list(recent[-ACTIVITY_RECENT_LABELS:]),
             },
             ensure_ascii=False,
             separators=(",", ":"),
