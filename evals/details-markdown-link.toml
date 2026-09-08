@@ -45,9 +45,9 @@ name = "no-coding-link"
 
 [[arm.replacements]]
 path = "extensions/coding/ufo_ext_coding/skills/coding/SKILL.md"
-old = '''3. Link the file the child wrote with Markdown under the shared delivery register, or use
+old = '''   link the file the child wrote with Markdown under the shared delivery register, or use
    `share_file` when the member's ask carries a share trigger, then reply.'''
-new = '''3. Reply under the shared delivery register and use `share_file` only when the member's ask
+new = '''   reply under the shared delivery register and use `share_file` only when the member's ask
    carries a share trigger.'''
 
 [[arm]]
