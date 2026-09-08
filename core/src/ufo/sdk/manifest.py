@@ -87,6 +87,9 @@ from ufo.runtime.ext.conversation_slots import (
 from ufo.runtime.ext.conversation_slots import (
     TasksSlotPayload as TasksSlotPayload,
 )
+from ufo.runtime.ext.hooks import (
+    HookChain as HookChain,
+)
 from ufo.runtime.ext.manifest import (
     SETUP_TOOLS as SETUP_TOOLS,
 )
@@ -98,6 +101,9 @@ from ufo.runtime.ext.manifest import (
 )
 from ufo.runtime.ext.manifest import (
     ConnectorProvider as ConnectorProvider,
+)
+from ufo.runtime.ext.manifest import (
+    ContextBoundarySpec as ContextBoundarySpec,
 )
 from ufo.runtime.ext.manifest import (
     CredentialSlot as CredentialSlot,

@@ -65,7 +65,11 @@ from ufo.runtime.authority import (
     ExecutionAuthority,
     turn_authority,
 )
-from ufo.runtime.compaction import Compaction
+from ufo.runtime.context_boundary import (
+    BoundaryInputs,
+    context_boundary_tools,
+    select_context_boundary,
+)
 from ufo.runtime.engine import (
     ADOPTED_CLAIM,
     MAIN_ROUND_LIMIT,
@@ -762,7 +766,7 @@ def reset_runtime() -> None:
 
 async def _execute_turn(workspace_id: str, turn_id: str) -> str:
     """The turn body, run directly in the `turn_workflow` DBOS workflow — not wrapped in a step, so
-    the model-round, tool-dispatch, arrival-drain, and compaction steps inside `engine.run()` are
+    the model-round, tool-dispatch, arrival-drain, and rollover steps inside `engine.run()` are
     the workflow's own steps and memoize for crash-recovery replay. Setup (claim, load, sandbox
     create-or-attach, engine build) re-runs each recovery and is idempotent; messages that arrive
     after the claim land on the conversation's inbound queue, which the engine drains at each round
@@ -1109,7 +1113,11 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 )
             )
         system_prompt = assembled.system_prompt
-        tools = assembled.tools
+        boundary = select_context_boundary(runtime.config, runtime.manifests)
+        offers_tool = context_boundary_tools(boundary, runtime.manifests)
+        tools = ToolRegistry(
+            tuple(tool for tool in assembled.tools.tools if offers_tool(tool.name))
+        )
         tool_ext = assembled.tool_ext
         verbs = assembled.verbs
         hooks = assembled.hooks
@@ -1192,13 +1200,16 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 )
             ),
             transcript=Transcript(blob=runtime.blob, conversation_id=turn.conversation_id),
-            compaction=Compaction(
-                serving=serving,
-                blob=runtime.blob,
-                conversation_id=turn.conversation_id,
-                hooks=hooks,
-                turn=turn,
-                agent=resolved,
+            context=boundary.build(
+                BoundaryInputs(
+                    serving=serving,
+                    blob=runtime.blob,
+                    conversation_id=turn.conversation_id,
+                    hooks=hooks,
+                    turn=turn,
+                    agent=resolved,
+                    sandbox=sandbox,
+                )
             ),
             hub=runtime.hub,
             lineage=lineage,

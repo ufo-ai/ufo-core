@@ -168,12 +168,12 @@ jobs:
           from importlib.metadata import entry_points
 
           from ufo.harness.agent import AgentDefinition, AgentEngine, Message, ToolDefinition
-          from ufo.harness.context import CompactionHarness
+          from ufo.harness.context import ContextWindow
           from ufo.harness.rounds import ModelRoundRunner
           from ufo.harness.sandbox.protocol import SandboxCommands
 
           assert AgentDefinition and AgentEngine and Message and ToolDefinition
-          assert CompactionHarness and ModelRoundRunner and SandboxCommands
+          assert ContextWindow and ModelRoundRunner and SandboxCommands
 
           os.chdir("/tmp")
           import evals.registry

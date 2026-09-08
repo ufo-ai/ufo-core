@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 
-import pytest
-
-from ufo.harness.context import CompactionHarness, ContextWindow, is_context_overflow
+from ufo.harness.context import ContextWindow, is_context_overflow
 
 
 @dataclass(frozen=True)
@@ -13,12 +11,11 @@ class Message:
     images: int = 0
 
 
-def policy(**overrides: int) -> ContextWindow[Message]:
+def window(**overrides: int) -> ContextWindow[Message]:
     values = {
         "context_tokens": 100,
-        "summary_tokens": 10,
+        "reserve_tokens": 10,
         "buffer_tokens": 20,
-        "keep_messages": 2,
         "chars_per_token": 2,
         "image_tokens": 8,
         **overrides,
@@ -32,90 +29,17 @@ def policy(**overrides: int) -> ContextWindow[Message]:
     )
 
 
-def test_window_selects_complete_rounds_and_counts_all_content() -> None:
-    messages = (
-        Message("user", "request"),
-        Message("assistant", "call one"),
-        Message("user", "result one"),
-        Message("assistant", "call two"),
-        Message("user", "result two"),
-    )
+def test_the_line_is_the_window_less_the_reserve_and_the_buffer_unless_pinned() -> None:
+    assert window().trigger == 70
+    assert window(trigger_tokens=20).trigger == 20
 
-    selection = policy().select(messages)
 
-    assert selection is not None
-    assert selection.head == ((messages[0],), (messages[1], messages[2]))
-    assert selection.tail == messages[3:]
-
-    window = policy(trigger_tokens=20)
+def test_tokens_count_role_text_opaque_chars_and_images() -> None:
     messages = (Message("user", "abcdefghij", opaque=10, images=1),) * 3
 
-    assert window.tokens(messages) == 60
-    assert window.should_compact(messages, force=False, automatic_suppressed=False)
-    assert not window.should_compact(messages, force=False, automatic_suppressed=True)
-
-
-def test_compaction_boundaries_require_a_head_and_a_fitting_replacement() -> None:
-    window = policy(keep_messages=2)
-
-    assert not window.should_compact(
-        (Message("user", "one"), Message("assistant", "two")),
-        force=True,
-        automatic_suppressed=False,
-    )
-
-    with pytest.raises(RuntimeError, match="stays over the compaction trigger"):
-        policy().require_budget(
-            before_tokens=100,
-            after_tokens=80,
-            tail_tokens=10,
-            fixed_replacement_tokens=10,
-        )
+    assert window().tokens(messages) == 60
 
 
 def test_context_overflow_detection_uses_class_and_message() -> None:
     assert is_context_overflow(RuntimeError("prompt is too large"))
     assert not is_context_overflow(RuntimeError("network closed"))
-
-
-@pytest.mark.asyncio
-async def test_compaction_retries_external_overflow_and_missing_anchors() -> None:
-    messages = tuple(
-        Message("assistant" if index % 2 else "user", str(index)) for index in range(8)
-    )
-    summaries: list[tuple[int, tuple[str, ...]]] = []
-    checkpoints: list[str] = []
-
-    async def summarize(
-        head: tuple[tuple[Message, ...], ...], missing: tuple[str, ...]
-    ) -> tuple[str, int]:
-        summaries.append((len(head), missing))
-        if len(summaries) == 1:
-            raise RuntimeError("prompt is too large")
-        return ("carried" if missing else "first"), 1
-
-    async def open_boundary(
-        head: tuple[tuple[Message, ...], ...], tail: tuple[Message, ...], before: int
-    ) -> str:
-        return "boundary"
-
-    async def checkpoint(candidate: str, boundary: str) -> None:
-        checkpoints.append(candidate)
-
-    result = await CompactionHarness(
-        window=policy(trigger_tokens=1),
-        summarize=summarize,
-        open_boundary=open_boundary,
-        verify=lambda summary, boundary, retried: f"{summary}:{retried}",
-        missing=lambda candidate: ("anchor",) if candidate == "first:False" else (),
-        retry_failed=lambda candidate, error: candidate,
-        failed_usage=lambda error: (),
-        after=lambda candidate: (Message("user", candidate), messages[-2], messages[-1]),
-        fixed_replacement_tokens=lambda boundary: 1,
-        checkpoint=checkpoint,
-        max_context_retries=1,
-    ).run(messages)
-
-    assert summaries == [(3, ()), (2, ()), (3, ("anchor",))]
-    assert result.usages == (1, 1)
-    assert checkpoints == ["carried:True"]

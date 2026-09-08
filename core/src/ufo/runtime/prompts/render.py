@@ -1,7 +1,9 @@
 """The system-prompt render engine: fill a template's slots, validate its vars, digest the result.
 
 A profile template is core-shipped prose with slots the renderer fills: {{agent-prompt}} (the
-agent's own instructions — only the shell carries this slot), {{skill_index}} (the loadable-skill
+agent's own instructions — only the shell carries this slot), {{context_window}} (the stable note on
+how the window behaves at the boundary — the active context strategy owns the words, so a deploy
+never promises a tool its boundary does not offer), {{skill_index}} (the loadable-skill
 <available_skills> block), {{sections}} (the capability sections packs contribute — the seam),
 {{citation}} (the one shared citation block, kept in citation.md and injected here),
 and {{knowledge_cutoff}} (the resolved model's knowledge boundary from knowledge_cutoff.md — the
@@ -29,17 +31,20 @@ AGENT_PROMPT_SLOT = "{{agent-prompt}}"
 SKILL_INDEX_SLOT = "{{skill_index}}"
 SECTIONS_SLOT = "{{sections}}"
 CITATION_SLOT = "{{citation}}"
+CONTEXT_WINDOW_SLOT = "{{context_window}}"
 DELIVERY_REGISTER_SLOT = "{{delivery_register}}"
 KNOWLEDGE_CUTOFF_SLOT = "{{knowledge_cutoff}}"
 CUTOFF_VAR = "{{cutoff}}"
 
 _PROMPTS_DIR = Path(__file__).parent
+CITATION_BLOCK = (_PROMPTS_DIR / "citation.md").read_text().strip()
 SHELL = (
     (_PROMPTS_DIR / "shell.md").read_text().replace(DELIVERY_REGISTER_SLOT, DELIVERY_REGISTER_BLOCK)
 )
-CITATION_BLOCK = (_PROMPTS_DIR / "citation.md").read_text().strip()
+"""The core shell with every core block filled but `{{context_window}}`: the boundary extension the
+deploy selected owns those words and ships the file they live in, and the renderer fills the slot
+from the selected spec rather than at import."""
 KNOWLEDGE_CUTOFF_BLOCK = (_PROMPTS_DIR / "knowledge_cutoff.md").read_text().strip()
-COMPACTION_SYSTEM_PROMPT = (_PROMPTS_DIR / "compaction.md").read_text().strip()
 SUBAGENT_OUTPUT_DISCIPLINE = (
     (_PROMPTS_DIR / "subagent_shell.md")
     .read_text()
@@ -47,6 +52,9 @@ SUBAGENT_OUTPUT_DISCIPLINE = (
     .replace(CITATION_SLOT, CITATION_BLOCK)
     .replace(DELIVERY_REGISTER_SLOT, DELIVERY_REGISTER_BLOCK)
 )
+"""The subagent shell with every core block filled but `{{context_window}}`: the strategy the deploy
+runs owns those words, and `subagent_system_prompt` fills the slot per deploy rather than at
+import."""
 
 
 @dataclass(frozen=True)
@@ -68,17 +76,25 @@ def render_system_prompt(
     skills: Sequence[tuple[str, str]] = (),
     *,
     knowledge_cutoff: str,
+    context_window: str = "",
 ) -> RenderedPrompt:
     """The main agent's system prompt: the core shell with the agent's own prompt, the pack-
     contributed capability sections, the loadable-skill index, and the model's knowledge cutoff
     slotted in. `knowledge_cutoff` is the resolved model's `ModelSpec.knowledge_cutoff` (a machine
     `YYYY-MM` date) — the spec guarantees every model declares one, so the prompt never ships
     without the boundary. The machine `YYYY-MM` date renders to the human month the prompt shows —
-    `"2026-02"` → `"February 2026"`."""
+    `"2026-02"` → `"February 2026"`. `context_window` is the active context strategy's own note on
+    how the window behaves at its boundary; a deploy that hands none renders no note rather than the
+    words of a strategy it does not run."""
     human_cutoff = datetime.strptime(knowledge_cutoff, "%Y-%m").strftime("%B %Y")
     block = KNOWLEDGE_CUTOFF_BLOCK.replace(CUTOFF_VAR, human_cutoff)
     return render_template(
-        SHELL.replace(KNOWLEDGE_CUTOFF_SLOT, block), agent_prompt, {}, skills, sections
+        SHELL.replace(KNOWLEDGE_CUTOFF_SLOT, block),
+        agent_prompt,
+        {},
+        skills,
+        sections,
+        context_window=context_window,
     )
 
 
@@ -88,6 +104,7 @@ def render_template(
     variables: Mapping[str, str],
     skills: Sequence[tuple[str, str]],
     sections: Sequence[tuple[str, str]],
+    context_window: str = "",
 ) -> RenderedPrompt:
     filled_agent_prompt = _substitute_vars(agent_prompt, variables)
     if filled_agent_prompt and AGENT_PROMPT_SLOT not in template:
@@ -97,6 +114,7 @@ def render_template(
         .replace(CITATION_SLOT, CITATION_BLOCK)
         .replace(SECTIONS_SLOT, "\n\n".join(body for _, body in sorted(sections)))
         .replace(AGENT_PROMPT_SLOT, filled_agent_prompt)
+        .replace(CONTEXT_WINDOW_SLOT, context_window)
     )
     if unresolved := frozenset(PROMPT_VAR_RE.findall(filled)):
         raise ValueError(f"prompt has unresolved slots: {', '.join(sorted(unresolved))}")

@@ -3,6 +3,7 @@ conversation, turn, and blob records into a diagnostic copy, while the original 
 byte-identical. The workspace rows and transcripts are real; only the historical run JSON is
 synthesized in the scrubbed shape the stale recorder produced."""
 
+import re
 from datetime import UTC, datetime, timedelta
 from json import loads
 from uuid import UUID, uuid4
@@ -11,17 +12,17 @@ import lz4.frame
 import sqlalchemy as sa
 
 from evals.harness.harness import EvalCaseResult, EvalReport, JsonObject
-from evals.harness.viewer import EvalRun, load_runs
+from evals.harness.viewer import VIEWER_PAGE, EvalRun, load_runs
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import Message, ToolResultBlock, ToolUseBlock
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.transcript import (
-    CompactionSummary,
-    CompactionWindow,
     Conversation,
-    compaction_key,
+    RecoveryRecord,
+    RolloverWindow,
+    rollover_key,
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -130,10 +131,12 @@ async def _seed_case_conversation(
             ),
         )
     )
-    summary = CompactionSummary(
-        intent="sentinel intent",
-        current_work="sentinel work",
-        next_step="sentinel next",
+    recovery = RecoveryRecord(
+        user_inputs=("sentinel member words",),
+        checklist=("sentinel checklist line",),
+        handoff="sentinel handoff",
+        first_entry_id=1,
+        last_entry_id=4,
     )
     windows = {
         "before": (Message(role="user", content="sentinel before"),),
@@ -141,12 +144,12 @@ async def _seed_case_conversation(
     }
     for half, messages in windows.items():
         await blob.put(
-            compaction_key(conversation_id, 1, half),
-            lz4.frame.compress(CompactionWindow(messages=messages).model_dump_json().encode()),
+            rollover_key(conversation_id, 1, half),
+            lz4.frame.compress(RolloverWindow(messages=messages).model_dump_json().encode()),
         )
     await blob.put(
-        compaction_key(conversation_id, 1, "summary"),
-        lz4.frame.compress(summary.model_dump_json().encode()),
+        rollover_key(conversation_id, 1, "recovery"),
+        lz4.frame.compress(recovery.model_dump_json().encode()),
     )
     return conversation_id, turn_id
 
@@ -177,7 +180,7 @@ def _scrubbed_case(name: str) -> EvalCaseResult:
                 "tokens": 55,
                 "costMicroUsd": 4,
                 "log": None,
-                "compactions": 1,
+                "rollovers": 1,
                 "grader": {"answer": True, "confidence": 40},
                 "trajectory": None,
             }
@@ -245,8 +248,8 @@ async def test_reconstruction_rebuilds_evidence_without_mutating_the_original_ru
         '"reconstructed": true',
         '"confidence": 40',
         '"tokens": 55',
-        '"compactions": 1',
-        "sentinel intent",
+        '"rollovers": 1',
+        "sentinel handoff",
         "sentinel before",
         "solution.py",
         "public question",
@@ -267,10 +270,11 @@ async def test_reconstruction_rebuilds_evidence_without_mutating_the_original_ru
     calls = attempt["calls"]
     assert isinstance(calls, list) and isinstance(calls[0], dict)
     assert calls[0]["input"] == {"command": "sentinel durable command"}
-    records = attempt["compactionRecords"]
+    records = attempt["rolloverRecords"]
     assert isinstance(records, list) and isinstance(records[0], dict)
     assert records[0]["index"] == 1
-    assert records[0]["summary"]["intent"] == "sentinel intent"
+    assert records[0]["recovery"]["handoff"] == "sentinel handoff"
+    assert records[0]["recovery"]["last_entry_id"] == 4
     assert records[0]["before_count"] == 1
     assert unmatched.evidence["reconstructed"] is True
     unmatched_attempts = unmatched.evidence["attempts"]
@@ -289,3 +293,14 @@ async def test_reconstruction_rebuilds_evidence_without_mutating_the_original_ru
     assert trajectory["conversation_id"] == str(conversation_id)
     assert trajectory["turn_id"] == str(turn_id)
     assert trajectory["status"] == "done"
+
+
+def test_the_viewer_reads_the_rollover_keys_the_attempt_writes() -> None:
+    """The run viewer names the attempt keys it renders; a key the harness writes under another name
+    falls into the raw evidence dump and the per-boundary section never shows."""
+    keys = re.search(r"const ATTEMPT_KEYS = new Set\(\[(.*?)\]\);", VIEWER_PAGE, re.S)
+    assert keys is not None
+    named = set(re.findall(r"'([A-Za-z]+)'", keys.group(1)))
+    assert {"rollovers", "rolloverRecords", "tokens", "costMicroUsd"} <= named
+    assert "compaction" not in VIEWER_PAGE.lower()
+    assert "attempt.rolloverRecords" in VIEWER_PAGE and "attempt.rollovers" in VIEWER_PAGE

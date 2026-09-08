@@ -316,7 +316,7 @@ def _grader(item: ManifestCase, record: GoldRecord, path: str):
             "behavior": behavior,
             "confidence": min(confidence, 100),
             "toolCount": len(output.calls),
-            "compactions": output.compactions,
+            "rollovers": output.rollovers,
         }
         if not formatted:
             return CapabilityVerdict(False, "missing ANSWER or valid CONFIDENCE", evidence)
@@ -433,7 +433,7 @@ def _behavior(
             return valid, "answered directly" if valid else "used a tool on a restraint case"
         case "compaction_retain":
             retained = f"RETAINED: RETENTION-{item.id}" in output.response
-            valid = output.compactions >= 1 and retained
+            valid = output.rollovers >= 1 and retained
             reason = (
                 "retained through compaction"
                 if valid

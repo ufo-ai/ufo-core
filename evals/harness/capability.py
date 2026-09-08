@@ -42,7 +42,7 @@ from evals.harness.judge import (
 from evals.harness.timing import CaseTiming
 from ufo.blob import WorkspaceBlobStore
 from ufo.runtime.tools.registry import OBJECT_ACTION_TOOL
-from ufo.runtime.turns.transcript import CompactionSummary
+from ufo.runtime.turns.transcript import RecoveryRecord
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import ImageBlock, ImageSource, Message
 
@@ -227,16 +227,16 @@ class EvalTrajectory(BaseModel):
     error: str = ""
 
 
-class StoredCompaction(BaseModel):
-    """One compaction the evaluated turn performed, in its archive form: the typed summary the head
-    was compressed into, the count of messages on each side of the boundary, and the redacted
-    before/after windows. `windows_omitted` marks a record whose windows were dropped to keep the
-    archive bounded — the summary and counts always survive."""
+class StoredRollover(BaseModel):
+    """One rollover the evaluated turn performed, in its archive form: the typed recovery record
+    the fresh window opened with, the count of messages on each side of the boundary, and the
+    redacted before/after windows. `windows_omitted` marks a record whose windows were dropped to
+    keep the archive bounded — the recovery record and counts always survive."""
 
     model_config = ConfigDict(frozen=True)
 
     index: int
-    summary: CompactionSummary
+    recovery: RecoveryRecord
     before_count: int
     after_count: int
     before: tuple[Message, ...] = ()
@@ -248,7 +248,10 @@ class StoredCompaction(BaseModel):
 class CapabilityOutput:
     """The answer, tool trajectory, artifacts, and allowlisted log visible to a grader.
     `workspace_dir` is the host directory the turn's `/workspace` was served from, so a grader can
-    read what the turn left on disk rather than only what it submitted."""
+    read what the turn left on disk rather than only what it submitted. `rollovers` counts every
+    context boundary the turn crossed, whichever strategy the deploy selected: the index walk reads
+    a rollover record and a compaction record alike, so a compact deploy counts its
+    boundaries under the same field."""
 
     response: str
     calls: tuple[ToolInvocation, ...]
@@ -257,8 +260,8 @@ class CapabilityOutput:
     artifact_references: tuple[SharedArtifactReference, ...] = ()
     artifact_error: str = ""
     log: TurnLog | None = None
-    compactions: int = 0
-    compaction_records: tuple[StoredCompaction, ...] = ()
+    rollovers: int = 0
+    rollover_records: tuple[StoredRollover, ...] = ()
     tokens: int = 0
     cost_micro_usd: int = 0
     workspace_dir: Path | None = None
@@ -602,9 +605,9 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
                 "log": (
                     None if sample_output.log is None else sample_output.log.model_dump(mode="json")
                 ),
-                "compactions": sample_output.compactions,
-                "compactionRecords": (
-                    [record.model_dump(mode="json") for record in sample_output.compaction_records]
+                "rollovers": sample_output.rollovers,
+                "rolloverRecords": (
+                    [record.model_dump(mode="json") for record in sample_output.rollover_records]
                     or None
                 ),
                 "grader": sample_verdict.evidence or None,
@@ -795,8 +798,8 @@ async def _sample_capability(case: CapabilityCase, target: CapabilityTarget) -> 
                         if error
                     ),
                     log=first_output.log,
-                    compactions=first_output.compactions,
-                    compaction_records=first_output.compaction_records,
+                    rollovers=first_output.rollovers,
+                    rollover_records=first_output.rollover_records,
                     timing=first_output.timing,
                     handoffs=prior_output.handoffs + step_output.handoffs,
                     own_calls=merge_tool_calls(prior_output.own_calls, output.own_calls),

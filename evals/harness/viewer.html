@@ -200,7 +200,7 @@ select {
 .excluded, .changed { color: var(--amber); background: var(--amber-deep); }
 .fixed, .new, .running { color: var(--blue); background: var(--blue-deep); }
 .missing, .same { color: var(--muted); background: var(--missing); }
-.compaction { color: var(--purple); background: var(--purple-deep); }
+.rollover { color: var(--purple); background: var(--purple-deep); }
 .filters { display: flex; gap: 5px; flex-wrap: wrap; padding: 8px 8px 2px; }
 .filter {
   border: 1px solid var(--line);
@@ -580,8 +580,8 @@ function callMarkup(attState) {
   };
 }
 const ATTEMPT_KEYS = new Set(['passed', 'reason', 'response', 'calls', 'toolErrors', 'artifacts',
-  'artifactContents', 'artifactReferences', 'artifactError', 'tokens', 'costMicroUsd', 'compactions',
-  'compactionRecords', 'log', 'grader', 'judge', 'turns', 'stopped', 'trajectory', 'timing']);
+  'artifactContents', 'artifactReferences', 'artifactError', 'tokens', 'costMicroUsd', 'rollovers',
+  'rolloverRecords', 'log', 'grader', 'judge', 'turns', 'stopped', 'trajectory', 'timing']);
 const CASE_EVIDENCE_KEYS = new Set(['message', 'grading', 'rubric', 'artifactRubric', 'visualRubric', 'memberKey', 'webDependent',
   'reconstructed', 'selectedAttempt', 'attempts', 'user', 'maxTurns', 'claims', 'claimVerdicts',
   'claimCoverage', 'enabledTools', 'exposedTools', 'omittedEnabledTools', 'referenceTools',
@@ -648,8 +648,8 @@ function resourcesMarkup(attempt) {
   const lines = [];
   if (attempt.tokens != null) lines.push(`${attempt.tokens} tokens`);
   if (attempt.costMicroUsd != null) lines.push(`${attempt.costMicroUsd} micro-USD`);
-  if (attempt.compactions) {
-    lines.push(`${attempt.compactions} compaction${attempt.compactions === 1 ? '' : 's'}`);
+  if (attempt.rollovers) {
+    lines.push(`${attempt.rollovers} rollover${attempt.rollovers === 1 ? '' : 's'}`);
   }
   return `<div class="section"><div class="section-title">Resources</div><pre>${h(lines.length ? lines.join('\n') : 'not recorded')}</pre></div>`;
 }
@@ -659,38 +659,41 @@ function statusBadge(status) {
   const label = status || 'not admitted';
   return `<span class="badge ${STATUS_CLASS[status] || 'missing'}">${h(label)}</span>`;
 }
-function compactionSummary(summary) {
+function recoveryLines(recovery) {
   const lines = [];
-  const scalar = [['intent', summary.intent], ['current work', summary.current_work],
-    ['next step', summary.next_step]];
-  for (const [label, value] of scalar) if (value) lines.push(`${label}: ${value}`);
-  const list = [['concepts', summary.concepts], ['errors', summary.errors],
-    ['decisions', summary.decisions], ['pending', summary.pending],
-    ['loaded skills', summary.loaded_skills]];
+  if (recovery.objective) lines.push(`objective: ${recovery.objective}`);
+  if (recovery.handoff) lines.push(`handoff: ${recovery.handoff}`);
+  if (recovery.checkpoint) lines.push(`checkpoint (possibly stale): ${recovery.checkpoint}`);
+  const list = [['member messages', recovery.user_inputs], ['checklist', recovery.checklist],
+    ['active requests', recovery.active_requests], ['dropped skills', recovery.loaded_skills]];
   for (const [label, values] of list) {
     if (Array.isArray(values) && values.length) lines.push(`${label}: ${values.join(' · ')}`);
   }
-  if (Array.isArray(summary.files) && summary.files.length) {
-    lines.push('files:');
-    for (const file of summary.files) lines.push(`  ${file.path} — ${file.why}`);
+  if (Array.isArray(recovery.pending_results) && recovery.pending_results.length) {
+    lines.push('unread results:');
+    for (const result of recovery.pending_results) {
+      lines.push(`  ${result.call} [line ${result.entry_id}]${result.truncated ? ' (trimmed)' : ''}`);
+    }
   }
+  const lost = recovery.history_lost ? ' (earlier history not on this sandbox)' : '';
+  lines.push(`history: ${recovery.history_path} lines ${recovery.first_entry_id}-${recovery.last_entry_id}${lost}`);
   return lines.join('\n');
 }
-function compactionMarkup(record) {
+function rolloverMarkup(record) {
   const windows = record.windows_omitted
     ? '<div class="empty">Windows omitted to keep the archive bounded.</div>'
     : `<details class="call"><summary>Before window · ${record.before_count} messages</summary><div class="call-body">${messagesMarkup(record.before || [])}</div></details>
     <details class="call"><summary>After window · ${record.after_count} messages</summary><div class="call-body">${messagesMarkup(record.after || [])}</div></details>`;
-  return `<details class="call"><summary><span class="badge compaction">compaction #${record.index}</span> · ${record.before_count} → ${record.after_count} messages</summary>
+  return `<details class="call"><summary><span class="badge rollover">rollover #${record.index}</span> · ${record.before_count} → ${record.after_count} messages</summary>
     <div class="call-body">
-      <div class="section"><div class="section-title">Summary</div><pre>${h(compactionSummary(record.summary))}</pre></div>
+      <div class="section"><div class="section-title">Recovery record</div><pre>${h(recoveryLines(record.recovery || {}))}</pre></div>
       ${windows}
     </div></details>`;
 }
-function compactionsMarkup(attempt) {
-  const records = attempt.compactionRecords;
+function rolloversMarkup(attempt) {
+  const records = attempt.rolloverRecords;
   if (!records || !records.length) return '';
-  return `<div class="section"><div class="section-title">Compactions · ${records.length}</div>${records.map(compactionMarkup).join('')}</div>`;
+  return `<div class="section"><div class="section-title">Rollovers · ${records.length}</div>${records.map(rolloverMarkup).join('')}</div>`;
 }
 function artifactsMarkup(attempt) {
   const contents = attempt.artifactContents || [];
@@ -770,7 +773,7 @@ function attemptMarkup(attempt, index, selected, kind) {
       ${judgeMarkup(attempt.judge)}
       <div class="section"><div class="section-title">Tool trajectory · ${calls.length}</div>${calls.length ? calls.map(callMarkup(attState)).join('') : '<div class="empty">No tool calls.</div>'}</div>
       ${toolErrorsMarkup(attempt.toolErrors)}
-      ${compactionsMarkup(attempt)}
+      ${rolloversMarkup(attempt)}
       ${jsonSection('Grader evidence', attempt.grader)}
       ${jsonSection('Turn log', attempt.log)}
       ${artifactsMarkup(attempt)}
@@ -924,7 +927,7 @@ function trajectoryMarkup(kind, run, report, item, attempt, index) {
       ${agentPrompt}
       ${resourcesMarkup(attempt)}
       ${timingMarkup(attempt.timing, true)}
-      ${compactionsMarkup(attempt)}
+      ${rolloversMarkup(attempt)}
       <div class="section"><div class="section-title">Stored transcript snapshot · ${(trajectory.messages || []).length} messages</div>${messagesMarkup(trajectory.messages || [], steps)}</div>
     </div>
   </section>`;

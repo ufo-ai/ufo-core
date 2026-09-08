@@ -58,6 +58,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
 from ufo.browser import CdpProvider, FindCompleter
 from ufo.db import workspace_tx
+from ufo.harness.context import ContextRemaining
 from ufo.harness.models.interface import AUTO_MODEL
 from ufo.harness.models.spec import ModelSpec
 from ufo.harness.o11y import log
@@ -471,6 +472,20 @@ class SubagentControl(Protocol):
     async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus: ...
 
 
+class ContextControl(Protocol):
+    """The turn's context window, as the context tools reach it: where the window stands against
+    its rollover line and the model's hard limit, and the cap a handoff carried across the boundary
+    is trimmed to. Backed by whichever strategy the deploy selected — a Protocol here so a tool the
+    boundary's own extension ships reaches the live boundary without importing the loop, and so the
+    tool layer imports no strategy at all."""
+
+    def remaining(self) -> ContextRemaining: ...
+
+    def handoff_cap(self) -> int: ...
+
+    def checklist_cap(self) -> int: ...
+
+
 @dataclass(eq=False)
 class TurnCleanup:
     """Per-turn async cleanup registry: a tool registers an `aclose` here on first use of a resource
@@ -628,6 +643,9 @@ class ToolContext:
     site_previewer: SitePreviewer | None = None
     publish_artifacts: Callable[[], Awaitable[None]] | None = None
     cleanup: TurnCleanup = field(default_factory=TurnCleanup)
+    context: ContextControl | None = None
+    """The turn's own context window — how much is left and the handoff cap a deliberate reset
+    trims to. None outside a turn loop that owns a window."""
 
     @property
     def authority(self) -> ExecutionAuthority:

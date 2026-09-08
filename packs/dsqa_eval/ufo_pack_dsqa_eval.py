@@ -1,7 +1,12 @@
 from ufo.sdk.manifest import Pack
 
 VERSION = "0.1.0"
-BASE_EXTENSIONS = ("index_default", "embed_openai", "openrouter")
+BASE_EXTENSIONS = (
+    "index_default",
+    "embed_openai",
+    "openrouter",
+    "context_compact",
+)
 CORE_NAME = "dsqa_core"
 SEARCH_NAME = "dsqa_search"
 BROWSER_NAME = "dsqa_browser"

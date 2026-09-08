@@ -6,6 +6,13 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from ufo_ext_context_compact.compaction import (
+    AUTOCOMPACT_BUFFER_TOKENS,
+    COMPACTION_SUMMARY_MAX_TOKENS,
+    MAX_REFERENCE_PATHS,
+    TOOL_OUTPUT_PATH_RE,
+    Compaction,
+)
 from ufo_testsupport.models import serving_model
 
 from evals.compaction.build import REAL_SKELETONS, SKELETON_SUFFIX, SnapshotBuild
@@ -29,13 +36,6 @@ from ufo.harness.models.interface import (
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
-)
-from ufo.runtime.compaction import (
-    AUTOCOMPACT_BUFFER_TOKENS,
-    COMPACTION_SUMMARY_MAX_TOKENS,
-    MAX_REFERENCE_PATHS,
-    TOOL_OUTPUT_PATH_RE,
-    Compaction,
 )
 from ufo.runtime.turns.transcript import (
     CompactionSummary,
@@ -474,7 +474,7 @@ async def test_behavior_probes_grade_answers_and_reread_trajectories(
     probes = {probe.id: probe for probe in case.probes}
     lab = _lab(tmp_path, _summary())
     conversation_id = uuid4()
-    await lab.compactor(conversation_id, TEST_TRIGGER_TOKENS).maybe_compact(case.messages)
+    await lab.compactor(conversation_id, TEST_TRIGGER_TOKENS).maybe_cross(case.messages)
     reference = probes["reference"]
     answers = {
         SEED_MESSAGE: _clean("ready"),
@@ -866,7 +866,7 @@ async def test_real_probes_are_report_only(real_snapshot_dir: Path, tmp_path: Pa
         ),
     )
     conversation_id = uuid4()
-    await lab.compactor(conversation_id, TEST_TRIGGER_TOKENS).maybe_compact(case.messages)
+    await lab.compactor(conversation_id, TEST_TRIGGER_TOKENS).maybe_cross(case.messages)
     answers = {
         SEED_MESSAGE: _clean("ready"),
         probes["recall"].question: _clean(f"It is {probes['recall'].expect_literals[0]}."),

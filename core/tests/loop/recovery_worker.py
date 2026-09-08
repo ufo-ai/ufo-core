@@ -23,11 +23,12 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from dbos import DBOS, EnqueueOptions
+from ufo_ext_context_rollover.manifest import manifest as rollover_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.invoker import invoker_factory
 
 from ufo.blob import FilesystemBlobStore
-from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.config import BlobConfig, Config, ContextConfig, DatabaseConfig
 from ufo.db import init_db, workspace_tx
 from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
@@ -195,6 +196,7 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
     config = Config(
         database=DatabaseConfig(url=env.app_url, system_url=env.system_url),
         blob=BlobConfig(backend="filesystem", root=env.blob_root),
+        context=ContextConfig(strategy="rollover"),
     )
     registry = ModelRegistry(
         specs={
@@ -226,9 +228,9 @@ def _install_runtime(env: _Env, model: _CrashModel | _AnswerModel) -> None:
             invoker_for=invoker_factory(recovery_dbos),
             subagents=SubagentRegistry(()),
             subagent_grants={},
-            manifests=(),
+            manifests=(rollover_manifest(),),
             environment=HostEnvironment(
-                manifests=(),
+                manifests=(rollover_manifest(),),
                 credentials=None,
                 index=DefaultIndex(transaction=workspace_tx),
                 embed=_StubEmbed(),

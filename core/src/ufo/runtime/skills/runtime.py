@@ -195,9 +195,9 @@ class LoadedSkills:
     """Which skills' workflows the model's context already holds, so `load_skill` never pays for the
     same instructions twice. Derived from the window rather than accumulated: each load in it is
     re-expanded through the registry, so the tracker is right across the turns of one conversation
-    (an earlier turn's load is still in the transcript), across a compaction that dropped those
+    (an earlier turn's load is still in the transcript), across a rollover that dropped those
     bodies, and across a DBOS replay that never re-ran the handler. `asked_for` is the subset the
-    agent named itself — what a compaction summary carries past the boundary, since re-loading one
+    agent named itself — what a recovery record carries past the boundary, since re-loading one
     of those brings its dependencies back with it."""
 
     in_context: set[str] = field(default_factory=set)
@@ -214,7 +214,7 @@ class LoadedSkills:
 
         `preloaded` is a subagent's `preload_skills` closure. Those workflows render into the
         child's system prompt rather than a tool result, and unlike a transcript body they outlive
-        a compaction, so they stay in context for the whole turn — but the child never asked for
+        a rollover, so they stay in context for the whole turn — but the child never asked for
         them, so they stay out of `asked_for` and out of the summary telling it what to load."""
         self.reset()
         for entries in loads:

@@ -26,6 +26,7 @@ from dbos import DBOS, SetWorkflowID
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from sqlalchemy.engine import make_url
+from ufo_ext_context_rollover.manifest import manifest as rollover_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.invoker import invoker_factory
 
@@ -229,9 +230,9 @@ def _install_runtime(config: Config, registry: ModelRegistry, workspace_root: Pa
             invoker_for=invoker_factory(recovery_dbos),
             subagents=SubagentRegistry(()),
             subagent_grants={},
-            manifests=(),
+            manifests=(rollover_manifest(),),
             environment=HostEnvironment(
-                manifests=(),
+                manifests=(rollover_manifest(),),
                 credentials=None,
                 index=DefaultIndex(transaction=workspace_tx),
                 embed=_StubEmbed(),

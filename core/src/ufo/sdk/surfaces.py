@@ -184,13 +184,13 @@ from ufo.runtime.turns.ambient_reply import (
     AmbientMessage as AmbientMessage,
 )
 from ufo.runtime.turns.transcript import (
-    CompactionRecord as CompactionRecord,
-)
-from ufo.runtime.turns.transcript import (
-    CompactionSummary as CompactionSummary,
-)
-from ufo.runtime.turns.transcript import (
     Conversation as Conversation,
+)
+from ufo.runtime.turns.transcript import (
+    RecoveryRecord as RecoveryRecord,
+)
+from ufo.runtime.turns.transcript import (
+    RolloverRecord as RolloverRecord,
 )
 from ufo.runtime.turns.transcript import (
     TranscriptDecodeError as TranscriptDecodeError,

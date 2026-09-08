@@ -23,6 +23,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from ufo_ext_context_rollover.manifest import manifest as rollover_manifest
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory import manifest as memory_manifest_module
@@ -163,7 +164,11 @@ async def _seed_member(workspace_id: UUID, email: str) -> tuple[UUID, str]:
     return member_id, token
 
 
-CORRECTION_MANIFESTS = (sources_manifest_module.manifest(), memory_manifest_module.manifest())
+CORRECTION_MANIFESTS = (
+    sources_manifest_module.manifest(),
+    memory_manifest_module.manifest(),
+    rollover_manifest(),
+)
 
 
 @pytest.fixture

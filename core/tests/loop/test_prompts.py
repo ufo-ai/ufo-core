@@ -12,8 +12,8 @@ import pytest
 from ufo.harness.models.catalog import CORE_MODEL_SPECS
 from ufo.host.ext.loader import load_manifests
 from ufo.runtime.prompts.render import (
-    COMPACTION_SYSTEM_PROMPT,
     SHELL,
+    SUBAGENT_OUTPUT_DISCIPLINE,
     WORKSPACE_FACTS_CLOSER,
     RenderedPrompt,
     render_object_kinds,
@@ -30,6 +30,7 @@ from ufo.sdk.delivery_register import DELIVERY_REGISTER_BLOCK as SDK_DELIVERY_RE
 
 SHELL_FIXTURE = "You are {{agent-prompt}}.\n\n{{skill_index}}\n\n{{sections}}"
 BROWSER_FIXTURE = "You browse the web. Cite what you find.\n\n{{sections}}"
+WINDOW_BLOCK_FIXTURE = "<context_window>The window behaves this way.</context_window>"
 
 
 def test_system_prompt_slots_the_agent_prompt_sections_and_citation() -> None:
@@ -325,10 +326,25 @@ def test_rendered_prompt_wraps_a_raw_string_with_a_digest() -> None:
     assert wrapped.digest.startswith("sha256:")
 
 
-def test_compaction_prompt_is_structured_and_loaded() -> None:
-    assert "SINGLE JSON object" in COMPACTION_SYSTEM_PROMPT
-    assert "`intent`" in COMPACTION_SYSTEM_PROMPT
-    assert "`next_step`" in COMPACTION_SYSTEM_PROMPT
+def test_both_shells_hold_the_slot_the_active_strategy_fills() -> None:
+    """The words at the boundary belong to the strategy the deploy runs, so neither shell bakes a
+    block at import: both carry the slot, and neither names a tool a boundary extension ships."""
+    assert "{{context_window}}" in SHELL
+    assert "{{context_window}}" in SUBAGENT_OUTPUT_DISCIPLINE
+    for shell in (SHELL, SUBAGENT_OUTPUT_DISCIPLINE):
+        assert "new_context" not in shell
+        assert "search_history" not in shell
+
+
+def test_the_rendered_prompt_carries_the_block_the_strategy_handed_it() -> None:
+    """The slot carries whatever note the selected boundary owns, and a render that hands none
+    leaves no note at all — never the prose of a strategy this deploy does not run."""
+    filled = render_system_prompt(
+        "A", (), knowledge_cutoff="2026-01", context_window=WINDOW_BLOCK_FIXTURE
+    ).content
+    bare = render_system_prompt("A", (), knowledge_cutoff="2026-01").content
+    assert WINDOW_BLOCK_FIXTURE in filled
+    assert "context_window" not in bare
 
 
 def test_the_capability_block_states_its_closer_once_for_every_line() -> None:

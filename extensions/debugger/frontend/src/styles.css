@@ -74,7 +74,7 @@ a { color: inherit; }
 .chip.failed, .chip.cancelled { background: color-mix(in srgb, #d64545 22%, transparent); }
 .chip.running, .chip.queued, .chip.parked { background: color-mix(in srgb, #d6a545 25%, transparent); }
 .chip.subagent { background: color-mix(in srgb, #6b7ddb 22%, transparent); }
-.chip.compaction { background: color-mix(in srgb, #b76bdb 20%, transparent); cursor: pointer; }
+.chip.rollover { background: color-mix(in srgb, #b76bdb 20%, transparent); cursor: pointer; }
 code, pre {
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   background: var(--soft);

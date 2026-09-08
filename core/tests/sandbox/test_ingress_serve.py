@@ -1312,7 +1312,7 @@ async def test_a_page_read_from_a_site_that_stopped_tells_the_conversation_that_
 ) -> None:
     """The whole hop, end to end: a member opens a site whose server has stopped, and the
     conversation that built it is told inside the same request that answers the member. The fire
-    restates the port and what was observed, so a report landing after a compaction needs no earlier
+    restates the port and what was observed, so a report landing after a rollover needs no earlier
     transcript to act on, and the authority is the workspace's — a site going down is nobody's
     delegated act."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)

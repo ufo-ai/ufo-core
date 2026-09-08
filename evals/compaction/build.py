@@ -18,6 +18,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ufo_ext_context_compact.compaction import (
+    AUTOCOMPACT_BUFFER_TOKENS,
+    COMPACTION_SUMMARY_MAX_TOKENS,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    IMAGE_MARKER,
+)
+
 from evals.compaction.models import (
     CompactionCase,
     CompactionLeaf,
@@ -40,12 +47,6 @@ from ufo.harness.models.interface import (
     ToolUseBlock,
 )
 from ufo.harness.models.spec import DEFAULT_COMPACTION_KEEP_MESSAGES
-from ufo.runtime.compaction import (
-    AUTOCOMPACT_BUFFER_TOKENS,
-    COMPACTION_SUMMARY_MAX_TOKENS,
-    DEFAULT_CONTEXT_WINDOW_TOKENS,
-    IMAGE_MARKER,
-)
 from ufo.runtime.engine import OFFLOAD_NOTICE
 from ufo.runtime.turns.transcript import decode
 

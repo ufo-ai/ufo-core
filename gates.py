@@ -53,7 +53,6 @@ COMPOSITION_ROOTS = (CORE_SRC / "serve.py", CORE_SRC / "proxy_serve.py", CORE_SR
 ROLE_PACKAGES = (
     "ufo.runtime.surfaces",
     "ufo.runtime.jobs",
-    "ufo.runtime.compaction",
     "ufo.runtime.delivery",
     "ufo.runtime.engine",
     "ufo.runtime.profiles",

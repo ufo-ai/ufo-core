@@ -109,6 +109,8 @@ from evals.memory_ingestion.runner import (
 from evals.memory_ingestion.runner import MemoryIngestionRun, load_memory_ingestion
 from evals.reconstruct import RunReconstruction, write_reconstruction
 from evals.registry import TASKS, selected_run_tasks
+from evals.rollover.runner import RolloverRun, load_rollover
+from evals.rollover.target import RolloverTarget
 from evals.skill_loading.catalog import CASES as SKILL_LOADING_CASES
 from evals.skill_loading.catalog import SKILL_LOADING_PACKS
 from evals.skill_loading.member import CASES as SKILL_MEMBER_CASES
@@ -340,6 +342,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--hle-gold", type=Path, metavar="GOLD_JSONL")
     parser.add_argument("--hle-gold-smoke", action="store_true")
     parser.add_argument("--dsqa-100", type=Path, metavar="SNAPSHOT")
+    parser.add_argument("--rollover", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--compaction", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--gdpval-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--gdpval-treatment", choices=TREATMENTS)
@@ -559,6 +562,7 @@ def main(argv: list[str] | None = None) -> None:
             args.gdpval_100,
             args.jobbench,
             args.hle_gold,
+            args.rollover,
             args.compaction,
             args.wandr,
             args.issue_recall,
@@ -610,6 +614,7 @@ def main(argv: list[str] | None = None) -> None:
             args.memory_ingestion, args.memory_ingestion_state
         )
     dsqa_run = load_dsqa_100(args.dsqa_100) if args.dsqa_100 is not None else None
+    rollover_run = load_rollover(args.rollover) if args.rollover is not None else None
     compaction_run = load_compaction(args.compaction) if args.compaction is not None else None
     if (args.mcp_atlas_data is not None or args.mcp_atlas_samples is not None) and (
         "mcp_atlas_100" not in names
@@ -672,6 +677,7 @@ def main(argv: list[str] | None = None) -> None:
             memory_ingestion_run,
             issue_run,
             dsqa_run,
+            rollover_run,
             compaction_run,
             gdpval_run,
             jobbench_tasks,
@@ -1084,6 +1090,17 @@ async def _run(
                             ).name,
                         )
                     )
+                rollover: RolloverTarget | None = None
+                if any(task.suite == "rollover" for task in tasks):
+                    rollover = RolloverTarget(
+                        serving=ServingModel(
+                            model=resolved_agent_model,
+                            spec=registry.spec(resolved_agent_model),
+                            client=(await registry.client_for(resolved_agent_model)).client,
+                        ),
+                        blob=blob,
+                        workspace_root=config.sandbox.workspace_root,
+                    )
                 compaction: CompactionTarget | None = None
                 if any(task.suite == "compaction" for task in tasks):
                     compaction = CompactionTarget(
@@ -1113,6 +1130,7 @@ async def _run(
                         mcp_atlas_url,
                         mcp_atlas_external_url,
                     ),
+                    rollover=rollover,
                     compaction=compaction,
                     loadable_skills=loadable_skills,
                     workspace_probe_for=(
@@ -1426,6 +1444,7 @@ def _tasks(
     memory_ingestion_run: MemoryIngestionRun | None = None,
     issue_run: IssueRecallRun | None = None,
     dsqa_run: DSQA100Run | None = None,
+    rollover_run: RolloverRun | None = None,
     compaction_run: CompactionRun | None = None,
     gdpval_run: GDPvalCalibration | None = None,
     jobbench_tasks: tuple[EvalTask, ...] | None = None,
@@ -1456,6 +1475,11 @@ def _tasks(
         if mcp_atlas_data is not None
         else ((load_mcp_atlas_task(limit=mcp_atlas_samples),) if "mcp_atlas_100" in names else ())
     )
+    if rollover_run is not None:
+        return selected_tasks(
+            (*TASKS, *rollover_run.tasks, *mcp_atlas),
+            names or tuple(task.name for task in rollover_run.tasks),
+        )
     if compaction_run is not None:
         return selected_tasks(
             (*TASKS, *compaction_run.tasks, *mcp_atlas),

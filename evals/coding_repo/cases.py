@@ -150,7 +150,7 @@ RESEARCH_CASES: tuple[CodingCase, ...] = (
             "terminal commit as a failed turn rather than arriving as a tool result the model "
             "sees.",
             "It names the real code path — the sandbox session's offload write and the engine "
-            "round loop / compaction salvage that call it — with file paths, not a guess.",
+            "round loop / rollover salvage that call it — with file paths, not a guess.",
             "It changes no files and reports findings only.",
         ),
     ),

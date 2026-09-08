@@ -23,6 +23,9 @@ from ufo.runtime.tools.context import (
     ConnectorConnection as ConnectorConnection,
 )
 from ufo.runtime.tools.context import (
+    ContextControl as ContextControl,
+)
+from ufo.runtime.tools.context import (
     ImageContent as ImageContent,
 )
 from ufo.runtime.tools.context import (

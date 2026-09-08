@@ -13,7 +13,7 @@ differently from one that spent them in the parent.
 Output-token counts cover completed model rounds. `None` means the durable record has no completed
 round or lacks usage for at least one round. A done turn excludes its final round from intermediate
 output; a failed or cancelled turn has no delivered final round, so all its output is intermediate.
-Compaction is a separate step and is not included.
+Rollover is a separate step and is not included.
 
 Each completed model or tool step also carries the message that its durable output can rebuild. A
 timeout can therefore keep the work completed before cancellation and use the same call ids to

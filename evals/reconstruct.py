@@ -24,7 +24,7 @@ from evals.harness.capability import EvalTrajectory, recorded_evidence_missing
 from evals.harness.harness import EvalCaseResult, EvalReport, Json, JsonObject
 from evals.harness.target import (
     capability_output,
-    compaction_snapshots,
+    rollover_snapshots,
     trajectory_snapshot,
 )
 from evals.harness.viewer import EvalRun, render_viewer, write_atomic
@@ -34,7 +34,7 @@ from ufo.runtime.turns.transcript import (
     Conversation,
     TranscriptDecodeError,
     decode,
-    read_compaction_records,
+    read_rollover_records,
     transcript_key,
 )
 from ufo.schema import tables
@@ -59,7 +59,7 @@ class RecordedAttempt(BaseModel):
     artifact_error: str | None = Field(default=None, alias="artifactError")
     tokens: int = 0
     cost_micro_usd: int = Field(default=0, alias="costMicroUsd")
-    compactions: int = 0
+    rollovers: int = 0
     grader: JsonObject | None = None
 
 
@@ -172,7 +172,7 @@ class RunReconstruction:
         snapshot = trajectory_snapshot(conversation_id, turn.id, turn.status, conversation.messages)
         turn_ids = await self._turn_tree(turn.id)
         tokens, cost_micro_usd = await self._resources(turn_ids)
-        records = await read_compaction_records(self.blob, conversation_id)
+        records = await read_rollover_records(self.blob, conversation_id)
         calls: list[Json] = [
             {
                 "name": call.name,
@@ -194,9 +194,9 @@ class RunReconstruction:
             "tokens": tokens,
             "costMicroUsd": cost_micro_usd,
             "log": None,
-            "compactions": len(records),
-            "compactionRecords": (
-                [record.model_dump(mode="json") for record in compaction_snapshots(records)] or None
+            "rollovers": len(records),
+            "rolloverRecords": (
+                [record.model_dump(mode="json") for record in rollover_snapshots(records)] or None
             ),
             "grader": attempt.grader,
             "trajectory": snapshot.model_dump(mode="json"),
@@ -283,7 +283,7 @@ class RunReconstruction:
             "tokens": attempt.tokens,
             "costMicroUsd": attempt.cost_micro_usd,
             "log": None,
-            "compactions": attempt.compactions,
+            "rollovers": attempt.rollovers,
             "grader": attempt.grader,
             "trajectory": None,
         }

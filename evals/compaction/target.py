@@ -7,14 +7,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from ufo.blob import WorkspaceBlobStore
-from ufo.harness.models.interface import Message
-from ufo.harness.models.registry import ServingModel
-from ufo.runtime.compaction import (
+from ufo_ext_context_compact.compaction import (
     AUTOCOMPACT_BUFFER_TOKENS,
     COMPACTION_SUMMARY_MAX_TOKENS,
     Compaction,
 )
+
+from ufo.blob import WorkspaceBlobStore
+from ufo.harness.models.interface import Message
+from ufo.harness.models.registry import ServingModel
 from ufo.runtime.turns.transcript import Conversation, encode, transcript_key
 
 WORKSPACE_PREFIX = "/workspace/"

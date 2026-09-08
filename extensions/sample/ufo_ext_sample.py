@@ -36,7 +36,16 @@ from ufo.sdk.connectors import (
     StagedUpload,
     UnknownBrokerTool,
 )
-from ufo.sdk.context import AgentChange, ExtensionContext, JsonValue, SourceReader
+from ufo.sdk.context import (
+    AgentChange,
+    BoundaryInputs,
+    BoundaryOutcome,
+    ContextBoundary,
+    ContextRemaining,
+    ExtensionContext,
+    JsonValue,
+    SourceReader,
+)
 from ufo.sdk.flags import SERVED_FALSE, SERVED_TRUE
 from ufo.sdk.http import (
     JSONResponse,
@@ -57,6 +66,7 @@ from ufo.sdk.manifest import (
     AgentSpec,
     CdpProviderSpec,
     ConnectorProvider,
+    ContextBoundarySpec,
     ConversationSlotContext,
     ConversationSlotProvider,
     CredentialSlot,
@@ -98,6 +108,7 @@ from ufo.sdk.manifest import (
 )
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import (
+    Message,
     ModelEvent,
     ModelPrice,
     ModelRequest,
@@ -135,6 +146,7 @@ from ufo.sdk.search import (
     SearchQuery,
     SearchResults,
 )
+from ufo.sdk.skills import LoadedSkills
 from ufo.sdk.sources import Page, SourceAuth, SyncResult
 from ufo.sdk.surfaces import (
     AskQuestion,
@@ -261,6 +273,13 @@ SAMPLE_MEMORY_KIND = "fact"
 MEMORY_SEARCH_KEY = "memory_search"
 MEMORY_RECENT_KEY = "memory_recent"
 MEMORY_SEARCH_PROVIDER = "sample"
+CONTEXT_STRATEGY = "sample_boundary"
+CONTEXT_BOUNDARY_HANDOFF_CHARS = 4_000
+CONTEXT_BOUNDARY_CHECKLIST_CHARS = 2_000
+CONTEXT_WINDOW_PROMPT = (
+    "<context_window>\nThis deploy holds your whole window: nothing is summarized and nothing is "
+    "reset. Read where the window stands with get_context_remaining.\n</context_window>"
+)
 FLAG_BACKEND = "sample_flags"
 FLAG_ON = "sample-flag-on"
 FLAG_OFF = "sample-flag-off"
@@ -939,7 +958,7 @@ async def _record_stop(ctx: HookContext) -> HookOutcome:
 
 
 async def _record_pre_compact(ctx: HookContext) -> HookOutcome:
-    """A pre_compact observer: records the reason and the pre-compaction token estimate."""
+    """A pre_compact observer: records the reason and the token estimate before the reset."""
     match ctx.payload:
         case PreCompact(reason=reason, before_tokens=before_tokens):
             await ctx.ext.store.put(
@@ -949,13 +968,13 @@ async def _record_pre_compact(ctx: HookContext) -> HookOutcome:
 
 
 async def _record_post_compact(ctx: HookContext) -> HookOutcome:
-    """A post_compact observer: records the summary and the tokens bracketing the compaction."""
+    """A post_compact observer: records the recovery record and the tokens bracketing the reset."""
     match ctx.payload:
-        case PostCompact(summary=summary, before_tokens=before_tokens, after_tokens=after_tokens):
+        case PostCompact(record=record, before_tokens=before_tokens, after_tokens=after_tokens):
             await ctx.ext.store.put(
                 HOOK_POST_COMPACT_KEY,
                 {
-                    "summary": summary,
+                    "record": record,
                     "before_tokens": before_tokens,
                     "after_tokens": after_tokens,
                 },
@@ -1269,6 +1288,46 @@ class SampleCdpProvider:
 
     async def reattach(self, token: str, sandbox: Sandbox | None = None) -> CdpLease:
         return SampleCdpLease()
+
+
+@dataclass(frozen=True)
+class SampleContextBoundary:
+    """A trivial ContextBoundary the probe registers through the `context_boundaries` Manifest
+    point: it holds every window whole and never crosses, so a deploy that selects
+    `sample_boundary` runs the extension's strategy instead of either core one. A real object
+    consumed through the protocol, so a test drives it as the loop does; rollover and compaction
+    keep their own boundary proofs."""
+
+    window_tokens: int
+    loaded_skills: LoadedSkills = field(default_factory=LoadedSkills)
+
+    def remaining(self, messages: tuple[Message, ...] | None = None) -> ContextRemaining:
+        return ContextRemaining(
+            used_tokens=0,
+            rollover_at_tokens=self.window_tokens,
+            tokens_until_rollover=self.window_tokens,
+            hard_limit_tokens=self.window_tokens,
+            tokens_until_hard_limit=self.window_tokens,
+        )
+
+    def handoff_cap(self) -> int:
+        return CONTEXT_BOUNDARY_HANDOFF_CHARS
+
+    def checklist_cap(self) -> int:
+        return CONTEXT_BOUNDARY_CHECKLIST_CHARS
+
+    async def maybe_cross(
+        self,
+        messages: tuple[Message, ...],
+        force: bool = False,
+        active_requests: tuple[str, ...] = (),
+        final: bool = False,
+    ) -> BoundaryOutcome:
+        return BoundaryOutcome(messages=messages, crossed=False)
+
+
+def _build_sample_boundary(inputs: BoundaryInputs) -> ContextBoundary:
+    return SampleContextBoundary(window_tokens=inputs.serving.spec.context_window)
 
 
 @dataclass(frozen=True)
@@ -1709,6 +1768,14 @@ def manifest() -> Manifest:
                 context_window=200_000,
                 reasoning=ReasoningSupport(supported=True, tools_with_reasoning=True),
                 api_surface="chat",
+            ),
+        ),
+        context_boundaries=(
+            ContextBoundarySpec(
+                strategy=CONTEXT_STRATEGY,
+                build=_build_sample_boundary,
+                tools=("get_context_remaining",),
+                prompt=CONTEXT_WINDOW_PROMPT,
             ),
         ),
         hubs=(HubSpec(backend=HUB_BACKEND, build=lambda _url: InProcessHub()),),

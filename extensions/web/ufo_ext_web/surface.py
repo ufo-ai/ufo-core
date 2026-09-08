@@ -2635,7 +2635,7 @@ async def _conversation_messages(
         ctx.read_transcript(conversation_id),
         ctx.agent_origin_refs(conversation_id),
         ctx.arrival_speakers(conversation_id),
-        ctx.list_compactions(conversation_id),
+        ctx.list_rollovers(conversation_id),
     )
     speakers = {
         str(arrival.id): arrival.sender
@@ -2720,7 +2720,7 @@ async def _verified_earlier(
     window, shadowing the orphaned record. Counting records would page those in as messages the
     window below already shows, so a page is advertised only when the chain to it holds."""
     for index in sorted(indices, reverse=True):
-        after = await ctx.read_compaction_after(conversation_id, index)
+        after = await ctx.read_rollover_after(conversation_id, index)
         if after and messages[: len(after)] == after:
             return index
     return 0
@@ -2797,7 +2797,7 @@ async def _history_messages(
         index, requested_end = _history_position(cursor)
     except ValueError:
         return None
-    record = await ctx.read_compaction(conversation_id, index)
+    record = await ctx.read_rollover(conversation_id, index)
     if record is None:
         return None
     kept = max(len(record.after) - 1, 0)

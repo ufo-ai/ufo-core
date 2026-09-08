@@ -23,6 +23,9 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncConnection
+from ufo_ext_context_compact import manifest as compact_manifest_module
+from ufo_ext_context_rollover import manifest as rollover_manifest_module
+from ufo_ext_context_rollover import rollover as rollover_module
 from ufo_ext_index_default import DefaultIndex
 from ufo_testsupport.invoker import invoker_factory
 from ufo_testsupport.stream_gate import GatingHub, StreamGate, release_when_running
@@ -55,7 +58,7 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
 )
 from ufo.harness.models.registry import ModelRegistry, ServingModel
-from ufo.harness.models.spec import RepeatedToolCompaction
+from ufo.harness.models.spec import RepeatedToolRollover
 from ufo.harness.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
     UNSIGNED_RUN_TOKEN,
@@ -172,6 +175,15 @@ STUB_BACKENDS = Manifest(
         ),
     ),
 )
+
+INSTALLED_MANIFESTS = (
+    STUB_BACKENDS,
+    compact_manifest_module.manifest(),
+    rollover_manifest_module.manifest(),
+)
+"""The extension set a turn here runs against. Core registers no context strategy, and the
+config's default is `compact`, so the compaction provider must be installed for a turn to
+reach its boundary at all; `rollover` rides along so tests that name it explicitly resolve."""
 
 
 ROUNDTRIP_PROFILE = SubagentProfile(
@@ -404,16 +416,13 @@ STANDIN_REGISTRY = ModelRegistry(
             client=lambda spec, key: StandInModel(),
             key_slot="",
             key_env="",
-            compaction_keep_messages=(
-                3 if spec.id == PINNED_MODEL else spec.compaction_keep_messages
+            rollover_trigger_tokens=(
+                123_000 if spec.id == PINNED_MODEL else spec.rollover_trigger_tokens
             ),
-            compaction_trigger_tokens=(
-                123_000 if spec.id == PINNED_MODEL else spec.compaction_trigger_tokens
-            ),
-            repeated_tool_compaction=(
-                RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50)
+            repeated_tool_rollover=(
+                RepeatedToolRollover(consecutive_turns=4, trigger_percent=50)
                 if spec.id == PINNED_MODEL
-                else spec.repeated_tool_compaction
+                else spec.repeated_tool_rollover
             ),
         )
         for spec in CORE_MODEL_SPECS
@@ -464,9 +473,9 @@ def dbos_runtime(
                 )
             ),
             subagent_grants={},
-            manifests=(STUB_BACKENDS,),
+            manifests=INSTALLED_MANIFESTS,
             environment=HostEnvironment(
-                manifests=(STUB_BACKENDS,),
+                manifests=INSTALLED_MANIFESTS,
                 credentials=None,
                 index=index,
                 embed=embed,
@@ -864,36 +873,32 @@ async def test_turn_prompt_uses_the_models_knowledge_cutoff(
     assert cutoffs != [STANDIN_REGISTRY.spec("claude-opus-4-8").knowledge_cutoff]
 
 
-async def test_turn_compaction_uses_the_models_policy(
+async def test_turn_rollover_uses_the_models_policy(
     surface: Turns, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     windows: list[int] = []
-    tails: list[int] = []
     triggers: list[int | None] = []
-    repeated: list[RepeatedToolCompaction | None] = []
-    compaction = loop_queue.Compaction
+    repeated: list[RepeatedToolRollover | None] = []
+    rollover = rollover_module.ContextRollover
 
     def capture_context_window(**kwargs: object) -> object:
         spec = cast(ServingModel, kwargs["serving"]).spec
         windows.append(spec.context_window)
-        tails.append(spec.compaction_keep_messages)
-        triggers.append(spec.compaction_trigger_tokens)
-        repeated.append(spec.repeated_tool_compaction)
-        return compaction(**kwargs)
+        triggers.append(spec.rollover_trigger_tokens)
+        repeated.append(spec.repeated_tool_rollover)
+        return rollover(**kwargs)
 
-    monkeypatch.setattr(loop_queue, "Compaction", capture_context_window)
+    monkeypatch.setattr(rollover_manifest_module, "ContextRollover", capture_context_window)
     seed = await _bootstrap(model=PINNED_MODEL)
     turn_id = await surface.admit(seed, "ping")
     _, terminal = await surface.consume(seed, turn_id)
     assert terminal["status"] == "done"
     assert windows == [STANDIN_REGISTRY.spec(PINNED_MODEL).context_window]
     assert windows != [STANDIN_REGISTRY.spec("claude-opus-4-8").context_window]
-    assert tails == [STANDIN_REGISTRY.spec(PINNED_MODEL).compaction_keep_messages]
-    assert tails != [STANDIN_REGISTRY.spec("claude-opus-4-8").compaction_keep_messages]
-    assert triggers == [STANDIN_REGISTRY.spec(PINNED_MODEL).compaction_trigger_tokens]
-    assert triggers != [STANDIN_REGISTRY.spec("claude-opus-4-8").compaction_trigger_tokens]
-    assert repeated == [STANDIN_REGISTRY.spec(PINNED_MODEL).repeated_tool_compaction]
-    assert repeated != [STANDIN_REGISTRY.spec("claude-opus-4-8").repeated_tool_compaction]
+    assert triggers == [STANDIN_REGISTRY.spec(PINNED_MODEL).rollover_trigger_tokens]
+    assert triggers != [STANDIN_REGISTRY.spec("claude-opus-4-8").rollover_trigger_tokens]
+    assert repeated == [STANDIN_REGISTRY.spec(PINNED_MODEL).repeated_tool_rollover]
+    assert repeated != [STANDIN_REGISTRY.spec("claude-opus-4-8").repeated_tool_rollover]
 
 
 async def test_a_turn_reads_its_provider_from_the_spec_registered_for_its_model(

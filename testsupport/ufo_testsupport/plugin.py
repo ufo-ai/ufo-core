@@ -45,7 +45,7 @@ from sandbox.build_template import (
     stage_client_binary,
     stage_system_skills,
 )
-from ufo.config import BlobConfig, Config, DatabaseConfig
+from ufo.config import BlobConfig, Config, ContextConfig, DatabaseConfig
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.runtime.workspace import init_workspace_credentials
@@ -367,6 +367,7 @@ def dbos_launched(database_url: str, tmp_path_factory: pytest.TempPathFactory) -
     config = Config(
         database=DatabaseConfig(url=database_url),
         blob=BlobConfig(backend="filesystem", root=tmp_path_factory.mktemp("blobs")),
+        context=ContextConfig(strategy="rollover"),
     )
     system_url = config.database.system_url
     if system_url.startswith("postgresql"):

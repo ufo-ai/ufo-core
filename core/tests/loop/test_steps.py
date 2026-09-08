@@ -67,6 +67,6 @@ def test_a_dispatch_with_images_notes_them_rather_than_rehydrating() -> None:
     assert block.content == "see screenshot" + IMAGE_ATTACHMENT_NOTE.format(count=1)
 
 
-def test_a_compaction_or_arrival_step_rebuilds_no_window() -> None:
+def test_a_rollover_or_arrival_step_rebuilds_no_window() -> None:
     assert _step_messages(((), ())) == ()
     assert _step_messages(None) == ()

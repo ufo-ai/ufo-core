@@ -28,8 +28,14 @@ from opentelemetry.sdk.metrics.export import (
 )
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
+from ufo_ext_context_rollover.rollover import (
+    ROLLOVER_PREFIX,
+    BoundaryOutcome,
+    ContextRollover,
+)
 from ufo_testsupport.models import CORE_SPECS, serving_model
 
+from evals.rollover.target import FileJournal
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness import o11y
@@ -108,10 +114,6 @@ from ufo.runtime.authority import (
 )
 from ufo.runtime.billing.accounting import TOKENS_DIMENSION, TurnUsageConflict, record_turn_usage
 from ufo.runtime.billing.balance import credit, debit, set_reserve
-from ufo.runtime.compaction import (
-    COMPACTED_CONTEXT_PREFIX,
-    Compaction,
-)
 from ufo.runtime.engine import (
     ADOPTED_CLAIM,
     BARE_RAISE_NOTICE,
@@ -179,7 +181,7 @@ from ufo.runtime.objects import (
     ObjectVerbs,
     object_registry,
 )
-from ufo.runtime.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
+from ufo.runtime.prompts.render import rendered_prompt
 from ufo.runtime.queue import (
     _agent_actions,
     _agent_tools,
@@ -212,7 +214,7 @@ from ufo.runtime.turns.activity import ActivitySummarizer
 from ufo.runtime.turns.audience import Audience, audience_subjects, conversation_audience
 from ufo.runtime.turns.contracts import ResultOutput
 from ufo.runtime.turns.dispatch import dispatch_next_turn
-from ufo.runtime.turns.transcript import CompactionSummary, Conversation
+from ufo.runtime.turns.transcript import Conversation
 from ufo.runtime.turns.workspace_changes import (
     WorkspaceChange,
     WorkspaceChanges,
@@ -328,13 +330,6 @@ class StaticMemorySearch:
 @dataclass(frozen=True)
 class EchoModel:
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        if request.system == COMPACTION_SYSTEM_PROMPT:
-            summary = CompactionSummary(
-                intent="condensed history", current_work="mid-turn", next_step="answer"
-            )
-            yield TextDelta(text=summary.model_dump_json())
-            yield Usage(input_tokens=7, output_tokens=3)
-            return
         yield TextDelta(text="answer")
         yield Usage(input_tokens=7, output_tokens=3)
 
@@ -482,7 +477,7 @@ class ToolCallingModel:
 
 class WriteThenAnswerModel:
     """Writes one file in its first round, answers with text once the result comes back — the
-    round shape whose write a mid-turn compaction folds out of the message window."""
+    round shape whose write a mid-turn rollover folds out of the message window."""
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
         answered = any(
@@ -1187,7 +1182,7 @@ def _engine(
     model: object,
     tmp_path: Path,
     carrier: RecordingCarrier | TerminalCarrier | None = None,
-    compaction: Compaction | None = None,
+    rollover: ContextRollover | None = None,
     member_id: UUID | None = None,
     requestable_credentials: CredentialRequests | None = None,
     memory: MemorySearch | None = None,
@@ -1220,8 +1215,13 @@ def _engine(
         serving=serving,
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
-        compaction=compaction
-        or Compaction(serving=serving, blob=blob, conversation_id=turn.conversation_id),
+        context=rollover
+        or ContextRollover(
+            serving=serving,
+            blob=blob,
+            conversation_id=turn.conversation_id,
+            journal=FileJournal(tmp_path / "history.jsonl"),
+        ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier, handle=handle),
         cdp_provider=None,
@@ -3861,7 +3861,7 @@ class SkillLoadRoundsModel:
 class OverflowBetweenSkillLoadsModel:
     """Loads a skill, then raises a provider context-overflow so the engine force-compacts and
     retries inside the same round, and loads the same skill again on that retry — the one shape that
-    reaches the overflow-recovery compaction with tools still offered. Records the tool-result texts
+    reaches the overflow-recovery rollover with tools still offered. Records the tool-result texts
     it was handed on each call, so a test reads back what the post-recovery load cost."""
 
     results: list[str] = field(default_factory=list)
@@ -3908,12 +3908,12 @@ async def _serve_terminal_ops(
         answered = op.op_id
 
 
-async def test_a_write_survives_mid_turn_compaction_into_the_changes_scan(
+async def test_a_write_survives_a_mid_turn_rollover_into_the_changes_scan(
     db: None, tmp_path: Path
 ) -> None:
-    """Round one writes, compaction folds that round out of the window before round two, and the
+    """Round one writes, a rollover folds that round out of the window before round two, and the
     turn-end scan still asks the write's directory: the targets ride the rounds' own tool calls,
-    not the messages compaction rewrites."""
+    not the messages a rollover resets."""
     turn = await _seed_turn("queued", None)
     terminals = Terminals()
     carrier = TerminalCarrier(terminals=terminals)
@@ -3928,12 +3928,12 @@ async def test_a_write_survives_mid_turn_compaction_into_the_changes_scan(
             env={"UFO_CONVERSATION_ID": str(turn.conversation_id)},
         )
     )
-    compaction = Compaction(
+    rollover = ContextRollover(
         serving=serving_model(EchoModel()),
         blob=FilesystemBlobStore(root=tmp_path),
         conversation_id=turn.conversation_id,
         trigger_tokens=1,
-        keep_messages=2,
+        journal=FileJournal(tmp_path / "history.jsonl"),
     )
     scan = json.dumps(
         {
@@ -3952,14 +3952,14 @@ async def test_a_write_survives_mid_turn_compaction_into_the_changes_scan(
             WriteThenAnswerModel(),
             tmp_path,
             carrier=carrier,
-            compaction=compaction,
+            rollover=rollover,
             handle=handle,
         ).run()
     finally:
         serving.cancel()
 
     assert frame is not None and frame.status == "done"
-    assert await compaction.read_record(1) is not None
+    assert await rollover.read_record(1) is not None
     enumeration = next(argv for argv in argvs if "changes-enum" in argv[2])
     assert enumeration[3:] == ["sh", "proj"]
     assert await recorded_workspace_changes(turn.conversation_id) == WorkspaceChanges(
@@ -4879,6 +4879,40 @@ async def test_round_budget_exhaustion_forces_a_final_answer_instead_of_failing(
     assert stored.messages[-1] == Message(role="assistant", content="best effort")
 
 
+async def test_round_budget_exhaustion_answers_from_the_whole_window_when_it_still_fits(
+    db: None, tmp_path: Path
+) -> None:
+    """The forced final round has no tools, so it could not follow a recovery record's pointer into
+    the history. A window that crosses the rollover line only by the time the budget is spent, and
+    still fits under the reserve, stays whole for that answer instead of being reset to a record."""
+    probe = replace(
+        _engine(await _seed_turn("queued", None), NeverAnsweringModel(), tmp_path / "p"),
+        max_rounds=2,
+    )
+    await probe.run()
+    sized = await probe.transcript.read()
+    assert sized is not None
+    before_last_round = probe.context.window.tokens(sized.messages[:3])
+    at_exhaustion = probe.context.window.tokens(sized.messages[:-2])
+    assert before_last_round < at_exhaustion
+
+    turn = await _seed_turn("queued", None)
+    model = NeverAnsweringModel()
+    engine = _engine(turn, model, tmp_path)
+    engine = replace(
+        engine, context=replace(engine.context, trigger_tokens=before_last_round), max_rounds=2
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done" and frame.text == "best effort"
+    stored = await engine.transcript.read()
+    assert stored is not None
+    assert not any(str(message.content).startswith(ROLLOVER_PREFIX) for message in stored.messages)
+    assert Message(role="user", content=FORCE_FINAL_PROMPT) in stored.messages
+    assert await engine.context.read_record(1) is None
+
+
 async def test_round_budget_exhaustion_meters_under_the_turn_profile(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5092,7 +5126,7 @@ async def test_connect_handoff_binds_the_requesting_speaker_in_an_aggregate_turn
     assert owner == bob
 
 
-async def test_engine_compacts_history_before_the_round_and_bills_the_summary(
+async def test_engine_rolls_the_window_over_before_the_round_and_bills_nothing_for_it(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn("queued", None, seq=2)
@@ -5110,29 +5144,27 @@ async def test_engine_compacts_history_before_the_round_and_bills_the_summary(
             ),
         )
     )
-    compaction = Compaction(
+    rollover = ContextRollover(
         serving=serving_model(EchoModel()),
         blob=blob,
         conversation_id=turn.conversation_id,
         trigger_tokens=10,
-        keep_messages=2,
+        journal=FileJournal(tmp_path / "history.jsonl"),
     )
-    engine = _engine(turn, EchoModel(), tmp_path, compaction=compaction)
+    engine = _engine(turn, EchoModel(), tmp_path, rollover=rollover)
     frame = await engine.run()
     assert frame.status == "done"
-    assert frame.tokens == 20
+    assert frame.tokens == 10
     stored = await transcript.read()
     assert stored is not None and stored.seq == 2
     assert isinstance(stored.messages[0].content, str)
-    assert stored.messages[0].content.startswith(COMPACTED_CONTEXT_PREFIX)
-    record = await compaction.read_record(1)
+    assert stored.messages[0].content.startswith(ROLLOVER_PREFIX)
+    record = await rollover.read_record(1)
     assert record is not None
     assert any("history 0" in str(message.content) for message in record.before)
 
 
-async def test_context_overflow_forces_a_compaction_then_completes(
-    db: None, tmp_path: Path
-) -> None:
+async def test_context_overflow_forces_a_rollover_then_completes(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn("queued", None, seq=2)
     blob = FilesystemBlobStore(root=tmp_path)
     transcript = Transcript(blob=blob, conversation_id=turn.conversation_id)
@@ -5148,24 +5180,24 @@ async def test_context_overflow_forces_a_compaction_then_completes(
             ),
         )
     )
-    compaction = Compaction(
+    rollover = ContextRollover(
         serving=serving_model(EchoModel()),
         blob=blob,
         conversation_id=turn.conversation_id,
         trigger_tokens=1_000_000,
-        keep_messages=2,
+        journal=FileJournal(tmp_path / "history.jsonl"),
     )
     model = OverflowThenAnswerModel()
-    engine = _engine(turn, model, tmp_path, compaction=compaction)
+    engine = _engine(turn, model, tmp_path, rollover=rollover)
     frame = await engine.run()
     assert frame.status == "done"
     assert frame.text == "recovered"
     assert model.calls == 2
-    assert await compaction.read_record(1) is not None
-    assert await compaction.read_record(2) is None
+    assert await rollover.read_record(1) is not None
+    assert await rollover.read_record(2) is None
 
 
-async def test_forced_compaction_keeps_each_request_bound_to_its_message_ref(
+async def test_a_forced_rollover_keeps_each_request_bound_to_its_message_ref(
     db: None, tmp_path: Path
 ) -> None:
     turn = (await _seed_turn("queued", None, seq=2)).model_copy(
@@ -5244,12 +5276,12 @@ async def test_forced_compaction_keeps_each_request_bound_to_its_message_ref(
             yield Usage(input_tokens=1, output_tokens=1)
 
     model = OverflowThenChooseRequest()
-    compaction = Compaction(
+    rollover = ContextRollover(
         serving=serving_model(EchoModel()),
         blob=blob,
         conversation_id=turn.conversation_id,
         trigger_tokens=1_000_000,
-        keep_messages=2,
+        journal=FileJournal(tmp_path / "history.jsonl"),
     )
     tool = ToolDef(
         name="authority_probe",
@@ -5258,7 +5290,7 @@ async def test_forced_compaction_keeps_each_request_bound_to_its_message_ref(
         handler=capture,
     )
     engine = replace(
-        _engine(turn, model, tmp_path, compaction=compaction),
+        _engine(turn, model, tmp_path, rollover=rollover),
         turn=turn.model_copy(update={"speaker_member_id": founder}),
         tools=ToolRegistry((tool,)),
     )
@@ -5355,8 +5387,8 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
 ) -> None:
     """The first account serves one round and the provider rate-limits it before the next. The
     turn moves onto the member's other account and every fact keyed to the model follows: the
-    round re-runs under the other model's id, the window compaction reads is that model's, and each
-    account's burn lands on the ledger under its own model at its own rate — the account the
+    round re-runs under the other model's id, the window the rollover reads is that model's, and
+    each account's burn lands on the ledger under its own model at its own rate — the account the
     attempt began on under the attempt's series, the one it moved onto under the attempt and its
     model."""
     turn = await _seed_turn("queued", None)
@@ -5369,7 +5401,7 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
         alternates=("claude-opus-5",),
         exhausted=lambda: RuntimeError("every account they connected is rate limited"),
     )
-    assert engine.compaction.window.context_tokens == CORE_SPECS["gpt-5.6-sol"].context_window
+    assert engine.context.window.context_tokens == CORE_SPECS["gpt-5.6-sol"].context_window
 
     both = frozenset({"gpt-5.6-sol", "claude-opus-5"})
     with ws(turn.workspace_id), model_authority(MemberAuthority(member), both):
@@ -5379,7 +5411,7 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
     assert first.seen == ["gpt-5.6-sol", "gpt-5.6-sol"]
     assert other.seen == ["claude-opus-5"]
     assert engine.serving.model == "claude-opus-5"
-    assert engine.compaction.window.context_tokens == CORE_SPECS["claude-opus-5"].context_window
+    assert engine.context.window.context_tokens == CORE_SPECS["claude-opus-5"].context_window
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
@@ -6580,25 +6612,25 @@ async def test_member_skill_block_walls_alone_when_no_hook_injects(
 
 
 @dataclass(frozen=True, repr=False)
-class _RequestCapturingCompaction(Compaction):
-    """Records the active member requests each round hands compaction, and compacts nothing."""
+class _RequestCapturingContextRollover(ContextRollover):
+    """Records the active member requests each round hands the rollover, and resets nothing."""
 
     seen: list[tuple[str, ...]] = field(default_factory=list)
 
-    async def maybe_compact(
+    async def maybe_cross(
         self,
         messages: tuple[Message, ...],
         force: bool = False,
         active_requests: tuple[str, ...] = (),
-    ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
+    ) -> BoundaryOutcome:
         self.seen.append(active_requests)
-        return messages, ()
+        return BoundaryOutcome(messages, False)
 
 
 async def test_the_active_request_carries_the_member_text_without_the_injection(
     db: None, tmp_path: Path
 ) -> None:
-    """Compaction keeps every active member request verbatim, so the request the turn registers is
+    """A rollover keeps every active member request verbatim, so the request the turn registers is
     captured before the injection is wrapped in: the injected context reaches the model after the
     submitted message and never travels as something the member asked for."""
     recalled = "<recalled_memory>the vault code is 4821</recalled_memory>"
@@ -6619,13 +6651,14 @@ async def test_the_active_request_carries_the_member_text_without_the_injection(
     )
     turn = await _seed_turn("queued", None)
     model = CapturingModel()
-    compaction = _RequestCapturingCompaction(
+    rollover = _RequestCapturingContextRollover(
         serving=serving_model(model),
         blob=FilesystemBlobStore(root=tmp_path),
         conversation_id=turn.conversation_id,
+        journal=FileJournal(tmp_path / "history.jsonl"),
     )
     engine = replace(
-        _engine(turn, model, tmp_path, compaction=compaction),
+        _engine(turn, model, tmp_path, rollover=rollover),
         hooks=chain,
     )
     frame = await engine.run()
@@ -6633,7 +6666,7 @@ async def test_the_active_request_carries_the_member_text_without_the_injection(
     submitted = (
         f"<context>\nmessage_ref: {turn.id}\ntime: Thursday 2026-07-09 18:32 UTC\n</context>\nhi"
     )
-    assert compaction.seen == [(submitted,)]
+    assert rollover.seen == [(submitted,)]
     assert model.seen[0][-1].content == (
         f"{submitted}\n\n<injected_context>\n{recalled}\n</injected_context>"
     )

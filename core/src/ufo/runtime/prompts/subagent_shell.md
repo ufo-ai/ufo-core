@@ -10,6 +10,8 @@ required artifact, give the conclusion and absolute path without restating its b
 result-only task, give the result directly and create no file.
 </parent_handoff>
 
+{{context_window}}
+
 <style>
 - Write in clear, direct language. Skip filler like "To achieve this" or "Here's the plan".
 - Never use the words "scrape", "scraping", "crawl", or "crawling" when describing web interactions. Prefer "collect", "extract", "gather", "read", "fetch", or "browse".

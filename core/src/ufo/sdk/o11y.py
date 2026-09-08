@@ -5,5 +5,6 @@ it cannot mint one, and the fleet's metric surface stays enumerable from one pla
 
 from ufo.harness.o11y import emit_metric as emit_metric
 from ufo.harness.o11y import log as log
+from ufo.harness.o11y import log_error as log_error
 from ufo.harness.o11y import turn_profile as turn_profile
 from ufo.harness.o11y import warn as warn

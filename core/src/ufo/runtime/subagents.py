@@ -44,6 +44,7 @@ from ufo.runtime.ext.manifest import SubagentProfile
 from ufo.runtime.ext.surface import conversation_name
 from ufo.runtime.hub import ArrivalQueued, Hub
 from ufo.runtime.prompts.render import (
+    CONTEXT_WINDOW_SLOT,
     PROMPT_VAR_RE,
     SKILL_INDEX_SLOT,
     SUBAGENT_OUTPUT_DISCIPLINE,
@@ -187,6 +188,7 @@ def subagent_system_prompt(
     *,
     skills: Sequence[tuple[str, str]] = CORE_SKILL_INDEX,
     preload: tuple[LoadedSkill, ...] = (),
+    context_window: str = "",
 ) -> str:
     """The child's system prompt: the profile's own instructions with its `{{skill_index}}` slot
     filled from the loadable-skill index, then any preloaded skills' instructions, then the shared
@@ -196,7 +198,10 @@ def subagent_system_prompt(
     can never displace that contract from the prompt's last word. A slot the profile leaves unfilled
     fails loud rather than reaching the model as a literal brace; preloaded bodies over the char
     bound fail loud rather than blowing the model call. Skill bodies are injected after slot
-    validation — a literal brace inside a skill is content, never an unfilled slot."""
+    validation — a literal brace inside a skill is content, never an unfilled slot.
+    `context_window` is the active context strategy's own note on the boundary: the child is told
+    what its window does under the strategy this deploy runs, and a deploy that hands none tells it
+    nothing rather than the words of another strategy."""
     if "load_skill" in profile.tool_names and SKILL_INDEX_SLOT not in profile.prompt:
         raise ValueError(
             f"subagent profile {profile.name!r} grants load_skill but has no "
@@ -207,7 +212,7 @@ def subagent_system_prompt(
         SUBAGENT_OUTPUT_DISCIPLINE
         if profile.concise_parent_handoff
         else UNCAPPED_SUBAGENT_OUTPUT_DISCIPLINE
-    )
+    ).replace(CONTEXT_WINDOW_SLOT, context_window)
     if unresolved := frozenset(PROMPT_VAR_RE.findall(f"{body}\n\n{discipline}")):
         raise ValueError(f"subagent prompt has unresolved slots: {', '.join(sorted(unresolved))}")
     if preload:

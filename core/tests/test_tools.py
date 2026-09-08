@@ -270,6 +270,7 @@ def _check_registry_schemas_cover_every_tool() -> None:
         "connect_account",
         "cancel_spawn",
         "message_spawn",
+        "get_context_remaining",
     }
     bash = next(schema for schema in schemas if schema.name == "bash")
     assert "command" in bash.input_schema["properties"]

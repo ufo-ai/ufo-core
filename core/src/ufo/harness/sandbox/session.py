@@ -3,7 +3,7 @@
 Everything downstream (tools, engine) depends only on this module; the Docker carrier and the
 egress proxy implement against it. A deploy swaps the carrier (E2B, remote) without touching a
 tool. The invariant the sandbox exists to hold: a file tool reaches only the conversation's
-`/workspace` and the `$UFO_HOME/skills` runtime tree, never the transcript or compaction records,
+`/workspace` and the `$UFO_HOME/skills` runtime tree, never the transcript or rollover records,
 which live in the blob store the sandbox holds no credential for.
 
 A caller holds a sandbox either way round: `SandboxSession` over one that exists, and `LateSandbox`

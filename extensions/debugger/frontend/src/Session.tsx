@@ -12,7 +12,7 @@ import {
 } from "./api";
 import { Loading } from "./Loading";
 import { Bubble } from "./Transcript";
-import { Compactions } from "./Compactions";
+import { Rollovers } from "./Rollovers";
 import { Files } from "./Files";
 import { Params } from "./nav";
 import { Tail } from "./Tail";
@@ -54,7 +54,7 @@ export function Session(props: {
   const [turns, setTurns] = useState<Turn[] | null>(null);
   const [details, setDetails] = useState<Details>({});
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
-  const [tab, setTab] = useState<"turns" | "transcript" | "compactions" | "files">("turns");
+  const [tab, setTab] = useState<"turns" | "transcript" | "rollovers" | "files">("turns");
 
   useEffect(() => {
     let cancelled = false;
@@ -90,7 +90,7 @@ export function Session(props: {
         )}
       </section>
       <div className="tabs">
-        {(["turns", "transcript", "compactions", "files"] as const).map((name) => (
+        {(["turns", "transcript", "rollovers", "files"] as const).map((name) => (
           <button
             key={name}
             className={tab === name ? "active" : ""}
@@ -112,7 +112,7 @@ export function Session(props: {
           />
         ))}
       {tab === "transcript" && <Transcript conversationId={props.conversationId} />}
-      {tab === "compactions" && <Compactions conversationId={props.conversationId} />}
+      {tab === "rollovers" && <Rollovers conversationId={props.conversationId} />}
       {tab === "files" && <Files conversationId={props.conversationId} />}
     </>
   );

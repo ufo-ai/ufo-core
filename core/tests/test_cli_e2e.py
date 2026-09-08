@@ -31,6 +31,7 @@ from click.testing import CliRunner
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from sqlalchemy.engine import make_url
+from ufo_ext_context_rollover.manifest import manifest as rollover_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
 from ufo_testsupport.invoker import invoker_factory
@@ -694,9 +695,9 @@ def wire_server(
                 invoker_for=invoker_factory(dbos_client),
                 subagents=SubagentRegistry(()),
                 subagent_grants={},
-                manifests=(),
+                manifests=(rollover_manifest(),),
                 environment=HostEnvironment(
-                    manifests=(),
+                    manifests=(rollover_manifest(),),
                     credentials=None,
                     index=DefaultIndex(transaction=workspace_tx),
                     embed=StubEmbed(),

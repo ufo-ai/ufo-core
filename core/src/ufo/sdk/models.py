@@ -119,8 +119,8 @@ from ufo.harness.models.openai import (
 from ufo.harness.models.pricing import (
     ModelPrice as ModelPrice,
 )
-from ufo.harness.models.spec import (
-    DEFAULT_COMPACTION_KEEP_MESSAGES as DEFAULT_COMPACTION_KEEP_MESSAGES,
+from ufo.harness.models.registry import (
+    ServingModel as ServingModel,
 )
 from ufo.harness.models.spec import (
     ApiSurface as ApiSurface,
@@ -132,7 +132,7 @@ from ufo.harness.models.spec import (
     ReasoningSupport as ReasoningSupport,
 )
 from ufo.harness.models.spec import (
-    RepeatedToolCompaction as RepeatedToolCompaction,
+    RepeatedToolRollover as RepeatedToolRollover,
 )
 from ufo.harness.rounds import (
     ModelRetryAfter as ModelRetryAfter,

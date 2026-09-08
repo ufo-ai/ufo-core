@@ -67,7 +67,7 @@ class BlobStore(Protocol):
 
     async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
         """Every stored object under a key prefix, sorted by key, capped at `BLOB_LIST_MAX_KEYS`
-        entries — the bounded enumeration a read view (a conversation's compaction records) walks;
+        entries — the bounded enumeration a read view (a conversation's rollover records) walks;
         never a whole-store scan, so the prefix is required."""
         ...
 
@@ -172,7 +172,7 @@ class FilesystemBlobStore:
 
         A symlinked root is followed here, unlike a workspace root the agent can reach: this one
         arrives as deploy config, where `/var/lib/ufo/blobs -> /mnt/data/blobs` is an ordinary
-        compose or k8s layout, and refusing it would take transcripts, compaction records and every
+        compose or k8s layout, and refusing it would take transcripts, rollover records and every
         shared artifact down on a deploy doing nothing unusual. A root nothing has written yet holds
         nothing to canonicalize, and the first write makes it."""
         try:

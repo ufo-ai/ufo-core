@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
 from ufo_ext_docker import DockerCarrier
 from ufo_testsupport.models import serving_model
 
@@ -34,7 +35,6 @@ from ufo.harness.sandbox.session import SandboxHandle, SandboxSession
 from ufo.host.ext.loader import HookChain
 from ufo.host.tools.builtins import BUILTIN_TOOLS
 from ufo.runtime.access.connectors import ConnectorRegistry
-from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import TurnEngine
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.prompts.render import rendered_prompt
@@ -186,10 +186,13 @@ async def test_turn_execs_bash_in_a_live_container(
         serving=serving,
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
-        compaction=Compaction(
+        context=ContextRollover(
             serving=serving,
             blob=blob,
             conversation_id=turn.conversation_id,
+            journal=SandboxJournal(
+                SandboxSession(carrier=DockerCarrier(), handle=live_container), turn.conversation_id
+            ),
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=DockerCarrier(), handle=live_container),

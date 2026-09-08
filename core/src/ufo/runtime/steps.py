@@ -18,7 +18,7 @@ def _step_messages(output: object) -> tuple[Message, ...]:
     A model round is the assistant message it produced — its reasoning, its text, its tool calls —
     or its salvaged partial output when the round errored mid-stream; a tool dispatch is the result
     the model saw, image bytes left as a note rather than rehydrated. Every other output — a
-    compaction, a claimed-arrival batch, a round that errored with nothing salvaged — rebuilds no
+    rollover, a claimed-arrival batch, a round that errored with nothing salvaged — rebuilds no
     window and contributes none. The text is the model's own, reply markup and all, because a
     reader diagnosing a turn wants what was emitted, not what the member was shown."""
     match output:

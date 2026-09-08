@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
 from ufo_ext_sites.store import HostedSites, hosted_site
@@ -28,7 +29,6 @@ from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSessio
 from ufo.host.ext.loader import turn_hooks, turn_tools
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import TurnEngine
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.objects import ObjectVerbs
@@ -293,8 +293,13 @@ def _engine(turn: Turn, model: object, tmp_path: Path, spawn=_unavailable_spawn)
         serving=serving_model(model),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
-        compaction=Compaction(
-            serving=serving_model(model), blob=blob, conversation_id=turn.conversation_id
+        context=ContextRollover(
+            serving=serving_model(model),
+            blob=blob,
+            conversation_id=turn.conversation_id,
+            journal=SandboxJournal(
+                SandboxSession(carrier=_StubCarrier(), handle=handle), turn.conversation_id
+            ),
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=_StubCarrier(), handle=handle),

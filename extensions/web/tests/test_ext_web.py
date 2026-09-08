@@ -30,6 +30,8 @@ from pydantic import BaseModel, ValidationError
 from ufo_ext_app_chat.manifest import manifest as app_chat_manifest
 from ufo_ext_app_radar.manifest import manifest as app_radar_manifest
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
+from ufo_ext_context_rollover.manifest import manifest as rollover_manifest
+from ufo_ext_context_rollover.rollover import ROLLOVER_PREFIX
 from ufo_ext_imessage.manifest import manifest as imessage_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import recall_subjects
@@ -221,10 +223,11 @@ from ufo.runtime.surfaces.artifacts import router as artifacts_router
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.turns.transcript import (
-    CompactionSummary,
-    CompactionWindow,
     Conversation,
+    RecoveryRecord,
+    RolloverWindow,
     compaction_key,
+    rollover_key,
 )
 from ufo.runtime.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
 from ufo.runtime.workspace import ws
@@ -891,7 +894,7 @@ async def _write_transcript(
         await Transcript(blob=blob, conversation_id=conversation_id).write(conversation)
 
 
-async def _write_compaction(
+async def _write_rollover(
     blob: WorkspaceBlobStore,
     conversation_id: UUID,
     index: int,
@@ -906,24 +909,52 @@ async def _write_compaction(
                 )
             )
         ).scalar_one()
-    summary = CompactionSummary(intent="", current_work="", next_step="")
+    recovery = RecoveryRecord(first_entry_id=1, last_entry_id=len(before))
     with ws(workspace_id):
         await blob.put(
-            compaction_key(conversation_id, index, "before"),
-            lz4.frame.compress(CompactionWindow(messages=before).model_dump_json().encode()),
+            rollover_key(conversation_id, index, "before"),
+            lz4.frame.compress(RolloverWindow(messages=before).model_dump_json().encode()),
         )
         await blob.put(
-            compaction_key(conversation_id, index, "after"),
-            lz4.frame.compress(CompactionWindow(messages=after).model_dump_json().encode()),
+            rollover_key(conversation_id, index, "after"),
+            lz4.frame.compress(RolloverWindow(messages=after).model_dump_json().encode()),
         )
+        await blob.put(
+            rollover_key(conversation_id, index, "recovery"),
+            lz4.frame.compress(recovery.model_dump_json().encode()),
+        )
+
+
+async def _write_summary_record(
+    blob: WorkspaceBlobStore,
+    conversation_id: UUID,
+    index: int,
+    before: tuple[Message, ...],
+    after: tuple[Message, ...],
+) -> None:
+    async with workspace_tx() as connection:
+        workspace_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.workspace_id).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
+    with ws(workspace_id):
+        for half, messages in (("before", before), ("after", after)):
+            await blob.put(
+                compaction_key(conversation_id, index, half),
+                lz4.frame.compress(RolloverWindow(messages=messages).model_dump_json().encode()),
+            )
         await blob.put(
             compaction_key(conversation_id, index, "summary"),
-            lz4.frame.compress(summary.model_dump_json().encode()),
+            lz4.frame.compress(b'{"intent": "finish the audit"}'),
         )
 
 
 PORTAL_MANIFESTS = (
     web_manifest(),
+    rollover_manifest(),
     connectors_manifest(),
     imessage_manifest(),
     SCHEDULED_TASK_KIND_ONLY,
@@ -9359,11 +9390,48 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_earlier_messages_page_through_records_the_compaction_boundary_left(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A conversation that crossed the line under the compaction boundary still pages above its
+    summary: the records it left are listed and read through the same walk as rollover records."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    conversation_id, _turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="done"),
+    )
+    texts = [f"earlier {at}" for at in range(6)]
+    history = tuple(
+        Message(role="user", content=f"<context>\nmessage_ref: bulk-{at}\n</context>\n{text}")
+        for at, text in enumerate(texts)
+    )
+    summary = Message(role="user", content="Context compacted — summary follows")
+    await _write_summary_record(blob, conversation_id, 1, before=history, after=(summary,))
+    await _write_transcript(blob, conversation_id, Conversation(seq=1, messages=(summary,)))
+
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
+    tail = await client.get(path, headers=headers)
+    cursor = tail.json()["earlier_cursor"]
+    assert cursor
+    page = await client.get(path, headers=headers, params={"cursor": cursor})
+    assert page.status_code == 200
+    assert [message["text"] for message in page.json()["messages"]] == texts
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_earlier_messages_are_bounded_and_cursor_complete(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """A large compaction window crosses in bounded newest-first pages whose cursors reconstruct
+    """A large rolled-over window crosses in bounded newest-first pages whose cursors reconstruct
     the complete history once, whether the message-count or encoded-byte ceiling cuts a page."""
     client, workspace_id, agent_id = web
     _config, _hub, blob, _sandboxes = dbos_runtime
@@ -9380,9 +9448,9 @@ async def test_earlier_messages_are_bounded_and_cursor_complete(
         Message(role="user", content=f"<context>\nmessage_ref: bulk-{at}\n</context>\n{text}")
         for at, text in enumerate(texts)
     )
-    summary = Message(role="user", content="Compacted context:\nthe bulk history")
-    await _write_compaction(blob, conversation_id, 1, before=history, after=(summary,))
-    await _write_transcript(blob, conversation_id, Conversation(seq=1, messages=(summary,)))
+    recovery = Message(role="user", content=ROLLOVER_PREFIX + "## Recent member messages, verbatim")
+    await _write_rollover(blob, conversation_id, 1, before=history, after=(recovery,))
+    await _write_transcript(blob, conversation_id, Conversation(seq=1, messages=(recovery,)))
 
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
@@ -9416,9 +9484,9 @@ async def test_earlier_names_only_records_the_transcript_reflects(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
-    """A compaction record can exist without ever reaching the transcript: a turn that compacted
-    and then ended non-done keeps the pre-compaction transcript, and the next compaction
-    summarizes from that fuller window, shadowing the orphaned record. The tail then already
+    """A rollover record can exist without ever reaching the transcript: a turn that rolled over
+    and then ended non-done keeps the pre-rollover transcript, and the next rollover resets that
+    fuller window instead, shadowing the orphaned record. The tail then already
     holds everything such a record replaced, so the cursor names only the newest record the
     transcript opens with — nothing while the transcript is unreflective, and never a shadowed
     record from the page above it."""
@@ -9442,8 +9510,8 @@ async def test_earlier_names_only_records_the_transcript_reflects(
         Message(role="user", content=f"<context>\nmessage_ref: {second}\n</context>\nsecond ask"),
         Message(role="assistant", content="second reply"),
     )
-    orphaned = Message(role="user", content="Compacted context:\nnever landed")
-    await _write_compaction(
+    orphaned = Message(role="user", content=ROLLOVER_PREFIX + "never landed")
+    await _write_rollover(
         blob, conversation_id, 1, before=history[:2], after=(orphaned, *history[1:2])
     )
     await _write_transcript(blob, conversation_id, Conversation(seq=2, messages=history))
@@ -9460,11 +9528,11 @@ async def test_earlier_names_only_records_the_transcript_reflects(
         Message(role="user", content=f"<context>\nmessage_ref: {third}\n</context>\nthird ask"),
         Message(role="assistant", content="third reply"),
     )
-    summary = Message(role="user", content="Compacted context:\nthe fuller window, summarized")
-    await _write_compaction(
-        blob, conversation_id, 2, before=(*history, *late), after=(summary, *late)
+    recovery = Message(role="user", content=ROLLOVER_PREFIX + "the fuller window, reset")
+    await _write_rollover(
+        blob, conversation_id, 2, before=(*history, *late), after=(recovery, *late)
     )
-    await _write_transcript(blob, conversation_id, Conversation(seq=3, messages=(summary, *late)))
+    await _write_transcript(blob, conversation_id, Conversation(seq=3, messages=(recovery, *late)))
 
     compacted = await client.get(path, headers=headers)
     assert compacted.status_code == 200

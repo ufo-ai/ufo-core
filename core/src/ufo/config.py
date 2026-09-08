@@ -21,6 +21,11 @@ DEFAULT_BACKGROUND_JOBS_MODEL = "gpt-5.6-luna"
 DEFAULT_PROXY_PORT = 8888
 DEFAULT_INGRESS_PORT = 8100
 DEFAULT_FLAG_CACHE_TTL_SECONDS = 30.0
+DEFAULT_CONTEXT_STRATEGY = "compact"
+"""The context boundary a deploy runs when its toml names none: spend one model call over the
+window and install the summary. A name, not an import — the strategy behind it ships as the
+`context_compact` extension, and this default resolves through the manifests like any
+other."""
 
 
 class DatabaseConfig(BaseModel):
@@ -55,7 +60,7 @@ class DatabaseConfig(BaseModel):
 
 
 class BlobConfig(BaseModel):
-    """The blob store — transcripts, compaction records, shared artifacts. Never a conversation's
+    """The blob store — transcripts, rollover records, shared artifacts. Never a conversation's
     workspace: that lives in the sandbox, which holds no credential for this store.
     `endpoint_url`/`region` are the S3 the serve process talks to; leaving `endpoint_url` unset
     selects AWS and its virtual-hosted addressing, setting it selects an S3-compatible endpoint and
@@ -370,6 +375,21 @@ class ResearchConfig(BaseModel):
     search_provider: str | None = None
 
 
+class ContextConfig(BaseModel):
+    """The context boundary — what a turn does when its window crosses its line. `strategy` names
+    one strategy registered at the Manifest `context_boundaries` point. Core registers none: the
+    `context_rollover` extension registers `rollover` (reset the window to a recovery record no
+    model authored and keep the outgoing window in the sandbox history file) and
+    `context_compact` registers `compact` (spend one model call over the head and
+    install the verified summary in front of a verbatim tail). Both ship in the wheel, so the
+    default below resolves on a stock deploy. Exactly one runs: the name selects the boundary every
+    window of the deploy crosses, and a name no active extension registers fails loud at boot rather
+    than falling back."""
+
+    model_config = ConfigDict(extra="forbid")
+    strategy: str = DEFAULT_CONTEXT_STRATEGY
+
+
 class FlagsConfig(BaseModel):
     """Feature flags. `backend` names a flag provider an extension registers through its Manifest
     `flag_providers` point (the `flagship` extension registers Cloudflare Flagship); unset selects
@@ -414,6 +434,7 @@ class Config(BaseModel):
     browser: BrowserConfig = BrowserConfig()
     connectors: ConnectorsConfig = ConnectorsConfig()
     research: ResearchConfig = ResearchConfig()
+    context: ContextConfig = ContextConfig()
     flags: FlagsConfig = FlagsConfig()
     pack: PackConfig = PackConfig()
     sources: tuple[SourceEntry, ...] = ()

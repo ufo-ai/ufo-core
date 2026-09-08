@@ -30,7 +30,7 @@ from evals.harness.capability import (
     ProbeCommandResult,
     SharedArtifact,
     SharedArtifactReference,
-    StoredCompaction,
+    StoredRollover,
     ToolInvocation,
     TurnLog,
     UndeliveredRound,
@@ -48,10 +48,10 @@ from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
 from ufo.runtime.ext.context import ConversationProbes
 from ufo.runtime.tools.registry import OBJECT_ACTION_TOOL
 from ufo.runtime.turns.transcript import (
-    CompactionRecord,
+    RolloverRecord,
     TranscriptDecodeError,
     decode,
-    read_compaction_records,
+    read_rollover_records,
     transcript_key,
 )
 from ufo.runtime.workspace import ws_current
@@ -78,12 +78,13 @@ from ufo.sdk.models import (
 if TYPE_CHECKING:
     from evals.compaction.target import CompactionTarget
     from evals.mcp_atlas_100.target import McpAtlasTarget
+    from evals.rollover.target import RolloverTarget
 
 MAX_EVAL_ARTIFACTS = 256
 MAX_EVAL_ARTIFACT_BYTES = 16 * 1024 * 1024
 MAX_EVAL_ARTIFACT_TOTAL_BYTES = 32 * 1024 * 1024
 MAX_EVAL_TRAJECTORY_BYTES = 8 * 1024 * 1024
-MAX_EVAL_COMPACTION_BYTES = 8 * 1024 * 1024
+MAX_EVAL_ROLLOVER_BYTES = 8 * 1024 * 1024
 PRIVATE_HANDOFF_ACTION = ("credential", "request_credentials")
 PRIVATE_HANDOFF_REDACTED = "[private handoff redacted]"
 REASONING_EVIDENCE = "[reasoning]\n{summary}"
@@ -298,6 +299,7 @@ class InProcessTarget:
     logs: TurnLogReader | None = None
     turn_steps: TurnSteps | None = None
     mcp_atlas: McpAtlasTarget | None = None
+    rollover: RolloverTarget | None = None
     compaction: CompactionTarget | None = None
     loadable_skills: frozenset[str] | None = None
     workspace_probe_for: Callable[[UUID], WorkspaceProbe] | None = None
@@ -376,14 +378,14 @@ class InProcessTarget:
         output = result.output
         if self.blob is not None:
             collected = await self._shared_artifacts((turn_id, *settled.descendant_ids))
-            records = await read_compaction_records(self.blob, conversation_id)
+            records = await read_rollover_records(self.blob, conversation_id)
             output = replace(
                 output,
                 artifacts=collected.artifacts,
                 artifact_references=collected.references,
                 artifact_error=collected.error,
-                compactions=len(records),
-                compaction_records=compaction_snapshots(records),
+                rollovers=len(records),
+                rollover_records=rollover_snapshots(records),
             )
             result = replace(result, output=output)
         if not result.clean:
@@ -1267,19 +1269,19 @@ def trajectory_snapshot(
     )
 
 
-def compaction_snapshots(records: tuple[CompactionRecord, ...]) -> tuple[StoredCompaction, ...]:
-    """The storable form of a conversation's compactions: each summary and window-count kept, each
-    window redacted like a trajectory. Windows are dropped (summaries kept) once their combined size
-    crosses the budget, mirroring `trajectory_snapshot` — the same reason a large transcript is
-    omitted. The live target and the offline reconstruction both store compactions only through
-    this."""
-    snapshots: list[StoredCompaction] = []
+def rollover_snapshots(records: tuple[RolloverRecord, ...]) -> tuple[StoredRollover, ...]:
+    """The storable form of a conversation's rollovers: each recovery record and window-count kept,
+    each window redacted like a trajectory. Windows are dropped (recovery records kept) once their
+    combined size crosses the budget, mirroring `trajectory_snapshot` — the same reason a large
+    transcript is omitted. The live target and the offline reconstruction both store rollovers only
+    through this."""
+    snapshots: list[StoredRollover] = []
     for record in records:
         private_results, private_values = _private_handoffs((*record.before, *record.after))
         snapshots.append(
-            StoredCompaction(
+            StoredRollover(
                 index=record.index,
-                summary=record.summary,
+                recovery=record.recovery,
                 before_count=len(record.before),
                 after_count=len(record.after),
                 before=_safe_messages(record.before, private_results, private_values),
@@ -1287,12 +1289,12 @@ def compaction_snapshots(records: tuple[CompactionRecord, ...]) -> tuple[StoredC
             )
         )
     total_bytes = sum(len(snapshot.model_dump_json().encode()) for snapshot in snapshots)
-    if total_bytes <= MAX_EVAL_COMPACTION_BYTES:
+    if total_bytes <= MAX_EVAL_ROLLOVER_BYTES:
         return tuple(snapshots)
     return tuple(
-        StoredCompaction(
+        StoredRollover(
             index=snapshot.index,
-            summary=snapshot.summary,
+            recovery=snapshot.recovery,
             before_count=snapshot.before_count,
             after_count=snapshot.after_count,
             windows_omitted=True,

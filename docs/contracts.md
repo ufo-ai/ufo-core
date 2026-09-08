@@ -17,7 +17,7 @@ core/src/ufo/
   db.py          engine + workspace_tx() boundary             hub.py      Hub + in-process
   schema/        SQL migrations (single source)               o11y.py     OTel facade
   models/        ModelClient + anthropic/openai               jobs.py     JobSpec + runner
-  loop/          queue (DBOS), engine, transcript, compaction, subagents
+  loop/          queue (DBOS), engine, transcript, rollover, subagents
   tools/         registry, context, builtins/
   sandbox/       carrier (+docker), image/, proxy/ (rewriters, sentinel swap, metering)
   memory/        service (store+recall), index (pgvector), pipeline (condensers), embed
@@ -52,9 +52,10 @@ audit columns.
 
 ## blob.py
 
-Transcripts, compaction records, and shared artifacts — never a conversation's workspace, which
+Transcripts, rollover records, and shared artifacts — never a conversation's workspace, which
 lives in its sandbox. Key layout: `artifacts/<uuid>/<name>` (U5),
-`conversations/<cid>/compactions/<n>/{before,after}.json.lz4` (U5). On S3 a shared file lands by a
+`conversations/<cid>/rollovers/<n>/{before,after,recovery}.json.lz4` (U5); the conversation's
+history file lives in its sandbox at `$UFO_HOME/runs/<sandbox>/history-<conversation>.jsonl`. On S3 a shared file lands by a
 presigned PUT the sandbox performs, bound to the preflighted size and sha256.
 
 ## hub.py
@@ -75,8 +76,9 @@ Provider image/content limits (Anthropic image-count trim) live in the provider 
 ## loop/ (later-unit remainder)
 
 `TurnEngine` grows fields as its deps land: `memory: MemoryService` with a `_recall` step (U4),
-`spend: SpendEvaluator` per step (U7). Compaction (`loop/compaction.py`: window trigger, before/after
-records, live-window swap) and typed subagents (`loop/subagents.py`: profile registry, DBOS child
+`spend: SpendEvaluator` per step (U7). The context boundary (`runtime/context_boundary.py`: the seam and
+the selection; the `context_rollover` extension's window line, sandbox history file, recovery record and
+live-window reset) and typed subagents (`loop/subagents.py`: profile registry, DBOS child
 spawn foreground/background, the `spawn` builtin) are code-authoritative.
 
 ## tools/
@@ -227,7 +229,7 @@ extension may touch; a CI gate fails any `extensions/` import outside `ufo.sdk`.
 - At most one running turn per conversation; every awaited turn ends in a committed terminal frame.
 - A live turn absorbs every speaker's inbound FIFO and emits one terminal reply and writeback.
 - A conversation persists one exact audience; foreign rooms cannot read workspace-shared subjects.
-- A tool reaches only `/workspace`; transcripts and compactions live in a blob store the sandbox
+- A tool reaches only `/workspace`; transcripts and rollover records live in a blob store the sandbox
   holds no credential for.
 - Sandbox commands carry signed `(workspace, turn, acting member)` authority; descendants inherit
   their launch environment, while unbound commands carry common authority.

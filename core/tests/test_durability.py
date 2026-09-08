@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel, ValidationError, create_model
+from ufo_ext_context_compact.compaction import _CompactionRequest
 
 from ufo.harness.durability import MOVED_MODULES, ReplaySafeSerializer
 from ufo.runtime.engine import Arrival, DispatchResult
@@ -119,6 +120,30 @@ def test_a_recording_from_a_moved_module_replays_through_the_current_path() -> N
     replayed = SERIALIZER.deserialize(recording)
     assert type(replayed) is DispatchResult
     assert replayed == DispatchResult(tool_use_id="c1", text="done", is_error=False)
+
+
+def test_a_compaction_recording_from_before_the_package_rename_replays() -> None:
+    """`_compact` is memoized, so a recording the outgoing image wrote names its step input under
+    the package path that image shipped. Replay on this build must land on the class at its
+    current home."""
+    recorded_class = type("_CompactionRequest", (_CompactionRequest,), {})
+    recorded_class.__module__ = "ufo_ext_context_summarization.compaction"
+    legacy = types.ModuleType("ufo_ext_context_summarization.compaction")
+    legacy._CompactionRequest = recorded_class
+    legacy_package = types.ModuleType("ufo_ext_context_summarization")
+    legacy_package.compaction = legacy
+    sys.modules["ufo_ext_context_summarization"] = legacy_package
+    sys.modules["ufo_ext_context_summarization.compaction"] = legacy
+    try:
+        recording = SERIALIZER.serialize(
+            recorded_class(messages=(), reason="auto", active_requests=())
+        )
+    finally:
+        del sys.modules["ufo_ext_context_summarization.compaction"]
+        del sys.modules["ufo_ext_context_summarization"]
+    assert b"ufo_ext_context_summarization.compaction" in base64.b64decode(recording)
+    replayed = SERIALIZER.deserialize(recording)
+    assert type(replayed) is _CompactionRequest
 
 
 def test_a_rebuild_reference_from_before_its_move_still_resolves() -> None:

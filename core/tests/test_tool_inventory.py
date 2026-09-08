@@ -14,6 +14,7 @@ RETAINED_GLOBAL_TOOLS = frozenset(
         "object_apply",
         "object_delete",
         "object_action",
+        "get_context_remaining",
         "bash",
         "read",
         "write",
@@ -98,3 +99,12 @@ def test_every_candidate_registers_as_an_action_and_never_as_a_global_tool() -> 
     assert {tool.name for tool in tools}.isdisjoint(MOVED_CANDIDATES)
     registered = {bound.action.name for held in verbs.actions.values() for bound in held.values()}
     assert MOVED_CANDIDATES <= registered
+
+
+def test_the_window_tools_reach_every_subagent() -> None:
+    """The `<context_window>` section rides the subagent shell prompt too, so the tools it names
+    must ride into every child as subagent defaults rather than as per-profile grants. This pack
+    bundles the compaction boundary, whose one window tool is `get_context_remaining`."""
+    tools, _, _ = _registry(HOSTED_PACK)
+    defaults = {tool.name for tool in tools if tool.subagent_default}
+    assert {"get_context_remaining"} <= defaults

@@ -22,6 +22,7 @@ import sqlalchemy as sa
 import ufo_ext_slack.surface as slack
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
+from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
 from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_slack.surface import (
     IDENTITY_BLOB_KEY,
@@ -60,7 +61,6 @@ from ufo.runtime.access.credentials import (
     CredentialStore,
     open_credential_request,
 )
-from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import TurnEngine
 from ufo.runtime.ext.context import ExtensionContext
 from ufo.runtime.hub import InProcessHub
@@ -359,10 +359,17 @@ async def _dispatch(
         serving=serving_model(model),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
         transcript=Transcript(blob=workspace_blob, conversation_id=turn.conversation_id),
-        compaction=Compaction(
+        context=ContextRollover(
             serving=serving_model(model),
             blob=workspace_blob,
             conversation_id=turn.conversation_id,
+            journal=SandboxJournal(
+                SandboxSession(
+                    carrier=_UntouchedCarrier(),
+                    handle=SandboxHandle(conversation_id=turn.conversation_id, container_id="test"),
+                ),
+                turn.conversation_id,
+            ),
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(

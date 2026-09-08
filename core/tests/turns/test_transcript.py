@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -16,15 +17,18 @@ from ufo.harness.models.interface import (
 )
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.transcript import (
-    CompactionSummary,
-    CompactionWindow,
     Conversation,
     ParkedTurn,
+    PendingResult,
+    RecoveryRecord,
+    RolloverWindow,
     compaction_key,
+    count_summary_records,
     decode,
     encode,
-    read_compaction_after,
-    read_compaction_records,
+    read_rollover_after,
+    read_rollover_records,
+    rollover_key,
     transcript_key,
 )
 
@@ -191,45 +195,126 @@ async def test_writer_bytes_decode_through_the_shared_contract(tmp_path: Path) -
     assert decode(await blob.get(transcript_key(conversation_id))) == conversation
 
 
-async def _write_compaction(blob: FilesystemBlobStore, conversation_id: UUID, index: int) -> None:
+async def _write_rollover(blob: FilesystemBlobStore, conversation_id: UUID, index: int) -> None:
     for half, messages in (
         ("before", (Message(role="user", content=f"before {index}"),)),
         ("after", (Message(role="user", content=f"after {index}"),)),
     ):
         await blob.put(
-            compaction_key(conversation_id, index, half),
-            lz4.frame.compress(CompactionWindow(messages=messages).model_dump_json().encode()),
+            rollover_key(conversation_id, index, half),
+            lz4.frame.compress(RolloverWindow(messages=messages).model_dump_json().encode()),
         )
-    summary = CompactionSummary(intent=f"intent {index}", current_work="", next_step="")
+    recovery = RecoveryRecord(
+        user_inputs=(f"member said {index}",),
+        pending_results=(
+            PendingResult(entry_id=index, call="bash", arguments="{}", text=f"result {index}"),
+        ),
+        checklist=(f"step {index}",),
+        first_entry_id=index,
+        last_entry_id=index + 1,
+    )
+    await blob.put(
+        rollover_key(conversation_id, index, "recovery"),
+        lz4.frame.compress(recovery.model_dump_json().encode()),
+    )
+
+
+async def _write_summary_record(
+    blob: FilesystemBlobStore, conversation_id: UUID, index: int
+) -> None:
+    for half, messages in (
+        ("before", (Message(role="user", content=f"before {index}"),)),
+        ("after", (Message(role="user", content=f"summary {index}"),)),
+    ):
+        await blob.put(
+            compaction_key(conversation_id, index, half),
+            lz4.frame.compress(RolloverWindow(messages=messages).model_dump_json().encode()),
+        )
+    summary = {
+        "intent": f"ship release {index}",
+        "current_work": "rotating the key",
+        "decisions": ["keep the old key until Friday"],
+        "files": [{"path": "/workspace/notes.md", "why": "the plan"}],
+    }
     await blob.put(
         compaction_key(conversation_id, index, "summary"),
-        lz4.frame.compress(summary.model_dump_json().encode()),
+        lz4.frame.compress(json.dumps(summary).encode()),
     )
 
 
-async def test_read_compaction_records_walks_every_index(tmp_path: Path) -> None:
+async def test_records_the_compaction_boundary_left_read_back_in_the_same_walk(
+    tmp_path: Path,
+) -> None:
+    """A conversation that crossed the line under the compaction boundary keeps its earlier
+    windows: its records read through the same index walk as rollover records, the summary
+    rendered as the handoff, and a later rollover numbers on after them."""
     blob = FilesystemBlobStore(root=tmp_path)
     conversation_id = uuid4()
-    await _write_compaction(blob, conversation_id, 1)
-    await _write_compaction(blob, conversation_id, 2)
-    records = await read_compaction_records(blob, conversation_id)
+    await _write_summary_record(blob, conversation_id, 1)
+    await _write_rollover(blob, conversation_id, 2)
+
+    assert await count_summary_records(blob, conversation_id) == 1
+    records = await read_rollover_records(blob, conversation_id)
     assert tuple(record.index for record in records) == (1, 2)
-    assert records[0].summary.intent == "intent 1"
+    assert records[0].before == (Message(role="user", content="before 1"),)
+    assert records[0].recovery.handoff is not None
+    assert records[0].recovery.handoff.startswith("intent: ship release 1\n")
+    assert "decisions: keep the old key until Friday" in records[0].recovery.handoff
+    assert "file /workspace/notes.md — the plan" in records[0].recovery.handoff
+    assert records[0].recovery.last_entry_id == 1
+    assert await read_rollover_after(blob, conversation_id, 1) == (
+        Message(role="user", content="summary 1"),
+    )
+    assert records[1].recovery.checklist == ("step 2",)
 
 
-async def test_read_compaction_records_is_empty_without_compactions(tmp_path: Path) -> None:
-    blob = FilesystemBlobStore(root=tmp_path)
-    assert await read_compaction_records(blob, uuid4()) == ()
-
-
-async def test_read_compaction_after_fetches_the_light_half_alone(tmp_path: Path) -> None:
+async def test_read_rollover_records_walks_every_index(tmp_path: Path) -> None:
     blob = FilesystemBlobStore(root=tmp_path)
     conversation_id = uuid4()
-    await _write_compaction(blob, conversation_id, 1)
-    assert await read_compaction_after(blob, conversation_id, 1) == (
+    await _write_rollover(blob, conversation_id, 1)
+    await _write_rollover(blob, conversation_id, 2)
+    records = await read_rollover_records(blob, conversation_id)
+    assert tuple(record.index for record in records) == (1, 2)
+    assert records[0].recovery.user_inputs == ("member said 1",)
+    assert records[0].recovery.checklist == ("step 1",)
+    assert records[0].recovery.pending_results[0].entry_id == 1
+
+
+async def test_a_recovery_record_carries_no_model_authored_summary_field() -> None:
+    """The contract the rollover rests on: every field of the record is copied from the window or
+    from the agent's own earlier words, so no boundary field can hold a paraphrase."""
+    assert "summary" not in RecoveryRecord.model_fields
+    assert set(RecoveryRecord.model_fields) == {
+        "objective",
+        "user_inputs",
+        "pending_results",
+        "checklist",
+        "checkpoint",
+        "handoff",
+        "active_requests",
+        "loaded_skills",
+        "first_entry_id",
+        "last_entry_id",
+        "history_path",
+        "history_lost",
+        "window_digest",
+        "verification",
+    }
+
+
+async def test_read_rollover_records_is_empty_without_rollovers(tmp_path: Path) -> None:
+    blob = FilesystemBlobStore(root=tmp_path)
+    assert await read_rollover_records(blob, uuid4()) == ()
+
+
+async def test_read_rollover_after_fetches_the_light_half_alone(tmp_path: Path) -> None:
+    blob = FilesystemBlobStore(root=tmp_path)
+    conversation_id = uuid4()
+    await _write_rollover(blob, conversation_id, 1)
+    assert await read_rollover_after(blob, conversation_id, 1) == (
         Message(role="user", content="after 1"),
     )
-    assert await read_compaction_after(blob, conversation_id, 2) is None
+    assert await read_rollover_after(blob, conversation_id, 2) is None
 
 
 async def test_a_shorter_run_record_never_clobbers_a_fuller_fallback_at_the_same_seq(
@@ -303,7 +388,9 @@ async def test_a_fuller_run_record_still_supersedes_the_thin_fallback(tmp_path: 
     assert stored is not None and stored.from_run and len(stored.messages) == 3
 
 
-async def test_a_completed_compacted_run_replaces_its_longer_parked_record(tmp_path: Path) -> None:
+async def test_a_completed_rolled_over_run_replaces_its_longer_parked_record(
+    tmp_path: Path,
+) -> None:
     blob = FilesystemBlobStore(root=tmp_path)
     conversation_id = uuid4()
     transcript = Transcript(blob=blob, conversation_id=conversation_id)
@@ -319,7 +406,7 @@ async def test_a_completed_compacted_run_replaces_its_longer_parked_record(tmp_p
     completed = Conversation(
         seq=2,
         messages=(
-            Message(role="user", content="compacted summary"),
+            Message(role="user", content="Context rollover — the window was reset."),
             Message(role="assistant", content="done"),
         ),
         from_run=True,

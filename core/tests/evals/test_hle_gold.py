@@ -236,10 +236,10 @@ async def test_compaction_grader_requires_durable_record_and_retained_token() ->
     grader = _grader(item, record, "unused")
     response = f"ANSWER: Poblet\nCONFIDENCE: 90%\nRETAINED: RETENTION-{record.id}"
 
-    passed = await grader(CapabilityOutput(response, (), compactions=1))
+    passed = await grader(CapabilityOutput(response, (), rollovers=1))
     missing_record = await grader(CapabilityOutput(response, ()))
     missing_token = await grader(
-        CapabilityOutput("ANSWER: Poblet\nCONFIDENCE: 90%", (), compactions=1)
+        CapabilityOutput("ANSWER: Poblet\nCONFIDENCE: 90%", (), rollovers=1)
     )
 
     assert passed.passed

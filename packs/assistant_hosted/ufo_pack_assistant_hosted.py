@@ -10,8 +10,10 @@ repository or a serve-local directory, the ufo terminal
 surface, the member web portal, and the operator session debugger, the Bedrock and OpenRouter
 model providers, Cloudflare Flagship as the feature-flag backend (and the open backend a stack
 without a flag service selects), Metronome plan provisioning,
-usage and seat metering, and the coding
-subagent — but over managed backends instead
+usage and seat metering, the coding
+subagent, and the compaction context boundary — the strategy a stock deploy crosses; a deploy
+that wants the rollover strategy instead names it in the toml and bundles the
+`context_rollover` extension — but over managed backends instead
 of core's own: the Turbopuffer index (in place of the local index), Slack and iMessage surfaces,
 the Redis live-frame hub, the E2B sandbox carrier, and a Browserbase-hosted Chrome per browser run
 (the browserbase cdp provider, in place of Chrome inside the conversation's own sandbox). Memory
@@ -88,6 +90,7 @@ EXTENSIONS = (
     "browser",
     "browserbase",
     "skill_create",
+    "context_compact",
     "embed_openai",
     "flagship",
     "flags_open",

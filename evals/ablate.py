@@ -35,6 +35,9 @@ The experiment file:
     [arm.files]
     "packs/assistant_hosted/ufo_pack_assistant_hosted.py" = "arms/no-topic-list.py"
 
+An arm's `[arm.files]` replace files the base holds; `[arm.additions]` add files the base lacks,
+such as a migration the base removed; `[[arm.replacements]]` swap one exact text for another.
+
 `memory_ingestion` snapshot and `memory_ingestion_corpus` paths make the ingestion suites
 measurable: both ride every matrix row, so every arm and repeat installs the same Luna-derived
 facts before its target runs. Those suites are named `memory_ingestion.<corpus>.<category>` and are
@@ -77,6 +80,8 @@ from evals.harness.viewer import EvalRun, write_viewer
 from evals.memory_ingestion.materialize import DerivedCorpus
 from evals.memory_ingestion.models import MANIFEST_FILE, load_snapshot
 from evals.registry import TASKS
+from evals.rollover.runner import load_rollover
+from evals.rollover.snapshot import MANIFEST_FILE as ROLLOVER_MANIFEST_FILE
 from evals.stack import RUNS_ROOT as STACK_RUNS_DIR
 from evals.stack import (
     cancel_stack_process,
@@ -89,6 +94,7 @@ from ufo.schema.records import ReasoningEffort
 
 CONTROL_ARM = "control"
 INGESTION_PREFIX = "memory_ingestion"
+ROLLOVER_PREFIX = "rollover"
 ARM_LABEL_PREFIX = "ablate"
 EGRESS_BINARY = Path("servers/egress/target/debug/ufo-egress")
 REMOTE_CLIENT_BINARY = Path(".local/bin/ufo")
@@ -123,11 +129,14 @@ class ArmReplacement(BaseModel):
 
 
 class ArmSpec(BaseModel):
-    """One variant arm: variant files or exact replacements applied in its own worktree."""
+    """One variant arm: variant files, files the base lacks, or exact replacements, applied in its
+    own worktree. `files` replace what the base holds and `additions` must not exist there, so a
+    misspelled path fails loud either way instead of quietly landing beside the file it meant."""
 
     model_config = ConfigDict(extra="forbid")
     name: str
     files: dict[str, Path] = Field(default_factory=dict)
+    additions: dict[str, Path] = Field(default_factory=dict)
     replacements: tuple[ArmReplacement, ...] = ()
 
     @field_validator("name")
@@ -154,6 +163,9 @@ class ExperimentSpec(BaseModel):
     Empty runs the default agent."""
     memory_ingestion: Path | None = None
     memory_ingestion_corpus: Path | None = None
+    rollover: Path | None = None
+    """The rollover snapshot the `rollover.<leaf>` suites are built from. Those suites live in the
+    snapshot rather than the registry, so every arm and repeat reads the same one."""
     repeats: int = 1
     concurrency: int = 4
     max_stacks: int = 3
@@ -191,6 +203,15 @@ class ExperimentSpec(BaseModel):
             raise ValueError("memory_ingestion_corpus needs memory_ingestion")
         return self
 
+    @model_validator(mode="after")
+    def _rollover_suites_name_their_snapshot(self) -> ExperimentSpec:
+        named = [name for name in self.suites if name.startswith(f"{ROLLOVER_PREFIX}.")]
+        if named and self.rollover is None:
+            raise ValueError(
+                f"suites {', '.join(named)} need rollover naming the snapshot they are built from"
+            )
+        return self
+
 
 def ingestion_suites(snapshot_root: Path) -> dict[str, tuple[str, ...]]:
     """The ingestion suites the snapshot carries, each with its case ids. The runner groups the
@@ -221,6 +242,11 @@ def load_experiment(path: Path) -> ExperimentSpec:
             and derived.snapshot_digest != load_snapshot(snapshot).manifest.digest
         ):
             raise SystemExit("memory_ingestion derived corpus belongs to a different snapshot")
+    rollover = None
+    if spec.rollover is not None:
+        rollover = (path.parent / spec.rollover).resolve()
+        if not (rollover / ROLLOVER_MANIFEST_FILE).is_file():
+            raise SystemExit(f"rollover snapshot missing {ROLLOVER_MANIFEST_FILE}: {rollover}")
     resolved = tuple(
         ArmSpec(
             name=arm.name,
@@ -228,12 +254,16 @@ def load_experiment(path: Path) -> ExperimentSpec:
                 repo_path: (path.parent / variant).resolve()
                 for repo_path, variant in arm.files.items()
             },
+            additions={
+                repo_path: (path.parent / variant).resolve()
+                for repo_path, variant in arm.additions.items()
+            },
             replacements=arm.replacements,
         )
         for arm in spec.arm
     )
     for arm in resolved:
-        for repo_path, variant in arm.files.items():
+        for repo_path, variant in (*arm.files.items(), *arm.additions.items()):
             if not variant.is_file():
                 raise SystemExit(f"arm {arm.name!r}: variant for {repo_path} missing: {variant}")
     return spec.model_copy(
@@ -241,6 +271,7 @@ def load_experiment(path: Path) -> ExperimentSpec:
             "arm": resolved,
             "memory_ingestion": snapshot,
             "memory_ingestion_corpus": corpus,
+            "rollover": rollover,
         }
     )
 
@@ -597,7 +628,11 @@ class Ablation:
 
     def _planned_cases(self) -> int:
         if self.spec.memory_ingestion is not None:
-            return self._planned_ingestion_cases(self.spec.memory_ingestion)
+            return self._planned_snapshot_cases(ingestion_suites(self.spec.memory_ingestion))
+        if self.spec.rollover is not None:
+            return self._planned_snapshot_cases(
+                {task.name: task.cases for task in load_rollover(self.spec.rollover).tasks}
+            )
         by_suite = {task.name: task for task in TASKS}
         unknown = [name for name in self.spec.suites if name not in by_suite]
         if unknown:
@@ -607,8 +642,9 @@ class Ablation:
             tasks = narrowed_tasks(tasks, self.spec.cases)
         return max(sum(len(task.cases) for task in tasks), 1)
 
-    def _planned_ingestion_cases(self, snapshot: Path) -> int:
-        suites = ingestion_suites(snapshot)
+    def _planned_snapshot_cases(self, suites: dict[str, tuple[str, ...]]) -> int:
+        """The cases a snapshot-built suite plans: the suites live in the snapshot, not the
+        registry, so the budget preflight counts them here."""
         unknown = [name for name in self.spec.suites if name not in suites]
         if unknown:
             raise SystemExit(f"unknown suites: {', '.join(unknown)}")
@@ -781,6 +817,14 @@ class Ablation:
                     f"arm {arm.name!r}: {repo_path} is not a file at the selected base"
                 )
             shutil.copy(variant, target)
+        for repo_path, variant in arm.additions.items():
+            target = root / repo_path
+            if target.exists():
+                raise RuntimeError(
+                    f"arm {arm.name!r}: {repo_path} already exists at the selected base"
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(variant, target)
         for replacement in arm.replacements:
             target = root / replacement.path
             if not target.is_file():
@@ -831,7 +875,8 @@ class Ablation:
 
         A memory-ingestion snapshot and derived corpus travel as row keys, never as arguments. The
         stack owns `--memory-ingestion` and `--memory-ingestion-state`, because it installs the
-        corpus and only then knows where the readiness state landed."""
+        corpus and only then knows where the readiness state landed. A rollover snapshot travels the
+        same way and the stack owns `--rollover`."""
         corpus: dict[str, object] = (
             {
                 "memory_ingestion": str(self.spec.memory_ingestion),
@@ -840,6 +885,8 @@ class Ablation:
             if self.spec.memory_ingestion is not None
             else {}
         )
+        if self.spec.rollover is not None:
+            corpus["rollover"] = str(self.spec.rollover)
         agent: dict[str, object] = {
             key: value
             for key, value in (

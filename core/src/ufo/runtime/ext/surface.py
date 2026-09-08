@@ -149,11 +149,11 @@ from ufo.runtime.turns.audience import (
     readable_audiences,
 )
 from ufo.runtime.turns.transcript import (
-    CompactionRecord,
     Conversation,
+    RolloverRecord,
     decode,
-    read_compaction_after,
-    read_compaction_record,
+    read_rollover_after,
+    read_rollover_record,
     transcript_key,
 )
 from ufo.runtime.turns.workspace_changes import (
@@ -1615,7 +1615,7 @@ class TurnStep(BaseModel):
     """One durable workflow step with its recorded identity and wall-clock interval. `messages` is
     what the step's recorded output rebuilds — a model round as the assistant message it produced,
     a tool dispatch as its result — so a reader sees the turn's actual trajectory, uncompacted, and
-    not only the timeline. A step whose output carries no window (a compaction, a claimed arrival, a
+    not only the timeline. A step whose output carries no window (a rollover, a claimed arrival, a
     round that only errored) contributes none."""
 
     number: int = Field(ge=1)
@@ -4602,12 +4602,15 @@ class SurfaceContext:
             return None
         return _without_carried(decode(body))
 
-    async def list_compactions(self, conversation_id: UUID) -> tuple[int, ...]:
-        """The indices of the conversation's persisted compaction records, ascending — each one
-        readable via `read_compaction`."""
+    async def list_rollovers(self, conversation_id: UUID) -> tuple[int, ...]:
+        """The indices of the conversation's persisted rollover records, ascending — each one
+        readable via `read_rollover`."""
         if not await self._owned_conversation(conversation_id):
             return ()
-        entries = await self.blob.list(f"conversations/{conversation_id}/compactions/")
+        entries = (
+            *await self.blob.list(f"conversations/{conversation_id}/rollovers/"),
+            *await self.blob.list(f"conversations/{conversation_id}/compactions/"),
+        )
         indices = {
             int(parts[3])
             for entry in entries
@@ -4615,23 +4618,23 @@ class SurfaceContext:
         }
         return tuple(sorted(indices))
 
-    async def read_compaction(self, conversation_id: UUID, index: int) -> CompactionRecord | None:
-        """One compaction's durable record — the pre-compaction window, its replacement, and the
-        typed summary — or None when the conversation is not this workspace's or the index holds
-        no record."""
+    async def read_rollover(self, conversation_id: UUID, index: int) -> RolloverRecord | None:
+        """One rollover's durable record — the pre-rollover window, the fresh window that replaced
+        it, and the typed recovery record — or None when the conversation is not this workspace's
+        or the index holds no record."""
         if not await self._owned_conversation(conversation_id):
             return None
-        return await read_compaction_record(self.blob, conversation_id, index)
+        return await read_rollover_record(self.blob, conversation_id, index)
 
-    async def read_compaction_after(
+    async def read_rollover_after(
         self, conversation_id: UUID, index: int
     ) -> tuple[Message, ...] | None:
-        """One compaction's `after` window alone — the summary plus the kept tail, the light half a
+        """One rollover's `after` window alone — the fresh window it installed, the light half a
         reader compares a later window's opening against — or None when the conversation is not
         this workspace's or the index holds no record."""
         if not await self._owned_conversation(conversation_id):
             return None
-        return await read_compaction_after(self.blob, conversation_id, index)
+        return await read_rollover_after(self.blob, conversation_id, index)
 
     async def list_workspace_files(self, conversation_id: UUID) -> tuple[WorkspaceFile, ...]:
         """Member-visible files in the conversation's `/workspace` — the sandbox's live state with

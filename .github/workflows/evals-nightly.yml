@@ -17,7 +17,7 @@ name: Nightly evals
 #
 # Each memory-ingestion report is its own job because it builds and materializes a fixed corpus
 # before the run. Other corpus suites (`--memory-100`, `--issue-recall`, `--dsqa-100`, `--gdpval-100`,
-# `--jobbench`, `--wandr`, `--hle-gold`, `--compaction`, `--handbook`, `--coding-repo`,
+# `--jobbench`, `--wandr`, `--hle-gold`, `--rollover`, `--handbook`, `--coding-repo`,
 # `mcp_atlas_100`) are not here.
 
 on:

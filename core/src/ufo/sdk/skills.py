@@ -5,6 +5,9 @@ member skills declares against, and the lexical scorer a skill search ranks with
 code in any `__init__.py`), so the public surface lives in named modules like this one."""
 
 from ufo.runtime.skills.runtime import (
+    LoadedSkills as LoadedSkills,
+)
+from ufo.runtime.skills.runtime import (
     RuntimeSkill as RuntimeSkill,
 )
 from ufo.runtime.skills.runtime import (

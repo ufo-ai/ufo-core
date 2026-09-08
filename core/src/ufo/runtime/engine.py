@@ -3,12 +3,14 @@ terminal commit.
 
 `run()` is the body of the `turn_workflow` DBOS workflow. Its non-deterministic, side-effecting
 units are DBOS steps — each model round (`_stream_once`), each tool dispatch (`_dispatch_step`),
-each arrival drain (`_claim_arrivals`), and each compaction (`Compaction._compact`). On a crash the
-workflow re-dispatches under the same `workflow_id`: every recorded step replays from DBOS's
-`operation_outputs` without re-executing — completed rounds are not re-called, completed tools not
-re-applied, drained arrivals not re-consumed — and execution resumes at the first unrecorded step.
-The queue claims before loading; setup then reclaims the same attempt while loading context,
-attaching the sandbox, and re-deciding spend. Each step is idempotent across replay."""
+each arrival drain (`_claim_arrivals`), and each context boundary (the selected strategy's
+own memoized step). On a
+crash the workflow re-dispatches under the same `workflow_id`: every recorded step replays from
+DBOS's `operation_outputs` without re-executing — completed rounds are not re-called, completed
+tools not re-applied, drained arrivals not re-consumed — and execution resumes at the first
+unrecorded step. The queue claims before loading; setup then reclaims the same attempt while
+loading context, attaching the sandbox, and re-deciding spend. Each step is idempotent across
+replay."""
 
 import asyncio
 import json
@@ -154,7 +156,7 @@ from ufo.runtime.billing.accounting import (
     record_turn_usage,
 )
 from ufo.runtime.billing.balance import balance_absent
-from ufo.runtime.compaction import Compaction
+from ufo.runtime.context_boundary import ContextBoundary
 from ufo.runtime.ext.context import ExtensionContext, SourceReader
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import (
@@ -214,7 +216,12 @@ from ufo.runtime.turns.activity import SKILL_LOAD_TOOL, ActivitySummarizer
 from ufo.runtime.turns.audience import Audience, audience_member, audience_subjects
 from ufo.runtime.turns.contracts import Contract, freeform_result_contract
 from ufo.runtime.turns.delivery_register import DIRECT_PROSE_RESULT_MAX_CHARS
-from ufo.runtime.turns.transcript import Conversation, ParkedRequester, ParkedTurn
+from ufo.runtime.turns.transcript import (
+    MEMBER_CONTEXT_OPENING,
+    Conversation,
+    ParkedRequester,
+    ParkedTurn,
+)
 from ufo.runtime.turns.workspace_changes import WorkspaceChangeRecorder, change_targets
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -835,7 +842,7 @@ def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: dat
         lines.append(f"source: {context.source}")
     if context is not None and context.reply_reaches:
         lines.append(f"reply_reaches: {context.reply_reaches}")
-    return "<context>\n" + "\n".join(lines) + "\n</context>\n"
+    return MEMBER_CONTEXT_OPENING + "\n".join(lines) + "\n</context>\n"
 
 
 def _bounded(content: str) -> str:
@@ -1266,15 +1273,15 @@ class _RuntimeConversation:
         await self.engine._enforce_spend(self.usage_events, self.requesters)
         self.engine._reseed_loaded_skills(absorbed)
         active_requests = tuple(message.rendered for message in self.requesters.values())
-        with span("compaction.maybe"):
-            compacted, compaction_usage = await self.engine.compaction.maybe_compact(
+        with span("context_boundary.maybe"):
+            outcome = await self.engine.context.maybe_cross(
                 absorbed, active_requests=active_requests
             )
-        self.engine._reseed_loaded_skills(compacted)
-        self.usage_events.extend(compaction_usage)
+        self.engine._reseed_loaded_skills(outcome.messages)
+        self.usage_events.extend(outcome.usage)
         self.meter.rounds += 1
         return HarnessPreparedRound(
-            messages=_to_harness_messages(compacted),
+            messages=_to_harness_messages(outcome.messages),
             interrupted_final_act=len(absorbed) > len(current),
         )
 
@@ -1287,11 +1294,11 @@ class _RuntimeConversation:
     ) -> tuple[HarnessMessage, ...]:
         await self.engine._enforce_spend(self.usage_events, self.requesters)
         active_requests = tuple(message.rendered for message in self.requesters.values())
-        compacted, compaction_usage = await self.engine.compaction.maybe_compact(
-            _from_harness_messages(messages), active_requests=active_requests
+        outcome = await self.engine.context.maybe_cross(
+            _from_harness_messages(messages), active_requests=active_requests, final=True
         )
-        self.usage_events.extend(compaction_usage)
-        return _to_harness_messages(compacted)
+        self.usage_events.extend(outcome.usage)
+        return _to_harness_messages(outcome.messages)
 
 
 @dataclass(frozen=True)
@@ -1751,7 +1758,7 @@ class TurnEngine:
     serving: ServingModel
     activity_summarizer: ActivitySummarizer
     transcript: Transcript
-    compaction: Compaction
+    context: ContextBoundary
     hub: Hub
     sandbox: Sandbox
     cdp_provider: CdpProvider | None
@@ -1860,7 +1867,8 @@ class TurnEngine:
             grants=self.grants,
             granted_actions=self.granted_actions,
             skills=self.skills,
-            loaded_skills=self.compaction.loaded_skills,
+            loaded_skills=self.context.loaded_skills,
+            context=self.context,
             cdp_provider=self.cdp_provider,
             search_provider=self.search_provider,
             connectors=self.connectors,
@@ -2137,7 +2145,8 @@ class TurnEngine:
             grants=self.grants,
             granted_actions=self.granted_actions,
             skills=self.skills,
-            loaded_skills=self.compaction.loaded_skills,
+            loaded_skills=self.context.loaded_skills,
+            context=self.context,
             cdp_provider=self.cdp_provider,
             search_provider=self.search_provider,
             connectors=self.connectors,
@@ -2772,11 +2781,11 @@ class TurnEngine:
         include_requested_by: bool = True,
     ) -> tuple[tuple[Message, ...], StreamResult]:
         """Run one model round, recovering from a provider context-overflow: the proactive
-        compaction already ran, so an overflow here means the window is still too large — force a
-        compaction past the trigger and retry once. The recovered window is returned so it carries
-        into the rest of the turn. When the forced compaction cannot shrink the window (nothing left
-        to summarize), the overflow is unrecoverable and re-raises rather than retrying a doomed
-        call; a non-overflow error re-raises unchanged."""
+        boundary already ran, so an overflow here means the window is still too large — force the
+        boundary past the line and retry once. The recovered window is returned so it carries into
+        the rest of the turn. When the forced boundary cannot replace the window (a window with
+        nothing to roll over or summarize), the overflow is unrecoverable and re-raises rather than
+        retrying a doomed call; a non-overflow error re-raises unchanged."""
         try:
             result = await self._stream_retrying_interruption(
                 _RoundInput(
@@ -2800,14 +2809,15 @@ class TurnEngine:
         except Exception as error:
             if not is_context_overflow(error):
                 raise
-            compacted, compaction_usage = await self.compaction.maybe_compact(
+            outcome = await self.context.maybe_cross(
                 messages,
                 force=True,
                 active_requests=active_requests,
             )
-            if not compaction_usage:
+            if not outcome.crossed:
                 raise
-            usage_events.extend(compaction_usage)
+            usage_events.extend(outcome.usage)
+            compacted = outcome.messages
             self._reseed_loaded_skills(compacted)
             emit_metric("turn_context_overflow_recovered_total", profile=self.profile)
             log("turn.context_overflow_recovered", turn_id=str(self.turn.id))
@@ -3151,14 +3161,14 @@ class TurnEngine:
 
     def _reseed_loaded_skills(self, messages: tuple[Message, ...]) -> None:
         """Re-derive which skills' workflows the window holds, for the tracker the turn's
-        `ToolContext` shares with `Compaction`. A compaction that may be followed by another
-        `load_skill` needs this after it: draining the tracker into the summary empties it, but a
-        compaction keeps a verbatim tail, so a load that survived there is still in front of the
-        model and must stay suppressed for the dispatches that follow. The compaction inside
+        `ToolContext` shares with the active context boundary. A boundary that may be followed by
+        another `load_skill` needs this after it: draining the tracker into the boundary's own
+        replacement empties it, so a load that survived the boundary is still in front of the model
+        and must stay suppressed for the dispatches that follow.
         The harness's forced final round is the exception: it ends the turn without offering tools.
         `preload` rides every reseed: a subagent's preloaded workflows sit in its system prompt,
-        which no compaction touches."""
-        self.compaction.loaded_skills.reseed(
+        which no boundary touches."""
+        self.context.loaded_skills.reseed(
             _loaded_skill_closures(messages, self.skills), preloaded=self.preload
         )
 
@@ -4019,7 +4029,7 @@ class TurnEngine:
         sandbox delays neither. It answers for the conversation that owns the sandbox rather than
         this turn's, since a subagent shares its parent's workspace and a member asks the parent
         what changed. The targets accumulated round by round from the memoized model outputs, so a
-        recovered turn replays them and a mid-turn compaction of the message window cannot lose
+        recovered turn replays them and a mid-turn boundary crossing the message window cannot lose
         them."""
         await WorkspaceChangeRecorder(
             sandbox=self.sandbox,

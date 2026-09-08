@@ -20,7 +20,7 @@ services: SQLite + filesystem blobs + in-process hub.
 - migration 001: workspace, member, surface_identity, agent, conversation, turn, ledger.
 - `config.py` (ufo.toml, fail-loud), `db.py` (`workspace_tx` boundary + gate), `o11y.py`, `blob.py`
   (FilesystemBlobStore + S3BlobStore), `hub.py` (in-process), `models/` (anthropic, openai),
-  `loop/` (DBOS queue serialized per conversation at dispatch, TurnEngine minus compaction/tools, transcript
+  `loop/` (DBOS queue serialized per conversation at dispatch, TurnEngine minus rollover/tools, transcript
   `messages.json.lz4`), `accounting.py` (ledger writes + prices only), `surfaces/cli.py`, `cli.py`, `serve.py`.
 - First-run bootstrap: create workspace + first owner + default agent (`ufoctl init`).
 - **Proof**: a terminal client streams a real Anthropic turn; transcript in blob store; ledger rows
@@ -72,13 +72,14 @@ services: SQLite + filesystem blobs + in-process hub.
 
 ## U5 — loop depth
 
-- `loop/compaction.py` (window trigger, before/after records), `loop/subagents.py` (profiles,
+- `runtime/context_boundary.py` with the `context_rollover` extension behind it (window line,
+  journal, recovery record), `loop/subagents.py` (profiles,
   DBOS child spawn, foreground/background), skills (`load_skill`, packs layout `packs/<name>/skills/…`),
   builtins `ask_user`, `spawn`, `share_file` (TTL token URL).
 - Core's skill — `sandbox` — lands here (workflow guidance for core builtins only; the
   skill-ships-with-what-it-teaches rule is in spec.md).
-- **Proof**: a conversation exceeding the window compacts and later turns still recall pre-compaction
-  facts verbatim from transcript; a typed subagent round-trips schema I/O; a shared file downloads
+- **Proof**: a conversation exceeding the window rolls over and later turns still recall pre-rollover
+  facts verbatim from the journal; a typed subagent round-trips schema I/O; a shared file downloads
   via its token URL and rejects without it.
 
 ## U6 — surfaces + onboarding
@@ -144,7 +145,7 @@ eval harness port · enterprise k8s layer (apiserver rewriter module, multi-work
 | Execution concern | Owner | Runtime responsibility |
 |---|---|---|
 | Provider streams, tool ordering, rounds, and round budgets | `ufo.harness` | Typed model/tool effects and DBOS adapters. |
-| Context selection and compaction sequencing | `ufo.harness` | Summary effects, typed verification, metering, hooks, and durable checkpoints. |
+| Window estimate and rollover line | `ufo.harness` | Token estimate, the line a window rolls over at, metering, hooks, and durable checkpoints. |
 | Sandbox command/file protocol, path containment | `ufo.harness` | Carrier selection, authorization, and egress policy. |
 | Durable turn host and harness adapters | `ufo.runtime` | Complete ownership. |
 | Workspace identity, grants, billing, extensions, and surfaces | Sibling `ufo` domain packages | Supply scoped effects to `ufo.runtime`. |

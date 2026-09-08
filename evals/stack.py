@@ -102,6 +102,8 @@ ORCHESTRATOR_ARGS = (
     "--memory-100-state",
     "--memory-ingestion",
     "--memory-ingestion-state",
+    "--rollover",
+    "--compaction",
     "--issue-recall",
     "--run-id",
 )
@@ -202,6 +204,8 @@ class RunSpec(BaseModel):
     memory_100: Path | None = None
     memory_ingestion: Path | None = None
     memory_ingestion_corpus: Path | None = None
+    rollover: Path | None = None
+    compaction: Path | None = None
     issue_recall: bool = False
     member_model_provider: Literal["anthropic", "openai"] | None = None
 
@@ -863,6 +867,10 @@ class EvalStack:
             ]
         if readiness is not None and self.spec.issue_recall:
             argv += ["--issue-recall", str(readiness)]
+        if self.spec.rollover is not None:
+            argv += ["--rollover", str(self.spec.rollover.resolve())]
+        if self.spec.compaction is not None:
+            argv += ["--compaction", str(self.spec.compaction.resolve())]
         return tuple(argv)
 
     async def _shutdown(

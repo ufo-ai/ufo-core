@@ -5,7 +5,7 @@ The field set and URL templates are GitHub's code-search response verbatim (the 
 `GITHUB_SEARCH_CODE` returns), pointed at this repository: URL-dense JSON, which is what a
 connector-heavy window is made of. `CONNECTOR_WINDOW_TOKENS` is what Anthropic's
 `/v1/messages/count_tokens` charges for exactly what `connector_window` builds, measured on
-`claude-opus-4-8` — the measured truth the compaction estimate is held against.
+`claude-opus-4-8` — the measured truth the rollover estimate is held against.
 """
 
 import json

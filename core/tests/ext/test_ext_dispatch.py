@@ -8,6 +8,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
+from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
@@ -26,7 +27,6 @@ from ufo.host.ext.loader import HookChain, turn_tools, validate_ext_tools
 from ufo.host.tools.builtins import BUILTIN_TOOLS
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import TurnEngine
 from ufo.runtime.ext.context import ExtensionContext, ScopedStore, context_for
 from ufo.runtime.ext.manifest import CredentialSlot, Manifest
@@ -254,8 +254,13 @@ def _engine(
         serving=serving_model(model),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
-        compaction=Compaction(
-            serving=serving_model(model), blob=blob, conversation_id=turn.conversation_id
+        context=ContextRollover(
+            serving=serving_model(model),
+            blob=blob,
+            conversation_id=turn.conversation_id,
+            journal=SandboxJournal(
+                SandboxSession(carrier=StubCarrier(), handle=handle), turn.conversation_id
+            ),
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=StubCarrier(), handle=handle),

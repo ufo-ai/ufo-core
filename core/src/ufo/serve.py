@@ -119,6 +119,7 @@ from ufo.runtime.access.egress_rules import (
 )
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from ufo.runtime.billing.balance import billing_screen_url
+from ufo.runtime.context_boundary import select_context_boundary
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import ConversationProbes, CredentialAccess, ModelAccess
 from ufo.runtime.ext.context import context_for as extension_context_for
@@ -322,6 +323,7 @@ def run(fleet: Fleet) -> None:
         target=lambda: asyncio.run(heartbeat.run()), name="instance-heartbeat", daemon=True
     ).start()
     deploy_actions = validate_ext_tools(manifests, credentials)
+    boundary = select_context_boundary(config, manifests)
     _validate_requires(config, manifests, credentials)
     init_workspace_credentials(credentials)
     init_flags(_select_flag_provider(config, manifests))
@@ -417,6 +419,7 @@ def run(fleet: Fleet) -> None:
             public_base_url=config.connect.public_base_url,
             home_surface=browser_home,
             artifact_token_secret=artifact_secret,
+            context_window=boundary.prompt,
             invoker_for=invoker_for,
         ),
         registry=registry,
@@ -996,10 +999,23 @@ def _require_memory_search(
         )
 
 
+def _require_context_boundary(
+    config: Config,
+    manifests: tuple[Manifest, ...],
+    credentials: CredentialStore | None,
+) -> None:
+    """The `context_boundaries` readiness contract: `[context] strategy` names a registered
+    strategy. An extension that ships its own boundary requires this seam, so a deploy whose toml
+    still selects a name nothing registers fails at boot rather than at the first window that
+    fills."""
+    select_context_boundary(config, manifests)
+
+
 _REQUIRED_SEAM_CHECKS: dict[
     str, Callable[[Config, tuple[Manifest, ...], CredentialStore | None], None]
 ] = {
     "cdp_providers": _require_cdp_provider,
+    "context_boundaries": _require_context_boundary,
     "memory_search": _require_memory_search,
     "search_providers": _require_search_provider,
 }

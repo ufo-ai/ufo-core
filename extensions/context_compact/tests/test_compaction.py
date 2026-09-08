@@ -8,7 +8,23 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
-from connector_payload import CONNECTOR_WINDOW_TOKENS, connector_window
+from ufo_ext_context_compact.compaction import (
+    ANCHOR_RETRY_INSTRUCTION,
+    AUTOCOMPACT_BUFFER_TOKENS,
+    CHARS_PER_TOKEN,
+    COMPACTED_CONTEXT_PREFIX,
+    COMPACTION_FORMAT_RESTATEMENT,
+    COMPACTION_SUMMARY_MAX_TOKENS,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    FILES_HEADING,
+    MAX_ANCHORS_PER_KIND,
+    MAX_REFERENCE_PATHS,
+    Compaction,
+    _CompactionRequest,
+    harvest_anchors,
+    missing_anchors,
+)
+from ufo_testsupport.connector_payload import CONNECTOR_WINDOW_TOKENS, connector_window
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
@@ -27,24 +43,8 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from ufo.harness.models.spec import ReasoningSupport, RepeatedToolCompaction
+from ufo.harness.models.spec import ReasoningSupport, RepeatedToolRollover
 from ufo.host.ext.loader import BoundHook, HookChain
-from ufo.runtime.compaction import (
-    ANCHOR_RETRY_INSTRUCTION,
-    AUTOCOMPACT_BUFFER_TOKENS,
-    CHARS_PER_TOKEN,
-    COMPACTED_CONTEXT_PREFIX,
-    COMPACTION_FORMAT_RESTATEMENT,
-    COMPACTION_SUMMARY_MAX_TOKENS,
-    DEFAULT_CONTEXT_WINDOW_TOKENS,
-    FILES_HEADING,
-    MAX_ANCHORS_PER_KIND,
-    MAX_REFERENCE_PATHS,
-    Compaction,
-    _CompactionRequest,
-    harvest_anchors,
-    missing_anchors,
-)
 from ufo.runtime.engine import MAX_OUTPUT_TOKENS, OFFLOAD_NOTICE
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.manifest import HookContext, HookSpec
@@ -194,13 +194,22 @@ def _compaction(tmp_path: Path, model: object = None, **overrides: object) -> Co
     )
 
 
+async def compact(
+    compaction: Compaction, *args: object, **kwargs: object
+) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
+    """The window a compaction answers with and what the summary cost, off the boundary outcome the
+    strategy returns."""
+    outcome = await compaction.maybe_cross(*args, **kwargs)  # type: ignore[arg-type]
+    return outcome.messages, outcome.usage
+
+
 def _capture_metrics(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, str]]]:
     metrics: list[tuple[str, dict[str, str]]] = []
 
     def capture(name: str, **dimensions: str) -> None:
         metrics.append((name, dimensions))
 
-    monkeypatch.setattr("ufo.runtime.compaction.emit_metric", capture)
+    monkeypatch.setattr("ufo_ext_context_compact.compaction.emit_metric", capture)
     return metrics
 
 
@@ -295,7 +304,7 @@ def _repeated_tool_history(
 async def test_history_under_the_window_is_left_untouched(tmp_path: Path) -> None:
     compaction = _compaction(tmp_path, keep_messages=2)
     messages = _history()
-    result, usage = await compaction.maybe_compact(messages)
+    result, usage = await compact(compaction, messages)
     assert result == messages
     assert usage == ()
     assert await compaction.read_record(1) is None
@@ -307,7 +316,7 @@ async def test_repeated_tool_calls_compact_above_the_early_trigger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     metrics = _capture_metrics(monkeypatch)
-    policy = RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50)
+    policy = RepeatedToolRollover(consecutive_turns=4, trigger_percent=50)
     compaction = _compaction(
         tmp_path,
         trigger_tokens=1_000,
@@ -315,7 +324,7 @@ async def test_repeated_tool_calls_compact_above_the_early_trigger(
     )
     compaction.serving.spec = replace(
         compaction.serving.spec,
-        repeated_tool_compaction=policy,
+        repeated_tool_rollover=policy,
     )
     call = ("bash", {"command": "pwd"})
     messages = (
@@ -325,7 +334,7 @@ async def test_repeated_tool_calls_compact_above_the_early_trigger(
     assert 500 < compaction.window.tokens(messages) < 1_000
 
     with caplog.at_level(logging.INFO, logger="ufo"):
-        result, usage = await compaction.maybe_compact(messages)
+        result, usage = await compact(compaction, messages)
 
     assert len(usage) == 1
     assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
@@ -342,7 +351,7 @@ async def test_a_completed_turn_without_the_call_resets_the_early_trigger(tmp_pa
     compaction = _compaction(tmp_path, trigger_tokens=1_000, keep_messages=2)
     compaction.serving.spec = replace(
         compaction.serving.spec,
-        repeated_tool_compaction=RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50),
+        repeated_tool_rollover=RepeatedToolRollover(consecutive_turns=4, trigger_percent=50),
     )
     call = ("bash", {"command": "pwd"})
     messages = (
@@ -353,7 +362,7 @@ async def test_a_completed_turn_without_the_call_resets_the_early_trigger(tmp_pa
     )
     assert 500 < compaction.window.tokens(messages) < 1_000
 
-    result, usage = await compaction.maybe_compact(messages)
+    result, usage = await compact(compaction, messages)
 
     assert result is messages
     assert usage == ()
@@ -391,13 +400,13 @@ async def test_early_trigger_requires_tokens_and_four_exact_tool_turns(
     compaction = _compaction(tmp_path, trigger_tokens=1_000, keep_messages=2)
     compaction.serving.spec = replace(
         compaction.serving.spec,
-        repeated_tool_compaction=RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50),
+        repeated_tool_rollover=RepeatedToolRollover(consecutive_turns=4, trigger_percent=50),
     )
     messages = _repeated_tool_history(calls, pad=pad)
     assert (compaction.window.tokens(messages) > 500) is above_early_trigger
     assert compaction.window.tokens(messages) < 1_000
 
-    result, usage = await compaction.maybe_compact(messages)
+    result, usage = await compact(compaction, messages)
 
     assert result is messages
     assert usage == ()
@@ -407,7 +416,7 @@ async def test_a_multimodal_member_turn_resets_the_early_trigger(tmp_path: Path)
     compaction = _compaction(tmp_path, trigger_tokens=1_000, keep_messages=2)
     compaction.serving.spec = replace(
         compaction.serving.spec,
-        repeated_tool_compaction=RepeatedToolCompaction(consecutive_turns=4, trigger_percent=50),
+        repeated_tool_rollover=RepeatedToolRollover(consecutive_turns=4, trigger_percent=50),
     )
     call = ("bash", {"command": "pwd"})
     messages = (
@@ -418,7 +427,7 @@ async def test_a_multimodal_member_turn_resets_the_early_trigger(tmp_path: Path)
     )
     assert 500 < compaction.window.tokens(messages) < 1_000
 
-    result, usage = await compaction.maybe_compact(messages)
+    result, usage = await compact(compaction, messages)
 
     assert result is messages
     assert usage == ()
@@ -431,7 +440,7 @@ async def test_force_compacts_below_the_trigger(
     metrics = _capture_metrics(monkeypatch)
     compaction = _compaction(tmp_path, trigger_tokens=1_000_000, keep_messages=2)
     messages = _history()
-    result, usage = await compaction.maybe_compact(messages, force=True)
+    result, usage = await compact(compaction, messages, force=True)
     assert len(usage) == 1
     assert len(result) == 3
     assert isinstance(result[0].content, str)
@@ -447,7 +456,8 @@ async def test_compaction_preserves_each_active_ref_with_its_exact_request(tmp_p
     first = f"<context>\nmessage_ref: {first_ref}\nsender: Alice\n</context>\napprove access"
     second = f"<context>\nmessage_ref: {second_ref}\nsender: Bob\n</context>\nonly inspect access"
 
-    result, usage = await compaction.maybe_compact(
+    result, usage = await compact(
+        compaction,
         _history(),
         force=True,
         active_requests=(first, second),
@@ -464,7 +474,7 @@ async def test_compaction_preserves_each_active_ref_with_its_exact_request(tmp_p
 async def test_force_noops_when_the_window_is_within_keep_messages(tmp_path: Path) -> None:
     compaction = _compaction(tmp_path, trigger_tokens=1_000_000, keep_messages=2)
     messages = (Message(role="user", content="only one message"),)
-    result, usage = await compaction.maybe_compact(messages, force=True)
+    result, usage = await compact(compaction, messages, force=True)
     assert result is messages
     assert usage == ()
 
@@ -476,7 +486,7 @@ async def test_force_noops_when_no_assistant_boundary_exists(tmp_path: Path) -> 
         Message(role="user", content="b"),
         Message(role="user", content="c"),
     )
-    result, usage = await compaction.maybe_compact(messages, force=True)
+    result, usage = await compact(compaction, messages, force=True)
     assert result is messages
     assert usage == ()
 
@@ -486,7 +496,7 @@ async def test_history_over_the_window_compacts_and_keeps_the_tail_verbatim(
 ) -> None:
     compaction = _compaction(tmp_path, trigger_tokens=10, keep_messages=2)
     messages = _history()
-    result, usage = await compaction.maybe_compact(messages)
+    result, usage = await compact(compaction, messages)
     assert len(usage) == 1
     assert len(result) == 3
     assert isinstance(result[0].content, str)
@@ -501,7 +511,7 @@ async def test_the_summary_is_a_validated_structured_object(tmp_path: Path) -> N
     """Phase 1: one metered call yields a typed CompactionSummary with populated intent/next_step,
     rendered into the swapped window and round-tripped through the durable record."""
     compaction = _compaction(tmp_path, trigger_tokens=10, keep_messages=2)
-    result, _ = await compaction.maybe_compact(_history())
+    result, _ = await compact(compaction, _history())
     record = await compaction.read_record(1)
     assert record is not None
     assert isinstance(record.summary, CompactionSummary)
@@ -516,7 +526,7 @@ async def test_the_summary_is_a_validated_structured_object(tmp_path: Path) -> N
 
 async def test_before_record_preserves_a_pre_compaction_fact_verbatim(tmp_path: Path) -> None:
     compaction = _compaction(tmp_path, trigger_tokens=10, keep_messages=2)
-    result, _ = await compaction.maybe_compact(_history())
+    result, _ = await compact(compaction, _history())
     record = await compaction.read_record(1)
     assert record is not None
     assert record.before == _history()
@@ -545,7 +555,7 @@ async def test_compaction_boundary_never_orphans_a_tool_result_or_repeats_a_role
         Message(role="user", content=(ToolResultBlock(tool_use_id="t2", content="/tmp"),)),
         Message(role="assistant", content="done"),
     )
-    result, usage = await compaction.maybe_compact(messages)
+    result, usage = await compact(compaction, messages)
     assert len(usage) == 1
     assert result[0].role == "user"
     assert result[1].role == "assistant"
@@ -586,7 +596,7 @@ async def test_head_images_become_markers_in_the_summarizer_input(tmp_path: Path
         Message(role="assistant", content="working " + "x" * 40),
         Message(role="user", content="tail " + "x" * 40),
     )
-    await compaction.maybe_compact(messages)
+    await compact(compaction, messages)
     assert model.seen
     assert "[image]" in model.seen[0]
     assert "SECRETBASE64" not in model.seen[0]
@@ -600,7 +610,7 @@ async def test_summarizer_requests_the_5m_conversation_cache_ttl(tmp_path: Path)
         Message(role="assistant", content="working " + "x" * 40),
         Message(role="user", content="tail " + "x" * 40),
     )
-    await compaction.maybe_compact(messages)
+    await compact(compaction, messages)
     assert model.seen_conversation_cache_ttl == ["5m"]
 
 
@@ -627,12 +637,13 @@ async def test_summarizer_uses_required_reasoning_minimum(tmp_path: Path) -> Non
             supported=True, tools_with_reasoning=True, default_on=True, can_disable=False
         ),
     )
-    await compaction.maybe_compact(
+    await compact(
+        compaction,
         (
             Message(role="user", content="begin " + "x" * 40),
             Message(role="assistant", content="working " + "x" * 40),
             Message(role="user", content="tail " + "x" * 40),
-        )
+        ),
     )
     assert model.seen_reasoning == ["low"]
 
@@ -650,7 +661,7 @@ async def test_summarizer_input_closes_with_the_format_restatement(tmp_path: Pat
         Message(role="assistant", content="working"),
         Message(role="user", content="tail"),
     )
-    await compaction.maybe_compact(messages)
+    await compact(compaction, messages)
     assert model.seen[0].endswith(COMPACTION_FORMAT_RESTATEMENT)
 
 
@@ -668,7 +679,7 @@ async def test_summarizer_input_folds_verbatim_repetition(tmp_path: Path) -> Non
         Message(role="assistant", content="working"),
         Message(role="user", content="tail"),
     )
-    await compaction.maybe_compact(messages)
+    await compact(compaction, messages)
     seen = model.seen[0]
     assert "Persistent instruction: retain RETENTION-abc." in seen
     assert "[repeated 731 times]" in seen
@@ -689,7 +700,7 @@ async def test_repetition_below_the_fold_threshold_reaches_the_summarizer_verbat
         Message(role="assistant", content="working"),
         Message(role="user", content="tail"),
     )
-    await compaction.maybe_compact(messages)
+    await compact(compaction, messages)
     seen = model.seen[0]
     assert nine in seen
     assert "spam [repeated 10 times]" in seen
@@ -719,7 +730,7 @@ async def test_offloaded_tool_output_paths_are_re_referenced_after_compaction(
             content="tail preview…" + OFFLOAD_NOTICE.format(total=8888, path=tail_path),
         ),
     )
-    result, _ = await compaction.maybe_compact(messages)
+    result, _ = await compact(compaction, messages)
     rendered = str(result[0].content)
     assert "## Durable references" in rendered
     assert f"- {head_path}\n" in rendered or rendered.endswith(f"- {head_path}")
@@ -776,7 +787,7 @@ async def test_a_dropped_anchor_is_retried_once_then_recorded_as_a_lossy_compact
     compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
 
     with caplog.at_level(logging.INFO, logger="ufo"):
-        result, usage = await compaction.maybe_compact(_offloaded_history(paths))
+        result, usage = await compact(compaction, _offloaded_history(paths))
 
     assert len(model.seen) == 2
     assert len(usage) == 2
@@ -811,7 +822,7 @@ async def test_a_retry_that_carries_the_named_anchors_records_a_clean_compaction
     model = RecoveringSummaryModel(paths=dropped)
     compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
 
-    result, usage = await compaction.maybe_compact(_offloaded_history(paths))
+    result, usage = await compact(compaction, _offloaded_history(paths))
 
     assert len(model.seen) == 2
     assert len(usage) == 2
@@ -834,7 +845,7 @@ async def test_a_failed_anchor_retry_installs_the_verified_first_summary(
     compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
-        result, usage = await compaction.maybe_compact(_offloaded_history(paths))
+        result, usage = await compact(compaction, _offloaded_history(paths))
 
     assert model.calls == 2
     assert len(usage) == 1
@@ -865,7 +876,7 @@ async def test_a_summary_path_the_window_never_mentioned_never_reaches_the_rende
     )
     compaction = _compaction(tmp_path, model=model, trigger_tokens=10, keep_messages=2)
 
-    result, _ = await compaction.maybe_compact(_history())
+    result, _ = await compact(compaction, _history())
 
     rendered = str(result[0].content)
     assert invented not in rendered
@@ -891,7 +902,7 @@ async def test_a_summary_that_outweighs_the_window_fails_the_turn_loud(tmp_path:
     )
 
     with pytest.raises(RuntimeError, match="did not shrink the window"):
-        await compaction.maybe_compact(_heavy_head_history())
+        await compact(compaction, _heavy_head_history())
 
     assert await compaction.read_record(1) is None
 
@@ -910,7 +921,7 @@ async def test_a_replacement_still_over_the_trigger_fails_the_turn_loud(tmp_path
     )
 
     with pytest.raises(RuntimeError, match="stays over the compaction trigger"):
-        await compaction.maybe_compact(_heavy_head_history())
+        await compact(compaction, _heavy_head_history())
 
 
 @pytest.mark.parametrize(
@@ -947,7 +958,7 @@ async def test_a_tail_that_leaves_no_room_installs_the_window_and_records_stayin
         keep_messages=2,
     )
 
-    result, usage = await compaction.maybe_compact(heavy_tail)
+    result, usage = await compact(compaction, heavy_tail)
 
     assert len(usage) == 1
     assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
@@ -968,7 +979,7 @@ async def test_a_clean_compaction_records_its_own_counts(
     metrics = _capture_metrics(monkeypatch)
     compaction = _compaction(tmp_path, trigger_tokens=10, keep_messages=2)
 
-    result, _ = await compaction.maybe_compact(_history())
+    result, _ = await compact(compaction, _history())
 
     record = await compaction.read_record(1)
     assert record is not None
@@ -1007,7 +1018,7 @@ async def test_loaded_skills_come_from_the_tracker_and_the_tracker_ends_empty(
         loaded_skills=tracker,
     )
 
-    result, _ = await compaction.maybe_compact(_history())
+    result, _ = await compact(compaction, _history())
 
     record = await compaction.read_record(1)
     assert record is not None
@@ -1020,7 +1031,7 @@ async def test_loaded_skills_come_from_the_tracker_and_the_tracker_ends_empty(
 
 async def test_a_turn_that_loaded_no_skill_renders_no_loaded_skills_section(tmp_path: Path) -> None:
     compaction = _compaction(tmp_path, trigger_tokens=10, keep_messages=2)
-    result, _ = await compaction.maybe_compact(_history())
+    result, _ = await compact(compaction, _history())
     assert "## Loaded skills" not in str(result[0].content)
 
 
@@ -1029,7 +1040,7 @@ async def test_summarize_recovers_from_a_prompt_too_long_overflow(tmp_path: Path
     the call retried, up to the bound — the retry meters, and the retried request is smaller."""
     model = OverflowingSummaryModel(fails=2)
     compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
-    result, usage = await compaction.maybe_compact(_many_rounds(8))
+    result, usage = await compact(compaction, _many_rounds(8))
     assert model.calls == 3
     assert len(usage) == 1
     assert model.seen_lengths[-1] < model.seen_lengths[0]
@@ -1042,7 +1053,7 @@ async def test_summarize_gives_up_loud_when_the_overflow_never_clears(tmp_path: 
     model = OverflowingSummaryModel(fails=99)
     compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
     with pytest.raises(RuntimeError, match="too long"):
-        await compaction.maybe_compact(_many_rounds(8))
+        await compact(compaction, _many_rounds(8))
     assert model.calls == 4
 
 
@@ -1051,7 +1062,7 @@ async def test_an_empty_summary_fails_open(tmp_path: Path) -> None:
     compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
     messages = _history()
 
-    result, usage = await compaction.maybe_compact(messages)
+    result, usage = await compact(compaction, messages)
 
     assert result == messages
     assert usage == (Usage(input_tokens=11, output_tokens=3),)
@@ -1064,7 +1075,7 @@ async def test_an_unparseable_summary_fails_open(tmp_path: Path) -> None:
     )
     messages = _history()
 
-    result, usage = await compaction.maybe_compact(messages)
+    result, usage = await compact(compaction, messages)
 
     assert result == messages
     assert usage == (Usage(input_tokens=1, output_tokens=1),)
@@ -1076,7 +1087,7 @@ async def test_a_summary_missing_required_fields_fails_open(tmp_path: Path) -> N
     compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
     messages = _history()
 
-    result, usage = await compaction.maybe_compact(messages)
+    result, usage = await compact(compaction, messages)
 
     assert result == messages
     assert usage == (Usage(input_tokens=1, output_tokens=1),)
@@ -1121,8 +1132,8 @@ async def test_a_malformed_automatic_summary_fails_open_and_logs_the_fault(
     repeated_messages = (*messages, Message(role="assistant", content="continue"))
 
     with caplog.at_level(logging.ERROR, logger="ufo"):
-        result, usage = await compaction.maybe_compact(messages)
-        repeated, repeated_usage = await compaction.maybe_compact(repeated_messages)
+        result, usage = await compact(compaction, messages)
+        repeated, repeated_usage = await compact(compaction, repeated_messages)
 
     assert result == messages
     assert usage == (Usage(input_tokens=1, output_tokens=1),)
@@ -1148,10 +1159,10 @@ async def test_a_malformed_forced_summary_bypasses_automatic_suppression_and_fai
         '"pending":["unfinished"}'
     )
     compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
-    await compaction.maybe_compact(_history())
+    await compact(compaction, _history())
 
     with pytest.raises(RuntimeError, match="invalid summary"):
-        await compaction.maybe_compact(_history(), force=True)
+        await compact(compaction, _history(), force=True)
 
     assert model.calls == 2
 
@@ -1167,7 +1178,7 @@ async def test_a_summary_with_trailing_characters_still_parses(tmp_path: Path) -
     compaction = _compaction(
         tmp_path, model=RawTextModel(text=text), trigger_tokens=1, keep_messages=2
     )
-    result, _ = await compaction.maybe_compact(_history())
+    result, _ = await compact(compaction, _history())
     rendered = str(result[0].content)
     assert rendered.startswith(COMPACTED_CONTEXT_PREFIX)
     assert FIXED_SUMMARY.intent in rendered
@@ -1192,14 +1203,14 @@ async def test_trigger_derives_from_the_model_window(tmp_path: Path) -> None:
         Message(role="assistant", content="b"),
         Message(role="user", content="c"),
     )
-    result, usage = await compaction.maybe_compact(under)
+    result, usage = await compact(compaction, under)
     assert result is under and usage == ()
     over = (
         Message(role="user", content="a " + "x" * (derived + 200) * CHARS_PER_TOKEN),
         Message(role="assistant", content="b"),
         Message(role="user", content="c"),
     )
-    result, usage = await compaction.maybe_compact(over)
+    result, usage = await compact(compaction, over)
     assert len(usage) == 1
     assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
 
@@ -1219,7 +1230,7 @@ async def test_a_connector_heavy_window_over_the_real_trigger_compacts(tmp_path:
     window = connector_window()
     assert CONNECTOR_WINDOW_TOKENS > derived
     assert 0.9 <= compaction.window.tokens(window) / CONNECTOR_WINDOW_TOKENS <= 1.2
-    result, usage = await compaction.maybe_compact(window)
+    result, usage = await compact(compaction, window)
     assert len(usage) == 1
     assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
 
@@ -1233,7 +1244,7 @@ async def test_images_count_toward_the_compaction_budget(tmp_path: Path) -> None
         Message(role="assistant", content="sure"),
         Message(role="user", content="tail"),
     )
-    _, text_usage = await compaction.maybe_compact(short_text)
+    _, text_usage = await compact(compaction, short_text)
     assert text_usage == ()
     with_image = (
         Message(
@@ -1245,7 +1256,7 @@ async def test_images_count_toward_the_compaction_budget(tmp_path: Path) -> None
         ),
         *short_text[1:],
     )
-    _, image_usage = await compaction.maybe_compact(with_image)
+    _, image_usage = await compact(compaction, with_image)
     assert len(image_usage) == 1
 
 
@@ -1275,14 +1286,14 @@ async def test_each_reasoning_kind_counts_toward_the_compaction_budget(
         Message(role="assistant", content="sure"),
         Message(role="user", content="tail"),
     )
-    _, text_usage = await compaction.maybe_compact(short_text)
+    _, text_usage = await compact(compaction, short_text)
     assert text_usage == ()
     with_reasoning = (
         short_text[0],
         Message(role="assistant", content=(block, ToolUseBlock(id="t1", name="bash", input={}))),
         *short_text[2:],
     )
-    _, reasoning_usage = await compaction.maybe_compact(with_reasoning)
+    _, reasoning_usage = await compact(compaction, with_reasoning)
     assert len(reasoning_usage) == 1
 
 
@@ -1291,7 +1302,8 @@ async def test_head_reasoning_reaches_the_summarizer_as_text_without_its_signatu
 ) -> None:
     model = CapturingSummaryModel()
     compaction = _compaction(tmp_path, model=model, trigger_tokens=1, keep_messages=2)
-    await compaction.maybe_compact(
+    await compact(
+        compaction,
         (
             Message(role="user", content="hi"),
             Message(
@@ -1310,7 +1322,7 @@ async def test_head_reasoning_reaches_the_summarizer_as_text_without_its_signatu
             Message(role="user", content="keep going"),
             Message(role="assistant", content="working"),
             Message(role="user", content="tail"),
-        )
+        ),
     )
     assert "weigh the options" in model.seen[0]
     assert "weigh the item" in model.seen[0]
@@ -1333,10 +1345,47 @@ def test_the_compact_step_renders_no_window_into_a_cancellation_log(tmp_path: Pa
     assert repr(request) == "_CompactionRequest(messages=5, reason=auto, active_requests=0)"
 
 
+async def test_a_final_round_does_not_read_the_early_trigger(tmp_path: Path) -> None:
+    compaction = _compaction(tmp_path, trigger_tokens=1_000, keep_messages=2)
+    compaction.serving.spec = replace(
+        compaction.serving.spec,
+        repeated_tool_rollover=RepeatedToolRollover(consecutive_turns=4, trigger_percent=50),
+    )
+    call = ("bash", {"command": "pwd"})
+    messages = (
+        *_repeated_tool_history((call, call, call, call), pad="x" * 200),
+        Message(role="user", content="new request"),
+    )
+    assert 500 < compaction.window.tokens(messages) < 1_000
+
+    result, usage = await compact(compaction, messages, final=True)
+
+    assert result == messages
+    assert usage == ()
+    assert await compaction.read_record(1) is None
+
+
+async def test_a_final_round_summarizes_a_window_that_cannot_fit(tmp_path: Path) -> None:
+    """The final round gives the summary's own reserve back before it reads the line, so the reserve
+    is pinned small here to put this window over the line the give-back leaves."""
+    compaction = _compaction(
+        tmp_path,
+        trigger_tokens=10,
+        keep_messages=2,
+        summary_max_tokens=SMALL_SUMMARY_RESERVE,
+    )
+
+    result, usage = await compact(compaction, _history(), final=True)
+
+    assert len(usage) == 1
+    assert str(result[0].content).startswith(COMPACTED_CONTEXT_PREFIX)
+    assert await compaction.read_record(1) is not None
+
+
 async def test_compaction_index_is_monotonic(tmp_path: Path) -> None:
     compaction = _compaction(tmp_path, trigger_tokens=10, keep_messages=2)
-    await compaction.maybe_compact(_history())
-    await compaction.maybe_compact(_history())
+    await compact(compaction, _history())
+    await compact(compaction, _history())
     assert await compaction.read_record(1) is not None
     assert await compaction.read_record(2) is not None
     assert await compaction.read_record(3) is None

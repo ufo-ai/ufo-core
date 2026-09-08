@@ -18,6 +18,19 @@ def is_context_overflow(error: Exception) -> bool:
 
 
 @dataclass(frozen=True)
+class ContextRemaining:
+    """Where a window stands: what it has spent, the line a rollover fires at, and the model's hard
+    limit. Reported on demand so the number an agent reads never churns the prompt it reads it
+    from."""
+
+    used_tokens: int
+    rollover_at_tokens: int
+    tokens_until_rollover: int
+    hard_limit_tokens: int
+    tokens_until_hard_limit: int
+
+
+@dataclass(frozen=True)
 class WindowSelection[MessageT]:
     """The whole model rounds summarized as a head and retained as a tail."""
 
@@ -27,27 +40,35 @@ class WindowSelection[MessageT]:
 
 @dataclass(frozen=True)
 class ContextWindow[MessageT]:
-    """Decide when and how an opaque transcript window is compacted."""
+    """Estimate an opaque transcript window's cost and the line it crosses its boundary at, without
+    owning its message types.
+
+    `reserve_tokens` is what the boundary's own replacement message may cost — the recovery record a
+    rollover installs, or the summary a compaction writes — so the line sits that far back from the
+    model's real window. `keep_messages` and `head_drop_denominator` serve the compaction
+    strategy alone: a rollover keeps no verbatim tail and leaves them at their defaults."""
 
     role: Callable[[MessageT], str]
     text: Callable[[MessageT], str]
     opaque_chars: Callable[[MessageT], int]
     image_count: Callable[[MessageT], int]
     context_tokens: int
-    summary_tokens: int
+    reserve_tokens: int
     buffer_tokens: int
-    keep_messages: int
     chars_per_token: int
     image_tokens: int
     trigger_tokens: int | None = None
+    keep_messages: int = 0
     head_drop_denominator: int = 5
 
     @property
     def trigger(self) -> int:
-        """The token count at which an automatic compaction starts."""
+        """The token count at which the window crosses its boundary: the model's window less the
+        reserve the replacement's own first message may cost and the buffer, unless the spec pins a
+        line."""
         if self.trigger_tokens is not None:
             return self.trigger_tokens
-        return self.context_tokens - self.summary_tokens - self.buffer_tokens
+        return self.context_tokens - self.reserve_tokens - self.buffer_tokens
 
     def should_compact(
         self,
@@ -102,7 +123,6 @@ class ContextWindow[MessageT]:
         return rounds[max(1, len(rounds) // self.head_drop_denominator) :]
 
     def tokens(self, messages: tuple[MessageT, ...]) -> int:
-        """Estimate opaque transcript cost without owning its message types."""
         if self.chars_per_token < 1:
             raise ValueError("chars_per_token must be positive")
         return sum(
@@ -128,7 +148,7 @@ class ContextWindow[MessageT]:
     ) -> None:
         """Reject a replacement that could shrink and fit but does neither."""
         head_tokens = before_tokens - tail_tokens
-        room = fixed_replacement_tokens + self.summary_tokens
+        room = fixed_replacement_tokens + self.reserve_tokens
         if head_tokens > room and after_tokens >= before_tokens:
             raise RuntimeError(
                 f"compaction did not shrink the window: {after_tokens} >= {before_tokens} tokens"

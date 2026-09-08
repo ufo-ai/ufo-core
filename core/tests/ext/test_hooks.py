@@ -26,9 +26,14 @@ import sqlalchemy as sa
 import ufo_ext_sample as sample
 from cryptography.fernet import Fernet
 from pydantic import BaseModel
+from ufo_ext_context_rollover.rollover import (
+    ROLLOVER_PREFIX,
+    ContextRollover,
+)
 from ufo_testsupport.models import serving_model
 
 import ufo.runtime.ext.hooks as hooks_module
+from evals.rollover.target import FileJournal
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import (
@@ -41,16 +46,11 @@ from ufo.harness.models.interface import (
     ToolResultBlock,
     Usage,
 )
-from ufo.harness.models.spec import DEFAULT_COMPACTION_KEEP_MESSAGES
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import load_manifests, turn_hooks, turn_tools
 from ufo.host.tools.builtins import BUILTIN_TOOLS
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.compaction import (
-    COMPACTED_CONTEXT_PREFIX,
-    Compaction,
-)
 from ufo.runtime.engine import TurnEngine
 from ufo.runtime.ext.context import ExtensionContext, ScopedStore, context_for
 from ufo.runtime.ext.hooks import BoundHook, HookChain
@@ -67,14 +67,13 @@ from ufo.runtime.ext.manifest import (
     UserPromptSubmit,
 )
 from ufo.runtime.hub import Activity, InProcessHub, LiveFrame
-from ufo.runtime.prompts.render import COMPACTION_SYSTEM_PROMPT, rendered_prompt
+from ufo.runtime.prompts.render import rendered_prompt
 from ufo.runtime.surfaces.hub_tail import HubTailer
 from ufo.runtime.tools.context import SpawnResult
 from ufo.runtime.tools.registry import ToolRegistry
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import ActivitySummarizer
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
-from ufo.runtime.turns.transcript import CompactionSummary
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, TerminalFrame, Turn
@@ -409,19 +408,11 @@ def _answered(request: ModelRequest) -> bool:
 
 @dataclass(frozen=True)
 class CompactingModel:
-    """Round 1: one bash call, which grows the window past keep_messages; round 2: answer. On the
-    compaction summarize request (identified by its COMPACTION_SYSTEM_PROMPT system prompt) it
-    returns fixed summary text, so a proactive compaction mid-turn yields a real summary and fires
-    the pre_compact/post_compact hooks."""
+    """Round 1: one bash call, which grows the window past the rollover line; round 2: answer. The
+    rollover itself spends no model call, so this model only has to grow the window — the reset
+    fires between the rounds and with it the pre_compact/post_compact hooks."""
 
     async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
-        if request.system == COMPACTION_SYSTEM_PROMPT:
-            summary = CompactionSummary(
-                intent="condensed history", current_work="mid-turn", next_step="answer"
-            )
-            yield TextDelta(text=summary.model_dump_json())
-            yield Usage(input_tokens=1, output_tokens=1)
-            return
         if _answered(request):
             yield TextDelta(text="done")
             yield Usage(input_tokens=1, output_tokens=1)
@@ -536,8 +527,7 @@ def _engine(
     tools: tuple = BUILTIN_TOOLS,
     tool_ext: dict | None = None,
     carrier: RecordingCarrier | None = None,
-    compaction_trigger: int | None = None,
-    compaction_keep: int = DEFAULT_COMPACTION_KEEP_MESSAGES,
+    rollover_trigger: int | None = None,
 ) -> TurnEngine:
     blob = FilesystemBlobStore(root=tmp_path)
     handle = SandboxHandle(conversation_id=turn.conversation_id, container_id="test")
@@ -550,15 +540,15 @@ def _engine(
         serving=serving_model(model),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
-        compaction=Compaction(
+        context=ContextRollover(
             serving=serving_model(model),
             blob=blob,
             conversation_id=turn.conversation_id,
-            trigger_tokens=compaction_trigger,
-            keep_messages=compaction_keep,
+            trigger_tokens=rollover_trigger,
             hooks=hooks,
             turn=turn,
             agent=agent,
+            journal=FileJournal(tmp_path / "history.jsonl"),
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=carrier or RecordingCarrier(), handle=handle),
@@ -652,7 +642,7 @@ async def test_tool_failure_reaches_post_tool_use_failure_not_post_tool_use(
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -> None:
+async def test_a_rollover_fires_pre_and_post_compact(db: None, tmp_path: Path) -> None:
     turn = await _seed_turn(uuid4())
     manifest = _sample_manifest()
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
@@ -666,8 +656,7 @@ async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -
             hooks,
             tools=tools,
             tool_ext=tool_ext,
-            compaction_trigger=1,
-            compaction_keep=2,
+            rollover_trigger=1,
         ).run()
         assert frame.status == "done"
         scoped = ScopedStore(extension=sample.NAME)
@@ -675,8 +664,7 @@ async def test_compaction_fires_pre_and_post_compact(db: None, tmp_path: Path) -
         post = await scoped.get(sample.HOOK_POST_COMPACT_KEY)
     assert pre is not None and pre["reason"] == "auto" and pre["before_tokens"] > 0
     assert post is not None
-    assert post["summary"].startswith(COMPACTED_CONTEXT_PREFIX)
-    assert "condensed history" in post["summary"]
+    assert post["record"].startswith(ROLLOVER_PREFIX)
     assert post["before_tokens"] == pre["before_tokens"]
     assert post["after_tokens"] > 0
 

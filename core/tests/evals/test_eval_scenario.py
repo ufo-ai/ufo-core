@@ -15,11 +15,13 @@ from uuid import UUID, uuid4
 
 import anthropic
 import httpx
+import lz4.frame
 import pytest
 import sqlalchemy as sa
 
 from evals.harness.capability import (
     ArtifactProbeResult,
+    CapabilityCase,
     CapabilityOutput,
     CapabilityVerdict,
     DescribedGrader,
@@ -43,13 +45,19 @@ from evals.harness.scenario import (
     _infra_owned_result,
     run_scenario_case,
 )
+from evals.harness.scorers import exact_scorer
 from evals.harness.target import CapabilityTarget, InProcessTarget, TargetResult
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority, MemberAuthority
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.transcript import Transcript
-from ufo.runtime.turns.transcript import Conversation
+from ufo.runtime.turns.transcript import (
+    CompactionSummary,
+    CompactionWindow,
+    Conversation,
+    compaction_key,
+)
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TurnRuntimeConfig
@@ -1245,3 +1253,57 @@ async def test_a_judge_transient_excludes_the_trial_as_the_providers_fault(
     assert result.excluded
     assert result.provider_fault
     assert "ConnectError" in result.evidence["attempts"][0]["reason"]
+
+
+@dataclass
+class CompactingWorker(ScriptedWorker):
+    """A worker whose turns cross the compaction boundary: each admitted turn persists one
+    compaction record beside the transcript, the way `Compaction` does in a deploy that selects
+    that strategy."""
+
+    compactions: int = 0
+
+    async def admit(
+        self,
+        conversation_id: UUID,
+        message: str,
+        idempotency_key: str | None = None,
+        speaker_key: str | None = None,
+    ) -> UUID:
+        turn_id = await super().admit(conversation_id, message, idempotency_key, speaker_key)
+        self.compactions += 1
+        window = CompactionWindow(messages=self.transcript)
+        summary = CompactionSummary(
+            intent="total the purchases", current_work="summarized", next_step="answer"
+        )
+        for half, body in (("before", window), ("after", window), ("summary", summary)):
+            await self.blob.put(
+                compaction_key(conversation_id, self.compactions, half),
+                lz4.frame.compress(body.model_dump_json().encode()),
+            )
+        return turn_id
+
+
+async def test_the_boundary_count_holds_compactions_as_well_as_rollovers(
+    db: None, tmp_path
+) -> None:
+    """The count a case reports is boundaries crossed, not one strategy's records. A compact
+    deploy writes compaction records and no rollover record, and the index walk still counts them
+    and renders each as a recovery record whose handoff is the summary."""
+    workspace_id = await _workspace()
+    agent_id = await _seed_agent(workspace_id)
+    blob = FilesystemBlobStore(root=tmp_path)
+    worker = CompactingWorker(
+        blob, workspace_id, replies=((Message(role="assistant", content="The total is 223."),),)
+    )
+    target = _target(workspace_id, agent_id, blob, worker, ScriptedMember(()))
+
+    with ws(workspace_id):
+        result = await target.run(
+            CapabilityCase("boundaries", "Total my two purchases.", exact_scorer("unused"))
+        )
+
+    assert result.clean
+    assert result.output.rollovers == 1
+    snapshot = result.output.rollover_records[0]
+    assert "intent: total the purchases" in snapshot.recovery.handoff

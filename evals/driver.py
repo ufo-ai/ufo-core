@@ -53,10 +53,13 @@ from ufo.runtime.seats import signup_workspace_id
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.turns.cancellation import cancel_one_turn
 from ufo.runtime.turns.transcript import (
+    MEMBER_CONTEXT_OPENING,
     Conversation,
+    RolloverRecord,
     TranscriptDecodeError,
     decode,
     encode,
+    read_rollover_records,
     transcript_key,
 )
 from ufo.runtime.workspace import ws
@@ -94,6 +97,61 @@ WORKFLOW_STATUSES = frozenset({"queued", "running"})
 FAILED_WORKFLOW_STATUSES = frozenset({"ERROR", "MAX_RECOVERY_ATTEMPTS_EXCEEDED", "CANCELLED"})
 REMOTE_TOKEN_TTL = timedelta(days=1)
 REMOTE_EVAL_DOMAIN = "eval.invalid"
+
+
+def _trajectory_messages(
+    records: tuple[RolloverRecord, ...],
+    conversation: Conversation,
+    turn_id: UUID,
+    turn_seq: int,
+    next_turn_id: UUID | None,
+    recorded: tuple[Message, ...] = (),
+) -> tuple[Message, ...] | None:
+    if conversation.seq < turn_seq:
+        return None
+    messages: tuple[Message, ...] = ()
+    for window in (
+        *(part for record in records for part in (record.before, record.after)),
+        conversation.messages,
+    ):
+        overlap = next(
+            (
+                size
+                for size in range(min(len(messages), len(window)), 0, -1)
+                if messages[-size:] == window[:size]
+            ),
+            0,
+        )
+        messages = (*messages, *window[overlap:])
+    if conversation.seq == turn_seq:
+        return messages
+    marker = f"{MEMBER_CONTEXT_OPENING}message_ref: {turn_id}\n"
+    start = next(
+        (
+            index
+            for index, message in enumerate(messages)
+            if message.role == "user"
+            and isinstance(message.content, str)
+            and message.content.startswith(marker)
+        ),
+        None,
+    )
+    if start is None:
+        return recorded if any(message.role == "assistant" for message in recorded) else None
+    if next_turn_id is None:
+        return messages[start:]
+    next_marker = f"{MEMBER_CONTEXT_OPENING}message_ref: {next_turn_id}\n"
+    end = next(
+        (
+            index
+            for index, message in enumerate(messages[start + 1 :], start + 1)
+            if message.role == "user"
+            and isinstance(message.content, str)
+            and message.content.startswith(next_marker)
+        ),
+        len(messages),
+    )
+    return messages[:end]
 
 
 class RemoteTurnTimeout(Exception):
@@ -729,7 +787,7 @@ class WorkspaceDriver:
         A round's cost is reported only as far as the record supports it, never raised over. The
         driver knows the evaluated agent's model, so a cancel frame that names no model still
         prices each completed model round from its recorded usage. The rounds are also only part of
-        what a turn spends: a compaction rides its own step, the
+        what a turn spends: a rollover rides its own step, the
         browser `find` ranking meters onto a dispatch, and a resumed attempt bills on top of a step
         log that starts empty, so the terminal's residual cost lands on the last round only when the
         rounds account for every token the terminal counts. A completed model or tool step also
@@ -1111,7 +1169,7 @@ class WorkspaceDriver:
         if row is None:
             return None
         if row.status in TERMINAL_STATUSES and row.result_delivery != DELIVERY_PENDING:
-            return await self._trajectory(conversation_id, row.seq)
+            return await self._trajectory(conversation_id, turn_id, row.seq)
         if row.status not in WORKFLOW_STATUSES and row.status not in TERMINAL_STATUSES:
             return None
         try:
@@ -1138,7 +1196,7 @@ class WorkspaceDriver:
                             row.status in TERMINAL_STATUSES
                             and row.result_delivery != DELIVERY_PENDING
                         ):
-                            return await self._trajectory(conversation_id, row.seq)
+                            return await self._trajectory(conversation_id, turn_id, row.seq)
                         if row.status in TERMINAL_STATUSES:
                             raise RuntimeError(
                                 f"terminal child {turn_id} has no workflow to settle delivery"
@@ -1172,7 +1230,7 @@ class WorkspaceDriver:
             or row.result_delivery == DELIVERY_PENDING
         ):
             return None
-        return await self._trajectory(conversation_id, row.seq)
+        return await self._trajectory(conversation_id, turn_id, row.seq)
 
     async def cancel(self, turn_id: UUID) -> bool:
         """Terminalize a live turn through the shared `cancel_one_turn` primitive: cancel its DBOS
@@ -1200,9 +1258,11 @@ class WorkspaceDriver:
             ).one_or_none()
         if row is None or row.status not in TERMINAL_STATUSES:
             return None
-        return await self._trajectory(conversation_id, row.seq)
+        return await self._trajectory(conversation_id, turn_id, row.seq)
 
-    async def _trajectory(self, conversation_id: UUID, turn_seq: int) -> Trajectory | None:
+    async def _trajectory(
+        self, conversation_id: UUID, turn_id: UUID, turn_seq: int
+    ) -> Trajectory | None:
         for attempt in range(TRANSCRIPT_POLL_ATTEMPTS):
             try:
                 body = await self.blob.get(transcript_key(conversation_id))
@@ -1213,13 +1273,53 @@ class WorkspaceDriver:
                     conversation = decode(body)
                 except TranscriptDecodeError:
                     return None
-                if conversation.seq == turn_seq:
+                try:
+                    records = await read_rollover_records(self.blob, conversation_id)
+                except TranscriptDecodeError:
+                    return None
+                recorded: tuple[Message, ...] = ()
+                next_turn_id = None
+                if conversation.seq > turn_seq:
+                    async with workspace_tx() as connection:
+                        inbound = (
+                            await connection.execute(
+                                sa.select(tables.turn.c.inbound).where(tables.turn.c.id == turn_id)
+                            )
+                        ).scalar_one()
+                        next_turn_id = (
+                            await connection.execute(
+                                sa.select(tables.turn.c.id)
+                                .where(
+                                    tables.turn.c.conversation_id == conversation_id,
+                                    tables.turn.c.seq > turn_seq,
+                                )
+                                .order_by(tables.turn.c.seq)
+                                .limit(1)
+                            )
+                        ).scalar_one_or_none()
+                    recorded = (
+                        Message(role="user", content=inbound),
+                        *(
+                            message
+                            for step in await self.steps(turn_id)
+                            for message in step.messages
+                        ),
+                    )
+                messages = _trajectory_messages(
+                    records,
+                    conversation,
+                    turn_id,
+                    turn_seq,
+                    next_turn_id,
+                    recorded,
+                )
+                if messages is not None:
                     return Trajectory(
                         conversation_id=conversation_id,
                         agent_id=self.agent_id,
                         agent_prompt=self.agent_prompt,
                         agent_prompt_digest=prompt_digest(self.agent_prompt),
-                        messages=conversation.messages,
+                        messages=messages,
                     )
             if attempt < TRANSCRIPT_POLL_ATTEMPTS - 1:
                 await asyncio.sleep(self.poll_interval_seconds)

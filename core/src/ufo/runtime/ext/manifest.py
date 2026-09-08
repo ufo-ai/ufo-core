@@ -12,7 +12,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import KW_ONLY, dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID
 
 from openfeature.provider import FeatureProvider
@@ -61,6 +61,9 @@ from ufo.schema.records import (
     ReasoningEffort,
     Turn,
 )
+
+if TYPE_CHECKING:
+    from ufo.runtime.context_boundary import BoundaryInputs, ContextBoundary
 
 
 @dataclass(frozen=True)
@@ -391,6 +394,25 @@ class CdpProviderSpec:
 
 
 @dataclass(frozen=True)
+class ContextBoundarySpec:
+    """A context-boundary strategy, selected by `config.context.strategy`. `strategy` is the name;
+    `build` constructs the boundary once per turn from the `BoundaryInputs` the loop hands it;
+    `tools` names the tools this strategy implements — its own extension's and the builtins it
+    speaks to — and the turn's registry drops every tool another registered strategy claims, so a
+    deploy never offers one its boundary cannot honor. `prompt` is the `{{context_window}}` block
+    the system prompt carries: the words that tell the agent what happens at the boundary and which
+    tools it has there, so the prose belongs to the strategy that owns the behavior rather than to
+    the shell. Core registers no strategy of its own; `context_rollover` and `context_compact`
+    each ship one at this seam, and exactly one is active per deploy, so a third strategy replaces
+    them rather than running beside them."""
+
+    strategy: str
+    build: "Callable[[BoundaryInputs], ContextBoundary]"
+    tools: tuple[str, ...] = ()
+    prompt: str = ""
+
+
+@dataclass(frozen=True)
 class SearchProviderSpec:
     """A search provider an extension registers, selected by `config.research.search_provider`.
     `backend` is the name; `build` constructs the process-wide SearchProvider once at boot, only
@@ -509,9 +531,9 @@ class Stop:
 
 @dataclass(frozen=True)
 class PreCompact:
-    """The turn's context window has a validated summary and is about to replace its head. `reason`
-    is `auto` when the window crossed the trigger or `force` when a provider overflow forced it;
-    `before_tokens` is the pre-compaction window estimate. Observe-only, fired only when compaction
+    """The turn's context window is about to be reset to a recovery record. `reason` is `auto` when
+    the window crossed the line or the agent asked, `force` when a provider overflow forced it;
+    `before_tokens` is the window estimate before the reset. Observe-only, fired only when the reset
     will occur."""
 
     reason: Literal["auto", "force"]
@@ -520,10 +542,11 @@ class PreCompact:
 
 @dataclass(frozen=True)
 class PostCompact:
-    """The turn's context window has just been compacted. `summary` is the condensed history that
-    replaced the head; `before_tokens`/`after_tokens` bracket the window it shrank. Observe-only."""
+    """The turn's context window has just been reset. `record` is the recovery record the fresh
+    window opened with; `before_tokens`/`after_tokens` bracket the window it replaced.
+    Observe-only."""
 
-    summary: str
+    record: str
     before_tokens: int
     after_tokens: int
 
@@ -875,6 +898,7 @@ class Manifest:
     carriers: tuple[CarrierSpec, ...] = ()
     auth_proxies: tuple[AuthProxySpec, ...] = ()
     search_providers: tuple[SearchProviderSpec, ...] = ()
+    context_boundaries: tuple[ContextBoundarySpec, ...] = ()
     flag_providers: tuple[FlagProviderSpec, ...] = ()
     flags: tuple[FlagSpec, ...] = ()
     memory_search: tuple[MemorySearchProviderSpec, ...] = ()

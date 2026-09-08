@@ -1,6 +1,6 @@
 """The compaction suite: one digest-pinned task per leaf, graded by deterministic literal survival.
 
-Artifact leaves drive `Compaction.maybe_compact` directly over a snapshot window (chains re-compact
+Artifact leaves drive `Compaction.maybe_cross` directly over a snapshot window (chains re-compact
 their own output plus fresh filler) and grade the rendered replacement message. The behavior leaf
 materializes a window as a live conversation's transcript and grades probe turns through the real
 engine — answers, forbidden stale values, and whether an offloaded fact was re-read by path.
@@ -17,6 +17,14 @@ from functools import partial
 from pathlib import Path
 from typing import Protocol, cast
 from uuid import UUID, uuid4
+
+from ufo_ext_context_compact.compaction import (
+    COMPACTED_CONTEXT_PREFIX,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    FILES_HEADING,
+    MAX_REFERENCE_PATHS,
+    REFERENCES_HEADING,
+)
 
 from evals.compaction.models import (
     CompactionCase,
@@ -37,13 +45,6 @@ from evals.harness.harness import (
 )
 from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import CapabilityTarget, EvalConversations, TargetResult
-from ufo.runtime.compaction import (
-    COMPACTED_CONTEXT_PREFIX,
-    DEFAULT_CONTEXT_WINDOW_TOKENS,
-    FILES_HEADING,
-    MAX_REFERENCE_PATHS,
-    REFERENCES_HEADING,
-)
 
 COMPACTION_GRADER_REVISION = "literal-survival-2"
 SEED_MESSAGE = "Reply with the single word: ready."
@@ -179,7 +180,8 @@ class CompactionSuite:
             if generation > 1:
                 window = (*window, *case.extensions[generation - 2].messages)
             before_tokens = estimate_tokens(window)
-            after, usages = await compactor.maybe_compact(window)
+            outcome = await compactor.maybe_cross(window)
+            after, usages = outcome.messages, outcome.usage
             if not usages:
                 return EvalCaseResult(
                     name=case.id,
@@ -587,7 +589,7 @@ def _turn_attempt(
         "toolErrors": list(outcome.output.tool_errors),
         "tokens": outcome.output.tokens,
         "costMicroUsd": outcome.output.cost_micro_usd,
-        "compactions": outcome.output.compactions,
+        "boundaries": outcome.output.rollovers,
         "grader": grader,
         "trajectory": (
             None if outcome.trajectory is None else outcome.trajectory.model_dump(mode="json")

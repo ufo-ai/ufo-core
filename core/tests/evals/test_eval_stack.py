@@ -574,6 +574,35 @@ def test_remote_child_args_carry_the_model_override(
     )
 
 
+def test_child_args_carry_the_rollover_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UFO_CREDENTIAL_KEY", raising=False)
+    template = tmp_path / "template.toml"
+    template.write_text(SQLITE_TEMPLATE)
+    stack = EvalStack.provision(
+        RunSpec(
+            label="rollover",
+            config=template,
+            args=("--only", "rollover.behavior"),
+            rollover=tmp_path / "snapshot",
+        ),
+        root=tmp_path / "stack",
+        out=tmp_path / "archive",
+        repo_root=tmp_path,
+    )
+
+    args = stack._child_args()
+    _close(stack)
+
+    assert args[args.index("--rollover") : args.index("--rollover") + 2] == (
+        "--rollover",
+        str((tmp_path / "snapshot").resolve()),
+    )
+    with pytest.raises(ValidationError, match="--rollover"):
+        RunSpec(label="smoke", config=template, args=("--rollover", "snap"))
+
+
 def test_child_args_carry_the_environment_document(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

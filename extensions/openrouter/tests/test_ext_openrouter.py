@@ -35,6 +35,12 @@ from openai.types.chat.chat_completion_chunk import (
 )
 from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
 from pydantic import ValidationError
+from ufo_ext_context_rollover.rollover import (
+    CHARS_PER_TOKEN,
+    HANDOFF_MAX_CHARS,
+    RECOVERY_RESERVE_TOKENS,
+    ROLLOVER_BUFFER_TOKENS,
+)
 from ufo_ext_openrouter import GenerateImageInput, GenerateVideoInput
 
 from ufo.blob import FilesystemBlobStore
@@ -247,11 +253,22 @@ def test_manifest_registers_fable_5_1() -> None:
 def test_manifest_compacts_glm_flash_before_its_observed_coherence_boundary() -> None:
     glm_flash = {spec.id: spec for spec in openrouter.manifest().models}["z-ai/glm-5.3-flash"]
     assert glm_flash.context_window == 1_048_576
-    assert glm_flash.compaction_trigger_tokens is None
-    assert glm_flash.compaction_keep_messages == 3
-    assert glm_flash.repeated_tool_compaction is not None
-    assert glm_flash.repeated_tool_compaction.consecutive_turns == 4
-    assert glm_flash.repeated_tool_compaction.trigger_percent == 50
+    assert glm_flash.rollover_trigger_tokens is None
+    assert glm_flash.repeated_tool_rollover is not None
+    assert glm_flash.repeated_tool_rollover.consecutive_turns == 4
+    assert glm_flash.repeated_tool_rollover.trigger_percent == 50
+
+
+def test_every_registered_model_has_a_usable_rollover_line() -> None:
+    """The rollover line is the model's window less the recovery reserve and the buffer. A model
+    whose window is too small for that leaves a line at or below zero and resets every round, so
+    each registered spec has to hold the largest recovery record and the same room again."""
+    usable_floor = HANDOFF_MAX_CHARS // CHARS_PER_TOKEN * 2
+    for spec in openrouter.manifest().models:
+        derived = spec.context_window - RECOVERY_RESERVE_TOKENS - ROLLOVER_BUFFER_TOKENS
+        line = spec.rollover_trigger_tokens or derived
+        assert line >= usable_floor, spec.id
+        assert line < spec.context_window, spec.id
 
 
 async def test_complete_streams_text_then_usage_without_an_auto_reasoning_budget() -> None:

@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from starlette.datastructures import Headers
 from starlette.requests import Request as StarletteRequest
+from ufo_ext_context_rollover.manifest import manifest as rollover_manifest
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_slack.manifest import manifest as slack_manifest
 from ufo_ext_ufo.manifest import manifest as ufo_manifest
@@ -640,9 +641,9 @@ def runtime(
             invoker_for=invoker_factory(dbos_client),
             subagents=SubagentRegistry(()),
             subagent_grants={},
-            manifests=(),
+            manifests=(rollover_manifest(),),
             environment=HostEnvironment(
-                manifests=(),
+                manifests=(rollover_manifest(),),
                 credentials=None,
                 index=DefaultIndex(transaction=workspace_tx),
                 embed=StubEmbed(),

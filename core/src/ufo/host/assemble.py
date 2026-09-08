@@ -122,6 +122,10 @@ class HostEnvironment:
     public_base_url: str | None = None
     home_surface: str | None = None
     artifact_token_secret: str = ""
+    context_window: str = ""
+    """The active context strategy's `{{context_window}}` prompt block, read off the boundary spec
+    the deploy selected. It rides here because assembly is where a prompt is composed, and the words
+    have to match the boundary this deploy actually crosses."""
     invoker_for: Callable[[UUID], TurnInvoker] | None = None
     """The internal turn seam an extension tool reaches through its context — the same factory the
     jobs role and the delivery sweep hold, bound to the turn's workspace at assembly. A tool that
@@ -189,6 +193,7 @@ class HostEnvironment:
                 sections,
                 skills=_prompt_skill_index(skills, request.member_block),
                 knowledge_cutoff=request.knowledge_cutoff,
+                context_window=self.context_window,
             )
         else:
             skills = _skills_with_document(skills, document)
@@ -203,6 +208,7 @@ class HostEnvironment:
                     profile,
                     skills=_prompt_skill_index(skills, request.member_block),
                     preload=preload,
+                    context_window=self.context_window,
                 )
             )
             granted_actions = granted_without_flagged(

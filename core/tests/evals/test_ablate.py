@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 import tomli_w
+from pydantic import ValidationError
 
 import evals.stack as eval_stack
 from evals import ablate
@@ -47,7 +48,10 @@ from evals.memory_ingestion.models import (
     load_snapshot,
     write_snapshot,
 )
+from evals.rollover.models import PlantedFact, RolloverCase
+from evals.rollover.snapshot import write_snapshot as write_rollover_snapshot
 from evals.stack import Matrix
+from ufo.harness.models.interface import Message
 
 TEMPLATE = 'template = { pack = { name = "assistant_eval" } }'
 INGESTION_SUITE = "memory_ingestion.longmem.information_extraction"
@@ -125,6 +129,26 @@ def test_arm_replacement_requires_one_exact_match(tmp_path: Path) -> None:
 
     assert target.read_text() == 'MODEL = "b"\n'
     with pytest.raises(RuntimeError, match="matched 0 times"):
+        ablation._apply_arm(spec.arm[0], tmp_path)
+
+
+def test_an_arm_may_add_a_file_the_base_lacks(tmp_path: Path) -> None:
+    variant = tmp_path / "variant.py"
+    variant.write_text("x = 1\n")
+    spec = ExperimentSpec(
+        name="exp",
+        base="origin/main",
+        suites=("basics",),
+        budget_usd=5.0,
+        template={"pack": {"name": "assistant_eval"}},
+        arm=(ArmSpec(name="adds", additions={"pkg/migrations/0001_x.py": variant}),),
+    )
+    ablation = Ablation(repo=tmp_path, spec=spec, out=tmp_path / "out")
+
+    ablation._apply_arm(spec.arm[0], tmp_path)
+
+    assert (tmp_path / "pkg/migrations/0001_x.py").read_text() == "x = 1\n"
+    with pytest.raises(RuntimeError, match="already exists at the selected base"):
         ablation._apply_arm(spec.arm[0], tmp_path)
 
 
@@ -239,6 +263,53 @@ def test_load_experiment_resolves_the_snapshot_against_the_file(tmp_path: Path) 
     loaded = load_experiment(path)
     assert loaded.memory_ingestion == spec.memory_ingestion
     assert loaded.memory_ingestion_corpus == spec.memory_ingestion_corpus
+
+
+def test_load_experiment_resolves_the_rollover_snapshot_against_the_file(tmp_path: Path) -> None:
+    snapshot = tmp_path / "snapshot"
+    write_rollover_snapshot(
+        snapshot,
+        builder_digest=f"sha256:{'0' * 64}",
+        target_tokens=100,
+        corpus=(),
+        cases=(
+            RolloverCase(
+                id="overload-1",
+                leaf="overload",
+                messages=(
+                    Message(role="user", content="x"),
+                    Message(role="assistant", content="y"),
+                ),
+                facts=(PlantedFact(id="f", kind="decision", literal="4242"),),
+            ),
+        ),
+    )
+    path = _experiment(
+        tmp_path,
+        'name = "exp"\nbase = "origin/main"\nsuites = ["rollover.overload"]\n'
+        'rollover = "snapshot"\nbudget_usd = 20.0\n'
+        f"{TEMPLATE}\n"
+        '[[arm]]\nname = "knockout"\n[arm.files]\n"packs/thing.py" = "variant.py"\n',
+    )
+    loaded = load_experiment(path)
+    assert loaded.rollover == snapshot
+    assert Ablation(repo=tmp_path, spec=loaded, out=tmp_path / "out")._planned_cases() == 1
+    matrix = Ablation(repo=tmp_path, spec=loaded, out=tmp_path / "out").matrix(
+        loaded.arm[0], tmp_path / "config.toml"
+    )
+    assert matrix["run"][0]["rollover"] == str(snapshot)
+
+
+def test_rollover_suites_need_their_snapshot() -> None:
+    with pytest.raises(ValidationError, match="need rollover naming the snapshot"):
+        ExperimentSpec(
+            name="exp",
+            base="origin/main",
+            suites=("rollover.behavior",),
+            budget_usd=20.0,
+            template={"pack": {"name": "assistant_eval"}},
+            arm=(ArmSpec(name="knockout", files={}),),
+        )
 
 
 def test_load_experiment_rejects_a_missing_snapshot(tmp_path: Path) -> None:

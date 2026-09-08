@@ -76,6 +76,9 @@ pytestmark = [
 ]
 
 
+WINDOW_BLOCK_FIXTURE = "<context_window>The window behaves this way.</context_window>"
+
+
 class _Task(BaseModel):
     task: str
 
@@ -125,6 +128,18 @@ def test_system_prompt_carries_instructions_and_the_finish_contract() -> None:
     assert "<parent_handoff>" not in prompt
     assert "at most 20 words" not in prompt
     assert prompt.endswith(FINISH_CONTRACT)
+
+
+def test_the_child_is_told_the_boundary_its_own_deploy_crosses() -> None:
+    """The child crosses the same boundary the deploy selected, so its prompt carries that
+    strategy's note and a deploy that hands none leaves the slot empty rather than filled with the
+    other strategy's prose."""
+    bare = subagent_system_prompt(_profile("research"))
+    assert "{{context_window}}" not in bare
+    assert "context_window" not in bare
+    assert WINDOW_BLOCK_FIXTURE in subagent_system_prompt(
+        _profile("research"), context_window=WINDOW_BLOCK_FIXTURE
+    )
 
 
 def test_core_ships_a_general_purpose_profile_the_registry_resolves() -> None:

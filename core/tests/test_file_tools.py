@@ -24,6 +24,7 @@ from uuid import uuid4
 import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel
+from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
 from ufo_ext_docker import DockerCarrier
 from ufo_testsupport.models import serving_model
 
@@ -42,7 +43,6 @@ from ufo.harness.sandbox.session import (
 from ufo.host.ext.loader import HookChain
 from ufo.host.tools.builtins import BUILTIN_TOOLS
 from ufo.runtime.access.connectors import ConnectorRegistry
-from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import (
     MAX_TOOL_RESULT_CHARS,
     OFFLOAD_NOTICE,
@@ -939,10 +939,11 @@ def _dispatch_engine(ctx: ToolContext, tools: ToolRegistry) -> TurnEngine:
         serving=serving_model(_QuietModel()),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
         transcript=Transcript(blob=ctx.blob, conversation_id=ctx.turn.conversation_id),
-        compaction=Compaction(
+        context=ContextRollover(
             serving=serving_model(_QuietModel()),
             blob=ctx.blob,
             conversation_id=ctx.turn.conversation_id,
+            journal=SandboxJournal(ctx.sandbox, ctx.turn.conversation_id),
         ),
         hub=InProcessHub(),
         sandbox=ctx.sandbox,

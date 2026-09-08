@@ -15,8 +15,9 @@ recording made here, so it must keep this module and name for as long as those r
 A recording also names each class by the module path of the build that wrote it, and module paths
 move between builds. `MOVED_MODULES` is the wire codec for those paths: deserialization resolves a
 recorded module through it, so a recording written before a move replays on the build after it.
-An entry maps the path a past release wrote to the module that defines the symbol today; a module
-move lands with its entry here and an entry lives for as long as recordings naming it replay.
+An entry maps the path a past release wrote to the module that defines the symbol today — including
+a module that has since moved out of core into an extension package; a module move lands with its
+entry here and an entry lives for as long as recordings naming it replay.
 """
 
 import base64
@@ -83,7 +84,10 @@ MOVED_MODULES = {
     "ufo.listings": "ufo.runtime.listings",
     "ufo.loop": "ufo.runtime",
     "ufo.runtime.environment": "ufo.host.environment",
-    "ufo.loop.compaction": "ufo.runtime.compaction",
+    "ufo.loop.compaction": "ufo_ext_context_compact.compaction",
+    "ufo.runtime.compaction": "ufo_ext_context_compact.compaction",
+    "ufo_ext_context_summarization.compaction": "ufo_ext_context_compact.compaction",
+    "ufo.runtime.rollover": "ufo_ext_context_rollover.rollover",
     "ufo.loop.delivery": "ufo.runtime.delivery",
     "ufo.loop.engine": "ufo.runtime.engine",
     "ufo.loop.profiles": "ufo.runtime.profiles",

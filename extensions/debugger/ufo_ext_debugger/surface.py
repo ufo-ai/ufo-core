@@ -108,27 +108,27 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     return JSONResponse(transcript.model_dump(mode="json"))
 
 
-async def conversation_compactions(ctx: SurfaceContext, request: Request) -> Response:
+async def conversation_rollovers(ctx: SurfaceContext, request: Request) -> Response:
     conversation_id = _uuid_param(request, "conversation_id")
     if conversation_id is None:
         return JSONResponse({"error": "no such conversation"}, status_code=404)
-    return JSONResponse(list(await ctx.list_compactions(conversation_id)))
+    return JSONResponse(list(await ctx.list_rollovers(conversation_id)))
 
 
-async def compaction_record(ctx: SurfaceContext, request: Request) -> Response:
+async def rollover_record(ctx: SurfaceContext, request: Request) -> Response:
     conversation_id = _uuid_param(request, "conversation_id")
     index = request.path_params["index"]
     if conversation_id is None or not index.isdigit():
-        return JSONResponse({"error": "no such compaction"}, status_code=404)
-    record = await ctx.read_compaction(conversation_id, int(index))
+        return JSONResponse({"error": "no such rollover"}, status_code=404)
+    record = await ctx.read_rollover(conversation_id, int(index))
     if record is None:
-        return JSONResponse({"error": "no such compaction"}, status_code=404)
+        return JSONResponse({"error": "no such rollover"}, status_code=404)
     return JSONResponse(
         {
             "index": record.index,
             "before": [message.model_dump(mode="json") for message in record.before],
             "after": [message.model_dump(mode="json") for message in record.after],
-            "summary": record.summary.model_dump(mode="json"),
+            "recovery": record.recovery.model_dump(mode="json"),
         }
     )
 
@@ -242,13 +242,13 @@ ROUTES = (
     ),
     SurfaceRoute(
         method="GET",
-        path="api/conversations/{conversation_id}/compactions",
-        handler=conversation_compactions,
+        path="api/conversations/{conversation_id}/rollovers",
+        handler=conversation_rollovers,
     ),
     SurfaceRoute(
         method="GET",
-        path="api/conversations/{conversation_id}/compactions/{index}",
-        handler=compaction_record,
+        path="api/conversations/{conversation_id}/rollovers/{index}",
+        handler=rollover_record,
     ),
     SurfaceRoute(
         method="GET", path="api/conversations/{conversation_id}/files", handler=workspace_files

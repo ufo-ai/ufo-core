@@ -12,6 +12,7 @@ import ufo_ext_sample as sample
 import yaml
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict
+from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
@@ -38,7 +39,6 @@ from ufo.host.ext.loader import (
 )
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.compaction import Compaction
 from ufo.runtime.engine import (
     BARE_RAISE_NOTICE,
     MAX_PARALLEL_TOOL_CALLS,
@@ -305,8 +305,13 @@ def _engine(
         serving=serving_model(model),
         activity_summarizer=ActivitySummarizer(_ActivityModel()),
         transcript=Transcript(blob=blob, conversation_id=turn.conversation_id),
-        compaction=Compaction(
-            serving=serving_model(model), blob=blob, conversation_id=turn.conversation_id
+        context=ContextRollover(
+            serving=serving_model(model),
+            blob=blob,
+            conversation_id=turn.conversation_id,
+            journal=SandboxJournal(
+                SandboxSession(carrier=_StubCarrier(), handle=handle), turn.conversation_id
+            ),
         ),
         hub=InProcessHub(),
         sandbox=SandboxSession(carrier=_StubCarrier(), handle=handle),

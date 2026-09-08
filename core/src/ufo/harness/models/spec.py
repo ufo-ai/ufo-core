@@ -42,24 +42,25 @@ class ReasoningSupport:
 
 
 @dataclass(frozen=True)
-class RepeatedToolCompaction:
-    """Compact a large transcript after the same tool call recurs across consecutive turns."""
+class RepeatedToolRollover:
+    """Cross the boundary early once the same tool call recurs across consecutive turns — read by
+    whichever context-boundary strategy the deploy selected."""
 
     consecutive_turns: int
     trigger_percent: int
 
     def __post_init__(self) -> None:
         if self.consecutive_turns < 2:
-            raise ValueError("repeated tool compaction consecutive_turns must be at least 2")
+            raise ValueError("repeated tool rollover consecutive_turns must be at least 2")
         if not 1 <= self.trigger_percent < 100:
-            raise ValueError("repeated tool compaction trigger_percent must be from 1 to 99")
+            raise ValueError("repeated tool rollover trigger_percent must be from 1 to 99")
 
 
 @dataclass(frozen=True)
 class ModelSpec:
     """Everything one model is: its provider and client builder, its price, its knowledge cutoff,
-    its context window and compaction policy, its reasoning and image-input capabilities, and the
-    api surface it is called on. The registry keys these by `id`; a seam reads
+    its context window and context-boundary policy, its reasoning and image-input capabilities, and
+    the api surface it is called on. The registry keys these by `id`; a seam reads
     `registry.spec(id).<fact>` instead of owning a per-model dict.
 
     `client` builds the `ModelClient` from this spec and the api key the registry resolves, once per
@@ -78,9 +79,11 @@ class ModelSpec:
     key_slot: str = ""
     key_env: str = ""
     accepts_image_input: bool = True
+    rollover_trigger_tokens: int | None = None
+    repeated_tool_rollover: RepeatedToolRollover | None = None
     compaction_keep_messages: int = DEFAULT_COMPACTION_KEEP_MESSAGES
-    compaction_trigger_tokens: int | None = None
-    repeated_tool_compaction: RepeatedToolCompaction | None = None
+    """How many trailing messages the compact strategy keeps verbatim behind its summary.
+    Read only when `[context] strategy = "compact"`; the rollover strategy keeps no tail."""
 
     def __post_init__(self) -> None:
         if not KNOWLEDGE_CUTOFF_RE.match(self.knowledge_cutoff):
@@ -95,14 +98,14 @@ class ModelSpec:
             raise ValueError(f"model {self.id!r} declares default reasoning without reasoning")
         if self.compaction_keep_messages < 1:
             raise ValueError(f"model {self.id!r} compaction_keep_messages must be positive")
-        if self.compaction_trigger_tokens is not None and self.compaction_trigger_tokens < 1:
-            raise ValueError(f"model {self.id!r} compaction_trigger_tokens must be positive")
+        if self.rollover_trigger_tokens is not None and self.rollover_trigger_tokens < 1:
+            raise ValueError(f"model {self.id!r} rollover_trigger_tokens must be positive")
         if (
-            self.compaction_trigger_tokens is not None
-            and self.compaction_trigger_tokens >= self.context_window
+            self.rollover_trigger_tokens is not None
+            and self.rollover_trigger_tokens >= self.context_window
         ):
             raise ValueError(
-                f"model {self.id!r} compaction_trigger_tokens must be below its context window"
+                f"model {self.id!r} rollover_trigger_tokens must be below its context window"
             )
 
     def key_rejected(self) -> CredentialValueInvalid:

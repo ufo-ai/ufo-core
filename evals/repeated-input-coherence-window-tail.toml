@@ -37,8 +37,7 @@ old = '''    _openrouter(
         "2026-03",
         context_window=1_048_576,
         reasoning=_REQUIRED_REASONS,
-        compaction_keep_messages=3,
-        repeated_tool_compaction=RepeatedToolCompaction(
+        repeated_tool_rollover=RepeatedToolRollover(
             consecutive_turns=4,
             trigger_percent=50,
         ),
@@ -49,34 +48,7 @@ new = '''    _openrouter(
         "2026-03",
         context_window=1_048_576,
         reasoning=_REQUIRED_REASONS,
-        compaction_keep_messages=3,
-        compaction_trigger_tokens=500_000,
-    ),'''
-
-[[arm]]
-name = "tail-only-policy"
-
-[[arm.replacements]]
-path = "extensions/openrouter/ufo_ext_openrouter.py"
-old = '''    _openrouter(
-        "z-ai/glm-5.3-flash",
-        ModelPrice(150_000, 500_000, 30_000, 0, 0),
-        "2026-03",
-        context_window=1_048_576,
-        reasoning=_REQUIRED_REASONS,
-        compaction_keep_messages=3,
-        repeated_tool_compaction=RepeatedToolCompaction(
-            consecutive_turns=4,
-            trigger_percent=50,
-        ),
-    ),'''
-new = '''    _openrouter(
-        "z-ai/glm-5.3-flash",
-        ModelPrice(150_000, 500_000, 30_000, 0, 0),
-        "2026-03",
-        context_window=1_048_576,
-        reasoning=_REQUIRED_REASONS,
-        compaction_keep_messages=3,
+        rollover_trigger_tokens=500_000,
     ),'''
 
 [[arm]]
@@ -90,8 +62,7 @@ old = '''    _openrouter(
         "2026-03",
         context_window=1_048_576,
         reasoning=_REQUIRED_REASONS,
-        compaction_keep_messages=3,
-        repeated_tool_compaction=RepeatedToolCompaction(
+        repeated_tool_rollover=RepeatedToolRollover(
             consecutive_turns=4,
             trigger_percent=50,
         ),

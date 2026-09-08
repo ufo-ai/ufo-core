@@ -86,6 +86,7 @@ from ufo.runtime.tools.context import (
     ARTIFACT_PUT_TTL_SECONDS,
     SHARE_PREFLIGHT_TIMEOUT_SECONDS,
     AmbiguousSpawnTarget,
+    ContextControl,
     ImageContent,
     SpawnModelRejected,
     SpawnPayloadRejected,
@@ -1195,7 +1196,52 @@ async def message_spawn_handler(ctx: ToolContext, args: MessageSpawnInput) -> To
     )
 
 
+class GetContextRemainingInput(BaseModel):
+    pass
+
+
+def _require_context(ctx: ToolContext) -> ContextControl:
+    if ctx.context is None:
+        raise RuntimeError("this context has no window of its own")
+    return ctx.context
+
+
+async def get_context_remaining_handler(
+    ctx: ToolContext, args: GetContextRemainingInput
+) -> ToolResult:
+    """Report where the window stands: tokens spent, the rollover line, and the model's hard
+    limit."""
+    remaining = _require_context(ctx).remaining()
+    return ToolResult(
+        content=(
+            TextContent(
+                text=json.dumps(
+                    {
+                        "used_tokens": remaining.used_tokens,
+                        "rollover_at_tokens": remaining.rollover_at_tokens,
+                        "tokens_until_rollover": remaining.tokens_until_rollover,
+                        "hard_limit_tokens": remaining.hard_limit_tokens,
+                        "tokens_until_hard_limit": remaining.tokens_until_hard_limit,
+                    }
+                )
+            ),
+        )
+    )
+
+
 BUILTIN_TOOLS: tuple[ToolDef, ...] = (
+    ToolDef(
+        name="get_context_remaining",
+        description=(
+            "Report how much of your context window is left: tokens used, the token count at "
+            "which the window rolls over into a fresh one, and the model's hard limit. Call it "
+            "before planning long work or a large read, and size the work to what is left."
+        ),
+        input_model=GetContextRemainingInput,
+        handler=get_context_remaining_handler,
+        parallel_safe=True,
+        subagent_default=True,
+    ),
     ToolDef(
         name="bash",
         description=(

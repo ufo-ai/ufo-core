@@ -24,7 +24,7 @@ Two conclusions follow, and they bound where a durable registry could pay. Withi
 claim is close to unmeasurable in principle: the failure sits in the transcript the agent is
 already reading, so "did it carry the failure forward" collapses into "did it read its own
 context", which it does. The claim only has force where the failure is *outside* the context — a
-sibling subagent repeating what another already disproved, or a repeat after compaction drops the
+sibling subagent repeating what another already disproved, or a repeat after rollover drops the
 failing round. Neither is measurable through this seam: `SubagentHandoff`
 (`evals/harness/handoff.py:40-54`) carries counts and a conversation id, never the child's tool
 trajectory, so a grader cannot see what a sibling tried. That instrument — a grader reading child

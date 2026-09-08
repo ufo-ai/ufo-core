@@ -1,5 +1,10 @@
 """Window-triggered transcript compaction: a deterministic compression pipeline, not one call.
 
+One of the two context-boundary strategies `runtime.context_boundary` selects between — the one a
+deploy runs with `[context] strategy = "compact"`. The other resets the window instead of
+summarizing it (the `context_rollover` extension). Exactly one is active, so this module owns every
+boundary of a compact deploy and none of a rollover deploy's.
+
 When the loaded history crosses the model's token window, the head is compressed into a validated
 structured summary and the recent tail is kept verbatim. The pipeline is deterministic around its
 bounded external summarization attempts: group into API rounds, render the head (images become
@@ -23,29 +28,35 @@ import lz4.frame
 from dbos import DBOS
 from pydantic import ValidationError
 
-from ufo.blob import BlobNotFound, WorkspaceBlobStore
-from ufo.harness.context import CompactionHarness, ContextWindow
-from ufo.harness.models.interface import (
+from ufo.sdk.context import (
+    Agent,
+    BoundaryOutcome,
+    CompactionHarness,
+    ContextRemaining,
+    ContextWindow,
+    Turn,
+    WorkspaceBlobStore,
+)
+from ufo.sdk.manifest import HookChain, PostCompact, PreCompact
+from ufo.sdk.models import (
     ImageBlock,
     Message,
     ModelRequest,
     ReasoningItemBlock,
     RedactedThinkingBlock,
+    RepeatedToolRollover,
+    ServingModel,
     TextBlock,
     TextDelta,
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    Usage,
 )
-from ufo.harness.models.registry import ServingModel
-from ufo.harness.models.spec import RepeatedToolCompaction
-from ufo.harness.o11y import emit_metric, log, log_error, warn
-from ufo.harness.sandbox.session import TOOL_OUTPUT_DIRNAME, UFO_HOME_ENV
-from ufo.runtime.ext.hooks import HookChain
-from ufo.runtime.ext.manifest import PostCompact, PreCompact
-from ufo.runtime.prompts.render import COMPACTION_SYSTEM_PROMPT
-from ufo.runtime.skills.runtime import LoadedSkills
-from ufo.runtime.turns.transcript import (
+from ufo.sdk.o11y import emit_metric, log, log_error, warn
+from ufo.sdk.sandbox import TOOL_OUTPUT_DIRNAME, UFO_HOME_ENV
+from ufo.sdk.skills import LoadedSkills
+from ufo.sdk.transcript import (
     Anchor,
     AnchorKind,
     CompactionRecord,
@@ -53,9 +64,9 @@ from ufo.runtime.turns.transcript import (
     CompactionVerification,
     CompactionWindow,
     compaction_key,
-    decode_compaction,
+    read_compaction_record,
 )
-from ufo.schema.records import Agent, Turn, Usage
+from ufo_ext_context_compact.prompts import COMPACTION_SYSTEM_PROMPT
 
 CHARS_PER_TOKEN = 2
 IMAGE_TOKEN_ESTIMATE = 1_600
@@ -193,6 +204,7 @@ class _InvalidSummary(RuntimeError):
 @dataclass
 class _CompactionState:
     automatic_suppressed: bool = False
+    window: tuple[Message, ...] = ()
 
 
 @dataclass(frozen=True, repr=False)
@@ -232,7 +244,7 @@ class Compaction:
             opaque_chars=self._opaque_chars,
             image_count=self._image_count,
             context_tokens=self.serving.spec.context_window,
-            summary_tokens=self.summary_max_tokens,
+            reserve_tokens=self.summary_max_tokens,
             buffer_tokens=AUTOCOMPACT_BUFFER_TOKENS,
             keep_messages=(
                 self.serving.spec.compaction_keep_messages
@@ -242,7 +254,7 @@ class Compaction:
             chars_per_token=CHARS_PER_TOKEN,
             image_tokens=IMAGE_TOKEN_ESTIMATE,
             trigger_tokens=(
-                self.serving.spec.compaction_trigger_tokens
+                self.serving.spec.rollover_trigger_tokens
                 if self.trigger_tokens is None
                 else self.trigger_tokens
             ),
@@ -252,27 +264,60 @@ class Compaction:
     def __repr__(self) -> str:
         return f"Compaction(conversation_id={self.conversation_id}, model={self.serving.model})"
 
-    async def maybe_compact(
+    def remaining(self, messages: tuple[Message, ...] | None = None) -> ContextRemaining:
+        """Where the window stands: tokens used, the line the next compaction fires at, and the
+        model's hard limit. Reported on demand for `get_context_remaining`, off the window the
+        caller passes or the last one this flow was asked about."""
+        window = self.window
+        used = window.tokens(self._state.window if messages is None else messages)
+        return ContextRemaining(
+            used_tokens=used,
+            rollover_at_tokens=window.trigger,
+            tokens_until_rollover=max(window.trigger - used, 0),
+            hard_limit_tokens=window.context_tokens,
+            tokens_until_hard_limit=max(window.context_tokens - used, 0),
+        )
+
+    def handoff_cap(self) -> int:
+        """No handoff crosses a compaction boundary: the summary is the whole carry, and this
+        strategy offers no `new_context` tool for a handoff to arrive through."""
+        return 0
+
+    def checklist_cap(self) -> int:
+        """No checklist crosses it either: the summary and the verbatim tail are the whole carry,
+        and no tool of this strategy takes a checklist."""
+        return 0
+
+    async def maybe_cross(
         self,
         messages: tuple[Message, ...],
         force: bool = False,
         active_requests: tuple[str, ...] = (),
-    ) -> tuple[tuple[Message, ...], tuple[Usage, ...]]:
+        final: bool = False,
+    ) -> BoundaryOutcome:
         """Compact when the window crosses the trigger, or unconditionally when `force` — the
         reactive path after a provider context-overflow. Either way the compactibility guards hold:
         a window at or under `keep_messages`, or one with no assistant boundary to split on, has
         nothing to summarize and is returned unchanged, so a forced call still no-ops safely. An
         unusable automatic summary suppresses further automatic attempts for this turn; a forced
-        recovery still runs because the provider has proven the unchanged window cannot proceed."""
-        repeated_policy = self._repeated_tool_policy()
-        repeated_trigger = self._repeated_tool_trigger(messages)
+        recovery still runs because the provider has proven the unchanged window cannot proceed.
+
+        `final` is the round budget's last word: the round that follows answers with no tools and
+        continues nothing, so an early line only spends a summarize call to make that answer
+        lossier. The repeated-tool line is not read, and the window is summarized only when it
+        cannot fit even with the summary's own reserve given back — so the answer is written from
+        the work itself whenever the work still fits."""
+        self._state.window = messages
+        repeated_policy = None if final else self._repeated_tool_policy()
+        repeated_trigger = None if final else self._repeated_tool_trigger(messages)
+        line = self.window.trigger + self.window.reserve_tokens if final else repeated_trigger
         if not self.window.should_compact(
             messages,
             force=force,
             automatic_suppressed=self._state.automatic_suppressed,
-            automatic_trigger_tokens=repeated_trigger,
+            automatic_trigger_tokens=line,
         ):
-            return messages, ()
+            return BoundaryOutcome(messages, False)
         if (
             not force
             and repeated_policy is not None
@@ -296,7 +341,8 @@ class Compaction:
         )
         if not force and usages and compacted == messages:
             self._state.automatic_suppressed = True
-        return compacted, usages
+        self._state.window = compacted
+        return BoundaryOutcome(compacted, compacted != messages, usages)
 
     def _repeated_tool_trigger(self, messages: tuple[Message, ...]) -> int | None:
         policy = self._repeated_tool_policy()
@@ -332,8 +378,10 @@ class Compaction:
             )
         return None
 
-    def _repeated_tool_policy(self) -> RepeatedToolCompaction | None:
-        return self.serving.spec.repeated_tool_compaction
+    def _repeated_tool_policy(self) -> RepeatedToolRollover | None:
+        """The early-boundary policy for a window of repeated identical tool calls. The model spec
+        declares it once, for whichever boundary strategy the deploy runs."""
+        return self.serving.spec.repeated_tool_rollover
 
     @DBOS.step()
     async def _compact(
@@ -343,7 +391,7 @@ class Compaction:
         writes, the index selection, and the pre/post_compact hook fires all run once and replay
         from the recorded output on a crash-recovery re-run, so recovery neither re-summarizes (no
         tokens re-spent) nor duplicates a compaction record at a fresh index, and the observe-only
-        compaction hooks do not double-fire. `maybe_compact`'s guards stay outside the step —
+        compaction hooks do not double-fire. `maybe_cross`'s guards stay outside the step —
         deterministic reads of the window — so a round that does not compact records no step and the
         step sequence lines up on replay. The summary's `loaded_skills` is drained from the tracker
         here rather than asked of the model: the tracker knows which workflows the head actually
@@ -417,7 +465,7 @@ class Compaction:
             await self.hooks.fire(
                 "post_compact",
                 PostCompact(
-                    summary=candidate.rendered,
+                    record=candidate.rendered,
                     before_tokens=boundary.before_tokens,
                     after_tokens=candidate.verification.after_tokens,
                 ),
@@ -735,13 +783,7 @@ class Compaction:
         return index
 
     async def read_record(self, index: int) -> CompactionRecord | None:
-        try:
-            before = await self.blob.get(self._key(index, "before"))
-            after = await self.blob.get(self._key(index, "after"))
-            summary = await self.blob.get(self._key(index, "summary"))
-        except BlobNotFound:
-            return None
-        return decode_compaction(index, before, after, summary)
+        return await read_compaction_record(self.blob, self.conversation_id, index)
 
     async def _write(
         self, index: int, half: Literal["before", "after"], messages: tuple[Message, ...]

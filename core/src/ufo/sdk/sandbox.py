@@ -35,6 +35,8 @@ from ufo.harness.sandbox.session import SANDBOX_UID as SANDBOX_UID
 from ufo.harness.sandbox.session import SENTINEL_MODEL_KEY as SENTINEL_MODEL_KEY
 from ufo.harness.sandbox.session import SYSTEM_CA_BUNDLE as SYSTEM_CA_BUNDLE
 from ufo.harness.sandbox.session import SYSTEM_SKILLS_ROOT as SYSTEM_SKILLS_ROOT
+from ufo.harness.sandbox.session import TOOL_OUTPUT_DIRNAME as TOOL_OUTPUT_DIRNAME
+from ufo.harness.sandbox.session import UFO_HOME_ENV as UFO_HOME_ENV
 from ufo.harness.sandbox.session import WORKSPACE_DIR as WORKSPACE_DIR
 from ufo.harness.sandbox.session import Carrier as Carrier
 from ufo.harness.sandbox.session import DialTarget as DialTarget

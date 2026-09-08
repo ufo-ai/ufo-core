@@ -54,7 +54,7 @@ async def test_filesystem_symlinked_store_root_is_followed(tmp_path: Path) -> No
     """The store root is deploy config, not a path an agent can reach, and `/var/lib/ufo/blobs ->
     /mnt/data/blobs` is an ordinary compose or k8s layout — so the link is followed once, keys are
     contained under the canonical result, and the store works. Refusing it would take transcripts,
-    compaction records and every shared artifact down on a deploy doing nothing unusual."""
+    rollover records and every shared artifact down on a deploy doing nothing unusual."""
     outside = tmp_path / "outside"
     outside.mkdir()
     linked_root = tmp_path / "blobs"
@@ -381,17 +381,17 @@ async def test_workspace_store_unbound_fails_loud(tmp_path: Path) -> None:
 async def test_workspace_store_list_returns_workspace_relative_keys(tmp_path: Path) -> None:
     store = WorkspaceBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     with ws(uuid4()):
-        await store.put("conversations/c1/compactions/0/before.json.lz4", b"bb")
-        await store.put("conversations/c1/compactions/1/before.json.lz4", b"b")
-        await store.put("conversations/c2/compactions/0/before.json.lz4", b"other")
-        entries = await store.list("conversations/c1/compactions/")
+        await store.put("conversations/c1/rollovers/0/before.json.lz4", b"bb")
+        await store.put("conversations/c1/rollovers/1/before.json.lz4", b"b")
+        await store.put("conversations/c2/rollovers/0/before.json.lz4", b"other")
+        entries = await store.list("conversations/c1/rollovers/")
         assert [entry.key for entry in entries] == [
-            "conversations/c1/compactions/0/before.json.lz4",
-            "conversations/c1/compactions/1/before.json.lz4",
+            "conversations/c1/rollovers/0/before.json.lz4",
+            "conversations/c1/rollovers/1/before.json.lz4",
         ]
         assert entries[0].size_bytes == 2
     with ws(uuid4()):
-        assert await store.list("conversations/c1/compactions/") == ()
+        assert await store.list("conversations/c1/rollovers/") == ()
 
 
 async def test_workspace_store_refuses_an_already_prefixed_key(tmp_path: Path) -> None:

@@ -1,7 +1,12 @@
 from ufo.sdk.manifest import Pack
 
 VERSION = "0.1.0"
-BASE_EXTENSIONS = ("index_default", "embed_openai", "openrouter")
+BASE_EXTENSIONS = (
+    "index_default",
+    "embed_openai",
+    "openrouter",
+    "context_compact",
+)
 DOCUMENT_EXTENSIONS = ("documents", "repl", "coding")
 RESEARCH_EXTENSIONS = ("perplexity", "research", "browser", "sandbox_chrome")
 CORE_NAME = "gdpval_core"

@@ -5,7 +5,7 @@ what a shell command did inside a touched checkout — none of which replaying t
 Which checkouts to ask is the recorder's `targets`: the paths the turn's `write` and `edit` calls
 named and the workspace root itself when the turn ran `bash`, mined from each round's tool calls
 as they dispatch — the memoized round outputs a recovered turn replays, and a record no mid-turn
-compaction of the message window rewrites — plus every directory the last recorded scan reported,
+a rollover of the message window resets — plus every directory the last recorded scan reported,
 so a checkout stays watched until git says it is clean. A deploy carrier walks its own disk and
 answers for every checkout regardless; a terminal-bound workspace is the member's real directory,
 arbitrarily large, and is asked only where the targets point.

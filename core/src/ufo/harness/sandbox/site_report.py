@@ -53,7 +53,7 @@ SITE_NOT_ANSWERING_FIRE = (
     "start it again, and check that the site answers."
 )
 """What the agent reads. It restates the whole fact — which port, which sandbox, what was observed
-— so a report landing after a compaction needs no earlier transcript to act on, and it asks for the
+— so a report landing after a rollover needs no earlier transcript to act on, and it asks for the
 check as well as the restart, because the member is watching a page that reloads until one of them
 succeeds."""
 

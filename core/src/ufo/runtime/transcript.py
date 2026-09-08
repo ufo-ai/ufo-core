@@ -33,7 +33,7 @@ class Transcript:
 def _supersedes(incoming: Conversation, stored: Conversation) -> bool:
     """Whether `incoming` may replace what is stored. A later seq always may. At the same seq, the
     run's record may replace the repair fallback, a later parked attempt may replace the parked
-    window it resumed, and a completed attempt may replace its parked window even when compaction
+    window it resumed, and a completed attempt may replace its parked window even when a rollover
     made the completed window shorter. The fallback knows the member's messages and nothing the
     turn did — the terminal row is committed before the blob is written, so a redelivery can reach
     the fallback while the run that owns the seq is still writing, and first-write-wins would

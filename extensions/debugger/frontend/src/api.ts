@@ -86,23 +86,34 @@ export type Transcript = {
   injected: string | null;
 };
 
-export type CompactionSummary = {
-  intent: string;
-  current_work: string;
-  next_step: string;
-  concepts: string[];
-  files: { path: string; why: string }[];
-  errors: string[];
-  decisions: string[];
-  pending: string[];
-  loaded_skills: string[];
+export type PendingResult = {
+  entry_id: number;
+  call: string;
+  arguments: string;
+  text: string;
+  truncated: boolean;
 };
 
-export type CompactionRecord = {
+export type RecoveryRecord = {
+  objective: string | null;
+  user_inputs: string[];
+  pending_results: PendingResult[];
+  checklist: string[];
+  checkpoint: string | null;
+  handoff: string | null;
+  history_path: string;
+  history_lost: boolean;
+  active_requests: string[];
+  loaded_skills: string[];
+  first_entry_id: number;
+  last_entry_id: number;
+};
+
+export type RolloverRecord = {
   index: number;
   before: TranscriptMessage[];
   after: TranscriptMessage[];
-  summary: CompactionSummary;
+  recovery: RecoveryRecord;
 };
 
 export type FleetWorkspace = {
