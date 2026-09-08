@@ -3640,7 +3640,12 @@ async def test_a_file_the_reply_carried_is_a_link_under_the_answer_and_no_upload
     turn_id = await _seed_done_turn(workspace_id, "C5:200.0", "the answer", blob, artifact=False)
     shared_at = datetime.now(UTC)
     await _seed_shared_files(
-        workspace_id, turn_id, blob, (("plan.md", None),), role="details", shared_at=shared_at
+        workspace_id,
+        turn_id,
+        blob,
+        (("plan.md", "Open the plan"),),
+        role="details",
+        shared_at=shared_at,
     )
     await _seed_shared_files(
         workspace_id,
@@ -3656,9 +3661,7 @@ async def test_a_file_the_reply_carried_is_a_link_under_the_answer_and_no_upload
     assert len(posts) == 1
     body = json.loads(posts[0].content)
     assert slack.SLACK_OVERSIZE_HEADING not in body["text"]
-    match = re.match(
-        rf"the answer\n\n\[{re.escape(slack.DETAILS_LINK_TEXT)}\]\((https://[^)]+)\)$", body["text"]
-    )
+    match = re.match(r"the answer\n\n\[Open the plan\]\((https://[^)]+)\)$", body["text"])
     assert match is not None, body["text"]
     assert match.group(1).startswith(f"{PUBLIC_BASE_URL}/artifacts/")
     assert body["unfurl_links"] is False and body["unfurl_media"] is False

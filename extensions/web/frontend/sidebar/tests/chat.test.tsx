@@ -2062,6 +2062,15 @@ test("a write-up the reply carried opens as the detailed report above the attach
               role: "details",
             },
             {
+              filename: "queue-costs.md",
+              url: "/dl/queue-costs.md",
+              size_bytes: 512,
+              preview_url: null,
+              media_type: "text/markdown",
+              role: "details",
+              subject: "Open the cost table",
+            },
+            {
               filename: "report.csv",
               url: "/dl/report.csv",
               size_bytes: 2048,
@@ -2077,9 +2086,12 @@ test("a write-up the reply carried opens as the detailed report above the attach
 
   expect(await screen.findByText(saying("Move the event-driven jobs onto a queue."))).toBeTruthy();
   const opener = screen.getByRole("button", { name: "Open detailed report" });
+  const captioned = screen.getByRole("button", { name: "Open the cost table" });
   const card = screen.getByRole("button", { name: "report.csv" });
   expect(opener.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(captioned.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(screen.queryByRole("button", { name: "nightly-runner-queue.md" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "queue-costs.md" })).toBeNull();
 
   await userEvent.click(opener);
   const sheet = await screen.findByRole("dialog", { name: "nightly-runner-queue.md" });

@@ -442,11 +442,12 @@ REPORT_NAME = "nightly-runner-queue.md"
 REPORT_BODY = (
     "# Nightly runner\n\nMove the event-driven jobs onto a queue.\n\n## Costs\n\nOne service."
 )
+REPORT_LINK_TEXT = "Open the plan"
 CARRYING_ANSWER = "Move the event-driven jobs onto a queue and keep cron for the clock."
 
 
 def _carried(answer: str, name: str = REPORT_NAME) -> str:
-    return f"{answer}\n\n[{name}](/workspace/{name})\n"
+    return f"{answer}\n\n[{REPORT_LINK_TEXT}](/workspace/{name})\n"
 
 
 async def _local_sandbox(conversation_id: UUID, workspace: Path) -> SandboxSession:
@@ -527,11 +528,11 @@ async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_be
         bytes_stored = await engine.blob.get(rows[0].blob_key) if rows else b""
 
     assert frame is not None
-    delivered = f"{CARRYING_ANSWER}\n\n{REPORT_NAME}\n"
+    delivered = f"{CARRYING_ANSWER}\n\n{REPORT_LINK_TEXT}\n"
     assert (frame.status, frame.text) == ("done", delivered)
-    assert [(row.filename, row.role, row.media_type, row.size_bytes) for row in rows] == [
-        (REPORT_NAME, "details", "text/markdown", len(REPORT_BODY) + 1)
-    ]
+    assert [
+        (row.filename, row.role, row.media_type, row.size_bytes, row.subject) for row in rows
+    ] == [(REPORT_NAME, "details", "text/markdown", len(REPORT_BODY) + 1, REPORT_LINK_TEXT)]
     assert bytes_stored == (REPORT_BODY + "\n").encode()
     streamed = "".join(f.text for f in hub.frames if isinstance(f, TextDelta))
     assert streamed == delivered
@@ -541,7 +542,7 @@ async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_be
         for message in stored.messages
         if message.role == "assistant"
     ]
-    assert any(f"[{REPORT_NAME}](/workspace/{REPORT_NAME})" in text for text in said)
+    assert any(f"[{REPORT_LINK_TEXT}](/workspace/{REPORT_NAME})" in text for text in said)
 
 
 async def test_a_refused_commit_lands_no_carried_file_and_the_closing_one_lands_once(
@@ -1138,7 +1139,7 @@ async def test_a_store_that_refuses_the_bytes_costs_the_report_and_never_the_ans
     assert frame is not None
     assert (frame.status, frame.text, rows) == (
         "done",
-        f"{CARRYING_ANSWER}\n\n{REPORT_NAME}\n",
+        f"{CARRYING_ANSWER}\n\n{REPORT_LINK_TEXT}\n",
         [],
     )
     missed = [

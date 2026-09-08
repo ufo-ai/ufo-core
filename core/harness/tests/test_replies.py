@@ -65,8 +65,24 @@ def test_reply_markup_leaves_a_file_link_in_the_window() -> None:
 
 def test_a_closing_answer_yields_its_file_and_the_link_label() -> None:
     artifacts, delivered = marked_artifacts(CARRIED)
-    assert artifacts == (MarkedArtifact(name="nightly-runner-queue.md", path=REPORT_PATH),)
+    assert artifacts == (
+        MarkedArtifact(
+            name="nightly-runner-queue.md",
+            path=REPORT_PATH,
+            text="nightly-runner-queue.md",
+        ),
+    )
     assert delivered == ANSWER + "\n\nnightly-runner-queue.md\n"
+
+
+def test_the_link_text_is_one_bounded_line_or_none() -> None:
+    def text(label: str) -> str | None:
+        return marked_artifacts(f"[{label}](/workspace/a.md)")[0][0].text
+
+    assert text("") is None
+    assert text(" Open  the plan ") == "Open the plan"
+    assert text("x" * 81) is None
+    assert text("x" * 80) == "x" * 80
 
 
 def test_file_links_keep_their_order_and_names() -> None:

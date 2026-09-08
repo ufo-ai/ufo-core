@@ -1742,11 +1742,13 @@ class RunLineage:
 
 @dataclass(frozen=True)
 class _CarriedFile:
-    """A carried artifact staged in the blob store, waiting on the commit that lands its row."""
+    """A carried artifact staged in the blob store, waiting on the commit that lands its row; its
+    `subject` is the link text the answer named, None for the surface's own."""
 
     key: str
     filename: str
     size_bytes: int
+    subject: str | None
 
 
 @dataclass(frozen=True, repr=False)
@@ -2604,7 +2606,12 @@ class TurnEngine:
                 )
                 continue
             staged.append(
-                _CarriedFile(key=key, filename=artifact.name, size_bytes=measured.size_bytes)
+                _CarriedFile(
+                    key=key,
+                    filename=artifact.name,
+                    size_bytes=measured.size_bytes,
+                    subject=artifact.text,
+                )
             )
         return tuple(staged)
 
@@ -4157,7 +4164,7 @@ class TurnEngine:
                         blob_key=file.key,
                         workspace_id=self.turn.workspace_id,
                         filename=file.filename,
-                        subject=None,
+                        subject=file.subject,
                         media_type=artifact_media_type(file.filename),
                         size_bytes=file.size_bytes,
                         role="details",

@@ -855,6 +855,13 @@ async def test_the_carried_report_links_the_portal_and_falls_back_to_the_downloa
         f"(https://ufo.example.test/artifacts/{artifact_id}/plan.md)"
     )
 
+    captioned = replace(
+        writeback, artifacts=(replace(writeback.artifacts[0], subject="Open the plan"),)
+    )
+    assert (await _reply_with_links(_PortalCtx(None), captioned)).endswith(
+        f"[Open the plan](https://ufo.example.test/artifacts/{artifact_id}/plan.md)"
+    )
+
 
 async def test_slack_writeback_links_the_portal_for_a_credential_request() -> None:
     """Slack collects no secret, so it hands the member a link to the one screen that fills a slot

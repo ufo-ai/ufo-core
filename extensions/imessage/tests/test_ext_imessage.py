@@ -716,7 +716,7 @@ async def test_a_file_the_reply_carried_is_a_link_in_the_reply_and_no_attachment
                 id=report_id,
                 blob_key="artifacts/a/plan.md",
                 filename="plan.md",
-                subject=None,
+                subject="Open the plan",
                 media_type="text/markdown",
                 size_bytes=3,
                 role="details",
@@ -736,7 +736,7 @@ async def test_a_file_the_reply_carried_is_a_link_in_the_reply_and_no_attachment
     assert await surface.post(Context(), writeback) == "message"
     await surface.attach(Context(), writeback, "message")
     assert sent == [
-        "The answer.\n\nOpen detailed report: https://ufo.example.test/surface/web#/c/"
+        "The answer.\n\nOpen the plan: https://ufo.example.test/surface/web#/c/"
         f"{writeback.conversation_id}?report={report_id}"
     ]
     assert attached == ["data.csv"]

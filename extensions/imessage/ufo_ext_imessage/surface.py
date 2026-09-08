@@ -488,7 +488,11 @@ class ImessageSurface:
             if artifact.role == "details":
                 link = await ctx.report_url(writeback.conversation_id, artifact)
             link = link or ctx.artifact_link(artifact)
-            label = DETAILS_LINK_TEXT if artifact.role == "details" else artifact.filename
+            label = (
+                (artifact.subject or DETAILS_LINK_TEXT)
+                if artifact.role == "details"
+                else artifact.filename
+            )
             parts.append(f"{label}: {link}" if link else artifact.filename)
         text = "\n\n".join(part for part in parts if part)
         return text or f"The turn ended with status: {writeback.terminal.status}."

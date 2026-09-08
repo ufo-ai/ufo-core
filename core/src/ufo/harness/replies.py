@@ -20,6 +20,7 @@ REPLY_MARKUP = re.compile(rf"<{REPLY_TAG}(?:\s[^<>]*)?>|{re.escape(REPLY_CLOSER)
 
 ARTIFACT_FALLBACK_NAME = "artifact"
 ARTIFACT_DEFAULT_SUFFIX = ".md"
+ARTIFACT_TEXT_MAX_CHARS = 80
 FILE_LINK = re.compile(r"(?<![\w!`])\[([^\]\n]*)\]\(\s*(?:<([^>\n]+)>|([^)\s]+))\s*\)")
 LINK_TAIL = re.compile(r"\[[^\]\n]*(?:\](?:\([^)\s]*)?)?$")
 LINK_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
@@ -52,10 +53,12 @@ class MarkedReply:
 
 @dataclass(frozen=True)
 class MarkedArtifact:
-    """One workspace file a closing answer linked and its download name."""
+    """One workspace file a closing answer linked, its download name, and the bounded words the
+    member clicks to open it, None when the link named none and the surface says its own."""
 
     name: str
     path: str
+    text: str | None = None
 
 
 def marked_replies(text: str) -> tuple[tuple[MarkedReply, ...], str]:
@@ -78,7 +81,11 @@ def marked_artifacts(text: str) -> tuple[tuple[MarkedArtifact, ...], str]:
         target = match.group(2) or match.group(3)
         if not _file_target(target):
             return match.group(0)
-        artifacts.append(MarkedArtifact(name=_artifact_name(target), path=target))
+        artifacts.append(
+            MarkedArtifact(
+                name=_artifact_name(target), path=target, text=_link_text(match.group(1))
+            )
+        )
         return match.group(1)
 
     delivered = FILE_LINK.sub(link, text)
@@ -99,6 +106,11 @@ def _artifact_name(named: str) -> str:
 
 def _file_target(target: str) -> bool:
     return not (LINK_SCHEME.match(target) or target.startswith(("#", "//")))
+
+
+def _link_text(named: str) -> str | None:
+    text = " ".join(named.split())
+    return text if 0 < len(text) <= ARTIFACT_TEXT_MAX_CHARS else None
 
 
 @dataclass

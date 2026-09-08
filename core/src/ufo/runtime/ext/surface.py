@@ -591,8 +591,9 @@ class SharedArtifact:
 
     `role` is how a surface delivers it: a `file` came through `share_file`, is attached where the
     surface can attach, and is an `artifact` object; a `details` file is the write-up the closing
-    reply carried, offered as an Open detailed report link under the answer, never attached or
-    listed. `id` is the row a link into the portal names to open the file's sheet.
+    reply carried, offered under the Markdown link's text or Open detailed report when none was
+    usable, never attached or listed. `id` is the row a link into the portal names to open the
+    file's sheet.
 
     `preview_*` names a second blob holding the rendered picture of a file that is not itself one —
     a document's first page, rasterized at share time. A file that is already an image carries none:

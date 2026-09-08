@@ -5178,7 +5178,7 @@ async def test_a_file_the_reply_carried_rides_the_reply_and_stays_out_of_the_art
                     blob_key=f"artifacts/{uuid4()}/{filename}",
                     workspace_id=workspace_id,
                     filename=filename,
-                    subject=None,
+                    subject="Open the plan" if role == "details" else None,
                     media_type=media_type,
                     size_bytes=3,
                     role=role,
@@ -5215,6 +5215,8 @@ async def test_a_file_the_reply_carried_rides_the_reply_and_stays_out_of_the_art
         ("data.csv", "file"),
         ("plan.md", "details"),
     ]
+    report = next(file for file in reply["files"] if file["role"] == "details")
+    assert report["subject"] == "Open the plan"
     assert all(f["url"].startswith("https://web/artifacts/") for f in reply["files"])
 
     slot = await client.get(
