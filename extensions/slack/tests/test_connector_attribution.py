@@ -1,11 +1,8 @@
-"""The connector Slack send's mentioning footer, end to end across the two extensions it joins: the
-surface mirrors the bot-user id it proved, the declared `pre_tool_use` hook reads that mirror and
-rewrites the send's arguments, and the connectors tool's own attribution then finds its line already
-present and adds nothing.
+"""The connector Slack send's mentioning footer across the two extensions it joins.
 
-Every failure on this path resolves to the plain footer, never to a refused send: a gating hook that
-raised or timed out would deny the member's Slack message, so the unresolvable cases are asserted
-through the real `HookChain`, where a denial would show.
+The surface mirrors the bot-user id it proved. Its `pre_tool_use` hook supplies that optional
+identity, and the connectors tool writes it only after its sending account proves the destination
+internal. A deploy without the Slack surface keeps the generic footer.
 """
 
 from dataclasses import dataclass
@@ -17,23 +14,19 @@ import pytest
 import sqlalchemy as sa
 import ufo_ext_connectors.tools as connector_tools
 import ufo_ext_slack.surface as slack
-from cryptography.fernet import Fernet
 from ufo_ext_connectors.tools import ATTRIBUTION_MRKDWN, CallExternalToolInput
-from ufo_ext_slack.attribution import addressing_mention, mention_attributed
+from ufo_ext_slack.attribution import addressing_mention
 from ufo_ext_slack.hooks import CONNECTOR_CALL_TOOL, attribute_connector_send
 from ufo_ext_slack.manifest import manifest as slack_manifest
 
 from ufo.blob import BlobStore, FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
-from ufo.host.ext.loader import turn_hooks
-from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
 from ufo.runtime.ext.hooks import BoundHook, HookChain, HookResolution
 from ufo.runtime.ext.manifest import HookSpec, PreToolUse
 from ufo.runtime.ext.surface import SurfaceContext
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.sdk.audience import SHARED_AUDIENCE
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -61,6 +54,34 @@ class _UnreadableStore(ScopedStore):
         raise RuntimeError("ext_store unavailable")
 
 
+class _MirroredStore(ScopedStore):
+    """A scoped store holding the bot-user id the surface mirrored, read without a database."""
+
+    async def get(self, key: str) -> JsonValue | None:
+        return BOT_USER_ID if key == slack.SELF_USER_ID_STORE_KEY else None
+
+
+def _published(call: CallExternalToolInput) -> dict[str, JsonValue]:
+    """The internal-destination arguments after the connector applies the hook's identity."""
+    return connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER,
+        call.tool_name,
+        call.arguments,
+        destination_internal=True,
+        bot_user_id=call.attribution_bot_user_id,
+    )
+
+
+def _mention_attributed(arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER,
+        SLACK_SEND_SLUG,
+        arguments,
+        destination_internal=True,
+        bot_user_id=BOT_USER_ID,
+    )
+
+
 @dataclass
 class _IdentityReadContext:
     """The two members `_identity` touches on a surface context: the workspace the route bound and
@@ -86,7 +107,10 @@ def _attribution_spec() -> HookSpec:
 
 def _chain_over(store: ScopedStore) -> HookChain:
     spec = _attribution_spec()
-    ext = ExtensionContext(store=store, credentials=CredentialAccess(declared=frozenset()))
+    ext = ExtensionContext(
+        store=store,
+        credentials=CredentialAccess(declared=frozenset()),
+    )
     return HookChain(hooks={"pre_tool_use": (BoundHook(spec=spec, ext=ext),)})
 
 
@@ -148,29 +172,21 @@ async def test_the_surfaces_own_identity_read_mirrors_the_id_into_the_store(
         )
 
 
-async def test_a_workspace_with_no_proved_id_keeps_the_generic_attribution(db: None) -> None:
-    """A deploy running the connector without a Slack install — no mirror row — degrades to the
-    footer the tool writes on its own, and the send still dispatches."""
-    workspace_id = await _seed_workspace()
+async def test_a_workspace_with_no_proved_id_keeps_the_generic_attribution() -> None:
+    """A deploy running the connector without a mirrored bot id degrades to the footer the tool
+    writes on its own — the destination is still proved internal, so the send is marked, and it
+    dispatches either way."""
     arguments: dict[str, JsonValue] = {"channel": "C1", "text": SENT_TEXT}
-    with ws(workspace_id):
-        resolution = await _fire(
-            turn_hooks(
-                (slack_manifest(),),
-                CredentialStore(fernet=Fernet(Fernet.generate_key())),
-                audience=SHARED_AUDIENCE,
-            ),
-            _send(arguments),
-        )
+    resolution = await _fire(
+        _chain_over(_UnreadableStore(extension=slack.SLACK_EXTENSION)),
+        _send(arguments),
+    )
 
     assert (resolution.denied, resolution.failed_closed) == (None, None)
-    assert resolution.tool_input is not None
     assert isinstance(resolution.tool_input, CallExternalToolInput)
     assert resolution.tool_input.arguments == arguments
     generic = ATTRIBUTION_MRKDWN.format(subject=connector_tools.UFO_ATTRIBUTION_SUBJECT)
-    assert connector_tools.slack_attributed(
-        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, arguments
-    ) == {
+    assert _published(resolution.tool_input) == {
         "channel": "C1",
         "text": SENT_TEXT,
         "blocks": [
@@ -178,6 +194,19 @@ async def test_a_workspace_with_no_proved_id_keeps_the_generic_attribution(db: N
             {"type": "context", "elements": [{"type": "mrkdwn", "text": generic}]},
         ],
     }
+
+
+async def test_a_proved_id_selects_the_mentioning_footer() -> None:
+    """The hook supplies the id and the connector uses it after proving the audience."""
+    resolution = await _fire(
+        _chain_over(_MirroredStore(extension=slack.SLACK_EXTENSION)),
+        _send({"channel": "C1", "text": SENT_TEXT}),
+    )
+
+    assert (resolution.denied, resolution.failed_closed) == (None, None)
+    assert isinstance(resolution.tool_input, CallExternalToolInput)
+    assert resolution.tool_input.attribution_bot_user_id == BOT_USER_ID
+    assert _published(resolution.tool_input)["blocks"] == [*SENT_BLOCKS, FOOTER_BLOCK]
 
 
 async def test_an_unreadable_store_never_denies_the_members_send() -> None:
@@ -220,14 +249,14 @@ def test_a_blocks_authored_send_is_not_an_address_when_slack_delivers_it_back() 
     Deciding over `text` alone, the mention is unreadable and the event admits as a turn with no
     body at all: the deploy's own published message opening a turn about itself. A mention the body
     blocks carry is the member's own and still addresses the agent."""
-    published = mention_attributed({"channel": "C1", "blocks": list(SENT_BLOCKS)}, BOT_USER_ID)
+    published = _mention_attributed({"channel": "C1", "blocks": list(SENT_BLOCKS)})
     event = {"type": "app_mention", "text": "", "blocks": published["blocks"]}
     assert slack.slack_message_addressed(event, BOT_USER_ID, is_dm=False) is False
 
     asked: list[JsonValue] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"<@{BOT_USER_ID}> what happened?"}}
     ]
-    mentioning = mention_attributed({"channel": "C1", "blocks": asked}, BOT_USER_ID)
+    mentioning = _mention_attributed({"channel": "C1", "blocks": asked})
     assert (
         slack.slack_message_addressed(
             {"type": "app_mention", "text": "", "blocks": mentioning["blocks"]},

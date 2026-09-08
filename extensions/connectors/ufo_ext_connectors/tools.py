@@ -12,7 +12,9 @@ connected account (bound through `/connect`). The broker holds the account's tok
 itself, so an execute reaches only the broker's own API. A Slack message sent through a connector
 is the one call that publishes text this deploy wrote into someone else's surface, so its body
 carries the ufo attribution (`slack_attributed`) — the Slack surface marks its own replies with the
-footer it renders, and a connector send reaches no renderer of ours.
+footer it renders, and a connector send reaches no renderer of ours. That footer reaches an internal
+audience only: a send whose own connector account did not prove the destination internal goes out
+unmarked, so an externally-shared Slack channel and a Teams chat across the tenant carry nothing.
 
 Files cross through the workspace, moved by the sandbox itself: an argument carrying the
 `workspace_file` vocabulary is hashed in the container, staged to where the broker mints
@@ -40,7 +42,9 @@ from pathlib import PurePosixPath
 from urllib.parse import quote, unquote
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+import httpx
+from pydantic import BaseModel, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from ufo.sdk.connectors import (
     WORKSPACE_FILE_KEY,
@@ -51,6 +55,7 @@ from ufo.sdk.connectors import (
     UnknownBrokerTool,
 )
 from ufo.sdk.context import JsonValue
+from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import WORKSPACE_DIR, contained_leaf, workspace_path
 from ufo.sdk.tools import (
     ConnectorConnection,
@@ -117,6 +122,15 @@ SLACK_SEND_VERBS = ("send", "post", "reply", "schedule")
 SLACK_MARKDOWN_ARGUMENT = "markdown_text"
 SLACK_BLOCKS_ARGUMENT = "blocks"
 SLACK_TEXT_ARGUMENT = "text"
+SLACK_CHANNEL_ARGUMENT = "channel"
+SLACK_CONVERSATIONS_INFO_URL = "https://slack.com/api/conversations.info"
+SLACK_DESTINATION_READ_SECONDS = 3.0
+SLACK_EXTERNAL_FLAGS = (
+    "is_ext_shared",
+    "is_pending_ext_shared",
+    "is_org_shared",
+    "is_shared",
+)
 SLACK_MARKDOWN_TEXT_LIMIT = 12_000
 """Slack's cap on the `markdown` blocks of one payload, counted across all of them together — the
 bound every writer of that block holds, here and on the surface's own reply, since a payload past it
@@ -236,6 +250,15 @@ class CallExternalToolInput(BaseModel):
         description="Arguments for the connector tool as a dict. Pass {} for tools that take no "
         "parameters."
     )
+    attribution_bot_user_id: SkipJsonSchema[str | None] = None
+    """The bot user the optional Slack surface proved. The connector owns the audience check and
+    uses this only to replace the generic footer's subject with a mention."""
+
+    @field_validator("attribution_bot_user_id", mode="before")
+    @classmethod
+    def _no_model_supplied_attribution_identity(cls, value: object) -> None:
+        """A call the model wrote cannot choose the identity named in the footer."""
+        return None
 
 
 class SearchConnectorToolsInput(BaseModel):
@@ -429,20 +452,44 @@ def _carries_attribution(value: JsonValue) -> bool:
 
 
 def slack_attributed(
-    provider: str, slug: str, arguments: dict[str, JsonValue]
+    provider: str,
+    slug: str,
+    arguments: dict[str, JsonValue],
+    *,
+    destination_internal: bool,
+    bot_user_id: str | None = None,
 ) -> dict[str, JsonValue]:
     """`arguments` with the ufo attribution attached to the body of a Slack send — the one connector
     call that publishes a message this deploy wrote, and the only place it can be marked: the Slack
     surface's own reply carries its footer, a message posted through a connector passes through no
     renderer of ours. A read, an edit, and a listing are untouched, as is a send already carrying a
-    footer of its own, so a resend or an edit of a marked message never stacks it and the mentioning
-    footer the Slack extension writes suppresses this generic one."""
-    if provider != SLACK_PROVIDER:
+    footer of its own, so a resend or an edit of a marked message never stacks it. The optional bot
+    id supplied by the Slack extension selects the mentioning form; without it the product name is
+    the subject.
+
+    A destination not proved internal carries no footer at all, the way the Slack surface withholds
+    its own accounting footer off an externally-shared channel: a Slack Connect or org-shared
+    channel, a Microsoft Teams chat or shared channel that crosses the tenant, and any destination
+    the prover could not read. `destination_internal` is that proof and nothing else settles it, so
+    a send whose audience cannot be shown internal fails closed and goes out unmarked."""
+    if not destination_internal or not is_slack_send(provider, slug):
         return arguments
+    subject = (
+        UFO_ATTRIBUTION_SUBJECT
+        if bot_user_id is None
+        else UFO_ATTRIBUTION_MENTION_SUBJECT.format(bot_user_id=bot_user_id)
+    )
+    return attributed_arguments(arguments, subject)
+
+
+def is_slack_send(provider: str, slug: str) -> bool:
+    """Whether this connector call publishes a Slack message."""
     name = slug.lower()
-    if SLACK_MESSAGE_NOUN not in name or not any(verb in name for verb in SLACK_SEND_VERBS):
-        return arguments
-    return attributed_arguments(arguments, UFO_ATTRIBUTION_SUBJECT)
+    return (
+        provider == SLACK_PROVIDER
+        and SLACK_MESSAGE_NOUN in name
+        and any(verb in name for verb in SLACK_SEND_VERBS)
+    )
 
 
 async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> ToolResult:
@@ -460,9 +507,63 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
                 ),
             ).result()
     connection = await ctx.connector_connection(args.source_id, args.account_id)
-    arguments = slack_attributed(entry.provider, args.tool_name, args.arguments)
+    candidate = slack_attributed(
+        entry.provider,
+        args.tool_name,
+        args.arguments,
+        destination_internal=True,
+        bot_user_id=args.attribution_bot_user_id,
+    )
+    arguments = (
+        candidate
+        if candidate is not args.arguments
+        and await _destination_is_internal(ctx, entry, connection, args.arguments)
+        else args.arguments
+    )
     call = _ConnectorCall(ctx=ctx, entry=entry, slug=args.tool_name)
     return ToolResult(content=(TextContent(text=await call.run(arguments, connection)),))
+
+
+async def _destination_is_internal(
+    ctx: ToolContext,
+    entry: ConnectorEntry,
+    connection: ConnectorConnection,
+    arguments: dict[str, JsonValue],
+) -> bool:
+    channel = arguments.get(SLACK_CHANNEL_ARGUMENT)
+    if not isinstance(channel, str) or not channel:
+        return False
+    try:
+        async with asyncio.timeout(SLACK_DESTINATION_READ_SECONDS):
+            credential = await entry.broker.credential(
+                ctx.turn.workspace_id, entry.provider, connection.account_id
+            )
+            headers = dict(credential.headers)
+            if credential.bearer is not None:
+                headers["Authorization"] = f"Bearer {credential.bearer}"
+            if credential.transport is None and not headers:
+                return False
+            async with httpx.AsyncClient(
+                transport=credential.transport,
+                headers=headers,
+                timeout=SLACK_DESTINATION_READ_SECONDS,
+            ) as client:
+                response = await client.get(
+                    SLACK_CONVERSATIONS_INFO_URL,
+                    params={"channel": channel},
+                )
+                response.raise_for_status()
+                payload = response.json()
+    except Exception as error:
+        log("connector.slack.destination_unread", error_class=type(error).__name__)
+        return False
+    info = payload.get("channel") if isinstance(payload, Mapping) else None
+    return (
+        payload.get("ok") is True
+        and isinstance(info, Mapping)
+        and info.get("id") == channel
+        and not any(info.get(flag) is True for flag in SLACK_EXTERNAL_FLAGS)
+    )
 
 
 @dataclass(frozen=True)

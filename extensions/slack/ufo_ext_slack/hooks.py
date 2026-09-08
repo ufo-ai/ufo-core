@@ -1,27 +1,25 @@
-"""This extension's hooks: the connector Slack send, footered with a mention of the bot user this
-workspace's own install proved, and the connect button a landed connection settles.
+"""This extension's hooks: the connector Slack send names the bot user this workspace's own install
+proved, and the connect button a landed connection settles.
 
-The footer belongs to whoever knows the id, and that is this extension — the connectors tool marks
-the send generically because it has no Slack identity to name. So the marking is rewritten here, in
-the arguments, before the tool dispatches: `pre_tool_use` on `call_external_tool` returns
-`ModifyInput`, and the tool's own append then finds the attribution line already present and adds
-nothing.
+The footer identity belongs to whoever knows it, and that is this extension. The connectors tool
+owns the audience check because it holds the account that sends the message, and writes the generic
+footer without this extension. This hook supplies the optional bot-user id before dispatch, so the
+tool can name that bot after it proves the destination internal.
 
 `pre_tool_use` is a gating event: a handler that raises or outruns the loader's per-handler timeout
 is a Deny, and the member's Slack send never leaves. A footer is cosmetic and must never hold that
-power, so every await here is inside a timeout of its own and every failure resolves to `None` —
-no rewrite, and the generic attribution the tool appends on its own. The read is the extension's
-scoped store, which the surface mirrors the id into, so the send path asks Slack nothing."""
+power, so the store read is inside a timeout of its own and every failure resolves to `None` — no
+identity rewrite, and the connector can still write its generic footer. The surface mirrors the id
+into this extension's scoped store."""
 
 import asyncio
 import re
 
-from ufo_ext_connectors.tools import CallExternalToolInput
+from ufo_ext_connectors.tools import CallExternalToolInput, is_slack_send
 
 from ufo.sdk.grants import ConnectionRecorded
 from ufo.sdk.manifest import HookContext, HookOutcome, ModifyInput, PreToolUse
 from ufo.sdk.o11y import log
-from ufo_ext_slack.attribution import is_slack_send, mention_attributed
 from ufo_ext_slack.surface import (
     BOT_USER_ID_PATTERN,
     SELF_USER_ID_STORE_KEY,
@@ -36,9 +34,7 @@ SELF_USER_ID_READ_SECONDS = 1.0
 
 
 async def attribute_connector_send(ctx: HookContext) -> HookOutcome:
-    """Rewrite a connector Slack send's message text to carry the mentioning footer. Any other
-    connector call, and any send whose bot user this workspace has not proved, is left exactly as
-    the model wrote it."""
+    """Supply the bot user for a connector Slack send's optional mentioning footer."""
     match ctx.payload:
         case PreToolUse(tool_input=CallExternalToolInput() as call) if is_slack_send(
             call.source_id, call.tool_name
@@ -46,8 +42,9 @@ async def attribute_connector_send(ctx: HookContext) -> HookOutcome:
             bot_user_id = await _mirrored_self_user_id(ctx)
             if bot_user_id is None:
                 return None
-            arguments = mention_attributed(call.arguments, bot_user_id)
-            return ModifyInput(tool_input=call.model_copy(update={"arguments": arguments}))
+            return ModifyInput(
+                tool_input=call.model_copy(update={"attribution_bot_user_id": bot_user_id})
+            )
         case _:
             return None
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+import httpx
 import pytest
 import ufo_ext_connectors.manifest as connectors
 import ufo_ext_connectors.tools as connector_tools
@@ -56,6 +57,7 @@ from ufo.runtime.ext.context import JsonValue
 from ufo.runtime.tools.context import ToolContext
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.authproxy import Credential
 
 TOOL_NARRATION = "using the connected account"
 
@@ -68,6 +70,8 @@ SLACK_HISTORY_SLUG = "SLACK_FETCH_CONVERSATION_HISTORY"
 SLACK_SCHEDULED_LIST_SLUG = "SLACK_LIST_SCHEDULED_MESSAGES"
 SLACK_SCHEDULED_DELETE_SLUG = "SLACK_DELETE_A_SCHEDULED_MESSAGE"
 GMAIL_SEND_SLUG = "GMAIL_SEND_EMAIL"
+TEAMS_PROVIDER = "microsoft_teams"
+TEAMS_SEND_SLUG = "MICROSOFT_TEAMS_SEND_MESSAGE_TO_CHANNEL"
 SLACK_BODY_BLOCKS: list[JsonValue] = [
     {"type": "section", "text": {"type": "mrkdwn", "text": "the *plan* is posted"}}
 ]
@@ -157,6 +161,30 @@ class _ReadBoundaryBroker(_AnySlugBroker):
         return await super().execute(
             workspace_id, provider, slug, arguments, account_id, idempotency_key
         )
+
+
+@dataclass(frozen=True, kw_only=True)
+class _SlackBroker(_AnySlugBroker):
+    response: dict[str, object]
+
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        if account != SLACK_ACCOUNT:
+            return Credential()
+
+        def channel_info(request: httpx.Request) -> httpx.Response:
+            if request.url.path != "/api/conversations.info":
+                return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+            if request.url.params.get("channel") != "C1":
+                return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
+            return httpx.Response(200, json=self.response)
+
+        return Credential(transport=httpx.MockTransport(channel_info))
+
+
+@dataclass(frozen=True)
+class _UnreadableSlackBroker(_AnySlugBroker):
+    async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
+        raise RuntimeError("connector credential unavailable")
 
 
 def _registry() -> ConnectorRegistry:
@@ -330,6 +358,104 @@ async def test_read_only_turn_refuses_mutating_or_unclassified_connector_tools(s
     assert broker.executed == []
 
 
+@pytest.mark.parametrize(
+    ("response", "marked"),
+    [
+        ({"ok": True, "channel": {"id": "C1", "is_ext_shared": False}}, True),
+        ({"ok": True, "channel": {"id": "C1", "is_ext_shared": True}}, False),
+        ({"ok": True, "channel": {"id": "C1", "is_pending_ext_shared": True}}, False),
+        ({"ok": True, "channel": {"id": "C1", "is_org_shared": True}}, False),
+        ({"ok": True, "channel": {"id": "C1", "is_shared": True}}, False),
+        ({"ok": False, "channel": {"id": "C1"}, "error": "channel_not_found"}, False),
+        ({"ok": True, "channel": {}}, False),
+    ],
+    ids=[
+        "internal",
+        "ext_shared",
+        "pending_ext_shared",
+        "org_shared",
+        "shared",
+        "unavailable",
+        "incomplete",
+    ],
+)
+async def test_a_slack_send_uses_its_connector_account_to_settle_the_footer(
+    response: dict[str, object], marked: bool
+) -> None:
+    broker = _SlackBroker(response=response)
+    registry = ConnectorRegistry(
+        entries={
+            connector_tools.SLACK_PROVIDER: ConnectorEntry(
+                provider=connector_tools.SLACK_PROVIDER,
+                label="Slack",
+                broker=broker,
+            )
+        }
+    )
+    arguments = {"channel": "C1", "text": "the plan is posted"}
+
+    result = await call_external_tool(
+        _ctx(
+            registry,
+            accounts=(SLACK_ACCOUNT,),
+            provider=connector_tools.SLACK_PROVIDER,
+        ),
+        CallExternalToolInput(
+            tool_name=SLACK_SEND_SLUG,
+            source_id=connector_tools.SLACK_PROVIDER,
+            arguments=arguments,
+        ),
+    )
+
+    payload = _payload(result)
+    assert payload["account"] == SLACK_ACCOUNT
+    if marked:
+        assert payload["arguments"]["blocks"][-1] == {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "*Sent using* ufo"}],
+        }
+    else:
+        assert payload["arguments"] == arguments
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"channel": "C1", "text": "the plan is posted"},
+        {"text": "the plan is posted"},
+    ],
+    ids=["credential_unavailable", "channel_missing"],
+)
+async def test_an_unreadable_slack_destination_is_published_unmarked(
+    arguments: dict[str, JsonValue],
+) -> None:
+    broker = _UnreadableSlackBroker()
+    registry = ConnectorRegistry(
+        entries={
+            connector_tools.SLACK_PROVIDER: ConnectorEntry(
+                provider=connector_tools.SLACK_PROVIDER,
+                label="Slack",
+                broker=broker,
+            )
+        }
+    )
+
+    result = await call_external_tool(
+        _ctx(
+            registry,
+            accounts=(SLACK_ACCOUNT,),
+            provider=connector_tools.SLACK_PROVIDER,
+        ),
+        CallExternalToolInput(
+            tool_name=SLACK_SEND_SLUG,
+            source_id=connector_tools.SLACK_PROVIDER,
+            arguments=arguments,
+        ),
+    )
+
+    assert _payload(result)["arguments"] == arguments
+
+
 def test_a_text_body_past_one_text_object_is_chunked_rather_than_refused() -> None:
     """A `text` body carries far more than one mrkdwn text object holds, and an object past that cap
     is a send Slack refuses as `invalid_blocks` — so the body is split across section blocks of its
@@ -338,7 +464,10 @@ def test_a_text_body_past_one_text_object_is_chunked_rather_than_refused() -> No
     limit = connector_tools.SLACK_SECTION_TEXT_LIMIT
     body = "x" * (2 * limit + 1)
     attributed = connector_tools.slack_attributed(
-        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", "text": body}
+        connector_tools.SLACK_PROVIDER,
+        SLACK_SEND_SLUG,
+        {"channel": "C1", "text": body},
+        destination_internal=True,
     )
     blocks = attributed["blocks"]
     assert isinstance(blocks, list)
@@ -370,7 +499,10 @@ def test_a_body_is_never_retyped_into_the_other_markup_language() -> None:
         ({"markdown_text": markdown_body}, {"type": "markdown", "text": markdown_body}),
     ):
         attributed = connector_tools.slack_attributed(
-            connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", **body}
+            connector_tools.SLACK_PROVIDER,
+            SLACK_SEND_SLUG,
+            {"channel": "C1", **body},
+            destination_internal=True,
         )
         assert attributed["blocks"] == [
             block,
@@ -385,7 +517,10 @@ def test_a_markdown_body_past_the_payloads_markdown_cap_stays_one_block() -> Non
     like. It goes out whole, footered like any other."""
     body = "x" * (connector_tools.SLACK_MARKDOWN_TEXT_LIMIT + 1)
     attributed = connector_tools.slack_attributed(
-        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"channel": "C1", "markdown_text": body}
+        connector_tools.SLACK_PROVIDER,
+        SLACK_SEND_SLUG,
+        {"channel": "C1", "markdown_text": body},
+        destination_internal=True,
     )
     assert attributed == {
         "channel": "C1",
@@ -394,6 +529,57 @@ def test_a_markdown_body_past_the_payloads_markdown_cap_stays_one_block() -> Non
             {"type": "context", "elements": [{"type": "mrkdwn", "text": "*Sent using* ufo"}]},
         ],
     }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"channel": "C1", "text": "the plan is posted"},
+        {"channel": "C1", "markdown_text": "the *plan* is posted"},
+        {"channel": "C1", "blocks": list(SLACK_BODY_BLOCKS)},
+    ],
+    ids=["text", "markdown_text", "blocks"],
+)
+def test_a_destination_not_proved_internal_is_published_unmarked(arguments: dict) -> None:
+    """The audience guard, in every body shape a send authors. A Slack Connect or org-shared channel
+    is external and an unreadable one is unproven, and neither is told what wrote the message — so
+    the send goes out exactly as the model wrote it, the way the Slack surface withholds its own
+    accounting footer off the same channels. Proof is the only thing that adds a footer, so a
+    provider with no prover of its own — Microsoft Teams, reached through the same tool — publishes
+    unmarked too."""
+    assert (
+        connector_tools.slack_attributed(
+            connector_tools.SLACK_PROVIDER,
+            SLACK_SEND_SLUG,
+            arguments,
+            destination_internal=False,
+        )
+        == arguments
+    )
+    assert (
+        connector_tools.slack_attributed(
+            TEAMS_PROVIDER, TEAMS_SEND_SLUG, arguments, destination_internal=True
+        )
+        == arguments
+    )
+
+
+def test_the_model_cannot_choose_the_attribution_identity() -> None:
+    """The optional bot identity belongs to the Slack hook, never the model."""
+    wire = {
+        "tool_name": SLACK_SEND_SLUG,
+        "source_id": connector_tools.SLACK_PROVIDER,
+        "arguments": {"channel": "C1", "text": "the plan is posted"},
+    }
+    schema = CallExternalToolInput.model_json_schema()["properties"]
+    assert "attribution_bot_user_id" not in schema
+    assert CallExternalToolInput.model_validate(wire).attribution_bot_user_id is None
+    claimed = CallExternalToolInput.model_validate({**wire, "attribution_bot_user_id": "U0MODEL"})
+    assert claimed.attribution_bot_user_id is None
+    assert (
+        claimed.model_copy(update={"attribution_bot_user_id": "U0HOOK"}).attribution_bot_user_id
+        == "U0HOOK"
+    )
 
 
 @pytest.mark.parametrize(
@@ -408,7 +594,9 @@ def test_a_call_carrying_no_body_is_never_given_one(slug: str, arguments: dict) 
     """Both slugs pass the substring gate — "scheduled" carries "schedule" — and neither publishes a
     message. An argument is only ever rewritten, so a call that names no body comes back identical
     and no `blocks` is introduced into one that had none."""
-    attributed = connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, slug, arguments)
+    attributed = connector_tools.slack_attributed(
+        connector_tools.SLACK_PROVIDER, slug, arguments, destination_internal=True
+    )
     assert attributed == arguments
     assert "blocks" not in attributed
 
@@ -429,11 +617,13 @@ def test_slack_attributed_never_stacks_the_footer_in_any_body_shape(arguments: d
     pass finds the footer the first wrote — as a line, as a directive, or as a context element — and
     adds nothing."""
     once = connector_tools.slack_attributed(
-        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, arguments
+        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, arguments, destination_internal=True
     )
     assert once != arguments
     assert (
-        connector_tools.slack_attributed(connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, once)
+        connector_tools.slack_attributed(
+            connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, once, destination_internal=True
+        )
         == once
     )
 
@@ -451,11 +641,17 @@ def test_the_never_stack_guard_reads_a_whole_line_and_never_a_prefix() -> None:
     ):
         footered = f"the plan is posted\n\n{footer}"
         assert connector_tools.slack_attributed(
-            connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": footered}
+            connector_tools.SLACK_PROVIDER,
+            SLACK_SEND_SLUG,
+            {"text": footered},
+            destination_internal=True,
         ) == {"text": footered}
     for body in ("Sent using an iPhone", "Sent using ufo to draft this", "a Sent using ufo joke"):
         attributed = connector_tools.slack_attributed(
-            connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": body}
+            connector_tools.SLACK_PROVIDER,
+            SLACK_SEND_SLUG,
+            {"text": body},
+            destination_internal=True,
         )
         assert attributed["blocks"] == [
             {"type": "section", "text": {"type": "mrkdwn", "text": body}},
@@ -481,7 +677,10 @@ def test_the_inbound_strip_reaches_a_footer_the_outbound_guard_will_not_read() -
     ends_the_way = "we posted it. Sent using an iPhone"
     assert connector_tools.attribution_stripped(ends_the_way) == ends_the_way
     assert "blocks" in connector_tools.slack_attributed(
-        connector_tools.SLACK_PROVIDER, SLACK_SEND_SLUG, {"text": ends_the_way}
+        connector_tools.SLACK_PROVIDER,
+        SLACK_SEND_SLUG,
+        {"text": ends_the_way},
+        destination_internal=True,
     )
 
 
