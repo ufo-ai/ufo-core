@@ -26,6 +26,11 @@ DEFAULT_CONTEXT_STRATEGY = "compact"
 window and install the summary. A name, not an import — the strategy behind it ships as the
 `context_compact` extension, and this default resolves through the manifests like any
 other."""
+DEFAULT_FLAGGED_CONTEXT_STRATEGY = "rollover"
+"""The context boundary a workspace runs where `ufo.runtime.context_boundary.CONTEXT_ROLLOVER_FLAG`
+reads on: reset the window at the line and keep the outgoing one in the sandbox history file. A name
+like the one above, so the flag selects between two names a toml holds rather than between two
+imports."""
 
 
 class DatabaseConfig(BaseModel):
@@ -382,12 +387,18 @@ class ContextConfig(BaseModel):
     model authored and keep the outgoing window in the sandbox history file) and
     `context_compact` registers `compact` (spend one model call over the head and
     install the verified summary in front of a verbatim tail). Both ship in the wheel, so the
-    default below resolves on a stock deploy. Exactly one runs: the name selects the boundary every
-    window of the deploy crosses, and a name no active extension registers fails loud at boot rather
-    than falling back."""
+    default below resolves on a stock deploy. Exactly one runs over one window: the name selects the
+    boundary the turn crosses, and a name no active extension registers fails loud rather than
+    falling back.
+
+    `flagged_strategy` is the other name — the one a workspace runs where
+    `ufo.runtime.context_boundary.CONTEXT_ROLLOVER_FLAG` reads on. That flag reads closed, so
+    `strategy` is what every workspace crosses until somebody turns the flag on for one, which is
+    how one build runs compaction in production and rollover in testing."""
 
     model_config = ConfigDict(extra="forbid")
     strategy: str = DEFAULT_CONTEXT_STRATEGY
+    flagged_strategy: str = DEFAULT_FLAGGED_CONTEXT_STRATEGY
 
 
 class FlagsConfig(BaseModel):

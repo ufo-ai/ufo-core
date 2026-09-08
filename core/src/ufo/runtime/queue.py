@@ -68,7 +68,7 @@ from ufo.runtime.authority import (
 from ufo.runtime.context_boundary import (
     BoundaryInputs,
     context_boundary_tools,
-    select_context_boundary,
+    flagged_context_boundary,
 )
 from ufo.runtime.engine import (
     ADOPTED_CLAIM,
@@ -650,7 +650,11 @@ class AssembleRequest:
     """The facts one turn hands the host to compose its environment from: the turn row and its
     resolved agent or profile, the billing-resolved model, the deploy's skill registry and grants,
     and the digest of the environment document the turn pins — gate-checked here, loaded and
-    applied by the host, which owns what a document means."""
+    applied by the host, which owns what a document means.
+
+    `context_window` is the `{{context_window}}` prompt block of the boundary spec this turn's flag
+    read selected, so the words the prompt carries describe the boundary this turn actually
+    crosses."""
 
     turn: Turn
     agent: Agent
@@ -664,6 +668,7 @@ class AssembleRequest:
     subagent_grants: dict[str, frozenset[str]]
     member_block: bool
     environment: str | None
+    context_window: str
 
 
 @dataclass(frozen=True)
@@ -1095,6 +1100,7 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 )
             ),
         )
+        boundary = await flagged_context_boundary(runtime.config, runtime.manifests)
         with span("environment.assemble"):
             assembled = await runtime.environment.assemble(
                 AssembleRequest(
@@ -1110,10 +1116,10 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                     subagent_grants=runtime.subagent_grants,
                     member_block=runtime.config.skills.member_block,
                     environment=environment,
+                    context_window=boundary.prompt,
                 )
             )
         system_prompt = assembled.system_prompt
-        boundary = select_context_boundary(runtime.config, runtime.manifests)
         offers_tool = context_boundary_tools(boundary, runtime.manifests)
         tools = ToolRegistry(
             tuple(tool for tool in assembled.tools.tools if offers_tool(tool.name))

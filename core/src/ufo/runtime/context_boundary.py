@@ -13,8 +13,16 @@ file) and `context_compact` registers `compact` (spend one model call over the h
 install the verified summary in front of a verbatim tail). Both ship in the wheel, so the config
 default resolves without core naming either implementation.
 
-The strategies are mutually exclusive: `strategy` names one, so a deploy cannot run both over one
-window, and selection fails loud on a name nothing registers or a name two providers claim.
+Which of the two a workspace crosses is a feature flag, `enable-context-rollover`, read once per
+turn: off — the state a deploy with no flag service, an unseeded key, or an outage lands on — the
+turn crosses `[context] strategy`, and on it crosses `[context] flagged_strategy`. Production serves
+the flag off and crosses compaction; testing serves it on and crosses rollover; one build, no
+per-environment toml. The flag decides the turn's tools and its `{{context_window}}` prompt block
+too, because both ride the spec it selects.
+
+The strategies are mutually exclusive: one name is selected per turn, so a turn cannot run both
+over one window, and selection fails loud on a name nothing registers or a name two providers
+claim.
 
 Whatever the strategy, the contract at the boundary is the same, and it is what makes a boundary
 durable: the replacement is written by one memoized DBOS step, so a crash-recovery replay re-reads
@@ -29,6 +37,7 @@ from uuid import UUID
 
 from ufo.blob import WorkspaceBlobStore
 from ufo.config import Config
+from ufo.flags import flag_enabled
 from ufo.harness.context import ContextRemaining
 from ufo.harness.models.interface import Message
 from ufo.harness.models.registry import ServingModel
@@ -37,6 +46,11 @@ from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import ContextBoundarySpec, Manifest, NotRegisteredError
 from ufo.runtime.skills.runtime import LoadedSkills
 from ufo.schema.records import Agent, Turn, Usage
+
+CONTEXT_ROLLOVER_FLAG = "enable-context-rollover"
+"""The flag that selects `[context] flagged_strategy` over `[context] strategy` for a workspace. It
+selects between two mechanisms the fleet already serves one of, so it reads closed: a stack with no
+flag service crosses the toml's own strategy."""
 
 
 @dataclass(frozen=True)
@@ -110,15 +124,41 @@ def boundary_specs(manifests: tuple[Manifest, ...]) -> dict[str, ContextBoundary
 def select_context_boundary(
     config: Config, manifests: tuple[Manifest, ...] = ()
 ) -> ContextBoundarySpec:
-    """The one strategy this deploy runs, named by `[context] strategy`. Resolved rather than
-    remembered, so boot and every turn read the same answer off the same config. A name no provider
-    registers fails loud: a deploy that meant to run compaction must not fall back to rollover
-    and lose a model call's worth of behavior without saying so."""
+    """The strategy this deploy runs with the flag off, named by `[context] strategy`. Resolved
+    rather than remembered, so boot and every turn read the same answer off the same config. A name
+    no provider registers fails loud: a deploy that meant to run compaction must not fall back to
+    rollover and lose a model call's worth of behavior without saying so."""
+    return _boundary_named(config.context.strategy, manifests)
+
+
+def select_flagged_context_boundary(
+    config: Config, manifests: tuple[Manifest, ...] = ()
+) -> ContextBoundarySpec:
+    """The strategy a workspace runs with the flag on, named by `[context] flagged_strategy`. Boot
+    resolves it beside the other name, because a flag flip is what selects it and no deploy follows
+    that flip."""
+    return _boundary_named(config.context.flagged_strategy, manifests)
+
+
+async def flagged_context_boundary(
+    config: Config, manifests: tuple[Manifest, ...] = ()
+) -> ContextBoundarySpec:
+    """The strategy this turn's workspace crosses: `[context] flagged_strategy` where
+    `CONTEXT_ROLLOVER_FLAG` reads on for that workspace, and `[context] strategy` where it reads off
+    or nothing answers. The read is per turn, so a workspace moves between the two mechanisms on a
+    flag flip with no deploy — and the flag failing closed leaves every workspace on the strategy
+    the toml names."""
+    if await flag_enabled(CONTEXT_ROLLOVER_FLAG, default=False):
+        return select_flagged_context_boundary(config, manifests)
+    return select_context_boundary(config, manifests)
+
+
+def _boundary_named(strategy: str, manifests: tuple[Manifest, ...]) -> ContextBoundarySpec:
     specs = boundary_specs(manifests)
-    found = specs.get(config.context.strategy)
+    found = specs.get(strategy)
     if found is None:
         raise NotRegisteredError(
-            f"config selects context strategy {config.context.strategy!r} but no provider "
+            f"config selects context strategy {strategy!r} but no provider "
             f"registers it (have {sorted(specs)})"
         )
     return found

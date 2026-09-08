@@ -240,12 +240,18 @@ state commits on the failure path too.
   one extension point over it: what a turn does when its window crosses its line. Core owns the
   seam (`runtime/context_boundary.py`) and registers no strategy. Every strategy ships as an
   extension declaring a `ContextBoundarySpec(strategy, build, tools, prompt)` at the Manifest
-  `context_boundaries` point, and `[context] strategy` in the config toml names the one this deploy
-  runs. Exactly one is active: a deploy never runs both over one window, selection resolves through
-  the merged manifests at boot (before the readiness contracts) and fails loud — `NotRegisteredError`
-  on a name nothing registers, `RuntimeError` on a name two providers claim — and never falls back
-  to the default. The spec also owns its tools and its `{{context_window}}` prompt block, so a turn
-  offers only the selected strategy's tools and the shell prompts describe only that behaviour.
+  `context_boundaries` point, and the config toml names two of them: `[context] strategy`, the one a
+  workspace crosses with the `enable-context-rollover` flag off, and `[context] flagged_strategy`
+  (default `rollover`), the one it crosses with that flag on. The flag is read once per turn and
+  reads closed, so a deploy with no flag service, an unseeded key, or an outage crosses
+  `strategy` — which is how one build runs compaction in production and rollover in testing, off a
+  flag flip rather than a per-environment toml. Exactly one is active over one window: a turn never
+  runs both, both names resolve through the merged manifests at boot (before the readiness
+  contracts) and selection fails loud — `NotRegisteredError` on a name nothing registers,
+  `RuntimeError` on a name two providers claim — and never falls back to the default. The spec also
+  owns its tools and its `{{context_window}}` prompt block, so a turn offers only the selected
+  strategy's tools and its prompt describes only that behaviour — the block rides the turn's
+  assembly request, not the deploy's.
   Whatever the strategy, the replacement is written by one memoized DBOS step reading the recorded
   window and the last persisted record — never process memory — so a crash-recovery replay decides
   the boundary exactly as the first run did. Two extensions ship in the wheel, so the default

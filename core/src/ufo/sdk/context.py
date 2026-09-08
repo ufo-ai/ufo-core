@@ -24,6 +24,9 @@ from ufo.runtime.agent_scope import (
     agent_current as agent_current,
 )
 from ufo.runtime.context_boundary import (
+    CONTEXT_ROLLOVER_FLAG as CONTEXT_ROLLOVER_FLAG,
+)
+from ufo.runtime.context_boundary import (
     BoundaryInputs as BoundaryInputs,
 )
 from ufo.runtime.context_boundary import (

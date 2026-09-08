@@ -185,6 +185,16 @@ def test_activating_the_assistant_hosted_pack_makes_exactly_its_bundle_active() 
     assert parsed == set(assistant_hosted.SKILL_NAMES)
 
 
+def test_the_hosted_pack_registers_both_context_strategies() -> None:
+    """`enable-context-rollover` selects between the two names in `[context]` per turn, so the pack
+    serving the flagged fleet must bring up both strategies. A bundle carrying only compaction fails
+    the flagged name at boot the moment somebody turns the flag on for one workspace."""
+    manifests = load_manifests(assistant_hosted.NAME)
+    strategies = {spec.strategy for manifest in manifests for spec in manifest.context_boundaries}
+    assert {"compact", "rollover"} <= strategies
+    assert {"context_compact", "context_rollover"} <= set(assistant_hosted.EXTENSIONS)
+
+
 def test_the_hosted_pack_manifest_carries_its_customers_section() -> None:
     manifests = load_manifests(assistant_hosted.NAME)
     own = manifests[-1]

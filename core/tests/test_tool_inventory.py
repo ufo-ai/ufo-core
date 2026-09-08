@@ -15,6 +15,8 @@ RETAINED_GLOBAL_TOOLS = frozenset(
         "object_delete",
         "object_action",
         "get_context_remaining",
+        "new_context",
+        "search_history",
         "bash",
         "read",
         "write",
@@ -104,7 +106,8 @@ def test_every_candidate_registers_as_an_action_and_never_as_a_global_tool() -> 
 def test_the_window_tools_reach_every_subagent() -> None:
     """The `<context_window>` section rides the subagent shell prompt too, so the tools it names
     must ride into every child as subagent defaults rather than as per-profile grants. This pack
-    bundles the compaction boundary, whose one window tool is `get_context_remaining`."""
+    bundles both boundaries, so every window tool either one offers rides in: `compact` names
+    `get_context_remaining` alone, and `rollover` adds the reset and the history search."""
     tools, _, _ = _registry(HOSTED_PACK)
     defaults = {tool.name for tool in tools if tool.subagent_default}
-    assert {"get_context_remaining"} <= defaults
+    assert {"get_context_remaining", "new_context", "search_history"} <= defaults

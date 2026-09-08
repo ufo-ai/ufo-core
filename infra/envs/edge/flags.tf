@@ -9,7 +9,10 @@
 # so a key the portal reads and this file omits fails CI rather than reading its default forever in
 # a live deploy. Testing creates a flag over one of the portal's own screens on, because that is
 # where a screen is seen first; production creates each one off, so nothing reaches a member there
-# before somebody turns it on. A flag over a shipped app is created off in both, because it is what
+# before somebody turns it on. A flag that selects between two mechanisms rather than offering a
+# screen is created at the mechanism its environment runs: `enable-context-rollover` on in testing,
+# which crosses its context boundary by rollover, and off in production, which crosses it by
+# compaction. A flag over a shipped app is created off in both, because it is what
 # offers that app rather than what withholds it — the apps a member is offered today are the ones
 # somebody turned on, and every other one is drawn in no list while the workspace still holds it and
 # its standing work keeps running.
@@ -37,6 +40,7 @@ locals {
       "enable-assistant-app"    = true
       "enable-code-app"         = false
       "enable-community-skills" = true
+      "enable-context-rollover" = true
       "enable-installed-skills" = true
       "enable-issues-app"       = false
       "enable-lanes-shell"      = false
@@ -52,6 +56,7 @@ locals {
       "enable-assistant-app"    = false
       "enable-code-app"         = false
       "enable-community-skills" = false
+      "enable-context-rollover" = false
       "enable-installed-skills" = false
       "enable-issues-app"       = false
       "enable-lanes-shell"      = false

@@ -1,11 +1,12 @@
-"""Selecting the one context boundary a deploy runs.
+"""Selecting the one context boundary a turn crosses.
 
-The strategy is config, not code: `[context] strategy` names it, every strategy is registered by an
+The strategy is config, not code: `[context] strategy` and `[context] flagged_strategy` name the
+two, `enable-context-rollover` picks between them per turn, every strategy is registered by an
 extension at the Manifest `context_boundaries` point, and the selection fails loud rather than
-falling back. These pin the selection itself over registered manifests — which spec is chosen, which
-tools the turn then offers, and every way the name can be wrong. Core registers no strategy, so a
-selection over no manifest at all resolves nothing; the strategies each prove their own boundary in
-their own extension's tests.
+falling back. These pin the selection itself over registered manifests — which spec is chosen, what
+the flag decides, which tools the turn then offers, and every way a name can be wrong. Core
+registers no strategy, so a selection over no manifest at all resolves nothing; the strategies each
+prove their own boundary in their own extension's tests.
 """
 
 from collections.abc import AsyncIterator
@@ -13,21 +14,32 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from pydantic import ValidationError
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
-from ufo.config import DEFAULT_CONTEXT_STRATEGY, Config, load_config
+from ufo.config import (
+    DEFAULT_CONTEXT_STRATEGY,
+    DEFAULT_FLAGGED_CONTEXT_STRATEGY,
+    Config,
+    load_config,
+)
+from ufo.flags import SERVED_FALSE, SERVED_TRUE, init_flags
 from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
 from ufo.host.ext.loader import HookChain
 from ufo.runtime.context_boundary import (
+    CONTEXT_ROLLOVER_FLAG,
     BoundaryInputs,
     ContextBoundary,
     boundary_specs,
     context_boundary_tools,
+    flagged_context_boundary,
     select_context_boundary,
+    select_flagged_context_boundary,
 )
 from ufo.runtime.ext.manifest import ContextBoundarySpec, Manifest, NotRegisteredError
+from ufo.runtime.workspace import ws
 
 CONFIG_BODY = """
 [database]
@@ -63,12 +75,16 @@ def _inputs(tmp_path: Path) -> BoundaryInputs:
     )
 
 
-def _config(strategy: str | None = None) -> Config:
+def _config(strategy: str | None = None, flagged: str | None = None) -> Config:
+    context = {
+        **({} if strategy is None else {"strategy": strategy}),
+        **({} if flagged is None else {"flagged_strategy": flagged}),
+    }
     return Config.model_validate(
         {
             "database": {"url": "sqlite+aiosqlite:///ufo.db"},
             "blob": {"backend": "filesystem", "root": "./blobs"},
-            **({} if strategy is None else {"context": {"strategy": strategy}}),
+            **({} if not context else {"context": context}),
         }
     )
 
@@ -80,7 +96,14 @@ def _extension(strategy: str, tools: tuple[str, ...] = (), name: str | None = No
     return Manifest(
         name=name or f"ext_{strategy}",
         version="1",
-        context_boundaries=(ContextBoundarySpec(strategy=strategy, build=build, tools=tools),),
+        context_boundaries=(
+            ContextBoundarySpec(
+                strategy=strategy,
+                build=build,
+                tools=tools,
+                prompt=f"<context_window>{strategy}</context_window>",
+            ),
+        ),
     )
 
 
@@ -153,3 +176,63 @@ def test_a_turn_offers_only_the_selected_strategys_tools() -> None:
     assert [name for name in claimed if rollover(name)] == list(claimed)
     assert [name for name in claimed if compact(name)] == ["get_context_remaining"]
     assert rollover("bash") and compact("bash")
+
+
+def _flag_serving(value: str) -> InMemoryProvider:
+    return InMemoryProvider(
+        {CONTEXT_ROLLOVER_FLAG: InMemoryFlag(default_variant="set", variants={"set": value})}
+    )
+
+
+def test_the_flagged_name_defaults_to_rollover() -> None:
+    spec = select_flagged_context_boundary(_config(), INSTALLED)
+    assert spec.strategy == DEFAULT_FLAGGED_CONTEXT_STRATEGY
+    assert spec.strategy != DEFAULT_CONTEXT_STRATEGY
+
+
+async def test_the_flag_selects_which_of_the_two_names_a_turn_crosses() -> None:
+    """One build, two mechanisms: production serves the flag off and crosses compaction, testing
+    serves it on and crosses rollover. The tools and the prompt block ride the spec the flag
+    selected, so a turn never crosses one boundary while offering the other's tools."""
+    try:
+        init_flags(_flag_serving(SERVED_TRUE))
+        with ws(uuid4()):
+            on = await flagged_context_boundary(_config(), INSTALLED)
+        init_flags(_flag_serving(SERVED_FALSE))
+        with ws(uuid4()):
+            off = await flagged_context_boundary(_config(), INSTALLED)
+    finally:
+        init_flags(InMemoryProvider({}))
+
+    assert on.strategy == ROLLOVER_STRATEGY
+    assert off.strategy == COMPACT_STRATEGY
+    assert on.prompt != off.prompt
+    offered = context_boundary_tools(on, INSTALLED)
+    assert offered("new_context") and offered("search_history")
+    assert not context_boundary_tools(off, INSTALLED)("new_context")
+
+
+async def test_a_flag_nothing_answers_crosses_the_strategy_the_toml_names() -> None:
+    """The closed state, which is what a deploy with no flag service, an unseeded key, or an outage
+    runs on: the mechanism moves only where the service says so."""
+    try:
+        init_flags(InMemoryProvider({}))
+        with ws(uuid4()):
+            unanswered = await flagged_context_boundary(_config(), INSTALLED)
+    finally:
+        init_flags(InMemoryProvider({}))
+
+    assert unanswered.strategy == DEFAULT_CONTEXT_STRATEGY
+
+
+async def test_a_flagged_name_no_provider_registers_fails_loud() -> None:
+    """A flag flip is what selects this name and no deploy follows the flip, so boot resolves it
+    beside the other one rather than leaving the first filled window to find it missing."""
+    with pytest.raises(NotRegisteredError, match="forgetting"):
+        select_flagged_context_boundary(_config(flagged="forgetting"), INSTALLED)
+    try:
+        init_flags(_flag_serving(SERVED_TRUE))
+        with ws(uuid4()), pytest.raises(NotRegisteredError, match="forgetting"):
+            await flagged_context_boundary(_config(flagged="forgetting"), INSTALLED)
+    finally:
+        init_flags(InMemoryProvider({}))
