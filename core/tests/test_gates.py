@@ -67,6 +67,25 @@ def _check_log_field_gate_rejects_the_reserved_status_field() -> None:
     assert gates._log_field_failures({CORE_FILE: ast.parse('log("x", http_status=200)\n')}) == []
 
 
+def _check_antijoin_gate_rejects_not_in_over_a_select_in_a_migration() -> None:
+    migration = Path("core/src/ufo/schema/migrations/versions/20260909000000_x.py")
+    slow = ast.parse(
+        "connection.execute(sa.delete(mem_page).where("
+        "mem_page.c.page_id.not_in(sa.select(page.c.id))))\n"
+    )
+    failures = gates._migration_antijoin_failures({migration: slow})
+    assert len(failures) == 1
+    assert "anti-join" in failures[0]
+    fast = ast.parse(
+        "connection.execute(sa.delete(mem_page).where("
+        "~sa.exists(sa.select(sa.literal(1)).where(page.c.id == mem_page.c.page_id))))\n"
+    )
+    assert gates._migration_antijoin_failures({migration: fast}) == []
+    # A value list is not a subquery, and outside a migration the planner is the caller's problem.
+    assert gates._migration_antijoin_failures({migration: ast.parse("x.not_in([1, 2])\n")}) == []
+    assert gates._migration_antijoin_failures({CORE_FILE: slow}) == []
+
+
 def _check_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
     trees = {ROGUE: ast.parse("from ufo.db import workspace_tx\n")}
     failures = gates._sdk_import_failures(trees)
@@ -1137,6 +1156,7 @@ def test_repository_gates() -> None:
     for check in (
         _check_the_gate_walk_skips_vendored_dependency_trees,
         _check_log_field_gate_rejects_the_reserved_status_field,
+        _check_antijoin_gate_rejects_not_in_over_a_select_in_a_migration,
         _check_sdk_only_gate_rejects_core_internal_import_from_extensions,
         _check_sdk_only_gate_rejects_bare_ufo_import_from_extensions,
         _check_sdk_only_gate_allows_sdk_import_from_extensions,

@@ -1688,6 +1688,35 @@ def _stamped_or_grandfathered(revision: str) -> bool:
     )
 
 
+def _migration_antijoin_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """`col.not_in(select(...))` inside a migration. Postgres converts no `NOT IN (subquery)` into
+    an anti-join — the planner limitation holds even where both sides are NOT NULL — so it
+    materializes the subquery and rescans it per row. `memory_0017` spelled the same set that way
+    and cost 7.2 billion against 456k rows against 489k, ran 51 minutes without finishing, and took
+    two production deploys down with it on 2026-09-08. `~sa.exists(...)` is a hash anti-join."""
+    failures = []
+    for rel, tree in trees.items():
+        if MIGRATION_DIR_PART not in rel.parts:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "not_in" or not node.args:
+                continue
+            argument = node.args[0]
+            selects = isinstance(argument, ast.Call) and (
+                getattr(argument.func, "attr", None) == "select"
+                or getattr(argument.func, "id", None) == "select"
+            )
+            if selects:
+                failures.append(
+                    f"{rel}:{node.lineno}: `not_in(select(...))` in a migration — Postgres "
+                    f"reads it as a subplan rescanned per row, never an anti-join. Write "
+                    f"`~sa.exists(sa.select(...).where(...))`"
+                )
+    return failures
+
+
 def _migration_failures(trees: dict[Path, ast.Module]) -> list[str]:
     """The migration seam's single-head discipline, generalized across owners so it composes with
     optional table-owning extensions. Each owner (core, each extension) has one base and one head,
@@ -2612,6 +2641,7 @@ def main() -> int:
     }
     failures.extend(_skill_boundary_failures(skill_trees))
     failures.extend(_migration_failures(trees))
+    failures.extend(_migration_antijoin_failures(trees))
     failures.extend(_registered_naming_failures())
     failures.extend(_portal_style_failures())
     failures.extend(_composition_rhythm_failures())

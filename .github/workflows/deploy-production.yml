@@ -356,6 +356,20 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -input=false "$RUNNER_TEMP/production.tfplan"
 
+      # The apply's own error names the resource and a deadline, never why the Job stopped. On
+      # 2026-09-08 the cause — a deadlock, then a query that could not finish — was only in Datadog.
+      - name: Migrate diagnostics
+        if: failure()
+        run: |
+          NAMESPACE="$(terraform -chdir="${{ env.TF_DIR }}" output -raw system_namespace)" || exit 0
+          JOB="ufo-migrate-$IMAGE_TAG"
+          kubectl --namespace "$NAMESPACE" describe job "$JOB" || true
+          for container in migrate control-schema rls-bootstrap; do
+            echo "::group::$JOB/$container"
+            kubectl --namespace "$NAMESPACE" logs "job/$JOB" -c "$container" --tail=300 || true
+            echo "::endgroup::"
+          done
+
       - name: Wait for runtime rollout
         run: |
           aws eks update-kubeconfig \
