@@ -73,13 +73,14 @@ resource "datadog_on_call_escalation_policy" "ufo" {
   retries = 1
   teams   = [datadog_team.ufo.id]
 
+  # The API returns the current position as a plain schedule target carrying no position at all, and
+  # only "next" as its own object, so sending "current" back fails the apply on an inconsistent result.
   step {
     assignment             = "default"
     escalate_after_seconds = 300
 
     target {
       schedule = datadog_on_call_schedule.ufo.id
-      position = "current"
     }
   }
 
