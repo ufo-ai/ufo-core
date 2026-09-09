@@ -125,6 +125,7 @@ resource "datadog_monitor" "db_tx_unavailable" {
   }
 
   require_full_window = false
+  timeout_h           = 1
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }
@@ -144,6 +145,7 @@ resource "datadog_monitor" "db_pool_exhausted" {
   }
 
   require_full_window = false
+  timeout_h           = 1
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }
@@ -185,7 +187,7 @@ resource "datadog_monitor" "source_stream_refused_everywhere" {
   }
 
   require_full_window = false
-  notify_no_data      = false
+  timeout_h           = 1
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }
@@ -205,7 +207,7 @@ resource "datadog_monitor" "page_change_parked" {
   }
 
   require_full_window = false
-  notify_no_data      = false
+  timeout_h           = 1
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }
@@ -225,6 +227,7 @@ resource "datadog_monitor" "page_change_stalled" {
   }
 
   require_full_window = false
+  timeout_h           = 1
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }
@@ -244,6 +247,7 @@ resource "datadog_monitor" "job_failed" {
   }
 
   require_full_window = false
+  timeout_h           = 1
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }
@@ -261,6 +265,7 @@ resource "datadog_monitor" "surface_listener_parked" {
   }
 
   require_full_window = false
+  timeout_h           = 1
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }
@@ -277,7 +282,7 @@ resource "datadog_monitor" "problem_reported" {
     critical = 0
   }
 
-  notify_no_data     = false
+  on_missing_data    = "resolve"
   enable_logs_sample = true
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
@@ -295,7 +300,7 @@ resource "datadog_monitor" "portal_unhandled_error" {
     critical = 0
   }
 
-  notify_no_data = false
+  on_missing_data = "resolve"
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }

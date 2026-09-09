@@ -4460,15 +4460,28 @@ def _check_the_job_failure_monitor_consumes_the_reported_counter() -> None:
         assert "jobs.failed" in message
 
 
-def _check_a_sparse_counters_alert_can_clear_itself() -> None:
+def _check_failure_only_alerts_resolve_without_data() -> None:
     for environment in DEPLOY_ENVIRONMENTS:
         for monitor in [
             "db_tx_unavailable",
             "db_pool_exhausted",
+            "source_stream_refused_everywhere",
+            "page_change_parked",
+            "page_change_stalled",
             "surface_listener_parked",
             "job_failed",
         ]:
+            block = _terraform_block(MONITORS[environment].read_text(), "resource", monitor)
+            assert _monitor_attribute(monitor, "type", environment) == "query alert"
+            assert _monitor_attribute(monitor, "timeout_h", environment) == "1"
             assert _monitor_attribute(monitor, "require_full_window", environment) == "false"
+            assert not re.search(r"^ +on_missing_data", block, re.MULTILINE)
+
+        assert _monitor_attribute("problem_reported", "type", environment) == "log alert"
+        assert _monitor_attribute("problem_reported", "on_missing_data", environment) == "resolve"
+
+    assert _monitor_attribute("portal_unhandled_error", "type", "prod") == "rum alert"
+    assert _monitor_attribute("portal_unhandled_error", "on_missing_data", "prod") == "resolve"
 
 
 def _check_testing_owns_one_database_and_model_board_for_both_fleets() -> None:
@@ -4904,7 +4917,7 @@ def test_deploy_workflow_sync_contract() -> None:
         _check_the_fleet_submits_the_stream_check_to_the_datadog_its_monitors_read,
         _check_surface_listener_park_monitor_consumes_the_reported_metric,
         _check_the_job_failure_monitor_consumes_the_reported_counter,
-        _check_a_sparse_counters_alert_can_clear_itself,
+        _check_failure_only_alerts_resolve_without_data,
         _check_database_capacity_monitors,
         _check_runtime_fleets_fit_the_database_connection_budget,
         _check_deploy_workflow_static_contract,
