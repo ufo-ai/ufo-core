@@ -4297,6 +4297,66 @@ def _check_on_call_schedule_uses_existing_daily_rotation() -> None:
     assert "days = 1" in schedule.group(1)
 
 
+def test_prod_member_paths_page_only_after_sustained_multi_region_failure() -> None:
+    source = MONITORS["prod"].read_text()
+    synthetic = _terraform_block(source, "resource", "member_paths")
+    attributes = {
+        name: re.search(rf"^  {name} += +(.+)$", synthetic, re.MULTILINE)
+        for name in ("type", "subtype", "status", "locations", "message", "tags")
+    }
+    assert all(attributes.values())
+    assert attributes["type"].group(1) == '"api"'
+    assert attributes["subtype"].group(1) == '"multi"'
+    assert attributes["status"].group(1) == '"live"'
+    assert set(re.findall(r'"(aws:[^"]+)"', attributes["locations"].group(1))) == {
+        "aws:us-east-2",
+        "aws:us-west-2",
+    }
+    assert not re.search(HANDLE, attributes["message"].group(1))
+    assert attributes["tags"].group(1) == '["env:prod", "managed-by:terraform", "team:ufo"]'
+    notification = _terraform_block(NOTIFICATION_RULES["prod"].read_text(), "resource", "prod")
+    assert re.search(
+        r'conditions \{\s*scope += +"priority:p1"\s*recipients += +\[[^]]*"oncall-ufo"',
+        notification,
+    )
+
+    options = re.search(r"  options_list \{\n(.*)\n  \}", synthetic, re.DOTALL)
+    assert options
+    assert re.search(r"^    tick_every += +60$", options.group(1), re.MULTILINE)
+    assert re.search(r"^    min_failure_duration += +300$", options.group(1), re.MULTILINE)
+    assert re.search(r"^    min_location_failed += +2$", options.group(1), re.MULTILINE)
+    assert re.search(r"^    monitor_priority += +1$", options.group(1), re.MULTILINE)
+    assert re.search(
+        r"retry \{\n      count += +2\n      interval += +5000\n    \}", options.group(1)
+    )
+    assert re.search(
+        r"monitor_options \{\n      renotify_interval += +60\n    \}", options.group(1)
+    )
+
+    steps = re.findall(
+        r"^  api_step \{\n(.*?)(?=^  api_step \{|^  options_list \{)",
+        synthetic,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert len(steps) == 2
+    expected = (
+        ("https://ufo.ai/healthz", "200", r'target += +"\\"status\\":\\"ok\\""'),
+        (
+            "https://app.ufo.ai/surface/web",
+            "303",
+            r'property += +"location"\n      target += +"/login"',
+        ),
+    )
+    for step, (url, status, contract) in zip(steps, expected, strict=True):
+        assert re.search(rf'url += +"{re.escape(url)}"', step)
+        assert re.search(r"follow_redirects += +false", step)
+        assert re.search(
+            rf'type += +"statusCode"\n      operator += +"is"\n      target += +"{status}"',
+            step,
+        )
+        assert re.search(contract, step)
+
+
 def _check_the_source_sync_monitor_watches_the_check_the_reporters_submit() -> None:
     """The two numbers are the whole behaviour asked of this monitor: a single failed run is one
     CRITICAL out of the last two statuses and pages nobody, the second consecutive one alerts, and a

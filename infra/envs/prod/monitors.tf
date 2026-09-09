@@ -4,6 +4,79 @@ provider "datadog" {
   api_url = "https://api.us5.datadoghq.com/"
 }
 
+resource "datadog_synthetics_test" "member_paths" {
+  name      = "ufo prod member paths are unavailable"
+  type      = "api"
+  subtype   = "multi"
+  status    = "live"
+  locations = ["aws:us-east-2", "aws:us-west-2"]
+  message   = "{{#is_alert}}The public health or portal path failed from two regions for five minutes. Open the failed synthetic step, then check Cloudflare, ingress, gateway, serve, and the control database in that order.{{/is_alert}}{{#is_recovery}}The public health and portal paths pass from both regions.{{/is_recovery}}"
+  tags      = ["env:prod", "managed-by:terraform", "team:ufo"]
+
+  api_step {
+    name    = "Control database is reachable"
+    subtype = "http"
+
+    request_definition {
+      method           = "GET"
+      url              = "https://ufo.ai/healthz"
+      follow_redirects = false
+    }
+
+    assertion {
+      type     = "statusCode"
+      operator = "is"
+      target   = "200"
+    }
+
+    assertion {
+      type     = "body"
+      operator = "contains"
+      target   = "\"status\":\"ok\""
+    }
+  }
+
+  api_step {
+    name    = "Portal route reaches the runtime"
+    subtype = "http"
+
+    request_definition {
+      method           = "GET"
+      url              = "https://app.ufo.ai/surface/web"
+      follow_redirects = false
+    }
+
+    assertion {
+      type     = "statusCode"
+      operator = "is"
+      target   = "303"
+    }
+
+    assertion {
+      type     = "header"
+      operator = "is"
+      property = "location"
+      target   = "/login"
+    }
+  }
+
+  options_list {
+    tick_every           = 60
+    min_failure_duration = 300
+    min_location_failed  = 2
+    monitor_priority     = 1
+
+    retry {
+      count    = 2
+      interval = 5000
+    }
+
+    monitor_options {
+      renotify_interval = 60
+    }
+  }
+}
+
 resource "datadog_monitor" "telemetry_silent" {
   name    = "ufo prod telemetry is silent"
   type    = "log alert"
