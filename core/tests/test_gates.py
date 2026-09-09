@@ -946,8 +946,11 @@ PACK_CONFIG = '  serve_config = <<-TOML\n    [pack]\n    name = "assistant_hoste
 
 def _declared_keys() -> set[str]:
     from ufo.host.ext.loader import load_manifests
+    from ufo.runtime.context_boundary import CORE_FLAGS
 
-    return {spec.key for manifest in load_manifests("assistant_hosted") for spec in manifest.flags}
+    return {spec.key for spec in CORE_FLAGS} | {
+        spec.key for manifest in load_manifests("assistant_hosted") for spec in manifest.flags
+    }
 
 
 def _flags_tf(*keys: str) -> str:

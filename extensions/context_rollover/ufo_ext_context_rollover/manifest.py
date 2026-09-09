@@ -1,5 +1,4 @@
-"""The rollover strategy's declaration: the `rollover` boundary, its two tools, its prompt, and the
-flag that selects it.
+"""The rollover strategy's declaration: the `rollover` boundary, its two tools, and its prompt.
 
 Core owns the seam and the selection, never a strategy: `[context] strategy` names one of the
 strategies registered at this Manifest point, and this extension is what registers `rollover`. It
@@ -7,16 +6,15 @@ ships in the wheel and is discovered like every other first-party extension, so 
 resolves to this boundary with no core import of it.
 
 `enable-context-rollover` is the flag core reads per turn to cross `[context] flagged_strategy`
-instead of `[context] strategy`, and it is declared here because this extension is what the flag
-turns on. It reads closed: rollover and compaction are two mechanisms the fleet already serves one
-of, so a stack with no flag service crosses the toml's own strategy.
+instead of `[context] strategy`. Core declares it beside that read rather than here: a pack that
+ships one boundary ships no rollover extension, and the flag has to read closed on that pack too.
 
 The build fails loud on a turn with no sandbox: this boundary appends the outgoing window to the
 conversation's history file, and a deploy that selects it must not silently reset the window with
 nowhere to keep what left it."""
 
-from ufo.sdk.context import CONTEXT_ROLLOVER_FLAG, BoundaryInputs, ContextBoundary
-from ufo.sdk.manifest import ContextBoundarySpec, FlagSpec, Manifest
+from ufo.sdk.context import BoundaryInputs, ContextBoundary
+from ufo.sdk.manifest import ContextBoundarySpec, Manifest
 from ufo_ext_context_rollover.prompts import CONTEXT_WINDOW_BLOCK
 from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
 from ufo_ext_context_rollover.tools import (
@@ -53,13 +51,6 @@ def manifest() -> Manifest:
         name=NAME,
         version=VERSION,
         tools=ROLLOVER_TOOLS,
-        flags=(
-            FlagSpec(
-                key=CONTEXT_ROLLOVER_FLAG,
-                what="The turn crosses its context boundary by rollover rather than by compaction.",
-                open=False,
-            ),
-        ),
         context_boundaries=(
             ContextBoundarySpec(
                 strategy=ROLLOVER_STRATEGY,

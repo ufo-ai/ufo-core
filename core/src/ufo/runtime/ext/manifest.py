@@ -345,7 +345,9 @@ class AuthProxySpec:
 
 @dataclass(frozen=True)
 class FlagSpec:
-    """A flag an extension reads, declared by the extension that reads it.
+    """A flag an extension reads, declared by the extension that reads it — or, for a key core
+    reads, by `ufo.runtime.context_boundary.CORE_FLAGS`, since the extension a core read selects is
+    one a pack can leave out.
 
     The declaration is the set each hosted environment's terraform must declare, held to it by a
     gate: a key the code reads and the flag service does not hold evaluates to its call-site default
@@ -366,9 +368,9 @@ class FlagProviderSpec:
     """A feature-flag provider an extension registers, selected by `config.flags.backend`. `backend`
     is the name; `build` constructs the process-wide OpenFeature provider once at boot, only when
     selected, from `config.flags.cache_ttl_seconds` — the window it may answer a flag out of its own
-    response cache — and the flags every active extension declared, keyed by flag key, for a backend
-    that answers from declarations rather than a service. Core ships no backend and reads every flag
-    through `ufo.flags.flag_enabled`, so a deploy swaps providers with a config line.
+    response cache — and the flags core and every active extension declared, keyed by flag key, for
+    a backend that answers from declarations rather than a service. Core ships no backend and reads
+    every flag through `ufo.flags.flag_enabled`, so a deploy swaps providers with a config line.
 
     `build` returns None when the deploy carries no credential for the backend. Flags then resolve
     to the default each call site passes rather than failing the boot: a flag says whether a feature

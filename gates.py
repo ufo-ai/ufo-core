@@ -1893,8 +1893,11 @@ def _declared_flag_failures(terraform: dict[Path, str]) -> list[str]:
 
     The two lists are in different languages, so nothing but this holds them together. The pack is
     read from each environment root's own serve config, and the flags from the edge root, which is
-    where every Cloudflare resource for both environments lives."""
+    where every Cloudflare resource for both environments lives. A pack's declarations are its
+    extensions' plus core's own, because core reads a flag of its own beside the ones extensions
+    read."""
     from ufo.host.ext.loader import load_manifests
+    from ufo.runtime.context_boundary import CORE_FLAGS
 
     packs = {
         path.parent.name: found.group(1)
@@ -1913,6 +1916,7 @@ def _declared_flag_failures(terraform: dict[Path, str]) -> list[str]:
         declared = {spec.key for manifest in load_manifests(pack) for spec in manifest.flags}
         if not declared:
             continue
+        declared |= {spec.key for spec in CORE_FLAGS}
         block = re.search(rf"{environment}\s*=\s*\{{(.*?)\n    \}}", flags_source, re.DOTALL)
         if block is None:
             failures.append(f"flags: no portal_flags map for {environment}")

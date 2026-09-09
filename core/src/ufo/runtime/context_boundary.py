@@ -43,7 +43,12 @@ from ufo.harness.models.interface import Message
 from ufo.harness.models.registry import ServingModel
 from ufo.harness.sandbox.session import Sandbox
 from ufo.runtime.ext.hooks import HookChain
-from ufo.runtime.ext.manifest import ContextBoundarySpec, Manifest, NotRegisteredError
+from ufo.runtime.ext.manifest import (
+    ContextBoundarySpec,
+    FlagSpec,
+    Manifest,
+    NotRegisteredError,
+)
 from ufo.runtime.skills.runtime import LoadedSkills
 from ufo.schema.records import Agent, Turn, Usage
 
@@ -51,6 +56,21 @@ CONTEXT_ROLLOVER_FLAG = "enable-context-rollover"
 """The flag that selects `[context] flagged_strategy` over `[context] strategy` for a workspace. It
 selects between two mechanisms the fleet already serves one of, so it reads closed: a stack with no
 flag service crosses the toml's own strategy."""
+
+CORE_FLAGS: tuple[FlagSpec, ...] = (
+    FlagSpec(
+        key=CONTEXT_ROLLOVER_FLAG,
+        what="The turn crosses its context boundary by rollover rather than by compaction.",
+        open=False,
+    ),
+)
+"""The flags core reads, declared where they are read rather than by an extension.
+
+A backend that answers from declarations instead of a service — the `open` one a dev or eval stack
+selects — reads a key no declaration named as on. The extension that registers the flagged
+strategy is exactly what a pack shipping one boundary leaves out, so a declaration riding that
+extension is absent on the deploy that most needs it, and every turn there selects a strategy no
+provider registers."""
 
 
 @dataclass(frozen=True)

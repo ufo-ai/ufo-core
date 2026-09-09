@@ -2,8 +2,7 @@
 
 Core registers no strategy, so the stock default is only real if it resolves through the installed
 entry points: these load the manifests the wheel ships and select `rollover` off a config that names
-nothing, then check the spec they get is this package's — its boundary, its tools, its prose, and
-the flag that selects it."""
+nothing, then check the spec they get is this package's: its boundary, its tools, and its prose."""
 
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -33,7 +32,6 @@ from ufo.runtime.context_boundary import (
     context_boundary_tools,
     select_context_boundary,
 )
-from ufo.sdk.context import CONTEXT_ROLLOVER_FLAG
 
 
 class _Model:
@@ -102,14 +100,11 @@ def test_the_declared_tools_are_the_ones_the_boundary_offers() -> None:
     assert offers(SEARCH_HISTORY_TOOL)
 
 
-def test_this_extension_declares_the_flag_that_selects_it() -> None:
-    """The key core reads per turn is declared by the extension the flag turns on, and declared
-    closed: rollover and compaction are two mechanisms the fleet already serves one of, so a stack
-    with no flag service crosses the toml's own strategy rather than this one."""
-    declared = manifest().flags
-    assert [spec.key for spec in declared] == ["enable-context-rollover"]
-    assert declared[0].key == CONTEXT_ROLLOVER_FLAG
-    assert declared[0].open is False
+def test_this_extension_declares_no_flag_of_its_own() -> None:
+    """The key that selects this strategy is core's read, so core declares it. A declaration here
+    would be absent from every pack that ships compaction alone, which is the pack the key has to
+    read closed on."""
+    assert manifest().flags == ()
 
 
 async def test_the_selected_spec_builds_a_rollover_over_the_turns_sandbox(tmp_path: Path) -> None:

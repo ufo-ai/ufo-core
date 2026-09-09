@@ -16,6 +16,7 @@ from uuid import uuid4
 import pytest
 from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from pydantic import ValidationError
+from ufo_ext_flags_open import FLAG_BACKEND as OPEN_FLAG_BACKEND
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
@@ -27,7 +28,7 @@ from ufo.config import (
 )
 from ufo.flags import SERVED_FALSE, SERVED_TRUE, init_flags
 from ufo.harness.models.interface import ModelEvent, ModelRequest, TextDelta
-from ufo.host.ext.loader import HookChain
+from ufo.host.ext.loader import HookChain, load_manifests
 from ufo.runtime.context_boundary import (
     CONTEXT_ROLLOVER_FLAG,
     BoundaryInputs,
@@ -40,6 +41,7 @@ from ufo.runtime.context_boundary import (
 )
 from ufo.runtime.ext.manifest import ContextBoundarySpec, Manifest, NotRegisteredError
 from ufo.runtime.workspace import ws
+from ufo.serve import _select_flag_provider
 
 CONFIG_BODY = """
 [database]
@@ -221,6 +223,30 @@ async def test_a_flag_nothing_answers_crosses_the_strategy_the_toml_names() -> N
         init_flags(InMemoryProvider({}))
 
     assert unanswered.strategy == DEFAULT_CONTEXT_STRATEGY
+
+
+async def test_a_pack_shipping_one_boundary_crosses_it_under_the_open_flag_backend() -> None:
+    """The `open` backend a dev or eval stack selects answers every key it holds no declaration for
+    as on, and the pack that ships compaction alone ships no rollover extension to declare this key.
+    Core declares the key it reads, so such a stack crosses `[context] strategy` instead of failing
+    every turn on a flagged name no provider registers."""
+    manifests = load_manifests("assistant")
+    assert sorted(boundary_specs(manifests)) == [DEFAULT_CONTEXT_STRATEGY]
+    config = Config.model_validate(
+        {
+            "database": {"url": "sqlite+aiosqlite:///ufo.db"},
+            "blob": {"backend": "filesystem", "root": "./blobs"},
+            "flags": {"backend": OPEN_FLAG_BACKEND},
+        }
+    )
+    try:
+        init_flags(_select_flag_provider(config, manifests))
+        with ws(uuid4()):
+            crossed = await flagged_context_boundary(config, manifests)
+    finally:
+        init_flags(InMemoryProvider({}))
+
+    assert crossed.strategy == DEFAULT_CONTEXT_STRATEGY
 
 
 async def test_a_flagged_name_no_provider_registers_fails_loud() -> None:

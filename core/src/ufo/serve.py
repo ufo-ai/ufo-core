@@ -120,6 +120,7 @@ from ufo.runtime.access.egress_rules import (
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from ufo.runtime.billing.balance import billing_screen_url
 from ufo.runtime.context_boundary import (
+    CORE_FLAGS,
     select_context_boundary,
     select_flagged_context_boundary,
 )
@@ -964,7 +965,13 @@ def _select_flag_provider(
             f"config selects flag provider backend {config.flags.backend!r} but no extension "
             "registers it"
         )
-    declared = {spec.key: spec for manifest in manifests for spec in manifest.flags}
+    declared = {
+        spec.key: spec
+        for spec in (
+            *CORE_FLAGS,
+            *(spec for manifest in manifests for spec in manifest.flags),
+        )
+    }
     provider = selected.build(config.flags.cache_ttl_seconds, declared)
     if provider is None:
         warn("flags.backend_unkeyed", backend=config.flags.backend)
