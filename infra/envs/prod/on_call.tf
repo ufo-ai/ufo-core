@@ -83,6 +83,8 @@ resource "datadog_on_call_team_routing_rules" "ufo" {
   }
 }
 
+# A rule recipient is the monitor-message handle with its "@" removed: the notification rule API
+# refuses a recipient that starts with one, so the channel and the on-call team are bare handles.
 resource "datadog_monitor_notification_rule" "prod" {
   name = "UFO production alerts"
 

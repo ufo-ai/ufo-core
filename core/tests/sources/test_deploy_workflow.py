@@ -4254,8 +4254,14 @@ def _check_notification_rules_route_each_environment() -> None:
     for environment in DEPLOY_ENVIRONMENTS:
         rules = NOTIFICATION_RULES[environment].read_text()
         assert re.search(rf'filter\s*{{\s*tags\s*=\s*\["env:{environment}"\]\s*}}', rules)
-        assert re.search(r'recipients\s*=\s*\["(?:slack|oncall)-[\w-]+"', rules)
-        assert not re.search(r'recipients\s*=\s*\["@', rules)
+        handles = [
+            handle
+            for recipients in re.findall(r"recipients\s*=\s*\[([^\]]*)\]", rules)
+            for handle in re.findall(r'"([^"]+)"', recipients)
+        ]
+        assert any(re.fullmatch(r"(?:slack|oncall)-[\w-]+", handle) for handle in handles)
+        for handle in handles:
+            assert not handle.startswith("@"), handle
         monitors = re.findall(
             r'resource "datadog_monitor" "(\w+)"', MONITORS[environment].read_text()
         )
