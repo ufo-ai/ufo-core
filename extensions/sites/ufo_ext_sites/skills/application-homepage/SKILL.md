@@ -8,7 +8,7 @@ metadata:
 # Application homepage
 
 An application's homepage is a kit page: one `app.tsx` beside a fixed `index.html`, drawn first as
-a 360 px wireframe, hosted by `deploy_website` at a permanent link, bound to the agent once by
+a full-width wireframe, hosted by `deploy_website` at a permanent link, bound to the agent once by
 `set_homepage`. The page is a working member surface: what the application does, what it watches,
 its recent work, and what it needs from members — never a status report or a design mock.
 
@@ -23,11 +23,30 @@ that writes `app.tsx` itself is paying Opus rates for a Gemini job and holds non
 ```
 spawn("profile:ufo_application_builder",
       {objective: <the application's own prompt in full, then what the page shows and who reads
-                   it>})                                          -> deployed, site, site_url
+                   it>})                                              -> site, site_url
 ```
 
-One spawn hosts the page. Bind what it hosted (see Bind) and reply with the link. Do not read its
-source, run its script, or repair its page — the deploy audited it.
+One spawn hosts the page. A child that answers `stopped` hosted nothing — say what it says and
+do not bind. Otherwise bind what it hosted, the first time only, and reply with the link:
+
+```
+object_action(kind="agent", name=<app name>, action="set_homepage", input={site=<site>})
+```
+
+Do not read its source, run its script, or repair its page — the child checked it in a browser before it deployed.
+
+**A page the app already hosts changes through you, not through a fresh build.** The child holds
+one object call, the deploy, and cannot look a site up — so you read the deployed source back:
+
+```
+object_list(kind="site", filters={homepage_agent: "mine"})
+object_get(kind="site", name=<site>)                       -> the source it hosts
+```
+
+Put that source in the objective with the member's request, so the child edits the page it already
+has rather than drawing a new one. Then take the deploy in this turn under the same `site_name`:
+`deploy_website` grants a redeploy only to a member speaking, and a worker carries no speaker. The
+link stays.
 
 A wireframe the member approves first is **the create flow's** pass, not this one, and
 create-application drives it. Ask for a drawing here only when the member asked to see the shape
@@ -42,9 +61,16 @@ about the page goes after the prompt, in the objective itself — never staged i
 the child's work and not yours.
 
 **If you are the builder child**, the rest of this skill is yours. Draw, then host the page —
-unless the objective asks you for the wireframe alone, where you stop after Draw and finish
-`designed` with `design_path` set to the SVG you wrote. Answering `designed` to an objective that
-wanted a page leaves the member with nothing.
+unless the objective asks you for the wireframe alone, where you stop after Draw and answer with no
+site. Every ending that hosts nothing says so in `stopped`, and answering `stopped` to an
+objective that wanted a page leaves the member with nothing.
+
+Read `$UFO_HOME/skills/application-homepage/references/designing-a-homepage.md` before you draw.
+It holds what a good homepage is: which region leads, what fits above the fold, which kit
+component carries which kind of information, how acts rank, and how a connector's fields are
+written for a member. Its last section is the one to follow once your first deploy has hosted a page —
+serve the project with `start_server` and look at it in `js_repl`, because `file://` is
+CORS-refused and mounts nothing, and the deploy's link does not answer from in here.
 
 ## Scaffold
 
@@ -72,31 +98,33 @@ approved.
 
 Write `/workspace/ufo-app/application-design.svg`:
 
-- `viewBox="0 0 360 H"`, `width="360"`, `height="H"`, integer `H` from 844 through 4096.
+- `viewBox="0 0 1440 H"`, `width="1440"`, `height="H"`, integer `H` from 900 through 4096.
 - 2 to 6 `<g data-app-region="slug">` groups, none nested inside another, none drawn as a band
-  across y=844. One carries `data-kit-component="ComponentName"` naming a visual `ufo/kit` export.
-- The primary task and every required fact above y=844.
+  across y=900. One carries `data-kit-component="ComponentName"` naming a visual `ufo/kit` export.
+- The primary task and every required fact above y=900.
+- Every band inside x=88..1352. `Page` gutters 88 px each side, so the page has 1264 px to
+  divide and a band drawn wider than that renders off the pane.
 - SVG drawing elements only. No `clip-path`, `mask`, `filter`, script, `foreignObject`, or any
   external reference.
 
 Then measure it:
 
 ```
-node "$UFO_HOME/skills/application-homepage/scripts/audit_application.cjs" --design 360 \
+node "$UFO_HOME/skills/application-homepage/scripts/audit_application.cjs" --design 1440 \
   /workspace/ufo-app/application-design.svg /workspace/ufo-app/design.png
 ```
 
-It writes `design.png` beside the SVG. `read` that file: it is your drawing as a member will see
-it, and reading it is how you look at your own work — you have no other way, and building one
-costs more than the drawing did.
+It writes `design.png` beside the SVG. `read` that file: it is your drawing as a member will
+see it, and looking at it costs a fraction of building the page it describes.
 
 A non-zero exit names the repair — a region, an edge, an overflow in pixels. Fix that exact thing
-and run the script again. Two repairs is normal; if the fifth still fails, the drawing is too
-ambitious for the lane, so cut a region rather than nudging it.
+and run the script again. Two repairs is normal; if the fifth still fails, the drawing is asking
+for more than one screen holds, so cut a region rather than nudging it.
 
-**Stop here only if the objective asked for the wireframe alone**, finishing `designed` with
-`design_path` set to the SVG, never the `design.png` beside it. Otherwise carry straight on to
-the next section.
+**Stop here only if the objective asked for the wireframe alone**, answering `stopped` with
+that reason and no site.
+The drawing is at `/workspace/ufo-app/application-design.svg`, where the parent will look for it.
+Otherwise carry straight on to the next section.
 
 ## Build
 
@@ -112,6 +140,8 @@ Then write `/workspace/ufo-app/app.tsx`:
 
 - Named imports from `ufo/kit` and nothing else. No exports.
 - `mountApp(document.getElementById("root")!, () => <App />)`.
+- `<Page>` wraps everything. It holds the gutters that keep the page off the pane's edges; a page
+  built out of bare `div`s runs edge to edge and reads as a wall of content.
 - One `data-app-region="slug"` container per design region, in the design's order.
 - Space every part with `gap-hair`, `gap-2xs`, `gap-sm`, `gap-2xl`, `gap-6xl`, `gap-8xl` and
   nothing else. The scale skips steps on purpose, so there is no `gap-xs`, `gap-md`, `gap-lg` or
@@ -136,46 +166,17 @@ object_action(kind="site", action="deploy_website",
               input={project_path="/workspace/ufo-app", site_name=<app name>})
 ```
 
-The deploy holds the page to the kit, builds it, and measures the built page in four views. A
-refusal lists the repairs; `edit` the exact text it names and deploy again. Never run `vite build`
-yourself. Finish `deployed` with the result's `site` and `site_url`.
+The deploy builds the page, holds it inside `ufo/kit`, and refuses one that never mounts. Nothing
+in it judges how the page looks — you settle that in the browser, in one pass, and answer with the
+deploy's `site` and `site_url` unless that pass found the page broken.
 
-## Bind
-
-```
-object_action(kind="agent", name=<app name>, action="set_homepage", input={site=<site>})
-```
-
-The first time only. The link never moves afterwards.
-
-## Rebuild
-
-This section is for a page that is **already hosted**. A build whose design sits in
-`/workspace/ufo-app` is not one: build that and deploy it, and never go looking for a site first.
-
-Changing a page that already has one is the same spawn, with the member's request in the objective.
-The child pulls the deployed source back and edits it rather than starting over:
-
-```
-object_list(kind="site", filters={homepage_agent: "mine"}) -> object_get
-```
-
-Edit `app.tsx` and `application-design.svg` under the `src` the status names, then deploy that
-`src` with the same `site_name`. The link stays.
-
-One deploy needs the member speaking: changing a page hosted by a **different** conversation than
-the one you are in. A worker carries no speaker, so it is refused there. Take that deploy yourself,
-in this turn — you hold `deploy_website` for it. Read the source back first, the way the worker
-would.
+Never run `vite build` yourself: the deploy writes the config that resolves `ufo/kit`, and
+without it the build cannot succeed.
 
 ## Traps
 
 - Do not embed the SVG in the app. The design fixes layout; it is not content.
 - Do not install packages. The project resolves `ufo/kit` and nothing else.
-- Do not start Chromium or `js_repl` to check the page. The deploy audits it.
-- Never read the audit script. It measures; it does not explain, and its refusal already names
-  the region and the pixels — everything a repair needs. One recorded drawing spent twenty-five
-  steps reading it and produced no better SVG for them.
 - Do not deploy the project as its own source. `deploy_website` builds it.
 - Write the page for a member who has nothing in it yet, because that is the state it is measured
   in. Every region draws its own container and a line saying it is empty, never nothing at all, and
@@ -183,7 +184,4 @@ would.
   nothing is measured as missing however carefully its slug is marked, and a read through data that
   is not there throws before the page mounts. Two recorded builds lost six deploys to `lacks
   visible <region>` and two more to `the page never mounted`.
-- A flex row holding text needs `min-w-0` on the child that holds it. Without it the text refuses
-  to shrink and the deploy answers `document is 361px` at a 360 px lane, or names the label it
-  clipped.
 - A `Stat` carries no border. It is already a tile; a figure divides by the space around it.

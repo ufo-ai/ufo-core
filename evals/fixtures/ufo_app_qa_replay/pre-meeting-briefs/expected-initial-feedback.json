@@ -1,14 +1,9 @@
 {
-  "sha256": "494bffebad17334fd9f1759aaeffa1738ec949f90b3327ece7f0d45134d7096b",
+  "sha256": "7600cc99697f2155c1877226885ae0e8985306b7731d15c25cceecede01fcd78",
   "issues": [
     {
       "code": "contrast",
-      "message": "Fix text contrast: light 1440px \"Drive: No prior notes\" at span rgb(183, 110, 0) on rgb(255, 243, 224) is 3.65:1; needs 4.5:1; light 1440px \"⚠ Missing & Uncertain Data Gaps\" at span rgb(183, 110, 0) on rgb(255, 251, 245) is 3.88:1; needs 4.5:1; dark 1440px \"Drive: No prior notes\" at span rgb(183, 110, 0) on rgb(255, 243, 224) is 3.65:1; needs 4.5:1; dark 1440px \"⚠ Missing & Uncertain Data Gaps\" at span rgb(183, 110, 0) on rgb(255, 251, 245) is 3.88:1; needs 4.5:1.",
-      "terms": []
-    },
-    {
-      "code": "clipping",
-      "message": "Fix clipped content: light 360px div: Attendees: maya@northstar.example, jorda; dark 360px div: Attendees: maya@northstar.example, jorda.",
+      "message": "Fix text contrast: light 1440px \"Drive: No prior notes\" at span rgb(183, 110, 0) on rgb(255, 243, 224) is 3.65:1; needs 4.5:1; light 1440px \"\u26a0 Missing & Uncertain Data Gaps\" at span rgb(183, 110, 0) on rgb(255, 251, 245) is 3.88:1; needs 4.5:1; dark 1440px \"Drive: No prior notes\" at span rgb(183, 110, 0) on rgb(255, 243, 224) is 3.65:1; needs 4.5:1; dark 1440px \"\u26a0 Missing & Uncertain Data Gaps\" at span rgb(183, 110, 0) on rgb(255, 251, 245) is 3.88:1; needs 4.5:1.",
       "terms": []
     },
     {

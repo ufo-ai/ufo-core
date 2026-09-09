@@ -103,4 +103,5 @@ read its references rather than deriving any of it again.
   name. The dark scheme clears AA on every step (`#A7A9A9` on `#191A1A` is 7.4:1).
 - Both schemes checked. The palette answers a scheme on its own, but a screenshot proves it.
 - The narrow width checked at 360px, not only the desktop width: `document.scrollWidth` equals the
-  viewport and no element is clipped. This is required before handover, not a suggestion.
+  viewport and no element is clipped. This is required before handover, not a suggestion. An
+  application homepage is the exception: it fills one pane at one width and is checked there.

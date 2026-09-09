@@ -1,9 +1,10 @@
 """The application homepage builder: one pinned subagent profile and where its build stops.
 
-An application's homepage is a kit page — `app.tsx` beside an `index.html` — drawn as a 360 px
-wireframe, built against the deploy's own `ufo/kit`, hosted by `deploy_website` at a permanent
-link, and bound to the agent by `set_homepage`. None of that is a tool of its own: the child holds
-the core file builtins, the read-only connector tools, and the one site action that hosts.
+An application's homepage is a kit page — `app.tsx` beside an `index.html` — drawn as a wireframe
+at the width it renders at, built against the deploy's own `ufo/kit`, hosted by `deploy_website` at
+a permanent link, and bound to the agent by `set_homepage`. None of that is a tool of its own: the
+child holds the core file builtins, the pair that show it its own page, the read-only connector
+tools, and the one site action that hosts.
 
 What is left here is only what a skill cannot say. A skill cannot pin a model or a reasoning
 effort, cannot make a tool set exact, cannot make connector calls read-only, cannot wall a child's
@@ -50,16 +51,11 @@ BUILDER_CONTRACT = (
 )
 
 
-ApplicationBuildStatus = Literal["designed", "deployed", "blocked"]
-"""Where a build stopped: the wireframe it drew, the site it hosted, or what stopped it."""
-
-
 class ApplicationBuildTask(BaseModel):
     """One application homepage build.
 
-    Where the build stops is said in the objective, not carried as a field. Nothing in the code
-    ever branched on such a field — only the contract the child reads did — so it was a convention
-    wearing an API, and one more thing for a spawn to get wrong."""
+    Where the build stops is said in the objective. Nothing in the code branched on a field for it,
+    and the statuses that replaced the field said only what the result already shows."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -78,42 +74,18 @@ class ApplicationBuildTask(BaseModel):
 
 
 class ApplicationBuildResult(BaseModel):
-    """What the build left behind: the design it drew, or the site it hosted.
+    """What the build left behind: a hosted page, or why there is none."""
 
-    Each status has to carry its own evidence. A `deployed` with no link is a claim the parent would
-    bind nothing from, and a `blocked` with no blocker is a turn that ended for no stated reason —
-    both reach the child as a validation error it can still fix, rather than reaching the member as
-    a page that is not there."""
-
-    status: ApplicationBuildStatus
-    design_path: str = Field(
-        default="",
-        description="The wireframe you wrote: the .svg itself, never the design.png the audit "
-        "renders beside it. The picture is how you look at the drawing; the drawing is the file.",
-    )
     site: str = ""
     site_url: str = ""
-    blocker: str = Field(default="", max_length=4_000)
+    stopped: str = ""
 
     @model_validator(mode="after")
-    def status_carries_its_evidence(self) -> "ApplicationBuildResult":
-        needed = {
-            "designed": ("design_path",),
-            "deployed": ("site", "site_url"),
-            "blocked": ("blocker",),
-        }[self.status]
-        missing = tuple(field for field in needed if not getattr(self, field))
-        if missing:
-            raise ValueError(f"{self.status} needs {', '.join(missing)}")
-        if self.status == "blocked" and PAGE_REFUSAL_OPENING in self.blocker:
-            raise ValueError(
-                "a deploy refusal is not a blocker: make the repairs it lists and deploy again"
-            )
-        if self.status == "designed" and not self.design_path.endswith(DESIGN_SUFFIX):
-            raise ValueError(
-                f"design_path is the wireframe you wrote, ending {DESIGN_SUFFIX} — not the "
-                "picture rendered beside it"
-            )
+    def answers_with_a_page_or_a_reason(self) -> "ApplicationBuildResult":
+        if bool(self.site) == bool(self.stopped):
+            raise ValueError("answer with the deploy's site, or with what stopped you")
+        if self.site and not self.site_url:
+            raise ValueError("a hosted site answers with its site_url")
         return self
 
 
@@ -127,6 +99,8 @@ APPLICATION_BUILDER_PROFILE = SubagentProfile(
         "edit",
         "glob",
         "grep",
+        "js_repl",
+        "start_server",
         "list_external_tools",
         "describe_external_tools",
         "search_connector_tools",

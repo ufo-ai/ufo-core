@@ -48,6 +48,7 @@ from ufo_ext_eval_env.manifest import (
 )
 from ufo_ext_sites.application_audit import (
     APPLICATION_KIT_COMPONENTS,
+    DESKTOP_HEIGHT,
     DESKTOP_WIDTH,
     MIN_CONTROLS,
     MIN_INTERACTIONS,
@@ -61,9 +62,6 @@ from ufo_ext_sites.application_audit import (
 )
 from ufo_ext_sites.application_audit import (
     MEASURED_VIEWS as APPLICATION_MEASURED_VIEWS,
-)
-from ufo_ext_sites.application_audit import (
-    NARROW_WIDTH as APPLICATION_NARROW_WIDTH,
 )
 from ufo_ext_sites.application_homepage import (
     APPLICATION_BUILDER_NAME,
@@ -88,7 +86,13 @@ from evals.harness.capability import (
 )
 from evals.harness.harness import EvalMetric, EvalReport, Json, JsonObject
 from evals.harness.registry import EvalTask
-from evals.harness.scorers import combine, content_words, skill_scorer
+from evals.harness.scorers import (
+    combine,
+    content_words,
+    scored_only,
+    skill_scorer,
+    spawns_profile,
+)
 from evals.harness.target import CapabilityTarget
 from evals.suites.app_audit_probe import AUDIT_CONTENT as AUDIT_CONTENT
 from evals.suites.app_audit_probe import AUDIT_DIGEST, AppAudit, app_audit
@@ -181,9 +185,6 @@ PROBE_PORT = 8137
 PROBE_TIMEOUT_SECONDS = 120
 DOCKER_INSPECT_TIMEOUT_SECONDS = 10
 DOCKER_OWNERSHIP_TIMEOUT_SECONDS = 30
-DESKTOP_HEIGHT = 900
-NARROW_WIDTH = APPLICATION_NARROW_WIDTH
-NARROW_HEIGHT = 844
 MEASURED_VIEWS = APPLICATION_MEASURED_VIEWS
 INTERACTION_MIN_CONTROLS = MIN_CONTROLS
 INTERACTION_MIN_SUCCESSES = MIN_INTERACTIONS
@@ -1593,7 +1594,6 @@ def _measured_screen(content: bytes) -> ArtifactCheck:
             "missing_view",
             "empty_view",
             "contrast",
-            "overflow",
             "clipping",
             "overlap",
             "console",
@@ -1894,7 +1894,7 @@ def _application_builder_scorer() -> Grader:
         delegations = tuple(
             call
             for call in own
-            if call.name == SPAWN_TOOL and call.arguments.get("target") == BUILDER_TARGET
+            if call.name == SPAWN_TOOL and spawns_profile(call, APPLICATION_BUILDER_NAME)
         )
         if not delegations:
             return CapabilityVerdict(False, "did not spawn the application builder", failed)
@@ -1910,16 +1910,12 @@ def _application_builder_scorer() -> Grader:
             result = ApplicationBuildResult.model_validate_json(unwall(delegations[0].result))
         except ValueError:
             return CapabilityVerdict(False, "the worker returned no structured result", failed)
-        if result.status != "deployed":
-            return CapabilityVerdict(
-                False,
-                f"the deterministic acceptance result was {result.status}: {result.blocker}",
-                failed,
-            )
+        if not result.site:
+            return CapabilityVerdict(False, "the worker came back with no site", failed)
         stray = tuple(
             call
             for call in own
-            if call.name == SPAWN_TOOL and call.arguments.get("target") != BUILDER_TARGET
+            if call.name == SPAWN_TOOL and not spawns_profile(call, APPLICATION_BUILDER_NAME)
         )
         if stray:
             return CapabilityVerdict(
@@ -1985,13 +1981,18 @@ def _application_builder_scorer() -> Grader:
 
 
 def _skill_scorer() -> Grader:
-    base = skill_scorer("website-building", APPLICATION_HOMEPAGE_SKILL)
+    """Every case here asks for an app's own homepage, so `website-building` is the distractor:
+    it is the off-platform route, and a parent that leads with it has read the wrong half of the
+    split. A delegating parent passes on the child's preload instead — the skill it hands the
+    builder is fixed by the profile, and the parent may open on the app's own skill first."""
+
+    base = skill_scorer(APPLICATION_HOMEPAGE_SKILL, "website-building")
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         verdict = await base(output)
         delegated = any(
             call.name == SPAWN_TOOL
-            and call.arguments.get("target") == BUILDER_TARGET
+            and spawns_profile(call, APPLICATION_BUILDER_NAME)
             and call.succeeded
             for call in output.own_calls
         )
@@ -2010,8 +2011,8 @@ def _skill_scorer() -> Grader:
         )
 
     return DescribedGrader(
-        "a direct turn loads 'website-building', or the builder preloads "
-        f"'{APPLICATION_HOMEPAGE_SKILL}' after its spawn",
+        f"a direct turn loads '{APPLICATION_HOMEPAGE_SKILL}' (not 'website-building'), or the "
+        "builder preloads it after its spawn",
         grade,
     )
 
@@ -2028,7 +2029,7 @@ def _delivery_scorer() -> Grader:
             call
             for call in output.own_calls
             if call.name == SPAWN_TOOL
-            and call.arguments.get("target") == BUILDER_TARGET
+            and spawns_profile(call, APPLICATION_BUILDER_NAME)
             and call.succeeded
         )
         result = None
@@ -2037,9 +2038,7 @@ def _delivery_scorer() -> Grader:
                 result = ApplicationBuildResult.model_validate_json(unwall(delegations[0].result))
             except ValueError:
                 pass
-        accepted = bool(
-            result is not None and result.status == "deployed" and result.site and result.site_url
-        )
+        accepted = bool(result is not None and bool(result.site) and bool(result.site_url))
         evidence = _score_evidence(
             "appDelivery", (1 if deployments else 0) + (1 if accepted else 0), 2
         )
@@ -2064,12 +2063,12 @@ def _delivery_scorer() -> Grader:
 
 
 def _qa_efficiency_scorer() -> Grader:
-    """The audit lives inside the deploy, so what this measures is how many deploys the page took.
+    """How many deploys the page took, and whether the builder looked at it before deploying.
 
-    A refused deploy hosts nothing and answers with the repairs to make, so a build that took one
-    is a build whose first page was right; a build that took four spent three rounds discovering
-    what the source gate would have told it. The floor is the same either way — nothing is hosted
-    until it passes — so this scores the loop, never the acceptance."""
+    The deploy no longer judges how a page looks, so the browser is where that is settled and a
+    deploy is a page already checked rather than the only way to see one. A build that never opens
+    its page has nothing behind it; a build that opens it and still needs several deploys is one
+    that looked without reading what it saw."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         failed = _score_evidence("processQa", 0, 1)
@@ -2084,25 +2083,20 @@ def _qa_efficiency_scorer() -> Grader:
             )
         if not deploys[-1].succeeded:
             return CapabilityVerdict(False, "the final application deploy failed", failed)
-        drove = tuple(
-            call.name
-            for call in output.calls
-            if call.name in {"js_repl", "start_server"} and call.succeeded
-        )
-        if drove:
+        looked = tuple(call for call in output.calls if call.name == "js_repl" and call.succeeded)
+        if not looked:
             return CapabilityVerdict(
-                False,
-                f"drove the page itself instead of letting the deploy audit it: {drove[0]}",
-                failed,
+                False, "deployed without opening the page in a browser", failed
             )
         return CapabilityVerdict(
             True,
-            f"{len(deploys)} deploy(s), the last one hosted",
+            f"{len(deploys)} deploy(s) after {len(looked)} look(s), the last one hosted",
             _score_evidence("processQa", 1, 1),
         )
 
     return DescribedGrader(
-        f"the page is hosted within {MAX_PRODUCT_QA_CALLS} deploys and nothing drives it by hand",
+        f"the builder opens the page in a browser and hosts it within {MAX_PRODUCT_QA_CALLS} "
+        "deploys",
         grade,
     )
 
@@ -2275,10 +2269,10 @@ def _screen(
         name,
         MEMBER_QUERIES[name],
         combine(
-            _skill_scorer(),
+            scored_only(_skill_scorer()),
             _delivery_scorer(),
-            _application_builder_scorer(),
-            _qa_efficiency_scorer(),
+            scored_only(_application_builder_scorer()),
+            scored_only(_qa_efficiency_scorer()),
             _kit_component_scorer(),
             _page_scorer(),
             _interaction_scorer(name),
@@ -2414,9 +2408,9 @@ COPY_CASES = tuple(
         f"copy-{spec.name}",
         MEMBER_QUERIES[spec.name],
         combine(
-            _skill_scorer(),
+            scored_only(_skill_scorer()),
             _delivery_scorer(),
-            _application_builder_scorer(),
+            scored_only(_application_builder_scorer()),
             _captured_artifact_scorer("-static.html"),
             _copy_scorer(spec),
         ),

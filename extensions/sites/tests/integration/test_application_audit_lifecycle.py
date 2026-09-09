@@ -39,8 +39,8 @@ def test_dense_cjk_design_text_is_bounded_in_six_real_regions(
         for index in range(6)
     )
     (tmp_path / "design.svg").write_text(
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 844" '
-        f'width="360" height="844">{rows}</svg>'
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" '
+        f'width="1440" height="900">{rows}</svg>'
     )
     tmp_path.chmod(CONTAINER_FIXTURE_MODE)
 

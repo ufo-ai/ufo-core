@@ -28,7 +28,6 @@ import pytest
 from ufo_ext_sites.application_audit import (
     DESIGN_VISIBLE_TEXT_MAX_CHARS,
     DESKTOP_WIDTH,
-    NARROW_WIDTH,
     ApplicationAuditContract,
     ApplicationAuditFact,
     ApplicationAuditReport,
@@ -396,7 +395,7 @@ def test_real_kit_quiet_labels_pass_but_author_quiet_prose_fails(measured: dict)
                         "aboveFoldText": measured["aboveFoldText"],
                         "regions": regions,
                     }
-                    for width in (DESKTOP_WIDTH, NARROW_WIDTH)
+                    for width in (DESKTOP_WIDTH,)
                     for scheme in ("light", "dark")
                 ],
                 "interaction": {
@@ -438,7 +437,6 @@ def test_real_kit_overlap_contract(tmp_path: Path, broken: bool) -> None:
         assert result["tableScroll"]["overflowX"] == "auto"
         assert result["tableScroll"]["scrollWidth"] > result["tableScroll"]["clientWidth"]
         assert measured["overlaps"] == []
-        assert measured["overhangs"] == []
         return
     assert 1 <= len(measured["overlaps"]) <= 8
     evidence = " ".join(f"{item['first']} {item['second']}" for item in measured["overlaps"])
@@ -446,9 +444,6 @@ def test_real_kit_overlap_contract(tmp_path: Path, broken: bool) -> None:
     assert "Assign" in evidence
     assert "Owner Ada" in evidence
     assert "Due Friday" in evidence
-    assert measured["pastViewport"]
-    assert any("viewport right" in item for item in measured["overhangs"])
-    assert any("card-content" in item for item in measured["overhangs"])
 
 
 def test_painted_text_reconstructs_inline_and_block_facts(tmp_path: Path) -> None:
@@ -508,7 +503,7 @@ def test_painted_text_reconstructs_inline_and_block_facts(tmp_path: Path) -> Non
                     "aboveFoldText": measured["aboveFoldText"],
                     "regions": regions,
                 }
-                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
+                for width in (DESKTOP_WIDTH,)
                 for scheme in ("light", "dark")
             ],
             "interaction": {

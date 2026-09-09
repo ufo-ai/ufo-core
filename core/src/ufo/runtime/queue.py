@@ -539,23 +539,27 @@ def _with_action_verbs(
     selected: tuple[ToolDef, ...],
     all_tools: tuple[ToolDef, ...],
     granted_actions: frozenset[str],
+    *,
+    discovery: bool = True,
 ) -> tuple[ToolDef, ...]:
     """Hold the action verbs to the grant rule: a turn holding at least one canonical action id
     rides the wire with `object_action` and the two reads that publish an action's envelope —
     `object_list` for a collection action, `object_get` for an instance action — because an
     allowlist never names the dispatcher, and one naming only canonical ids would otherwise hold
     actions it can dispatch but never discover. `object_apply` and `object_delete` stay the
-    allowlist's own to grant."""
+    allowlist's own to grant.
+
+    `discovery` is off for a tool set that is already exact: a profile declaring `isolated_tools`
+    names every tool it holds and reads its one call out of its skill, so the two reads are not a
+    companion it needs but a surface it wanders into. The dispatcher still rides along, because
+    without it the action the profile was granted could not be called at all."""
     without = tuple(tool for tool in selected if tool.name != OBJECT_ACTION_TOOL)
     if not granted_actions:
         return without
     held = {tool.name for tool in without}
     by_name = {tool.name: tool for tool in all_tools}
-    verbs = tuple(
-        by_name[name]
-        for name in (OBJECT_ACTION_TOOL, *ACTION_READ_TOOLS)
-        if name in by_name and name not in held
-    )
+    wanted = (OBJECT_ACTION_TOOL, *ACTION_READ_TOOLS) if discovery else (OBJECT_ACTION_TOOL,)
+    verbs = tuple(by_name[name] for name in wanted if name in by_name and name not in held)
     return (*without, *verbs)
 
 

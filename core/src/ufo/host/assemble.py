@@ -214,6 +214,7 @@ class HostEnvironment:
                 _subagent_tools(all_tools, profile, profile_grants),
                 all_tools,
                 granted_actions,
+                discovery=not profile.isolated_tools,
             )
         tools = ToolRegistry(_with_spawn_payload(selected, targets))
         prompt_replaced = False

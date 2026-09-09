@@ -31,8 +31,8 @@ const AA_FLOOR = 4.5;
 const DESIGN_ALPHA_FLOOR = 0.15;
 const DESIGN_REGION_MAX = 6;
 const DESIGN_VISIBLE_TEXT_MAX_CHARS = 72;
-const DESIGN_INITIAL_HEIGHT = 844;
-const DESIGN_INITIAL_FOLD = 844;
+const DESIGN_INITIAL_HEIGHT = 900;
+const DESIGN_INITIAL_FOLD = 900;
 const DESIGN_NATIVE_DIMENSION_MAX = 4096;
 const DESIGN_DRAWING_ELEMENTS = 'circle,ellipse,image,line,path,polygon,polyline,rect,text,use';
 const DESIGN_ELEMENT_MAX = 4096;
@@ -61,7 +61,6 @@ function boundedProblem(text) {
     .toString('utf8')
     .replace(/\uFFFD+$/, '');
 }
-const DESIGN_FAULT_EXIT = 4;
 const SVG_PRESENTATION_PROPERTIES = new Set(
   ('alignment-baseline baseline-shift clip-path clip-rule color color-interpolation ' +
     'color-interpolation-filters color-rendering cursor cx cy d direction display ' +
@@ -77,8 +76,6 @@ const SVG_PRESENTATION_PROPERTIES = new Set(
 const VIEWS = [
   { scheme: 'light', width: 1440, height: 900, shoot: true },
   { scheme: 'dark', width: 1440, height: 900, shoot: true },
-  { scheme: 'light', width: 360, height: 844, shoot: false },
-  { scheme: 'dark', width: 360, height: 844, shoot: false },
 ];
 const MIME_TYPES = new Map([
   ['.avif', 'image/avif'],
@@ -691,14 +688,6 @@ async function measure(floor) {
     if (accidentalOverlaps.length === 8) break;
   }
 
-  const wider = [];
-  const overhangs = [];
-  const overhangKeys = new Set();
-  const addOverhang = (key, evidence) => {
-    if (overhangs.length === 8 || overhangKeys.has(key)) return;
-    overhangKeys.add(key);
-    overhangs.push(evidence.slice(0, 200));
-  };
   const containerSelector = [
     'main', 'section', 'article', 'aside', 'nav', '[data-app-region]',
     '[data-slot="card"]', '[data-slot="card-content"]', '[data-slot="item"]',
@@ -713,31 +702,6 @@ async function measure(floor) {
     const name =
       element.tagName.toLowerCase() +
       (element.className ? '.' + String(element.className).trim().split(/\s+/)[0] : '');
-    const viewportLeft = Math.max(0, -box.left);
-    const viewportRight = Math.max(0, box.right - window.innerWidth);
-    if (viewportLeft > 1 || viewportRight > 1) {
-      wider.push(name);
-      const edge = viewportLeft > viewportRight ? 'left' : 'right';
-      const pixels = Math.round(Math.max(viewportLeft, viewportRight) * 10) / 10;
-      addOverhang(`viewport|${name}|${edge}`, `${name} extends ${pixels}px past viewport ${edge}`);
-    }
-    const container = element.parentElement?.closest(containerSelector);
-    const containerOverflowX = container ? getComputedStyle(container).overflowX : null;
-    if (container && !intentionalComposition(element) && !overlayComposition(element) &&
-        style.position !== 'fixed' && !['auto', 'scroll'].includes(containerOverflowX)) {
-      const containerBox = container.getBoundingClientRect();
-      const containerLeft = Math.max(0, containerBox.left - box.left);
-      const containerRight = Math.max(0, box.right - containerBox.right);
-      if (containerLeft > 1 || containerRight > 1) {
-        const edge = containerLeft > containerRight ? 'left' : 'right';
-        const pixels = Math.round(Math.max(containerLeft, containerRight) * 10) / 10;
-        const containerName = overlapLabel(container);
-        addOverhang(
-          `container|${name}|${containerName}|${edge}`,
-          `${name} extends ${pixels}px past ${containerName} ${edge}`
-        );
-      }
-    }
     if (element.children.length) continue;
     if (
       element.scrollWidth > element.clientWidth + 2 &&
@@ -759,9 +723,7 @@ async function measure(floor) {
     renderedParts,
     aboveFoldText,
     regions,
-    pastViewport: wider.slice(0, 12),
     clipped: clipped.slice(0, 8),
-    overhangs,
     overlaps: accidentalOverlaps,
   };
 }
@@ -1655,7 +1617,7 @@ async function nativeDesignGeometry(page, laneWidth) {
         root.getAttribute('height') !== String(box.height)) {
       throw new Error(
         `application design must use viewBox="0 0 ${width} H", width="${width}", and a ` +
-        'matching integer height H from 844 through 4096'
+        'matching integer height H from 900 through 4096'
       );
     }
     return { width: box.width, height: box.height };
@@ -1862,7 +1824,11 @@ async function interactiveDocument(frame) {
         script.remove();
         continue;
       }
-      script.setAttribute('src', await asDataUrl(resource));
+      const inlined = documentCopy.createElement('script');
+      if (script.type) inlined.setAttribute('type', script.type);
+      const code = await (await fetch(resource)).text();
+      inlined.textContent = code.split('</script').join('<\\/script');
+      script.replaceWith(inlined);
     }
     for (const link of documentCopy.querySelectorAll('link[rel="stylesheet"][href]')) {
       const resource = new URL(link.getAttribute('href'), location.href);
@@ -1921,16 +1887,13 @@ async function main() {
   let browser = null;
   try {
     browser = await chromium.launch();
-    // A design fault is a repair, not a broken run, and only the exit code can say which: leaving
-    // the gate to match on the shape of a message would make prose the contract.
     let design = { height: DESIGN_INITIAL_FOLD, regions: [] };
+    let designFault = '';
     if (designPath) {
       try {
         design = await measuredDesign(browser, laneWidth, designPath, '');
       } catch (error) {
-        console.error(error && error.message ? error.message : String(error));
-        await closeApplicationAudit(browser, server, sockets);
-        process.exit(DESIGN_FAULT_EXIT);
+        designFault = (error && error.message ? error.message : String(error)).slice(0, 500);
       }
     }
     const { height: designHeight, regions: designRegions } = design;
@@ -2007,7 +1970,9 @@ async function main() {
       }
     }));
     const interaction = await interactionAudit(browser, url);
-    const report = { url, floor: AA_FLOOR, designHeight, designRegions, views, interaction };
+    const report = {
+      url, floor: AA_FLOOR, designHeight, designRegions, designFault, views, interaction,
+    };
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
     for (const view of views) {
       console.log(

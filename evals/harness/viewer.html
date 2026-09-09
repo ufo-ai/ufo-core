@@ -744,6 +744,41 @@ function previewDocument(source, interactive) {
   const offset = head.index + head[0].length;
   return source.slice(0, offset) + policy + source.slice(offset);
 }
+const PREVIEW_AGENT = {
+  id: 'preview-agent', name: 'Assistant', model: 'preview', main: true, icon: 'user',
+};
+function previewReply(route, method) {
+  if (route === 'api/agents') {
+    return { agents: [PREVIEW_AGENT], member: { email: 'preview@localhost', admin: true } };
+  }
+  if (method === 'GET' && route.startsWith('objects/')) {
+    const parts = route.split('/');
+    const kind = { kind: parts[1], fields: [], spec_schema: null, applies: false, deletes: false };
+    if (parts.length === 2) return { ...kind, objects: [], next_cursor: null };
+    return {
+      ...kind, name: decodeURIComponent(parts.slice(2).join('/')), summary: '', spec: null,
+      status: {}, links: [], created_at: null, updated_at: null,
+    };
+  }
+  return { applied: true, message: 'Prepared action accepted.' };
+}
+window.addEventListener('message', event => {
+  const message = event.data;
+  if (!message || typeof message !== 'object' || !event.source) return;
+  if (message.ufo === 'ready') {
+    event.source.postMessage({
+      ufo: 'init', member: { email: 'preview@localhost', admin: true },
+      agents: [PREVIEW_AGENT], agentId: PREVIEW_AGENT.id, place: {}, portal: location.origin,
+    }, '*');
+    return;
+  }
+  if (message.ufo !== 'call') return;
+  const route = String(message.path || '').replace(/^[/]+/, '').split('?', 1)[0];
+  event.source.postMessage({
+    ufo: 'data', id: message.id, ok: true, status: 200,
+    body: JSON.stringify(previewReply(route, message.method)),
+  }, '*');
+});
 function openArtifactPreview(key) {
   const item = previewArtifacts.get(key);
   if (!item) return;

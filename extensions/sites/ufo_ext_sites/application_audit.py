@@ -14,13 +14,11 @@ from xml.etree import ElementTree
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DESKTOP_WIDTH = 1440
-NARROW_WIDTH = 360
-APPLICATION_DESIGN_FOLD = 844
+DESKTOP_HEIGHT = 900
+APPLICATION_DESIGN_FOLD = DESKTOP_HEIGHT
 APPLICATION_DESIGN_MAX_HEIGHT = 4_096
 SCHEMES: tuple[Literal["light", "dark"], ...] = ("light", "dark")
-MEASURED_VIEWS = tuple(
-    (scheme, width) for width in (DESKTOP_WIDTH, NARROW_WIDTH) for scheme in SCHEMES
-)
+MEASURED_VIEWS = tuple((scheme, DESKTOP_WIDTH) for scheme in SCHEMES)
 AA_BODY = 4.5
 AA_LARGE = 3.0
 KIT_QUIET_TEXT_MIN = 2.8
@@ -43,10 +41,15 @@ MAX_MESSAGE_CHARS = 500
 MAX_PRODUCT_QA_CONTROLS = 100
 APPLICATION_DESIGN_MAX_CHARS = 128_000
 APPLICATION_SOURCE_MAX_CHARS = 256_000
-APPLICATION_DESIGN_WIDTH = NARROW_WIDTH
-"""The design lane is the narrow view the fidelity check measures. One width for both is what
-lets a region drawn above y=844 be compared with the region rendered above 844 px without a
-scale between them."""
+APPLICATION_DESIGN_WIDTH = DESKTOP_WIDTH
+"""A page is drawn at the width it is rendered at. The homepage frame fills its pane, so one
+width serves the drawing and the measurement, and a region drawn above the fold is compared with
+the region rendered above it without a scale between them."""
+APPLICATION_PAGE_GUTTER = 88
+"""`--size-page-gutter` in `extensions/web/frontend/src/theme.css`, which `Page` sets each side."""
+APPLICATION_CONTENT_WIDTH = APPLICATION_DESIGN_WIDTH - 2 * APPLICATION_PAGE_GUTTER
+APPLICATION_BAND_GAP = 16
+"""`--spacing-2xl` in `extensions/web/frontend/src/theme.css`, the one gap a band stack takes."""
 APPLICATION_DESIGN_EFFECT_ERROR = (
     "application design native bounds do not support clip, mask, or filter effects"
 )
@@ -65,7 +68,6 @@ AuditIssueCode = Literal[
     "missing_view",
     "empty_view",
     "contrast",
-    "overflow",
     "clipping",
     "overlap",
     "design",
@@ -136,28 +138,6 @@ class ApplicationAuditRegion(BaseModel):
     )
 
 
-class AcceptedApplicationDesignEvidence(BaseModel):
-    """The accepted design digest and its validated rendered regions."""
-
-    model_config = ConfigDict(frozen=True)
-
-    version: Literal[1] = 1
-    design_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    kit_components: tuple[str, ...] = Field(min_length=1)
-    regions: tuple[ApplicationAuditRegion, ...] = Field(
-        min_length=DESIGN_REGION_MIN, max_length=DESIGN_REGION_MAX
-    )
-
-    @model_validator(mode="after")
-    def regions_are_unique(self) -> "AcceptedApplicationDesignEvidence":
-        names = tuple(region.name for region in self.regions)
-        if len(names) != len(set(names)):
-            raise ValueError("accepted application design regions must be unique")
-        if len(self.kit_components) != len(set(self.kit_components)):
-            raise ValueError("accepted application design Kit components must be unique")
-        return self
-
-
 class ApplicationAuditView(BaseModel):
     """The browser measurements for one colour scheme and viewport width.
 
@@ -173,7 +153,6 @@ class ApplicationAuditView(BaseModel):
     document_width: int = Field(alias="documentWidth", ge=0)
     page_height: int = Field(default=APPLICATION_DESIGN_FOLD, alias="pageHeight", ge=1)
     clipped: tuple[str, ...]
-    overhangs: tuple[AuditTerm, ...] = Field(default=(), max_length=8)
     overlaps: tuple[ApplicationAuditOverlap, ...] = Field(max_length=8)
     console: tuple[str, ...]
     above_fold_text: str = Field(alias="aboveFoldText")
@@ -216,6 +195,7 @@ class ApplicationAuditReport(BaseModel):
     design_regions: tuple[ApplicationAuditRegion, ...] = Field(
         default=(), alias="designRegions", max_length=20
     )
+    design_fault: str = Field(default="", alias="designFault", max_length=MAX_MESSAGE_CHARS)
     views: tuple[ApplicationAuditView, ...]
     interaction: ApplicationAuditInteraction
 
@@ -251,48 +231,11 @@ class ApplicationAuditVerdict(BaseModel):
         return not self.issues
 
 
-class ApplicationAuditFeedback(BaseModel):
-    """The failed attempt and repair items returned to the active builder."""
-
-    model_config = ConfigDict(frozen=True)
-
-    status: Literal["repair_required"] = "repair_required"
-    attempt: int = Field(ge=1)
-    attempts_remaining: int = Field(ge=0)
-    issues: tuple[ApplicationAuditIssue, ...] = Field(min_length=1, max_length=MAX_ISSUES)
-
-
-class ApplicationProductQaResult(BaseModel):
-    """The deterministic product proof returned to the application worker."""
-
-    model_config = ConfigDict(frozen=True)
-
-    status: Literal["passed"] = "passed"
-    views_checked: tuple[str, ...] = Field(min_length=4, max_length=4)
-    controls_checked: tuple[str, ...] = Field(
-        min_length=MIN_CONTROLS, max_length=MAX_PRODUCT_QA_CONTROLS
-    )
-    interactions_verified: tuple[str, ...] = Field(
-        min_length=MIN_INTERACTIONS, max_length=MAX_PRODUCT_QA_CONTROLS
-    )
-
-
-class ApplicationQaProof(BaseModel):
-    """The exact application source accepted by deterministic product QA."""
-
-    model_config = ConfigDict(frozen=True)
-
-    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    browser_batches: int = Field(ge=1, le=3)
-
-
 @dataclass(frozen=True)
 class ApplicationDesign:
-    """One validated application design: the regions it names, the kit components it draws, and the
-    lane height it was drawn at."""
+    """One validated application design: the regions it names and the height it was drawn at."""
 
     regions: tuple[str, ...]
-    kit_components: tuple[str, ...]
     height: int
 
 
@@ -324,13 +267,12 @@ def _issue(
 
 
 def application_first_screen_scale(page_height: int) -> float:
-    """Return the fraction of one measured page that spans its first 844 px screen.
+    """Return the fraction of one measured page that spans its first screen.
 
     A region's top and height are fractions of the whole page, so every vertical threshold is
-    written against the 844 px first screen and shrinks by this factor on a taller page. One
-    threshold then holds one pixel size at every page height the design gate accepts. Horizontal
-    thresholds stay unscaled because the page width is fixed: the design lane and the narrow view
-    are both 360 px, and a desktop view is its own measured width.
+    written against the first screen and shrinks by this factor on a taller page. One threshold
+    then holds one pixel size at every page height the design gate accepts. Horizontal thresholds
+    stay unscaled because the drawing and the measurement share one width.
     """
 
     return APPLICATION_DESIGN_FOLD / page_height
@@ -411,7 +353,7 @@ def application_region_failure(
     measured: ApplicationAuditRegion | None,
     designed: ApplicationAuditRegion,
 ) -> str | None:
-    """Why the built page does not carry this design region at 360 px, or None.
+    """Why the built page does not carry this design region, or None.
 
     A repair treats the two differently, and one message for both left a build guessing: a region
     the page never rendered is written or unhidden, a region below the fold is moved. Nothing can
@@ -419,24 +361,22 @@ def application_region_failure(
     neither is measured — so the first names both rather than implying the one."""
     if measured is None:
         return (
-            f"{scheme} {NARROW_WIDTH}px measured no {name}: the page renders no such region, or "
+            f"{scheme} {DESKTOP_WIDTH}px measured no {name}: the page renders no such region, or "
             "hides it behind a control that shows one region at a time"
         )
     if designed.above_fold and not measured.above_fold:
         return (
-            f"{scheme} {NARROW_WIDTH}px renders {name} below the fold, where the design puts "
+            f"{scheme} {DESKTOP_WIDTH}px renders {name} below the fold, where the design puts "
             "it above"
         )
     return None
 
 
 def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDesignFidelity:
-    """Measure named region identity, first-screen membership, and vertical order at 360 px.
+    """Measure named region identity, first-screen membership, and vertical order.
 
-    The design is one 360 px lane, so the lane is what it can be held to: the same width, the same
-    844 px first screen, no scale between what was drawn and what was rendered. The desktop views
-    keep every page check and carry no region verdict — a one-column lane and a 1440 px layout
-    cannot share a fold, so comparing them measures nothing the designer chose.
+    A page is drawn at the width it renders at, so the drawing and the measurement share a width
+    and a first screen and nothing scales between them.
     """
 
     design = report.design_regions
@@ -476,20 +416,20 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
             (
                 candidate
                 for candidate in report.views
-                if candidate.scheme == scheme and candidate.width == NARROW_WIDTH
+                if candidate.scheme == scheme and candidate.width == DESKTOP_WIDTH
             ),
             None,
         )
         total += 1 + len(design)
         if view is None:
-            failures.append(f"{scheme} {NARROW_WIDTH}px has no region measurement")
+            failures.append(f"{scheme} {DESKTOP_WIDTH}px has no region measurement")
             continue
         app_names = tuple(region.name for region in view.regions)
         app_by_name = {region.name: region for region in view.regions}
         if len(app_by_name) == len(view.regions) and set(app_names) == set(design_names):
             passed += 1
         else:
-            failures.append(f"{scheme} {NARROW_WIDTH}px region names differ")
+            failures.append(f"{scheme} {DESKTOP_WIDTH}px region names differ")
         for name in design_names:
             failure = application_region_failure(
                 scheme, name, app_by_name.get(name), design_by_name[name]
@@ -518,7 +458,7 @@ def application_design_fidelity(report: ApplicationAuditReport) -> ApplicationDe
                     passed += 1
                 else:
                     failures.append(
-                        f"{scheme} {NARROW_WIDTH}px changes {expected[0]} order for "
+                        f"{scheme} {DESKTOP_WIDTH}px changes {expected[0]} order for "
                         f"{first_name} and {second_name}"
                     )
     return ApplicationDesignFidelity(passed=passed, total=total, failures=tuple(failures))
@@ -566,24 +506,6 @@ def audit_application(
     contrast = _contrast_failures(measured)
     if contrast:
         issues.append(_issue("contrast", f"Fix text contrast: {'; '.join(contrast[:4])}."))
-    overflow = tuple(
-        (
-            *(
-                f"{view.scheme} {view.width}px document is {view.document_width}px"
-                for view in measured
-                if view.document_width > view.width
-            ),
-            *(
-                f"{view.scheme} {view.width}px {item}"
-                for view in measured
-                for item in view.overhangs
-            ),
-        )
-    )
-    if overflow:
-        issues.append(
-            _issue("overflow", f"Fix horizontal overflow or overhang: {'; '.join(overflow[:4])}.")
-        )
     clipped = tuple(
         f"{view.scheme} {view.width}px {item}" for view in measured for item in view.clipped
     )
@@ -597,6 +519,8 @@ def audit_application(
     )
     if overlaps:
         issues.append(_issue("overlap", f"Fix accidental overlap: {'; '.join(overlaps[:4])}."))
+    if report.design_fault:
+        issues.append(_issue("design", f"Repair the wireframe: {report.design_fault}"))
     fidelity = application_design_fidelity(report)
     if report.design_regions and fidelity.failures:
         issues.append(
@@ -883,106 +807,17 @@ def _validate_application_imports(source: str) -> None:
         raise ValueError("app.tsx must import from ufo/kit instead of using UfoAppKit")
 
 
-def _rendered_application_components(source: str) -> set[str]:
-    if ROOT_MOUNT.search(source) is None:
-        raise ValueError("mountApp must receive the root element and a render callback")
-    imported_components: dict[str, set[str]] = {}
-    for declaration in NAMED_KIT_IMPORT.finditer(source):
-        if declaration.group("type"):
-            continue
-        for value in declaration.group("names").split(","):
-            imported = KIT_IMPORT_NAME.fullmatch(value.strip())
-            if (
-                imported is not None
-                and imported.group("type") is None
-                and imported.group("export") in APPLICATION_KIT_COMPONENTS
-            ):
-                imported_components.setdefault(imported.group("export"), set()).add(
-                    imported.group("local") or imported.group("export")
-                )
-    code = SOURCE_LITERAL_OR_COMMENT.sub("", source)
-    local_declarations = _local_source_bindings(code)
-    rendered_components = set(JSX_COMPONENT.findall(code)) - local_declarations
-    rendered_kit_components = {
-        exported
-        for exported, local_names in imported_components.items()
-        if not local_names.isdisjoint(rendered_components)
-    }
-    if not rendered_kit_components:
-        raise ValueError("app.tsx must render at least one UI component imported from ufo/kit")
-    return rendered_kit_components
+def validate_application_source(source: str) -> None:
+    """Raise what makes an app page unservable, before it is worth building.
 
-
-def _validate_designed_components(
-    rendered_kit_components: set[str], designed_kit_components: tuple[str, ...]
-) -> None:
-    missing_designed_components = tuple(
-        name for name in designed_kit_components if name not in rendered_kit_components
-    )
-    if missing_designed_components:
-        label = "component" if len(missing_designed_components) == 1 else "components"
-        raise ValueError(
-            f"app.tsx must directly render designed Kit {label}: "
-            f"{', '.join(missing_designed_components)}"
-        )
-
-
-def _validate_designed_regions(source: str, designed_regions: tuple[str, ...]) -> None:
-    marked = set(APPLICATION_SOURCE_REGION.findall(source))
-    missing = tuple(name for name in designed_regions if name not in marked)
-    if missing:
-        label = "region" if len(missing) == 1 else "regions"
-        raise ValueError(
-            f"app.tsx must mark each designed {label} with data-app-region: {', '.join(missing)}"
-        )
-
-
-def _validate_application_styling(source: str) -> None:
-    if LITERAL_WHITE_ON_SCHEME_INK.search(source):
-        raise ValueError(
-            "a --color-ink background must use --color-surface text in both colour schemes"
-        )
-    if STYLE_TAG.search(source):
-        raise ValueError("app.tsx may not emit a <style> tag — the kit's theme is the sheet")
-    if DATA_SLOT_ATTRIBUTE.search(source):
-        raise ValueError("app.tsx: data-slot is reserved for ufo/kit components")
-    for pattern, repair in PAGE_CLASS_REFUSALS:
-        found = pattern.search(source)
-        if found:
-            raise ValueError(f"app.tsx: {found.group(0)!r} — {repair}")
-    for pattern in (ARBITRARY_VALUE, ARBITRARY_PROPERTY):
-        for segment in pattern.finditer(source):
-            if RAW_CSS_VALUE.search(segment.group(1)):
-                raise ValueError(
-                    f"app.tsx: {segment.group(0)} names a raw value — "
-                    "resolve it through a theme token"
-                )
-    if FRAMED_STAT.search(source):
-        raise ValueError(
-            "app.tsx: a Stat carries a border — a figure divides by the space around it, and a "
-            "tile is what a Stat already is"
-        )
-    for gap in COMPOSITION_GAP.finditer(source):
-        if gap.group(1) not in COMPOSITION_STEPS:
-            raise ValueError(
-                f"app.tsx: {gap.group(0)!r} is not a composition step — a page spaces its parts "
-                f"with {', '.join('gap-' + step for step in COMPOSITION_STEPS)} and nothing else"
-            )
-
-
-def validate_application_source(source: str, design: ApplicationDesign | None = None) -> None:
-    """Raise the repair an app page needs before it is worth building.
-
-    Every message is worded as the edit to make, because the builder's repair loop is what reads
-    them. The design is optional: a page deployed without one beside it is still held to the kit,
-    the mount, and the styling rules."""
+    Two facts, neither of which looking at the page can reveal: the module boundary a page may
+    reach across, and the mount call without which there is no page to look at. What the page
+    renders, how it spaces it and which components carry it are read off the rendered page by
+    whoever drew it."""
 
     _validate_application_imports(source)
-    rendered_kit_components = _rendered_application_components(source)
-    if design is not None:
-        _validate_designed_components(rendered_kit_components, design.kit_components)
-        _validate_designed_regions(source, design.regions)
-    _validate_application_styling(source)
+    if ROOT_MOUNT.search(source) is None:
+        raise ValueError("mountApp must receive the root element and a render callback")
 
 
 def _parse_application_design(source: str) -> tuple[ElementTree.Element, tuple[float, ...]]:
@@ -1060,7 +895,6 @@ def _validate_design_element(
     element: ElementTree.Element,
     ids: set[str],
     regions: list[ElementTree.Element],
-    kit_components: list[str],
 ) -> bool:
     tag = element.tag.rsplit("}", 1)[-1]
     if tag.casefold() in {"clippath", "filter", "mask"}:
@@ -1091,36 +925,18 @@ def _validate_design_element(
         if tag != "g" or APPLICATION_DESIGN_REGION.fullmatch(region) is None:
             raise ValueError("application design regions must be lowercase slugs on SVG g elements")
         regions.append(element)
-    kit_component = element.attrib.get("data-kit-component")
-    if kit_component is not None:
-        if tag != "g":
-            raise ValueError("application design data-kit-component must be on an SVG g element")
-        if not kit_component.strip():
-            raise ValueError(
-                "application design data-kit-component must name one visual ufo/kit export"
-            )
-        if APPLICATION_DESIGN_KIT_COMPONENT.fullmatch(kit_component) is None:
-            raise ValueError("application design data-kit-component must be one ComponentName")
-        if kit_component not in APPLICATION_KIT_COMPONENTS:
-            raise ValueError(
-                f"application design data-kit-component {kit_component!r} is not a visual "
-                "ufo/kit export"
-            )
-        if kit_component not in kit_components:
-            kit_components.append(kit_component)
     _validate_design_attributes(element)
     return tag in SVG_DRAWING_ELEMENTS and _visible_design_element(element, tag, attributes)
 
 
 def validate_application_design(source: str) -> ApplicationDesign:
-    """The regions, kit components, and height of one SVG that meets the design contract."""
+    """The named regions and height of one SVG that meets the design contract."""
 
     root, view_box = _parse_application_design(source)
     regions: list[ElementTree.Element] = []
-    kit_components: list[str] = []
     ids: set[str] = set()
     drawing_elements = sum(
-        _validate_design_element(element, ids, regions, kit_components) for element in root.iter()
+        _validate_design_element(element, ids, regions) for element in root.iter()
     )
     if drawing_elements == 0:
         raise ValueError("application design must contain SVG drawing elements only")
@@ -1135,8 +951,4 @@ def validate_application_design(source: str) -> ApplicationDesign:
         for descendant in region.iter()
     ):
         raise ValueError("application design regions must not be nested")
-    if not kit_components:
-        raise ValueError(
-            "application design requires data-kit-component on at least one SVG g element"
-        )
-    return ApplicationDesign(names, tuple(kit_components), int(view_box[3]))
+    return ApplicationDesign(names, int(view_box[3]))

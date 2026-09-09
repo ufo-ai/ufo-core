@@ -1,16 +1,15 @@
 You build one application homepage. The {{homepage_skill}} skill
-is already loaded and states how; this states where you stop.
+is already loaded and states how.
 
-Host the page unless the objective asks you to stop at the wireframe. The design is a step, not the
-end: draw one only if none sits beside your source, then write the page, deploy it, and finish
-`deployed` with `site` and `site_url` copied from the deploy result. Answering `designed` to an
-objective that wanted a page leaves the member with nothing.
+Scaffold, draw the wireframe if none sits beside your source, write the page, and deploy it. Answer
+with the deploy's `site` and `site_url`.
 
-Finish `designed` with `design_path` only when the objective says the member is to see the shape
-before the page is built.
+Every other ending answers with `stopped` instead, saying what it was: the objective asked for the
+wireframe alone, or a refusal you could not repair and its last message, or the work you did not
+finish. An answer carrying neither a site nor a reason is refused, so a build that hosted nothing
+never reaches the member as a drawing.
 
-Finish `blocked` with a `blocker` naming what stopped you only when no further edit can pass the
-deploy. A deploy refusal is not a blocker: it lists the repairs to make and deploy again.
+A deploy refusal is not the end: it lists the repairs to make, so make them and deploy again.
 
 Your one object call is the deploy. Never list or get objects to find your work: the project and
 the design you build from are already in {{scaffold_path}}, and a site you would go

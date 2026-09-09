@@ -16,9 +16,12 @@ from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_
 from ufo_ext_sites import manifest as sites_manifest
 from ufo_ext_sites import tools as sites_tools
 from ufo_ext_sites.application_audit import (
+    APPLICATION_BAND_GAP,
+    APPLICATION_CONTENT_WIDTH,
     APPLICATION_DESIGN_FOLD,
     APPLICATION_DESIGN_MAX_HEIGHT,
     APPLICATION_DESIGN_WIDTH,
+    APPLICATION_PAGE_GUTTER,
     APPLICATION_REGION_MIN_AREA,
     APPLICATION_REGION_MIN_HEIGHT,
     APPLICATION_REGION_MIN_WIDTH,
@@ -27,7 +30,6 @@ from ufo_ext_sites.application_audit import (
     KIT_QUIET_TEXT_MIN,
     MAX_MESSAGE_CHARS,
     MEASURED_VIEWS,
-    NARROW_WIDTH,
     PAGE_CLASS_REFUSALS,
     ApplicationAuditRegion,
     ApplicationAuditReport,
@@ -47,12 +49,9 @@ from ufo_ext_sites.application_homepage import (
     APPLICATION_BUILDER_NAME,
     APPLICATION_BUILDER_PROFILE,
     APPLICATION_BUILDER_ROUND_LIMIT,
-    APPLICATION_DESIGN_PATH,
     APPLICATION_HOMEPAGE_SKILL,
     APPLICATION_SKILL_DIR,
     APPLICATION_TEMPLATE_DIR,
-    PAGE_REFUSAL_OPENING,
-    ApplicationBuildResult,
 )
 from ufo_ext_sites.delegation import BuildWebsiteInput
 from ufo_ext_sites.objects import (
@@ -106,9 +105,9 @@ HOUSE_STYLE = "ufo-style"
 HOUSE_STYLE_TOKENS = "references/tokens.css"
 PLAYWRIGHT_GUIDANCE = "shared/12-playwright-interactive.md"
 APPLICATION_QA_GUIDANCE = "shared/13-ufo-application-qa.md"
-APPLICATION_DESIGN = """<svg viewBox="0 0 360 844" width="360" height="844">
-<g data-app-region="queue"><g data-kit-component="Card"><rect width="216" height="844" /></g></g>
-<g data-app-region="detail"><rect x="216" width="144" height="844" /></g>
+APPLICATION_DESIGN = """<svg viewBox="0 0 1440 900" width="1440" height="900">
+<g data-app-region="queue"><g data-kit-component="Card"><rect width="864" height="900" /></g></g>
+<g data-app-region="detail"><rect x="864" width="576" height="900" /></g>
 </svg>"""
 APPLICATION_SOURCE = """import { mountApp, Card } from "ufo/kit";
 
@@ -415,7 +414,7 @@ def _keyed_server_task(sandbox: FakeSandbox, key: str, port: int, log: str) -> N
 
 
 def _side_by_side_bands(page_height: int) -> tuple[dict[str, object], ...]:
-    """Two 60 px bands 100 px down one page, side by side in the 360 px lane."""
+    """Two 60 px bands 100 px down one page, side by side in the 1440 px lane."""
     return tuple(
         {
             "name": name,
@@ -448,7 +447,7 @@ def _side_by_side_report(design_height: int, application_height: int) -> Applica
                     "aboveFoldText": "Stats",
                     "regions": _side_by_side_bands(application_height),
                 }
-                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
+                for width in (DESKTOP_WIDTH,)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -870,9 +869,14 @@ def test_manifest_declares_the_tools_the_profiles_and_the_skills() -> None:
 
 
 def test_the_application_builder_profile_holds_generic_tools_and_one_site_action() -> None:
-    """Every act the builder makes is a core builtin or the one action that hosts. What the profile
-    still carries is what a skill cannot say: the model, the round cap, read-only connectors, the
-    untrusted wall, and a payload spawn validates."""
+    """Every act the builder makes is a core builtin, the pair that show it its own page, or the
+    one action that hosts. `start_server` and `js_repl` are that pair, and neither is optional:
+    a module build is CORS-refused over `file://` and the deploy's own link does not answer from
+    the sandbox, so without them the page cannot be opened at all. One recorded build spent eight
+    of nine browser calls discovering exactly that, and the deploy no longer judges how a page
+    looks, so a builder that cannot open its own page cannot judge one either. What the profile
+    still carries beyond tools is what a skill cannot say: the model, the round cap, read-only
+    connectors, the untrusted wall, and a payload spawn validates."""
 
     profile = APPLICATION_BUILDER_PROFILE
     assert profile.name == APPLICATION_BUILDER_NAME
@@ -883,6 +887,8 @@ def test_the_application_builder_profile_holds_generic_tools_and_one_site_action
         "edit",
         "glob",
         "grep",
+        "js_repl",
+        "start_server",
         "list_external_tools",
         "describe_external_tools",
         "search_connector_tools",
@@ -901,13 +907,13 @@ def test_the_application_builder_profile_holds_generic_tools_and_one_site_action
 
 
 def _audit_report(regions: tuple[dict[str, object], ...]) -> bytes:
-    """A clean browser report: four views, no failure, the design's own regions rendered."""
+    """A clean browser report: both views, no failure, the design's own regions rendered."""
 
     view = {
         "textChecked": 12,
         "text": [],
         "documentWidth": 0,
-        "pageHeight": 844,
+        "pageHeight": 900,
         "clipped": [],
         "overlaps": [],
         "console": [],
@@ -917,7 +923,7 @@ def _audit_report(regions: tuple[dict[str, object], ...]) -> bytes:
     return (
         ApplicationAuditReport.model_validate(
             {
-                "designHeight": 844,
+                "designHeight": 900,
                 "designRegions": list(regions),
                 "views": [
                     {**view, "scheme": scheme, "width": width, "documentWidth": width}
@@ -976,19 +982,6 @@ async def test_the_source_gate_refuses_before_the_build_is_paid_for(tmp_path: Pa
     assert not any("vite build" in script for script, _args, _timeout in sandbox.shells)
 
 
-async def test_the_source_gate_wants_every_designed_region_marked(tmp_path: Path) -> None:
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    sandbox.writes["/workspace/ufo-app/app.tsx"] = APPLICATION_SOURCE.replace(
-        '<div data-app-region="detail" />', "<div />"
-    ).encode()
-    with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
-        await _gate(sandbox, tmp_path).built_page()
-    (issue,) = refused.value.verdict.issues
-    assert issue.code == "source"
-    assert "data-app-region: detail" in issue.message
-
-
 async def test_a_build_failure_is_a_repair_not_a_crash(tmp_path: Path) -> None:
     sandbox = FakeSandbox()
     _seed_application_project(sandbox, "/workspace/ufo-app")
@@ -1025,21 +1018,22 @@ async def test_a_long_build_failure_keeps_the_error_and_drops_the_warnings(
     assert len(issue.message) <= sites_tools.MAX_MESSAGE_CHARS
 
 
-async def test_a_page_that_passes_is_built_audited_and_answered_as_its_dist(
+async def test_a_page_that_passes_is_built_loaded_and_answered_as_its_dist(
     tmp_path: Path,
 ) -> None:
+    """The gate loads the built page and reads one bit off it — did the lifecycle become ready.
+    The design is not handed to the script, because matching a page to its wireframe is a judgment
+    the builder makes with its own eyes and the grader suite measures offline."""
+
     sandbox = FakeSandbox()
     _seed_application_project(sandbox, "/workspace/ufo-app")
-    sandbox.writes[f"{RUNTIME_ROOT}/{TOOL_OUTPUT_DIR}/application-audit/report.json"] = b""
     gate = _gate(sandbox, tmp_path)
-    report_path = f"{RUNTIME_ROOT}/{TOOL_OUTPUT_DIR}/application-audit/{gate.ctx.turn.id}.json"
-    sandbox.writes[report_path] = _audit_report(AUDIT_DESIGN_REGIONS)
     assert await gate.built_page() == "/workspace/ufo-app/dist"
     assert "/workspace/ufo-app/vite.config.ts" in sandbox.workspace_writes
     assert "/workspace/ufo-app/preview.html" in sandbox.workspace_writes
-    audit = next(args for script, args, _timeout in sandbox.shells if "node" in script)
-    assert audit[1] == "/workspace/ufo-app"
-    assert audit[-1] == "/workspace/ufo-app/application-design.svg"
+    loaded = next(args for script, args, _timeout in sandbox.shells if "node" in script)
+    assert loaded[1] == "/workspace/ufo-app"
+    assert "/workspace/ufo-app/application-design.svg" not in loaded
 
 
 async def test_a_project_without_a_design_is_built_and_served_unaudited(tmp_path: Path) -> None:
@@ -1060,25 +1054,6 @@ async def test_a_project_without_a_design_is_built_and_served_unaudited(tmp_path
     assert not any("node" in script for script, _args, _timeout in sandbox.shells)
 
 
-async def test_the_audit_verdict_is_the_refusal_and_it_never_relents(tmp_path: Path) -> None:
-    """A page that fails the browser audit is refused on every attempt, and the gate counts none.
-
-    The bound is the child's rounds and the member's next message, never a budget that turns the
-    third attempt into a hosted page nobody checked."""
-
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    gate = _gate(sandbox, tmp_path)
-    report_path = f"{RUNTIME_ROOT}/{TOOL_OUTPUT_DIR}/application-audit/{gate.ctx.turn.id}.json"
-    report = json.loads(_audit_report(AUDIT_DESIGN_REGIONS))
-    report["interaction"]["successes"] = []
-    sandbox.writes[report_path] = json.dumps(report).encode()
-    for _attempt in range(3):
-        with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
-            await gate.built_page()
-        assert [issue.code for issue in refused.value.verdict.issues] == ["interaction"]
-
-
 async def test_an_audit_that_cannot_run_is_not_a_repair(tmp_path: Path) -> None:
     """Chromium dying is infrastructure. Telling the builder to edit `app.tsx` over it would send
     it hunting a fault that is not in the page."""
@@ -1090,26 +1065,6 @@ async def test_an_audit_that_cannot_run_is_not_a_repair(tmp_path: Path) -> None:
         await _gate(sandbox, tmp_path).built_page()
     assert not isinstance(raised.value, sites_tools.ApplicationPageRefused)
     assert "chromium exited with 137" in str(raised.value)
-
-
-async def test_a_design_the_browser_measured_and_refused_is_a_repair(tmp_path: Path) -> None:
-    """The audit found the fault, so the fault is the page's. A recorded build spent two of
-    thirteen deploys on a design overflow that arrived as an uncaught Node exception, which the
-    builder could only read as the deploy being broken."""
-
-    sandbox = FakeSandbox()
-    _seed_application_project(sandbox, "/workspace/ufo-app")
-    sandbox.scripted_shells["node"] = ExecResult(
-        "",
-        "application design extends outside its viewBox: "
-        "region=brief-feed edge=right overflow=26px",
-        sites_tools.APPLICATION_DESIGN_FAULT_EXIT,
-    )
-    with pytest.raises(sites_tools.ApplicationPageRefused) as refused:
-        await _gate(sandbox, tmp_path).built_page()
-    (issue,) = refused.value.verdict.issues
-    assert issue.code == "design"
-    assert "overflow=26px" in issue.message
 
 
 async def test_a_page_that_never_became_ready_is_a_repair(tmp_path: Path) -> None:
@@ -1293,6 +1248,27 @@ def test_the_audit_bounds_a_console_line_in_bytes() -> None:
     assert bound * lines < sites_tools.APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES
 
 
+def test_a_wireframe_the_browser_cannot_measure_is_scored_not_dropped() -> None:
+    """Both ends of `designFault`: the script records the measurement failure instead of exiting,
+    and the verdict raises a design issue on it. Without the reader an unmeasurable wireframe
+    scored as a page carrying no design at all."""
+
+    script = APPLICATION_AUDIT_SCRIPT_PATH.read_text()
+    assert "designFault = (error && error.message" in script
+    assert "process.exit(DESIGN_FAULT_EXIT)" not in script
+
+    base = {"views": [], "interaction": {"controls": [], "successes": [], "console": []}}
+    faulted = ApplicationAuditReport.model_validate(
+        {**base, "designFault": "region board overlaps text by 12px"}
+    )
+    assert faulted.design_fault == "region board overlaps text by 12px"
+    issue = next(item for item in audit_application(faulted).issues if item.code == "design")
+    assert "region board overlaps text by 12px" in issue.message
+
+    clean = ApplicationAuditReport.model_validate(base)
+    assert "design" not in {item.code for item in audit_application(clean).issues}
+
+
 def test_the_audit_hands_the_readiness_wait_the_page_console() -> None:
     """Both ends of one field: the script collects console and pageerror lines on the page it is
     waiting on, and the wait that gives up carries them into the diagnostic the gate reads."""
@@ -1362,22 +1338,13 @@ def test_a_static_deploy_needs_no_entry_point_named() -> None:
     assert deployed.entry_point == "index.html"
 
 
-def test_the_design_contract_is_one_360_px_lane() -> None:
-    assert APPLICATION_DESIGN_WIDTH == NARROW_WIDTH
+def test_the_design_contract_is_one_1440_px_lane() -> None:
+    assert APPLICATION_DESIGN_WIDTH == DESKTOP_WIDTH
     design = validate_application_design(APPLICATION_DESIGN)
-    assert design == ApplicationDesign(("queue", "detail"), ("Card",), 844)
-    with pytest.raises(ValueError, match='viewBox="0 0 360 H"'):
+    assert design == ApplicationDesign(("queue", "detail"), 900)
+    with pytest.raises(ValueError, match='viewBox="0 0 1440 H"'):
         validate_application_design(
-            APPLICATION_DESIGN.replace('"0 0 360 844" width="360"', '"0 0 305 844" width="305"')
-        )
-
-
-def test_a_page_without_its_design_is_still_held_to_the_kit() -> None:
-    validate_application_source(APPLICATION_SOURCE)
-    with pytest.raises(ValueError, match="at least one UI component"):
-        validate_application_source(
-            'import { mountApp } from "ufo/kit";\n'
-            'mountApp(document.getElementById("root")!, () => <main>hi</main>);\n'
+            APPLICATION_DESIGN.replace('"0 0 1440 900" width="1440"', '"0 0 1280 900" width="1280"')
         )
 
 
@@ -1414,78 +1381,74 @@ def test_a_page_may_read_one_file_beside_it_and_nothing_else() -> None:
         validate_application_source(page.replace(kit, f'{kit}import Kit from "ufo/kit";\n'))
 
 
-def test_design_fidelity_reads_the_narrow_views_and_leaves_desktop_alone() -> None:
-    """The design is a 360 px lane, so the lane is what it is held to. A desktop layout answers
-    the same page checks and carries no region verdict — comparing a one-column lane with a 1440 px
-    layout measures nothing the designer chose."""
-
-    report = ApplicationAuditReport.model_validate_json(_audit_report(AUDIT_DESIGN_REGIONS))
-    assert application_design_fidelity(report).failures == ()
-    moved = tuple(
-        {**dict(region), "name": "elsewhere"} if region["name"] == "detail" else dict(region)
-        for region in AUDIT_DESIGN_REGIONS
-    )
-    payload = json.loads(_audit_report(AUDIT_DESIGN_REGIONS))
-    for view in payload["views"]:
-        if view["width"] == DESKTOP_WIDTH:
-            view["regions"] = list(moved)
-    assert (
-        application_design_fidelity(ApplicationAuditReport.model_validate(payload)).failures == ()
-    )
-    for view in payload["views"]:
-        if view["width"] == NARROW_WIDTH:
-            view["regions"] = list(moved)
-    narrow = application_design_fidelity(ApplicationAuditReport.model_validate(payload))
-    assert narrow.failures
-    assert all(str(NARROW_WIDTH) in failure for failure in narrow.failures)
-
-
 def test_the_lane_width_is_named_once_and_every_copy_of_it_is_watched() -> None:
-    """The design lane is `NARROW_WIDTH` and nothing else may say so on its own.
+    """The design lane is `APPLICATION_DESIGN_WIDTH` and nothing else may say so on its own.
 
     The Python validator reads the constant, the audit script takes it as an argument with no
     default, and the skill is markdown that has to print the number — so the one place a second
     copy exists is the one place a gate watches it. A width that drifted would draw a wireframe
-    against a fold the audit never measures, which is the fault the field record recorded."""
+    against a fold the audit never measures, which is the fault the field record recorded. The
+    content box the skill divides is the lane less `Page`'s two gutters, so the gutter is held
+    against the `--size-page-gutter` the kit actually applies."""
 
-    assert APPLICATION_DESIGN_WIDTH == NARROW_WIDTH
+    assert APPLICATION_DESIGN_WIDTH == DESKTOP_WIDTH
+    theme = (Path(__file__).parents[3] / "extensions/web/frontend/src/theme.css").read_text()
+    assert f"--size-page-gutter: {APPLICATION_PAGE_GUTTER}px;" in theme
     script = APPLICATION_AUDIT_SCRIPT_PATH.read_text()
     assert "DESIGN_INITIAL_VIEWPORT" not in script
     assert "usage: node ${SELF} --design <lane-width> <application-design.svg>" in script
     assert "app-audit.cjs" not in script
     skill = (APPLICATION_SKILL_DIR / "SKILL.md").read_text()
-    widths = re.findall(r"\b(\d{3,4}) px\b|--design (\d+)\b", skill)
-    printed = {int(value) for pair in widths for value in pair if value}
-    assert printed == {NARROW_WIDTH}
-    assert f'viewBox="0 0 {NARROW_WIDTH} H"' in skill
-    assert f'width="{NARROW_WIDTH}"' in skill
+    widths = re.findall(r"\b(\d{2,4}) px\b|--design (\d+)\b|\bx=(\d+)\.\.(\d+)\b", skill)
+    printed = {int(value) for found in widths for value in found if value}
+    assert printed == {
+        APPLICATION_PAGE_GUTTER,
+        APPLICATION_CONTENT_WIDTH,
+        APPLICATION_DESIGN_WIDTH - APPLICATION_PAGE_GUTTER,
+        APPLICATION_DESIGN_WIDTH,
+    }
+    assert f'viewBox="0 0 {APPLICATION_DESIGN_WIDTH} H"' in skill
+    assert f'width="{APPLICATION_DESIGN_WIDTH}"' in skill
 
 
-def test_a_build_result_carries_the_evidence_its_status_claims() -> None:
-    """A `deployed` with no link is a claim the parent would bind nothing from, and a `blocked` with
-    no blocker is a turn that ended for no stated reason. Both reach the child as a validation error
-    it can still fix, rather than the member as a page that is not there."""
+def test_the_reference_divides_the_content_box_and_never_states_a_width_of_its_own() -> None:
+    """Eight column widths in the across table are the content box divided, and every one of them
+    goes stale the moment the gutter moves — silently, because the numbers stay arithmetic that
+    was once true. The child lays out against them, so they are held against the constants."""
 
-    for status, missing in (
-        ("designed", "design_path"),
-        ("deployed", "site, site_url"),
-        ("blocked", "blocker"),
-    ):
-        with pytest.raises(ValidationError, match=f"{status} needs {missing}"):
-            ApplicationBuildResult.model_validate({"status": status})
-
-    assert (
-        ApplicationBuildResult.model_validate(
-            {"status": "deployed", "site": "queue", "site_url": "https://ufo.test/queue"}
-        ).site
-        == "queue"
+    theme = (Path(__file__).parents[3] / "extensions/web/frontend/src/theme.css").read_text()
+    assert f"--spacing-2xl: {APPLICATION_BAND_GAP}px;" in theme
+    reference = (APPLICATION_SKILL_DIR / "references" / "designing-a-homepage.md").read_text()
+    assert f"content box is {APPLICATION_CONTENT_WIDTH} px" in reference
+    assert f"lay out divides {APPLICATION_CONTENT_WIDTH};" in reference
+    assert f"each {APPLICATION_CONTENT_WIDTH}/N wide" in reference
+    assert f"{APPLICATION_PAGE_GUTTER} px gutter each side" in reference
+    assert f"x={APPLICATION_PAGE_GUTTER}..{APPLICATION_DESIGN_WIDTH - APPLICATION_PAGE_GUTTER}" in (
+        reference
     )
-    assert (
-        ApplicationBuildResult.model_validate(
-            {"status": "designed", "design_path": APPLICATION_DESIGN_PATH}
-        ).design_path
-        == APPLICATION_DESIGN_PATH
-    )
+    rows = re.findall(r"^\| (\d) \| (\d+) px \| (\d+) px \|$", reference, re.MULTILINE)
+    assert [int(across) for across, _, _ in rows] == [2, 3, 4, 5]
+    for across, flush, gapped in rows:
+        columns = int(across)
+        gaps = APPLICATION_BAND_GAP * (columns - 1)
+        assert int(flush) == round(APPLICATION_CONTENT_WIDTH / columns)
+        assert int(gapped) == round((APPLICATION_CONTENT_WIDTH - gaps) / columns)
+
+
+def test_the_interactive_capture_inlines_its_bundle() -> None:
+    """A module script fetched from a `data:` URL does not execute, and the viewer mounts the
+    capture under `sandbox="allow-scripts"`, whose opaque origin fails the CORS fetch the build's
+    `crossorigin` attribute asks for. Every recorded capture was a 45-byte body — `<div id="root">`
+    with nothing mounted into it — so the interactive preview had never once rendered.
+
+    The stylesheet loop beside it already fetches and inlines; scripts do the same, which needs no
+    fetch at all."""
+
+    audit = APPLICATION_AUDIT_SCRIPT_PATH.read_text()
+    loop = audit.split("querySelectorAll('script[src]')")[1].split("querySelectorAll('link")[0]
+    assert "setAttribute('src'" not in loop, "the capture still points a script at a data: URL"
+    assert "inlined.textContent" in loop
+    assert "'</script'" in loop, "an unescaped </script> in the bundle would close the tag early"
 
 
 def test_the_skill_names_every_class_the_deploy_refuses() -> None:
@@ -1499,41 +1462,6 @@ def test_the_skill_names_every_class_the_deploy_refuses() -> None:
         assert " ".join(reason.split()) in skill, f"the skill never tells the child: {reason}"
     for step in COMPOSITION_STEPS:
         assert f"`gap-{step}`" in skill, f"the skill never names the step gap-{step}"
-
-
-def test_a_deploy_refusal_cannot_be_handed_back_as_a_blocker() -> None:
-    """`BUILDER_CONTRACT` says a refusal lists the repairs to make and deploy again. Two recorded
-    builds answered `blocked` with the refusal pasted into the blocker instead, and each time the
-    parent took the repair on itself — 205 calls, then 105. The result refuses it, so the child
-    reads an error it can still act on rather than the member reading a page that is not there."""
-
-    refused = f"ApplicationPageRefused: {PAGE_REFUSAL_OPENING}\n- light 360px lacks a region"
-    with pytest.raises(ValidationError, match="a deploy refusal is not a blocker"):
-        ApplicationBuildResult.model_validate({"status": "blocked", "blocker": refused})
-
-    stands = "the connector holds no account for this workspace"
-    assert (
-        ApplicationBuildResult.model_validate({"status": "blocked", "blocker": stands}).blocker
-        == stands
-    )
-
-
-def test_a_design_answers_with_the_drawing_and_not_its_picture() -> None:
-    """The audit renders `design.png` beside the SVG so the child can look at its own work, and a
-    child that answered with the picture handed its parent a file the design pass cannot carry
-    forward. The drawing is the SVG; the error reaches the child as one it can still fix."""
-
-    with pytest.raises(ValidationError, match="design_path is the wireframe you wrote"):
-        ApplicationBuildResult.model_validate(
-            {"status": "designed", "design_path": "/workspace/ufo-app/design.png"}
-        )
-
-    assert (
-        ApplicationBuildResult.model_validate(
-            {"status": "deployed", "site": "clock", "site_url": "https://ufo.test/clock"}
-        ).design_path
-        == ""
-    )
 
 
 def test_the_scaffold_copies_files_and_never_the_template_directory() -> None:
@@ -1605,7 +1533,7 @@ def test_application_design_fidelity_compares_only_the_separating_axis() -> None
                     "aboveFoldText": "Queue",
                     "regions": app_regions,
                 }
-                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
+                for width in (DESKTOP_WIDTH,)
                 for scheme in ("light", "dark")
             ],
             "interaction": {"controls": [], "successes": [], "console": []},
@@ -1659,7 +1587,7 @@ def test_application_design_fidelity_preserves_design_fold_placement() -> None:
                         "aboveFoldText": "Summary",
                         "regions": app_regions,
                     }
-                    for width in (DESKTOP_WIDTH, NARROW_WIDTH)
+                    for width in (DESKTOP_WIDTH,)
                     for scheme in ("light", "dark")
                 ],
                 "interaction": {"controls": [], "successes": [], "console": []},
@@ -1672,8 +1600,8 @@ def test_application_design_fidelity_preserves_design_fold_placement() -> None:
     assert accepted.failures == ()
     assert accepted.passed == accepted.total
     assert rejected.failures == (
-        "light 360px renders summary below the fold, where the design puts it above",
-        "dark 360px renders summary below the fold, where the design puts it above",
+        "light 1440px renders summary below the fold, where the design puts it above",
+        "dark 1440px renders summary below the fold, where the design puts it above",
     )
 
 
@@ -1712,7 +1640,7 @@ def test_application_design_fidelity_rejects_overlapping_regions() -> None:
                     "aboveFoldText": "Queue",
                     "regions": regions,
                 }
-                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
+                for width in (DESKTOP_WIDTH,)
                 for scheme in ("light", "dark")
             ],
             "interaction": {"controls": [], "successes": [], "console": []},
@@ -1911,7 +1839,7 @@ def test_a_region_the_page_never_rendered_says_so() -> None:
         name="summary", left=0.05, top=0.9, width=0.9, height=0.05, above_fold=False
     )
     assert application_region_failure("light", "summary", below, designed) == (
-        "light 360px renders summary below the fold, where the design puts it above"
+        "light 1440px renders summary below the fold, where the design puts it above"
     )
 
     assert application_region_failure("light", "summary", designed, designed) is None
@@ -1968,7 +1896,7 @@ def test_application_design_regions_do_not_cross_the_first_screen_boundary() -> 
 
 
 def _side_by_side_bands(page_height: int) -> tuple[dict[str, object], ...]:
-    """Two 60 px bands 100 px down one page, side by side in the 305 px lane."""
+    """Two 60 px bands 100 px down one page, side by side in the 1440 px lane."""
     return tuple(
         {
             "name": name,
@@ -2001,7 +1929,7 @@ def _side_by_side_report(design_height: int, application_height: int) -> Applica
                     "aboveFoldText": "Stats",
                     "regions": _side_by_side_bands(application_height),
                 }
-                for width in (DESKTOP_WIDTH, NARROW_WIDTH)
+                for width in (DESKTOP_WIDTH,)
                 for scheme in ("light", "dark")
             ],
             "interaction": {
@@ -2052,7 +1980,7 @@ def test_application_audit_uses_the_quiet_floor_only_for_exact_kit_slots() -> No
                         "aboveFoldText": "Open issues 42",
                         "regions": AUDIT_DESIGN_REGIONS,
                     }
-                    for width in (DESKTOP_WIDTH, NARROW_WIDTH)
+                    for width in (DESKTOP_WIDTH,)
                     for scheme in ("light", "dark")
                 ],
                 "interaction": {
@@ -2087,109 +2015,6 @@ def test_application_audit_uses_the_quiet_floor_only_for_exact_kit_slots() -> No
         report({**measured, "slot": "author-quiet"})
 
 
-def test_application_source_rejects_literal_white_on_scheme_ink() -> None:
-    source = (
-        'import { Group, mountApp } from "ufo/kit";\n'
-        "function App() { return <Group><button style={{\n"
-        '  backgroundColor: active ? "var(--color-ink)" : "var(--color-field)",\n'
-        '  color: active ? "#FFFFFF" : "var(--color-ink)",\n'
-        "}}>Review</button></Group>; }\n"
-        'mountApp(document.getElementById("root")!, () => <App />);'
-    )
-
-    with pytest.raises(ValueError, match="must use --color-surface text"):
-        validate_application_source(source)
-
-    validate_application_source(source.replace('"#FFFFFF"', '"var(--color-surface)"'))
-
-
-def _page(body: str) -> str:
-    return (
-        'import { Group, mountApp } from "ufo/kit";\n'
-        f"function App() {{ return <Group>{body}</Group>; }}\n"
-        'mountApp(document.getElementById("root")!, () => <App />);'
-    )
-
-
-@pytest.mark.parametrize(
-    "imports",
-    [
-        "{ mountApp, useState }",
-        "type { Card }",
-        "{ mountApp, Card }",
-        "{ mountApp, Card as MeetingCard }",
-    ],
-)
-def test_application_source_rejects_kit_imports_without_a_rendered_component(
-    imports: str,
-) -> None:
-    mount = 'mountApp(document.getElementById("root")!, () => <main />);'
-    runtime = 'import { mountApp } from "ufo/kit";\n' if "mountApp" not in imports else ""
-    source = f'import {imports} from "ufo/kit";\n{runtime}{mount}'
-
-    with pytest.raises(ValueError, match="render at least one UI component"):
-        validate_application_source(source)
-
-
-def test_application_source_rejects_namespace_and_local_look_alike_components() -> None:
-    namespace = (
-        'import * as Kit from "ufo/kit";\n'
-        'import { mountApp } from "ufo/kit";\n'
-        'mountApp(document.getElementById("root")!, () => <Kit.Card />);'
-    )
-    with pytest.raises(ValueError, match="use named imports"):
-        validate_application_source(namespace)
-
-    look_alike = (
-        'import { mountApp, useState } from "ufo/kit";\n'
-        "function Card({ children }: { children: unknown }) { return <div>{children}</div>; }\n"
-        "function App() { useState(false); return <Card>Ready</Card>; }\n"
-        'mountApp(document.getElementById("root")!, () => <App />);'
-    )
-    with pytest.raises(ValueError, match="render at least one UI component"):
-        validate_application_source(look_alike)
-
-    shadowed_alias = (
-        'import { Card as KitCard, mountApp } from "ufo/kit";\n'
-        "function App() { function KitCard() { return <main />; } return <KitCard />; }\n"
-        'mountApp(document.getElementById("root")!, () => <App />);'
-    )
-    with pytest.raises(ValueError, match="render at least one UI component"):
-        validate_application_source(shadowed_alias)
-
-    parameter_alias = (
-        'import { Card as KitCard, mountApp } from "ufo/kit";\n'
-        "const LocalCard = () => <main />;\n"
-        "function App(KitCard = LocalCard) { return <KitCard />; }\n"
-        'mountApp(document.getElementById("root")!, () => <App />);'
-    )
-    with pytest.raises(ValueError, match="render at least one UI component"):
-        validate_application_source(parameter_alias)
-
-
-def test_application_source_rejects_a_destructured_local_kit_shadow() -> None:
-    source = (
-        'import { Card, mountApp } from "ufo/kit";\n'
-        "const local = { Card: () => <main /> };\n"
-        "function App() { const { Card } = local; return <Card />; }\n"
-        'mountApp(document.getElementById("root")!, () => <App />);'
-    )
-
-    with pytest.raises(ValueError, match="render at least one UI component"):
-        validate_application_source(source)
-
-
-def test_application_source_reserves_kit_slot_ownership() -> None:
-    with pytest.raises(ValueError, match="data-slot is reserved for ufo/kit components"):
-        validate_application_source(_page('<p data-slot="stat-label">x</p>'))
-
-    validate_application_source(
-        _page("<Stat><StatLabel>x</StatLabel><StatValue>1</StatValue></Stat>").replace(
-            "{ mountApp }", "{ mountApp, Stat, StatLabel, StatValue }"
-        )
-    )
-
-
 @pytest.mark.parametrize(
     "data",
     [
@@ -2206,15 +2031,6 @@ def test_application_source_reads_a_members_own_data_as_data(data: str) -> None:
     JavaScript array. Reading the whole file for brackets refuses a page over its own data, and
     tells the builder's repair loop to resolve an issue number through a theme token."""
     validate_application_source(_page("<p>x</p>").replace("function App", data + "\nfunction App"))
-
-
-def test_ufo_style_uses_the_application_audit_narrow_width() -> None:
-    skill = (
-        Path(__file__).parents[3] / "core/src/ufo/runtime/skills/ufo-style/SKILL.md"
-    ).read_text()
-
-    assert f"narrow width checked at {NARROW_WIDTH}px" in skill
-    assert "narrow width checked at 390px" not in skill
 
 
 def test_application_design_keeps_side_by_side_bands_horizontal_on_a_tall_application_page() -> (

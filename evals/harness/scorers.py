@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from evals.harness.artifact_checks import (
@@ -292,6 +293,15 @@ def local_fs_scorer() -> Grader:
     return DescribedGrader(
         "a local file/shell tool completes successfully and no web tool is attempted", grade
     )
+
+
+def spawns_profile(call: ToolInvocation, name: str) -> bool:
+    """The two spellings the dispatcher resolves to one profile: `profile:<name>` is exact, and a
+    bare `<name>` reaches the same child unless a workspace agent shares it, where the spawn is
+    refused as ambiguous instead. Matching only the qualified form grades spelling, not the
+    delegation."""
+    target = str(call.arguments.get("target") or "")
+    return target in {f"profile:{name}", name}
 
 
 def skill_scorer(expected: str, distractor: str) -> Grader:
@@ -639,6 +649,19 @@ def delegation_only_scorer(forbidden: tuple[str, ...], *, reads_allowed: bool = 
 
     reach = "changes no checkout" if reads_allowed else "reaches no checkout"
     return DescribedGrader(f"the evaluated turn {reach} with {', '.join(forbidden)} itself", grade)
+
+
+def scored_only(grader: Grader) -> Grader:
+    """Run a grader for its evidence and its reason, and never fail a case on it.
+
+    A gating criterion decides whether the work counted at all; this one reports and leaves the
+    verdict to the dimensions a member would notice. Use it where the criterion measures how a
+    result was reached rather than what the result is."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        return replace(await grader(output), passed=True)
+
+    return DescribedGrader(grading_statement(grader), grade)
 
 
 def combine(*graders: Grader) -> Grader:

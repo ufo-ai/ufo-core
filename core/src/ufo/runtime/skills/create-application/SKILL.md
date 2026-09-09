@@ -100,8 +100,8 @@ holds how a page is built — and take the drawing yourself:
 ```
 spawn("profile:ufo_application_builder",
       {objective: <the whole application prompt, then what the page shows, and that you want the
-                   wireframe alone for the member to approve>})   -> designed, design_path
-share_file({files: [{file_path: <design_path>}]})
+                   wireframe alone for the member to approve>})   -> stopped, it drew only
+share_file({files: [{file_path: "/workspace/ufo-app/application-design.svg"}]})
 ask_user(`Build it`, `Change the design`)
 ```
 
@@ -144,7 +144,7 @@ member never gets a page:
 ```
 spawn("profile:ufo_application_builder",
       {objective: <the whole application prompt, then: build and host the page from the accepted
-                   design already at /workspace/ufo-app, and finish `deployed`>})
+                   design already at /workspace/ufo-app, and host it>})
 ```
 
 Then bind what it hosted to the application you just made:
@@ -156,16 +156,6 @@ object_action(kind="agent", name=<the app name>, action="set_homepage",
 
 Give the member the link in the closing reply. A blocked build is stated plainly and leaves the
 application created — its page is built from its own conversation later.
-
-## Say what it holds nothing of
-
-Nothing else will ever tell the member the new application reaches nothing, so close the turn with
-what it still needs and the one repair you can make from here: attach an account the workspace
-already holds by applying `connector_grant` with `agent:` set to the new name, which asks for no
-new sign-in. That repair runs on the workspace's main agent alone.
-
-Skills and sources attach only from inside the new application's own conversation. Send the member
-there instead of trying from this one.
 
 ## Traps
 

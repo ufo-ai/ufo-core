@@ -69,7 +69,8 @@ def app_audit(
                 f'>> "$capture/{name}-design.html"\n'
                 f"node /tmp/ufo-app-bench-audit.cjs --design {APPLICATION_DESIGN_WIDTH} "
                 f'"$capture/{name}-design.svg" '
-                f'> "$capture/{name}-design-regions.json"\n'
+                f'> "$capture/{name}-design-regions.json" '
+                f'|| printf %s [] > "$capture/{name}-design-regions.json"\n'
             )
         )
         + compile_command

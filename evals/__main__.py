@@ -274,11 +274,14 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="copy durable SWE-bench patches into a submissions directory without rerunning",
     )
-    parser.add_argument("--only", nargs="*", default=(), help="run only the named suites")
+    parser.add_argument(
+        "--only", nargs="*", action="extend", default=None, help="run only the named suites"
+    )
     parser.add_argument(
         "--case",
         nargs="*",
-        default=(),
+        action="extend",
+        default=None,
         help="run only the named cases within the --only suites",
     )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="run archive directory")
@@ -476,7 +479,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--run-id requires --budget-usd")
     if args.fresh_workspace and args.budget_usd is None:
         parser.error("--fresh-workspace requires --budget-usd")
-    names = tuple(args.only)
+    names = tuple(args.only or ())
+    args.case = tuple(args.case or ())
     if args.case and not names:
         parser.error("--case requires --only naming the suites to narrow")
     if (args.memory_100 is None) != (args.memory_100_state is None):

@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from ufo_ext_sites.application_audit import DESKTOP_WIDTH, NARROW_WIDTH
+from ufo_ext_sites.application_audit import DESKTOP_WIDTH
 from ufo_testsupport.plugin import docker_or_fail
 
 from evals.sandbox_image import SandboxImagePlan
@@ -264,9 +264,10 @@ def test_root_cli_writes_ordered_outputs_and_closes_on_success_and_failure(
     (app / "app.webmanifest").write_text('{"name":"Audit fixture"}')
     (dist / "assets" / "app.css").write_text("body{color:#111;background:#fff}")
     design = (
-        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 844" width="360" height="844">'
-        b'<g data-app-region="queue"><rect width="170" height="844" /></g>'
-        b'<g data-app-region="detail"><rect x="190" width="170" height="844" /></g>'
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" '
+        b'width="1440" height="900">'
+        b'<g data-app-region="queue"><rect width="680" height="900" /></g>'
+        b'<g data-app-region="detail"><rect x="760" width="680" height="900" /></g>'
         b"</svg>"
     )
     (tmp_path / "accepted-design.svg").write_bytes(design)
@@ -275,12 +276,12 @@ if node /fixture/audit_application.cjs \
   http://127.0.0.1:49123/preview.html \
   /tmp/refused.json /tmp/refused-light.png /tmp/refused-dark.png \
   /tmp/refused-interactive.html /tmp/refused-static.html \
-  360 /fixture/accepted-design.svg \
+  1440 /fixture/accepted-design.svg \
   >/tmp/refused.out 2>/tmp/refused.err; then exit 11; fi
 node /fixture/audit_application.cjs /fixture/app \
   /fixture/report.json /fixture/light.png /fixture/dark.png \
   /fixture/interactive.html /fixture/static.html \
-  360 /fixture/accepted-design.svg
+  1440 /fixture/accepted-design.svg
 python3 - <<'PY'
 import json
 from urllib.error import URLError
@@ -298,7 +299,7 @@ sed 's|/assets/app.css|/missing.css|' /fixture/complete.html > /fixture/app/dist
 if node /fixture/audit_application.cjs /fixture/app \
   /fixture/missing-report.json /fixture/missing-light.png /fixture/missing-dark.png \
   /fixture/missing-interactive.html /fixture/missing-static.html \
-  360 /fixture/accepted-design.svg \
+  1440 /fixture/accepted-design.svg \
   >/fixture/missing.out 2>/fixture/missing.err; then
   exit 14
 else
@@ -313,7 +314,7 @@ if node /fixture/audit_application.cjs /fixture/app \
   /fixture/missing-manifest-report.json /fixture/missing-manifest-light.png \
   /fixture/missing-manifest-dark.png /fixture/missing-manifest-interactive.html \
   /fixture/missing-manifest-static.html \
-  360 /fixture/accepted-design.svg \
+  1440 /fixture/accepted-design.svg \
   >/fixture/missing-manifest.out 2>/fixture/missing-manifest.err; then
   exit 15
 else
@@ -328,7 +329,7 @@ printf '%s' '<!doctype html><p>No lifecycle</p>' > /fixture/app/dist/index.html
 if timeout 25 node /fixture/audit_application.cjs /fixture/app \
   /fixture/failed-report.json /fixture/failed-light.png /fixture/failed-dark.png \
   /fixture/failed-interactive.html /fixture/failed-static.html \
-  360 /fixture/accepted-design.svg; then
+  1440 /fixture/accepted-design.svg; then
   exit 13
 else
   test "$?" -eq 3
@@ -359,8 +360,6 @@ fi
     assert [(view["scheme"], view["width"]) for view in report["views"]] == [
         ("light", DESKTOP_WIDTH),
         ("dark", DESKTOP_WIDTH),
-        ("light", NARROW_WIDTH),
-        ("dark", NARROW_WIDTH),
     ]
     measured = report["designRegions"]
     assert [region["name"] for region in measured] == ["queue", "detail"]

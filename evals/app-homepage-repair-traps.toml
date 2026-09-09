@@ -27,8 +27,5 @@ old = """- Write the page for a member who has nothing in it yet, because that i
   nothing is measured as missing however carefully its slug is marked, and a read through data that
   is not there throws before the page mounts. Two recorded builds lost six deploys to `lacks
   visible <region>` and two more to `the page never mounted`.
-- A flex row holding text needs `min-w-0` on the child that holds it. Without it the text refuses
-  to shrink and the deploy answers `document is 361px` at a 360 px lane, or names the label it
-  clipped.
 - A `Stat` carries no border. It is already a tile; a figure divides by the space around it."""
 new = ""

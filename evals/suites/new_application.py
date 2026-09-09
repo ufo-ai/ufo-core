@@ -32,7 +32,6 @@ from ufo_ext_sites.application_homepage import (
     APPLICATION_BUILDER_NAME,
     APPLICATION_SOURCE_PATH,
     ApplicationBuildResult,
-    ApplicationBuildStatus,
     ApplicationBuildTask,
 )
 from ufo_ext_sites.store import SourceManifest, hosted_site
@@ -49,6 +48,7 @@ from evals.harness.capability import (
 )
 from evals.harness.memory_fence import forget_workspace_memory
 from evals.harness.scenario import EvalSeed, ScenarioCase, ScenarioOutcome, ScenarioUser
+from evals.harness.scorers import spawns_profile
 from evals.harness.target import CapabilityTarget
 from evals.suites.app_audit_probe import app_audit
 from evals.suites.ufo_app_bench import APP_WORKSPACE_FILES
@@ -570,23 +570,23 @@ def _carries(whole: str, part: str) -> bool:
 
 
 def _builder_spawns(
-    output: CapabilityOutput, status: ApplicationBuildStatus
+    output: CapabilityOutput, hosted: bool
 ) -> tuple[tuple[int, ToolInvocation], ...]:
-    """Builder spawns whose child finished with this status.
+    """Builder spawns that came back with a site, or that stopped at the drawing.
 
-    The task carries no phase — where a build stops is said in the objective — so what a spawn was
-    is read from what it returned, which is what the member got either way."""
+    Where a build stops is said in the objective, and what it did is read from what it returned —
+    a site or nothing — which is what the member got either way."""
     spawns: list[tuple[int, ToolInvocation]] = []
     for index, call in enumerate(output.calls):
         if call.name != SPAWN_TOOL or not call.succeeded:
             continue
-        if call.arguments.get("target") != BUILDER_TARGET:
+        if not spawns_profile(call, APPLICATION_BUILDER_NAME):
             continue
         try:
             result = ApplicationBuildResult.model_validate_json(unwall(call.result))
         except ValueError:
             continue
-        if result.status == status:
+        if bool(result.site) == hosted:
             spawns.append((index, call))
     return tuple(spawns)
 
@@ -605,7 +605,7 @@ def _design_pass_failure(
     create = applies[0][0]
     asks = tuple(index for index in _asks(output) if index < create)
     preview_calls = tuple(
-        (index, call) for index, call in _builder_spawns(output, "designed") if index < create
+        (index, call) for index, call in _builder_spawns(output, hosted=False) if index < create
     )
     parent_website_skill = any(
         index < create
@@ -645,8 +645,8 @@ def _design_pass_failure(
             result = ApplicationBuildResult.model_validate_json(unwall(call.result))
         except (KeyError, ValueError):
             return f"design {position + 1} returned no structured build result"
-        if result.status != "designed" or not result.design_path.endswith(".svg"):
-            return f"design {position + 1} drew no SVG wireframe"
+        if result.site:
+            return f"design {position + 1} hosted a page instead of drawing one"
         if not task.objective.strip():
             return f"design {position + 1} carried an empty objective"
         if not any(render < share < design_asks[position] for share in shares):
@@ -668,7 +668,7 @@ def _accepted_design(
     if application is None:
         return None, failure
     previews: list[tuple[int, ToolInvocation, ApplicationBuildTask, ApplicationBuildResult]] = []
-    for index, call in _builder_spawns(output, "designed"):
+    for index, call in _builder_spawns(output, hosted=False):
         if index >= application.create_index:
             continue
         try:
@@ -676,7 +676,7 @@ def _accepted_design(
             result = ApplicationBuildResult.model_validate_json(unwall(call.result))
         except (KeyError, ValueError):
             continue
-        if result.status == "designed":
+        if not result.site:
             previews.append((index, call, contract, result))
     if not previews:
         return None, "the application has no valid accepted preview before its create"
@@ -907,7 +907,7 @@ async def _homepage_journey_failure(
     if created is None:
         return failure or "no durable application exists"
     application = created.application
-    builds = _builder_spawns(output, "deployed")
+    builds = _builder_spawns(output, hosted=True)
     if len(builds) != 1:
         return f"the create turn made {len(builds)} successful build spawns"
     build_index, build = builds[0]
@@ -918,8 +918,8 @@ async def _homepage_journey_failure(
         result = ApplicationBuildResult.model_validate_json(unwall(build.result))
     except (KeyError, ValueError):
         return "the build spawn returned no structured result"
-    if result.status != "deployed":
-        return f"the build result was {result.status}: {result.blocker}"
+    if not result.site:
+        return "the build came back with no site"
     if not _carries(task.objective, application.prompt):
         return "the Gemini task omitted the created application's instructions"
     binds = tuple(
@@ -1073,7 +1073,7 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
         for call in calls
     ):
         return CapabilityVerdict(False, f"never loaded {SKILL!r}")
-    previews = _builder_spawns(outcome.output, "designed")
+    previews = _builder_spawns(outcome.output, hosted=False)
     if not previews:
         return CapabilityVerdict(False, "generated no wireframe, so the member saw nothing")
     shares = tuple(
@@ -1084,8 +1084,10 @@ async def _graded_shows_the_design(outcome: ScenarioOutcome) -> CapabilityVerdic
             result = ApplicationBuildResult.model_validate_json(unwall(preview.result))
         except ValueError:
             return CapabilityVerdict(False, f"wireframe {position + 1} returned no design result")
-        if result.status != "designed" or not result.design_path.endswith(".svg"):
-            return CapabilityVerdict(False, f"wireframe {position + 1} drew no SVG")
+        if result.site:
+            return CapabilityVerdict(
+                False, f"wireframe {position + 1} hosted a page instead of drawing one"
+            )
         if not any(share > index for share in shares):
             return CapabilityVerdict(False, f"wireframe {position + 1} was never shared")
     applies = _agent_applies(outcome.output)
@@ -1104,11 +1106,11 @@ async def _graded_shows_the_design_early(outcome: ScenarioOutcome) -> Capability
     if not visible.passed:
         return visible
     calls = outcome.output.calls
-    preview_index, preview = _builder_spawns(outcome.output, "designed")[0]
+    preview_index, preview = _builder_spawns(outcome.output, hosted=False)[0]
     if any(
         call.name == SPAWN_TOOL
         and not call.succeeded
-        and call.arguments.get("target") == BUILDER_TARGET
+        and spawns_profile(call, APPLICATION_BUILDER_NAME)
         for call in calls[:preview_index]
     ):
         return CapabilityVerdict(False, "a failed wireframe attempt preceded the shared design")
@@ -1331,9 +1333,16 @@ async def _graded_guided_revision_journey(outcome: ScenarioOutcome) -> Capabilit
     )
 
 
-def _application_repair_tool_failure(
-    first: CapabilityOutput, second: CapabilityOutput
-) -> str | None:
+def _application_repair_failure(first: CapabilityOutput, second: CapabilityOutput) -> str | None:
+    """Whether the two seeded builds are the failure-then-repair journey the case asks for."""
+    hosted = _builder_spawns(first, hosted=True)
+    stopped = _builder_spawns(first, hosted=False)
+    if hosted or not stopped:
+        return f"the failed attempt made {len(hosted)} hosting and {len(stopped)} stopped build(s)"
+    repairs = _builder_spawns(second, hosted=True)
+    retries = _builder_spawns(second, hosted=False)
+    if len(repairs) != 1 or retries:
+        return f"the repair attempt made {len(repairs)} hosting and {len(retries)} stopped build(s)"
     if not any(call.name == WRITE_TOOL for call in first.calls):
         return "the failed attempt made no initial source write"
     if any(call.call == DEPLOY_ACTION and call.succeeded for call in first.calls):
@@ -1349,27 +1358,10 @@ async def _graded_repair_journey(outcome: ScenarioOutcome) -> CapabilityVerdict:
         return failure
     if len(outcome.followups) != 2:
         return CapabilityVerdict(False, f"the journey retained {len(outcome.followups)} build(s)")
-    build_statuses: list[str] = []
-    for followup in outcome.followups:
-        calls = tuple(call for index, call in _builder_spawns(followup, "deployed") if index >= 0)
-        if not calls:
-            return CapabilityVerdict(
-                False,
-                "an application parent made no successful build call",
-            )
-        results = {call.result for call in calls}
-        if len(results) != 1:
-            return CapabilityVerdict(False, "an application parent received inconsistent results")
-        result = yaml.safe_load(results.pop())
-        if not isinstance(result, dict) or not isinstance(result.get("status"), str):
-            return CapabilityVerdict(False, "a build delegation returned no status")
-        build_statuses.append(result["status"])
-    if build_statuses != ["blocked", "deployed"]:
-        return CapabilityVerdict(False, f"build statuses were {build_statuses}")
     if any(call.call == HOMEPAGE_ACTION for call in outcome.output.calls):
         return CapabilityVerdict(False, "a Gemini worker tried to certify its own homepage")
     first, second = outcome.followups
-    if repair_failure := _application_repair_tool_failure(first, second):
+    if repair_failure := _application_repair_failure(first, second):
         return CapabilityVerdict(False, repair_failure)
     name = _agent_applies(outcome.output)[0][1]
     async with workspace_tx() as connection:

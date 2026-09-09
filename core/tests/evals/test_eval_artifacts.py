@@ -100,8 +100,6 @@ from evals.suites.ufo_app_bench import (
     INTERACTION_MIN_SUCCESSES,
     MEASURED_VIEWS,
     MEMBER_QUERIES,
-    NARROW_HEIGHT,
-    NARROW_WIDTH,
     SCHEMES,
     SETUP_CASES,
     SETUP_CONTRACTS,
@@ -521,15 +519,21 @@ async def test_app_bench_browser_probe_lock_spans_processes(monkeypatch, tmp_pat
 def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     source = AUDIT_CONTENT.decode()
 
-    assert NARROW_WIDTH == 360
-    assert f"{{ scheme: 'light', width: {NARROW_WIDTH}, height: 844, shoot: false }}" in source
-    assert f"{{ scheme: 'dark', width: {NARROW_WIDTH}, height: 844, shoot: false }}" in source
+    assert (DESKTOP_WIDTH, DESKTOP_HEIGHT) == (1440, 900)
+    assert (
+        f"{{ scheme: 'light', width: {DESKTOP_WIDTH}, height: {DESKTOP_HEIGHT}, shoot: true }}"
+        in source
+    )
+    assert (
+        f"{{ scheme: 'dark', width: {DESKTOP_WIDTH}, height: {DESKTOP_HEIGHT}, shoot: true }}"
+        in source
+    )
     assert "document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)" in source
     assert "document.caretRangeFromPoint" in source
     assert "renderedText,\n    renderedParts,\n    aboveFoldText," in source
     assert "aboveFoldText: aboveFold.join" not in source
     assert "visuallyHidden(element, style, box)" not in source
-    assert "script.setAttribute('src', await asDataUrl(resource))" in source
+    assert "script.replaceWith(inlined)" in source
     assert "style.textContent = await inlineCssResources(css, resource.href)" in source
     assert "sheets.push(await inlineCssResources(css, sheet.href || location.href))" in source
     assert "link.replaceWith(style)" in source
@@ -546,10 +550,8 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     assert "acceptedDesignUrl" not in source
     assert "document.querySelectorAll('[data-app-region]')" in source
     assert "}).slice(0, 20);" in source
-    assert (
-        "const report = { url, floor: AA_FLOOR, designHeight, designRegions, views, interaction };"
-        in source
-    )
+    assert "designHeight, designRegions, designFault, views, interaction," in source
+    assert "process.exit(DESIGN_FAULT_EXIT)" not in source
     assert "const { height: designHeight, regions: designRegions } = design;" in source
     assert "await measuredDesign(browser, laneWidth, designPath, '')" in source
     assert "DESIGN_INITIAL_VIEWPORT" not in source
@@ -610,7 +612,7 @@ def _run_application_audit(
             f"/workspace/{artifact_stem}dark.png",
             f"/workspace/{artifact_stem}interactive.html",
             f"/workspace/{artifact_stem}static.html",
-            str(NARROW_WIDTH),
+            str(DESKTOP_WIDTH),
             "/workspace/accepted-design.svg",
         ),
         check=False,
@@ -672,10 +674,10 @@ def test_app_bench_audit_reads_the_page_chromium_paints(
     subprocess.run(
         ("docker", "exec", "-i", container, "tee", "/workspace/accepted-design.svg"),
         input=(
-            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 844" '
-            b'width="360" height="844">'
-            b'<g data-app-region="queue"><rect width="145" height="844" /></g>'
-            b'<g data-app-region="detail"><rect x="160" width="145" height="844" /></g>'
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" '
+            b'width="1440" height="900">'
+            b'<g data-app-region="queue"><rect width="580" height="900" /></g>'
+            b'<g data-app-region="detail"><rect x="640" width="580" height="900" /></g>'
             b"</svg>"
         ),
         check=True,
@@ -736,7 +738,7 @@ def test_app_bench_design_measurement_uses_painted_pixels(
                 "node",
                 "/workspace/app-audit.cjs",
                 "--design",
-                str(NARROW_WIDTH),
+                str(DESKTOP_WIDTH),
                 "/workspace/application-design.svg",
             ),
             check=False,
@@ -746,17 +748,17 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         )
 
     def native(svg: bytes) -> bytes:
-        if b'viewBox="0 0 360 ' in svg:
+        if b'viewBox="0 0 1440 ' in svg:
             return svg.replace(b"<svg ", b'<svg xmlns="http://www.w3.org/2000/svg" ', 1)
         opening_end = svg.index(b">")
         nested = (
-            svg[:opening_end].replace(b"<svg ", b'<svg x="0" y="0" width="360" height="844" ', 1)
+            svg[:opening_end].replace(b"<svg ", b'<svg x="0" y="0" width="1440" height="900" ', 1)
             + b' preserveAspectRatio="none"'
             + svg[opening_end:]
         )
         return (
-            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 844" '
-            b'width="360" height="844">' + nested + b"</svg>"
+            b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" '
+            b'width="1440" height="900">' + nested + b"</svg>"
         )
 
     def render(svg: bytes) -> list[dict[str, object]]:
@@ -767,18 +769,18 @@ def test_app_bench_design_measurement_uses_painted_pixels(
         return value
 
     lane_design = (
-        b'<svg viewBox="0 0 360 844" width="360" height="844">'
-        b'<g data-app-region="queue"><rect width="360" height="420" /></g>'
-        b'<g data-app-region="detail"><rect y="424" width="360" height="420" /></g></svg>'
+        b'<svg viewBox="0 0 1440 900" width="1440" height="900">'
+        b'<g data-app-region="queue"><rect width="1440" height="448" /></g>'
+        b'<g data-app-region="detail"><rect y="452" width="1440" height="448" /></g></svg>'
     )
     native_lane = render(lane_design)
     assert [region["name"] for region in native_lane] == ["queue", "detail"]
 
     right_overrun = invoke(
         native(
-            b'<svg viewBox="0 0 360 844" width="360" height="844">'
-            b'<g data-app-region="queue"><text x="300" y="40">Queue overflow</text></g>'
-            b'<g data-app-region="detail"><rect y="80" width="360" height="764" /></g></svg>'
+            b'<svg viewBox="0 0 1440 900" width="1440" height="900">'
+            b'<g data-app-region="queue"><text x="1380" y="40">Queue overflow</text></g>'
+            b'<g data-app-region="detail"><rect y="80" width="1440" height="820" /></g></svg>'
         )
     )
     assert right_overrun.returncode != 0
@@ -788,7 +790,7 @@ def test_app_bench_design_measurement_uses_painted_pixels(
 
     internal_collision = invoke(
         native(
-            b'<svg viewBox="0 0 360 920" width="360" height="920" '
+            b'<svg viewBox="0 0 1440 920" width="1440" height="920" '
             b'style="font-family:-apple-system,BlinkMacSystemFont,Inter,sans-serif">'
             b'<g data-app-region="meeting-investor" transform="translate(12,622)">'
             b'<rect width="281" height="250" rx="8" />'
@@ -812,20 +814,20 @@ def test_app_bench_design_measurement_uses_painted_pixels(
     assert 'text="Attendees: investor@transpose" crosses tag=rect' in internal_collision.stderr
 
     ordinary_lines_and_avatar_stack = render(
-        b'<svg viewBox="0 0 360 844" width="360" height="844">'
-        b'<g data-app-region="queue"><rect x="8" y="8" width="289" height="120" />'
+        b'<svg viewBox="0 0 1440 900" width="1440" height="900">'
+        b'<g data-app-region="queue"><rect x="8" y="8" width="1156" height="120" />'
         b'<text x="16" y="28">Queue</text><text x="16" y="48">Next line</text>'
         b'<g data-slot="avatar-stack"><text x="16" y="80">AL</text>'
         b'<text x="16" y="80">SR</text></g></g>'
-        b'<g data-app-region="detail"><rect x="8" y="136" width="289" height="700" />'
+        b'<g data-app-region="detail"><rect x="8" y="136" width="1156" height="700" />'
         b'<text x="16" y="160">Detail</text></g></svg>'
     )
     assert [region["name"] for region in ordinary_lines_and_avatar_stack] == ["queue", "detail"]
     bottom_overrun = invoke(
         native(
-            b'<svg viewBox="0 0 360 844" width="360" height="844">'
-            b'<g data-app-region="queue"><rect width="360" height="800" /></g>'
-            b'<g data-app-region="detail"><rect y="820" width="360" height="40" /></g></svg>'
+            b'<svg viewBox="0 0 1440 900" width="1440" height="900">'
+            b'<g data-app-region="queue"><rect width="1440" height="800" /></g>'
+            b'<g data-app-region="detail"><rect y="876" width="1440" height="40" /></g></svg>'
         )
     )
     assert bottom_overrun.returncode != 0
@@ -1619,8 +1621,8 @@ async def test_rendered_pages_scorer_rejects_a_corrupt_page_image() -> None:
 
 
 def _measured(**overrides: object) -> bytes:
-    """An audit report over four clean views, with one view's measurements overridden."""
-    heights = {DESKTOP_WIDTH: DESKTOP_HEIGHT, NARROW_WIDTH: NARROW_HEIGHT}
+    """An audit report over both clean views, with one view's measurements overridden."""
+    heights = {DESKTOP_WIDTH: DESKTOP_HEIGHT}
     views = [
         {
             "scheme": scheme,
@@ -1633,9 +1635,7 @@ def _measured(**overrides: object) -> bytes:
             "textUnderFloor": 0,
             "text": [],
             "aboveFoldText": "",
-            "pastViewport": [],
             "clipped": [],
-            "overhangs": [],
             "overlaps": [],
             "console": [],
             "regions": AUDIT_DESIGN_REGIONS,
@@ -1706,32 +1706,21 @@ async def test_measured_screen_scorer_recomputes_the_aa_threshold_per_string() -
     assert large.passed, large.reason
 
 
-async def test_measured_screen_scorer_fails_an_unmeasured_view_and_a_wide_document() -> None:
-    """A report that skipped a scheme or a width fails as unmeasured rather than passing on the
-    views that ran, and a document wider than its viewport at the narrow width fails on its own."""
+async def test_measured_screen_scorer_fails_an_unmeasured_view() -> None:
+    """A report that skipped a scheme fails as unmeasured rather than passing on the view that
+    ran, and a page taller than the fold scrolls rather than failing."""
     grader = shared_artifact_scorer(".json", _measured_screen)
 
     partial = loads(_measured())
-    partial["views"] = [view for view in partial["views"] if view["width"] != NARROW_WIDTH]
+    partial["views"] = [view for view in partial["views"] if view["scheme"] != "dark"]
     short = await grader(_output("audit.json", dumps(partial).encode()))
     assert not short.passed
-    assert f"measures no light at {NARROW_WIDTH}px, dark at {NARROW_WIDTH}px" in short.reason
-
-    narrow = loads(_measured())
-    narrow["views"][2]["documentWidth"] = NARROW_WIDTH + 1
-    overflowing = await grader(_output("audit.json", dumps(narrow).encode()))
-    assert not overflowing.passed
-    assert f"{NARROW_WIDTH}px document is {NARROW_WIDTH + 1}px" in overflowing.reason
+    assert f"measures no dark at {DESKTOP_WIDTH}px" in short.reason
 
     tall = loads(_measured())
     tall["views"][0]["documentHeight"] = DESKTOP_HEIGHT + 500
     scrolls = await grader(_output("audit.json", dumps(tall).encode()))
     assert scrolls.passed, scrolls.reason
-
-    narrow_tall = loads(_measured())
-    narrow_tall["views"][2]["documentHeight"] = NARROW_HEIGHT + 500
-    narrow_scrolls = await grader(_output("audit.json", dumps(narrow_tall).encode()))
-    assert narrow_scrolls.passed, narrow_scrolls.reason
 
     empty = await grader(_output("audit.json", _measured(textChecked=0)))
     assert not empty.passed
@@ -1756,19 +1745,6 @@ async def test_measured_screen_scorer_fails_bounded_accidental_overlap_evidence(
 
     assert not verdict.passed
     assert 'button "Review" overlaps button "Assign" by 24x32px' in verdict.reason
-
-
-async def test_measured_screen_scorer_fails_bounded_overhang_evidence() -> None:
-    grader = shared_artifact_scorer(".json", _measured_screen)
-    report = loads(_measured())
-    report["views"][0]["overhangs"] = [
-        "div.wide extends 24px past div[data-slot=card-content] right"
-    ]
-
-    verdict = await grader(_output("audit.json", dumps(report).encode()))
-
-    assert not verdict.passed
-    assert "extends 24px past div[data-slot=card-content] right" in verdict.reason
 
 
 async def test_interaction_screen_requires_two_accessible_visible_state_changes() -> None:
@@ -1802,12 +1778,11 @@ async def test_interaction_screen_requires_two_accessible_visible_state_changes(
 
 def _built_screen(files: dict[str, bytes]) -> CapabilityOutput:
     result = ApplicationBuildResult(
-        status="deployed",
         site="built-app",
         site_url="https://ufo.test/built-app",
     ).model_dump_json()
     own_calls = (
-        ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
+        ToolInvocation("load_skill", {"name": "application-homepage"}, "loaded", has_result=True),
         ToolInvocation(
             "spawn",
             {"target": f"profile:{APPLICATION_BUILDER_NAME}", "payload": {"objective": "build it"}},
@@ -2053,17 +2028,28 @@ async def test_ufo_app_bench_accepts_the_worker_preloaded_skill() -> None:
         own_calls=tuple(call for call in base.own_calls if call.name != "load_skill"),
     )
 
+    off_platform = replace(
+        without_delegation,
+        calls=tuple(
+            replace(call, input={"name": "website-building"}) if call.name == "load_skill" else call
+            for call in without_delegation.calls
+        ),
+    )
+
     direct = await scorer(without_delegation)
     verdict = await scorer(without_parent_load)
+    wrong_half = await scorer(off_platform)
 
     assert grading_statement(scorer) == (
-        "a direct turn loads 'website-building', or the builder preloads "
-        "'application-homepage' after its spawn"
+        "a direct turn loads 'application-homepage' (not 'website-building'), or the builder "
+        "preloads it after its spawn"
     )
     assert direct.passed, direct.reason
-    assert direct.reason == "loaded 'website-building'"
+    assert direct.reason == "loaded 'application-homepage'"
     assert verdict.passed, verdict.reason
     assert "preloads 'application-homepage'" in verdict.reason
+    assert not wrong_half.passed
+    assert wrong_half.reason == "loaded the distractor 'website-building' first"
 
 
 async def test_ufo_app_bench_accepts_static_deploy_or_published_application() -> None:
@@ -2072,6 +2058,7 @@ async def test_ufo_app_bench_accepts_static_deploy_or_published_application() ->
         _built_screen({}),
         calls=(
             ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
+            ToolInvocation("js_repl", {"code": "await page.screenshot()"}, "{}", has_result=True),
             ToolInvocation(
                 "object_action",
                 {"kind": "site", "action": "deploy_website", "input": {}},
@@ -2234,10 +2221,7 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         built = await case.grader(_built_screen({**pages, **report, **shots}))
         assert built.passed, case.name
 
-        blocked = ApplicationBuildResult(
-            status="blocked",
-            blocker="The source did not compile.",
-        ).model_dump_json()
+        blocked = ApplicationBuildResult(stopped="The source did not compile.").model_dump_json()
         own_calls = (
             ToolInvocation("load_skill", {"name": "website-building"}, "loaded", has_result=True),
             ToolInvocation(
@@ -2265,7 +2249,7 @@ async def test_ufo_app_bench_grades_every_screen_on_both_schemes() -> None:
         )
         not_homepage = await case.grader(unbound)
         assert not not_homepage.passed, case.name
-        assert "deterministic acceptance" in not_homepage.reason
+        assert "came back with no site" in not_homepage.reason
 
         one_scheme = await case.grader(
             _built_screen({**pages, **report, f"{case.name}-light.png": _png()})
@@ -2765,7 +2749,7 @@ async def test_app_design_region_grader_measures_names_fold_and_relative_order()
         },
     ]
     for view in report["views"]:
-        if view["width"] == NARROW_WIDTH:
+        if view["width"] == DESKTOP_WIDTH:
             view["regions"] = [dict(region) for region in report["designRegions"]]
     output = CapabilityOutput(
         "Built app",
@@ -2781,7 +2765,7 @@ async def test_app_design_region_grader_measures_names_fold_and_relative_order()
     dark = next(
         view
         for view in report["views"]
-        if view["width"] == NARROW_WIDTH and view["scheme"] == "dark"
+        if view["width"] == DESKTOP_WIDTH and view["scheme"] == "dark"
     )
     dark["regions"][0]["left"] = 0.7
     dark["regions"][1]["left"] = 0.05
@@ -3138,12 +3122,12 @@ def test_every_design_mode_caller_passes_the_one_lane_width() -> None:
         compile_source=True,
     )
     command = audit.command
-    assert f"--design {NARROW_WIDTH} " in command
+    assert f"--design {DESKTOP_WIDTH} " in command
     usage = AUDIT_CONTENT.decode()
     assert "node ${SELF} --design <lane-width> <application-design.svg>" in usage
 
     root = Path(__file__).parents[3]
-    named = re.compile(r"NARROW_WIDTH|APPLICATION_DESIGN_WIDTH|\b360\b")
+    named = re.compile(r"APPLICATION_DESIGN_WIDTH|DESKTOP_WIDTH|\b1440\b")
     invoked = re.compile(r"""["']--design["']|--design \{""")
     stale = []
     for area in ("core", "extensions", "evals"):

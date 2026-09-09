@@ -87,11 +87,9 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_SOURCE_MAX_CHARS,
     MAX_MESSAGE_CHARS,
     ApplicationAuditIssue,
-    ApplicationAuditReport,
     ApplicationAuditVerdict,
     ApplicationDesign,
     AuditIssueCode,
-    audit_application,
     validate_application_design,
     validate_application_source,
 )
@@ -137,7 +135,6 @@ APPLICATION_AUDIT_STOP_TIMEOUT_SECONDS = 15
 APPLICATION_AUDIT_REPORT_MAX_BYTES = 1024 * 1024
 APPLICATION_LIFECYCLE_DIAGNOSTIC_MAX_BYTES = 4096
 APPLICATION_LIFECYCLE_EXIT = 3
-APPLICATION_DESIGN_FAULT_EXIT = 4
 APPLICATION_LIFECYCLE_SUFFIX = ".lifecycle.json"
 APPLICATION_LIFECYCLE_UNREAD = (
     "the page did not become ready, and the audit's own record of why could not be read"
@@ -1143,19 +1140,18 @@ class ApplicationPageGate:
     project: str
 
     async def built_page(self) -> str:
-        """The kit rules, the build, and — for a page drawn against a design — the browser audit.
+        """What must be true of a page before its bytes become a site, and nothing more.
 
-        The audit drives the page in a preview that answers every read with a workspace holding
-        nothing, so it measures what a page draws on its own. A page whose content is the
-        workspace's own rows draws its blank state there and exposes no control, which is the
-        preview's emptiness and not the page's fault. Every page the builder makes is drawn
-        against a design first, so the design is what says a page was built to be measured this
-        way; the app pages an extension ships carry none and are built and served as they were."""
+        Four facts, each one a thing a member would meet as a broken product rather than an
+        ugly one: the design parses into named regions, the source stays inside the module
+        boundary and mounts, the project builds, and the built page reaches its ready state in
+        a browser. Whether the page is good is read off the page by whoever drew it — the
+        builder holds `js_repl` and looks before it deploys."""
         design = await self._design()
-        await self._gate_source(design)
+        await self._gate_source()
         await self._build()
         if design is not None:
-            await self._audit(design)
+            await self._mounts()
         return f"{self.project}/{PROJECT_DIST}"
 
     async def _read(self, name: str, maximum: int) -> str | None:
@@ -1177,12 +1173,12 @@ class ApplicationPageGate:
         except ValueError as error:
             raise ApplicationPageRefused(_verdict("design", str(error))) from error
 
-    async def _gate_source(self, design: ApplicationDesign | None) -> None:
+    async def _gate_source(self) -> None:
         source = await self._read(PROJECT_SOURCE, APPLICATION_SOURCE_MAX_CHARS)
         if source is None:
             raise RuntimeError(f"{PROJECT_SOURCE} could not be read")
         try:
-            validate_application_source(source, design)
+            validate_application_source(source)
         except ValueError as error:
             raise ApplicationPageRefused(_verdict("source", str(error))) from error
 
@@ -1203,12 +1199,19 @@ class ApplicationPageGate:
                 )
             )
 
-    async def _audit(self, design: ApplicationDesign | None) -> None:
+    async def _mounts(self) -> None:
+        """Load the built page in a browser and refuse one whose lifecycle never became ready.
+
+        The script measures far more than this, and the grader suite runs it for all of it. Here
+        only the ready state is read: a page that throws on load is not a page, and no member
+        should meet one. What it looks like once it is up belongs to whoever drew it."""
+
         relative_root = f"{TOOL_OUTPUT_DIR}/application-audit/{self.ctx.turn.id}"
         root = await self.ctx.sandbox.runtime_path(relative_root)
         report_path = f"{root}.json"
         await self.ctx.sandbox.write_runtime_file(f"{relative_root}.cjs", APPLICATION_AUDIT_SCRIPT)
-        arguments = [
+        run = await self.ctx.sandbox.sh(
+            'node "$@"',
             f"{root}.cjs",
             self.project,
             report_path,
@@ -1217,42 +1220,19 @@ class ApplicationPageGate:
             f"{root}-interactive.html",
             f"{root}-static.html",
             str(APPLICATION_DESIGN_WIDTH),
-        ]
-        if design is not None:
-            arguments.append(f"{self.project}/{PROJECT_DESIGN}")
-        run = await self.ctx.sandbox.sh(
-            'node "$@"',
-            *arguments,
             timeout_s=APPLICATION_AUDIT_TIMEOUT_SECONDS,
         )
         if run.exit_code != 0:
             await self._refuse_or_raise(run, report_path)
-        report_read = await self.ctx.sandbox.python(
-            APPLICATION_AUDIT_REPORT_READ, report_path, str(APPLICATION_AUDIT_REPORT_MAX_BYTES)
-        )
-        if report_read.exit_code != 0:
-            absent = "audit report is absent"
-            raise RuntimeError(_last_words(report_read.stderr or report_read.stdout) or absent)
-        verdict = audit_application(ApplicationAuditReport.model_validate_json(report_read.stdout))
-        if not verdict.passed:
-            raise ApplicationPageRefused(verdict)
 
     async def _refuse_or_raise(self, run: ExecResult, report_path: str) -> None:
-        """Turn a failed audit run into the repair it is, or raise it as ours.
+        """Turn a failed run into the repair it is, or raise it as ours.
 
-        The script exits on three kinds of fault and the builder can act on two of them. A design
-        the browser measured and found wrong — text past the lane, regions overlapping — names the
-        region and the overflow, which is an edit. A page that never became ready is the page's own
-        fault and says so. Only a run that could not happen — no Chromium, no node, a wedged box —
-        is infrastructure, and telling a model to repair `app.tsx` over that sends it hunting a
-        fault that is not in the page.
-
-        This is the distinction that mattered most in the field: eight of thirteen deploys in one
-        recorded build were spent on faults the audit had already diagnosed and then discarded."""
+        A page that never became ready is the page's own fault and says so. Only a run that could
+        not happen — no Chromium, no node, a wedged box — is infrastructure, and telling a model to
+        repair `app.tsx` over that sends it hunting a fault that is not in the page."""
 
         detail = _last_words(run.stderr or run.stdout)
-        if run.exit_code == APPLICATION_DESIGN_FAULT_EXIT:
-            raise ApplicationPageRefused(_verdict("design", detail or "the design did not measure"))
         if run.exit_code == APPLICATION_LIFECYCLE_EXIT:
             reason = await self._lifecycle_reason(report_path)
             raise ApplicationPageRefused(

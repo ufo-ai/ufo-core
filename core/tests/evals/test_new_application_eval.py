@@ -47,15 +47,7 @@ def _design_outcome(
         "payload": {"objective": "world-clock"},
     }
     design = b"<svg><text>World clock</text></svg>"
-    preview_result = json.dumps(
-        {
-            "status": "designed",
-            "design_path": "/workspace/ufo-app/application-design.svg",
-            "site": "",
-            "site_url": "",
-            "blocker": "",
-        }
-    )
+    preview_result = json.dumps({"stopped": "the objective asked for the wireframe alone"})
     calls = [
         ToolInvocation(
             name="load_skill",
@@ -701,3 +693,115 @@ async def test_created_application_resolves_one_durable_identity(db: None) -> No
         )
         assert missing is None
         assert reason == "created 'missing' but found 0 durable application rows"
+
+
+STOPPED_BUILD = json.dumps({"stopped": "the deploy refused a worker with no speaker"})
+HOSTED_BUILD = json.dumps({"site": "call-brief", "site_url": "https://ufo.test/call-brief"})
+
+
+def _seeded_build(*builds: str, wrote: bool = True, deployed: bool = False) -> CapabilityOutput:
+    calls = [
+        ToolInvocation(
+            name="spawn",
+            input={
+                "target": new_application.BUILDER_TARGET,
+                "payload": {"objective": "build the call brief homepage"},
+            },
+            result=result,
+            has_result=True,
+        )
+        for result in builds
+    ]
+    if wrote:
+        calls.append(ToolInvocation(name="write", input={}, result="written", has_result=True))
+    if deployed:
+        calls.append(
+            ToolInvocation(
+                name="object_action",
+                input={"kind": "site", "action": "deploy_website", "input": {}},
+                result="deployed",
+                has_result=True,
+            )
+        )
+    return CapabilityOutput("", tuple(calls))
+
+
+def test_the_repair_journey_passes_one_stopped_build_then_one_hosting_build() -> None:
+    failure = new_application._application_repair_failure(
+        _seeded_build(STOPPED_BUILD),
+        _seeded_build(HOSTED_BUILD, deployed=True),
+    )
+
+    assert failure is None
+
+
+def test_the_repair_journey_refuses_a_first_attempt_that_hosted() -> None:
+    failure = new_application._application_repair_failure(
+        _seeded_build(HOSTED_BUILD, deployed=True),
+        _seeded_build(HOSTED_BUILD, deployed=True),
+    )
+
+    assert failure == "the failed attempt made 1 hosting and 0 stopped build(s)"
+
+
+def test_the_repair_journey_refuses_a_first_attempt_that_hosted_after_it_stopped() -> None:
+    failure = new_application._application_repair_failure(
+        _seeded_build(STOPPED_BUILD, HOSTED_BUILD, deployed=True),
+        _seeded_build(HOSTED_BUILD, deployed=True),
+    )
+
+    assert failure == "the failed attempt made 1 hosting and 1 stopped build(s)"
+
+
+def test_the_repair_journey_refuses_a_first_attempt_that_built_nothing() -> None:
+    failure = new_application._application_repair_failure(
+        _seeded_build(),
+        _seeded_build(HOSTED_BUILD, deployed=True),
+    )
+
+    assert failure == "the failed attempt made 0 hosting and 0 stopped build(s)"
+
+
+def test_the_repair_journey_refuses_a_repair_that_hosted_nothing() -> None:
+    failure = new_application._application_repair_failure(
+        _seeded_build(STOPPED_BUILD),
+        _seeded_build(STOPPED_BUILD),
+    )
+
+    assert failure == "the repair attempt made 0 hosting and 1 stopped build(s)"
+
+
+def test_the_repair_journey_refuses_a_repair_that_deployed_without_the_builder() -> None:
+    failure = new_application._application_repair_failure(
+        _seeded_build(STOPPED_BUILD),
+        _seeded_build(deployed=True),
+    )
+
+    assert failure == "the repair attempt made 0 hosting and 0 stopped build(s)"
+
+
+def test_the_repair_journey_refuses_a_repair_that_stopped_before_it_hosted() -> None:
+    failure = new_application._application_repair_failure(
+        _seeded_build(STOPPED_BUILD),
+        _seeded_build(STOPPED_BUILD, HOSTED_BUILD, deployed=True),
+    )
+
+    assert failure == "the repair attempt made 1 hosting and 1 stopped build(s)"
+
+
+def test_the_repair_journey_refuses_a_first_attempt_that_never_wrote_source() -> None:
+    failure = new_application._application_repair_failure(
+        _seeded_build(STOPPED_BUILD, wrote=False),
+        _seeded_build(HOSTED_BUILD, deployed=True),
+    )
+
+    assert failure == "the failed attempt made no initial source write"
+
+
+def test_the_repair_journey_refuses_a_repair_that_deployed_no_site() -> None:
+    failure = new_application._application_repair_failure(
+        _seeded_build(STOPPED_BUILD),
+        _seeded_build(HOSTED_BUILD),
+    )
+
+    assert failure == "the repair attempt deployed no site"
