@@ -908,6 +908,13 @@ class InProcessTarget:
         *,
         wait_for_background: bool = False,
     ) -> _Settled:
+        """The result for a run whose turn never wrote a terminal transcript.
+
+        A fault before the first round — loading the turn, selecting the boundary, attaching the
+        sandbox — leaves no transcript to carry it, and `WAIT_EXPIRED` alone names no fault. The
+        turn row's terminal frame carries the class and the message, so this path reads it as the
+        settled path does: the record says which fault one reason stood for, and a provider-owned
+        transient in setup is excluded rather than scored against the model."""
         steps = () if self.turn_steps is None else await self.turn_steps.steps(turn_id)
         messages = (
             Message(role="user", content=inbound),
@@ -933,13 +940,18 @@ class InProcessTarget:
         snapshot_error = WAIT_EXPIRED if not snapshot.error else f"{WAIT_EXPIRED}; {snapshot.error}"
         if missing_child:
             snapshot_error = f"{snapshot_error}; {missing_child}"
+        error_class, error_message = await self._turn_error(turn_id)
+        if error_class:
+            snapshot_error = f"{snapshot_error}; {error_class}: {error_message}"
         snapshot = snapshot.model_copy(update={"error": snapshot_error})
         return _Settled(
             TargetResult(
                 output,
                 False,
                 WAIT_EXPIRED,
+                error_class=error_class or None,
                 trajectory=snapshot,
+                error_message=error_message,
             ),
             descendant_ids,
         )

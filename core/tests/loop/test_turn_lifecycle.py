@@ -86,7 +86,12 @@ from ufo.runtime.engine import (
     TRUNCATION_FEEDBACK,
 )
 from ufo.runtime.ext.context import context_for
-from ufo.runtime.ext.manifest import EmbedBackendSpec, IndexBackendSpec, Manifest
+from ufo.runtime.ext.manifest import (
+    EmbedBackendSpec,
+    IndexBackendSpec,
+    Manifest,
+    NotRegisteredError,
+)
 from ufo.runtime.hub import CostTick, Hub, InProcessHub, Parked, SubagentActivity, Terminal
 from ufo.runtime.jobs import TurnDispatcher
 from ufo.runtime.seats import create_member
@@ -1585,6 +1590,65 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
     handle = await runtime.dbos.retrieve_workflow_async(str(overdue.trajectory.turn_id))
     assert (await handle.get_status()).status == "CANCELLED"
     assert followup.clean
+
+
+async def test_eval_reads_a_setup_faults_class_off_the_turn_row(
+    db: None,
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fault in turn setup writes a terminal frame and no transcript at all, so the harness's
+    reconstruction reads `turn produced no terminal transcript` — the one reason every case of the
+    2026-09-09 nightly carried while the frame beside it named the class and the message. The
+    reason stays what it is, and the class and message ride the result and the trajectory, so a red
+    case says which fault it stood for and a provider-owned transient in setup is still excluded."""
+    _, _, blob = dbos_runtime
+    STREAM_GATE.reset()
+    await _bootstrap()
+    async with workspace_tx() as connection:
+        workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
+        agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
+    runtime = loop_queue._runtime
+    assert runtime is not None
+
+    async def refuse_the_boundary(*_args: object, **_kwargs: object) -> object:
+        raise NotRegisteredError("config selects context strategy 'rollover'")
+
+    monkeypatch.setattr(loop_queue, "flagged_context_boundary", refuse_the_boundary)
+    driver = WorkspaceDriver(
+        workspace_id,
+        agent_id,
+        "be brief",
+        blob,
+        runtime.dbos,
+        runtime.sandboxes.workspace_root,
+        poll_interval_seconds=0.05,
+        workflow_wait_seconds=EVAL_FOLLOWUP_WAIT_SECONDS,
+    )
+    target = InProcessTarget(
+        ctx=context_for(
+            "evals",
+            frozenset(),
+            invoker=AdmissionInvoker(
+                admission=Admission(dbos=runtime.dbos, durable_surfaces=frozenset()),
+                workspace_id=workspace_id,
+            ),
+        ),
+        agent_id=agent_id,
+        conversations=driver,
+        outcome=driver,
+    )
+
+    with ws(workspace_id):
+        result = await target.run(CapabilityCase("setup-fault", "ping", exact_scorer("unused")))
+
+    assert not result.clean
+    assert result.failure_reason == "turn produced no terminal transcript"
+    assert result.error_class == "NotRegisteredError"
+    assert "rollover" in result.error_message
+    assert result.trajectory is not None
+    assert result.trajectory.status == "failed"
+    assert "NotRegisteredError" in result.trajectory.error
 
 
 async def test_eval_timing_reads_the_engines_own_step_record_for_every_turn(
