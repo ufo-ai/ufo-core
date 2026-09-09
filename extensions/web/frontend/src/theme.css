@@ -387,6 +387,7 @@ body[data-shell="sidebar"] [data-chat-start-line] {
   --brand-crowdin: url("./assets/brands/crowdin.png");
   --brand-dart: url("./assets/brands/dart.png");
   --brand-datadog: url("./assets/brands/datadog.svg");
+  --brand-deepseek: url("./assets/brands/deepseek.svg");
   --brand-dialpad: url("./assets/brands/dialpad.png");
   --brand-discord: url("./assets/brands/discord.svg");
   --brand-discordbot: url("./assets/brands/discordbot.png");
@@ -461,6 +462,7 @@ body[data-shell="sidebar"] [data-chat-start-line] {
   --brand-whatsapp: url("./assets/brands/whatsapp.svg");
   --brand-wrike: url("./assets/brands/wrike.png");
   --brand-youtube: url("./assets/brands/youtube.svg");
+  --brand-zai: url("./assets/brands/zai.svg");
   --brand-zendesk: url("./assets/brands/zendesk.png");
   --brand-zeplin: url("./assets/brands/zeplin.png");
   --brand-zoho: url("./assets/brands/zoho.png");

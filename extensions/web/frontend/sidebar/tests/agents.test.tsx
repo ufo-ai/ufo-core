@@ -95,8 +95,10 @@ function board(done: number, running: number | null) {
 const NO_BOARD = () =>
   json({ type: "tasks", title: "", tasks: [], total_count: 0, completed_count: 0, truncated: false });
 
+const SERVED = ["auto", "claude-opus-4-8", "claude-sonnet-5"];
+
 function boot(agents: unknown[], member: unknown) {
-  return json({ member, agents });
+  return json({ member, agents, models: SERVED });
 }
 
 const OPENED = { turn_id: TURN_ID, conversation_id: CONVO_ID, title: TITLE };

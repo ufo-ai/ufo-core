@@ -1561,6 +1561,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
         },
         "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True)
         | {"app-store": False, "team": False},
+        "models": ["auto", "claude-opus-4-8", "claude-sonnet-5"],
         "archived": [],
         "agents": [
             {

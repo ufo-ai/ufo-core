@@ -871,10 +871,9 @@ test("a chat lane's history lists the member's own conversations and groups coll
   await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
   const lane = await screen.findByRole("region", { name: "History" });
 
-  const rows = within(lane)
-    .getAllByRole("button")
-    .map((row) => row.textContent ?? "")
-    .filter(Boolean);
+  const rows = [...lane.querySelectorAll("section")]
+    .flatMap((run) => [...run.querySelectorAll("button")])
+    .map((row) => row.textContent ?? "");
   expect(rows).toHaveLength(2);
   expect(rows[0]).toContain(CHAT_ROW.title);
   expect(rows[1]).toContain(colleague.title);

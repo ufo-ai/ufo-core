@@ -34,6 +34,10 @@ function open() {
   return render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 }
 
+/** The model chip is drawn for a member who may write the agent row: its owner, or an admin for
+ *  the main agent, which has no owner. */
+const ADMIN = { ...MEMBER, admin: true };
+
 function waiting(text: string): boolean {
   return screen.getByText(text).classList.contains("italic");
 }
@@ -3644,4 +3648,235 @@ test("the starters close on a link to the connectors screen, which the press rea
   expect(location.hash).toBe("#/connectors");
   await screen.findByText("No connector is offered yet.");
   expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
+});
+
+test("the composer's model chip picks a model out of its provider's flyout, and the pick rides one intent", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...transcript(),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Applied." });
+    },
+  });
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Claude" }));
+  expect(
+    (await screen.findByRole("menuitemradio", { name: "Opus 5" })).getAttribute("aria-checked"),
+  ).toBe("false");
+
+  await userEvent.click(screen.getByRole("menuitem", { name: "GPT" }));
+  const pick = await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" });
+  expect(pick.getAttribute("aria-checked")).toBe("false");
+  await userEvent.click(pick);
+
+  expect(posted).toEqual([
+    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-sol" } },
+  ]);
+  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
+});
+
+test("the model picker offers the latest of each family, a speed variant on its own row", async () => {
+  wire(transcript());
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Claude" }));
+  await screen.findByRole("menuitemradio", { name: "Opus 5" });
+  expect(screen.queryByRole("menuitemradio", { name: "Opus 4.8" })).toBeNull();
+  expect(screen.queryByRole("menuitemradio", { name: "Sonnet 4.6" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("menuitem", { name: "GLM" }));
+  expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual([
+    "Auto",
+    "GLM 5.3",
+    "GLM 5.3 Flash",
+  ]);
+});
+
+test("an agent on auto reads Auto on the chip and the picker ticks the Auto row", async () => {
+  wire(transcript());
+  render(<App agents={[{ ...AGENT, model: "auto" }]} member={ADMIN} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Auto" }));
+  const auto = await screen.findByRole("menuitemradio", { name: "Auto" });
+  expect(auto.getAttribute("aria-checked")).toBe("true");
+
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Claude" }));
+  expect(
+    (await screen.findByRole("menuitemradio", { name: "Opus 5" })).getAttribute("aria-checked"),
+  ).toBe("false");
+});
+
+test("the Auto row hands the choice back to the deploy after a concrete pick", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...transcript(),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Applied." });
+    },
+  });
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Auto" }));
+
+  expect(posted).toEqual([
+    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "auto" } },
+  ]);
+  expect(await screen.findByRole("button", { name: "Model: Auto" })).toBeTruthy();
+});
+
+test("a model this deploy refuses says so and leaves the chip on the model the agent runs", async () => {
+  wire({
+    ...transcript(),
+    "/intents": () => json({ applied: false, message: "no model named 'gpt-5.6-sol'" }),
+  });
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+
+  expect(await screen.findByText("no model named 'gpt-5.6-sol'")).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "Model: Opus 4.8" })).toBeTruthy();
+});
+
+test("a pick that applies reads the roster again, and the chip follows the fresh row", async () => {
+  const reread = vi.fn();
+  wire({
+    ...transcript(),
+    "/intents": () => json({ applied: true, message: "Applied." }),
+  });
+  const { rerender } = render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={reread} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+
+  await waitFor(() => expect(reread).toHaveBeenCalled());
+  rerender(<App agents={[{ ...AGENT, model: "gpt-5.6-sol" }]} member={ADMIN} onAgents={reread} />);
+  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
+});
+
+test("the box handed to the next agent drops the model picked for the last one", async () => {
+  wire({
+    ...transcript(),
+    "/intents": () => json({ applied: true, message: "Applied." }),
+  });
+  location.hash = newChatHash(AGENT_ID);
+  render(
+    <App
+      agents={[
+        { ...AGENT, model: "claude-opus-4-8" },
+        { ...SECOND, model: "claude-opus-4-8" },
+      ]}
+      member={ADMIN}
+      onAgents={() => {}}
+    />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Auto" }));
+  expect(await screen.findByRole("button", { name: "Model: Auto" })).toBeTruthy();
+
+  follow(newChatHash(SECOND_ID));
+
+  expect(await screen.findByRole("button", { name: "Model: Opus 4.8" })).toBeTruthy();
+});
+
+test("a member who may not write the agent row reads the composer without a model chip", async () => {
+  wire(transcript());
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  await screen.findByLabelText("Ask UFO");
+  expect(screen.queryByRole("button", { name: "Model: Opus 4.8" })).toBeNull();
+});
+
+test("a model written elsewhere stands the picked chip down", async () => {
+  wire({
+    ...transcript(),
+    "/intents": () => json({ applied: true, message: "Applied." }),
+  });
+  const { rerender } = render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
+
+  rerender(<App agents={[{ ...AGENT, model: "auto" }]} member={ADMIN} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("button", { name: "Model: Auto" })).toBeTruthy();
+});
+
+test("a model that needs reasoning is applied with the default effort beside it", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...transcript(),
+    "/intents": (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      posted.push(body);
+      if (body.spec.reasoning === undefined)
+        return json({
+          applied: false,
+          message: "model 'gpt-5.6-sol' requires reasoning when reasoning is 'off'",
+        });
+      return json({ applied: true, message: "Applied." });
+    },
+  });
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+
+  expect(await screen.findByText("GPT-5.6 Sol needs reasoning.")).toBeTruthy();
+  expect(posted).toEqual([
+    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-sol" } },
+    {
+      verb: "apply",
+      kind: "agent",
+      name: AGENT.name,
+      spec: { model: "gpt-5.6-sol", reasoning: "auto" },
+    },
+  ]);
+  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
+});
+
+test("the model picker's rows read left to right while the flyout stands to the left", async () => {
+  wire(transcript());
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  const providers = await screen.findByRole("menu");
+  expect(providers.getAttribute("dir")).toBe("ltr");
+
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Claude" }));
+  const models = screen
+    .getAllByRole("menu")
+    .find((menu) => menu !== providers) as HTMLElement;
+  expect(models.getAttribute("dir")).toBe("ltr");
+  expect(models.getAttribute("data-side")).toBe("left");
 });

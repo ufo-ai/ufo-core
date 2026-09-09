@@ -77,6 +77,7 @@ export type AgentsPayload = {
   agents: Agent[];
   archived: ArchivedApp[];
   member: Member;
+  models: string[];
   surfaces: Surfaces;
 };
 

@@ -230,7 +230,7 @@ export function App({
       <WorkspaceId.Provider value={member.workspace_id ?? null}>
         <Viewer.Provider value={member.email}>
           <SurfacesProvider surfaces={surfaces}>
-            <MainAgentProvider agents={agents}>
+            <MainAgentProvider agents={agents} onAgents={onAgents}>
               {mainAgent ? (
                 <FirstRun
                   agent={mainAgent}
@@ -264,7 +264,7 @@ export function App({
     <WorkspaceId.Provider value={member.workspace_id ?? null}>
       <Viewer.Provider value={member.email}>
         <SurfacesProvider surfaces={surfaces}>
-          <MainAgentProvider agents={agents}>
+          <MainAgentProvider agents={agents} onAgents={onAgents}>
             <TooltipProvider>
             <Shortcuts />
             <DrawerHost hosted={narrow && shell} shut={shutMenu}>

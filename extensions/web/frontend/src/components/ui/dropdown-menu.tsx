@@ -56,13 +56,17 @@ function Tick() {
 
 /** `container` is where the menu is drawn: the document's own end by default, and the element a
  *  caller names when the menu belongs inside a layer already standing — a drawer is a modal, and a
- *  menu drawn past it is out of the member's reach. */
+ *  menu drawn past it is out of the member's reach. `dir` is the direction the rows read in, for a
+ *  menu whose root takes the other direction to place its flyouts. */
 export function DropdownMenuContent({
   className,
   sideOffset = 4,
   container,
   ...props
-}: ComponentProps<typeof DropdownMenuPrimitive.Content> & { container?: HTMLElement | null }) {
+}: ComponentProps<typeof DropdownMenuPrimitive.Content> & {
+  container?: HTMLElement | null;
+  dir?: "ltr" | "rtl";
+}) {
   return (
     <DropdownMenuPrimitive.Portal container={container}>
       <DropdownMenuPrimitive.Content
@@ -114,7 +118,7 @@ export function DropdownMenuSubContent({
   className,
   sideOffset = 4,
   ...props
-}: ComponentProps<typeof DropdownMenuPrimitive.SubContent>) {
+}: ComponentProps<typeof DropdownMenuPrimitive.SubContent> & { dir?: "ltr" | "rtl" }) {
   return (
     <DropdownMenuPrimitive.Portal>
       <DropdownMenuPrimitive.SubContent

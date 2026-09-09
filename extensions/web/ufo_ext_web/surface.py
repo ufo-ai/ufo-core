@@ -1369,7 +1369,11 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     because the portal draws its shell from this read — the setup screen draws no navigation, and a
     portal that learned the fact from a later per-app request would draw the sidebar and take it
     away again. The page row it needs is the row the homepage answer already reads, so the fact
-    costs no query of its own."""
+    costs no query of its own.
+
+    `models` is the model ids this deploy's registry serves: the closed set the portal offers
+    where a member chooses what an agent runs on, so no screen names a model a turn would
+    refuse."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1433,6 +1437,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                 **{name: flags[key] for name, key in PORTAL_SURFACES.items()},
                 "team": audience.admin,
             },
+            "models": list(ctx.models),
             "archived": [
                 {
                     "id": str(app.id),

@@ -27,11 +27,12 @@ import {
   PromptInputAttach,
   PromptInputAttachments,
   PromptInputEyebrow,
+  PromptInputModel,
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputToolbar,
 } from "@/components/ui/prompt-input";
-import { SILENT, Toast } from "@/components/ui/toast";
+import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import {
   MessageLog,
   Meta,
@@ -56,11 +57,12 @@ import {
   writeDraft,
 } from "@/lib/drafts";
 import { useEarlierMessages } from "@/lib/earlier";
-import { CHAT_SURFACE } from "@/lib/mainAgent";
+import { CHAT_SURFACE, useRereadAgents } from "@/lib/mainAgent";
+import { modelLabel } from "@/lib/models";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
 import { newChatHash, sectionHash } from "@/lib/route";
 import { navigate, useRoute } from "@/lib/router";
-import { uploadAttachment, type UploadRef } from "@/lib/api";
+import { postIntent, uploadAttachment, type UploadRef } from "@/lib/api";
 import {
   answerQuestions,
   refreshTranscript,
@@ -77,6 +79,7 @@ export type ChatAgent = {
   model: string;
   icon?: string;
   app?: string | null;
+  mine?: boolean;
 };
 
 export type ChatProps = {
@@ -236,6 +239,8 @@ export function Chat({
         </TranscriptPane>
       )}
       <Composer
+        agent={agent}
+        member={member}
         target={target}
         draftKey={draftKey}
         input={composer}
@@ -299,6 +304,8 @@ export function FoundingChat({
     <TranscriptScroll>
       <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
       <Composer
+        agent={agent}
+        member={member}
         target={target}
         draftKey={draftKey}
         input={composer}
@@ -568,9 +575,16 @@ const NEW_CHAT_PLACEHOLDER = "Start new chat…";
 const FOLLOW_UP_PLACEHOLDER = "Ask a follow-up…";
 const START_INTRO = "What can UFO do for you?";
 
+/** The write refuses reasoning 'off' beside a model that cannot run without it, and the composer
+ *  draws no reasoning control — so the pick carries the effort the runtime defaults to. */
+const REASONING_REFUSED = /requires reasoning/;
+const DEFAULT_REASONING = "auto";
+
 /** A composition in flight — an IME candidate — takes its own Enter, so the guard reads `isComposing`
  *  before claiming the key. */
 function Composer({
+  agent,
+  member,
   target,
   draftKey,
   input,
@@ -579,6 +593,8 @@ function Composer({
   eyebrow,
   eyebrowIcon,
 }: {
+  agent: ChatAgent;
+  member: Member;
   target: ChatTarget;
   draftKey: string;
   input: RefObject<HTMLTextAreaElement | null>;
@@ -598,9 +614,25 @@ function Composer({
   });
   const [stopping, setStopping] = useState(false);
   const [dismissed, setDismissed] = useState(false);
+  const [picked, setPicked] = useState<string | null>(null);
+  const [refused, setRefused] = useState<ToastState>(SILENT);
+  const reread = useRereadAgents();
+  const model = picked ?? agent.model;
+  /** The write refuses a member who neither owns the agent nor administers the workspace, so the
+   *  chip that posts it is drawn for nobody else. */
+  const picks = agent.mine === true || member.admin;
   const showsEyebrow = eyebrow !== null && !dismissed;
   const running = state.turn;
   const disabled = state.messages === null || (target.conversationId === null && state.busy);
+
+  /** Any row that arrives outranks the pick drawn before the write landed: a model another surface
+   *  wrote, and the next agent's row where the pane keeps this box across an agent change. */
+  const held = useRef({ id: agent.id, model: agent.model });
+  useEffect(() => {
+    if (held.current.id === agent.id && held.current.model === agent.model) return;
+    held.current = { id: agent.id, model: agent.model };
+    setPicked(null);
+  }, [agent.id, agent.model]);
 
   const drafted = useRef(draftKey);
   useEffect(() => {
@@ -634,6 +666,30 @@ function Composer({
     setStopping(true);
     await stopTurn(target, turnId);
     setStopping(false);
+  }
+
+  async function pick(chosen: string) {
+    if (chosen === model) return;
+    setPicked(chosen);
+    const apply = (spec: Record<string, string>) =>
+      postIntent(agent.id, { verb: "apply", kind: "agent", name: agent.name, spec });
+    let outcome = await apply({ model: chosen });
+    let repaired = false;
+    if (!outcome.applied && REASONING_REFUSED.test(outcome.message)) {
+      outcome = await apply({ model: chosen, reasoning: DEFAULT_REASONING });
+      repaired = outcome.applied;
+    }
+    if (!outcome.applied) {
+      setPicked(null);
+      setRefused({ title: outcome.message });
+      return;
+    }
+    if (repaired)
+      setRefused({
+        title: modelLabel(chosen) + " needs reasoning.",
+        description: "Reasoning is back on " + DEFAULT_REASONING + ".",
+      });
+    reread?.();
   }
 
   async function send(attached: File[]): Promise<boolean> {
@@ -698,6 +754,7 @@ function Composer({
       <PromptInputToolbar>
         <PromptInputAttach />
         <div className="flex items-center gap-sm">
+          {picks ? <PromptInputModel model={model} onPick={(chosen) => void pick(chosen)} /> : null}
           <PromptInputSubmit
             stops={Boolean(running && state.busy && !text.trim())}
             busy={stopping}
@@ -739,6 +796,7 @@ function Composer({
         {starting ? <Starters agentId={target.agentId} /> : null}
         {box}
       </div>
+      <Toast state={refused} onDone={() => setRefused(SILENT)} />
     </div>
   );
 }

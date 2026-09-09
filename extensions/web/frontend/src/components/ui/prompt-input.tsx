@@ -10,10 +10,32 @@ import {
   type ReactNode,
 } from "react";
 
+import { IconChevronDown, IconSparkles } from "@tabler/icons-react";
+
 import { PickedThumbnail } from "@/components/ui/attachment";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { CONTROL, GrowingTextarea } from "@/components/ui/field";
+import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
+import {
+  AUTO_LABEL,
+  AUTO_MODEL,
+  modelLabel,
+  modelMark,
+  modelMenu,
+  servesAuto,
+} from "@/lib/models";
 
 type Attached = { id: string; file: File };
 
@@ -230,6 +252,84 @@ export function PromptInputAttach() {
         <path d="M8 4v8M4 8h8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
       </svg>
     </Button>
+  );
+}
+
+const MODEL_MARK = "size-(--size-glyph)";
+
+/** The model the chat runs on, chosen beside the send act: a provider per row, and the models it
+ *  serves in the flyout beside it. The menu is opened right to left so a flyout stands to the left
+ *  of the provider it belongs to — Radix takes a submenu's side from the reading direction and from
+ *  nothing else. It also writes that direction onto each popup, which mirrors the rows, so every
+ *  popup takes `dir="ltr"` back: the mark leads the label and the chevron or the tick closes the
+ *  row, while the flyout still stands to the left.
+ *
+ *  Auto stands as its own row over the providers, because it is the deploy's choice rather than a
+ *  model of any one of them, and it is how a member hands the choice back after picking. */
+export function PromptInputModel({
+  model,
+  onPick,
+}: {
+  model: string;
+  onPick: (model: string) => void;
+}) {
+  const groups = modelMenu();
+  const auto = servesAuto();
+  if (!groups.length && !auto) return null;
+  const mark = modelMark(model);
+  return (
+    <DropdownMenu dir="rtl">
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="quiet"
+          aria-label={"Model: " + modelLabel(model)}
+          className="gap-sm rounded-full px-md text-label"
+        >
+          {model === AUTO_MODEL ? (
+            <IconSparkles aria-hidden className={MODEL_MARK} stroke={1.5} />
+          ) : mark ? (
+            <BrandMark provider={mark} className={MODEL_MARK} />
+          ) : null}
+          <span className="truncate">{modelLabel(model)}</span>
+          <IconChevronDown aria-hidden className={cn(MODEL_MARK, "text-ink-soft")} />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent dir="ltr" align="end">
+        {auto ? (
+          <DropdownMenuRadioGroup value={model} onValueChange={onPick}>
+            <DropdownMenuRadioItem value={AUTO_MODEL}>
+              <span className="flex items-center gap-sm">
+                <IconSparkles aria-hidden className={MODEL_MARK} stroke={1.5} />
+                {AUTO_LABEL}
+              </span>
+            </DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
+        ) : null}
+        {auto && groups.length ? <DropdownMenuSeparator /> : null}
+        {groups.map(({ provider, models }) => (
+          <DropdownMenuSub key={provider.id}>
+            <DropdownMenuSubTrigger>
+              <span className="flex items-center gap-sm">
+                <BrandMark provider={provider.mark} className={MODEL_MARK} />
+                {provider.label}
+              </span>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent dir="ltr">
+              <DropdownMenuRadioGroup value={model} onValueChange={onPick}>
+                {models.map((choice) => (
+                  <DropdownMenuRadioItem key={choice.id} value={choice.id}>
+                    <span className="flex items-center gap-sm">
+                      <BrandMark provider={provider.mark} className={MODEL_MARK} />
+                      {choice.label}
+                    </span>
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

@@ -5,6 +5,7 @@ import { Empty, Loading } from "@/kernel/panel";
 import { Frame } from "@/views/Frame";
 import { FAULTS, SignIn } from "@/views/SignIn";
 import { BASE, SIGN_IN_PATH, sessionFault, type SessionFault } from "@/lib/api";
+import { holdServedModels } from "@/lib/models";
 import { parseHash } from "@/lib/route";
 import { identifyRum } from "@/lib/rum";
 import { titled } from "@/lib/title";
@@ -51,7 +52,9 @@ export function Portal() {
   }, []);
 
   useEffect(() => {
-    if (boot.phase === "ready") identifyRum(boot.payload.member.email);
+    if (boot.phase !== "ready") return;
+    identifyRum(boot.payload.member.email);
+    holdServedModels(boot.payload.models);
   }, [boot]);
 
   useEffect(() => {
