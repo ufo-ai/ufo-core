@@ -2382,7 +2382,9 @@ class ExtensionContext:
                     created_at=registered_at,
                     updated_at=registered_at,
                 )
-                .on_conflict_do_nothing(index_elements=[tables.source.c.id])
+                .on_conflict_do_nothing(
+                    index_elements=[tables.source.c.workspace_id, tables.source.c.id]
+                )
             )
             present = (
                 await connection.execute(

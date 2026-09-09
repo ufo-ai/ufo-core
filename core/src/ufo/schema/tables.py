@@ -795,6 +795,7 @@ page = sa.Table(
     sa.Column("uid", sa.Uuid, nullable=False),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("source_id", sa.Uuid, sa.ForeignKey("source.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("source_uid", sa.Uuid, nullable=True),
     sa.Column("source_identity", sa.Text, nullable=True),
     sa.Column("digest", sa.Text, nullable=False),
     sa.Column("body_ref", sa.Text, nullable=False),

@@ -324,6 +324,7 @@ async def _pages() -> list[sa.RowMapping]:
                 await connection.execute(
                     sa.select(
                         tables.page.c.source_id,
+                        tables.page.c.source_uid,
                         tables.page.c.stream,
                         tables.page.c.title,
                         tables.page.c.record_created_at,
@@ -435,6 +436,7 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
             sa.select(tables.source.c.uid).where(tables.source.c.id == pages[0]["source_id"])
         )
     assert [change.source_id for change in changes] == [source_uid]
+    assert pages[0]["source_uid"] == source_uid
 
     await index_pages()
     assert await _chunk_count() >= 1

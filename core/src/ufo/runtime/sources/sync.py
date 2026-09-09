@@ -505,13 +505,16 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
-                .on_conflict_do_nothing(index_elements=[tables.source.c.id])
+                .on_conflict_do_nothing(
+                    index_elements=[tables.source.c.workspace_id, tables.source.c.id]
+                )
             )
 
 
 @dataclass(frozen=True)
 class ClaimedSource:
     source_id: UUID
+    source_uid: UUID
     workspace_id: UUID
     claim: str
     backend: str
@@ -861,6 +864,7 @@ class SyncDriver:
         due = (
             sa.select(
                 tables.source.c.id,
+                tables.source.c.uid,
                 tables.source.c.workspace_id,
                 tables.source.c.backend,
                 tables.source.c.config,
@@ -897,6 +901,7 @@ class SyncDriver:
         return tuple(
             ClaimedSource(
                 source_id=row["id"],
+                source_uid=row["uid"],
                 workspace_id=row["workspace_id"],
                 claim=claim,
                 backend=row["backend"],
@@ -1163,6 +1168,7 @@ class SyncDriver:
                             source_identity=changed_page.browse.source_identity,
                             workspace_id=workspace_id,
                             source_id=source.source_id,
+                            source_uid=source.source_uid,
                             digest=changed_page.digest,
                             body_ref=changed_page.body_ref,
                             stream=changed_page.browse.stream,
@@ -1607,7 +1613,7 @@ class CorePageFeed:
         query = (
             sa.select(
                 tables.page.c.uid,
-                tables.source.c.uid.label("source_uid"),
+                sa.func.coalesce(tables.page.c.source_uid, tables.source.c.uid).label("source_uid"),
                 tables.page.c.subject,
                 tables.page.c.stream,
                 tables.page.c.title,
