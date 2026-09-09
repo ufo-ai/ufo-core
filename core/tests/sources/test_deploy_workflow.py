@@ -33,6 +33,10 @@ MONITORS = {
     environment: ROOT / "infra" / "envs" / environment / "monitors.tf"
     for environment in DEPLOY_ENVIRONMENTS
 }
+NOTIFICATION_RULES = {
+    "testing": ROOT / "infra" / "envs" / "testing" / "notifications.tf",
+    "prod": ROOT / "infra" / "envs" / "prod" / "on_call.tf",
+}
 RUN_URL = "https://github.com/metalcraftai/ufo/actions/runs/30120902872"
 DATADOG_STATUS_OK = 0
 DATADOG_STATUS_CRITICAL = 2
@@ -4246,15 +4250,51 @@ def test_the_deploy_monitor_watches_the_check_the_reporter_submits(
     assert succeeded_report["status"] == DATADOG_STATUS_OK
 
 
-def _check_every_monitor_notifies_a_reachable_handle() -> None:
+def _check_notification_rules_route_each_environment() -> None:
     for environment in DEPLOY_ENVIRONMENTS:
+        rules = NOTIFICATION_RULES[environment].read_text()
+        assert re.search(rf'filter\s*{{\s*tags\s*=\s*\["env:{environment}"\]\s*}}', rules)
+        assert re.search(r'recipients\s*=\s*\["(?:slack|oncall)-[\w-]+"', rules)
+        assert not re.search(r'recipients\s*=\s*\["@', rules)
         monitors = re.findall(
             r'resource "datadog_monitor" "(\w+)"', MONITORS[environment].read_text()
         )
         assert monitors
         for monitor in monitors:
+            assert f'"env:{environment}"' in _monitor_attribute(monitor, "tags", environment)
             message = _monitor_attribute(monitor, "message", environment)
-            assert re.search(HANDLE, message), monitor
+            assert not re.search(HANDLE, message), monitor
+
+    testing = NOTIFICATION_RULES["testing"].read_text()
+    assert re.findall(r'scope\s*=\s*"(transition_type:[^"]+)"', testing) == [
+        "transition_type:is_alert",
+        "transition_type:is_recovery",
+    ]
+    assert "fallback_recipients" not in testing
+
+    production = NOTIFICATION_RULES["prod"].read_text()
+    assert re.search(r'scope\s*=\s*"priority:p1"', production)
+    assert re.search(r'fallback_recipients\s*=\s*\["slack-on-call"\]', production)
+
+
+def _check_on_call_schedule_uses_existing_daily_rotation() -> None:
+    source = NOTIFICATION_RULES["prod"].read_text()
+    assert re.search(
+        r"import\s*{\s*to\s*=\s*datadog_on_call_schedule\.ufo\s*"
+        r'id\s*=\s*"d4c50744-7563-4f43-8e25-d2ed5df3a5f3"\s*}',
+        source,
+    )
+    schedule = re.search(
+        r'resource "datadog_on_call_schedule" "ufo" {\n(.*?)\n  }\n}',
+        source,
+        re.DOTALL,
+    )
+    assert schedule
+    assert 'time_zone = "America/Los_Angeles"' in schedule.group(1)
+    assert 'name           = "Daily"' in schedule.group(1)
+    assert 'effective_date = "2026-09-09T19:00:00Z"' in schedule.group(1)
+    assert 'rotation_start = "2026-09-09T19:00:00Z"' in schedule.group(1)
+    assert "days = 1" in schedule.group(1)
 
 
 def _check_the_source_sync_monitor_watches_the_check_the_reporters_submit() -> None:
@@ -4298,7 +4338,7 @@ def _check_the_source_sync_monitor_reports_both_transitions() -> None:
         assert set(blocks) == {"is_alert", "is_recovery"}
         assert "still failing" in blocks["is_alert"]
         assert "still failing" not in blocks["is_recovery"]
-        assert re.search(HANDLE, message)
+        assert not re.search(HANDLE, message)
         for block in blocks.values():
             assert not re.search(HANDLE, block)
 
@@ -4592,7 +4632,7 @@ def _check_database_capacity_monitors() -> None:
         assert _monitor_attribute(monitor, "warning", environment) == warning
         assert _monitor_attribute(monitor, "evaluation_delay", environment) == "900"
         assert _monitor_attribute(monitor, "tags", environment) == (
-            f'["env:{environment}", "managed-by:terraform"]'
+            f'["env:{environment}", "managed-by:terraform", "team:ufo"]'
         )
 
 
@@ -4797,7 +4837,8 @@ def test_deploy_workflow_sync_contract() -> None:
         _check_runtime_rollout_drains_before_the_proxy_gate,
         _check_runtime_apply_waits_for_prior_drains,
         _check_deployment_gate_accepts_only_expected_results,
-        _check_every_monitor_notifies_a_reachable_handle,
+        _check_notification_rules_route_each_environment,
+        _check_on_call_schedule_uses_existing_daily_rotation,
         _check_the_source_sync_monitor_watches_the_check_the_reporters_submit,
         _check_the_source_sync_monitor_reports_both_transitions,
         _check_the_fleet_submits_the_stream_check_to_the_datadog_its_monitors_read,
