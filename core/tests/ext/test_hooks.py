@@ -118,7 +118,6 @@ async def _fire(chain: HookChain, event: str, payload: object) -> hooks_module.H
         turn,
         Agent(prompt="p", model="claude-opus-4-8"),
         None,
-        None,
     )
 
 
@@ -153,7 +152,6 @@ async def test_a_hook_reads_the_frames_and_the_end_of_the_turn_it_fires_under(db
             UserPromptSubmit(text="hi"),
             turn,
             Agent(prompt="p", model="claude-opus-4-8"),
-            None,
             None,
         )
         assert resolution.denied is None

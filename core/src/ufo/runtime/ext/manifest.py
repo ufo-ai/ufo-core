@@ -634,9 +634,9 @@ class HookContext:
     OAuth handoff, with that workspace bound and the connection already committed.
 
     `sandbox` is the turn's own `/workspace`, so a hook that must read the tree the turn works in
-    reads what the turn's own tools do rather than opening a session of its own. Every fire point
-    states it, and the ones that hold no sandbox — the compaction events an extension fires, and
-    every event outside a turn — state None."""
+    reads what the turn's own tools do rather than opening a session of its own. The engine passes
+    it at every fire point of a turn; an event fired without one — the compaction events an
+    extension fires, and every event outside a turn — leaves it None."""
 
     ext: ExtensionContext
     payload: HookPayload

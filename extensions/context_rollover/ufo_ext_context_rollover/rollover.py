@@ -552,7 +552,6 @@ class ContextRollover:
             self.turn,
             self.agent,
             None,
-            None,
         )
         await self._persist(index, messages, after, record)
         self._record_verification(index, reason, verification)
@@ -561,7 +560,6 @@ class ContextRollover:
             PostCompact(record=rendered, before_tokens=before_tokens, after_tokens=after_tokens),
             self.turn,
             self.agent,
-            None,
             None,
         )
         return after

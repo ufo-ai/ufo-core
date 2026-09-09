@@ -100,7 +100,7 @@ class HookChain:
         turn: Turn | None,
         agent: Agent | None,
         speaker_member_id: UUID | None,
-        sandbox: Sandbox | None,
+        sandbox: Sandbox | None = None,
     ) -> HookResolution:
         """Run every hook bound to `event` in order and fold their outcomes. Any Deny denies and
         short-circuits (later hooks skip); ModifyInput/ModifyOutput fold left-to-right so each hook

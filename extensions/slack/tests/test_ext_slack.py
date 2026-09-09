@@ -5565,7 +5565,6 @@ async def _arm_followers(
                 turn.model_copy(update={"created_at": moment - age}),
                 agent,
                 turn.speaker_member_id,
-                None,
             )
         finally:
             slack.datetime = datetime
