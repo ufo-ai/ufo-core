@@ -50,6 +50,7 @@ from ufo.runtime.access.grants import (
 from ufo.runtime.agent_scope import AgentUnbound, agent
 from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.manifest import HookContext, HookOutcome, HookSpec, Manifest
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.surfaces.admission import Admission, ConnectResume
 from ufo.runtime.surfaces.cli import CONNECTED_PARAM, callback_router, portal_url
 from ufo.runtime.tools.context import SpeakerRequired, ToolContext
@@ -2171,6 +2172,7 @@ async def _seed_streams(
                     workspace_id=workspace_id,
                     backend="stub",
                     config={"stream": stream},
+                    feed_handle=feed_handle_for({"stream": stream}, frozenset()),
                     connection_id=connection_id,
                     next_sync_at=STREAM_SYNCED_AT,
                     created_at=STREAM_SYNCED_AT,

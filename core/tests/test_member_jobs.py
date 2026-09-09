@@ -13,6 +13,7 @@ from ufo.db import workspace_tx
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.ext.context import _member_blob_text, context_for
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.turns.audience import conversation_audience, foreign_room_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -398,6 +399,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
                 workspace_id=workspace_id,
                 backend="probe",
                 config={},
+                feed_handle=feed_handle_for({}, frozenset()),
                 connection_id=connection_id,
                 next_sync_at=now,
                 created_at=now,

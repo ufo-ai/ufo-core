@@ -216,6 +216,7 @@ from ufo.runtime.hub import (
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.objects import OBJECT_LIST_PAGE
 from ufo.runtime.seats import signup_workspace_id
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
@@ -2035,6 +2036,7 @@ async def _seed_stream(workspace_id: UUID, connection_id: UUID, stream: str) -> 
                 workspace_id=workspace_id,
                 backend="github",
                 config={"stream": stream},
+                feed_handle=feed_handle_for({"stream": stream}, frozenset()),
                 connection_id=connection_id,
                 next_sync_at=sa.func.now(),
                 created_at=sa.func.now(),

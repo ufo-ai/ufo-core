@@ -386,12 +386,14 @@ def source_row_id(
     one backend naming a field cannot drop it from another's identity."""
     return uuid5(
         NAMESPACE_URL,
-        f"{workspace_id}/source/{backend}/{_source_identity(config, non_identity_keys)}"
+        f"{workspace_id}/source/{backend}/{feed_handle_for(config, non_identity_keys)}"
         f"/connection/{connection_id}",
     )
 
 
-def _source_identity(config: Mapping[str, object], non_identity_keys: frozenset[str]) -> str:
+def feed_handle_for(config: Mapping[str, object], non_identity_keys: frozenset[str]) -> str:
+    """The identity string `source_row_id` hashes and `source.feed_handle` stores: the config minus
+    its declared non-identity keys, dumped with sorted keys so one dataset spells one string."""
     return json.dumps(
         {key: value for key, value in config.items() if key not in non_identity_keys},
         sort_keys=True,
@@ -411,7 +413,7 @@ def feed_handle(config: BaseModel) -> str:
         if isinstance(config, SourceRowConfig)
         else frozenset[str]()
     )
-    return _source_identity(config.model_dump(mode="json"), non_identity)
+    return feed_handle_for(config.model_dump(mode="json"), non_identity)
 
 
 def page_id_for(source_id: UUID, source_ref: str) -> UUID:
@@ -487,6 +489,7 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
                     workspace_id=workspace_id,
                     backend=entry.backend,
                     config=config,
+                    feed_handle=feed_handle_for(config, frozenset()),
                     connection_id=connection_id,
                     cursor=None,
                     next_sync_at=now,

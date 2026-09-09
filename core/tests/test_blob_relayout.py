@@ -8,7 +8,7 @@ import sqlalchemy as sa
 
 from ufo.blob import S3BlobStore
 from ufo.db import workspace_tx
-from ufo.runtime.sources.sync import FOLDER_BACKEND
+from ufo.runtime.sources.sync import FOLDER_BACKEND, feed_handle_for
 from ufo.schema import tables
 
 ROOT = Path(__file__).parents[2]
@@ -105,6 +105,7 @@ async def _seed_rows(artifact_key: str, body_ref: str):
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
                 config={"root": "/seed"},
+                feed_handle=feed_handle_for({"root": "/seed"}, frozenset()),
                 connection_id=connection_id,
                 cursor=None,
                 next_sync_at=sa.func.now(),

@@ -48,7 +48,7 @@ from ufo.runtime.indexing import (
     IndexScope,
     TextChunker,
 )
-from ufo.runtime.sources.sync import PageChange
+from ufo.runtime.sources.sync import PageChange, feed_handle_for
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -196,6 +196,7 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
+                feed_handle=feed_handle_for({}, frozenset()),
                 connection_id=connection_id,
                 next_sync_at=now,
                 created_at=now,

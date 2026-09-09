@@ -62,6 +62,7 @@ from ufo.runtime.agent_scope import agent as bind_agent
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.skills.runtime import RuntimeSkill
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
@@ -533,6 +534,7 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
+                feed_handle=feed_handle_for({}, frozenset()),
                 connection_id=connection_id,
                 next_sync_at=minted_at,
                 created_at=minted_at,

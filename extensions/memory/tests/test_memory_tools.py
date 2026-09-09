@@ -39,6 +39,7 @@ from ufo.runtime.indexing import TextChunker
 from ufo.runtime.objects import (
     ObjectListQuery,
 )
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.tools.context import SpawnResult, ToolContext, ToolResult
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
@@ -913,6 +914,7 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
+                feed_handle=feed_handle_for({}, frozenset()),
                 connection_id=connection_id,
                 next_sync_at=now,
                 created_at=now,

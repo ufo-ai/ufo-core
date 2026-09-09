@@ -34,7 +34,7 @@ from ufo.db import workspace_tx
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import context_for
-from ufo.runtime.sources.sync import SyncDriver
+from ufo.runtime.sources.sync import SyncDriver, feed_handle_for
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
@@ -248,6 +248,7 @@ async def _seed_source(
                 backend=backend,
                 connection_id=connection_id,
                 config={"stream": "tickets"},
+                feed_handle=feed_handle_for({"stream": "tickets"}, frozenset()),
                 next_sync_at=seeded_at,
                 created_at=seeded_at,
                 updated_at=seeded_at,

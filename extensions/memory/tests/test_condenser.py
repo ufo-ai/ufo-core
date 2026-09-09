@@ -108,7 +108,7 @@ from ufo.runtime.indexing import (
 )
 from ufo.runtime.jobs import PageChangeRunner
 from ufo.runtime.objects import ObjectListQuery
-from ufo.runtime.sources.sync import CorePageFeed, PageChange
+from ufo.runtime.sources.sync import CorePageFeed, PageChange, feed_handle_for
 from ufo.runtime.tools.context import SpeakerRequired, ToolContext
 from ufo.runtime.turns.audience import conversation_audience, foreign_room_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
@@ -431,6 +431,7 @@ async def _seed_page(
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
+                feed_handle=feed_handle_for({}, frozenset()),
                 connection_id=await _seed_connection(connection, workspace_id, "folder"),
                 cursor=None,
                 next_sync_at=WHEN,
@@ -466,6 +467,7 @@ async def _seed_page_authority(
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
+                feed_handle=feed_handle_for({}, frozenset()),
                 connection_id=await _seed_connection(connection, workspace_id, "test"),
                 next_sync_at=WHEN,
                 created_at=WHEN,
@@ -2568,6 +2570,7 @@ async def _seed_wiki_feed(workspace_id: UUID) -> UUID:
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
+                feed_handle=feed_handle_for({}, frozenset()),
                 connection_id=await _seed_connection(connection, workspace_id, "folder"),
                 next_sync_at=WHEN,
                 created_at=WHEN,

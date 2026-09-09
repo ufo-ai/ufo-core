@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from ufo_ext_memory.store import mem_page
 
 from ufo.db import workspace_tx
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
@@ -54,6 +55,7 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID]:
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
+                feed_handle=feed_handle_for({}, frozenset()),
                 connection_id=connection_id,
                 next_sync_at=sa.func.now(),
                 created_at=sa.func.now(),

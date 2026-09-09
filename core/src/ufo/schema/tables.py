@@ -736,6 +736,7 @@ source = sa.Table(
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("backend", sa.Text, nullable=False),
     sa.Column("config", sa.JSON, nullable=False),
+    sa.Column("feed_handle", sa.Text, nullable=False),
     sa.Column("connection_id", sa.Uuid, nullable=False),
     sa.Column("cursor", sa.Text, nullable=True),
     sa.Column("next_sync_at", sa.DateTime(timezone=True), nullable=False),
@@ -751,6 +752,9 @@ source = sa.Table(
     sa.Index("source_due", "next_sync_at"),
     sa.Index("source_authority", "workspace_id", "connection_id"),
     sa.UniqueConstraint("workspace_id", "id", name="source_workspace_identity"),
+    sa.UniqueConstraint(
+        "workspace_id", "connection_id", "backend", "feed_handle", name="source_feed_handle"
+    ),
     sa.ForeignKeyConstraint(
         ["workspace_id", "connection_id"],
         ["connection.workspace_id", "connection.id"],

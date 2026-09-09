@@ -86,6 +86,7 @@ from ufo.runtime.sources.sync import (
     SyncDriver,
     SyncResult,
     feed_handle,
+    feed_handle_for,
     page_id_for,
     register_sources,
     source_body_ref_matches,
@@ -471,6 +472,7 @@ async def test_the_driver_stamps_pages_with_its_connections_disclosure(
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
                 config={"root": str(root)},
+                feed_handle=feed_handle_for({"root": str(root)}, frozenset()),
                 connection_id=connection_id,
                 cursor=None,
                 next_sync_at=sa.func.now(),
@@ -507,14 +509,20 @@ async def test_register_source_settles_on_one_row_per_connection_and_config(db: 
         second = await ctx.register_source(FOLDER_BACKEND, config, connection_id=second_connection)
     assert second != first
     async with workspace_tx() as connection:
-        held = dict(
-            (
-                await connection.execute(
-                    sa.select(tables.source.c.id, tables.source.c.connection_id)
+        rows = (
+            await connection.execute(
+                sa.select(
+                    tables.source.c.id, tables.source.c.connection_id, tables.source.c.feed_handle
                 )
-            ).all()
-        )
-    assert held == {first: first_connection, second: second_connection}
+            )
+        ).all()
+    assert {row.id: row.connection_id for row in rows} == {
+        first: first_connection,
+        second: second_connection,
+    }
+    # The same stream under two connections shares one handle, which is why the unique key over it
+    # also carries the connection.
+    assert {row.feed_handle for row in rows} == {feed_handle(config)}
 
 
 async def test_register_source_refuses_a_connection_that_is_not_the_backends(db: None) -> None:
@@ -554,6 +562,7 @@ async def test_a_source_row_cannot_exist_without_a_connection(db: None) -> None:
                     workspace_id=workspace_id,
                     backend=FOLDER_BACKEND,
                     config={"root": "/shared"},
+                    feed_handle=feed_handle_for({"root": "/shared"}, frozenset()),
                     connection_id=None,
                     next_sync_at=sa.func.now(),
                     created_at=sa.func.now(),
@@ -868,7 +877,7 @@ async def test_rewindow_sources_refuses_a_config_that_would_move_the_row(db: Non
                 .values(cursor="9001")
                 .where(tables.source.c.id == source_id)
             )
-        with pytest.raises(ValueError, match="would move it to"):
+        with pytest.raises(ValueError, match="would change which dataset"):
             await ctx.rewindow_sources(
                 {source_id: config.model_copy(update={"stream": "contacts"})}
             )
@@ -1451,6 +1460,7 @@ async def _seed_page(workspace_id: UUID) -> UUID:
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
                 config={},
+                feed_handle=feed_handle_for({}, frozenset()),
                 connection_id=connection_id,
                 cursor=None,
                 next_sync_at=sa.func.now(),
@@ -1661,6 +1671,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
                 config={"root": "/seed"},
+                feed_handle=feed_handle_for({"root": "/seed"}, frozenset()),
                 connection_id=connection_id,
                 cursor=None,
                 next_sync_at=sa.func.now(),
@@ -1824,6 +1835,7 @@ async def _authority() -> _Authority:
                     "workspace_id": state.workspace_id,
                     "backend": FOLDER_BACKEND,
                     "config": {"root": f"/{source_id.hex}"},
+                    "feed_handle": feed_handle_for({"root": f"/{source_id.hex}"}, frozenset()),
                     "connection_id": connection_id,
                     "cursor": None,
                     "next_sync_at": datetime.now(UTC),
@@ -2180,7 +2192,8 @@ async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=SCRIPTED_BACKEND,
-                config={"root": "/unused"},
+                config={"root": f"/{source_id.hex}"},
+                feed_handle=feed_handle_for({"root": f"/{source_id.hex}"}, frozenset()),
                 connection_id=connection_id,
                 cursor=cursor,
                 next_sync_at=sa.func.now(),
@@ -2293,7 +2306,8 @@ async def test_sync_stamps_the_disclosure_its_connection_holds_after_the_fetch(
                     id=source_id,
                     workspace_id=workspace_id,
                     backend=SCRIPTED_BACKEND,
-                    config={"root": "/unused"},
+                    config={"root": f"/{source_id.hex}"},
+                    feed_handle=feed_handle_for({"root": f"/{source_id.hex}"}, frozenset()),
                     connection_id=connection_id,
                     cursor=None,
                     next_sync_at=sa.func.now(),
@@ -3167,6 +3181,7 @@ async def _seed_connected_source(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
                 workspace_id=workspace_id,
                 backend=CONNECTOR_PROVIDER,
                 config={"stream": CONNECTOR_STREAM},
+                feed_handle=feed_handle_for({"stream": CONNECTOR_STREAM}, frozenset()),
                 connection_id=connection_id,
                 cursor="held-cursor",
                 next_sync_at=sa.func.now(),
@@ -3425,6 +3440,7 @@ async def _seed_peer_source(workspace_id: UUID) -> UUID:
                 workspace_id=workspace_id,
                 backend=CONNECTOR_PROVIDER,
                 config={"stream": CONNECTOR_STREAM},
+                feed_handle=feed_handle_for({"stream": CONNECTOR_STREAM}, frozenset()),
                 connection_id=connection_id,
                 cursor="peer-cursor",
                 next_sync_at=sa.func.now(),
@@ -3658,6 +3674,7 @@ async def _seed_connector_source(workspace_id: UUID, *, consecutive_errors: int 
                 workspace_id=workspace_id,
                 backend=CONNECTOR_PROVIDER,
                 config={"stream": CONNECTOR_STREAM},
+                feed_handle=feed_handle_for({"stream": CONNECTOR_STREAM}, frozenset()),
                 connection_id=connection_id,
                 cursor=None,
                 consecutive_errors=consecutive_errors,

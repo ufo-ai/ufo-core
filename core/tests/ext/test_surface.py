@@ -108,6 +108,7 @@ from ufo.runtime.ext.surface import (
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.queue import _load_turn
 from ufo.runtime.seats import signup_workspace_id
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.surfaces.hub_tail import HubTailer
 from ufo.runtime.turns.ambient_reply import (
@@ -781,6 +782,7 @@ async def _seed_source(
                 workspace_id=workspace_id,
                 backend=backend,
                 config=config,
+                feed_handle=feed_handle_for(config, frozenset()),
                 connection_id=connection_id,
                 next_sync_at=sa.func.now(),
                 created_at=sa.func.now(),

@@ -44,7 +44,7 @@ from ufo.runtime.objects import (
     VerbNotSupported,
     object_registry,
 )
-from ufo.runtime.sources.sync import PageChange
+from ufo.runtime.sources.sync import PageChange, feed_handle_for
 from ufo.runtime.tools.context import SpawnResult, TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.audience import conversation_audience
@@ -212,6 +212,7 @@ async def _seed_source(
                 workspace_id=workspace_id,
                 backend="asana",
                 config={"stream": "issues"},
+                feed_handle=feed_handle_for({"stream": "issues"}, frozenset()),
                 connection_id=connection_id,
                 next_sync_at=when,
                 created_at=when,

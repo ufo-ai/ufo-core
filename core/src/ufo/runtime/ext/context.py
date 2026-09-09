@@ -79,7 +79,13 @@ from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.governance import Governance, prompt_digest
 from ufo.runtime.media.artifact_url import is_text_media, mint_image_preview_url
 from ufo.runtime.seats import Seats, workspace_domain
-from ufo.runtime.sources.sync import PageFeed, SourceRowConfig, source_row_id
+from ufo.runtime.sources.sync import (
+    PageFeed,
+    SourceRowConfig,
+    feed_handle,
+    feed_handle_for,
+    source_row_id,
+)
 from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
     Audience,
@@ -2355,6 +2361,7 @@ class ExtensionContext:
                     workspace_id=self.store.workspace_id,
                     backend=backend,
                     config=payload,
+                    feed_handle=feed_handle(config),
                     connection_id=connection_id,
                     cursor=None,
                     next_sync_at=registered_at,
@@ -2540,6 +2547,7 @@ class ExtensionContext:
                         tables.source.c.id,
                         tables.source.c.backend,
                         tables.source.c.connection_id,
+                        tables.source.c.feed_handle,
                     )
                     .where(
                         tables.source.c.id.in_(tuple(configs)),
@@ -2559,17 +2567,10 @@ class ExtensionContext:
                     if isinstance(config, SourceRowConfig)
                     else frozenset[str]()
                 )
-                landed = source_row_id(
-                    self.store.workspace_id,
-                    row.backend,
-                    payload,
-                    connection_id=row.connection_id,
-                    non_identity_keys=non_identity,
-                )
-                if landed != row.id:
+                if feed_handle_for(payload, non_identity) != row.feed_handle:
                     raise ValueError(
-                        f"rewindowing source {row.id} would move it to {landed}: only a config "
-                        "field the model declares non-identity may be rewritten in place"
+                        f"rewindowing source {row.id} would change which dataset it is: only a "
+                        "config field the model declares non-identity may be rewritten in place"
                     )
                 values: dict[str, Any] = {"config": payload, "updated_at": now}
                 if row.id in refetch:

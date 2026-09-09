@@ -69,6 +69,7 @@ from ufo.runtime.sources.sync import (
     PageBatch,
     PageChange,
     SyncDriver,
+    feed_handle_for,
     page_cursor,
 )
 from ufo.runtime.subagents import SubagentRegistry
@@ -135,7 +136,8 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="folder",
-                config={},
+                config={"root": f"/{source_id.hex}"},
+                feed_handle=feed_handle_for({"root": f"/{source_id.hex}"}, frozenset()),
                 connection_id=connection_id,
                 cursor=None,
                 next_sync_at=when,
