@@ -288,7 +288,7 @@
   --container-app-settings: min(493px, 100vw);
   --container-spotlight: min(720px, calc(100vw - 32px));
   --container-bubble: 70ch;
-  --container-said: 256px;
+  --container-said: 80%;
   --container-section: 728px;
   --container-page: calc(var(--container-section) + 2 * var(--spacing-2xl));
   --container-hint: 64ch;
