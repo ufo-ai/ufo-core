@@ -9,8 +9,17 @@ export type ModelProvider = { id: string; label: string; mark: string };
 /** `family` names a model's version line: the models that differ from each other only by version
  *  number. A named or a lightweight variant — Sol, Luna, Flash, Mini — stands as its own family,
  *  because a member picks between those rather than between versions. Each family is held newest
- *  first, so the picker offers the head of each one. */
-export type ModelChoice = { id: string; provider: string; family: string; label: string };
+ *  first, so the picker offers the head of each one.
+ *
+ *  `offered: false` holds a model out of the picker while it keeps its name: a member whose agent
+ *  already stores that id still reads the model rather than the id. */
+export type ModelChoice = {
+  id: string;
+  provider: string;
+  family: string;
+  label: string;
+  offered?: false;
+};
 
 export type ModelGroup = { provider: ModelProvider; models: ModelChoice[] };
 
@@ -28,17 +37,35 @@ export const MODEL_CHOICES: readonly ModelChoice[] = [
   { id: "claude-opus-4-6", provider: "anthropic", family: "opus", label: "Opus 4.6" },
   { id: "claude-sonnet-5", provider: "anthropic", family: "sonnet", label: "Sonnet 5" },
   { id: "claude-sonnet-4-6", provider: "anthropic", family: "sonnet", label: "Sonnet 4.6" },
-  { id: "claude-haiku-4-5", provider: "anthropic", family: "haiku", label: "Haiku 4.5" },
+  {
+    id: "claude-haiku-4-5",
+    provider: "anthropic",
+    family: "haiku",
+    label: "Haiku 4.5",
+    offered: false,
+  },
   { id: "anthropic/claude-fable-5.1", provider: "anthropic", family: "fable", label: "Fable 5.1" },
   { id: "anthropic/claude-fable-5", provider: "anthropic", family: "fable", label: "Fable 5" },
   { id: "gpt-6-astra", provider: "openai", family: "gpt-astra", label: "GPT-6 Astra" },
   { id: "gpt-5.6-sol", provider: "openai", family: "gpt-sol", label: "GPT-5.6 Sol" },
   { id: "gpt-5.6-terra", provider: "openai", family: "gpt-terra", label: "GPT-5.6 Terra" },
   { id: "gpt-5.6-luna", provider: "openai", family: "gpt-luna", label: "GPT-5.6 Luna" },
-  { id: "gpt-5.5", provider: "openai", family: "gpt", label: "GPT-5.5" },
-  { id: "gpt-5.4", provider: "openai", family: "gpt", label: "GPT-5.4" },
-  { id: "gpt-5.4-mini", provider: "openai", family: "gpt-mini", label: "GPT-5.4 Mini" },
-  { id: "gpt-5.4-nano", provider: "openai", family: "gpt-nano", label: "GPT-5.4 Nano" },
+  { id: "gpt-5.5", provider: "openai", family: "gpt", label: "GPT-5.5", offered: false },
+  { id: "gpt-5.4", provider: "openai", family: "gpt", label: "GPT-5.4", offered: false },
+  {
+    id: "gpt-5.4-mini",
+    provider: "openai",
+    family: "gpt-mini",
+    label: "GPT-5.4 Mini",
+    offered: false,
+  },
+  {
+    id: "gpt-5.4-nano",
+    provider: "openai",
+    family: "gpt-nano",
+    label: "GPT-5.4 Nano",
+    offered: false,
+  },
   {
     id: "deepseek/deepseek-v4-flash",
     provider: "deepseek",
@@ -87,12 +114,13 @@ export function modelMark(id: string): string | null {
 }
 
 /** An older version stays in the table — a member already on it still reads its name — and stays
- *  out of what the picker offers. */
+ *  out of what the picker offers, as does a model the table holds unoffered. */
 function latestOfEachFamily(): ModelChoice[] {
-  const offered = served;
+  const serves = served;
   const taken = new Set<string>();
   return MODEL_CHOICES.filter((choice) => {
-    if (offered !== null && !offered.includes(choice.id)) return false;
+    if (choice.offered === false) return false;
+    if (serves !== null && !serves.includes(choice.id)) return false;
     if (taken.has(choice.family)) return false;
     taken.add(choice.family);
     return true;

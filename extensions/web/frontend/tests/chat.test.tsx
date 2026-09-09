@@ -8,7 +8,7 @@ import type { EarlierMessages } from "@/lib/earlier";
 import { chatHash, conversationSlotHash, newChatHash } from "@/lib/route";
 import { ConversationTranscript } from "@/views/Conversations";
 
-import { AGENT, AGENT_ID, ARRIVAL_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, ARRIVAL_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -3680,6 +3680,16 @@ test("the composer's model chip picks a model out of its provider's flyout, and 
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
 });
 
+/** The rows of the flyout a model stands in: a submenu that has just closed lingers in the tree
+ *  until Radix unmounts it, so one flyout is read through a row of its own. */
+async function flyoutRows(model: string) {
+  const row = await screen.findByRole("menuitemradio", { name: model });
+  const flyout = row.closest("[role='menu']") as HTMLElement;
+  return within(flyout)
+    .getAllByRole("menuitemradio")
+    .map((item) => item.textContent);
+}
+
 test("the model picker offers the latest of each family, a speed variant on its own row", async () => {
   wire(transcript());
   render(
@@ -3691,13 +3701,18 @@ test("the model picker offers the latest of each family, a speed variant on its 
   await screen.findByRole("menuitemradio", { name: "Opus 5" });
   expect(screen.queryByRole("menuitemradio", { name: "Opus 4.8" })).toBeNull();
   expect(screen.queryByRole("menuitemradio", { name: "Sonnet 4.6" })).toBeNull();
+  expect(screen.queryByRole("menuitemradio", { name: "Haiku 4.5" })).toBeNull();
+
+  await userEvent.click(screen.getByRole("menuitem", { name: "GPT" }));
+  expect(await flyoutRows("GPT-6 Astra")).toEqual([
+    "GPT-6 Astra",
+    "GPT-5.6 Sol",
+    "GPT-5.6 Terra",
+    "GPT-5.6 Luna",
+  ]);
 
   await userEvent.click(screen.getByRole("menuitem", { name: "GLM" }));
-  expect((await screen.findAllByRole("menuitemradio")).map((item) => item.textContent)).toEqual([
-    "Auto",
-    "GLM 5.3",
-    "GLM 5.3 Flash",
-  ]);
+  expect(await flyoutRows("GLM 5.3")).toEqual(["GLM 5.3", "GLM 5.3 Flash"]);
 });
 
 test("an agent on auto reads Auto on the chip and the picker ticks the Auto row", async () => {
@@ -3879,4 +3894,39 @@ test("the model picker's rows read left to right while the flyout stands to the 
     .find((menu) => menu !== providers) as HTMLElement;
   expect(models.getAttribute("dir")).toBe("ltr");
   expect(models.getAttribute("data-side")).toBe("left");
+});
+
+test("at a phone width the picker keeps its flyout, and a tap on a model shuts both menus", async () => {
+  const posted: unknown[] = [];
+  atPhoneWidth();
+  wire({
+    ...transcript(),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Applied." });
+    },
+  });
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+  const touch = userEvent.setup();
+
+  await touch.pointer([
+    { keys: "[TouchA]", target: await screen.findByRole("button", { name: "Model: Opus 4.8" }) },
+  ]);
+  const providers = await screen.findByRole("menu");
+
+  await touch.pointer([
+    { keys: "[TouchA]", target: await screen.findByRole("menuitem", { name: "GLM" }) },
+  ]);
+  const flash = await screen.findByRole("menuitemradio", { name: "GLM 5.3 Flash" });
+  expect(flash.closest("[role='menu']")).not.toBe(providers);
+
+  await touch.pointer([{ keys: "[TouchA]", target: flash }]);
+
+  expect(posted).toEqual([
+    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "z-ai/glm-5.3-flash" } },
+  ]);
+  expect(await screen.findByRole("button", { name: "Model: GLM 5.3 Flash" })).toBeTruthy();
+  await waitFor(() => expect(screen.queryAllByRole("menu")).toEqual([]));
 });

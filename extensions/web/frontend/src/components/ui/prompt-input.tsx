@@ -264,6 +264,10 @@ const MODEL_MARK = "size-(--size-glyph)";
  *  popup takes `dir="ltr"` back: the mark leads the label and the chevron or the tick closes the
  *  row, while the flyout still stands to the left.
  *
+ *  The menu holds its own open state and shuts it as the pick is made rather than leaving the close
+ *  to Radix: a tap on a model in the flyout dismisses the flyout, and the same touch does not always
+ *  reach the root, which left the root standing open over an unchanged chip on a phone.
+ *
  *  Auto stands as its own row over the providers, because it is the deploy's choice rather than a
  *  model of any one of them, and it is how a member hands the choice back after picking. */
 export function PromptInputModel({
@@ -273,12 +277,17 @@ export function PromptInputModel({
   model: string;
   onPick: (model: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
   const groups = modelMenu();
   const auto = servesAuto();
   if (!groups.length && !auto) return null;
   const mark = modelMark(model);
+  const pick = (id: string) => {
+    setOpen(false);
+    onPick(id);
+  };
   return (
-    <DropdownMenu dir="rtl">
+    <DropdownMenu dir="rtl" open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="quiet"
@@ -296,7 +305,7 @@ export function PromptInputModel({
       </DropdownMenuTrigger>
       <DropdownMenuContent dir="ltr" align="end">
         {auto ? (
-          <DropdownMenuRadioGroup value={model} onValueChange={onPick}>
+          <DropdownMenuRadioGroup value={model} onValueChange={pick}>
             <DropdownMenuRadioItem value={AUTO_MODEL}>
               <span className="flex items-center gap-sm">
                 <IconSparkles aria-hidden className={MODEL_MARK} stroke={1.5} />
@@ -315,7 +324,7 @@ export function PromptInputModel({
               </span>
             </DropdownMenuSubTrigger>
             <DropdownMenuSubContent dir="ltr">
-              <DropdownMenuRadioGroup value={model} onValueChange={onPick}>
+              <DropdownMenuRadioGroup value={model} onValueChange={pick}>
                 {models.map((choice) => (
                   <DropdownMenuRadioItem key={choice.id} value={choice.id}>
                     <span className="flex items-center gap-sm">
