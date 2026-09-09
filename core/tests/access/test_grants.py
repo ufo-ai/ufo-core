@@ -2423,6 +2423,16 @@ def test_a_tenant_url_is_admitted_only_under_its_providers_rule() -> None:
     with pytest.raises(ValueError, match=re.escape("/v3/company/<realmId>")):
         _tenant_url("quickbooks", "https://quickbooks.api.intuit.com")
 
+    for site in ("api.datadoghq.com", "api.us5.datadoghq.com", "api.datadoghq.eu"):
+        assert _tenant_url("datadog", f"https://{site}/") == f"https://{site}"
+    for wrong_site in (
+        "https://api.us9.datadoghq.com",
+        "https://api.datadoghq.com.evil.example.com",
+        "https://api.datadoghq.com/api/v1",
+    ):
+        with pytest.raises(ValueError, match=re.escape("https://api.datadoghq.com")):
+            _tenant_url("datadog", wrong_site)
+
     for refused in REFUSED_TENANT_URLS:
         with pytest.raises(ValueError, match="base_url"):
             _tenant_url("zendesk", refused)

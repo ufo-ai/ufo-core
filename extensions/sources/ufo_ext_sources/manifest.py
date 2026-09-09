@@ -25,7 +25,7 @@ from ufo.sdk.jobs import JobSpec, feed_workspaces
 from ufo.sdk.manifest import CredentialSlot, HookSpec, Manifest, SourceProvider
 from ufo.sdk.sources import Connector, ConnectorBackend
 from ufo_ext_sources.connected import on_connection_recorded, retry_connected_sources
-from ufo_ext_sources.direct import DirectAuthProxy
+from ufo_ext_sources.direct import DirectAuthProxy, keyed_secret_merge
 from ufo_ext_sources.pages import PAGE_OBJECT
 from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT, on_link_seen, on_page_change
@@ -35,6 +35,24 @@ VERSION = "0.1.0"
 DIRECT_BACKEND = "direct"
 CONNECTED_SOURCES_RETRY_JOB = "connected_sources_retry"
 CONNECTED_SOURCES_RETRY_SCHEDULE = "0 * * * * *"
+
+
+def _direct_slot(name: str, connector: type[Connector]) -> CredentialSlot:
+    """One connector's BYOK slot for the direct auth backend: a bearer key, or — where the connector
+    authenticates with headers — the several secrets it names, merged into that one slot a
+    submission at a time."""
+    if not connector.key_headers:
+        return CredentialSlot(
+            name=name,
+            description=f"BYOK API key for {name} feed-sync via the direct auth backend.",
+        )
+    fields = tuple(connector.key_headers.values())
+    return CredentialSlot(
+        name=name,
+        description=f"BYOK secrets for {name} feed-sync via the direct auth backend, as a JSON "
+        f"object naming {', '.join(fields)}.",
+        merge=keyed_secret_merge(fields),
+    )
 
 
 @dataclass(frozen=True)
@@ -71,13 +89,7 @@ def manifest() -> Manifest:
             )
             for name, cls in CONNECTORS.items()
         ),
-        credentials=tuple(
-            CredentialSlot(
-                name=name,
-                description=f"BYOK API key for {name} feed-sync via the direct auth backend.",
-            )
-            for name in CONNECTORS
-        ),
+        credentials=tuple(_direct_slot(name, connector) for name, connector in CONNECTORS.items()),
         auth_proxies=(
             AuthProxySpec(
                 backend=DIRECT_BACKEND,

@@ -1,4 +1,5 @@
 import pytest
+from ufo_ext_sources.manifest import manifest
 from ufo_ext_sources.providers.asana import AsanaConnector
 from ufo_ext_sources.registry import CONNECTORS, _connector_registry
 
@@ -14,7 +15,7 @@ class SecondConnector(AsanaConnector):
 
 
 def test_registry_maps_every_connector_name_once() -> None:
-    assert len(CONNECTORS) == 54
+    assert len(CONNECTORS) == 55
     assert all(name == connector_type.name for name, connector_type in CONNECTORS.items())
 
 
@@ -40,7 +41,7 @@ def test_every_connector_declaring_a_window_reads_the_floor_it_is_handed() -> No
         for name, cls in CONNECTORS.items()
     }
     declaring = {name: streams for name, streams in obliged.items() if streams}
-    assert set(declaring) == {"github", "gmail", "granola_mcp", "outlook", "slack"}
+    assert set(declaring) == {"datadog", "github", "gmail", "granola_mcp", "outlook", "slack"}
 
     deaf = [
         f"{name} declares a window on {streams} but does not override paginate_source"
@@ -49,3 +50,11 @@ def test_every_connector_declaring_a_window_reads_the_floor_it_is_handed() -> No
         and CONNECTORS[name].paginate_source is RestConnector.paginate_source
     ]
     assert deaf == []
+
+
+def test_a_two_key_connector_keeps_one_slot_that_merges_its_secrets() -> None:
+    slots = {slot.name: slot for slot in manifest().credentials}
+    assert set(slots) == set(CONNECTORS)
+    assert slots["github"].merge is None
+    assert slots["datadog"].merge is not None
+    assert "api_key, application_key" in slots["datadog"].description

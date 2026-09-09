@@ -10,6 +10,7 @@ proof), the `direct` BYOK backend reading a member-added key host-side, and the 
 honouring each `Credential` shape. These live in `extensions/sources/tests` so the framework evolves
 without colliding with the composio broker's auth-proxy proof in `extensions/connectors/tests`."""
 
+import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -20,7 +21,7 @@ import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_ext_embed_openai import EMBED_DIM
-from ufo_ext_sources.direct import DirectAuthProxy
+from ufo_ext_sources.direct import DirectAuthProxy, keyed_secret_merge
 from ufo_ext_sources.providers.asana import AsanaConnector
 from ufo_ext_sources.providers.github import GitHubConnector
 from ufo_ext_sources.watermark import text_checkpoint
@@ -28,8 +29,9 @@ from ufo_ext_sources.watermark import text_checkpoint
 from ufo.db import workspace_tx
 from ufo.runtime.access.connectors import (
     Credential,
+    GrantUnusable,
 )
-from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.credentials import CredentialStore, CredentialValueInvalid
 from ufo.runtime.ext.context import CredentialAccess
 from ufo.runtime.sources import rest
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
@@ -608,6 +610,53 @@ async def test_direct_backend_returns_a_bearer_read_from_the_credential_store(db
     with ws(workspace_id):
         credential = await DirectAuthProxy(credentials=access).credential(workspace_id, "github")
     assert credential == Credential(bearer="ghp_realkey")
+
+
+async def _keyed_slot(value: str) -> tuple[UUID, CredentialAccess]:
+    workspace_id = await _workspace()
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    await store.put(workspace_id, "datadog", value)
+    return workspace_id, CredentialAccess(declared=frozenset({"datadog"}))
+
+
+async def test_direct_backend_reads_a_two_key_provider_into_its_headers(db: None) -> None:
+    """A connector declaring `key_headers` holds its several secrets as fields of the one slot named
+    for it, and the backend reads each field into the header that carries it."""
+    workspace_id, access = await _keyed_slot(
+        json.dumps({"api_key": "dd-api", "application_key": "dd-app"})
+    )
+    with ws(workspace_id):
+        credential = await DirectAuthProxy(credentials=access).credential(workspace_id, "datadog")
+    assert credential == Credential(
+        headers={"DD-API-KEY": "dd-api", "DD-APPLICATION-KEY": "dd-app"}
+    )
+
+
+async def test_direct_backend_answers_grant_unusable_while_a_secret_is_unfilled(db: None) -> None:
+    """A half-filled slot cannot authenticate, and Datadog refuses an API key with no application
+    key beside it — so the run is skipped naming the field to fill, spending no refusal."""
+    workspace_id, access = await _keyed_slot(json.dumps({"api_key": "dd-api"}))
+    with ws(workspace_id), pytest.raises(GrantUnusable, match="application_key"):
+        await DirectAuthProxy(credentials=access).credential(workspace_id, "datadog")
+
+
+def test_a_keyed_secret_merges_one_submitted_field_at_a_time() -> None:
+    merge = keyed_secret_merge(("api_key", "application_key"))
+    first = merge(None, json.dumps({"api_key": "dd-api"}))
+    assert json.loads(merge(first, json.dumps({"application_key": "dd-app"}))) == {
+        "api_key": "dd-api",
+        "application_key": "dd-app",
+    }
+    assert json.loads(merge(first, json.dumps({"api_key": "rotated"}))) == {"api_key": "rotated"}
+
+
+def test_a_keyed_secret_refuses_a_submission_it_cannot_place() -> None:
+    merge = keyed_secret_merge(("api_key", "application_key"))
+    unplaceable = ("dd-api", "[]", "{}", json.dumps({"token": "x"}), json.dumps({"api_key": ""}))
+    for submitted in unplaceable:
+        with pytest.raises(CredentialValueInvalid):
+            merge(None, submitted)
 
 
 async def test_direct_backend_refuses_a_provider_slot_it_never_declared() -> None:

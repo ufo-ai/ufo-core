@@ -1237,6 +1237,15 @@ TENANT_URL_RULES: dict[str, tuple[re.Pattern[str], re.Pattern[str], str]] = {
         re.compile(r"/api/v2/?"),
         "https://<site>.chargebee.com/api/v2",
     ),
+    "datadog": (
+        re.compile(
+            r"api\.(?:us3\.|us5\.|ap1\.|ap2\.|uk1\.)?datadoghq\.com"
+            r"|api\.datadoghq\.eu"
+            r"|api\.(?:us2\.)?ddog-gov\.com"
+        ),
+        re.compile(r"/?"),
+        "https://api.datadoghq.com",
+    ),
     "freshdesk": (
         re.compile(rf"{DOMAIN_LABEL}\.freshdesk\.com"),
         re.compile(r"/?"),

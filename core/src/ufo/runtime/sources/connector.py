@@ -440,11 +440,17 @@ class Connector(ABC):
 
     `dials_host` False says the connector dials no provider host at all: it reads through tool
     executions the broker runs server-side (`ToolConnector`), so an empty `base_url` is its whole
-    address rather than a per-tenant one the connection must name."""
+    address rather than a per-tenant one the connection must name.
+
+    It declares its direct-key auth shape the same way. `key_headers` empty is one bearer token, and
+    the slot named for the connector holds it. `key_headers` populated is a provider authenticating
+    with headers instead — header name to the field holding its secret — and that same one slot
+    holds those fields as an object the member fills a field at a time."""
 
     name: ClassVar[str] = ""
     base_url: ClassVar[str] = ""
     dials_host: ClassVar[bool] = True
+    key_headers: ClassVar[Mapping[str, str]] = {}
 
     @abstractmethod
     def streams(self) -> list[StreamSpec]:

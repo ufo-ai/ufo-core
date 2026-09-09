@@ -18,6 +18,7 @@ from ufo_ext_sources.providers.calendly import CalendlyConnector
 from ufo_ext_sources.providers.chargebee import ChargebeeConnector
 from ufo_ext_sources.providers.clickup import ClickUpConnector
 from ufo_ext_sources.providers.confluence import ConfluenceConnector
+from ufo_ext_sources.providers.datadog import DatadogConnector
 from ufo_ext_sources.providers.deel import DeelConnector
 from ufo_ext_sources.providers.docusign import DocuSignConnector
 from ufo_ext_sources.providers.facebook_ads import FacebookAdsConnector
@@ -87,6 +88,7 @@ CONNECTORS = _connector_registry(
         ChargebeeConnector,
         ClickUpConnector,
         ConfluenceConnector,
+        DatadogConnector,
         DeelConnector,
         DocuSignConnector,
         FacebookAdsConnector,

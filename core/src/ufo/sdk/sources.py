@@ -30,7 +30,10 @@ into a `SyncResult`. A provider returns opaque checkpoint state through `RestCon
 after each record page; the framework publishes it after enumeration. A provider that can resume
 between pages emits `StreamPage.next_cursor` directly, which takes priority over that callback.
 The pagination helpers (`get_path`, `list_or_empty`, `records_at`,
-`with_context`) are the shared record-shaping primitives a provider reaches for. A stream that fans
+`with_context`) are the shared record-shaping primitives a provider reaches for, and
+`normalize_page_timestamp` is the one rule for reading a provider's instant — the same rule the
+adapter projects a page's own timestamps through, so a provider rendering an instant of its own
+cannot disagree with the page beside it. A stream that fans
 out over partitions (one cursor per repo, channel) drives `PartitionWalk` with an `Ordering` and a
 per-partition page factory, so the per-partition cursor-map codec and bounded-backfill resume live
 once here, not in each connector. The concrete shapes live in `ufo.runtime.sources`, reached only
@@ -134,6 +137,9 @@ from ufo.runtime.sources.sync import (
 )
 from ufo.runtime.sources.sync import (
     feed_handle as feed_handle,
+)
+from ufo.runtime.sources.sync import (
+    normalize_page_timestamp as normalize_page_timestamp,
 )
 from ufo.runtime.sources.tool import (
     ToolConnector as ToolConnector,
