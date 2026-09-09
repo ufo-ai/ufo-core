@@ -57,6 +57,7 @@ from evals.suites import (
     object_tools,
     onboarding_help,
     pdf_build,
+    proactive_handoff,
     problem_report,
     rebuild_actions,
     red_after_green,
@@ -103,6 +104,7 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("language_drift", language_drift.CASES),
     capability_task("closing_message", closing_message.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
+    capability_task("proactive_handoff", proactive_handoff.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     capability_task(
         "slack_message_block", slack_message_block.CASES, judge_model=SEMANTIC_JUDGE_MODEL
     ),

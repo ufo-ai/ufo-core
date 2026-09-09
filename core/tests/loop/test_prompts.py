@@ -135,6 +135,21 @@ def test_shell_writes_the_report_and_sends_it_only_when_the_member_asks() -> Non
     assert "full structure, because the content is genuinely report-shaped" not in SHELL
 
 
+def test_the_delivery_carries_the_handle_for_the_next_step() -> None:
+    prose = " ".join(SHELL.split())
+    assert "Give the next step its handle" in prose
+    assert "put that thing in the delivery, in the form they act on" in prose
+    assert "on the line that reports the result" in prose
+    assert "leave its handle in a tool result the recipient cannot open" in prose
+    assert "[Join the call](https://meet.example.com/abc-defg)" in prose
+    assert "Carry one handle for the result you report" in prose
+    assert "never a list of everything the work passed" in prose
+    assert "Take the handle from this turn's own material and never guess or rebuild one" in prose
+    assert "report the result and say that no link came with it" in prose
+    assert "The handle for the next step is part of the answer and never a ride-along." in prose
+    assert SUBAGENT_OUTPUT_DISCIPLINE.count("Give the next step its handle") == 1
+
+
 def test_shell_answers_first_and_grounds_an_explanation_in_current_content() -> None:
     prose = " ".join(SHELL.split())
     assert "In answer, discuss, and report, the first sentence answers the question" in prose
