@@ -865,3 +865,37 @@ test("the rail's leading tile opens the launcher, and no tile searches beside it
   expect(await screen.findByRole("combobox", { name: "Search" })).toBeTruthy();
   expect(await screen.findByRole("option", { name: /Pick one thread/ })).toBeTruthy();
 });
+
+const UNTITLED_CONVERSATION = { ...FOUND_CONVERSATION, description: "" };
+
+const TRIGGER_NAME = "github-30847ee49f0a4c7f8d2e1a3b4c5d6e7f-1a2b3c4d";
+
+const FOUND_TRIGGER = owned({
+  name: TRIGGER_NAME,
+  summary: "github-30847ee4 — issues",
+  conversation: CONVO_ID,
+  delivery: "current",
+  mine: true,
+});
+
+test("a thread the wire titles with nothing reads as who it is with, never as its id", async () => {
+  everything({ "/conversations$": () => json({ conversations: [UNTITLED_CONVERSATION] }) });
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: /Workspace/ })).toBeTruthy();
+  expect(found.queryByText(CONVO_ID)).toBeNull();
+});
+
+test("a source trigger reads as the feed it watches, not as the name its conversation's hex is in", async () => {
+  everything({
+    ["/objects/" + TRIGGER_KIND.kind]: () => objectIndex(TRIGGER_KIND, [FOUND_TRIGGER]),
+  });
+  await open();
+  await type("github");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: /github-30847ee4 — issues/ })).toBeTruthy();
+  expect(found.queryByText(TRIGGER_NAME)).toBeNull();
+});

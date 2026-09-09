@@ -42,6 +42,34 @@ import type { Agent, SpecSchema } from "@/lib/types";
 const AGENT_FIELD = "object-agent";
 const CONVERSATION_FIELD = "conversation";
 const ID_FIELD = "id";
+const SUMMARY_FIELD = "summary";
+
+/** A kind that names its rows by an id says which of its list fields titles a record instead, the
+ *  most readable field first. Every row carries a `summary`, so a kind may name that among them. */
+const TITLED_BY: Record<string, readonly string[]> = {
+  conversation: ["title", SUMMARY_FIELD],
+  memory: [SUMMARY_FIELD, "text"],
+  notification: ["subject"],
+  source_trigger: [SUMMARY_FIELD],
+};
+
+const TITLE_MAX = 72;
+
+const PAGE_TITLE_FIELD = "created_from_page_title";
+const CREATED_FROM_RELATION = "created_from";
+
+/** An id-valued status field beside the readable field that says the same thing. */
+const READABLE_BESIDE: Record<string, string> = {
+  created_from_page_id: PAGE_TITLE_FIELD,
+};
+
+const MEMBER_ID_FIELD = "member_id";
+const TRIAGED_TURN_FIELD = "triaged_turn";
+const TRIAGED_FIELD = "triaged";
+const TRIAGED_HEADING = "Triaged";
+
+/** A uuid, with or without its dashes — how a kind that names its rows by an id spells one. */
+const ID_SHAPED = /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 
 const LEADING_FIELDS = 1;
 
@@ -93,9 +121,32 @@ function noun(kind: string): string {
   return kind.replaceAll("_", " ");
 }
 
+function firstLine(value: ObjectValue | undefined): string {
+  if (typeof value !== "string") return "";
+  const said = value.split("\n", 1)[0].trim();
+  return said.length > TITLE_MAX ? said.slice(0, TITLE_MAX - 1).trimEnd() + "…" : said;
+}
+
+function sentence(said: string): string {
+  return said.charAt(0).toUpperCase() + said.slice(1);
+}
+
+/** What a record is called: its own name, except where its kind names its rows by an id and states
+ *  the readable field to title them by. A titled kind whose row carries none of those fields yet
+ *  reads as the kind in words rather than as the id. */
+export function titled(kind: string, name: string, row: Record<string, ObjectValue>): string {
+  const titles = TITLED_BY[kind];
+  if (titles === undefined) return name;
+  for (const field of titles) {
+    const said = firstLine(row[field]);
+    if (said) return said;
+  }
+  return sentence(noun(kind));
+}
+
 function heading(field: string, schema: SpecSchema | null): string {
-  const titled = schema?.properties?.[field]?.title;
-  if (titled) return titled;
+  const stated = schema?.properties?.[field]?.title;
+  if (stated) return stated;
   return noun(field)
     .split(" ")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
@@ -343,9 +394,14 @@ function ObjectIndex({
         const narrowing = Boolean(query || narrowed);
         const acts = makes && payload.applies && payload.spec_schema !== null && owner !== null;
         const owned = agentId !== null && payload.fields.includes(OWNER_FIELD);
-        const prose = payload.fields.includes(PROMPT_FIELD) ? null : "summary";
+        const titles = TITLED_BY[payload.kind] ?? [];
+        const prose =
+          payload.fields.includes(PROMPT_FIELD) || titles[0] === SUMMARY_FIELD
+            ? null
+            : SUMMARY_FIELD;
         const shown = payload.fields.filter(
           (field) =>
+            !titles.includes(field) &&
             field !== CONVERSATION_FIELD &&
             field !== OWNER_FIELD &&
             field !== PROMPT_FIELD &&
@@ -467,7 +523,7 @@ function ObjectIndex({
                     <Td>
                       <span className="flex min-w-0 max-w-full items-center gap-xs">
                         <span data-part="primary" className="truncate">
-                          {row.name}
+                          {titled(payload.kind, row.name, row)}
                         </span>
                         {typeof row[STATE_FIELD] === "boolean" ? (
                           <Chip>{row[STATE_FIELD] ? "Paused" : "Active"}</Chip>
@@ -616,7 +672,11 @@ export function ObjectDetail({
   return (
     <Sheet
       open
-      title={name}
+      title={titled(
+        kind,
+        name,
+        payload === null ? {} : { ...payload.status, summary: payload.summary },
+      )}
       onClose={onBack}
       actions={editing === null ? actions?.(payload?.status ?? null, apply) : undefined}
     >
@@ -690,6 +750,20 @@ export function ObjectDetail({
   );
 }
 
+function told(field: string, status: Record<string, ObjectValue>): boolean {
+  if (field === ID_FIELD || field === MEMBER_ID_FIELD) return false;
+  if (field === TRIAGED_TURN_FIELD) return status[TRIAGED_FIELD] === undefined;
+  const readable = READABLE_BESIDE[field];
+  return readable === undefined || !status[readable];
+}
+
+function linkSaid(link: ObjectLink, status: Record<string, ObjectValue>): string {
+  const said = link.relation + " " + noun(link.kind);
+  if (!ID_SHAPED.test(link.name)) return said + " " + link.name;
+  const stated = link.relation === CREATED_FROM_RELATION ? firstLine(status[PAGE_TITLE_FIELD]) : "";
+  return stated ? said + " \u201c" + stated + "\u201d" : said;
+}
+
 function SpecAndStatus({
   agentId,
   record,
@@ -718,14 +792,19 @@ function SpecAndStatus({
       <Section title="Status">
         <Facts
           rows={record.fields
-            .filter((field) => field !== ID_FIELD)
+            .filter((field) => told(field, record.status))
             .map((field) =>
               field === OWNER_FIELD
                 ? { label: OWNER_HEADING, value: creator(record.status[field], viewer) }
-                : {
-                    label: heading(field, record.spec_schema),
-                    value: cell(field, record.status[field] ?? null, record.spec_schema),
-                  },
+                : field === TRIAGED_TURN_FIELD
+                  ? {
+                      label: TRIAGED_HEADING,
+                      value: record.status[field] === null ? "No" : "Yes",
+                    }
+                  : {
+                      label: heading(field, record.spec_schema),
+                      value: cell(field, record.status[field] ?? null, record.spec_schema),
+                    },
             )}
         />
       </Section>
@@ -734,12 +813,12 @@ function SpecAndStatus({
           <ul className="m-0 list-none p-0">
             {record.links.map((link) => {
               const at = { agent: agentId, kind: link.kind, name: link.name };
-              const said = link.relation + " " + noun(link.kind) + " " + link.name;
+              const said = linkSaid(link, record.status);
               return (
                 <li key={link.relation + link.kind + link.name} className="py-2xs">
                   {link.opens && link.kind === CONVERSATION_FIELD ? (
                     <span data-part="link">
-                      {link.relation + " " + noun(link.kind) + " "}
+                      {link.relation + " "}
                       <ConversationLink id={link.name} />
                     </span>
                   ) : link.opens ? (

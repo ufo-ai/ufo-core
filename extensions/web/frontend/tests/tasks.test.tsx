@@ -75,7 +75,7 @@ test("a task the address opens links its conversation and offers pause", async (
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const sheet = await screen.findByRole("dialog", { name: "nightly-deploy" });
-  expect(within(sheet).getByRole("link", { name: CONVERSATION_ID }).getAttribute("href")).toBe(
+  expect(within(sheet).getByRole("link", { name: "Conversation" }).getAttribute("href")).toBe(
     chatHash(CONVERSATION_ID),
   );
   await userEvent.click(within(sheet).getByRole("button", { name: "Pause" }));
@@ -90,7 +90,7 @@ test("a task the address opens links its conversation and offers pause", async (
     ]),
   );
 
-  await userEvent.click(within(sheet).getByRole("link", { name: CONVERSATION_ID }));
+  await userEvent.click(within(sheet).getByRole("link", { name: "Conversation" }));
   expect(location.hash).toBe(chatHash(CONVERSATION_ID));
 });
 

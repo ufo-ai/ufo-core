@@ -631,7 +631,7 @@ test("a conversation link inside a framed record rides the bridge and leaves the
   );
 
   const sheet = await screen.findByRole("dialog", { name: "nightly-deploy" });
-  fireEvent.click(await within(sheet).findByRole("link", { name: CONVO_ID }));
+  fireEvent.click(await within(sheet).findByRole("link", { name: "Conversation" }));
   await bridge.settled();
   expect(bridge.posted).toEqual([chatHash(CONVO_ID)]);
   expect(location.hash).toBe("#/radar");

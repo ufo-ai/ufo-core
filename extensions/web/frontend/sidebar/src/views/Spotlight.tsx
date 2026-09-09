@@ -26,6 +26,7 @@ import {
   CommandNote,
 } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import {
   AGENTS_HASH,
@@ -92,6 +93,7 @@ export function Spotlight({
   const [typed, setTyped] = useState("");
   const [groups, setGroups] = useState<Group[] | null>(null);
   const [settled, setSettled] = useState(false);
+  const viewer = useViewer();
   const wanted = typed.trim();
   const named = agents.find((agent) => agent.main) ?? agents[0];
 
@@ -122,7 +124,7 @@ export function Spotlight({
     const timer = window.setTimeout(() => {
       /* Each kind is drawn as it lands rather than at the end of the fan-out: the reads are one per kind and
          the slowest would otherwise hold back every row the others answered. */
-      searchEverywhere(wanted, agents, held.signal, (answering) => {
+      searchEverywhere(wanted, agents, viewer, held.signal, (answering) => {
         if (!held.signal.aborted) setGroups(answering);
       })
         .then((found) => {
@@ -142,7 +144,7 @@ export function Spotlight({
       window.clearTimeout(timer);
       held.abort();
     };
-  }, [open, wanted, agents]);
+  }, [open, wanted, agents, viewer]);
 
   const take = (hash: string) => {
     show(false);

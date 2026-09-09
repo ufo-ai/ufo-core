@@ -335,7 +335,7 @@ export function Spotlight({
     setSettled(false);
     const held = new AbortController();
     const timer = window.setTimeout(() => {
-      searchEverywhere(wanted, agents, held.signal, (answering) => {
+      searchEverywhere(wanted, agents, viewer, held.signal, (answering) => {
         if (!held.signal.aborted) setGroups(answering);
       })
         .then((answered) => {
@@ -353,7 +353,7 @@ export function Spotlight({
       window.clearTimeout(timer);
       held.abort();
     };
-  }, [open, page.kind, wanted, agents]);
+  }, [open, page.kind, wanted, agents, viewer]);
 
   useEffect(() => {
     if (!open || page.kind !== "threads" || !wanted) {

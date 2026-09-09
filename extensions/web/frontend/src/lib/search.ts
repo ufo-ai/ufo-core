@@ -7,11 +7,12 @@ import {
   type TablerIcon,
 } from "@tabler/icons-react";
 
-import { slotOf } from "@/kernel/objects";
+import { slotOf, titled } from "@/kernel/objects";
 import { agentName } from "@/lib/agentName";
 import { getJson } from "@/lib/api";
 import { chatHash, workspaceHash, agentHash, sectionHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
+import { subject } from "@/views/Conversations";
 
 export type Hit = {
   key: string;
@@ -35,7 +36,15 @@ const TASK_KINDS = [
 
 const SITE_KIND = "site";
 
-type FoundObject = { name: string; agent_id: string };
+const NEW_CONVERSATION = "New conversation";
+
+/** A thread hit's main line: what the transcript list calls the same conversation, and the word for
+ *  an untitled one — never its id. */
+function threadLine(entry: Conversation, viewer: string | null): string {
+  return subject(entry, viewer) || NEW_CONVERSATION;
+}
+
+type FoundObject = { name: string; agent_id: string; summary: string };
 
 type FoundArtifact = { name: string; filename: string; media_type: string };
 
@@ -127,6 +136,7 @@ type Slot = "apps" | "conversations" | "files" | "sites" | "tasks" | "connectors
 export async function searchEverywhere(
   term: string,
   agents: Agent[],
+  viewer: string | null,
   signal: AbortSignal,
   answering: (groups: Group[]) => void = () => {},
 ): Promise<Group[]> {
@@ -187,7 +197,7 @@ export async function searchEverywhere(
           payload.conversations.map((entry) => ({
             key: entry.id,
             hash: chatHash(entry.id),
-            primary: entry.description || entry.id,
+            primary: threadLine(entry, viewer),
             fact: entry.agent ? agentName(entry.agent.name) : "",
           })),
         signal,
@@ -242,7 +252,7 @@ export async function searchEverywhere(
             hash: workspaceHash("tasks", {
               opens: [slotOf({ agent: row.agent_id, kind, name: row.name })],
             }),
-            primary: row.name,
+            primary: titled(kind, row.name, row),
             fact: TASK_KINDS.find((entry) => entry.kind === kind)?.label ?? kind,
           }));
         },
@@ -290,7 +300,7 @@ export async function searchThreads(
       {
         key: entry.id,
         hash: chatHash(entry.id),
-        primary: entry.description || entry.id,
+        primary: threadLine(entry, viewer),
         fact: "",
         mine: entry.member_email !== null && entry.member_email === viewer,
       },

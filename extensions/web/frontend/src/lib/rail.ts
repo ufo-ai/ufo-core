@@ -62,12 +62,22 @@ export const CHAT_LADDERS: { value: ChatLadder; label: string }[] = [
 const HELD_LADDER = "chat-ladder";
 const HELD_HIDDEN = "chat-hidden";
 
+/** An app page frame reaches this module, and a browser blocking third-party storage raises on the
+ *  property itself rather than on the read. */
+function store(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function heldChatLadder(): ChatLadder {
-  return localStorage.getItem(HELD_LADDER) === "app" ? "app" : "recency";
+  return store()?.getItem(HELD_LADDER) === "app" ? "app" : "recency";
 }
 
 export function holdChatLadder(ladder: ChatLadder): void {
-  localStorage.setItem(HELD_LADDER, ladder);
+  store()?.setItem(HELD_LADDER, ladder);
   told();
 }
 
@@ -75,7 +85,7 @@ let heldWord = "";
 let heldSurfaces: string[] = [];
 
 export function heldChatHidden(): string[] {
-  const word = localStorage.getItem(HELD_HIDDEN) ?? "";
+  const word = store()?.getItem(HELD_HIDDEN) ?? "";
   if (word !== heldWord) {
     heldWord = word;
     heldSurfaces = word.split(",").filter(Boolean);
@@ -84,7 +94,7 @@ export function heldChatHidden(): string[] {
 }
 
 export function holdChatHidden(hidden: string[]): void {
-  localStorage.setItem(HELD_HIDDEN, hidden.join(","));
+  store()?.setItem(HELD_HIDDEN, hidden.join(","));
   told();
 }
 
@@ -177,12 +187,12 @@ const HELD_PINNED = "pinned-rows";
 /** A browser holding `null` has never had a pin touched, which is not the same as one holding an empty
  *  set. A stored id no live agent answers resolves to nothing rather than a row. */
 export function heldPinned(): string[] | null {
-  const held = localStorage.getItem(HELD_PINNED);
+  const held = store()?.getItem(HELD_PINNED) ?? null;
   return held === null ? null : held.split("\n").filter(Boolean);
 }
 
 export function holdPinned(pinned: string[]): void {
-  localStorage.setItem(HELD_PINNED, pinned.join("\n"));
+  store()?.setItem(HELD_PINNED, pinned.join("\n"));
 }
 
 export function appOrder(apps: Agent[], pinned: string[]): Agent[] {
@@ -197,11 +207,11 @@ export function appOrder(apps: Agent[], pinned: string[]): Agent[] {
 const HELD_SECTIONS_SHUT = "sections-shut";
 
 export function heldSectionsShut(): string[] {
-  return (localStorage.getItem(HELD_SECTIONS_SHUT) ?? "").split("\n").filter(Boolean);
+  return (store()?.getItem(HELD_SECTIONS_SHUT) ?? "").split("\n").filter(Boolean);
 }
 
 export function holdSectionsShut(shut: string[]): void {
-  localStorage.setItem(HELD_SECTIONS_SHUT, shut.join("\n"));
+  store()?.setItem(HELD_SECTIONS_SHUT, shut.join("\n"));
 }
 
 export function stampIso(at: Date): string {

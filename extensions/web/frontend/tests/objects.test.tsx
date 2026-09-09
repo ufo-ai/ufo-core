@@ -94,6 +94,13 @@ const TASK_DETAIL = {
   updated_at: "2026-07-02T09:00:00Z",
 };
 
+/** A trigger's own name carries the conversation's hex, so what the screen draws is its summary. */
+const ISSUES = "github-30847ee4 — issues";
+const PULLS = "github-30847ee4 — pull_requests";
+
+/** A memory item is named by its uuid, so what the screen draws is its summary line. */
+const MEMORY_LINE = "what the member decided";
+
 const TRIGGER_ROW = owned({
   name: "github-issues",
   summary: "github-30847ee4 — issues",
@@ -255,7 +262,7 @@ const LINKED_TRIGGER = {
   ],
 };
 
-const PULLS_DETAIL = { ...TRIGGER_DETAIL, name: "github-pulls", links: [] };
+const PULLS_DETAIL = { ...TRIGGER_DETAIL, name: "github-pulls", summary: PULLS, links: [] };
 
 function triggers() {
   return wire({
@@ -607,10 +614,10 @@ test("a detail renders spec, then status, then links, then when the row was made
   });
   mount([AGENT], "source_trigger");
 
-  await openRow("github-issues");
+  await openRow(ISSUES);
 
   const sections = [...document.querySelectorAll("h2")].map((heading) => heading.textContent);
-  expect(sections).toEqual(["github-issues", "Spec", "Status", "Links"]);
+  expect(sections).toEqual([ISSUES, "Spec", "Status", "Links"]);
   expect(document.querySelectorAll("h1").length).toBe(0);
   expect(await waitFor(() => specFact("Delivery"))).toHaveProperty("said.textContent", "current");
   expect(fact("Created By")).toBe("mel@example.com");
@@ -680,7 +687,7 @@ test("a spec value longer than its row stands under its label, wrapped, and clea
   });
   mount([AGENT], "memory");
 
-  await openRow("mem-1");
+  await openRow(MEMORY_LINE);
 
   const body = await waitFor(() => specFact("Body"));
   expect(body.said.textContent).toBe(LONG_PROMPT);
@@ -703,7 +710,7 @@ test("a spec value with no space to break on wraps in its own block rather than 
   });
   mount([AGENT], "memory");
 
-  await openRow("mem-1");
+  await openRow(MEMORY_LINE);
 
   const body = await waitFor(() => specFact("Body"));
   expect(body.said.textContent).toBe(LONG_URL);
@@ -751,15 +758,15 @@ test("an object link replaces the visible sheet and closing returns to its sourc
   triggers();
   mount([AGENT], "source_trigger");
 
-  await openRow("github-issues");
-  expect(standing()).toEqual(["github-issues"]);
+  await openRow(ISSUES);
+  expect(standing()).toEqual([ISSUES]);
 
   await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  const pulls = await screen.findByRole("dialog", { name: "github-pulls" });
-  expect(standing()).toEqual(["github-pulls"]);
+  const pulls = await screen.findByRole("dialog", { name: PULLS });
+  expect(standing()).toEqual([PULLS]);
 
   await userEvent.click(within(pulls).getByRole("button", { name: "Close" }));
-  await waitFor(() => expect(standing()).toEqual(["github-issues"]));
+  await waitFor(() => expect(standing()).toEqual([ISSUES]));
 });
 
 test("an open conversation link goes to the conversation", async () => {
@@ -796,50 +803,48 @@ test("an open conversation link goes to the conversation", async () => {
     </MainAgentProvider>,
   );
 
-  const conversation = await screen.findByRole("link", { name: CONVO_ID });
+  const conversation = await screen.findByRole("link", { name: "Conversation" });
   expect(conversation.getAttribute("href")).toBe(chatHash(CONVO_ID));
-  expect(conversation.closest('[data-part="link"]')?.textContent).toBe(
-    "created_in conversation " + CONVO_ID,
-  );
+  expect(conversation.closest('[data-part="link"]')?.textContent).toBe("created_in Conversation");
 });
 
 test("a modifier press retains the source behind the one visible sheet", async () => {
   triggers();
   mount([AGENT], "source_trigger");
 
-  await openRow("github-issues");
+  await openRow(ISSUES);
   await besidePress(link(FOLLOWS));
 
-  const pulls = await screen.findByRole("dialog", { name: "github-pulls" });
-  expect(standing()).toEqual(["github-pulls"]);
+  const pulls = await screen.findByRole("dialog", { name: PULLS });
+  expect(standing()).toEqual([PULLS]);
   await userEvent.click(within(pulls).getByRole("button", { name: "Close" }));
-  await waitFor(() => expect(standing()).toEqual(["github-issues"]));
+  await waitFor(() => expect(standing()).toEqual([ISSUES]));
 });
 
 test("a row of the index shuts every record standing and opens the one it names", async () => {
   triggers();
   mount([AGENT], "source_trigger");
 
-  await openRow("github-issues");
+  await openRow(ISSUES);
   await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  expect(await screen.findByRole("dialog", { name: "github-pulls" })).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: PULLS })).toBeTruthy();
 
-  await openRow("github-pulls");
+  await openRow(PULLS);
 
-  await waitFor(() => expect(standing()).toEqual(["github-pulls"]));
+  await waitFor(() => expect(standing()).toEqual([PULLS]));
 });
 
 test("closing the current record returns to the record opened from it", async () => {
   triggers();
   mount([AGENT], "source_trigger");
 
-  await openRow("github-issues");
+  await openRow(ISSUES);
   await userEvent.click(await screen.findByRole("button", { name: FOLLOWS }));
-  const pulls = await screen.findByRole("dialog", { name: "github-pulls" });
+  const pulls = await screen.findByRole("dialog", { name: PULLS });
 
   await userEvent.click(within(pulls).getByRole("button", { name: "Close" }));
 
-  await waitFor(() => expect(standing()).toEqual(["github-issues"]));
+  await waitFor(() => expect(standing()).toEqual([ISSUES]));
 });
 
 test("the index row whose record is standing is marked, and no other", async () => {
@@ -868,16 +873,16 @@ test("an outcome does not leak into the sheet that replaces its record", async (
   });
   mount([AGENT], "source_trigger");
 
-  await openRow("github-issues");
+  await openRow(ISSUES);
   await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
   await userEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
   expect(await screen.findByText("The workspace refuses it.")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: FOLLOWS }));
 
-  const opened = await screen.findByRole("dialog", { name: "github-pulls" });
+  const opened = await screen.findByRole("dialog", { name: PULLS });
   expect(within(opened).queryByText("The workspace refuses it.")).toBeNull();
-  expect(standing()).toEqual(["github-pulls"]);
+  expect(standing()).toEqual([PULLS]);
 });
 
 test("a spec the kind elides reads as the row's own summary, with no form to submit", async () => {
@@ -888,9 +893,12 @@ test("a spec the kind elides reads as the row's own summary, with no form to sub
   });
   mount([AGENT], "source_trigger");
 
-  await openRow("github-issues");
+  await openRow(ISSUES);
 
-  expect(await screen.findByText("a source another member watches")).toBeTruthy();
+  const elided = await screen.findByRole("dialog", { name: "a source another member watches" });
+  expect(
+    within(elided).getByText("a source another member watches", { selector: "p" }),
+  ).toBeTruthy();
   expect(screen.queryByLabelText("source")).toBeNull();
   expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
   expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
@@ -1129,4 +1137,185 @@ test("a kind the lane declines to write offers no act on its rows", async () => 
   await screen.findByText("daily-brief");
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
   expect(screen.queryByRole("button", { name: "New scheduled task" })).toBeNull();
+});
+
+const NOTIFICATION_KIND = {
+  kind: "notification",
+  fields: ["subject", "occurrences", "triaged"],
+  spec_schema: null,
+  applies: false,
+  deletes: true,
+};
+
+const NOTIFICATION_NAME = "5b7fbd1e9f0a4c7f8d2e1a3b4c5d6e7f";
+const NOTIFICATION_SUBJECT = "The invoice is ready";
+
+const NOTIFICATION_ROW = owned({
+  name: NOTIFICATION_NAME,
+  summary: NOTIFICATION_SUBJECT + ": it needs a signature.",
+  subject: NOTIFICATION_SUBJECT,
+  occurrences: 2,
+  triaged: false,
+});
+
+const NOTIFICATION_DETAIL = {
+  ...NOTIFICATION_KIND,
+  name: NOTIFICATION_NAME,
+  summary: NOTIFICATION_SUBJECT + ": it needs a signature.",
+  spec: null,
+  status: { subject: NOTIFICATION_SUBJECT, occurrences: 2, triaged: false },
+  links: [],
+  created_at: "2026-07-01T09:00:00Z",
+  updated_at: null,
+};
+
+function detail(kind: string, name: string) {
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Pane>
+        <ObjectDetail
+          agentId={AGENT_ID}
+          kind={kind}
+          name={name}
+          onOpen={() => {}}
+          onBack={() => {}}
+        />
+      </Pane>
+    </MainAgentProvider>,
+  );
+}
+
+test("a notification is titled by its subject, in its row and in its record", async () => {
+  wire({
+    ["/objects/notification/" + NOTIFICATION_NAME]: () => json(NOTIFICATION_DETAIL),
+    "/objects/notification": () => objectIndex(NOTIFICATION_KIND, [NOTIFICATION_ROW]),
+  });
+  mount([AGENT], "notification");
+
+  await openRow(NOTIFICATION_SUBJECT);
+
+  await waitFor(() => expect(standing()).toEqual([NOTIFICATION_SUBJECT]));
+  expect(screen.queryByText(NOTIFICATION_NAME)).toBeNull();
+  expect(headings()).not.toContain("Subject");
+});
+
+test("the turn that read a notification reads as a yes, and never as the turn's id", async () => {
+  const TRIAGED_TURN = "7c3a1b2d-4e5f-4a6b-8c9d-0e1f2a3b4c5d";
+  wire({
+    ["/objects/notification/" + NOTIFICATION_NAME]: () =>
+      json({
+        ...NOTIFICATION_DETAIL,
+        fields: ["subject", "triaged_turn"],
+        status: { subject: NOTIFICATION_SUBJECT, triaged_turn: TRIAGED_TURN },
+      }),
+  });
+  detail("notification", NOTIFICATION_NAME);
+
+  expect(await waitFor(() => fact("Triaged"))).toBe("Yes");
+  expect(screen.queryByText(TRIAGED_TURN)).toBeNull();
+  expect(screen.queryByText("Triaged Turn")).toBeNull();
+});
+
+const PAGE_ID = "3f6c1d2b-7a8e-4c5f-9b0a-1d2e3f4a5b6c";
+const PAGE_TITLE = "Weekly founder sync";
+const MEMORY_NAME = "9c8b7a6d5e4f3a2b1c0d9e8f7a6b5c4d";
+const MEMORY_TEXT = "The founders meet weekly on Monday.";
+
+const CITED_MEMORY = {
+  kind: "memory",
+  fields: ["subject", "text", "created_from_page_id", "created_from_page_title"],
+  spec_schema: null,
+  applies: false,
+  deletes: false,
+  name: MEMORY_NAME,
+  summary: MEMORY_TEXT,
+  spec: null,
+  status: {
+    subject: "workspace",
+    text: MEMORY_TEXT,
+    created_from_page_id: PAGE_ID,
+    created_from_page_title: PAGE_TITLE,
+  },
+  links: [{ relation: "created_from", kind: "page", name: PAGE_ID, opens: false }],
+  created_at: "2026-07-01T09:00:00Z",
+  updated_at: null,
+};
+
+test("a memory record is titled by its own words and names its page, not the page id", async () => {
+  wire({ ["/objects/memory/" + MEMORY_NAME]: () => json(CITED_MEMORY) });
+  detail("memory", MEMORY_NAME);
+
+  await waitFor(() => expect(standing()).toEqual([MEMORY_TEXT]));
+  expect(await screen.findByText("created_from page \u201c" + PAGE_TITLE + "\u201d")).toBeTruthy();
+  expect(fact("Created From Page Title")).toBe(PAGE_TITLE);
+  expect(screen.queryByText("Created From Page Id")).toBeNull();
+  expect(screen.queryByText(PAGE_ID)).toBeNull();
+  expect(screen.queryByText(MEMORY_NAME)).toBeNull();
+});
+
+test("a link to a record named by an id says what it links to and no more", async () => {
+  wire({
+    ["/objects/memory/" + MEMORY_NAME]: () =>
+      json({
+        ...CITED_MEMORY,
+        status: { subject: "workspace", text: MEMORY_TEXT },
+        links: [
+          { relation: "superseded_by", kind: "memory", name: CONVO_ID, opens: false },
+          { relation: "scoped_to", kind: "agent", name: "assistant", opens: false },
+        ],
+      }),
+  });
+  detail("memory", MEMORY_NAME);
+
+  expect(await screen.findByText("superseded_by memory")).toBeTruthy();
+  expect(screen.getByText("scoped_to agent assistant")).toBeTruthy();
+  expect(screen.queryByText(CONVO_ID)).toBeNull();
+});
+
+test("a profile record states no member id, which no read here turns into words", async () => {
+  const MEMBER_ID = "0a1b2c3d-4e5f-4a6b-8c9d-1e2f3a4b5c6d";
+  wire({
+    ["/objects/profile/" + MEMBER_ID]: () =>
+      json({
+        kind: "profile",
+        fields: ["member_id", "role"],
+        spec_schema: null,
+        applies: false,
+        deletes: false,
+        name: MEMBER_ID,
+        summary: "Founder, carrying the launch.",
+        spec: null,
+        status: { member_id: MEMBER_ID, role: "founder" },
+        links: [],
+        created_at: "2026-07-01T09:00:00Z",
+        updated_at: null,
+      }),
+  });
+  detail("profile", MEMBER_ID);
+
+  expect(await waitFor(() => fact("Role"))).toBe("founder");
+  expect(screen.queryByText("Member Id")).toBeNull();
+});
+
+test("a conversation record is titled by what the conversation is called", async () => {
+  wire({
+    ["/objects/conversation/" + CONVO_ID]: () =>
+      json({
+        ...CONVERSATION_DETAIL,
+        fields: ["title", "surface"],
+        status: { title: "Ship the nightly", surface: "web" },
+      }),
+  });
+  detail("conversation", CONVO_ID);
+
+  await waitFor(() => expect(standing()).toEqual(["Ship the nightly"]));
+  expect(screen.queryByText(CONVO_ID)).toBeNull();
+});
+
+test("a conversation the wire titles with nothing falls back to its summary line", async () => {
+  wire({ ["/objects/conversation/" + CONVO_ID]: () => json(CONVERSATION_DETAIL) });
+  detail("conversation", CONVO_ID);
+
+  await waitFor(() => expect(standing()).toEqual(["web conversation, created 2026-07-01"]));
+  expect(screen.queryByText(CONVO_ID)).toBeNull();
 });

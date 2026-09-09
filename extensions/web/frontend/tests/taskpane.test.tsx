@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { ObjectDetail } from "@/kernel/objects";
+import { railFounded } from "@/lib/railStore";
 import { Viewer } from "@/lib/audience";
 import { chatHash } from "@/lib/route";
 import { MainAgentProvider } from "@/lib/mainAgent";
@@ -292,14 +293,119 @@ test("the chat the task reports into is stated and pressed through, never picked
   expect(screen.queryByRole("button", { name: "Notifications" })).toBeNull();
 });
 
-test("the conversation the task belongs to stands in the pane as its own address", async () => {
+test("the conversation the task belongs to stands in the pane by its title", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
+  });
+  railFounded({
+    conversation_id: CONVO_ID,
+    agent_id: AGENT_ID,
+    agent_name: "assistant",
+    title: "Ship the nightly",
+    last_at: "2026-08-01T09:00:00.000Z",
+    surface: "web",
+    surface_label: null,
+    mine: true,
+    speaker: null,
+  });
+  mount();
+
+  const link = await screen.findByRole("link", { name: "Ship the nightly" });
+  expect(link.getAttribute("href")).toBe(chatHash(CONVO_ID));
+  expect(screen.queryByText(CONVO_ID)).toBeNull();
+});
+
+test("a conversation the rail has no title for reads as the plain word, never as its id", async () => {
   wire({
     "/objects/scheduled_task/daily-brief": () =>
       json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
   });
   mount();
 
-  const link = await screen.findByRole("link", { name: CONVO_ID });
+  const link = await screen.findByRole("link", { name: "Conversation" });
+  expect(link.getAttribute("href")).toBe(chatHash(CONVO_ID));
+  expect(screen.queryByText(CONVO_ID)).toBeNull();
+});
+
+test("a frame the browser denies storage still draws the link, rather than tearing the page down", async () => {
+  const held = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get() {
+      throw new DOMException("storage is blocked", "SecurityError");
+    },
+  });
+  try {
+    wire({
+      "/objects/scheduled_task/daily-brief": () =>
+        json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
+    });
+    mount();
+
+    const link = await screen.findByRole("link", { name: "Conversation" });
+    expect(link.getAttribute("href")).toBe(chatHash(CONVO_ID));
+  } finally {
+    if (held) Object.defineProperty(globalThis, "localStorage", held);
+  }
+});
+
+test("a conversation the wire names with a projection alone is titled by its description", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
+    "/api/chats": () =>
+      json({
+        chats: [],
+        conversation: {
+          id: CONVO_ID,
+          agent: { id: AGENT_ID, name: "assistant", icon: "spark" },
+          surface: "slack",
+          surface_label: "#general",
+          audience: "member:m1",
+          member_email: MEMBER.email,
+          description: "Ship the nightly",
+          source: null,
+          speakers: [MEMBER.email],
+          turn_count: 1,
+          created_at: "2026-07-30T10:00:00",
+          last_turn_at: "2026-07-30T10:00:01",
+          readable: true,
+          disclosable: false,
+          commentable: false,
+        },
+      }),
+  });
+  mount();
+
+  const link = await screen.findByRole("link", { name: "Ship the nightly" });
+  expect(link.getAttribute("href")).toBe(chatHash(CONVO_ID));
+});
+
+test("a conversation the rail never gathered is sought, so an app page names it too", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
+    "/api/chats": () =>
+      json({
+        chats: [
+          {
+            conversation_id: CONVO_ID,
+            agent_id: AGENT_ID,
+            agent_name: "assistant",
+            title: "Ship the nightly",
+            last_at: "2026-08-01T09:00:00.000Z",
+            surface: "web",
+            surface_label: null,
+            mine: true,
+            speaker: null,
+          },
+        ],
+      }),
+  });
+  mount();
+
+  const link = await screen.findByRole("link", { name: "Ship the nightly" });
   expect(link.getAttribute("href")).toBe(chatHash(CONVO_ID));
 });
 
