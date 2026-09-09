@@ -1,5 +1,13 @@
-from evals.harness.capability import CapabilityOutput, ToolInvocation
+from pathlib import Path
+
+from evals.harness.capability import (
+    CapabilityOutput,
+    CapabilityVerdict,
+    DescribedGrader,
+    ToolInvocation,
+)
 from evals.harness.coding import PinnedRepositoryRoute
+from evals.suites.coding_subagent import profile_proxy_scorer
 
 PIN = "a" * 40
 
@@ -159,3 +167,35 @@ async def test_every_breach_kind_is_named_not_only_the_first() -> None:
     assert any(breach.startswith("route ") for breach in breaches)
     assert any(breach.startswith("clone: ") for breach in breaches)
     assert any(breach.startswith("fetch past pin: ") for breach in breaches)
+
+
+async def test_the_proxy_scorer_hands_the_child_grader_the_turns_workspace(tmp_path: Path) -> None:
+    """A coding child inherits the parent's sandbox, so what it left on disk is under the parent
+    turn's own `workspace_dir` — a grader that reads a written file gets nothing without it."""
+    objective = "work the checkout"
+    seen: list[Path | None] = []
+
+    async def inner(output: CapabilityOutput) -> CapabilityVerdict:
+        seen.append(output.workspace_dir)
+        return CapabilityVerdict(True, "read the tree")
+
+    spawn = ToolInvocation(
+        name="spawn",
+        input={"target": "profile:coding", "payload": {"objective": objective}},
+        result='{"result": "done"}',
+        has_result=True,
+        call_id="parent-1",
+    )
+    output = CapabilityOutput(
+        response="done",
+        calls=(spawn,),
+        own_calls=(spawn,),
+        workspace_dir=tmp_path,
+    )
+
+    verdict = await profile_proxy_scorer(objective, DescribedGrader("reads the tree", inner))(
+        output
+    )
+
+    assert verdict.passed, verdict.reason
+    assert seen == [tmp_path]

@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 from pathlib import Path
 from uuid import UUID
+
+from ufo_ext_coding.agents_md import INSTRUCTION_FILENAMES
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -109,6 +112,33 @@ UNIT_OBJECTIVE = (
 )
 
 
+SKILL_RADIUS = "0.25rem"
+"""What `ufo-style` states for a control and a panel — the value the checkout's rule contradicts."""
+HOUSE_RADIUS = "0.75rem"
+CARD_REPOSITORY = "cardbook"
+CARD_FILE = "src/ui/card.css"
+CARD_RULES = f"""# cardbook
+
+## Shape
+
+Every control and panel in this repository takes a `{HOUSE_RADIUS}` radius. `{SKILL_RADIUS}` is the
+house style of the product this repository is built against, and it is wrong here: our surfaces sit
+inside a partner's shell whose radius we match instead.
+"""
+CARD_FILES = {
+    "AGENTS.md": CARD_RULES,
+    "README.md": "# cardbook\n",
+    CARD_FILE: ".panel {\n  padding: 1rem;\n}\n",
+}
+CARD_OBJECTIVE = (
+    f"Repository setup: use the existing checkout at /workspace/{CARD_REPOSITORY}. Do not "
+    "clone.\n\n"
+    "Load the `ufo-style` skill first — you are matching a visual system and need its exact "
+    f"facts.\n\nThen add a `.card` rule to `{CARD_FILE}` giving the card a border radius. Reply "
+    "exactly `ANSWER: <the radius you used>`."
+)
+
+
 async def _seeded(workspace_dir: Path, name: str, files: dict[str, str]) -> None:
     repository = workspace_dir / name
     for relative, content in files.items():
@@ -140,6 +170,10 @@ async def prepare_postbook(_workspace_id: UUID, workspace_dir: Path) -> None:
     await _seeded(workspace_dir, UNIT_REPOSITORY, UNIT_FILES)
 
 
+async def prepare_cardbook(_workspace_id: UUID, workspace_dir: Path) -> None:
+    await _seeded(workspace_dir, CARD_REPOSITORY, CARD_FILES)
+
+
 def _written(output: CapabilityOutput, repository: str, relative: str) -> str | None:
     if output.workspace_dir is None:
         return None
@@ -158,6 +192,20 @@ def _defined(source: str, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef |
     )
 
 
+def _opened_itself(output: CapabilityOutput) -> tuple[str, ...]:
+    """Every call whose arguments name an instruction file — a read, a `cat`, a glob, a grep.
+
+    A capable child finds `AGENTS.md` on its own and complies, so compliance alone separates no arm.
+    What the block buys is that it does not have to look: measured here, and only here, because a
+    child that reads the file is a working product and a useless sample.
+    """
+    return tuple(
+        f"{call.name} {json.dumps(call.input)}"
+        for call in output.calls
+        if any(name in json.dumps(call.input) for name in INSTRUCTION_FILENAMES)
+    )
+
+
 def _house_error_and_no_docstring(required: str) -> Grader:
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         source = _written(output, FEE_REPOSITORY, FEE_FILE)
@@ -173,8 +221,15 @@ def _house_error_and_no_docstring(required: str) -> Grader:
             if isinstance(inner.func, ast.Name)
         )
         docstring = ast.get_docstring(node)
-        evidence: JsonObject = {"raised": list(raised), "docstring": docstring}
+        opened = _opened_itself(output)
+        evidence: JsonObject = {
+            "raised": list(raised),
+            "docstring": docstring,
+            "openedItself": list(opened),
+        }
         reasons = []
+        if opened:
+            reasons.append(f"opened {len(opened)} instruction file(s) itself: {opened[0]}")
         if OWN_ERROR not in raised:
             reasons.append(f"raised {list(raised) or 'nothing'} rather than {OWN_ERROR}")
         if builtin := [name for name in raised if name in BUILTIN_ERRORS]:
@@ -187,7 +242,7 @@ def _house_error_and_no_docstring(required: str) -> Grader:
 
     return DescribedGrader(
         f"`{required}` raises {OWN_ERROR} rather than a built-in and carries no docstring, as the "
-        "checkout's AGENTS.md requires",
+        "checkout's AGENTS.md requires, without opening that file itself",
         grade,
     )
 
@@ -201,7 +256,16 @@ def _deeper_rule_won(required: str) -> Grader:
         if node is None:
             return CapabilityVerdict(False, f"{UNIT_FILE} does not define {required}")
         docstring = ast.get_docstring(node)
-        evidence: JsonObject = {"docstring": docstring, "followed": _followed(docstring)}
+        opened = _opened_itself(output)
+        evidence: JsonObject = {
+            "docstring": docstring,
+            "followed": _followed(docstring),
+            "openedItself": list(opened),
+        }
+        if opened:
+            return CapabilityVerdict(
+                False, f"opened {len(opened)} instruction file(s) itself: {opened[0]}", evidence
+            )
         if docstring is None:
             return CapabilityVerdict(False, "no docstring — the root rule won", evidence)
         if not docstring.strip().rstrip(".").casefold().endswith(DOCSTRING_UNIT):
@@ -210,7 +274,7 @@ def _deeper_rule_won(required: str) -> Grader:
 
     return DescribedGrader(
         f"`{required}` carries a one-line docstring ending in `{DOCSTRING_UNIT}`, the nested "
-        "AGENTS.md rule that overrides the repository's own",
+        "AGENTS.md rule that overrides the repository's own, without opening that file itself",
         grade,
     )
 
@@ -221,6 +285,53 @@ def _followed(docstring: str | None) -> str:
     if docstring.strip().rstrip(".").casefold().endswith(DOCSTRING_UNIT):
         return "nested"
     return "neither"
+
+
+def _the_checkouts_rule_survived_the_skill() -> Grader:
+    """Which authority the child took its radius from once a skill arrived mid-turn.
+
+    The block reaches the model once at the founding message and again after every `load_skill`,
+    and the second injection is the whole claim: a workflow pulled mid-turn is the latest text in
+    context, so without it the skill's exact value is what the model has last read. The checkout's
+    rule and the skill state different radii, so the value in the file names the winner.
+    """
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        source = _written(output, CARD_REPOSITORY, CARD_FILE)
+        if source is None:
+            return CapabilityVerdict(False, f"{CARD_FILE} was never written", excluded=True)
+        loaded = tuple(call for call in output.calls if call.name == "load_skill")
+        opened = _opened_itself(output)
+        evidence: JsonObject = {
+            "loadedSkills": [str(call.input.get("name")) for call in loaded],
+            "openedItself": list(opened),
+            "house": HOUSE_RADIUS in source,
+            "skill": SKILL_RADIUS in source,
+        }
+        if not loaded:
+            return CapabilityVerdict(
+                False,
+                "loaded no skill, so nothing arrived to override the checkout's rule",
+                evidence,
+                excluded=True,
+            )
+        if opened:
+            return CapabilityVerdict(
+                False, f"opened {len(opened)} instruction file(s) itself: {opened[0]}", evidence
+            )
+        if HOUSE_RADIUS in source:
+            return CapabilityVerdict(True, f"took {HOUSE_RADIUS}, the checkout's rule", evidence)
+        if SKILL_RADIUS in source:
+            return CapabilityVerdict(
+                False, f"took {SKILL_RADIUS}, the skill's value, over the checkout's rule", evidence
+            )
+        return CapabilityVerdict(False, "took neither radius", evidence)
+
+    return DescribedGrader(
+        f"`.card` takes the checkout's {HOUSE_RADIUS} rather than the {SKILL_RADIUS} the skill "
+        "loaded mid-turn states, without opening the instruction file itself",
+        grade,
+    )
 
 
 CASES = (
@@ -237,5 +348,12 @@ CASES = (
         profile_proxy_scorer(UNIT_OBJECTIVE, _deeper_rule_won("order_total")),
         prepare=prepare_postbook,
         digest_tag="agents-md:deeper-rule-wins:v1",
+    ),
+    CapabilityCase(
+        "agents-md-checkout-rule-survives-a-loaded-skill",
+        profile_proxy_message(CARD_OBJECTIVE),
+        profile_proxy_scorer(CARD_OBJECTIVE, _the_checkouts_rule_survived_the_skill()),
+        prepare=prepare_cardbook,
+        digest_tag="agents-md:checkout-rule-survives-a-loaded-skill:v1",
     ),
 )

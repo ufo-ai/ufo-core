@@ -4,22 +4,29 @@ from pathlib import Path, PurePosixPath
 import pytest
 from ufo_ext_coding import agents_md
 
-from evals.harness.capability import CapabilityOutput
+from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.registry import DEFAULT_TASKS, TASKS
 from evals.suites.agents_md import (
+    CARD_FILE,
+    CARD_OBJECTIVE,
+    CARD_REPOSITORY,
     CASES,
     DOCSTRING_UNIT,
     FEE_FILE,
     FEE_FILES,
     FEE_OBJECTIVE,
     FEE_REPOSITORY,
+    HOUSE_RADIUS,
+    INSTRUCTION_FILENAMES,
     OWN_ERROR,
+    SKILL_RADIUS,
     UNIT_FILE,
     UNIT_FILES,
     UNIT_OBJECTIVE,
     UNIT_REPOSITORY,
     _deeper_rule_won,
     _house_error_and_no_docstring,
+    _the_checkouts_rule_survived_the_skill,
 )
 
 OBEDIENT_FEE = """from decimal import ROUND_HALF_UP, Decimal
@@ -149,3 +156,117 @@ async def test_a_file_the_child_never_wrote_leaves_the_case_excluded(grader) -> 
 
     assert result.excluded
     assert not result.passed
+
+
+def _looked_it_up(path: str) -> ToolInvocation:
+    return ToolInvocation(name="read", input={"file_path": path}, result="rules", has_result=True)
+
+
+READ_THE_RULES = _looked_it_up(f"/workspace/{FEE_REPOSITORY}/AGENTS.md")
+CAT_THE_RULES = ToolInvocation(
+    name="bash",
+    input={"command": f"cat /workspace/{UNIT_REPOSITORY}/src/postbook/AGENTS.md"},
+    result="rules",
+    has_result=True,
+)
+READ_THE_CODE = _looked_it_up(f"/workspace/{FEE_REPOSITORY}/{FEE_FILE}")
+
+
+async def verdict_with_calls(grader, repository, relative, source, calls):
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / repository / relative
+        path.parent.mkdir(parents=True)
+        path.write_text(source)
+        return await grader(
+            CapabilityOutput(response="", calls=calls, workspace_dir=Path(directory))
+        )
+
+
+@pytest.mark.parametrize(
+    ("calls", "passed"),
+    (
+        ((), True),
+        ((READ_THE_CODE,), True),
+        ((READ_THE_RULES,), False),
+        ((CAT_THE_RULES,), False),
+    ),
+)
+async def test_the_fee_grader_fails_a_child_that_looked_the_rules_up(calls, passed) -> None:
+    result = await verdict_with_calls(FEE_GRADER, FEE_REPOSITORY, FEE_FILE, OBEDIENT_FEE, calls)
+
+    assert result.passed is passed, result.reason
+    if not passed:
+        assert "opened 1 instruction file(s) itself" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("calls", "passed"), (((), True), ((READ_THE_CODE,), True), ((CAT_THE_RULES,), False))
+)
+async def test_the_unit_grader_fails_a_child_that_looked_the_rules_up(calls, passed) -> None:
+    result = await verdict_with_calls(UNIT_GRADER, UNIT_REPOSITORY, UNIT_FILE, NESTED_UNIT, calls)
+
+    assert result.passed is passed, result.reason
+
+
+def test_the_elision_check_reads_the_filenames_the_product_ships() -> None:
+    assert INSTRUCTION_FILENAMES == agents_md.INSTRUCTION_FILENAMES
+
+
+LOADED_STYLE = ToolInvocation(
+    name="load_skill", input={"name": "ufo-style"}, result="loaded", has_result=True
+)
+HOUSE_CARD = f".card {{\n  border-radius: {HOUSE_RADIUS};\n}}\n"
+SKILL_CARD = f".card {{\n  border-radius: {SKILL_RADIUS};\n}}\n"
+NEITHER_CARD = ".card {\n  border-radius: 8px;\n}\n"
+CARD_GRADER = _the_checkouts_rule_survived_the_skill()
+
+
+@pytest.mark.parametrize(
+    ("source", "calls", "passed", "reason"),
+    (
+        (HOUSE_CARD, (LOADED_STYLE,), True, f"took {HOUSE_RADIUS}"),
+        (SKILL_CARD, (LOADED_STYLE,), False, f"took {SKILL_RADIUS}, the skill's value"),
+        (NEITHER_CARD, (LOADED_STYLE,), False, "took neither radius"),
+        (HOUSE_CARD, (), False, "loaded no skill"),
+    ),
+)
+async def test_the_conflict_grader_names_the_authority_the_child_took(
+    source: str, calls: tuple, passed: bool, reason: str
+) -> None:
+    result = await verdict_with_calls(CARD_GRADER, CARD_REPOSITORY, CARD_FILE, source, calls)
+
+    assert result.passed is passed, result.reason
+    assert reason in result.reason
+
+
+async def test_a_turn_that_loaded_no_skill_is_excluded_rather_than_failed() -> None:
+    result = await verdict_with_calls(CARD_GRADER, CARD_REPOSITORY, CARD_FILE, HOUSE_CARD, ())
+
+    assert result.excluded
+    assert not result.passed
+
+
+async def test_the_conflict_grader_also_fails_a_child_that_read_the_rule_itself() -> None:
+    opened = ToolInvocation(
+        name="read",
+        input={"file_path": f"/workspace/{CARD_REPOSITORY}/AGENTS.md"},
+        result="rules",
+        has_result=True,
+    )
+
+    result = await verdict_with_calls(
+        CARD_GRADER, CARD_REPOSITORY, CARD_FILE, HOUSE_CARD, (LOADED_STYLE, opened)
+    )
+
+    assert not result.passed
+    assert "opened 1 instruction file(s) itself" in result.reason
+
+
+def test_the_conflict_case_contradicts_the_skill_it_makes_the_child_load() -> None:
+    skill = (
+        Path(__file__).resolve().parents[3] / "core/src/ufo/runtime/skills/ufo-style/SKILL.md"
+    ).read_text()
+
+    assert f"`{SKILL_RADIUS}`" in skill
+    assert HOUSE_RADIUS not in skill
+    assert "ufo-style" in CARD_OBJECTIVE

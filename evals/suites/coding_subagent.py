@@ -170,7 +170,14 @@ def profile_proxy_scorer(objective: str, grader: Grader, *, relayed_answer: bool
             return CapabilityVerdict(False, "the proxy did not relay the child result verbatim")
         parent_calls = {call.call_id for call in output.own_calls if call.call_id}
         child_calls = tuple(call for call in output.calls if call.call_id not in parent_calls)
-        return await grader(CapabilityOutput(response, child_calls, tool_errors=output.tool_errors))
+        return await grader(
+            CapabilityOutput(
+                response,
+                child_calls,
+                tool_errors=output.tool_errors,
+                workspace_dir=output.workspace_dir,
+            )
+        )
 
     return DescribedGrader(
         f"one exact profile:coding spawn satisfies: {grading_statement(grader)}", grade
