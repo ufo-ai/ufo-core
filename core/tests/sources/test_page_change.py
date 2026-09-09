@@ -76,6 +76,7 @@ from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import Usage
 
 BACKGROUND_MODEL = "gpt-5.6-luna"
@@ -133,6 +134,7 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
             )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="folder",
@@ -147,6 +149,7 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,

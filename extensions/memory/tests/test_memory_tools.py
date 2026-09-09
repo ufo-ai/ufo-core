@@ -44,6 +44,7 @@ from ufo.runtime.tools.context import SpawnResult, ToolContext, ToolResult
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import (
     SHARED_AUDIENCE,
@@ -910,6 +911,7 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="folder",
@@ -923,6 +925,7 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,

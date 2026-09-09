@@ -10,6 +10,7 @@ from ufo.blob import S3BlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.sources.sync import FOLDER_BACKEND, feed_handle_for
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 
 ROOT = Path(__file__).parents[2]
 SCRIPT = ROOT / "infra" / "blob_relayout.py"
@@ -101,6 +102,7 @@ async def _seed_rows(artifact_key: str, body_ref: str):
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
@@ -117,6 +119,7 @@ async def _seed_rows(artifact_key: str, body_ref: str):
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,

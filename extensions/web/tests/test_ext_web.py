@@ -233,6 +233,7 @@ from ufo.runtime.turns.transcript import (
 from ufo.runtime.turns.workspace_changes import WorkspaceChange, WorkspaceChanges
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import (
     MEMBER_ADMISSION,
     SPAWN_RESULT_KEY_PREFIX,
@@ -2033,6 +2034,7 @@ async def _seed_stream(workspace_id: UUID, connection_id: UUID, stream: str) -> 
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=uuid4(),
                 workspace_id=workspace_id,
                 backend="github",

@@ -97,6 +97,7 @@ from ufo.runtime.turns.subjects import MEMBER_SUBJECT_PREFIX, SHARED_SUBJECT
 from ufo.runtime.turns.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.runtime.workspace import PLATFORM_FUNDED, ResolvedModelClient, ws_current
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import (
     MEMBER_ADMISSION,
     SUBAGENT_SURFACE,
@@ -1045,6 +1046,8 @@ class PageRecord:
 
 @dataclass(frozen=True)
 class PageState:
+    uid: UUID
+    source_uid: UUID
     subject: str
     revision: int
     digest: str
@@ -2171,23 +2174,33 @@ class ExtensionContext:
         """Current subject and revision for this workspace's live named pages."""
         if not page_ids:
             return {}
-        query = sa.select(
-            tables.page.c.id,
-            tables.page.c.subject,
-            tables.page.c.revision,
-            tables.page.c.digest,
-            tables.page.c.body_ref,
-            tables.page.c.title,
-            tables.page.c.stream,
-        ).where(
-            tables.page.c.workspace_id == self.store.workspace_id,
-            tables.page.c.id.in_(page_ids),
-            tables.page.c.tombstone.is_(False),
+        query = (
+            sa.select(
+                tables.page.c.id,
+                tables.page.c.uid,
+                tables.source.c.uid.label("source_uid"),
+                tables.page.c.subject,
+                tables.page.c.revision,
+                tables.page.c.digest,
+                tables.page.c.body_ref,
+                tables.page.c.title,
+                tables.page.c.stream,
+            )
+            .select_from(
+                tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
+            )
+            .where(
+                tables.page.c.workspace_id == self.store.workspace_id,
+                tables.page.c.id.in_(page_ids),
+                tables.page.c.tombstone.is_(False),
+            )
         )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         return {
             row.id: PageState(
+                uid=row.uid,
+                source_uid=row.source_uid,
                 subject=row.subject,
                 revision=row.revision,
                 digest=row.digest,
@@ -2206,6 +2219,8 @@ class ExtensionContext:
         query = (
             sa.select(
                 tables.page.c.id,
+                tables.page.c.uid,
+                tables.source.c.uid.label("source_uid"),
                 tables.page.c.subject,
                 tables.page.c.revision,
                 tables.page.c.digest,
@@ -2228,6 +2243,8 @@ class ExtensionContext:
             rows = (await connection.execute(query)).all()
         return {
             row.id: PageState(
+                uid=row.uid,
+                source_uid=row.source_uid,
                 subject=row.subject,
                 revision=row.revision,
                 digest=row.digest,
@@ -2357,6 +2374,7 @@ class ExtensionContext:
             await connection.execute(
                 insert(tables.source)
                 .values(
+                    uid=uuid7(),
                     id=source_id,
                     workspace_id=self.store.workspace_id,
                     backend=backend,

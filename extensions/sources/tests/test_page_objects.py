@@ -39,6 +39,7 @@ from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import Audience, conversation_audience, foreign_room_audience, room_audience
 from ufo.sdk.connectors import ConnectorRegistry
@@ -243,6 +244,7 @@ async def _seed_source(
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=state.workspace_id,
                 backend=backend,
@@ -288,6 +290,7 @@ async def _seed_page(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=state.workspace_id,
                 source_id=source_id,

@@ -63,6 +63,7 @@ from ufo.runtime.billing.balance import funded
 from ufo.runtime.sources.rest import list_or_empty
 from ufo.runtime.turns.subjects import connection_subject
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 
 FOLDER_BACKEND = "folder"
 SOURCE_SYNC_JOB = "source_sync"
@@ -483,6 +484,7 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
             await connection.execute(
                 insert(tables.source)
                 .values(
+                    uid=uuid7(),
                     id=source_row_id(
                         workspace_id, entry.backend, config, connection_id=connection_id
                     ),
@@ -1092,6 +1094,7 @@ class SyncDriver:
                 if updated.rowcount == 0:
                     await connection.execute(
                         sa.insert(tables.page).values(
+                            uid=uuid7(),
                             id=changed_page.browse.id,
                             source_identity=changed_page.browse.source_identity,
                             workspace_id=workspace_id,

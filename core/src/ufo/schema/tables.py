@@ -733,6 +733,7 @@ source = sa.Table(
     "source",
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("uid", sa.Uuid, nullable=False),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("backend", sa.Text, nullable=False),
     sa.Column("config", sa.JSON, nullable=False),
@@ -752,6 +753,7 @@ source = sa.Table(
     sa.Index("source_due", "next_sync_at"),
     sa.Index("source_authority", "workspace_id", "connection_id"),
     sa.UniqueConstraint("workspace_id", "id", name="source_workspace_identity"),
+    sa.UniqueConstraint("workspace_id", "uid", name="source_workspace_uid"),
     sa.UniqueConstraint(
         "workspace_id", "connection_id", "backend", "feed_handle", name="source_feed_handle"
     ),
@@ -790,6 +792,7 @@ page = sa.Table(
     "page",
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("uid", sa.Uuid, nullable=False),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("source_id", sa.Uuid, sa.ForeignKey("source.id", ondelete="CASCADE"), nullable=False),
     sa.Column("source_identity", sa.Text, nullable=True),
@@ -805,6 +808,7 @@ page = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="page_subject"),
+    sa.UniqueConstraint("workspace_id", "uid", name="page_workspace_uid"),
     sa.Index("page_feed", "workspace_id", "revision", "id"),
     sa.Index("page_source", "source_id"),
     sa.Index(

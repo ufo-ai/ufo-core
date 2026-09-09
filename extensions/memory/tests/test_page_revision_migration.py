@@ -115,7 +115,7 @@ def migration_urls(database_url: str, tmp_path: Path) -> Iterator[tuple[str, str
         )
     finally:
         with admin.connect() as connection:
-            connection.exec_driver_sql(f'drop database "{database}"')
+            connection.exec_driver_sql(f'drop database "{database}" with (force)')
         admin.dispose()
 
 
@@ -350,6 +350,27 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
     assert links == {(derived_id, source_id, page_id, 1)}
     assert bodies == {DERIVED_BODY, UNREPLAYED_BODY, MANUAL_BODY, PAGELESS_BODY}
 
+    # The store is current code and names `uid` columns that exist only at the heads. On the way
+    # there, `0056` refuses a workspace with no member and no agent, so this seed supplies one each.
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "insert into member (id, workspace_id, email, created_at, updated_at) "
+                "values (:id, :ws, 'admin@work.com', :now, :now)"
+            ),
+            {"id": uuid4().hex, "ws": workspace_id.hex, "now": now},
+        )
+        connection.execute(
+            sa.text(
+                "insert into agent (id, workspace_id, name, prompt, model, created_at, updated_at) "
+                "values (:id, :ws, 'main', 'p', 'auto', :now, :now)"
+            ),
+            {"id": uuid4().hex, "ws": workspace_id.hex, "now": now},
+        )
+        connection.commit()
+    engine.dispose()
+    command.upgrade(config, "heads")
     rebuilt = asyncio.run(_replay_derivation(migration_url, workspace_id, page_id, source_id))
     assert rebuilt == [(derived_id, source_id)]
 

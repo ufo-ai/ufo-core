@@ -98,6 +98,7 @@ from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import Agent, Turn
 
 TOOL_NARRATION = "looking through what they synced"
@@ -468,6 +469,7 @@ async def test_the_driver_stamps_pages_with_its_connections_disclosure(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=uuid4(),
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
@@ -558,6 +560,7 @@ async def test_a_source_row_cannot_exist_without_a_connection(db: None) -> None:
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.insert(tables.source).values(
+                    uid=uuid7(),
                     id=uuid4(),
                     workspace_id=workspace_id,
                     backend=FOLDER_BACKEND,
@@ -1456,6 +1459,7 @@ async def _seed_page(workspace_id: UUID) -> UUID:
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
@@ -1472,6 +1476,7 @@ async def _seed_page(workspace_id: UUID) -> UUID:
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -1667,6 +1672,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
         source_id = uuid4()
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
@@ -1683,6 +1689,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -1700,6 +1707,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
         await connection.execute(
             sa.insert(mem_page).values(
                 page_id=page_id,
+                page_uid=uuid7(),
                 workspace_id=workspace_id,
                 subject=member_subject(alice),
                 revision=revision,
@@ -1832,6 +1840,7 @@ async def _authority() -> _Authority:
             [
                 {
                     "id": source_id,
+                    "uid": uuid7(),
                     "workspace_id": state.workspace_id,
                     "backend": FOLDER_BACKEND,
                     "config": {"root": f"/{source_id.hex}"},
@@ -2189,6 +2198,7 @@ async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=SCRIPTED_BACKEND,
@@ -2303,6 +2313,7 @@ async def test_sync_stamps_the_disclosure_its_connection_holds_after_the_fetch(
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.insert(tables.source).values(
+                    uid=uuid7(),
                     id=source_id,
                     workspace_id=workspace_id,
                     backend=SCRIPTED_BACKEND,
@@ -2504,6 +2515,7 @@ async def test_source_identity_attaches_without_replaying_and_survives_a_ref_cha
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -2617,6 +2629,7 @@ async def test_database_revision_orders_an_old_writer_after_a_new_cursor(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -2758,6 +2771,7 @@ async def _seed_prior_page(workspace_id: UUID, source_id: UUID, source_ref: str)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -3177,6 +3191,7 @@ async def _seed_connected_source(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=CONNECTOR_PROVIDER,
@@ -3436,6 +3451,7 @@ async def _seed_peer_source(workspace_id: UUID) -> UUID:
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=CONNECTOR_PROVIDER,
@@ -3670,6 +3686,7 @@ async def _seed_connector_source(workspace_id: UUID, *, consecutive_errors: int 
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=CONNECTOR_PROVIDER,

@@ -62,6 +62,7 @@ from ufo.runtime.turns.audience import (
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.schema.tables import MAX_BACKFILL_DAYS
 from ufo.sdk.callback_page import (
@@ -2168,6 +2169,7 @@ async def _seed_streams(
             source_id, live_id, tombstoned_id = uuid4(), uuid4(), uuid4()
             await connection.execute(
                 sa.insert(tables.source).values(
+                    uid=uuid7(),
                     id=source_id,
                     workspace_id=workspace_id,
                     backend="stub",
@@ -2184,6 +2186,7 @@ async def _seed_streams(
                 [
                     {
                         "id": page_id,
+                        "uid": uuid7(),
                         "workspace_id": workspace_id,
                         "source_id": source_id,
                         "digest": f"sha256:{stream}-{page_id.hex[:8]}",

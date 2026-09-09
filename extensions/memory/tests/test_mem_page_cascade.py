@@ -19,6 +19,7 @@ from ufo.db import workspace_tx
 from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -51,6 +52,7 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID]:
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="folder",
@@ -64,6 +66,7 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID]:
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -83,6 +86,7 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID]:
         await connection.execute(
             sa.insert(mem_page).values(
                 page_id=page_id,
+                page_uid=uuid7(),
                 workspace_id=workspace_id,
                 subject="shared",
                 revision=revision,
@@ -129,6 +133,7 @@ async def test_a_mirror_row_cannot_be_written_without_a_revision(db: None) -> No
                 await connection.execute(
                     sa.insert(mem_page).values(
                         page_id=page_id,
+                        page_uid=uuid7(),
                         workspace_id=workspace_id,
                         subject="shared",
                         revision=None,

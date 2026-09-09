@@ -126,8 +126,10 @@ memory_item = sa.Table(
     sa.Column("confidence", sa.Integer, nullable=False),
     sa.Column("source_ref", sa.Text, nullable=True),
     sa.Column("created_from_page_id", sa.Uuid, nullable=True),
+    sa.Column("created_from_page_uid", sa.Uuid, nullable=True),
     sa.Column("created_from_page_revision", sa.BigInteger, nullable=True),
     sa.Column("source_id", sa.Uuid, nullable=True),
+    sa.Column("source_uid", sa.Uuid, nullable=True),
     sa.Column("as_of", sa.DateTime(timezone=True), nullable=True),
     sa.Column("embedding_digest", sa.Text, nullable=True),
     sa.Column("embedding_claimed_at", sa.DateTime(timezone=True), nullable=True),
@@ -149,7 +151,9 @@ memory_source = sa.Table(
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("memory_item_id", sa.Uuid, nullable=False),
     sa.Column("source_id", sa.Uuid, nullable=False),
+    sa.Column("source_uid", sa.Uuid, nullable=True),
     sa.Column("page_id", sa.Uuid, nullable=False),
+    sa.Column("page_uid", sa.Uuid, nullable=True),
     sa.Column("revision", sa.BigInteger, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -166,6 +170,7 @@ mem_page = sa.Table(
     "mem_page",
     _metadata,
     sa.Column("page_id", sa.Uuid, primary_key=True),
+    sa.Column("page_uid", sa.Uuid, nullable=True),
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("subject", sa.Text, nullable=False),
     sa.Column("revision", sa.BigInteger, nullable=False),
@@ -340,8 +345,10 @@ class MemoryWrite(BaseModel):
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
     source_ref: str | None = None
     created_from_page_id: UUID | None = None
+    created_from_page_uid: UUID | None = None
     created_from_page_revision: int | None = None
     source_id: UUID | None = None
+    source_uid: UUID | None = None
     as_of: datetime | None = None
 
     @model_validator(mode="after")
@@ -653,6 +660,7 @@ class MemoryStore:
             MEMORY_ITEM_NAMESPACE,
             "\x00".join((str(self.workspace_id), write.subject, write.item_class, write.body)),
         )
+        page_uid, source_uid = write.created_from_page_uid, write.source_uid
         async with self.transaction() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             statement = insert(memory_item).values(
@@ -665,8 +673,10 @@ class MemoryStore:
                 confidence=write.confidence,
                 source_ref=write.source_ref,
                 created_from_page_id=write.created_from_page_id,
+                created_from_page_uid=page_uid,
                 created_from_page_revision=write.created_from_page_revision,
                 source_id=write.source_id,
+                source_uid=source_uid,
                 as_of=write.as_of,
                 superseded_by=None,
                 created_at=sa.func.now(),
@@ -715,7 +725,9 @@ class MemoryStore:
                     workspace_id=self.workspace_id,
                     memory_item_id=item_id,
                     source_id=write.source_id,
+                    source_uid=source_uid,
                     page_id=write.created_from_page_id,
+                    page_uid=page_uid,
                     revision=write.created_from_page_revision,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
@@ -799,7 +811,9 @@ class MemoryStore:
                     sa.select(
                         memory_source.c.memory_item_id,
                         memory_source.c.source_id,
+                        memory_source.c.source_uid,
                         memory_source.c.page_id,
+                        memory_source.c.page_uid,
                         memory_source.c.revision,
                     )
                     .where(memory_source.c.memory_item_id.in_(affected))
@@ -849,8 +863,10 @@ class MemoryStore:
                     .where(memory_item.c.id == row.id)
                     .values(
                         created_from_page_id=survivor.page_id,
+                        created_from_page_uid=survivor.page_uid,
                         created_from_page_revision=survivor.revision,
                         source_id=survivor.source_id,
+                        source_uid=survivor.source_uid,
                         embedding_digest=None,
                         embedding_claimed_at=None,
                     )
@@ -1399,6 +1415,7 @@ class PageIndexer:
                 await connection.execute(
                     sa.insert(mem_page).values(
                         page_id=change.page_id,
+                        page_uid=current.uid,
                         workspace_id=self.workspace_id,
                         subject=current.subject,
                         revision=current.revision,

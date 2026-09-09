@@ -34,6 +34,7 @@ from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.objects import VerbNotSupported
@@ -297,6 +298,7 @@ async def _seed_page(state: _Workspace, source_id: UUID, subject: str) -> UUID:
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.insert(tables.page).values(
+                    uid=uuid7(),
                     id=page_id,
                     workspace_id=state.workspace_id,
                     source_id=source_id,

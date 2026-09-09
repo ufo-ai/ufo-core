@@ -51,6 +51,7 @@ from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.grants import account_object_name
 
@@ -208,6 +209,7 @@ async def _seed_source(
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="asana",
@@ -241,6 +243,7 @@ async def _seed_page(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,

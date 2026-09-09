@@ -101,6 +101,8 @@ class ReclassifyingPage:
         self.calls += 1
         return {
             self.page_id: PageState(
+                uid=uuid4(),
+                source_uid=uuid4(),
                 subject=self.before if self.calls == 1 else self.after,
                 revision=self.before_revision if self.calls == 1 else self.after_revision,
                 digest="sha256:test",

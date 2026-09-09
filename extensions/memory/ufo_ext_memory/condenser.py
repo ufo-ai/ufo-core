@@ -396,8 +396,10 @@ class FactDeriver:
                     memory_kind=fact.memory_kind,
                     confidence=fact.confidence,
                     created_from_page_id=page.page_id,
+                    created_from_page_uid=latest.uid,
                     created_from_page_revision=page.revision,
                     source_id=page.source_id,
+                    source_uid=latest.source_uid,
                     as_of=page.as_of,
                 )
             )

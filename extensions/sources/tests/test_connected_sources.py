@@ -34,6 +34,7 @@ from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.sdk.sources import ConnectorSourceConfig, RestConnector, StreamSpec
 
 pytestmark = [
@@ -475,6 +476,7 @@ async def test_a_cleared_credential_slot_removes_its_connection_and_pages(db: No
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.insert(tables.page).values(
+                    uid=uuid7(),
                     id=page_id,
                     workspace_id=state.workspace_id,
                     source_id=landed["id"],

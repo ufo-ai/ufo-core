@@ -67,6 +67,7 @@ from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
 from ufo.sdk.manifest import Manifest
 from ufo.serve import _mount_shared_surfaces
@@ -530,6 +531,7 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="test",
@@ -543,6 +545,7 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -564,6 +567,7 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
         await connection.execute(
             sa.insert(mem_page).values(
                 page_id=page_id,
+                page_uid=uuid7(),
                 workspace_id=workspace_id,
                 subject="shared",
                 revision=revision,

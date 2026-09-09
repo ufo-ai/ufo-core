@@ -17,6 +17,7 @@ from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.turns.audience import conversation_audience, foreign_room_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 
 pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
@@ -395,6 +396,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="probe",
@@ -411,6 +413,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
             (
                 {
                     "id": page_id,
+                    "uid": uuid7(),
                     "workspace_id": workspace_id,
                     "source_id": source_id,
                     "digest": "sha256:page",
@@ -424,6 +427,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
                 },
                 {
                     "id": missing_page_id,
+                    "uid": uuid7(),
                     "workspace_id": workspace_id,
                     "source_id": source_id,
                     "digest": "sha256:missing",
@@ -437,6 +441,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
                 },
                 {
                     "id": invalid_page_id,
+                    "uid": uuid7(),
                     "workspace_id": workspace_id,
                     "source_id": source_id,
                     "digest": "sha256:invalid",

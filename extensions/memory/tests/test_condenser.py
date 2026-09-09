@@ -119,6 +119,7 @@ from ufo.runtime.workspace import (
     ws,
 )
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import Agent, Turn, Usage
 from ufo.sdk.audience import SHARED_AUDIENCE
 from ufo.sdk.delivery_register import DELIVERY_REGISTER_BLOCK
@@ -427,6 +428,7 @@ async def _seed_page(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="folder",
@@ -441,6 +443,7 @@ async def _seed_page(
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -463,6 +466,7 @@ async def _seed_page_authority(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="test",
@@ -476,6 +480,7 @@ async def _seed_page_authority(
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -1458,7 +1463,9 @@ async def _seed_copy(
                     workspace_id=workspace_id,
                     memory_item_id=item_id,
                     source_id=page_source_id,
+                    source_uid=uuid7(),
                     page_id=created_from_page_id,
+                    page_uid=uuid7(),
                     revision=created_from_page_revision,
                     created_at=created_at,
                     updated_at=created_at,
@@ -2566,6 +2573,7 @@ async def _seed_wiki_feed(workspace_id: UUID) -> UUID:
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="folder",
@@ -2597,6 +2605,7 @@ async def _seed_wiki_source_page(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -2618,6 +2627,7 @@ async def _seed_wiki_source_page(
         await connection.execute(
             sa.insert(mem_page).values(
                 page_id=page_id,
+                page_uid=uuid7(),
                 workspace_id=workspace_id,
                 subject=subject,
                 revision=revision,

@@ -52,6 +52,7 @@ from ufo.runtime.sources.sync import PageChange, feed_handle_for
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -115,6 +116,8 @@ class ReclassifyingPage:
         self.calls += 1
         return {
             self.page_id: PageState(
+                uid=uuid4(),
+                source_uid=uuid4(),
                 subject=self.before if self.calls == 1 else self.after,
                 revision=PAGE_REVISION,
                 digest=PAGE_DIGEST,
@@ -192,6 +195,7 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=uuid7(),
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="test",
@@ -205,6 +209,7 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -339,7 +344,9 @@ async def _seed_item(
                     workspace_id=workspace_id,
                     memory_item_id=item_id,
                     source_id=page_authority[1],
+                    source_uid=uuid7(),
                     page_id=created_from_page_id,
+                    page_uid=uuid7(),
                     revision=page_authority[0],
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
@@ -384,6 +391,7 @@ async def _seed_page_chunk(
         await connection.execute(
             sa.insert(mem_page).values(
                 page_id=page_id,
+                page_uid=uuid7(),
                 workspace_id=workspace_id,
                 subject=subject,
                 revision=revision,
@@ -584,6 +592,7 @@ async def test_two_pages_of_one_source_each_keep_the_fact_they_share(db: None) -
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=uuid7(),
                 id=page_2,
                 workspace_id=workspace_id,
                 source_id=source_id,
