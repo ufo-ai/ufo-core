@@ -308,8 +308,10 @@ resource "kubectl_manifest" "ufo_migrate" {
     }
   }
 
+  # A Job mid-migration writes no `status.succeeded`, so a wait shorter than the Job's own
+  # activeDeadlineSeconds kills a healthy migration: that is how the 2026-09-08 deploys died at 10m.
   timeouts {
-    create = "10m"
+    create = "32m"
   }
 
   depends_on = [

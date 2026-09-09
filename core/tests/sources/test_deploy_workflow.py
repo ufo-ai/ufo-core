@@ -3504,6 +3504,29 @@ def _check_runtime_apply_waits_for_prior_drains() -> None:
         assert os.access(ROOT / AWAIT_DRAINED, os.X_OK)
 
 
+def _check_the_migrate_wait_outlives_the_migrate_job() -> None:
+    """The apply waits on `status.succeeded`, which a Job writes only once it is done, so a create
+    timeout under the Job's `activeDeadlineSeconds` fails a migration that is still running."""
+    deadline = re.search(
+        r"^  activeDeadlineSeconds: (\d+)$",
+        (ROOT / "infra" / "templates" / "hosted.yaml.tpl").read_text(),
+        re.MULTILINE,
+    )
+    assert deadline
+    for environment in DEPLOY_ENVIRONMENTS:
+        block = _code(
+            _terraform_block(
+                (ROOT / "infra" / "envs" / environment / "ufo.tf").read_text(),
+                "resource",
+                "ufo_migrate",
+            )
+        )
+        assert 'key   = "status.succeeded"' in block
+        wait = re.search(r'^    create = "(\d+)m"$', block, re.MULTILINE)
+        assert wait, environment
+        assert int(wait.group(1)) * 60 > int(deadline.group(1)), environment
+
+
 def test_await_drained_waits_for_terminating_pods(tmp_path: Path) -> None:
     kubectl = tmp_path / "kubectl"
     kubectl.write_text(
@@ -4915,6 +4938,7 @@ def test_deploy_workflow_sync_contract() -> None:
         _check_proxy_gate_dials_the_rolled_proxy_with_the_shared_ca,
         _check_runtime_rollout_drains_before_the_proxy_gate,
         _check_runtime_apply_waits_for_prior_drains,
+        _check_the_migrate_wait_outlives_the_migrate_job,
         _check_deployment_gate_accepts_only_expected_results,
         _check_notification_rules_route_each_environment,
         _check_on_call_schedule_uses_existing_daily_rotation,
