@@ -6,9 +6,10 @@ owns `config_model`, so a source carries typed parameters, never an untyped bag)
 workspace the sync runs for, so a connector backend can resolve its provider token itself — core
 never mints or holds one. Core ships `FolderSource` (a local directory); connector/S3/GitHub
 backends are extensions registered through the `sources` Manifest point and sourced into
-`SyncDriver.backends` at boot. `SyncDriver` is the core sync job: it claims due sources (one worker
-per source, dialect-native — Postgres `FOR UPDATE SKIP LOCKED`, SQLite the single writer), fetches,
-writes each page's body to the blob store, and upserts page rows — skipping ones unchanged by
+`SyncDriver.backends` at boot. `SyncDriver` is the core sync job: it claims due sources
+dialect-native — Postgres `FOR UPDATE SKIP LOCKED`, SQLite the single writer — runs connections
+concurrently while keeping each connection's sources serial, fetches, writes each page's body to
+the blob store, and upserts page rows — skipping ones unchanged by
 digest, tombstoning the ones a full-snapshot fetch no longer holds or a delta fetch explicitly
 deletes. It writes NO chunks: the database assigns each material change a workspace-monotonic
 revision, and `PageFeed` — the seam threaded onto an extension's context — replays those changes
@@ -85,6 +86,7 @@ SOURCE_PARK_HOLD_SECONDS = 365 * 24 * 3600
 CLAIM_LEASE_SECONDS = 300
 CLAIM_REFRESH_SECONDS = 60
 DUE_BATCH_MAX_SOURCES = 50
+SOURCE_CONNECTION_CONCURRENCY = 4
 SOURCE_BLOB_PREFIX = "sources"
 SOURCE_SYNC_FAILED_METRIC = "source_sync_failed_total"
 SOURCE_SYNC_PARKED_METRIC = "source_sync_parked_total"
@@ -176,13 +178,16 @@ class SyncResult(BaseModel):
 
     `dropped` counts the provider records this run could not represent as a page and discarded. A
     run that drops every record it fetched is a success by every other signal it emits, so the count
-    rides onto `source_sync.ok`: the event that says what a run wrote says what it lost with it."""
+    rides onto `source_sync.ok`: the event that says what a run wrote says what it lost with it.
+    `retry_after_seconds` makes an incomplete, checkpointed read durable without holding a
+    worker."""
 
     pages: tuple[Page, ...]
     next_cursor: str | None = None
     deletes: tuple[str, ...] = ()
     snapshot: bool = False
     dropped: int = 0
+    retry_after_seconds: float | None = Field(default=None, gt=0)
 
 
 class CursorExpired(Exception):
@@ -733,42 +738,80 @@ class SyncDriver:
     async def run(self) -> None:
         claim = uuid4().hex
         sources = await self._claim_due(claim)
-        renewals = [asyncio.create_task(self._renew_claim(source)) for source in sources]
+        renewals = {
+            source.source_id: asyncio.create_task(self._renew_claim(source)) for source in sources
+        }
+        grouped: dict[UUID, list[ClaimedSource]] = {}
+        for source in sources:
+            grouped.setdefault(source.connection_id, []).append(source)
+        limit = asyncio.Semaphore(SOURCE_CONNECTION_CONCURRENCY)
         try:
-            for source, renewal in zip(sources, renewals, strict=True):
-                await self._run_with_lease(source, renewal)
+            async with asyncio.TaskGroup() as running:
+                for group in grouped.values():
+                    running.create_task(self._run_connection(tuple(group), renewals, limit))
         finally:
-            for renewal in renewals:
+            for renewal in renewals.values():
                 if not renewal.done():
                     renewal.cancel()
-            await asyncio.gather(*renewals, return_exceptions=True)
+            await asyncio.gather(*renewals.values(), return_exceptions=True)
 
-    async def _run_with_lease(self, source: ClaimedSource, renewal: asyncio.Task[None]) -> None:
-        sync = asyncio.create_task(self._sync_claimed(source))
+    async def _run_connection(
+        self,
+        sources: tuple[ClaimedSource, ...],
+        renewals: Mapping[UUID, asyncio.Task[None]],
+        limit: asyncio.Semaphore,
+    ) -> None:
+        async with limit:
+            for index, source in enumerate(sources):
+                rate_limited = await self._run_with_lease(source, renewals[source.source_id])
+                if not rate_limited:
+                    continue
+                remaining = sources[index + 1 :]
+                for sibling in remaining:
+                    renewal = renewals[sibling.source_id]
+                    if not renewal.done():
+                        renewal.cancel()
+                await asyncio.gather(
+                    *(renewals[sibling.source_id] for sibling in remaining),
+                    return_exceptions=True,
+                )
+                return
+
+    async def _run_with_lease(self, source: ClaimedSource, renewal: asyncio.Task[None]) -> bool:
+        sync_task = asyncio.create_task(self._sync_claimed(source))
         try:
             done, _pending = await asyncio.wait(
-                (sync, renewal), return_when=asyncio.FIRST_COMPLETED
+                (sync_task, renewal), return_when=asyncio.FIRST_COMPLETED
             )
-            if sync not in done:
+            if sync_task not in done:
                 if renewal.cancelled():
                     raise asyncio.CancelledError
                 error = renewal.exception()
                 if error is None:
                     raise RuntimeError("source claim renewal stopped")
                 raise error
-            await sync
+            return await sync_task
         except _SourceClaimLost:
             log("source_sync.claim_lost", source_id=str(source.source_id), **_stream_tags(source))
+            return False
         finally:
-            for task in (sync, renewal):
+            for task in (sync_task, renewal):
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(sync, renewal, return_exceptions=True)
+            await asyncio.gather(sync_task, renewal, return_exceptions=True)
 
-    async def _sync_claimed(self, source: ClaimedSource) -> None:
+    async def _sync_claimed(self, source: ClaimedSource) -> bool:
+        with suppress(Exception):
+            log(
+                "source_sync.started",
+                source_id=str(source.source_id),
+                **_stream_tags(source),
+                account_id=source.account_id,
+            )
         try:
             result = await self._fetch(source)
             await self._commit(source, result)
+            return result.retry_after_seconds is not None
         except _SourceClaimLost:
             raise
         except StreamSkipped as skipped:
@@ -780,14 +823,16 @@ class SyncDriver:
                     reason=skipped.reason,
                 )
             await self._skip(source, skipped.reason, awaits_grant=skipped.awaits_grant)
+            return False
         except Exception as error:
             if _database_unreachable(error):
                 await self._defer(source, error)
-                return
+                return False
             cursor_reset = isinstance(error, CursorExpired)
             errors, next_sync_at = self._error_backoff(source, datetime.now(UTC))
             await self._report_failed(source, error, cursor_reset, errors, next_sync_at)
             await self._release(source, cursor_reset, errors, next_sync_at)
+            return False
 
     async def _renew_claim(self, source: ClaimedSource) -> None:
         while True:
@@ -835,6 +880,7 @@ class SyncDriver:
                 _readers_remain(),
                 funded(tables.source.c.workspace_id, self.own_key_slots),
             )
+            .order_by(tables.source.c.next_sync_at, tables.source.c.id)
             .limit(DUE_BATCH_MAX_SOURCES)
         )
         if self.postgres:
@@ -960,7 +1006,7 @@ class SyncDriver:
                 for ref in result.deletes
             ]
             try:
-                tombstoned = await self._write(
+                tombstoned, retry_at = await self._write(
                     source,
                     result.next_cursor,
                     changed,
@@ -968,6 +1014,7 @@ class SyncDriver:
                     fetched,
                     deleted,
                     result.snapshot,
+                    result.retry_after_seconds,
                 )
             except asyncio.CancelledError:
                 written.clear()
@@ -983,13 +1030,26 @@ class SyncDriver:
                     "source commit and blob cleanup failed", [error, *failures]
                 ) from None
             raise
-        await self._report_ok(
-            source,
-            len(result.pages),
-            len(changed) + len(metadata),
-            tombstoned,
-            result.dropped,
-        )
+        if retry_at is not None:
+            with suppress(Exception):
+                warn(
+                    "source_sync.rate_limited",
+                    source_id=str(source.source_id),
+                    **_stream_tags(source),
+                    account_id=source.account_id,
+                    pages_fetched=len(result.pages),
+                    pages_written=len(changed) + len(metadata),
+                    pages_dropped=result.dropped,
+                    retry_at=retry_at.isoformat(),
+                )
+        else:
+            await self._report_ok(
+                source,
+                len(result.pages),
+                len(changed) + len(metadata),
+                tombstoned,
+                result.dropped,
+            )
 
     async def _prior_pages(
         self, source_id: UUID
@@ -1046,7 +1106,8 @@ class SyncDriver:
         fetched: list[UUID],
         deleted: list[UUID],
         snapshot: bool,
-    ) -> int:
+        retry_after_seconds: float | None,
+    ) -> tuple[int, datetime | None]:
         """Persist one fetched batch and return how many pages it tombstoned — the delete refs that
         named a live row plus the snapshot sweep, which names no refs at all. The database orders
         material changes for `PageFeed`.
@@ -1057,6 +1118,9 @@ class SyncDriver:
         page the other way, and this run's trailing stamp put them back — leaving shared pages on a
         connection the member just made private."""
         now = datetime.now(UTC)
+        retry_at = (
+            None if retry_after_seconds is None else now + timedelta(seconds=retry_after_seconds)
+        )
         async with workspace_tx() as connection:
             workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
             authority = (
@@ -1156,7 +1220,11 @@ class SyncDriver:
                 )
             )
             landed = bool(changed) or bool(deleted) or tombstoned > 0
-            empty_runs = sa.literal(0) if landed else tables.source.c.consecutive_empty + 1
+            empty_runs = (
+                tables.source.c.consecutive_empty
+                if retry_at is not None
+                else (sa.literal(0) if landed else tables.source.c.consecutive_empty + 1)
+            )
             never_landed = ~sa.exists(
                 sa.select(sa.literal(1))
                 .select_from(tables.page)
@@ -1168,18 +1236,29 @@ class SyncDriver:
                 sa.update(tables.source)
                 .values(
                     cursor=next_cursor,
-                    next_sync_at=_rescheduled(
-                        source,
+                    next_sync_at=(
                         sa.case(
-                            (idles, now + timedelta(seconds=SOURCE_EMPTY_IDLE_SECONDS)),
-                            else_=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
-                        ),
+                            (tables.source.c.next_sync_at < retry_at, retry_at),
+                            else_=tables.source.c.next_sync_at,
+                        )
+                        if retry_at is not None
+                        else _rescheduled(
+                            source,
+                            sa.case(
+                                (idles, now + timedelta(seconds=SOURCE_EMPTY_IDLE_SECONDS)),
+                                else_=now + timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS),
+                            ),
+                        )
                     ),
-                    consecutive_errors=0,
-                    consecutive_refusals=0,
+                    consecutive_errors=(
+                        tables.source.c.consecutive_errors if retry_at is not None else 0
+                    ),
+                    consecutive_refusals=(
+                        tables.source.c.consecutive_refusals if retry_at is not None else 0
+                    ),
                     consecutive_empty=empty_runs,
-                    parked_at=None,
-                    parked_reason=None,
+                    parked_at=tables.source.c.parked_at if retry_at is not None else None,
+                    parked_reason=tables.source.c.parked_reason if retry_at is not None else None,
                     claimed_by=None,
                     claim_expires_at=None,
                     updated_at=sa.func.now(),
@@ -1189,7 +1268,31 @@ class SyncDriver:
                     tables.source.c.claimed_by == source.claim,
                 )
             )
-        return tombstoned
+            if retry_at is not None:
+                await connection.execute(
+                    sa.update(tables.source)
+                    .values(
+                        next_sync_at=sa.case(
+                            (tables.source.c.next_sync_at < retry_at, retry_at),
+                            else_=tables.source.c.next_sync_at,
+                        ),
+                        updated_at=sa.func.now(),
+                    )
+                    .where(tables.source.c.connection_id == source.connection_id)
+                )
+                await connection.execute(
+                    sa.update(tables.source)
+                    .values(
+                        claimed_by=None,
+                        claim_expires_at=None,
+                        updated_at=sa.func.now(),
+                    )
+                    .where(
+                        tables.source.c.connection_id == source.connection_id,
+                        tables.source.c.claimed_by == source.claim,
+                    )
+                )
+        return tombstoned, retry_at
 
     async def _report_ok(
         self, source: ClaimedSource, fetched: int, written: int, tombstoned: int, dropped: int

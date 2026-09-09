@@ -25,6 +25,10 @@ pathological provider makes positional progress rather than spinning a worker fo
 full-history backfill thus lands as a bounded run per sync interval instead of one unbounded
 fetch, and two tiers guarantee it makes progress.
 
+A provider rate limit ends a normal incremental run at its last complete checkpoint. Its pages
+return for commit with the provider delay. A full snapshot and a tier-2 positional resume instead
+retry the current request: neither can yield without losing the state required to make progress.
+
 A `delete_missing` stream is exempt from the cap: it returns
 an authoritative full-collection `snapshot` the driver tombstones against, and tombstone
 correctness requires the complete enumeration — a capped snapshot would either livelock
@@ -66,6 +70,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from ufo.harness.o11y import warn
 from ufo.runtime.access.connectors import Credential, GrantUnusable
 from ufo.runtime.sources.connector import Connector, StreamPage, StreamSpec, get_path
+from ufo.runtime.sources.rest import ProviderRateLimited
 from ufo.runtime.sources.sync import (
     Page,
     SourceAuth,
@@ -149,6 +154,7 @@ class ConnectorBackend:
             base_url=base_url,
             self_user_id=auth.self_user_id,
             backfill_after=config.backfill_after,
+            yield_rate_limits=not stream.delete_missing and skip_target == 0,
         )
         try:
             async for page in stream_pages:
@@ -200,16 +206,24 @@ class ConnectorBackend:
                         snapshot=False,
                         dropped=dropped,
                     )
+        except ProviderRateLimited as limited:
+            return self._rate_limited_result(
+                stream=stream,
+                cursor=cursor,
+                origin=origin,
+                skip_target=skip_target,
+                consumed=consumed,
+                watermark=watermark,
+                page_cursor=page_cursor,
+                pages=pages,
+                deletes=deletes,
+                dropped=dropped,
+                retry_after_seconds=limited.retry_after_seconds,
+            )
         finally:
             if isinstance(stream_pages, AsyncGenerator):
                 await stream_pages.aclose()
-        if stream.cursor_field and pages and watermark is None and page_cursor is None:
-            warn(
-                "source_sync.cursor_field_absent",
-                connector=self.connector.name,
-                stream=stream.name,
-                cursor_field=stream.cursor_field,
-            )
+        self._warn_missing_cursor(stream, pages, watermark, page_cursor)
         next_cursor = (
             None
             if stream.delete_missing
@@ -220,6 +234,61 @@ class ConnectorBackend:
             next_cursor=next_cursor,
             deletes=tuple(deletes),
             snapshot=stream.delete_missing,
+            dropped=dropped,
+        )
+
+    def _warn_missing_cursor(
+        self,
+        stream: StreamSpec,
+        pages: list[Page],
+        watermark: str | None,
+        page_cursor: str | None,
+    ) -> None:
+        if stream.cursor_field and pages and watermark is None and page_cursor is None:
+            warn(
+                "source_sync.cursor_field_absent",
+                connector=self.connector.name,
+                stream=stream.name,
+                cursor_field=stream.cursor_field,
+            )
+
+    def _rate_limited_result(
+        self,
+        *,
+        stream: StreamSpec,
+        cursor: str | None,
+        origin: str | None,
+        skip_target: int,
+        consumed: int,
+        watermark: str | None,
+        page_cursor: str | None,
+        pages: list[Page],
+        deletes: list[str],
+        dropped: int,
+        retry_after_seconds: float,
+    ) -> SyncResult:
+        if stream.delete_missing or skip_target > 0:
+            raise RuntimeError(
+                f"connector {self.connector.name!r} yielded a protected rate limit for "
+                f"stream {stream.name!r}"
+            )
+        resume = page_cursor
+        if resume is None and consumed > skip_target:
+            resume = json.dumps(
+                {
+                    BACKFILL_KEY: _BackfillEnvelope(
+                        origin=origin,
+                        skip=consumed,
+                        watermark=watermark,
+                    ).model_dump()
+                },
+                sort_keys=True,
+            )
+        return SyncResult(
+            pages=tuple(pages),
+            next_cursor=cursor if resume is None else resume,
+            deletes=tuple(deletes),
+            retry_after_seconds=retry_after_seconds,
             dropped=dropped,
         )
 

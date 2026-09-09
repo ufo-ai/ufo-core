@@ -39,6 +39,7 @@ class ToolConnector(Connector):
         base_url: str,
         self_user_id: str | None,
         backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         if credential.execute is None:
             raise RuntimeError(

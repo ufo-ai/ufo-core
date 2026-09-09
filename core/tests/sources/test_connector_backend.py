@@ -28,7 +28,7 @@ from ufo.runtime.access.connectors import Credential, GrantUnusable
 from ufo.runtime.sources import backend as backend_module
 from ufo.runtime.sources.backend import BACKFILL_KEY, ConnectorBackend, ConnectorSourceConfig
 from ufo.runtime.sources.connector import Connector, StreamPage, StreamSpec
-from ufo.runtime.sources.rest import RestConnector
+from ufo.runtime.sources.rest import ProviderRateLimited, RestConnector
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
 ACCOUNT = "acct-1"
@@ -50,6 +50,7 @@ class _FeedConnector(Connector):
         self.received_streams: list[StreamSpec] = []
         self.received_windows: list[datetime | None] = []
         self.received_base_urls: list[str] = []
+        self.received_rate_limit_modes: list[bool] = []
         self.closed = False
 
     def streams(self) -> list[StreamSpec]:
@@ -64,11 +65,13 @@ class _FeedConnector(Connector):
         base_url: str,
         self_user_id: str | None,
         backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         self.received_cursors.append(cursor)
         self.received_streams.append(stream)
         self.received_windows.append(backfill_after)
         self.received_base_urls.append(base_url)
+        self.received_rate_limit_modes.append(yield_rate_limits)
         try:
             for page in self._feed:
                 yield page
@@ -197,6 +200,39 @@ async def test_capped_run_resumes_at_the_last_native_checkpoint(
     assert result.pages[0].title == "items/1"
     assert result.next_cursor == "ck3"
     assert result.snapshot is False
+
+
+class _RateLimitedConnector(_FeedConnector):
+    async def fetch_page(
+        self,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        credential: Credential,
+        base_url: str,
+        self_user_id: str | None,
+        backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        yield StreamPage(records=_records(1, 2), next_cursor="ck1")
+        raise ProviderRateLimited(60)
+
+
+async def test_rate_limit_returns_pages_and_the_last_safe_checkpoint() -> None:
+    stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
+    result = await _run(_RateLimitedConnector(stream, []), stream)
+
+    assert [page.source_ref for page in result.pages] == ["items/1", "items/2"]
+    assert result.next_cursor == "ck1"
+    assert result.retry_after_seconds == 60
+    assert result.snapshot is False
+
+
+async def test_protected_rate_limit_fails_loud_when_a_connector_yields_it() -> None:
+    stream = StreamSpec(name="items", source_object="items", delete_missing=True)
+
+    with pytest.raises(RuntimeError, match="yielded a protected rate limit"):
+        await _run(_RateLimitedConnector(stream, []), stream)
 
 
 async def _check_a_rows_pinned_window_reaches_the_connector_beside_the_spec_it_drives() -> None:
@@ -465,6 +501,7 @@ async def _check_resumed_run_drives_from_origin_and_skips_the_prefix() -> None:
     connector = _FeedConnector(stream, [_records(1, 2, 3, 4)])
     result = await _run(connector, stream, cursor=_envelope("ORIGIN", 2, "WATERMARK"))
     assert connector.received_cursors == ["ORIGIN"]
+    assert connector.received_rate_limit_modes == [False]
     assert [page.source_ref for page in result.pages] == ["items/3", "items/4"]
     assert result.snapshot is False
 
@@ -488,10 +525,12 @@ async def test_slicing_lands_every_record_exactly_once(monkeypatch: pytest.Monke
 
 async def _check_uncapped_snapshot_run_keeps_snapshot_semantics() -> None:
     stream = StreamSpec(name="items", source_object="items", delete_missing=True)
-    result = await _fetch(stream, [_records(1, 2)])
+    connector = _FeedConnector(stream, [_records(1, 2)])
+    result = await _run(connector, stream)
     assert result.snapshot is True
     assert result.next_cursor is None
     assert len(result.pages) == 2
+    assert connector.received_rate_limit_modes == [False]
 
 
 async def test_delete_missing_stream_ignores_the_cap_and_snapshots(

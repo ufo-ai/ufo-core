@@ -33,7 +33,6 @@ from ufo.runtime.access.connectors import (
 )
 from ufo.runtime.access.credentials import CredentialStore, CredentialValueInvalid
 from ufo.runtime.ext.context import CredentialAccess
-from ufo.runtime.sources import rest
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
@@ -43,6 +42,7 @@ from ufo.sdk.sources import (
     ConnectorSourceConfig,
     Pagination,
     PaginationStrategy,
+    ProviderRateLimited,
     RestConnector,
     StreamPage,
     StreamSpec,
@@ -52,9 +52,6 @@ pytestmark = [
     pytest.mark.usefixtures("database_url"),
     pytest.mark.parametrize("database_url", ["sqlite"], indirect=True),
 ]
-
-QUOTA_WINDOW_SECONDS = 60.0
-STATED_RESET_SECONDS = 45.0
 
 
 @dataclass(frozen=True)
@@ -104,7 +101,7 @@ class _ProbeConnector(RestConnector):
 
 
 async def _pages(
-    connector: Connector, cursor: str | None = None
+    connector: Connector, cursor: str | None = None, *, yield_rate_limits: bool = True
 ) -> list[list[dict[str, Any]] | StreamPage]:
     stream = connector.streams()[0]
     return [
@@ -115,6 +112,7 @@ async def _pages(
             credential=Credential(bearer="tok"),
             base_url="",
             self_user_id=None,
+            yield_rate_limits=yield_rate_limits,
         )
     ]
 
@@ -225,36 +223,6 @@ def _record_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
 
 
 RETRY_WAIT_CASES = (
-    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "42"})], [(42.0, 60.0)]),
-    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "600"})], [(60.0, 60.0)]),
-    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "0.25"})], [(1.0, 1.5)]),
-    (
-        [lambda: httpx.Response(503, json={})] * 5
-        + [lambda: httpx.Response(429, json={}, headers={"retry-after": "1"})],
-        [(1.0, 1.5), (2.0, 3.0), (4.0, 6.0), (8.0, 12.0), (16.0, 24.0), (30.0, 30.0)],
-    ),
-    (
-        [lambda: httpx.Response(503, json={})] * 5
-        + [lambda: httpx.Response(429, json={}, headers={"retry-after": "30"})],
-        [(1.0, 1.5), (2.0, 3.0), (4.0, 6.0), (8.0, 12.0), (16.0, 24.0), (30.0, 30.0)],
-    ),
-    (
-        [lambda: httpx.Response(503, json={})] * 5
-        + [lambda: httpx.Response(429, json={}, headers={"retry-after": "32"})],
-        [(1.0, 1.5), (2.0, 3.0), (4.0, 6.0), (8.0, 12.0), (16.0, 24.0), (32.0, 48.0)],
-    ),
-    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "inf"})], [(1.0, 1.5)]),
-    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "nan"})], [(1.0, 1.5)]),
-    ([lambda: httpx.Response(429, json={}, headers={"retry-after": "-5"})], [(1.0, 1.5)]),
-    ([lambda: httpx.Response(429, json={})], [(1.0, 1.5)]),
-    (
-        [
-            lambda: httpx.Response(
-                429, json={}, headers={"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}
-            )
-        ],
-        [(1.0, 1.5)],
-    ),
     ([lambda: httpx.Response(503, json={}, headers={"retry-after": "42"})], [(42.0, 60.0)]),
     ([lambda: httpx.Response(504, json={}, headers={"retry-after": "42"})], [(42.0, 60.0)]),
     ([lambda: httpx.Response(500, json={}, headers={"retry-after": "42"})], [(1.0, 1.5)]),
@@ -269,33 +237,6 @@ RETRY_WAIT_CASES = (
 async def test_retry_waits_a_bounded_retry_after_else_a_jittered_doubling_delay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A come-back-later response carrying `Retry-After` must wait at least that long — the provider
-    is telling us when it will accept the next request, which beats the connector's own guessed
-    doubling delay — capped at `RETRY_AFTER_MAX_SECONDS` so a header naming a distant rate-limit
-    reset cannot park one page fetch on it. A stated reset at or below the delay the ladder has
-    already reached, clamped by the ladder's own bound, leaves that delay standing under that bound:
-    a quarter-second reset must not turn the remaining attempts into back-to-back requests, and one
-    arriving late — after five failures have carried the delay to 32 — must not lift the draw to the
-    higher cap a raised floor would have earned. A reset naming exactly that clamped delay ties, and
-    the tie goes to the ladder: 30 seconds against a ladder its own bound already holds to 30 draws
-    the single point 30, not the spread up to 45 the stated reset's cap would open. A reset above
-    that clamped delay does earn it, even where the nominal delay has outrun the reset: 32 seconds
-    against a ladder standing at 32 draws from 32 under the stated reset's cap, not the 30 the
-    ladder's bound would hold it to. `503` and `504` are read alongside `429`: behind a quota proxy
-    they name a reset just as usefully. A `500` is a fault rather than a schedule, so its header
-    stays unread — the set of statuses whose header counts is deliberate, not blanket.
-
-    Every other shape takes the doubling delay: a non-finite or negative seconds count (a `nan`
-    reaching `asyncio.sleep` corrupts the shared loop's timer heap), no header at all, an RFC 9110
-    HTTP-date that the seconds parse rejects, and a transport error — which the envelope hands to
-    the same wait calculation carrying no response at all to read a header off. The last case
-    fails twice, so the doubling is observed across consecutive retries rather than assumed from
-    one.
-
-    Each pair of bounds is the interval the envelope draws from: the floor it computed, up to
-    `JITTER_MAX_FACTOR` times that floor and never past the cap governing it — which is why the
-    over-the-cap row is one point rather than a range. The lower bound is what pins the jitter as
-    one-sided, so a stated reset is never undercut."""
     for case, (failing_calls, expected_bounds) in enumerate(RETRY_WAIT_CASES):
         waits = _record_waits(monkeypatch)
         calls = 0
@@ -316,42 +257,7 @@ async def test_retry_waits_a_bounded_retry_after_else_a_jittered_doubling_delay(
             assert low <= wait <= high, case
 
 
-async def test_the_retry_envelope_outlasts_a_per_minute_quota_window(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A permanently rate-limited request must spend more than a minute of waiting before it gives
-    up, because the quota bucket it waits on refills on roughly that cadence. A ladder that raises
-    inside the window discards every page the run has already paid for and re-spends the same
-    requests a minute later.
-
-    Jitter is pinned to its floor so the ladder is asserted exactly; the property under test is the
-    total."""
-    monkeypatch.setattr("ufo.runtime.sources.rest.random.uniform", lambda low, high: low)
-    waits = _record_waits(monkeypatch)
-    calls = 0
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(429, json={})
-
-    with pytest.raises(httpx.HTTPStatusError) as raised:
-        await _pages(_ProbeConnector(_retry_stream(), handle))
-
-    assert raised.value.response.status_code == 429
-    assert calls == rest.MAX_ATTEMPTS
-    assert waits == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
-    assert sum(waits) > QUOTA_WINDOW_SECONDS
-    assert sum(waits) <= rest.RETRY_BUDGET_SECONDS
-
-
-async def test_the_retry_budget_stops_a_long_retry_after_before_the_attempt_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two bounds, not one: a provider naming a 60-second reset on every attempt would otherwise
-    spend the attempt cap on minutes of waiting for a single request. The budget ends the envelope
-    first, before the attempts are used up."""
-    monkeypatch.setattr("ufo.runtime.sources.rest.random.uniform", lambda low, high: low)
+async def test_rate_limit_yields_without_sleep_or_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     waits = _record_waits(monkeypatch)
     calls = 0
 
@@ -360,94 +266,73 @@ async def test_the_retry_budget_stops_a_long_retry_after_before_the_attempt_cap(
         calls += 1
         return httpx.Response(429, json={}, headers={"retry-after": "60"})
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(ProviderRateLimited) as raised:
         await _pages(_ProbeConnector(_retry_stream(), handle))
 
-    assert waits == [60.0, 60.0]
-    assert calls < rest.MAX_ATTEMPTS
+    assert raised.value.retry_after_seconds >= 60
+    assert calls == 1
+    assert waits == []
 
 
-async def test_retry_waits_are_jittered_so_workers_do_not_retry_in_lockstep(
+async def test_protected_rate_limit_waits_and_continues(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits = _record_waits(monkeypatch)
+    calls = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, json={}, headers={"retry-after": "42"})
+        return httpx.Response(200, json=[{"id": 1}])
+
+    pages = await _pages(_ProbeConnector(_retry_stream(), handle), yield_rate_limits=False)
+
+    assert _ids(pages) == {1}
+    assert calls == 2
+    assert len(waits) == 1
+    assert 42 <= waits[0] <= 60
+
+
+async def test_protected_rate_limit_stays_within_the_retry_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The point of the jitter: many workers sharing one provider's per-user quota trip it
-    together, and a fixed doubling grid has them all retry at the same instants and re-collide.
-    Repeated runs of the same single failure must therefore not settle on one wait — while staying
-    inside the one-sided factor range, so the nominal delay remains a floor."""
+    monkeypatch.setattr("ufo.runtime.sources.rest.random.uniform", lambda low, high: low)
     waits = _record_waits(monkeypatch)
+    calls = 0
 
-    for _ in range(20):
-        calls = 0
-
-        def handle(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return httpx.Response(429, json={}) if calls == 1 else httpx.Response(200, json=[])
-
-        await _pages(_ProbeConnector(_retry_stream(), handle))
-
-    ceiling = rest.RETRY_INITIAL_DELAY_SECONDS * rest.JITTER_MAX_FACTOR
-    assert len(waits) == 20
-    assert all(rest.RETRY_INITIAL_DELAY_SECONDS <= wait <= ceiling for wait in waits)
-    assert len(set(waits)) > 1
-
-
-async def test_a_stated_reset_spreads_across_the_headroom_below_its_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stated reset is a floor the spread builds up from, and `RETRY_AFTER_MAX_SECONDS` is the
-    ceiling it stops at, so a header naming 45 seconds spreads over the 15 seconds of headroom
-    between them. The cap is asserted absent from the draws, not merely as their upper bound."""
-    waits = _record_waits(monkeypatch)
-
-    for _ in range(20):
-        calls = 0
-
-        def handle(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                header = f"{STATED_RESET_SECONDS:g}"
-                return httpx.Response(429, json={}, headers={"retry-after": header})
-            return httpx.Response(200, json=[])
-
-        await _pages(_ProbeConnector(_retry_stream(), handle))
-
-    assert len(waits) == 20
-    assert all(STATED_RESET_SECONDS <= wait <= rest.RETRY_AFTER_MAX_SECONDS for wait in waits)
-    assert rest.RETRY_AFTER_MAX_SECONDS not in waits
-    assert len(set(waits)) > 1
-
-
-async def test_a_jittered_wait_stays_under_the_bound_that_governs_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two bounds govern the two kinds of wait, and the spread crosses neither: a doubling delay
-    stops at `RETRY_MAX_DELAY_SECONDS`, and a stated reset stops at `RETRY_AFTER_MAX_SECONDS`. Both
-    ladders here run their jitter live, and both climb past their bound in nominal terms — the
-    doubling one reaches 32 and 64, the stated one names 600 — so each asserts the bound holding the
-    drawn wait, not the nominal one."""
-    waits = _record_waits(monkeypatch)
-
-    def rate_limited(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, json={})
-
-    with pytest.raises(httpx.HTTPStatusError):
-        await _pages(_ProbeConnector(_retry_stream(), rate_limited))
-
-    assert all(wait <= rest.RETRY_MAX_DELAY_SECONDS for wait in waits)
-    assert waits[-1] == rest.RETRY_MAX_DELAY_SECONDS
-    assert sum(waits) > QUOTA_WINDOW_SECONDS
-
-    waits.clear()
-
-    def distant_reset(request: httpx.Request) -> httpx.Response:
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         return httpx.Response(429, json={}, headers={"retry-after": "600"})
 
     with pytest.raises(httpx.HTTPStatusError):
-        await _pages(_ProbeConnector(_retry_stream(), distant_reset))
+        await _pages(_ProbeConnector(_retry_stream(), handle), yield_rate_limits=False)
 
-    assert waits == [rest.RETRY_AFTER_MAX_SECONDS, rest.RETRY_AFTER_MAX_SECONDS]
+    assert waits == [60, 60]
+    assert calls == 3
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (None, 60.0),
+        ("0.25", 1.0),
+        ("42", 42.0),
+        ("600", 600.0),
+        ("7200", 3600.0),
+        ("nan", 60.0),
+        ("-5", 60.0),
+    ],
+)
+async def test_rate_limit_delay_is_finite_and_bounded(header: str | None, expected: float) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        headers = {} if header is None else {"retry-after": header}
+        return httpx.Response(429, json={}, headers=headers)
+
+    with pytest.raises(ProviderRateLimited) as raised:
+        await _pages(_ProbeConnector(_retry_stream(), handle))
+
+    assert raised.value.retry_after_seconds == expected
 
 
 class _CannedConnector(RestConnector):

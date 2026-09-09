@@ -466,13 +466,15 @@ class Connector(ABC):
         base_url: str,
         self_user_id: str | None,
         backfill_after: datetime | None,
+        yield_rate_limits: bool,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         """Async-yield records from `cursor`, excluding exact `self_user_id` where applicable.
 
         `backfill_after` is this row's pinned floor, resolved at registration and replayed every
         run. A connector declaring `backfill_window_days` translates it into its provider's own
         floor (a `q=after:` term, a `$filter`) on the request that opens a walk; a resume carries
-        its own and needs none. None is unbounded."""
+        its own and needs none. None is unbounded. `yield_rate_limits` is false when the active
+        enumeration must retain its in-memory state through a provider wait."""
 
     def checkpoint(
         self, stream: StreamSpec, records: list[dict[str, Any]], cursor: str | None

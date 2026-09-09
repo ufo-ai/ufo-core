@@ -2,7 +2,8 @@
 
 Owns the boilerplate a provider would otherwise duplicate: the httpx client (built from whichever
 `Credential` the auth-proxy resolved — a broker's proxying transport, a bearer token, or auth
-headers), retry on transient/5xx responses, and one page loop per declared `PaginationStrategy`.
+headers), retry on transient transport/5xx responses, a durable yield on provider rate limits where
+the caller has a safe checkpoint, and one page loop per declared `PaginationStrategy`.
 Async — a connector runs from the core sync driver where a blocking network call would stall every
 other surface.
 
@@ -17,6 +18,7 @@ import math
 import random
 import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, ClassVar
 
@@ -36,6 +38,8 @@ RETRY_INITIAL_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 30.0
 RETRY_AFTER_MAX_SECONDS = 60.0
 RETRY_BUDGET_SECONDS = 120.0
+RATE_LIMIT_DEFAULT_SECONDS = 60.0
+RATE_LIMIT_MAX_SECONDS = 3600.0
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 RETRY_AFTER_STATUS = frozenset({429, 503, 504})
 JITTER_MAX_FACTOR = 1.5
@@ -45,6 +49,15 @@ ERROR_BODY_CAP = 800
 MAX_PAGES = 10_000
 
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>\s*;\s*rel="?next"?', re.IGNORECASE)
+_RATE_LIMIT_YIELDS = ContextVar("source_rate_limit_yields", default=True)
+
+
+class ProviderRateLimited(Exception):
+    """A provider cooldown that the durable source scheduler must wait outside the worker."""
+
+    def __init__(self, retry_after_seconds: float) -> None:
+        super().__init__("provider rate limited")
+        self.retry_after_seconds = retry_after_seconds
 
 
 def list_or_empty(value: Any) -> list[dict[str, Any]]:
@@ -241,10 +254,8 @@ class RestConnector(Connector):
         return await self._send(lambda: client.post(path, json=json))
 
     async def _send(self, request: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
-        """The shared retry envelope behind `_get_raw`/`_post`: run one request coroutine, retrying
-        a transient/5xx response until either `MAX_ATTEMPTS` attempts or `RETRY_BUDGET_SECONDS` of
-        waiting on this one request is spent, whichever comes first — waiting the response's
-        `Retry-After` when it carries a usable one, otherwise a jittered doubling delay."""
+        """Send one read request. A rate limit yields to the durable source scheduler when the
+        active walk has a safe checkpoint; protected walks retry with transport and 5xx faults."""
         delay = RETRY_INITIAL_DELAY_SECONDS
         waited = 0.0
         for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -253,6 +264,13 @@ class RestConnector(Connector):
                 _raise_for_status(response)
                 return response
             except (httpx.TransportError, httpx.HTTPStatusError) as error:
+                if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
+                    retry_after = _retry_after(error)
+                    wait = RATE_LIMIT_DEFAULT_SECONDS if retry_after is None else retry_after
+                    if _RATE_LIMIT_YIELDS.get():
+                        raise ProviderRateLimited(
+                            min(max(wait, RETRY_INITIAL_DELAY_SECONDS), RATE_LIMIT_MAX_SECONDS)
+                        ) from error
                 if attempt >= MAX_ATTEMPTS or not _is_retryable(error):
                     raise
                 wait = _retry_wait(error, delay)
@@ -272,37 +290,42 @@ class RestConnector(Connector):
         base_url: str,
         self_user_id: str | None,
         backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         url = (base_url or self.base_url) or ""
         if not url:
             raise RuntimeError(f"{type(self).__name__}: no base_url available")
-        async with self._make_client(url, credential) as client:
-            source = self.paginate_source(
-                client,
-                stream,
-                cursor=cursor,
-                self_user_id=self_user_id,
-                backfill_after=backfill_after,
-            )
-            try:
-                async for page in source:
-                    if not page:
-                        continue
-                    native = page if isinstance(page, StreamPage) else None
-                    records = page.records if isinstance(page, StreamPage) else page
-                    self._validate_page(records, stream)
-                    records = [self.flatten(record, stream) for record in records]
-                    if native is not None:
-                        yield StreamPage(
-                            records=records,
-                            deletes=native.deletes,
-                            next_cursor=native.next_cursor,
-                        )
-                    else:
-                        yield records
-            finally:
-                if isinstance(source, AsyncGenerator):
-                    await source.aclose()
+        rate_limit_token = _RATE_LIMIT_YIELDS.set(yield_rate_limits)
+        try:
+            async with self._make_client(url, credential) as client:
+                source = self.paginate_source(
+                    client,
+                    stream,
+                    cursor=cursor,
+                    self_user_id=self_user_id,
+                    backfill_after=backfill_after,
+                )
+                try:
+                    async for page in source:
+                        if not page:
+                            continue
+                        native = page if isinstance(page, StreamPage) else None
+                        records = page.records if isinstance(page, StreamPage) else page
+                        self._validate_page(records, stream)
+                        records = [self.flatten(record, stream) for record in records]
+                        if native is not None:
+                            yield StreamPage(
+                                records=records,
+                                deletes=native.deletes,
+                                next_cursor=native.next_cursor,
+                            )
+                        else:
+                            yield records
+                finally:
+                    if isinstance(source, AsyncGenerator):
+                        await source.aclose()
+        finally:
+            _RATE_LIMIT_YIELDS.reset(rate_limit_token)
 
     def paginate_source(
         self,

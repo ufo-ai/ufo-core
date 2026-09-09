@@ -88,6 +88,9 @@ from ufo.runtime.sources.connector import (
     WalkPage as WalkPage,
 )
 from ufo.runtime.sources.rest import (
+    ProviderRateLimited as ProviderRateLimited,
+)
+from ufo.runtime.sources.rest import (
     RestConnector as RestConnector,
 )
 from ufo.runtime.sources.rest import (

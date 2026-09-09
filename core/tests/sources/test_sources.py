@@ -2156,6 +2156,22 @@ class _BlockingSource:
         return self.result
 
 
+@dataclass
+class _ConnectionProbeSource:
+    config_model: ClassVar[type[SourceConfig]] = SourceConfig
+    slow_entered: asyncio.Event = field(default_factory=asyncio.Event)
+    fast_finished: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
+        if config.root == "slow":
+            self.slow_entered.set()
+            await self.release.wait()
+        else:
+            self.fast_finished.set()
+        return SyncResult(pages=())
+
+
 @dataclass(frozen=True)
 class _BlockingReadBlob(FilesystemBlobStore):
     armed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -2192,9 +2208,17 @@ def _scripted_driver(
     return driver, backend
 
 
-async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
-    source_id = uuid4()
-    connection_id = await _connection(workspace_id, SCRIPTED_BACKEND)
+async def _seed_scripted_source(
+    workspace_id: UUID,
+    cursor: str | None,
+    *,
+    source_id: UUID | None = None,
+    account_id: str = "",
+    root: str | None = None,
+) -> UUID:
+    source_id = uuid4() if source_id is None else source_id
+    connection_id = await _connection(workspace_id, SCRIPTED_BACKEND, account_id=account_id)
+    configured_root = f"/{source_id.hex}" if root is None else root
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
@@ -2202,8 +2226,8 @@ async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
                 id=source_id,
                 workspace_id=workspace_id,
                 backend=SCRIPTED_BACKEND,
-                config={"root": f"/{source_id.hex}"},
-                feed_handle=feed_handle_for({"root": f"/{source_id.hex}"}, frozenset()),
+                config={"root": configured_root},
+                feed_handle=feed_handle_for({"root": configured_root}, frozenset()),
                 connection_id=connection_id,
                 cursor=cursor,
                 next_sync_at=sa.func.now(),
@@ -2214,6 +2238,90 @@ async def _seed_scripted_source(workspace_id: UUID, cursor: str | None) -> UUID:
             )
         )
     return source_id
+
+
+async def test_connections_sync_concurrently(db: None, database_url: str, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    await _seed_scripted_source(
+        workspace_id, None, source_id=UUID(int=1), account_id="slow", root="slow"
+    )
+    await _seed_scripted_source(
+        workspace_id, None, source_id=UUID(int=2), account_id="fast", root="fast"
+    )
+    backend = _ConnectionProbeSource()
+    driver = SyncDriver(
+        backends={SCRIPTED_BACKEND: backend},
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+    )
+
+    with ws(workspace_id):
+        running = asyncio.create_task(driver.run())
+        try:
+            await backend.slow_entered.wait()
+            async with asyncio.timeout(1):
+                await backend.fast_finished.wait()
+        finally:
+            backend.release.set()
+            await running
+
+
+async def test_rate_limit_commits_progress_and_defers_the_connection(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workspace_id = await _workspace()
+    first = await _seed_scripted_source(
+        workspace_id, None, source_id=UUID(int=1), account_id="limited"
+    )
+    second = await _seed_scripted_source(
+        workspace_id, None, source_id=UUID(int=2), account_id="limited"
+    )
+    waiting = await _seed_scripted_source(
+        workspace_id, None, source_id=UUID(int=3), account_id="limited"
+    )
+    page = Page(source_ref="doc", body="body", stream="docs", title="Doc")
+    driver, backend = _scripted_driver(
+        [SyncResult(pages=(page,), next_cursor="checkpoint", retry_after_seconds=60)],
+        database_url,
+        tmp_path / "blobs",
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.source)
+            .values(consecutive_errors=2)
+            .where(tables.source.c.id.in_((first, second, waiting)))
+        )
+        await connection.execute(
+            sa.update(tables.source)
+            .values(next_sync_at=datetime.now(UTC) + timedelta(seconds=30))
+            .where(tables.source.c.id == waiting)
+        )
+
+    with caplog.at_level(logging.INFO, logger="ufo"), ws(workspace_id):
+        await driver.run()
+
+    first_state = await _source_state(first)
+    second_state = await _source_state(second)
+    waiting_state = await _source_state(waiting)
+    now = datetime.now(UTC)
+    for state in (first_state, second_state, waiting_state):
+        retry_at = state["next_sync_at"]
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        assert retry_at > now
+        assert state["claimed_by"] is None
+        assert state["consecutive_errors"] == 2
+    assert first_state["cursor"] == "checkpoint"
+    assert second_state["cursor"] is None
+    assert waiting_state["cursor"] is None
+    assert backend.cursors == [None]
+    assert len(await _pages()) == 1
+    assert len(_events(caplog, "source_sync.started")) == 1
+    assert len(_events(caplog, "source_sync.rate_limited")) == 1
+    assert _events(caplog, "source_sync.ok") == []
 
 
 async def test_source_claims_renew_while_an_earlier_fetch_is_running(

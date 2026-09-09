@@ -372,6 +372,7 @@ class _WalkConnector(Connector):
         base_url: str,
         self_user_id: str | None,
         backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         async def partitions() -> AsyncIterator[str]:
             yield "p"
@@ -486,6 +487,7 @@ class _NonePartitionsConnector(Connector):
         base_url: str,
         self_user_id: str | None,
         backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         async def partitions() -> AsyncIterator[str]:
             for key in self.data:
