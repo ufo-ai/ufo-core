@@ -403,7 +403,9 @@ def test_manifest_declares_the_trigger_and_page_kinds() -> None:
         "post_tool_use",
     }
     assert {hook.event for hook in declared.hooks if hook.best_effort} == {"user_prompt_submit"}
-    assert {slot.name for slot in declared.credentials} == set(CONNECTORS)
+    assert {slot.name for slot in declared.credentials} == {
+        name for name, connector in CONNECTORS.items() if not connector.key_headers
+    } | {slot for connector in CONNECTORS.values() for slot in connector.key_headers.values()}
     assert {source.backend for source in declared.sources} == set(CONNECTORS)
 
 

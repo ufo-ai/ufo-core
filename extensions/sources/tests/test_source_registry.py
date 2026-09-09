@@ -52,9 +52,10 @@ def test_every_connector_declaring_a_window_reads_the_floor_it_is_handed() -> No
     assert deaf == []
 
 
-def test_a_two_key_connector_keeps_one_slot_that_merges_its_secrets() -> None:
-    slots = {slot.name: slot for slot in manifest().credentials}
-    assert set(slots) == set(CONNECTORS)
-    assert slots["github"].merge is None
-    assert slots["datadog"].merge is not None
-    assert "api_key, application_key" in slots["datadog"].description
+def test_a_two_key_connector_declares_the_slot_behind_each_header() -> None:
+    slots = {slot.name for slot in manifest().credentials}
+    assert {"datadog_api_key", "datadog_application_key"} <= slots
+    assert "datadog" not in slots
+    assert "github" in slots
+    bearer_named = {name for name in CONNECTORS if not CONNECTORS[name].key_headers}
+    assert bearer_named <= slots

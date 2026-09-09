@@ -12,47 +12,19 @@ NEVER reaches the sandbox or the agent surface, which is the invariant this pres
 logged.
 
 A provider that authenticates with headers rather than a bearer (Datadog's API key beside its
-application key) declares `key_headers` on its connector, and that one slot holds a field per
-secret: `keyed_secret_merge` validates and merges each private submission, so the member fills one
-field per handoff, and `credential` reads the fields back into headers. A slot still missing a field
-answers `GrantUnusable`, which the sync seam records as a skip naming what to fill — the run issues
-no request it already knows the provider will refuse."""
+application key) declares `key_headers` on its connector, and `credential` reads the slot named
+beside each header. Those slots are the provider's own, not this extension's: the keyed connector
+declares the same names for the wire it injects on, one secret answers both readers, and one fill
+serves both. A slot with nothing in it answers `GrantUnusable`, which the sync seam records as a
+skip naming what to fill — the run issues no request it already knows the provider will refuse."""
 
-import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import UUID
 
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.connectors import GrantUnusable
-from ufo.sdk.context import CredentialAccess
-from ufo.sdk.credentials import CredentialValueInvalid
+from ufo.sdk.context import CredentialAccess, CredentialSlotUnset
 from ufo_ext_sources.registry import CONNECTORS
-
-
-def keyed_secret_merge(fields: tuple[str, ...]) -> Callable[[str | None, str], str]:
-    """The value merge for a slot holding several secrets: one private submission is a JSON object
-    naming any of `fields`, merged over what the slot already holds."""
-    expected = ", ".join(fields)
-
-    def merge(current: str | None, submitted: str) -> str:
-        try:
-            incoming = json.loads(submitted)
-        except ValueError as error:
-            raise CredentialValueInvalid(f"expected a JSON object naming {expected}") from error
-        if not isinstance(incoming, dict) or not incoming:
-            raise CredentialValueInvalid(f"expected a JSON object naming {expected}")
-        unknown = sorted(set(incoming) - set(fields))
-        if unknown:
-            raise CredentialValueInvalid(
-                f"{', '.join(unknown)} is not a secret this provider takes; expected {expected}"
-            )
-        if any(not isinstance(value, str) or not value for value in incoming.values()):
-            raise CredentialValueInvalid(f"every value of {expected} is a non-empty string")
-        held = {} if current is None else json.loads(current)
-        return json.dumps({**held, **incoming}, sort_keys=True)
-
-    return merge
 
 
 @dataclass(frozen=True)
@@ -69,11 +41,12 @@ class DirectAuthProxy:
         key_headers = {} if connector is None else connector.key_headers
         if not key_headers:
             return Credential(bearer=await self.credentials.get(provider))
-        held = json.loads(await self.credentials.get(provider))
-        missing = sorted(field for field in key_headers.values() if not held.get(field))
-        if missing:
-            raise GrantUnusable(
-                f"the {provider} credential is missing {', '.join(missing)}; fill the slot with "
-                "every secret the provider demands"
-            )
-        return Credential(headers={header: held[field] for header, field in key_headers.items()})
+        headers: dict[str, str] = {}
+        for header, slot in key_headers.items():
+            try:
+                headers[header] = await self.credentials.get(slot)
+            except CredentialSlotUnset as unset:
+                raise GrantUnusable(
+                    f"{provider} needs the {slot} credential and nothing is in it"
+                ) from unset
+        return Credential(headers=headers)

@@ -133,3 +133,14 @@ CONNECTORS = _connector_registry(
         ZendeskConnector,
     )
 )
+
+
+def direct_slots(connector: type[Connector]) -> tuple[str, ...]:
+    """The credential slots the direct auth backend spends for one connector: the slot behind each
+    header a `key_headers` connector authenticates with, else the one bearer slot named for the
+    connector itself. Three readers share this one rule — what the manifest declares, what the
+    registrar reads to decide a keyed feed's lifecycle, and what its job filters candidates on — so
+    a provider demanding two keys is not a provider whose feed silently never starts."""
+    if not connector.key_headers:
+        return (connector.name,)
+    return tuple(connector.key_headers.values())

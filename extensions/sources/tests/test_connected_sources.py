@@ -23,7 +23,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_ext_sources import manifest as sources_manifest
 from ufo_ext_sources.connected import ConnectedSources
-from ufo_ext_sources.registry import CONNECTORS
+from ufo_ext_sources.registry import CONNECTORS, direct_slots
 
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import connection_hooks
@@ -53,6 +53,10 @@ STREAM_WINDOW_DAYS = 30
 RAISED_WINDOW_DAYS = 90
 LOWERED_WINDOW_DAYS = 7
 JOB_KEY = f"{sources_manifest.NAME}:{sources_manifest.CONNECTED_SOURCES_RETRY_JOB}"
+DECLARED_SLOTS = frozenset(slot.name for slot in sources_manifest.manifest().credentials)
+DATADOG = "datadog"
+DATADOG_SLOTS = direct_slots(CONNECTORS[DATADOG])
+DATADOG_SITE = "https://api.us5.datadoghq.com"
 
 
 class _WindowedConnector(RestConnector):
@@ -245,7 +249,7 @@ async def _tick(state: _Workspace) -> None:
 
 
 def _ext() -> ExtensionContext:
-    return context_for(sources_manifest.NAME, frozenset(CONNECTORS))
+    return context_for(sources_manifest.NAME, DECLARED_SLOTS)
 
 
 async def _register(state: _Workspace) -> None:
@@ -409,11 +413,15 @@ async def test_a_stream_newly_marked_canonical_joins_a_connection_that_already_s
     assert held[0]["id"] in {row["id"] for row in rows}
 
 
-async def _fill_slot(state: _Workspace, provider: str, key: str) -> None:
+async def _fill_slot(state: _Workspace, slot: str, key: str) -> None:
     """A member adding a provider key — the whole of what they do for a feed no broker can grant."""
     init_workspace_credentials(CredentialStore(fernet=Fernet(Fernet.generate_key())))
     with ws(state.workspace_id):
-        await ws_current().put_credential(provider, key)
+        await ws_current().put_credential(slot, key)
+
+
+async def _clear_slot(state: _Workspace, slot: str) -> None:
+    await CredentialStore(fernet=Fernet(Fernet.generate_key())).clear(state.workspace_id, slot)
 
 
 async def _connections(state: _Workspace) -> list[sa.RowMapping]:
@@ -671,3 +679,53 @@ async def test_a_row_that_took_the_streams_declared_window_repins_from_that_wind
         str(before["dated"][1])
     ) - timedelta(days=RAISED_WINDOW_DAYS - STREAM_WINDOW_DAYS)
     assert after["undated"] == (None, None)
+
+
+async def test_a_provider_keyed_by_two_slots_mints_only_once_both_are_filled(db: None) -> None:
+    """Datadog refuses a read carrying an API key with no application key beside it, so its slots
+    are its feed's lifecycle together rather than one at a time. One of the pair mints nothing — a
+    connection that cannot authenticate would only park — and the workspace is a candidate on the
+    strength of that one slot, because the registrar is what has to look and decide."""
+    state = await _workspace()
+    await _fill_slot(state, DATADOG_SLOTS[0], "dd-api")
+
+    assert state.workspace_id in set(await _runner().candidates(JOB_KEY))
+    await _tick(state)
+    assert [row["provider"] for row in await _connections(state)] == []
+
+    await _fill_slot(state, DATADOG_SLOTS[1], "dd-app")
+    await _tick(state)
+
+    minted = await _connections(state)
+    assert [row["provider"] for row in minted] == [DATADOG]
+    assert await _rows(state) == []
+
+    await _set_tenant_url(state, minted[0]["id"], DATADOG_SITE)
+    await _tick(state)
+    assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(DATADOG)
+
+
+async def test_clearing_one_key_of_a_pair_keeps_the_feed_and_clearing_both_removes_it(
+    db: None,
+) -> None:
+    """A member rotating one key of a pair is not asking for their synced pages to be destroyed, so
+    the connection stands while the pair is half filled — its runs skip until the slot is filled
+    again. Clearing both is the off switch, and then the connection and its rows go."""
+    state = await _workspace()
+    for slot, key in zip(DATADOG_SLOTS, ("dd-api", "dd-app"), strict=True):
+        await _fill_slot(state, slot, key)
+    await _tick(state)
+    minted = await _connections(state)
+    assert [row["provider"] for row in minted] == [DATADOG]
+    await _set_tenant_url(state, minted[0]["id"], DATADOG_SITE)
+    await _tick(state)
+
+    await _clear_slot(state, DATADOG_SLOTS[1])
+    await _tick(state)
+    assert [row["id"] for row in await _connections(state)] == [minted[0]["id"]]
+    assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(DATADOG)
+
+    await _clear_slot(state, DATADOG_SLOTS[0])
+    await _tick(state)
+    assert await _connections(state) == []
+    assert await _rows(state) == []

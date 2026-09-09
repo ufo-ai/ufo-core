@@ -2,9 +2,10 @@
 pages.
 
 Datadog authenticates a read with two headers rather than one bearer, so the class declares
-`key_headers` and the direct backend fills each from the field of that name in its one credential
-slot. Its host is per site, so the class carries no `base_url` and each source row names the host
-its own org answers on.
+`key_headers` and the direct backend fills each header from the slot named beside it — the same two
+slots the keyed connector spends on the sandbox's own `curl`, so one fill serves both readers. Its
+host is per site, so the class carries no `base_url` and the connection names the host its own org
+answers on.
 
 `monitors` reads the whole collection each run (`GET /api/v1/monitor`, page-numbered over a
 top-level array) and lands as a snapshot: a deleted monitor is tombstoned, and a monitor whose
@@ -98,8 +99,8 @@ class DatadogConnector(RestConnector):
     name = "datadog"
     streams_list = ALL_STREAMS
     key_headers: ClassVar[Mapping[str, str]] = {
-        "DD-API-KEY": "api_key",
-        "DD-APPLICATION-KEY": "application_key",
+        "DD-API-KEY": "datadog_api_key",
+        "DD-APPLICATION-KEY": "datadog_application_key",
     }
     checkpoint = staticmethod(text_checkpoint)
 

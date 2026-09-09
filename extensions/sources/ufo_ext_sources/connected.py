@@ -9,10 +9,12 @@ its API publishes. Which agents read what it syncs is the grant's answer at read
 nothing about grants and nothing about disclosure: the connection carries both.
 
 A provider no broker grants is connected the same way from the other end: a member fills its
-credential slot, and the job mints the workspace's own connection to it — no account handle, and
-nobody's to keep private — so the one act of adding a key starts the feed, and the one act of
-clearing the slot ends it: the next tick removes that connection, and its streams, their pages and
-its grants go with it. A provider already holding a connection keeps it, whoever made it.
+credential slots, and the job mints the workspace's own connection to it — no account handle, and
+nobody's to keep private — so the one act of adding the keys starts the feed, and the one act of
+clearing them ends it: the next tick removes that connection, and its streams, their pages and its
+grants go with it. Which slots those are is the connector's own declaration, one per header where a
+provider authenticates with several keys, and a pair half filled is neither act. A provider already
+holding a connection keeps it, whoever made it.
 
 The job is the retry path for everything else, never the producer: a hook that raised, or a process
 that died between the connection and its rows, leaves streams uncreated, and the next tick creates
@@ -35,7 +37,7 @@ from ufo.sdk.context import ExtensionContext, SourceRecord
 from ufo.sdk.grants import ConnectionRecorded, FeedConnection, feed_connections
 from ufo.sdk.manifest import HookContext, HookOutcome
 from ufo.sdk.sources import ConnectorSourceConfig, StreamSpec
-from ufo_ext_sources.registry import CONNECTORS
+from ufo_ext_sources.registry import CONNECTORS, direct_slots
 
 
 async def on_connection_recorded(ctx: HookContext) -> HookOutcome:
@@ -86,24 +88,38 @@ class ConnectedSources:
             await self._rewindow(connection, streams, live)
 
     async def _settle_keyed_connections(self) -> None:
-        """The workspace's own connection to each provider whose credential slot a member filled,
-        and none to a provider whose slot is empty — the slot is the whole of a keyed feed's
-        lifecycle. Filling it mints the connection here and its canonical streams register below on
-        the same tick; clearing it removes the connection here, and its streams, their pages and
-        every grant on it go by cascade, so nothing keeps asking for a key that is gone and nothing
-        it synced stays recallable.
+        """The workspace's own connection to each provider whose credentials a member filled, and
+        none to a provider whose credentials are empty — the slots are the whole of a keyed feed's
+        lifecycle. Filling them mints the connection here and its canonical streams register below
+        on the same tick; clearing them removes the connection here, and its streams, their pages
+        and every grant on it go by cascade, so nothing keeps asking for a key that is gone and
+        nothing it synced stays recallable.
+
+        A provider authenticating with several keys is settled on all of them, and the state between
+        is neither act: one key of a pair mints nothing, because a connection that cannot
+        authenticate would only park, and clearing one key of a filled pair removes nothing, because
+        a member mid-rotation is not asking for their synced pages to be destroyed. Such a feed's
+        runs skip while it stands, naming the slot still to fill.
 
         A provider already holding a connection is left alone, whoever made it. An account someone
         connected is the authority for that provider, and a second connection beside it would sync
         the same content twice under two disclosures."""
         connections = await feed_connections()
-        keyed = await self.ext.credentials.stored_slots()
+        stored = await self.ext.credentials.stored_slots()
+        keyed: set[str] = set()
+        keyless: set[str] = set()
+        for provider, connector in CONNECTORS.items():
+            slots = direct_slots(connector)
+            filled = sum(slot in stored for slot in slots)
+            if filled == len(slots):
+                keyed.add(provider)
+            elif filled == 0:
+                keyless.add(provider)
         for connection in connections:
             if (
-                connection.provider in CONNECTORS
-                and connection.owner_member_id is None
+                connection.owner_member_id is None
                 and connection.account_id == ""
-                and connection.provider not in keyed
+                and connection.provider in keyless
             ):
                 await self.ext.remove_connection(connection.id)
         connected = {connection.provider for connection in connections}

@@ -25,9 +25,9 @@ from ufo.sdk.jobs import JobSpec, feed_workspaces
 from ufo.sdk.manifest import CredentialSlot, HookSpec, Manifest, SourceProvider
 from ufo.sdk.sources import Connector, ConnectorBackend
 from ufo_ext_sources.connected import on_connection_recorded, retry_connected_sources
-from ufo_ext_sources.direct import DirectAuthProxy, keyed_secret_merge
+from ufo_ext_sources.direct import DirectAuthProxy
 from ufo_ext_sources.pages import PAGE_OBJECT
-from ufo_ext_sources.registry import CONNECTORS
+from ufo_ext_sources.registry import CONNECTORS, direct_slots
 from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT, on_link_seen, on_page_change
 
 NAME = "sources"
@@ -35,23 +35,30 @@ VERSION = "0.1.0"
 DIRECT_BACKEND = "direct"
 CONNECTED_SOURCES_RETRY_JOB = "connected_sources_retry"
 CONNECTED_SOURCES_RETRY_SCHEDULE = "0 * * * * *"
+FEED_SLOTS = frozenset(
+    slot for connector in CONNECTORS.values() for slot in direct_slots(connector)
+)
+"""Every slot a keyed feed can start from, which is what makes a workspace holding one a candidate
+for the registrar's tick — the provider names alone would miss a provider whose keys are its own."""
 
 
-def _direct_slot(name: str, connector: type[Connector]) -> CredentialSlot:
-    """One connector's BYOK slot for the direct auth backend: a bearer key, or — where the connector
-    authenticates with headers — the several secrets it names, merged into that one slot a
-    submission at a time."""
+def _declared_slots(name: str, connector: type[Connector]) -> tuple[CredentialSlot, ...]:
+    """One connector's BYOK slots as declarations. A `key_headers` connector's slots carry the
+    provider's own names, which the extension injecting them on the sandbox wire declares too — one
+    secret, two readers, and the panel shows a row per reader."""
     if not connector.key_headers:
-        return CredentialSlot(
-            name=name,
-            description=f"BYOK API key for {name} feed-sync via the direct auth backend.",
+        return (
+            CredentialSlot(
+                name=name,
+                description=f"BYOK API key for {name} feed-sync via the direct auth backend.",
+            ),
         )
-    fields = tuple(connector.key_headers.values())
-    return CredentialSlot(
-        name=name,
-        description=f"BYOK secrets for {name} feed-sync via the direct auth backend, as a JSON "
-        f"object naming {', '.join(fields)}.",
-        merge=keyed_secret_merge(fields),
+    return tuple(
+        CredentialSlot(
+            name=slot,
+            description=f"{slot}, read host-side for {name} feed-sync.",
+        )
+        for slot in direct_slots(connector)
     )
 
 
@@ -79,7 +86,7 @@ def manifest() -> Manifest:
                 name=CONNECTED_SOURCES_RETRY_JOB,
                 schedule=CONNECTED_SOURCES_RETRY_SCHEDULE,
                 handler=retry_connected_sources,
-                candidates=feed_workspaces(frozenset(CONNECTORS)),
+                candidates=feed_workspaces(FEED_SLOTS),
             ),
         ),
         sources=tuple(
@@ -89,7 +96,11 @@ def manifest() -> Manifest:
             )
             for name, cls in CONNECTORS.items()
         ),
-        credentials=tuple(_direct_slot(name, connector) for name, connector in CONNECTORS.items()),
+        credentials=tuple(
+            slot
+            for name, connector in CONNECTORS.items()
+            for slot in _declared_slots(name, connector)
+        ),
         auth_proxies=(
             AuthProxySpec(
                 backend=DIRECT_BACKEND,
