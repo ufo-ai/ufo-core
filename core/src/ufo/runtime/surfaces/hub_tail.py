@@ -11,7 +11,7 @@ nothing else: it is the only source that sees a turn committed on a peer loop, a
 stopped on a blip would leave the stream open until the caller gave up."""
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass
 from uuid import UUID
@@ -21,8 +21,13 @@ import sqlalchemy as sa
 from ufo.db import workspace_tx
 from ufo.harness.o11y import log
 from ufo.runtime.authority import turn_authority
-from ufo.runtime.billing.accounting import ALLOW, SpendEvaluator, applicable_caps_absent
-from ufo.runtime.billing.balance import balance_park_message, read_headroom
+from ufo.runtime.billing.accounting import (
+    ALLOW,
+    BalanceGate,
+    SpendEvaluator,
+    applicable_caps_absent,
+)
+from ufo.runtime.billing.balance import balance_park_message
 from ufo.runtime.hub import Activity, ArrivalQueued, Hub, LiveFrame, Parked, Terminal
 from ufo.runtime.seats import SEAT_REVOKED_MESSAGE, Seats
 from ufo.schema import tables
@@ -33,7 +38,11 @@ PARK_NOTICE = "This turn is paused. It resumes on its own."
 
 
 async def tail_frames(
-    hub: Hub, turn_id: UUID, since: str = "", billing_url: str | None = None
+    hub: Hub,
+    turn_id: UUID,
+    since: str = "",
+    billing_url: str | None = None,
+    key_slot_for: Callable[[str], str | None] | None = None,
 ) -> AsyncGenerator[tuple[str, LiveFrame]]:
     """Yield a turn's live frames, each with its cursor, until it ends — a Terminal, or a Parked
     hold — whether the turn is still running or already committed when the caller attaches. A
@@ -51,11 +60,13 @@ async def tail_frames(
     pump = asyncio.ensure_future(_pump(hub, turn_id, start, frames))
     tasks = [pump]
     try:
-        stored = await _read_status_frame(turn_id, billing_url)
+        stored = await _read_status_frame(turn_id, billing_url, key_slot_for)
         if stored is not None:
             yield "", stored
             return
-        tasks.append(asyncio.ensure_future(_poll_status(turn_id, frames, billing_url)))
+        tasks.append(
+            asyncio.ensure_future(_poll_status(turn_id, frames, billing_url, key_slot_for))
+        )
         while True:
             cursor, frame = await frames.get()
             yield cursor, frame
@@ -80,12 +91,15 @@ async def _pump(
 
 
 async def _poll_status(
-    turn_id: UUID, frames: asyncio.Queue[tuple[str, LiveFrame]], billing_url: str | None
+    turn_id: UUID,
+    frames: asyncio.Queue[tuple[str, LiveFrame]],
+    billing_url: str | None,
+    key_slot_for: Callable[[str], str | None] | None,
 ) -> None:
     while True:
         await asyncio.sleep(TERMINAL_POLL_SECONDS)
         try:
-            frame = await _read_status_frame(turn_id, billing_url)
+            frame = await _read_status_frame(turn_id, billing_url, key_slot_for)
         except Exception as error:
             log("hub_tail.poll_failed", turn=str(turn_id), error=repr(error))
             continue
@@ -94,8 +108,10 @@ async def _poll_status(
             return
 
 
-async def _read_status_frame(turn_id: UUID, billing_url: str | None) -> LiveFrame | None:
-    read = asyncio.ensure_future(turn_status_frame(turn_id, billing_url))
+async def _read_status_frame(
+    turn_id: UUID, billing_url: str | None, key_slot_for: Callable[[str], str | None] | None
+) -> LiveFrame | None:
+    read = asyncio.ensure_future(turn_status_frame(turn_id, billing_url, key_slot_for))
     cancelled: asyncio.CancelledError | None = None
     while not read.done():
         try:
@@ -115,7 +131,11 @@ async def _read_status_frame(turn_id: UUID, billing_url: str | None) -> LiveFram
     return frame
 
 
-async def turn_status_frame(turn_id: UUID, billing_url: str | None = None) -> LiveFrame | None:
+async def turn_status_frame(
+    turn_id: UUID,
+    billing_url: str | None = None,
+    key_slot_for: Callable[[str], str | None] | None = None,
+) -> LiveFrame | None:
     """The frame that ends a turn's stream: its committed Terminal, or a Parked hold when the turn
     is parked. None while it is still queued or running.
 
@@ -125,10 +145,9 @@ async def turn_status_frame(turn_id: UUID, billing_url: str | None = None) -> Li
     keeps the words true as the hold changes: a workspace credited since it stopped reads whatever
     cap still holds it instead of the balance it has already cleared.
 
-    The balance is read as its own line rather than through `BalanceGate`, because the gate's
-    own-key exemption needs the model registry this tail does not hold. A workspace serving itself
-    therefore reads the balance line for the one poll before the sweep resumes it, which overstates
-    the hold for a second and never invents a cause the way one fixed string did for every park."""
+    The balance is asked of `BalanceGate.admits` with the same key resolution the resume sweep
+    passes it, so its own-key exemption decides here too: a workspace serving turns on its own key
+    at its reserve reads the cap that actually holds it, not a refill that would not resume it."""
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
@@ -153,11 +172,10 @@ async def turn_status_frame(turn_id: UUID, billing_url: str | None = None) -> Li
         authority = turn_authority(row.speaker_member_id, row.on_behalf_of_member_id)
         if not await Seats(row.workspace_id).admits(connection, authority):
             return Parked(message=SEAT_REVOKED_MESSAGE)
-        headroom = await read_headroom(connection, row.workspace_id)
-        if (
-            headroom is not None
-            and headroom.balance_micro_usd <= headroom.reserve_micro_usd - headroom.grace_micro_usd
-        ):
+        balance = await BalanceGate(row.workspace_id).admits(
+            connection, row.agent_id, key_slot_for, turn_id
+        )
+        if balance.outcome != ALLOW:
             return Parked(message=balance_park_message(billing_url))
         member_id = (
             await connection.execute(
@@ -184,11 +202,12 @@ class HubTailer:
 
     hub: Hub
     billing_url: str | None = None
+    key_slot_for: Callable[[str], str | None] | None = None
 
     def tail(
         self, turn_id: UUID, since: str = ""
     ) -> AbstractAsyncContextManager[AsyncIterator[tuple[str, LiveFrame]]]:
-        return aclosing(tail_frames(self.hub, turn_id, since, self.billing_url))
+        return aclosing(tail_frames(self.hub, turn_id, since, self.billing_url, self.key_slot_for))
 
     async def latest_activity(self, turn_id: UUID) -> Activity | None:
         return await self.hub.latest_activity(turn_id)

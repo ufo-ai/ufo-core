@@ -369,7 +369,7 @@ def run(fleet: Fleet) -> None:
         return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
 
     app = FastAPI(lifespan=_serve_lifespan)
-    tailer = HubTailer(hub=hub, billing_url=billing_url)
+    tailer = HubTailer(hub=hub, billing_url=billing_url, key_slot_for=registry.key_slot_for)
     tool_bridge = ToolBridge(
         dbos=dbos_client,
         tailer=tailer,
@@ -1203,7 +1203,7 @@ def _mount_shared_surfaces(
         key_slot_for=key_slot_for,
         billing_url=billing_url,
     )
-    tailer = HubTailer(hub=hub, billing_url=billing_url)
+    tailer = HubTailer(hub=hub, billing_url=billing_url, key_slot_for=key_slot_for)
     stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
     turn_steps = DurableTurnSteps(client=dbos_client)
     system_skill_bundle = SystemSkillBundle.from_skills(skills.bundled_skills())

@@ -81,7 +81,7 @@ async def test_poll_starts_after_the_durable_precheck(
     release = asyncio.Event()
     poll_started = asyncio.Event()
 
-    async def status(turn_id: UUID, billing_url: str | None = None) -> LiveFrame | None:
+    async def status(turn_id: UUID, *_wiring: object) -> LiveFrame | None:
         started.set()
         await release.wait()
         return None
@@ -89,7 +89,7 @@ async def test_poll_starts_after_the_durable_precheck(
     async def poll(
         turn_id: UUID,
         frames: asyncio.Queue[tuple[str, LiveFrame]],
-        billing_url: str | None,
+        *_wiring: object,
     ) -> None:
         poll_started.set()
         await asyncio.Event().wait()
@@ -116,7 +116,7 @@ async def test_cancel_waits_for_the_durable_read_to_close(
     release = asyncio.Event()
     finished = asyncio.Event()
 
-    async def status(turn_id: UUID, billing_url: str | None = None) -> LiveFrame | None:
+    async def status(turn_id: UUID, *_wiring: object) -> LiveFrame | None:
         started.set()
         await release.wait()
         finished.set()
@@ -257,9 +257,7 @@ async def test_a_failing_poll_logs_and_the_live_leg_still_ends_the_tail(
     monkeypatch.setattr(hub_tail, "TERMINAL_POLL_SECONDS", 0.01)
     reads = {"count": 0}
 
-    async def wedged_after_precheck(
-        turn_id: UUID, billing_url: str | None = None
-    ) -> LiveFrame | None:
+    async def wedged_after_precheck(turn_id: UUID, *_wiring: object) -> LiveFrame | None:
         reads["count"] += 1
         if reads["count"] == 1:
             return None
@@ -299,13 +297,11 @@ async def test_a_read_that_fails_once_still_ends_the_tail_on_the_durable_state(
     durable = hub_tail.turn_status_frame
     reads = {"count": 0}
 
-    async def blips_on_the_first_poll(
-        turn: UUID, billing_url: str | None = None
-    ) -> LiveFrame | None:
+    async def blips_on_the_first_poll(turn: UUID, *_wiring: object) -> LiveFrame | None:
         reads["count"] += 1
         if reads["count"] == 2:
             raise RuntimeError("wedged query")
-        return await durable(turn, billing_url)
+        return await durable(turn)
 
     monkeypatch.setattr(hub_tail, "turn_status_frame", blips_on_the_first_poll)
     hub = InProcessHub()

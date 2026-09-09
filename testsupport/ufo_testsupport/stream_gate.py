@@ -108,17 +108,20 @@ class GatingHub:
         return await self.inner.latest_activity(turn_id)
 
 
-def release_when_running(
-    gate: StreamGate,
-    turn_status_frame: Callable[[UUID, str | None], Awaitable[LiveFrame | None]],
-) -> Callable[[UUID, str | None], Awaitable[LiveFrame | None]]:
+KeySlotFor = Callable[[str], str | None] | None
+StatusRead = Callable[[UUID, str | None, KeySlotFor], Awaitable[LiveFrame | None]]
+
+
+def release_when_running(gate: StreamGate, turn_status_frame: StatusRead) -> StatusRead:
     """Wrap the tail's `turn_status_frame` so a consumer's durable-status check releases that turn's
     held first delta the moment it confirms the turn is still running (a `None` result) — which is
     exactly when the tail stops short-circuiting to a durable terminal and begins draining live
     frames. Installed over the tail module for the duration of a test that arms the gate."""
 
-    async def checked(turn_id: UUID, billing_url: str | None = None) -> LiveFrame | None:
-        frame = await turn_status_frame(turn_id, billing_url)
+    async def checked(
+        turn_id: UUID, billing_url: str | None = None, key_slot_for: KeySlotFor = None
+    ) -> LiveFrame | None:
+        frame = await turn_status_frame(turn_id, billing_url, key_slot_for)
         if frame is None:
             gate.release(str(turn_id))
         return frame

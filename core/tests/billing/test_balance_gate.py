@@ -595,6 +595,34 @@ async def test_the_park_notice_names_the_cap_that_holds_the_turn(db: None) -> No
     assert "workspace spend cap of $1.00" in frame.message
 
 
+async def test_the_park_notice_carries_the_gates_own_key_exemption(db: None) -> None:
+    """A workspace serving its turns on its own key is admitted at its reserve, so the balance is
+    not what holds a turn there. Naming the balance would send the member to buy credit for a park
+    the cap holds, and the sweep — which re-decides with the same exemption — would leave the turn
+    exactly where it is."""
+    async with workspace_tx() as connection:
+        workspace_id, _member_id, agent_id, conversation_id = await _seed(connection)
+        await _fund(connection, workspace_id, dollars=100, reserve_dollars=1000)
+        await _store_own_key(connection, workspace_id)
+        await _set_cap(connection, workspace_id, "workspace", None, 3600, DOLLAR, "park")
+        running = await _insert_running(connection, workspace_id, conversation_id, agent_id, seq=1)
+        await record_turn_usage(
+            connection,
+            workspace_id,
+            running,
+            "claude-opus-4-8",
+            Usage(input_tokens=1_000_000, output_tokens=1_000_000),
+            "attempt",
+        )
+        turn_id = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
+    with ws(workspace_id):
+        without_the_key = await turn_status_frame(turn_id)
+        with_the_key = await turn_status_frame(turn_id, None, _own_key)
+    assert without_the_key == Parked(message=balance_park_message(None))
+    assert isinstance(with_the_key, Parked)
+    assert "workspace spend cap of $1.00" in with_the_key.message
+
+
 async def test_a_park_no_gate_still_refuses_reads_as_a_pause(db: None) -> None:
     """Every gate clear means the sweep is about to re-admit it, so the notice states that and
     claims no cause."""
