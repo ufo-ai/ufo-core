@@ -1001,9 +1001,14 @@ def test_the_frame_ancestor_is_an_origin_and_nothing_frames_a_site_without_one(
 ) -> None:
     """An origin, not the whole configured URL: a path in `frame-ancestors` is matched by the
     browser and would name a source no page has. Unset, `'none'` — there is no frame to allow, and
-    unset is not a reason to permit what a configured base would forbid."""
+    unset is not a reason to permit what a configured base would forbid. A plain-http localhost
+    base admits every port on the host, so a portal served from source on another port frames a
+    site the way the slot's own portal does."""
     assert ingress_frame_ancestor("https://app.example/chat?c=1") == "https://app.example"
-    assert ingress_frame_ancestor("http://localhost:8710/") == "http://localhost:8710"
+    assert ingress_frame_ancestor("https://app.example:8443/") == "https://app.example:8443"
+    assert ingress_frame_ancestor("http://localhost:8710/") == "http://localhost:*"
+    assert ingress_frame_ancestor("http://ufo-3.localhost:18280") == "http://ufo-3.localhost:*"
+    assert ingress_frame_ancestor("http://10.0.0.5:8710") == "http://10.0.0.5:8710"
     assert ingress_frame_ancestor(None) == NO_FRAME_ANCESTOR
     assert ingress_frame_ancestor("") == NO_FRAME_ANCESTOR
 

@@ -88,16 +88,25 @@ test("the trailing note travels with the line, as the one thing the row says", a
   );
 });
 
-test("a recent row states how long ago it moved, not the date", () => {
+test("a recent row states its distance from now in one number and one letter", () => {
   render(<PressRow line={TITLE} when={AN_HOUR_AGO} onPress={() => {}} />);
 
-  expect(screen.getByRole("button").textContent).toContain("1h ago");
+  expect(screen.getByRole("button").textContent).toContain("1h");
+  expect(screen.getByRole("button").textContent).not.toContain("ago");
 });
 
-test("an older row states the day it moved, and carries the whole stamp with it", () => {
+test("an older row keeps the same scale, and carries the whole stamp with it", () => {
   render(<PressRow line={TITLE} when={A_WEEK_BACK} onPress={() => {}} />);
 
-  const stamp = screen.getByText("Aug 7 2026");
-  expect(stamp.getAttribute("datetime")).toBe(A_WEEK_BACK);
-  expect(stamp.getAttribute("title")).toBe("Aug 7 2026 at 09:30 UTC");
+  const stamp = screen.getByRole("button").querySelector("time");
+  expect(stamp?.textContent).toMatch(/^\d+(w|mo|y)$/);
+  expect(stamp?.getAttribute("datetime")).toBe(A_WEEK_BACK);
+  expect(stamp?.getAttribute("title")).toBe("Aug 7 2026 at 09:30 UTC");
+});
+
+test("the stamp is drawn at rest, not withheld until the pointer arrives", () => {
+  render(<PressRow line={TITLE} when={AN_HOUR_AGO} onPress={() => {}} />);
+
+  const stamp = screen.getByRole("button").querySelector("time");
+  expect(stamp?.parentElement?.className).not.toContain("opacity-0");
 });

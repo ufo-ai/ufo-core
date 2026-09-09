@@ -1306,10 +1306,11 @@ test("the lane's History lists the app's conversations, and one press opens it i
   await userEvent.click(act);
 
   expect(act.getAttribute("aria-pressed")).toBe("true");
-  const row = await screen.findByRole("button", { name: "Newest thread Jul 30 2026" });
-  const other = screen.getByRole("button", { name: "Older thread Slack Jul 30 2026" });
+  const row = await screen.findByRole("button", { name: /^Newest thread \d+(mo|y)$/ });
+  const other = screen.getByRole("button", { name: /^Older thread Slack \d+(mo|y)$/ });
   const line = within(row).getByText("Newest thread");
-  const stamp = within(row).getByText("Jul 30 2026");
+  const stamp = row.querySelector("time")!;
+  expect(stamp.getAttribute("title")).toBe("Jul 30 2026 at 10:00 UTC");
   expect(line.contains(stamp)).toBe(false);
   expect(line.compareDocumentPosition(stamp) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
@@ -1327,7 +1328,7 @@ test("the list's way back stands beside its name, and leaves it without shutting
   render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
-  await screen.findByRole("button", { name: "Newest thread Jul 30 2026" });
+  await screen.findByRole("button", { name: /^Newest thread \d+(mo|y)$/ });
 
   const back = screen.getByRole("button", { name: "Back" });
   const name = within(screen.getByRole("region", { name: "History" })).getByText("History");
@@ -1336,7 +1337,7 @@ test("the list's way back stands beside its name, and leaves it without shutting
 
   await userEvent.click(back);
 
-  expect(screen.queryByRole("button", { name: "Newest thread Jul 30 2026" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Newest thread \d+(mo|y)$/ })).toBeNull();
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + CONVO_ID);
   expect(await screen.findByRole("button", { name: "Close Newest thread" })).toBeTruthy();
 });
@@ -1367,7 +1368,7 @@ test("a history the read carries whole ends on its last row", async () => {
   render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
-  await screen.findByRole("button", { name: "Newest thread Jul 30 2026" });
+  await screen.findByRole("button", { name: /^Newest thread \d+(mo|y)$/ });
 
   expect(screen.queryByText(/The newest few/)).toBeNull();
 });

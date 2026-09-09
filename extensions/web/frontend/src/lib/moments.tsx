@@ -5,6 +5,9 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 const NEAR_DAYS = 7;
+const WEEK_MS = 7 * DAY_MS;
+const MONTH_MS = 30 * DAY_MS;
+const YEAR_MS = 365 * DAY_MS;
 
 export function isMoment(value: string): boolean {
   return ISO_MOMENT.test(value);
@@ -65,6 +68,30 @@ export function Moment({ at }: { at: string | null }) {
   return (
     <time dateTime={at} title={fullMoment(at)}>
       {friendlyMoment(at, new Date())}
+    </time>
+  );
+}
+
+/** The distance from now as one number and one letter — `Now`, `4m`, `2h`, `3d`, `2w`, `5mo`,
+ *  `1y` — for a column every row of a list carries, where the words beside it are what the member
+ *  came to read. The whole stamp stands under the pointer. */
+export function ageMoment(raw: string, now: Date): string {
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return raw;
+  const span = Math.abs(now.getTime() - at.getTime());
+  if (span < MINUTE_MS) return "Now";
+  if (span < HOUR_MS) return Math.floor(span / MINUTE_MS) + "m";
+  if (span < DAY_MS) return Math.floor(span / HOUR_MS) + "h";
+  if (span < WEEK_MS) return Math.floor(span / DAY_MS) + "d";
+  if (span < MONTH_MS) return Math.floor(span / WEEK_MS) + "w";
+  if (span < YEAR_MS) return Math.floor(span / MONTH_MS) + "mo";
+  return Math.floor(span / YEAR_MS) + "y";
+}
+
+export function Age({ at }: { at: string }) {
+  return (
+    <time dateTime={at} title={fullMoment(at)}>
+      {ageMoment(at, new Date())}
     </time>
   );
 }

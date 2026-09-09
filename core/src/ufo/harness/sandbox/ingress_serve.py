@@ -72,7 +72,7 @@ from ufo.proxy_serve import OTLP_ENDPOINT_ENV, owner_dsn
 from ufo.runtime.ext.manifest import CarrierSpec
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.sdk.http import cookie_secure, set_session_cookie
+from ufo.sdk.http import cookie_secure, plain_local, set_session_cookie
 
 HOP_BY_HOP_HEADERS = frozenset(
     {
@@ -1248,10 +1248,17 @@ def ingress_frame_ancestor(configured: str | None) -> str:
     `[connect] public_base_url` — scheme, host and port, never its path — which is where the frame
     that reads a hosted site lives. A signed session may name one workspace-scoped sibling site
     beside it. `'none'` when unset, since then no frame exists and nothing may embed a site: unset
-    is not a reason to allow what a set base would forbid."""
+    is not a reason to allow what a set base would forbid.
+
+    A plain-http `localhost` base names every port on it: the host never leaves the machine, so
+    the portal served from source on another port (`make web`) is the same developer's page, and
+    the exact port would refuse the frame it opens with a browser-generated error no reply can
+    explain. An https base keeps its one port."""
     base = urlsplit(configured or "")
     if not (base.scheme and base.hostname):
         return NO_FRAME_ANCESTOR
+    if plain_local(configured):
+        return f"{base.scheme}://{base.hostname}:*"
     port = f":{base.port}" if base.port else ""
     return f"{base.scheme}://{base.hostname}{port}"
 

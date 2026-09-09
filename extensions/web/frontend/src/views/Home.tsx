@@ -367,7 +367,6 @@ function History({
         <div ref={openAtTop} className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable">
           <HistoryRuns
             runs={runs}
-            stamps
             onPick={(conversationId) =>
               onOpens(taken(opens, lane, homeConversationLane(conversationId)))
             }
@@ -385,12 +384,10 @@ function History({
 function HistoryRuns({
   runs,
   onPick,
-  stamps,
   headings = true,
 }: {
   runs: ChatRun[];
   onPick: (conversationId: string) => void;
-  stamps?: boolean;
   headings?: boolean;
 }) {
   return (
@@ -403,7 +400,7 @@ function HistoryRuns({
               key={row.conversation_id}
               line={row.title || agentName(row.agent_name)}
               note={isPortalChat(row.surface) ? undefined : origin(row)}
-              when={stamps ? row.last_at : undefined}
+              when={row.last_at}
               onPress={() => onPick(row.conversation_id)}
             />
           ))}

@@ -402,7 +402,7 @@ test("the picker lane offers the workspace's apps and the member's history", asy
   const rows = within(chats)
     .getAllByRole("button")
     .filter((row) => row.textContent !== "");
-  expect(rows.map((row) => row.textContent)).toEqual([CHAT_ROW.title]);
+  expect(rows.map((row) => row.querySelector("span")?.textContent)).toEqual([CHAT_ROW.title]);
   await userEvent.click(rows[0]);
   expect(laneNames()).toEqual([CHAT_ROW.title, "Assistant"]);
 });
@@ -546,8 +546,9 @@ test("a history row stamps when its conversation last moved", async () => {
   const lane = await screen.findByRole("region", { name: "Assistant" });
   await within(lane).findByRole("heading", { name: "History", level: 3 });
 
-  const stamp = within(lane).getByText("Aug 1 2026");
+  const stamp = within(lane).getByRole("button", { name: /^Pick one thread / }).querySelector("time")!;
   expect(stamp.getAttribute("datetime")).toBe(CHAT_ROW.last_at);
+  expect(stamp.textContent).toMatch(/^\d+(mo|y)$/);
 });
 
 test("the history runs the rows in the ladder the member picks and drops the surfaces they put away", async () => {
