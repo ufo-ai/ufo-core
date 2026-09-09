@@ -7,7 +7,9 @@ metadata:
   labels: {app: ufo-migrate}
 spec:
   backoffLimit: 0
-  activeDeadlineSeconds: 540
+  # Production's own rows take ~5 minutes of this: `_rekey_sources` walks every source and rewrites
+  # the tables citing it. 540s left no margin and killed the Job mid-migration on 2026-09-08.
+  activeDeadlineSeconds: 1800
   template:
     metadata:
       labels: {app: ufo-migrate}

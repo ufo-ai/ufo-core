@@ -36,10 +36,18 @@ mem_page = sa.table(
 )
 page = sa.table("page", sa.column("id", sa.Uuid()))
 
+# `page_id NOT IN (SELECT page.id …)` is the same set — `page.id` is the key and never null — but
+# Postgres will not read it as an anti-join: it materializes `page` and rescans it per mirror row.
+STALE_MIRROR = ~sa.exists(sa.select(sa.literal(1)).where(page.c.id == mem_page.c.page_id))
+
 
 def upgrade() -> None:
     connection = op.get_bind()
-    connection.execute(sa.delete(mem_page).where(mem_page.c.page_id.not_in(sa.select(page.c.id))))
+    # Read the strays, then delete them by key. Postgres parallelizes no DML, so the anti-join runs
+    # once here over two workers and an index-only scan rather than serially inside the delete.
+    stale = connection.scalars(sa.select(mem_page.c.page_id).where(STALE_MIRROR)).all()
+    if stale:
+        connection.execute(sa.delete(mem_page).where(mem_page.c.page_id.in_(stale)))
     connection.execute(sa.delete(mem_page).where(mem_page.c.revision.is_(None)))
     with op.batch_alter_table("mem_page") as batch:
         batch.alter_column("revision", existing_type=sa.BigInteger(), nullable=False)

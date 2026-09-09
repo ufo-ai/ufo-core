@@ -471,3 +471,76 @@ def test_source_partition_backfills_one_link_per_source_without_rekeying(
         None,
     )
     assert orphan_origin.source_id is None
+
+
+def test_mem_page_cascade_collects_a_mirror_whose_page_is_gone(
+    migration_urls: tuple[str, str],
+) -> None:
+    """`memory_0017` puts a foreign key over `mem_page.page_id`, and a key cannot be created while a
+    mirror names a page that is gone — so the upgrade collects those rows first. A mirror whose page
+    still stands survives it. What the key then does with a live page is `test_mem_page_cascade`'s,
+    which drives the app's own engine — this one's raw engine never runs SQLite's foreign-key
+    pragma."""
+    migration_url, sync_url = migration_urls
+    config = _alembic(migration_url)
+    command.upgrade(config, "0054")
+    command.upgrade(config, "memory_0016")
+
+    workspace_id, source_id, page_id = uuid4(), uuid4(), uuid4()
+    gone_page_id = uuid4()
+    now = datetime(2026, 9, 9, tzinfo=UTC)
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text("insert into workspace (id, created_at, updated_at) values (:id, :now, :now)"),
+            {"id": workspace_id.hex, "now": now},
+        )
+        connection.execute(
+            sa.text(
+                "insert into source "
+                "(id, workspace_id, backend, config, next_sync_at, created_at, updated_at) "
+                "values (:id, :workspace_id, 'folder', '{}', :now, :now, :now)"
+            ),
+            {"id": source_id.hex, "workspace_id": workspace_id.hex, "now": now},
+        )
+        connection.execute(
+            sa.text(
+                "insert into page "
+                "(id, workspace_id, source_id, digest, body_ref, stream, title, subject, "
+                "tombstone, created_at, updated_at) values "
+                "(:id, :workspace_id, :source_id, 'sha256:page', 'pages/page', 'notes', "
+                "'Page', 'shared', false, :now, :now)"
+            ),
+            {
+                "id": page_id.hex,
+                "workspace_id": workspace_id.hex,
+                "source_id": source_id.hex,
+                "now": now,
+            },
+        )
+        for mirror_page_id in (page_id, gone_page_id):
+            connection.execute(
+                sa.text(
+                    "insert into mem_page "
+                    "(page_id, workspace_id, subject, revision, created_at) values "
+                    "(:page_id, :workspace_id, 'shared', 1, :now)"
+                ),
+                {
+                    "page_id": mirror_page_id.hex,
+                    "workspace_id": workspace_id.hex,
+                    "now": now,
+                },
+            )
+        connection.commit()
+    engine.dispose()
+
+    command.upgrade(config, "memory_0017")
+
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        mirrors = {
+            UUID(str(stored))
+            for stored in connection.execute(sa.text("select page_id from mem_page")).scalars()
+        }
+        assert mirrors == {page_id}
+    engine.dispose()
