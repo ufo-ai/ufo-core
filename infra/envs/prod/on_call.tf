@@ -10,15 +10,30 @@ data "datadog_user" "marshall" {
   exclude_service_accounts = true
 }
 
+import {
+  to = datadog_team.ufo
+  id = "d4c50744-7563-4f43-8e25-d2ed5df3a5f3"
+}
+
 resource "datadog_team" "ufo" {
   name        = "UFO"
   handle      = "ufo"
   description = "UFO production operations."
 }
 
+import {
+  to = datadog_team_membership.alex
+  id = "d4c50744-7563-4f43-8e25-d2ed5df3a5f3:95bdda15-44fc-45f1-83ca-a7c58b2b887a"
+}
+
 resource "datadog_team_membership" "alex" {
   team_id = datadog_team.ufo.id
   user_id = data.datadog_user.alex.id
+}
+
+import {
+  to = datadog_team_membership.marshall
+  id = "d4c50744-7563-4f43-8e25-d2ed5df3a5f3:19b2a4c5-ceba-4d62-9fc0-3c08400759af"
 }
 
 resource "datadog_team_membership" "marshall" {
@@ -46,6 +61,11 @@ resource "datadog_on_call_schedule" "ufo" {
       days = 1
     }
   }
+}
+
+import {
+  to = datadog_on_call_escalation_policy.ufo
+  id = "f3c45cbd-7744-4128-b9c2-d74048e08869"
 }
 
 resource "datadog_on_call_escalation_policy" "ufo" {

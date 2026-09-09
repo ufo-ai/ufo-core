@@ -51,6 +51,14 @@ STORAGE_QUERY = (
 )
 HANDLE = r"@(?:slack-[\w-]+|[\w.-]+@[\w.-]+)"
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+ON_CALL_TEAM = "d4c50744-7563-4f43-8e25-d2ed5df3a5f3"
+ON_CALL_IMPORTS = {
+    "datadog_team.ufo": ON_CALL_TEAM,
+    "datadog_team_membership.alex": f"{ON_CALL_TEAM}:95bdda15-44fc-45f1-83ca-a7c58b2b887a",
+    "datadog_team_membership.marshall": f"{ON_CALL_TEAM}:19b2a4c5-ceba-4d62-9fc0-3c08400759af",
+    "datadog_on_call_schedule.ufo": "64f82149-e8df-4380-93e4-426f2ba4e364",
+    "datadog_on_call_escalation_policy.ufo": "f3c45cbd-7744-4128-b9c2-d74048e08869",
+}
 
 
 def _code(source: str) -> str:
@@ -4307,16 +4315,15 @@ def _check_notification_rules_route_each_environment() -> None:
     assert re.search(r'fallback_recipients\s*=\s*\["slack-on-call"\]', production)
 
 
-def _check_on_call_schedule_uses_existing_daily_rotation() -> None:
-    """The import id is the schedule's own id, and the team it belongs to carries a different one,
-    so a second literal id anywhere in the file is an import of the wrong object."""
+def _check_on_call_adopts_the_ui_objects_and_the_daily_rotation() -> None:
+    """The team, both memberships, the schedule and the escalation policy were made in the Datadog
+    UI, so each carries an import block addressing it by its own id; a literal id anywhere outside
+    an import block is a raw address pasted into a resource."""
     source = NOTIFICATION_RULES["prod"].read_text()
-    assert re.search(
-        r"import\s*{\s*to\s*=\s*datadog_on_call_schedule\.ufo\s*"
-        r'id\s*=\s*"64f82149-e8df-4380-93e4-426f2ba4e364"\s*}',
-        source,
-    )
-    assert re.findall(UUID, source) == ["64f82149-e8df-4380-93e4-426f2ba4e364"]
+    imports = re.findall(r'import\s*{\s*to\s*=\s*([\w.]+)\s*id\s*=\s*"([^"]+)"\s*}', source)
+    assert len(imports) == len(ON_CALL_IMPORTS)
+    assert dict(imports) == ON_CALL_IMPORTS
+    assert not re.findall(UUID, re.sub(r"import\s*{[^}]*}", "", source))
     schedule = re.search(
         r'resource "datadog_on_call_schedule" "ufo" {\n(.*?)\n  }\n}',
         source,
@@ -4945,7 +4952,7 @@ def test_deploy_workflow_sync_contract() -> None:
         _check_the_migrate_wait_outlives_the_migrate_job,
         _check_deployment_gate_accepts_only_expected_results,
         _check_notification_rules_route_each_environment,
-        _check_on_call_schedule_uses_existing_daily_rotation,
+        _check_on_call_adopts_the_ui_objects_and_the_daily_rotation,
         _check_the_source_sync_monitor_watches_the_check_the_reporters_submit,
         _check_the_source_sync_monitor_reports_both_transitions,
         _check_the_fleet_submits_the_stream_check_to_the_datadog_its_monitors_read,
