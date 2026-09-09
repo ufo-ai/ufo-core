@@ -70,6 +70,9 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_id)
+                .scalar_subquery(),
                 digest=DIGEST,
                 body_ref=f"pages/{page_id}",
                 subject="shared",

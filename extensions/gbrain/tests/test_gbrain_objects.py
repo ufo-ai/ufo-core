@@ -302,6 +302,9 @@ async def _seed_page(state: _Workspace, source_id: UUID, subject: str) -> UUID:
                     id=page_id,
                     workspace_id=state.workspace_id,
                     source_id=source_id,
+                    source_uid=sa.select(tables.source.c.uid)
+                    .where(tables.source.c.id == source_id)
+                    .scalar_subquery(),
                     digest="sha256:x",
                     body_ref=f"pages/{page_id}",
                     subject=subject,

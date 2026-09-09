@@ -2166,10 +2166,11 @@ async def _seed_streams(
     seeded: dict[str, tuple[UUID, UUID]] = {}
     async with workspace_tx() as connection:
         for stream in streams:
-            source_id, live_id, tombstoned_id = uuid4(), uuid4(), uuid4()
+            source_id, source_uid = uuid4(), uuid7()
+            live_id, tombstoned_id = uuid4(), uuid4()
             await connection.execute(
                 sa.insert(tables.source).values(
-                    uid=uuid7(),
+                    uid=source_uid,
                     id=source_id,
                     workspace_id=workspace_id,
                     backend="stub",
@@ -2189,6 +2190,7 @@ async def _seed_streams(
                         "uid": uuid7(),
                         "workspace_id": workspace_id,
                         "source_id": source_id,
+                        "source_uid": source_uid,
                         "digest": f"sha256:{stream}-{page_id.hex[:8]}",
                         "body_ref": f"sources/{source_id}/{page_id}",
                         "stream": stream,

@@ -49,12 +49,25 @@ def upgrade() -> None:
     if stale:
         connection.execute(sa.delete(mem_page).where(mem_page.c.page_id.in_(stale)))
     connection.execute(sa.delete(mem_page).where(mem_page.c.revision.is_(None)))
+    # A database built after RFC 0046 unit C keys `page` by `(workspace_id, uid)`, and no key can
+    # name `page (id)` there; `memory_0019` carries the cascade on the new key for every database.
+    page_keyed_by_id = connection.dialect.name != "postgresql" or connection.scalar(
+        sa.text(
+            "select count(*) from pg_constraint where conrelid = 'page'::regclass "
+            "and contype = 'p' and pg_get_constraintdef(oid) = 'PRIMARY KEY (id)'"
+        )
+    )
     with op.batch_alter_table("mem_page") as batch:
         batch.alter_column("revision", existing_type=sa.BigInteger(), nullable=False)
-        batch.create_foreign_key(MEM_PAGE_FK, "page", ["page_id"], ["id"], ondelete="CASCADE")
+        if page_keyed_by_id:
+            batch.create_foreign_key(MEM_PAGE_FK, "page", ["page_id"], ["id"], ondelete="CASCADE")
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(f"alter table mem_page drop constraint if exists {MEM_PAGE_FK}")
+        op.alter_column("mem_page", "revision", existing_type=sa.BigInteger(), nullable=True)
+        return
     with op.batch_alter_table("mem_page") as batch:
         batch.drop_constraint(MEM_PAGE_FK, type_="foreignkey")
         batch.alter_column("revision", existing_type=sa.BigInteger(), nullable=True)

@@ -297,6 +297,9 @@ async def _seed_page(
                 id=uuid4(),
                 workspace_id=state.workspace_id,
                 source_id=source_key,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_key)
+                .scalar_subquery(),
                 digest="sha256:abc",
                 body_ref=body_ref,
                 stream=stream,

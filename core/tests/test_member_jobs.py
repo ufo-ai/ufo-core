@@ -256,7 +256,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
 ) -> None:
     workspace_id, member_id, other_member_id, brief_id = await _seed()
     now = datetime.now(UTC)
-    connection_id, source_id = uuid4(), uuid4()
+    connection_id, source_id, source_uid = uuid4(), uuid4(), uuid7()
     page_id, missing_page_id, invalid_page_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         main_id = (
@@ -396,7 +396,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
         )
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
+                uid=source_uid,
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="probe",
@@ -414,6 +414,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
                 {
                     "id": page_id,
                     "uid": uuid7(),
+                    "source_uid": source_uid,
                     "workspace_id": workspace_id,
                     "source_id": source_id,
                     "digest": "sha256:page",
@@ -430,6 +431,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
                     "uid": uuid7(),
                     "workspace_id": workspace_id,
                     "source_id": source_id,
+                    "source_uid": source_uid,
                     "digest": "sha256:missing",
                     "body_ref": f"pages/{missing_page_id}",
                     "stream": "reports",
@@ -444,6 +446,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
                     "uid": uuid7(),
                     "workspace_id": workspace_id,
                     "source_id": source_id,
+                    "source_uid": source_uid,
                     "digest": "sha256:invalid",
                     "body_ref": f"pages/{invalid_page_id}",
                     "stream": "reports",

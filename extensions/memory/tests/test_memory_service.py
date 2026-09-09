@@ -216,6 +216,9 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
                 id=page_key,
                 workspace_id=workspace_id,
                 source_id=source_key,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_key)
+                .scalar_subquery(),
                 digest=PAGE_DIGEST,
                 body_ref=f"pages/{page_id}",
                 stream="notes",
@@ -604,6 +607,7 @@ async def test_two_pages_of_one_source_each_keep_the_fact_they_share(db: None) -
                 source_id=sa.select(tables.source.c.id)
                 .where(tables.source.c.uid == source_id)
                 .scalar_subquery(),
+                source_uid=source_id,
                 digest=PAGE_DIGEST,
                 body_ref=f"pages/{page_2}",
                 stream="notes",

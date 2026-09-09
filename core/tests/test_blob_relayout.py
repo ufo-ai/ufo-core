@@ -123,6 +123,9 @@ async def _seed_rows(artifact_key: str, body_ref: str):
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_id)
+                .scalar_subquery(),
                 digest="sha256:seed",
                 body_ref=body_ref,
                 stream="files",

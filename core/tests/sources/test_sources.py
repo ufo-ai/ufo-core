@@ -1486,6 +1486,9 @@ async def _seed_page(workspace_id: UUID) -> UUID:
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_id)
+                .scalar_subquery(),
                 digest="d",
                 body_ref="",
                 subject=SHARED_SUBJECT,
@@ -1699,6 +1702,9 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_id)
+                .scalar_subquery(),
                 digest="sha256:seed",
                 body_ref="sources/seed",
                 subject=member_subject(alice),
@@ -2639,6 +2645,9 @@ async def test_source_identity_attaches_without_replaying_and_survives_a_ref_cha
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_id)
+                .scalar_subquery(),
                 source_identity=None,
                 digest=page.digest,
                 body_ref=body_ref,
@@ -2753,6 +2762,9 @@ async def test_database_revision_orders_an_old_writer_after_a_new_cursor(
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_id)
+                .scalar_subquery(),
                 digest="sha256:old",
                 body_ref=old_ref,
                 subject=SHARED_SUBJECT,
@@ -2904,6 +2916,9 @@ async def _seed_prior_page(workspace_id: UUID, source_id: UUID, source_ref: str)
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_id)
+                .scalar_subquery(),
                 digest="sha256:prior",
                 body_ref=f"sources/{source_id}/{page_id}",
                 subject=SHARED_SUBJECT,

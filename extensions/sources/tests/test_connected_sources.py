@@ -488,6 +488,9 @@ async def test_a_cleared_credential_slot_removes_its_connection_and_pages(db: No
                     id=page_id,
                     workspace_id=state.workspace_id,
                     source_id=landed["id"],
+                    source_uid=sa.select(tables.source.c.uid)
+                    .where(tables.source.c.id == landed["id"])
+                    .scalar_subquery(),
                     digest="d" * 64,
                     body_ref="pages/seed",
                     stream=landed["config"]["stream"],

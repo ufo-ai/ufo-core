@@ -549,6 +549,9 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
                 id=page_key,
                 workspace_id=workspace_id,
                 source_id=source_key,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_key)
+                .scalar_subquery(),
                 digest="d" * 64,
                 body_ref=f"pages/{page_id}",
                 stream="notes",

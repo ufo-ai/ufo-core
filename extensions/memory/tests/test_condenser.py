@@ -450,6 +450,9 @@ async def _seed_page(
                 id=page_key,
                 workspace_id=workspace_id,
                 source_id=source_key,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_key)
+                .scalar_subquery(),
                 digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
                 body_ref=f"pages/{page_id}",
                 subject=SHARED_SUBJECT,
@@ -488,6 +491,9 @@ async def _seed_page_authority(
                 id=page_key,
                 workspace_id=workspace_id,
                 source_id=source_key,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_key)
+                .scalar_subquery(),
                 digest="sha256:page",
                 body_ref=f"pages/{page_id}",
                 stream="notes",
@@ -2643,6 +2649,9 @@ async def _seed_wiki_source_page(
                 id=uuid4(),
                 workspace_id=workspace_id,
                 source_id=source_key,
+                source_uid=sa.select(tables.source.c.uid)
+                .where(tables.source.c.id == source_key)
+                .scalar_subquery(),
                 digest="sha256:page",
                 body_ref=f"pages/{page_id}",
                 subject=subject,

@@ -170,7 +170,7 @@ def _upgrade_postgres() -> None:
         "add constraint mem_page_pkey primary key (page_uid)"
     )
     op.alter_column("mem_page", "page_id", existing_type=sa.Uuid(), nullable=True)
-    op.drop_constraint("mem_page_page_id_fkey", "mem_page", type_="foreignkey")
+    op.execute("alter table mem_page drop constraint if exists mem_page_page_id_fkey")
     op.create_foreign_key(
         "mem_page_page_uid_fkey",
         "mem_page",
@@ -246,8 +246,8 @@ def downgrade() -> None:
     )
     op.drop_index("mem_page_page_id", table_name="mem_page")
     op.alter_column("mem_page", "page_id", existing_type=sa.Uuid(), nullable=False)
-    # The key on the content id comes back in whichever form `page` can hold it: alone while `page`
-    # is keyed by it, workspace-qualified once unit C has partitioned `page` by workspace.
+    # The key on the content id comes back only where `page` is still keyed by it; a `page` unit C
+    # has partitioned never carried it, since memory_0017 skips it there as well.
     page_keyed_by_id = op.get_bind().scalar(
         sa.text(
             "select count(*) from pg_constraint where conrelid = 'page'::regclass "
@@ -257,15 +257,6 @@ def downgrade() -> None:
     if page_keyed_by_id:
         op.create_foreign_key(
             "mem_page_page_id_fkey", "mem_page", "page", ["page_id"], ["id"], ondelete="CASCADE"
-        )
-    else:
-        op.create_foreign_key(
-            "mem_page_page_id_fkey",
-            "mem_page",
-            "page",
-            ["workspace_id", "page_id"],
-            ["workspace_id", "id"],
-            ondelete="CASCADE",
         )
     op.alter_column("mem_page", "page_uid", existing_type=sa.Uuid(), nullable=True)
     # Adopting an index as the primary key renames it to the constraint, so dropping the constraint
