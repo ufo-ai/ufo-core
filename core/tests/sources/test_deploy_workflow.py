@@ -50,6 +50,7 @@ STORAGE_QUERY = (
     "{dbinstanceidentifier:${module.platform.db_instance_identifier}} < 0.05"
 )
 HANDLE = r"@(?:slack-[\w-]+|[\w.-]+@[\w.-]+)"
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
 
 def _code(source: str) -> str:
@@ -4307,12 +4308,15 @@ def _check_notification_rules_route_each_environment() -> None:
 
 
 def _check_on_call_schedule_uses_existing_daily_rotation() -> None:
+    """The import id is the schedule's own id, and the team it belongs to carries a different one,
+    so a second literal id anywhere in the file is an import of the wrong object."""
     source = NOTIFICATION_RULES["prod"].read_text()
     assert re.search(
         r"import\s*{\s*to\s*=\s*datadog_on_call_schedule\.ufo\s*"
-        r'id\s*=\s*"d4c50744-7563-4f43-8e25-d2ed5df3a5f3"\s*}',
+        r'id\s*=\s*"64f82149-e8df-4380-93e4-426f2ba4e364"\s*}',
         source,
     )
+    assert re.findall(UUID, source) == ["64f82149-e8df-4380-93e4-426f2ba4e364"]
     schedule = re.search(
         r'resource "datadog_on_call_schedule" "ufo" {\n(.*?)\n  }\n}',
         source,

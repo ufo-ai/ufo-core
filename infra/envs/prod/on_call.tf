@@ -28,7 +28,7 @@ resource "datadog_team_membership" "marshall" {
 
 import {
   to = datadog_on_call_schedule.ufo
-  id = "d4c50744-7563-4f43-8e25-d2ed5df3a5f3"
+  id = "64f82149-e8df-4380-93e4-426f2ba4e364"
 }
 
 resource "datadog_on_call_schedule" "ufo" {
