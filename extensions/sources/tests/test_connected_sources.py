@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from ufo_ext_gbrain.git import GIT_BACKEND, GbrainGitConfig
 from ufo_ext_sources import manifest as sources_manifest
 from ufo_ext_sources.connected import ConnectedSources
 from ufo_ext_sources.registry import CONNECTORS, direct_slots
@@ -411,6 +412,29 @@ async def test_a_stream_newly_marked_canonical_joins_a_connection_that_already_s
     assert {row["config"]["stream"] for row in held} == {first}
     assert {row["config"]["stream"] for row in rows} == _canonical(ASANA)
     assert held[0]["id"] in {row["id"] for row in rows}
+
+
+async def test_a_source_declaring_no_stream_leaves_a_connection_its_feeds(db: None) -> None:
+    """A workspace's source rows are not all a connector's streams: a gbrain origin hangs off a
+    connection of its own and its config names a repository, never a stream. The registrar reads
+    the streams this connection holds, so the gbrain row is not one it asks a stream of, and the
+    account connected beside it syncs."""
+    state = await _workspace()
+    with ws(state.workspace_id), agent(state.main_id):
+        ext = _ext()
+        await ext.register_source(
+            GIT_BACKEND,
+            GbrainGitConfig(repo="metalcraftai/handbook"),
+            connection_id=await ext.register_connection(GIT_BACKEND, account_id="handbook"),
+        )
+
+    await _connect(state, state.main_id, ASANA)
+    await _tick(state)
+
+    rows = await _rows(state)
+    origin = [row for row in rows if row["backend"] == GIT_BACKEND]
+    assert {row["config"].get("stream") for row in rows} == _canonical(ASANA) | {None}
+    assert [row["config"] for row in origin] == [{"repo": "metalcraftai/handbook", "branch": None}]
 
 
 async def _fill_slot(state: _Workspace, slot: str, key: str) -> None:

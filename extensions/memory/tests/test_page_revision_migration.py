@@ -39,10 +39,11 @@ class _UnreachedEmbed:
 
 
 async def _replay_derivation(
-    migration_url: str, workspace_id: UUID, page_id: UUID, source_id: UUID
+    migration_url: str, workspace_id: UUID, page_uid: UUID, source_uid: UUID
 ) -> list[tuple[UUID, UUID]]:
     """Deliver the same page change twice through the real store — the at-least-once replay a
-    restarted page-change cursor performs — and read back what the derived rows carry."""
+    restarted page-change cursor performs, naming the page and the source by the uid every citer
+    reads them by — and read back what the derived rows carry."""
     init_db(migration_url)
     try:
         with ws(workspace_id):
@@ -58,9 +59,9 @@ async def _replay_derivation(
                     MemoryWrite(
                         subject="shared",
                         body=DERIVED_BODY,
-                        created_from_page_id=page_id,
+                        created_from_page_id=page_uid,
                         created_from_page_revision=1,
-                        source_id=source_id,
+                        source_id=source_uid,
                     )
                 )
             async with workspace_tx() as connection:
@@ -69,7 +70,7 @@ async def _replay_derivation(
                     for row in (
                         await connection.execute(
                             sa.select(memory_item.c.id, memory_item.c.source_uid).where(
-                                memory_item.c.created_from_page_uid == page_id
+                                memory_item.c.created_from_page_uid == page_uid
                             )
                         )
                     ).all()
@@ -371,8 +372,19 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
         connection.commit()
     engine.dispose()
     command.upgrade(config, "heads")
-    rebuilt = asyncio.run(_replay_derivation(migration_url, workspace_id, page_id, source_id))
-    assert rebuilt == [(derived_id, source_id)]
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        minted = connection.execute(
+            sa.text(
+                "select page.uid as page_uid, source.uid as source_uid from page "
+                "join source on source.id = page.source_id where page.id = :id"
+            ),
+            {"id": page_id.hex},
+        ).one()
+    engine.dispose()
+    page_uid, source_uid = UUID(str(minted.page_uid)), UUID(str(minted.source_uid))
+    rebuilt = asyncio.run(_replay_derivation(migration_url, workspace_id, page_uid, source_uid))
+    assert rebuilt == [(derived_id, source_uid)]
 
     command.downgrade(config, "memory_0011")
     engine = sa.create_engine(sync_url)

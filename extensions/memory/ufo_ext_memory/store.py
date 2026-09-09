@@ -655,7 +655,13 @@ class MemoryStore:
         synced re-commits its identical body on every derivation, so a judgement written where the
         upsert reaches would stand until the next tick and no longer; the page pass retires a row by
         stamping that column, and the row it retired stays retired through every re-derivation of
-        the body behind it."""
+        the body behind it.
+
+        The content-id columns carry the uid too, and that is what keeps the roll safe: the release
+        being replaced fences every recall on `source_id` and reads a null one as a row a member
+        wrote, which would serve one connection's facts to an agent holding no grant on it. A uid
+        matches no source id it can read, so it withholds the row instead. Unit D drops the
+        columns."""
         item_id = uuid5(
             MEMORY_ITEM_NAMESPACE,
             "\x00".join((str(self.workspace_id), write.subject, write.item_class, write.body)),
@@ -671,8 +677,10 @@ class MemoryStore:
                 memory_kind=write.memory_kind,
                 confidence=write.confidence,
                 source_ref=write.source_ref,
+                created_from_page_id=write.created_from_page_id,
                 created_from_page_uid=write.created_from_page_id,
                 created_from_page_revision=write.created_from_page_revision,
+                source_id=write.source_id,
                 source_uid=write.source_id,
                 as_of=write.as_of,
                 superseded_by=None,
@@ -695,12 +703,14 @@ class MemoryStore:
                         memory_item.c.memory_kind: statement.excluded.memory_kind,
                         memory_item.c.confidence: statement.excluded.confidence,
                         memory_item.c.source_ref: statement.excluded.source_ref,
+                        memory_item.c.created_from_page_id: statement.excluded.created_from_page_id,
                         memory_item.c.created_from_page_uid: (
                             statement.excluded.created_from_page_uid
                         ),
                         memory_item.c.created_from_page_revision: (
                             statement.excluded.created_from_page_revision
                         ),
+                        memory_item.c.source_id: statement.excluded.source_id,
                         memory_item.c.source_uid: statement.excluded.source_uid,
                         memory_item.c.embedding_digest: sa.case(
                             (rebound, None), else_=memory_item.c.embedding_digest
@@ -721,7 +731,9 @@ class MemoryStore:
                 link = insert(memory_source).values(
                     workspace_id=self.workspace_id,
                     memory_item_id=item_id,
+                    source_id=write.source_id,
                     source_uid=write.source_id,
+                    page_id=write.created_from_page_id,
                     page_uid=write.created_from_page_id,
                     revision=write.created_from_page_revision,
                     created_at=sa.func.now(),
@@ -734,6 +746,7 @@ class MemoryStore:
                             memory_source.c.page_uid,
                         ],
                         set_={
+                            memory_source.c.source_id: link.excluded.source_id,
                             memory_source.c.source_uid: link.excluded.source_uid,
                             memory_source.c.revision: link.excluded.revision,
                             memory_source.c.updated_at: sa.func.now(),
@@ -854,8 +867,10 @@ class MemoryStore:
                     sa.update(memory_item)
                     .where(memory_item.c.id == row.id)
                     .values(
+                        created_from_page_id=survivor.page_uid,
                         created_from_page_uid=survivor.page_uid,
                         created_from_page_revision=survivor.revision,
+                        source_id=survivor.source_uid,
                         source_uid=survivor.source_uid,
                         embedding_digest=None,
                         embedding_claimed_at=None,
@@ -1410,31 +1425,19 @@ class PageIndexer:
         async with self.transaction() as connection:
             await connection.execute(sa.delete(mem_page).where(mem_page.c.page_uid == page_id))
 
-    async def adopt_chunks(self, limit: int) -> int:
-        """Move up to `limit` pages' chunks off the content id the index still files them under and
-        onto the page's id, oldest mirror rows first; returns how many pages moved. The mirror's
-        `page_id` column is the marker: a row still carrying one names chunks the index keyed by it,
-        and clearing it says every chunk of that page now answers to `page_uid`. Idempotent — a
-        repeated pass over an adopted page finds no chunks under the old key and one row to clear —
-        and the per-minute job drains a workspace in bounded batches while `_apply` adopts any page
-        it touches first, so no page is ever indexed under two keys at once."""
-        async with self.transaction() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(mem_page.c.page_uid, mem_page.c.page_id)
-                    .where(
-                        mem_page.c.workspace_id == self.workspace_id,
-                        mem_page.c.page_id.is_not(None),
-                    )
-                    .order_by(mem_page.c.page_uid)
-                    .limit(limit)
-                )
-            ).all()
-        for row in rows:
-            await self._adopt(row.page_uid, row.page_id)
-        return len(rows)
-
     async def _adopt_chunks(self, page_id: UUID) -> None:
+        """Move a page's chunks off the content id the index still files them under and onto the
+        page's id, so no page is ever indexed under two keys at once. The mirror's `page_id` column
+        is the marker: a row still carrying one names chunks the index keyed by it, and clearing it
+        says every chunk of that page now answers to `page_uid`. Idempotent — a repeated pass over
+        an adopted page finds no marker and moves nothing.
+
+        Only a page this pass re-indexes is adopted, and that is what keeps the roll safe: the
+        release being replaced reads a page hit back through `mem_page.page_id` and resolves it
+        against `page.id`, so a page whose chunks moved out from under it is a page it can no longer
+        answer with. A page this pass touches is one it re-keys anyway. Draining every other page
+        is the work of the release after this one, once no serving image reads a page chunk by its
+        content id."""
         async with self.transaction() as connection:
             content_id = await connection.scalar(
                 sa.select(mem_page.c.page_id).where(

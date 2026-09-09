@@ -132,13 +132,16 @@ class ConnectedSources:
         streams: dict[str, StreamSpec],
         live: tuple[SourceRecord, ...],
     ) -> None:
-        """One row per canonical stream the connection does not hold yet. The row a stream would
-        take is derived, not searched, so a stream already syncing is left exactly as it is and a
-        stream a later connector release marks canonical joins a connection registered long ago."""
-        held = {(record.connection_id, record.config["stream"]) for record in live}
+        """One row per canonical stream the connection does not hold yet, read off the streams this
+        connection already holds — the natural key a connector's rows carry, so a stream already
+        syncing is left exactly as it is and a stream a later connector release marks canonical
+        joins a connection registered long ago. Only this connection's rows name a stream: a
+        gbrain origin, a folder root and the sample feed each hang off a connection of their own
+        and their configs declare no stream at all."""
+        held = {record.config["stream"] for record in live if record.connection_id == connection.id}
         registered_at = datetime.now(UTC)
         for stream in streams.values():
-            if not stream.canonical or (connection.id, stream.name) in held:
+            if not stream.canonical or stream.name in held:
                 continue
             days = backfill_days(connection, stream)
             config = ConnectorSourceConfig(
