@@ -7,7 +7,10 @@ terse or uniformly structured. Each dispute and report crosses one boundary: cha
 standalone summary, while one Markdown report linked from the reply — never sent as
 a file, because the ask named none — carries the structured detail. Two cases flip register
 mid-thread — an acknowledgement after a report, an analysis after banter — because the register is
-chosen per turn, never inherited from the thread.
+chosen per turn, never inherited from the thread. One case arrives with other people @-mentioned
+beside the ask, because a mention of a colleague does not move who the message is addressed to:
+the turn still owes the member the answer, and reading the mentions as the address leaves the
+member with no reply at all.
 
 Sending that report as a file is decided by the trigger in the ask and by nothing else, so the
 cases sit on both sides of the line: an ask that names a file has to arrive through share_file,
@@ -273,6 +276,33 @@ def unwritten_reply_scorer(max_words: int, max_lines: int) -> Grader:
         f"a chat-register reply: at most {max_words} words and {max_lines} lines, no section "
         "headers, no bullet list, with no Markdown report written to the workspace and no file "
         "shared",
+        grade,
+    )
+
+
+def addressed_reply_scorer(min_words: int, max_words: int, max_lines: int) -> Grader:
+    """A chat-register reply to a member message that also @-mentions other people.
+
+    `conversational_scorer` caps length and nothing else, so a turn that read the message as
+    addressed to the named colleagues and left a few words of deferral passed it. The floor is
+    what separates an answer to the member from a step aside."""
+    conversational = conversational_scorer(max_words, max_lines)
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        verdict = await conversational(output)
+        shape = measure(output.response.strip())
+        failures = [] if verdict.passed else [verdict.reason]
+        if shape.words < min_words:
+            failures.append(f"{shape.words} words under the {min_words} floor")
+        if failures:
+            return CapabilityVerdict(
+                False, "addressed reply: " + ", ".join(failures), verdict.evidence
+            )
+        return CapabilityVerdict(True, verdict.reason, verdict.evidence)
+
+    return DescribedGrader(
+        f"a chat-register reply to the member: at least {min_words} and at most {max_words} "
+        f"words, at most {max_lines} lines, no section headers, no bullet list",
         grade,
     )
 
@@ -1424,6 +1454,25 @@ CASES = (
         rubric=(
             "The reply states that the default is 0, meaning no timeout.",
             "The answer leads the reply rather than arriving after preamble or setup.",
+        ),
+    ),
+    CapabilityCase(
+        "fact-question-mentions-other-people",
+        "@dana @priya adding the reindex step now — does VACUUM FULL block reads on the table "
+        "while it runs?",
+        addressed_reply_scorer(min_words=8, max_words=55, max_lines=4),
+        digest_tag="register:fact-question-mentions-other-people",
+        samples=3,
+        prior_messages=(
+            "@dana @priya Thursday's failover drill moves to 09:00. the runbook is half written, "
+            "I'll post the gaps here as I hit them.",
+        ),
+        rubric=(
+            "The reply answers the question: VACUUM FULL takes an exclusive lock on the table, so "
+            "reads block until it finishes.",
+            "The reply answers the member who wrote the message. It does not read the message as "
+            "addressed to Dana or Priya, does not defer the question to them, and does not ask "
+            "whether the question was meant for it.",
         ),
     ),
     CapabilityCase(

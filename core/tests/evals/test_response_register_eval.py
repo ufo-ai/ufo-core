@@ -3,6 +3,7 @@ from pathlib import Path
 from evals.harness.capability import CapabilityOutput, SharedArtifact, ToolInvocation
 from evals.suites.response_register import (
     CASES,
+    addressed_reply_scorer,
     carried_report_scorer,
     conversational_scorer,
     shared_report_scorer,
@@ -158,6 +159,36 @@ async def test_shared_report_accepts_the_exact_shared_artifact_url(tmp_path: Pat
     verdict = await grader(output)
 
     assert verdict.passed, verdict.reason
+
+
+async def test_addressed_reply_rejects_a_deferral_to_the_mentioned_people() -> None:
+    grader = addressed_reply_scorer(8, 55, 4)
+
+    verdict = await grader(CapabilityOutput("That one is for Dana and Priya.", ()))
+
+    assert not verdict.passed
+    assert "under the 8 floor" in verdict.reason
+
+
+async def test_addressed_reply_accepts_an_answer_to_the_member() -> None:
+    grader = addressed_reply_scorer(8, 55, 4)
+
+    verdict = await grader(
+        CapabilityOutput(
+            "Yes. VACUUM FULL takes an ACCESS EXCLUSIVE lock on the table, so reads and writes "
+            "both block until it finishes.",
+            (),
+        )
+    )
+
+    assert verdict.passed, verdict.reason
+
+
+def test_mention_case_carries_mentions_in_the_thread_and_the_message() -> None:
+    case = next(case for case in CASES if case.name == "fact-question-mentions-other-people")
+
+    assert "@dana" in case.message and "@priya" in case.message
+    assert any("@dana" in prior and "@priya" in prior for prior in case.prior_messages)
 
 
 def test_workspace_link_regression_runs_each_attempt() -> None:
