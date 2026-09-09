@@ -135,10 +135,10 @@ class ConnectedSources:
         """One row per canonical stream the connection does not hold yet. The row a stream would
         take is derived, not searched, so a stream already syncing is left exactly as it is and a
         stream a later connector release marks canonical joins a connection registered long ago."""
-        held = {record.id for record in live}
+        held = {(record.connection_id, record.config["stream"]) for record in live}
         registered_at = datetime.now(UTC)
         for stream in streams.values():
-            if not stream.canonical:
+            if not stream.canonical or (connection.id, stream.name) in held:
                 continue
             days = backfill_days(connection, stream)
             config = ConnectorSourceConfig(
@@ -146,9 +146,6 @@ class ConnectedSources:
                 backfill_days=days,
                 backfill_after=None if days is None else registered_at - timedelta(days=days),
             )
-            source_id = self.ext.source_id(connection.provider, config, connection_id=connection.id)
-            if source_id in held:
-                continue
             await self.ext.register_source(connection.provider, config, connection_id=connection.id)
 
     async def _rewindow(

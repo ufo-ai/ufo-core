@@ -222,6 +222,20 @@ class TurbopufferIndex:
             response.raise_for_status()
         return True
 
+    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
+        response = await self._api().post(
+            self._path(),
+            json={
+                "patch_by_filter": {
+                    "filters": scope_filters(scope, None),
+                    "patch": {"owner_id": owner_id},
+                }
+            },
+            headers=await self._auth(),
+        )
+        if response.status_code != httpx.codes.NOT_FOUND:
+            response.raise_for_status()
+
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         headers = await self._auth()
         chunks = await self._scope_chunks(scope, headers)

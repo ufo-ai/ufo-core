@@ -103,6 +103,7 @@ from ufo_ext_memory.store import (
     Recalled,
     SourceMatch,
     _aware,
+    mem_page,
     memory_item,
     recall_subjects,
     store_for,
@@ -156,6 +157,9 @@ states one night; it runs last of the three because it is the only pass that als
 which is what puts a member seated that day on the page the same night."""
 PAGE_PASS_JOB = "memory_page_pass"
 PAGE_PASS_SCHEDULE = "0 45 2 * * *"
+ADOPT_JOB = "memory_adopt_page_chunks"
+ADOPT_SCHEDULE = "20 * * * * *"
+ADOPT_BATCH = 500
 """Daily at 02:45 UTC, before the night's writing passes. This pass retires rows and writes no
 prose, so it runs first: a paragraph written from rows the same night's curation then retired would
 describe the page for a day as it stood before the curation, and the member reading it would find
@@ -715,6 +719,24 @@ def _items_awaiting_index() -> sa.Select[tuple[UUID]]:
     )
 
 
+async def adopt_page_chunks(ctx: ExtensionContext) -> None:
+    """Drain one batch of pages whose chunks the index still files under their content id."""
+    if ctx.index is None or ctx.embed is None:
+        raise RuntimeError(f"{ADOPT_JOB} requires the index and embed backends; none are wired")
+    await PageIndexer(
+        index=ctx.index,
+        embed=ctx.embed,
+        transaction=ctx.transaction,
+        chunker=TextChunker(),
+        workspace_id=ctx.store.workspace_id,
+        page_states=ctx.page_states,
+    ).adopt_chunks(ADOPT_BATCH)
+
+
+def _pages_chunked_by_content_id() -> sa.Select[tuple[UUID]]:
+    return sa.select(mem_page.c.workspace_id).where(mem_page.c.page_id.is_not(None)).distinct()
+
+
 def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]:
     """Workspaces where a consolidation pass could actually form a cluster: at least
     MIN_CLUSTER_FACTS live facts aged past MIN_OLDEST_AGE — the consolidator's own floor, folded
@@ -725,7 +747,7 @@ def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]:
         sa.select(memory_item.c.workspace_id)
         .where(
             memory_item.c.item_class == FACT,
-            memory_item.c.created_from_page_id.is_(None),
+            memory_item.c.created_from_page_uid.is_(None),
             memory_item.c.superseded_by.is_(None),
             memory_item.c.retired_at.is_(None),
             memory_item.c.created_at <= cutoff,
@@ -747,7 +769,7 @@ def _dedupable_workspaces() -> sa.Select[tuple[UUID]]:
     return (
         sa.select(memory_item.c.workspace_id)
         .where(
-            memory_item.c.created_from_page_id.is_(None),
+            memory_item.c.created_from_page_uid.is_(None),
             memory_item.c.item_class != SECTION,
             memory_item.c.superseded_by.is_(None),
             memory_item.c.retired_at.is_(None),
@@ -993,6 +1015,12 @@ def manifest() -> Manifest:
                 schedule=PROFILE_SCHEDULE,
                 handler=write_member_profiles,
                 candidates=owner_candidates(_peopled_workspaces),
+            ),
+            JobSpec(
+                name=ADOPT_JOB,
+                schedule=ADOPT_SCHEDULE,
+                handler=adopt_page_chunks,
+                candidates=owner_candidates(_pages_chunked_by_content_id),
             ),
             JobSpec(
                 name=PAGE_PASS_JOB,

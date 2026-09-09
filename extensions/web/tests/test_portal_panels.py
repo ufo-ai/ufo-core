@@ -510,7 +510,7 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
     _member_id, headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     _other_id, other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
     await _grant(workspace_id, agent_b, CREATOR_EMAIL)
-    page_id, source_id = uuid4(), uuid4()
+    page_id, source_id, page_key, source_key = uuid7(), uuid7(), uuid4(), uuid4()
     minted_at = datetime(2026, 7, 1, 8, 30, tzinfo=UTC)
     vector = [0.0] * EMBED_DIM
     vector[0] = 1.0
@@ -531,8 +531,8 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
         )
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_id,
+                id=source_key,
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
@@ -545,10 +545,10 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
-                id=page_id,
+                uid=page_id,
+                id=page_key,
                 workspace_id=workspace_id,
-                source_id=source_id,
+                source_id=source_key,
                 digest="d" * 64,
                 body_ref=f"pages/{page_id}",
                 stream="notes",
@@ -561,13 +561,12 @@ async def test_memory_panel_shows_a_shared_source_to_every_member_through_the_ma
         )
         revision = (
             await connection.execute(
-                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
             )
         ).scalar_one()
         await connection.execute(
             sa.insert(mem_page).values(
-                page_id=page_id,
-                page_uid=uuid7(),
+                page_uid=page_id,
                 workspace_id=workspace_id,
                 subject="shared",
                 revision=revision,

@@ -146,11 +146,18 @@ class Materializer:
             rows = (
                 (
                     await connection.execute(
-                        sa.select(memory_item.c.source_ref, memory_item.c.created_from_page_id)
+                        sa.select(memory_item.c.source_ref, memory_item.c.created_from_page_uid)
                     )
                 )
                 .mappings()
                 .all()
+            )
+            page_uids = set(
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.uid).where(tables.page.c.id.in_(page_ids))
+                    )
+                ).scalars()
             )
             foreign_pages = (
                 await connection.execute(
@@ -163,7 +170,8 @@ class Materializer:
             {
                 str(row["source_ref"])
                 for row in rows
-                if row["source_ref"] not in declared and row["created_from_page_id"] not in page_ids
+                if row["source_ref"] not in declared
+                and row["created_from_page_uid"] not in page_uids
             }
         )
         if foreign or foreign_pages:
@@ -246,7 +254,7 @@ class Materializer:
                 (
                     await connection.execute(
                         sa.select(memory_item.c.id, memory_item.c.body).where(
-                            memory_item.c.created_from_page_id.is_(None),
+                            memory_item.c.created_from_page_uid.is_(None),
                             memory_item.c.source_ref.is_(None),
                         )
                     )

@@ -500,7 +500,7 @@ class PageChangeRunner:
         workspace, unchanged."""
         cursor_key = f"{PAGE_CHANGE_CURSOR_KEY}:{consumer.discriminator}"
         of_workspace = tables.page.c.workspace_id == tables.workspace.c.id
-        newest_first = (tables.page.c.revision.desc(), tables.page.c.id.desc())
+        newest_first = (tables.page.c.revision.desc(), tables.page.c.uid.desc())
         newest_revision = (
             sa.select(tables.page.c.revision)
             .where(of_workspace)
@@ -509,7 +509,7 @@ class PageChangeRunner:
             .scalar_subquery()
         )
         newest_id = (
-            sa.select(tables.page.c.id)
+            sa.select(tables.page.c.uid)
             .where(of_workspace)
             .order_by(*newest_first)
             .limit(1)

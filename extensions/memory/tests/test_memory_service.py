@@ -116,8 +116,6 @@ class ReclassifyingPage:
         self.calls += 1
         return {
             self.page_id: PageState(
-                uid=uuid4(),
-                source_uid=uuid4(),
                 subject=self.before if self.calls == 1 else self.after,
                 revision=PAGE_REVISION,
                 digest=PAGE_DIGEST,
@@ -152,6 +150,9 @@ class RebindingIndex:
     async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
         return await self.backend.restamp(scope, subject, keep)
 
+    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
+        await self.backend.reattribute(scope, owner_id)
+
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
@@ -176,9 +177,11 @@ async def _workspace() -> UUID:
 
 async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject: str) -> None:
     """One page under its own source, under its own workspace-shared connection — the authority a
-    reader is granted, so one source is one grantable feed in these tests."""
+    reader is granted, so one source is one grantable feed in these tests. `page_id` and
+    `source_id` are the rows' ids as the SDK names them; the content-addressed keys are minted here
+    and never handed back, so a lookup by the wrong one finds nothing."""
     now = datetime(2025, 1, 1, tzinfo=UTC)
-    connection_id = uuid4()
+    connection_id, source_key, page_key = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.connection).values(
@@ -195,8 +198,8 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
         )
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_id,
+                id=source_key,
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
@@ -209,10 +212,10 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
-                id=page_id,
+                uid=page_id,
+                id=page_key,
                 workspace_id=workspace_id,
-                source_id=source_id,
+                source_id=source_key,
                 digest=PAGE_DIGEST,
                 body_ref=f"pages/{page_id}",
                 stream="notes",
@@ -236,7 +239,7 @@ def _store(embed: object, workspace_id: UUID) -> MemoryStore:
             return frozenset(
                 (
                     await connection.execute(
-                        sa.select(tables.source.c.id).where(
+                        sa.select(tables.source.c.uid).where(
                             tables.source.c.workspace_id == workspace_id,
                         )
                     )
@@ -291,7 +294,7 @@ async def _granted_reader(workspace_id: UUID, subject: str, *source_ids: UUID) -
 async def _connection_of(connection: AsyncConnection, source_id: UUID) -> UUID:
     return (
         await connection.execute(
-            sa.select(tables.source.c.connection_id).where(tables.source.c.id == source_id)
+            sa.select(tables.source.c.connection_id).where(tables.source.c.uid == source_id)
         )
     ).scalar_one()
 
@@ -314,9 +317,13 @@ async def _seed_item(
             if created_from_page_id is None
             else (
                 await connection.execute(
-                    sa.select(tables.page.c.revision, tables.page.c.source_id).where(
-                        tables.page.c.id == created_from_page_id
+                    sa.select(tables.page.c.revision, tables.source.c.uid)
+                    .select_from(
+                        tables.page.join(
+                            tables.source, tables.page.c.source_id == tables.source.c.id
+                        )
                     )
+                    .where(tables.page.c.uid == created_from_page_id)
                 )
             ).one()
         )
@@ -328,9 +335,9 @@ async def _seed_item(
                 body=body,
                 item_class=FACT,
                 source_ref=None,
-                created_from_page_id=created_from_page_id,
+                created_from_page_uid=created_from_page_id,
                 created_from_page_revision=page_authority[0],
-                source_id=page_authority[1],
+                source_uid=page_authority[1],
                 as_of=as_of,
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
@@ -343,10 +350,8 @@ async def _seed_item(
                 sa.insert(memory_source).values(
                     workspace_id=workspace_id,
                     memory_item_id=item_id,
-                    source_id=page_authority[1],
-                    source_uid=uuid7(),
-                    page_id=created_from_page_id,
-                    page_uid=uuid7(),
+                    source_uid=page_authority[1],
+                    page_uid=created_from_page_id,
                     revision=page_authority[0],
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
@@ -385,13 +390,12 @@ async def _seed_page_chunk(
     async with workspace_tx() as connection:
         revision = (
             await connection.execute(
-                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
             )
         ).scalar_one()
         await connection.execute(
             sa.insert(mem_page).values(
-                page_id=page_id,
-                page_uid=uuid7(),
+                page_uid=page_id,
                 workspace_id=workspace_id,
                 subject=subject,
                 revision=revision,
@@ -498,21 +502,21 @@ async def test_same_fact_from_two_sources_is_one_row_granted_by_either(db: None)
             await connection.execute(
                 sa.select(
                     memory_item.c.id,
-                    memory_item.c.created_from_page_id,
-                    memory_item.c.source_id,
+                    memory_item.c.created_from_page_uid,
+                    memory_item.c.source_uid,
                 )
             )
         ).all()
         links = (
             await connection.execute(
-                sa.select(memory_source.c.source_id, memory_source.c.page_id).where(
+                sa.select(memory_source.c.source_uid, memory_source.c.page_uid).where(
                     memory_source.c.memory_item_id == items[0].id
                 )
             )
         ).all()
     assert len(items) == 1
-    assert items[0].created_from_page_id == page_b
-    assert items[0].source_id == source_b
+    assert items[0].created_from_page_uid == page_b
+    assert items[0].source_uid == source_b
     assert set(links) == {(source_a, page_a), (source_b, page_b)}
 
     (provenance,) = await inventory(workspace_tx, workspace_id)
@@ -541,7 +545,7 @@ async def test_deleting_one_source_keeps_a_fact_its_other_source_still_provides(
             )
         )
     async with workspace_tx() as connection:
-        await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_b))
+        await connection.execute(sa.delete(tables.page).where(tables.page.c.uid == page_b))
     with ws(workspace_id):
         await store.supersede_page_facts(page_b, None)
 
@@ -550,17 +554,19 @@ async def test_deleting_one_source_keeps_a_fact_its_other_source_still_provides(
             await connection.execute(
                 sa.select(
                     memory_item.c.id,
-                    memory_item.c.created_from_page_id,
-                    memory_item.c.source_id,
+                    memory_item.c.created_from_page_uid,
+                    memory_item.c.source_uid,
                     memory_item.c.embedding_digest,
                 )
             )
         ).one()
         links = (
-            await connection.execute(sa.select(memory_source.c.source_id, memory_source.c.page_id))
+            await connection.execute(
+                sa.select(memory_source.c.source_uid, memory_source.c.page_uid)
+            )
         ).all()
-    assert row.created_from_page_id == page_a
-    assert row.source_id == source_a
+    assert row.created_from_page_uid == page_a
+    assert row.source_uid == source_a
     assert row.embedding_digest is None
     assert set(links) == {(source_a, page_a)}
 
@@ -592,10 +598,12 @@ async def test_two_pages_of_one_source_each_keep_the_fact_they_share(db: None) -
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
-                id=page_2,
+                uid=page_2,
+                id=uuid4(),
                 workspace_id=workspace_id,
-                source_id=source_id,
+                source_id=sa.select(tables.source.c.id)
+                .where(tables.source.c.uid == source_id)
+                .scalar_subquery(),
                 digest=PAGE_DIGEST,
                 body_ref=f"pages/{page_2}",
                 stream="notes",
@@ -619,21 +627,23 @@ async def test_two_pages_of_one_source_each_keep_the_fact_they_share(db: None) -
             )
         )
     async with workspace_tx() as connection:
-        await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_1))
+        await connection.execute(sa.delete(tables.page).where(tables.page.c.uid == page_1))
     with ws(workspace_id):
         await store.supersede_page_facts(page_1, None)
 
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(memory_item.c.created_from_page_id, memory_item.c.source_id)
+                sa.select(memory_item.c.created_from_page_uid, memory_item.c.source_uid)
             )
         ).one()
         links = (
-            await connection.execute(sa.select(memory_source.c.source_id, memory_source.c.page_id))
+            await connection.execute(
+                sa.select(memory_source.c.source_uid, memory_source.c.page_uid)
+            )
         ).all()
-    assert row.created_from_page_id == page_2
-    assert row.source_id == source_id
+    assert row.created_from_page_uid == page_2
+    assert row.source_uid == source_id
     assert set(links) == {(source_id, page_2)}
 
 
@@ -676,30 +686,30 @@ async def test_a_revision_bump_retires_only_the_stale_source_link(db: None) -> N
         shared_row = (
             await connection.execute(
                 sa.select(
-                    memory_item.c.created_from_page_id,
+                    memory_item.c.created_from_page_uid,
                     memory_item.c.created_from_page_revision,
-                    memory_item.c.source_id,
+                    memory_item.c.source_uid,
                 ).where(memory_item.c.body == shared)
             )
         ).one()
         links = {
-            (row.body, row.source_id, row.page_id, row.revision)
+            (row.body, row.source_uid, row.page_uid, row.revision)
             for row in (
                 await connection.execute(
                     sa.select(
                         memory_item.c.body,
-                        memory_source.c.source_id,
-                        memory_source.c.page_id,
+                        memory_source.c.source_uid,
+                        memory_source.c.page_uid,
                         memory_source.c.revision,
                     ).join(memory_source, memory_source.c.memory_item_id == memory_item.c.id)
                 )
             ).all()
         }
-    assert (shared_row.created_from_page_id, shared_row.created_from_page_revision) == (
+    assert (shared_row.created_from_page_uid, shared_row.created_from_page_revision) == (
         page_b,
         PAGE_REVISION,
     )
-    assert shared_row.source_id == source_b
+    assert shared_row.source_uid == source_b
     assert links == {
         (shared, source_b, page_b, PAGE_REVISION),
         ("the ledger closes on friday", source_a, page_a, next_revision),
@@ -731,7 +741,7 @@ async def test_concurrent_retirements_over_one_fact_leave_no_dangling_primary(db
             )
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.delete(tables.page).where(tables.page.c.id.in_((page_a, page_b)))
+            sa.delete(tables.page).where(tables.page.c.uid.in_((page_a, page_b)))
         )
     with ws(workspace_id):
         await asyncio.gather(
@@ -741,14 +751,14 @@ async def test_concurrent_retirements_over_one_fact_leave_no_dangling_primary(db
     async with workspace_tx() as connection:
         primaries = (
             await connection.execute(
-                sa.select(memory_item.c.id, memory_item.c.created_from_page_id)
+                sa.select(memory_item.c.id, memory_item.c.created_from_page_uid)
             )
         ).all()
         live_links = {
-            (link.memory_item_id, link.page_id)
+            (link.memory_item_id, link.page_uid)
             for link in (
                 await connection.execute(
-                    sa.select(memory_source.c.memory_item_id, memory_source.c.page_id)
+                    sa.select(memory_source.c.memory_item_id, memory_source.c.page_uid)
                 )
             ).all()
         }
@@ -773,9 +783,9 @@ async def test_concurrent_retirements_over_one_fact_leave_no_dangling_primary(db
                         confidence=5,
                         item_class=FACT,
                         source_ref=None,
-                        created_from_page_id=page_id,
+                        created_from_page_uid=page_id,
                         created_from_page_revision=revision,
-                        source_id=source,
+                        source_uid=source,
                         as_of=None,
                         embedding_digest=None,
                         superseded_by=None,
@@ -1004,7 +1014,11 @@ async def test_connector_grants_filter_before_recall_ranking(db: None) -> None:
         )
         granted_source = (
             await connection.execute(
-                sa.select(tables.page.c.source_id).where(tables.page.c.id == granted_page)
+                sa.select(tables.source.c.uid)
+                .select_from(
+                    tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
+                )
+                .where(tables.page.c.uid == granted_page)
             )
         ).scalar_one()
         await connection.execute(
@@ -1062,11 +1076,11 @@ async def test_a_fact_from_two_feeds_is_recalled_through_a_non_primary_granted_s
     await _seed_page(workspace_id, page_b, source_b, SHARED_SUBJECT)
     async with workspace_tx() as connection:
         revisions = {
-            row.id: row.revision
+            row.uid: row.revision
             for row in (
                 await connection.execute(
-                    sa.select(tables.page.c.id, tables.page.c.revision).where(
-                        tables.page.c.id.in_((page_a, page_b))
+                    sa.select(tables.page.c.uid, tables.page.c.revision).where(
+                        tables.page.c.uid.in_((page_a, page_b))
                     )
                 )
             ).all()
@@ -1103,7 +1117,7 @@ async def test_a_fact_from_two_feeds_is_recalled_through_a_non_primary_granted_s
     async with workspace_tx() as connection:
         primary = (
             await connection.execute(
-                sa.select(memory_item.c.source_id).where(memory_item.c.body == body)
+                sa.select(memory_item.c.source_uid).where(memory_item.c.body == body)
             )
         ).scalar_one()
     assert primary == source_b
@@ -1285,7 +1299,7 @@ async def test_page_indexer_writes_the_contexts_workspace_id(db: None) -> None:
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(mem_page.c.workspace_id).where(mem_page.c.page_id == change.page_id)
+                sa.select(mem_page.c.workspace_id).where(mem_page.c.page_uid == change.page_id)
             )
         ).one()
     assert row.workspace_id == workspace_id
@@ -1341,7 +1355,7 @@ async def test_page_index_write_is_deleted_when_the_subject_changes_during_embed
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
-                sa.select(mem_page.c.page_id).where(mem_page.c.page_id == page_id)
+                sa.select(mem_page.c.page_uid).where(mem_page.c.page_uid == page_id)
             )
         ).one_or_none()
     assert row is None
@@ -1357,7 +1371,7 @@ async def test_stale_private_payload_is_never_indexed_after_a_shared_sanitized_e
         await connection.execute(
             sa.update(tables.page)
             .values(digest="sha256:sanitized")
-            .where(tables.page.c.id == page_id)
+            .where(tables.page.c.uid == page_id)
         )
     now = datetime(2025, 1, 2, tzinfo=UTC)
     index = DefaultIndex(transaction=workspace_tx)
@@ -1439,7 +1453,7 @@ async def test_same_subject_redaction_hides_stale_facts_and_no_page_pass_removes
             await connection.execute(
                 sa.update(tables.page)
                 .values(digest="sha256:redacted")
-                .where(tables.page.c.id == page_id)
+                .where(tables.page.c.uid == page_id)
             )
         assert (
             await store.recall(
@@ -1501,7 +1515,7 @@ async def test_same_subject_redaction_hides_stale_facts_and_no_page_pass_removes
             await connection.execute(
                 sa.select(sa.func.count())
                 .select_from(memory_item)
-                .where(memory_item.c.created_from_page_id == page_id)
+                .where(memory_item.c.created_from_page_uid == page_id)
             )
         ).scalar_one() == 1
 
@@ -1540,7 +1554,7 @@ async def test_retirement_requeues_a_fact_rebound_while_its_index_is_deleted(
     new_revision = PAGE_REVISION + 1
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.page).values(digest=new_digest).where(tables.page.c.id == page_id)
+            sa.update(tables.page).values(digest=new_digest).where(tables.page.c.uid == page_id)
         )
 
     async def recommit() -> None:
@@ -1579,7 +1593,7 @@ async def test_retirement_requeues_a_fact_rebound_while_its_index_is_deleted(
                 sa.select(
                     memory_item.c.created_from_page_revision,
                     memory_item.c.embedding_digest,
-                ).where(memory_item.c.created_from_page_id == page_id)
+                ).where(memory_item.c.created_from_page_uid == page_id)
             )
         ).one()
     assert row.created_from_page_revision == new_revision
@@ -1621,7 +1635,7 @@ async def test_a_revision_rebind_with_an_unchanged_body_is_not_re_embedded(db: N
 
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.page).values(digest="sha256:rev2").where(tables.page.c.id == page_id)
+            sa.update(tables.page).values(digest="sha256:rev2").where(tables.page.c.uid == page_id)
         )
     await store.commit(
         MemoryWrite(
@@ -1652,7 +1666,7 @@ async def test_a_revision_rebind_with_an_unchanged_body_is_not_re_embedded(db: N
             await connection.execute(
                 sa.select(
                     memory_item.c.embedding_digest, memory_item.c.created_from_page_revision
-                ).where(memory_item.c.created_from_page_id == page_id)
+                ).where(memory_item.c.created_from_page_uid == page_id)
             )
         ).one()
     assert row.embedding_digest is not None
@@ -1687,7 +1701,7 @@ async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(
     with ws(workspace_id):
         async with workspace_tx() as connection:
             await connection.execute(
-                sa.update(tables.page).values(subject=subject).where(tables.page.c.id == page_id)
+                sa.update(tables.page).values(subject=subject).where(tables.page.c.uid == page_id)
             )
         await store.commit(
             MemoryWrite(
@@ -1760,7 +1774,7 @@ async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(
             (
                 await connection.execute(
                     sa.select(memory_item.c.subject, memory_item.c.body).where(
-                        memory_item.c.created_from_page_id == page_id
+                        memory_item.c.created_from_page_uid == page_id
                     )
                 )
             )
@@ -1813,7 +1827,7 @@ async def test_recommitting_an_unchanged_body_at_the_same_binding_never_re_embed
         first = (
             await connection.execute(
                 sa.select(memory_item.c.embedding_digest).where(
-                    memory_item.c.created_from_page_id == page_id
+                    memory_item.c.created_from_page_uid == page_id
                 )
             )
         ).scalar_one()
@@ -1823,13 +1837,74 @@ async def test_recommitting_an_unchanged_body_at_the_same_binding_never_re_embed
             await connection.execute(
                 sa.select(
                     memory_item.c.embedding_digest, memory_item.c.created_from_page_revision
-                ).where(memory_item.c.created_from_page_id == page_id)
+                ).where(memory_item.c.created_from_page_uid == page_id)
             )
         ).one()
     assert after_first == 1
     assert first is not None
     assert second == (first, PAGE_REVISION)
     assert embed.calls == after_first
+
+
+async def test_a_page_indexed_under_its_content_id_is_found_then_adopted(db: None) -> None:
+    """The release being replaced filed a page's chunks under the page's content id and left that
+    id on the mirror row. Search still resolves such a hit through the mirror, so nothing goes dark
+    while the corpus moves; adopting the page re-keys its chunks and clears the marker, after which
+    the hit resolves through the page's id alone and a second pass finds nothing left to do."""
+    workspace_id = await _workspace()
+    ext = context_for("memory", frozenset())
+    page_id, source_id = uuid7(), uuid7()
+    probe = vec((7, 1.0))
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    async with workspace_tx() as connection:
+        content_id = await connection.scalar(
+            sa.select(tables.page.c.id).where(tables.page.c.uid == page_id)
+        )
+    with ws(workspace_id):
+        await DefaultIndex(transaction=workspace_tx).upsert(
+            (Chunk("p-old", OWNER_KIND_PAGE, str(content_id), SHARED_SUBJECT, 0, "runway", probe),)
+        )
+    async with workspace_tx() as connection:
+        revision = (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(mem_page).values(
+                page_uid=page_id,
+                page_id=content_id,
+                workspace_id=workspace_id,
+                subject=SHARED_SUBJECT,
+                revision=revision,
+                created_at=sa.func.now(),
+            )
+        )
+    store = _store(StubEmbed(probe), workspace_id)
+    indexer = PageIndexer(
+        index=store.index,
+        embed=store.embed,
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
+        page_states=ext.page_states,
+    )
+    subjects = frozenset({SHARED_SUBJECT})
+    with ws(workspace_id):
+        before = await store.search_sources("runway", subjects, 5, source_reader=_reader(subjects))
+        adopted = await indexer.adopt_chunks(10)
+        after = await store.search_sources("runway", subjects, 5, source_reader=_reader(subjects))
+        again = await indexer.adopt_chunks(10)
+        moved = await store.index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(page_id)))
+        left = await store.index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(content_id)))
+    async with workspace_tx() as connection:
+        marker = await connection.scalar(
+            sa.select(mem_page.c.page_id).where(mem_page.c.page_uid == page_id)
+        )
+    assert [match.page_id for match in before] == [page_id]
+    assert (adopted, again) == (1, 0)
+    assert [match.page_id for match in after] == [page_id]
+    assert (moved, left, marker) == (True, False, None)
 
 
 async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: None) -> None:
@@ -1885,7 +1960,7 @@ async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: Non
         await indexer.apply((live,))
         async with workspace_tx() as connection:
             await connection.execute(
-                sa.update(tables.page).values(tombstone=True).where(tables.page.c.id == page_id)
+                sa.update(tables.page).values(tombstone=True).where(tables.page.c.uid == page_id)
             )
         now = datetime(2025, 1, 2, tzinfo=UTC)
         await indexer.apply(
@@ -1931,14 +2006,14 @@ async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: Non
             await connection.execute(
                 sa.select(sa.func.count())
                 .select_from(mem_page)
-                .where(mem_page.c.page_id == page_id)
+                .where(mem_page.c.page_uid == page_id)
             )
         ).scalar_one()
         count = (
             await connection.execute(
                 sa.select(sa.func.count())
                 .select_from(memory_item)
-                .where(memory_item.c.created_from_page_id == page_id)
+                .where(memory_item.c.created_from_page_uid == page_id)
             )
         ).scalar_one()
     assert mirror == 0

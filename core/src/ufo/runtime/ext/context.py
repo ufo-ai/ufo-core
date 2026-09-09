@@ -1046,8 +1046,6 @@ class PageRecord:
 
 @dataclass(frozen=True)
 class PageState:
-    uid: UUID
-    source_uid: UUID
     subject: str
     revision: int
     digest: str
@@ -1518,7 +1516,7 @@ class ExtensionContext:
             pages = (
                 await connection.execute(
                     sa.select(
-                        tables.page.c.id,
+                        tables.page.c.uid,
                         tables.page.c.stream,
                         tables.page.c.title,
                         tables.page.c.digest,
@@ -1543,11 +1541,11 @@ class ExtensionContext:
             records.append(
                 MemberContextRecord(
                     kind="page",
-                    ref=f"page/{page.id}",
+                    ref=f"page/{page.uid}",
                     title=page.title,
                     text=body,
                     information_date=page.updated_at,
-                    stable_subject_key=f"page:{page.id}:{page.digest}",
+                    stable_subject_key=f"page:{page.uid}:{page.digest}",
                 )
             )
         records.extend(
@@ -2174,33 +2172,23 @@ class ExtensionContext:
         """Current subject and revision for this workspace's live named pages."""
         if not page_ids:
             return {}
-        query = (
-            sa.select(
-                tables.page.c.id,
-                tables.page.c.uid,
-                tables.source.c.uid.label("source_uid"),
-                tables.page.c.subject,
-                tables.page.c.revision,
-                tables.page.c.digest,
-                tables.page.c.body_ref,
-                tables.page.c.title,
-                tables.page.c.stream,
-            )
-            .select_from(
-                tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
-            )
-            .where(
-                tables.page.c.workspace_id == self.store.workspace_id,
-                tables.page.c.id.in_(page_ids),
-                tables.page.c.tombstone.is_(False),
-            )
+        query = sa.select(
+            tables.page.c.uid,
+            tables.page.c.subject,
+            tables.page.c.revision,
+            tables.page.c.digest,
+            tables.page.c.body_ref,
+            tables.page.c.title,
+            tables.page.c.stream,
+        ).where(
+            tables.page.c.workspace_id == self.store.workspace_id,
+            tables.page.c.uid.in_(page_ids),
+            tables.page.c.tombstone.is_(False),
         )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         return {
-            row.id: PageState(
-                uid=row.uid,
-                source_uid=row.source_uid,
+            row.uid: PageState(
                 subject=row.subject,
                 revision=row.revision,
                 digest=row.digest,
@@ -2218,9 +2206,7 @@ class ExtensionContext:
             return {}
         query = (
             sa.select(
-                tables.page.c.id,
                 tables.page.c.uid,
-                tables.source.c.uid.label("source_uid"),
                 tables.page.c.subject,
                 tables.page.c.revision,
                 tables.page.c.digest,
@@ -2233,7 +2219,7 @@ class ExtensionContext:
             )
             .where(
                 tables.page.c.workspace_id == self.store.workspace_id,
-                tables.page.c.id.in_(page_ids),
+                tables.page.c.uid.in_(page_ids),
                 tables.page.c.tombstone.is_(False),
                 tables.page.c.subject.in_(reader.subjects),
                 _source_readable(self.store.workspace_id, reader),
@@ -2242,9 +2228,7 @@ class ExtensionContext:
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         return {
-            row.id: PageState(
-                uid=row.uid,
-                source_uid=row.source_uid,
+            row.uid: PageState(
                 subject=row.subject,
                 revision=row.revision,
                 digest=row.digest,
@@ -2256,7 +2240,7 @@ class ExtensionContext:
         }
 
     async def readable_source_ids(self, reader: SourceReader) -> frozenset[UUID]:
-        query = sa.select(tables.source.c.id).where(
+        query = sa.select(tables.source.c.uid).where(
             _source_readable(self.store.workspace_id, reader),
         )
         async with workspace_tx() as connection:
@@ -2351,7 +2335,17 @@ class ExtensionContext:
         them. The core sync driver polls the row and lands its pages in memory; embedding stays a
         job."""
         payload = config.model_dump(mode="json")
-        source_id = self.source_id(backend, config, connection_id=connection_id)
+        source_id = source_row_id(
+            self.store.workspace_id,
+            backend,
+            payload,
+            connection_id=connection_id,
+            non_identity_keys=(
+                type(config).non_identity_fields
+                if isinstance(config, SourceRowConfig)
+                else frozenset[str]()
+            ),
+        )
         registered_at = datetime.now(UTC)
         async with workspace_tx() as connection:
             authority = (
@@ -2392,7 +2386,7 @@ class ExtensionContext:
             )
             present = (
                 await connection.execute(
-                    sa.select(tables.source.c.config)
+                    sa.select(tables.source.c.uid, tables.source.c.config)
                     .where(tables.source.c.id == source_id)
                     .with_for_update()
                 )
@@ -2410,31 +2404,14 @@ class ExtensionContext:
                     "a source with this configuration is already registered asking for a "
                     f"different {', '.join(differing)}; delete it before changing what it reaches"
                 )
-        return source_id
-
-    def source_id(self, backend: str, config: BaseModel, *, connection_id: UUID) -> UUID:
-        """The row `register_source` settles this authority on. It is derived, never read, so a
-        caller may name a row that does not exist and be naming the exact row registering would
-        create — which is how a caller registering on its own initiative tells a stream the
-        workspace already syncs from one nobody has yet."""
-        return source_row_id(
-            self.store.workspace_id,
-            backend,
-            config.model_dump(mode="json"),
-            connection_id=connection_id,
-            non_identity_keys=(
-                type(config).non_identity_fields
-                if isinstance(config, SourceRowConfig)
-                else frozenset[str]()
-            ),
-        )
+        return present.uid
 
     async def sources(self, backend: str | None = None) -> tuple[SourceRecord, ...]:
         """This workspace's registered sources, optionally narrowed to one backend — the read half
         of `register_source`, scoped exactly as it is."""
         query = (
             sa.select(
-                tables.source.c.id,
+                tables.source.c.uid,
                 tables.source.c.backend,
                 tables.source.c.config,
                 tables.source.c.connection_id,
@@ -2446,7 +2423,7 @@ class ExtensionContext:
                 tables.source.c.updated_at,
             )
             .where(tables.source.c.workspace_id == self.store.workspace_id)
-            .order_by(tables.source.c.backend, tables.source.c.id)
+            .order_by(tables.source.c.backend, tables.source.c.uid)
         )
         if backend is not None:
             query = query.where(tables.source.c.backend == backend)
@@ -2454,7 +2431,7 @@ class ExtensionContext:
             rows = (await connection.execute(query)).mappings().all()
         return tuple(
             SourceRecord(
-                id=row["id"],
+                id=row["uid"],
                 backend=row["backend"],
                 config=row["config"],
                 connection_id=row["connection_id"],
@@ -2473,8 +2450,8 @@ class ExtensionContext:
         authority."""
         query = (
             sa.select(
-                tables.page.c.id,
-                tables.page.c.source_id,
+                tables.page.c.uid,
+                tables.source.c.uid.label("source_uid"),
                 tables.page.c.stream,
                 tables.page.c.title,
                 tables.page.c.record_created_at,
@@ -2490,7 +2467,7 @@ class ExtensionContext:
                 tables.page.c.workspace_id == self.store.workspace_id,
                 tables.page.c.tombstone.is_(False),
             )
-            .order_by(tables.page.c.id)
+            .order_by(tables.page.c.uid)
         )
         query = query.select_from(
             tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
@@ -2502,8 +2479,8 @@ class ExtensionContext:
             rows = (await connection.execute(query)).mappings().all()
         return tuple(
             PageRecord(
-                id=row["id"],
-                source_id=row["source_id"],
+                id=row["uid"],
+                source_id=row["source_uid"],
                 stream=row["stream"],
                 title=row["title"],
                 record_created_at=row["record_created_at"],
@@ -2528,7 +2505,7 @@ class ExtensionContext:
                 sa.update(tables.page)
                 .values(tombstone=True, updated_at=now)
                 .where(
-                    tables.page.c.id == page_id,
+                    tables.page.c.uid == page_id,
                     tables.page.c.workspace_id == self.store.workspace_id,
                     tables.page.c.tombstone.is_(False),
                 )
@@ -2563,22 +2540,23 @@ class ExtensionContext:
                 await connection.execute(
                     sa.select(
                         tables.source.c.id,
+                        tables.source.c.uid,
                         tables.source.c.backend,
                         tables.source.c.connection_id,
                         tables.source.c.feed_handle,
                     )
                     .where(
-                        tables.source.c.id.in_(tuple(configs)),
+                        tables.source.c.uid.in_(tuple(configs)),
                         tables.source.c.workspace_id == self.store.workspace_id,
                     )
                     .with_for_update()
                 )
             ).all()
             if len(rows) != len(configs):
-                found = {row.id for row in rows}
+                found = {row.uid for row in rows}
                 raise ValueError(f"no sources {sorted(set(configs) - found)} in this workspace")
             for row in rows:
-                config = configs[row.id]
+                config = configs[row.uid]
                 payload = config.model_dump(mode="json")
                 non_identity = (
                     type(config).non_identity_fields
@@ -2587,11 +2565,11 @@ class ExtensionContext:
                 )
                 if feed_handle_for(payload, non_identity) != row.feed_handle:
                     raise ValueError(
-                        f"rewindowing source {row.id} would change which dataset it is: only a "
+                        f"rewindowing source {row.uid} would change which dataset it is: only a "
                         "config field the model declares non-identity may be rewritten in place"
                     )
                 values: dict[str, Any] = {"config": payload, "updated_at": now}
-                if row.id in refetch:
+                if row.uid in refetch:
                     values |= {
                         "cursor": None,
                         "next_sync_at": now,
@@ -2626,7 +2604,7 @@ class ExtensionContext:
                     updated_at=sa.func.now(),
                 )
                 .where(
-                    tables.source.c.id.in_(source_ids),
+                    tables.source.c.uid.in_(source_ids),
                     tables.source.c.workspace_id == self.store.workspace_id,
                 )
             )

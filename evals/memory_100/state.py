@@ -163,8 +163,8 @@ class CorpusAttestor:
             ):
                 raise RuntimeError(f"memory_100 memory {source_ref!r} is not ready")
 
-        expected_mirrors = {(row.id, row.subject) for row in page_rows if not row.tombstone}
-        actual_mirrors = {(row.page_id, row.subject) for row in mirror_rows}
+        expected_mirrors = {(row.uid, row.subject) for row in page_rows if not row.tombstone}
+        actual_mirrors = {(row.page_uid, row.subject) for row in mirror_rows}
         if actual_mirrors != expected_mirrors:
             raise RuntimeError("memory_100 page mirrors are not ready")
 
@@ -209,7 +209,7 @@ class CorpusAttestor:
         if actual_chunks != expected_chunk_rows:
             raise RuntimeError("memory_100 default-index chunks are not ready")
 
-        high_water = f"{page_rows[-1].revision}|{page_rows[-1].id}" if page_rows else None
+        high_water = f"{page_rows[-1].revision}|{page_rows[-1].uid}" if page_rows else None
         expected_cursors = {
             "page_change_cursor:index_pages": high_water,
             "page_change_cursor:derive_facts": high_water,
@@ -270,7 +270,7 @@ class CorpusAttestor:
             page_rows = list(
                 (
                     await connection.execute(
-                        sa.select(tables.page).order_by(tables.page.c.revision, tables.page.c.id)
+                        sa.select(tables.page).order_by(tables.page.c.revision, tables.page.c.uid)
                     )
                 ).all()
             )
@@ -284,7 +284,7 @@ class CorpusAttestor:
             mirror_rows = list(
                 (
                     await connection.execute(
-                        sa.select(memory_store.mem_page).order_by(memory_store.mem_page.c.page_id)
+                        sa.select(memory_store.mem_page).order_by(memory_store.mem_page.c.page_uid)
                     )
                 ).all()
             )

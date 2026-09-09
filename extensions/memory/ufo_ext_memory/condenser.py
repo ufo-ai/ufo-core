@@ -250,7 +250,7 @@ def live_page_link() -> ColumnElement[bool]:
     background pass that writes what a member reads has to agree with them, or it writes a paragraph
     from rows the page under it does not carry."""
     return sa.and_(
-        mem_page.c.page_id == memory_item.c.created_from_page_id,
+        mem_page.c.page_uid == memory_item.c.created_from_page_uid,
         mem_page.c.workspace_id == memory_item.c.workspace_id,
         mem_page.c.subject == memory_item.c.subject,
         mem_page.c.revision == memory_item.c.created_from_page_revision,
@@ -267,8 +267,8 @@ def member_servable() -> ColumnElement[bool]:
     instead: its judgement is destructive and nothing restores what it retires, so it is kept off
     the rows a member wrote."""
     return sa.or_(
-        memory_item.c.created_from_page_id.is_(None),
-        sa.select(mem_page.c.page_id).where(live_page_link()).exists(),
+        memory_item.c.created_from_page_uid.is_(None),
+        sa.select(mem_page.c.page_uid).where(live_page_link()).exists(),
     )
 
 
@@ -396,10 +396,8 @@ class FactDeriver:
                     memory_kind=fact.memory_kind,
                     confidence=fact.confidence,
                     created_from_page_id=page.page_id,
-                    created_from_page_uid=latest.uid,
                     created_from_page_revision=page.revision,
                     source_id=page.source_id,
-                    source_uid=latest.source_uid,
                     as_of=page.as_of,
                 )
             )
@@ -570,7 +568,7 @@ class MemoryConsolidator:
                         .where(
                             memory_item.c.workspace_id == self.workspace_id,
                             memory_item.c.item_class == FACT,
-                            memory_item.c.created_from_page_id.is_(None),
+                            memory_item.c.created_from_page_uid.is_(None),
                             memory_item.c.superseded_by.is_(None),
                             memory_item.c.retired_at.is_(None),
                             memory_item.c.created_at <= cutoff,
@@ -645,7 +643,7 @@ class MemoryConsolidator:
                     memory_item.c.workspace_id == self.workspace_id,
                     memory_item.c.subject == cluster[0].subject,
                     memory_item.c.item_class == FACT,
-                    memory_item.c.created_from_page_id.is_(None),
+                    memory_item.c.created_from_page_uid.is_(None),
                     memory_item.c.superseded_by.is_(None),
                     memory_item.c.retired_at.is_(None),
                 )
@@ -685,7 +683,7 @@ class MemoryConsolidator:
                     memory_item.c.workspace_id == self.workspace_id,
                     memory_item.c.subject == cluster[0].subject,
                     memory_item.c.item_class == FACT,
-                    memory_item.c.created_from_page_id.is_(None),
+                    memory_item.c.created_from_page_uid.is_(None),
                     memory_item.c.superseded_by.is_(None),
                     memory_item.c.retired_at.is_(None),
                 )
@@ -834,7 +832,7 @@ class MemoryDeduper:
                     )
                     .where(
                         memory_item.c.workspace_id == self.workspace_id,
-                        memory_item.c.created_from_page_id.is_(None),
+                        memory_item.c.created_from_page_uid.is_(None),
                         memory_item.c.item_class != SECTION,
                         memory_item.c.superseded_by.is_(None),
                         memory_item.c.retired_at.is_(None),
@@ -946,7 +944,7 @@ class MemoryDeduper:
             memory_item.c.workspace_id == self.workspace_id,
             memory_item.c.subject == group.subject,
             memory_item.c.item_class == group.item_class,
-            memory_item.c.created_from_page_id.is_(None),
+            memory_item.c.created_from_page_uid.is_(None),
             memory_item.c.superseded_by.is_(None),
             memory_item.c.retired_at.is_(None),
             memory_item.c.created_at <= datetime.now(UTC) - DEDUP_MIN_AGE,

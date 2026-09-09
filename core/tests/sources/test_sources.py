@@ -430,7 +430,11 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
     feed = CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs"))
     with ws(workspace_id):
         changes = (await feed.pages_changed_since(None, 50)).changes
-    assert [change.source_id for change in changes] == [pages[0]["source_id"]]
+    async with workspace_tx() as connection:
+        source_uid = await connection.scalar(
+            sa.select(tables.source.c.uid).where(tables.source.c.id == pages[0]["source_id"])
+        )
+    assert [change.source_id for change in changes] == [source_uid]
 
     await index_pages()
     assert await _chunk_count() >= 1
@@ -514,11 +518,11 @@ async def test_register_source_settles_on_one_row_per_connection_and_config(db: 
         rows = (
             await connection.execute(
                 sa.select(
-                    tables.source.c.id, tables.source.c.connection_id, tables.source.c.feed_handle
+                    tables.source.c.uid, tables.source.c.connection_id, tables.source.c.feed_handle
                 )
             )
         ).all()
-    assert {row.id: row.connection_id for row in rows} == {
+    assert {row.uid: row.connection_id for row in rows} == {
         first: first_connection,
         second: second_connection,
     }
@@ -741,7 +745,7 @@ async def test_register_source_refuses_a_live_row_on_a_different_window(db: None
     async with workspace_tx() as connection:
         stored = (
             await connection.execute(
-                sa.select(tables.source.c.config).where(tables.source.c.id == source_id)
+                sa.select(tables.source.c.config).where(tables.source.c.uid == source_id)
             )
         ).scalar_one()
     assert stored["backfill_days"] == 7
@@ -830,7 +834,7 @@ async def test_rewindow_sources_breaks_the_claim_of_a_sync_already_in_flight(db:
                     claimed_by=claim,
                     claim_expires_at=datetime.now(UTC) + timedelta(seconds=300),
                 )
-                .where(tables.source.c.id == source_id)
+                .where(tables.source.c.uid == source_id)
             )
         widened = config.model_copy(
             update={"backfill_days": 365, "backfill_after": datetime(2026, 1, 30, tzinfo=UTC)}
@@ -842,14 +846,14 @@ async def test_rewindow_sources_breaks_the_claim_of_a_sync_already_in_flight(db:
                 sa.update(tables.source)
                 .values(cursor="9002", claimed_by=None, claim_expires_at=None)
                 .where(
-                    tables.source.c.id == source_id,
+                    tables.source.c.uid == source_id,
                     tables.source.c.claimed_by == claim,
                 )
             )
             row = (
                 await connection.execute(
                     sa.select(tables.source.c.cursor, tables.source.c.config).where(
-                        tables.source.c.id == source_id
+                        tables.source.c.uid == source_id
                     )
                 )
             ).one()
@@ -878,7 +882,7 @@ async def test_rewindow_sources_refuses_a_config_that_would_move_the_row(db: Non
             await connection.execute(
                 sa.update(tables.source)
                 .values(cursor="9001")
-                .where(tables.source.c.id == source_id)
+                .where(tables.source.c.uid == source_id)
             )
         with pytest.raises(ValueError, match="would change which dataset"):
             await ctx.rewindow_sources(
@@ -888,7 +892,7 @@ async def test_rewindow_sources_refuses_a_config_that_would_move_the_row(db: Non
             untouched = (
                 await connection.execute(
                     sa.select(tables.source.c.config, tables.source.c.cursor).where(
-                        tables.source.c.id == source_id
+                        tables.source.c.uid == source_id
                     )
                 )
             ).one()
@@ -903,7 +907,7 @@ async def test_rewindow_sources_refuses_a_config_that_would_move_the_row(db: Non
             moved = (
                 await connection.execute(
                     sa.select(tables.source.c.config, tables.source.c.cursor).where(
-                        tables.source.c.id == source_id
+                        tables.source.c.uid == source_id
                     )
                 )
             ).one()
@@ -936,7 +940,7 @@ async def test_register_source_settles_two_racers_that_asked_for_the_same_window
     async with workspace_tx() as connection:
         stored = (
             await connection.execute(
-                sa.select(tables.source.c.config).where(tables.source.c.id == source_id)
+                sa.select(tables.source.c.config).where(tables.source.c.uid == source_id)
             )
         ).scalar_one()
     assert stored["backfill_after"] == winner.backfill_after.isoformat().replace("+00:00", "Z")
@@ -957,7 +961,7 @@ async def test_register_source_settles_on_a_live_row_that_reaches_all_history(db
             await connection.execute(
                 sa.update(tables.source)
                 .values(cursor="9001")
-                .where(tables.source.c.id == source_id)
+                .where(tables.source.c.uid == source_id)
             )
         assert (
             await ctx.register_source("gmail", unwindowed, connection_id=connection_id) == source_id
@@ -972,7 +976,7 @@ async def test_register_source_settles_on_a_live_row_that_reaches_all_history(db
         row = (
             await connection.execute(
                 sa.select(tables.source.c.config, tables.source.c.cursor).where(
-                    tables.source.c.id == source_id
+                    tables.source.c.uid == source_id
                 )
             )
         ).one()
@@ -1448,7 +1452,7 @@ async def _seed_page(workspace_id: UUID) -> UUID:
     """A workspace with one source and one (tombstoned) page — enough for the runner to enumerate
     the workspace and replay the page; tombstoned so the feed inlines an empty body without a blob.
     Returns the page id the drive should replay to this workspace."""
-    page_id, source_id = uuid4(), uuid4()
+    page_id, page_uid, source_id = uuid4(), uuid7(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -1476,7 +1480,7 @@ async def _seed_page(workspace_id: UUID) -> UUID:
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
+                uid=page_uid,
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -1488,7 +1492,7 @@ async def _seed_page(workspace_id: UUID) -> UUID:
                 updated_at=sa.func.now(),
             )
         )
-    return page_id
+    return page_uid
 
 
 @dataclass
@@ -1664,7 +1668,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
     alice = await _member(workspace_id, "alice@example.com")
     bob = await _member(workspace_id, "bob@example.com")
     probe = vec((13, 1.0))
-    page_id = uuid4()
+    page_id, page_uid = uuid4(), uuid7()
     connection_id = await _connection(
         workspace_id, account_id="alice", owner_member_id=alice, shared=False
     )
@@ -1689,7 +1693,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
+                uid=page_uid,
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -1706,8 +1710,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
         )
         await connection.execute(
             sa.insert(mem_page).values(
-                page_id=page_id,
-                page_uid=uuid7(),
+                page_uid=page_uid,
                 workspace_id=workspace_id,
                 subject=member_subject(alice),
                 revision=revision,
@@ -1721,7 +1724,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 Chunk(
                     "pg-" + page_id.hex,
                     OWNER_KIND_PAGE,
-                    str(page_id),
+                    str(page_uid),
                     member_subject(alice),
                     0,
                     "alices private onboarding checklist",
@@ -1741,7 +1744,7 @@ async def test_member_scoped_page_is_invisible_to_another_member(
                 alice,
             ),
         )
-        assert len(mine) == 1 and mine[0].page_id == page_id
+        assert len(mine) == 1 and mine[0].page_id == page_uid
         assert (
             await service.search_sources(
                 "onboarding checklist",
@@ -1839,8 +1842,8 @@ async def _authority() -> _Authority:
             sa.insert(tables.source),
             [
                 {
-                    "id": source_id,
-                    "uid": uuid7(),
+                    "id": uuid4(),
+                    "uid": source_id,
                     "workspace_id": state.workspace_id,
                     "backend": FOLDER_BACKEND,
                     "config": {"root": f"/{source_id.hex}"},
@@ -2137,7 +2140,9 @@ class _ResyncingSource:
 
     async def fetch(self, config: SourceConfig, cursor: str | None, auth: SourceAuth) -> SyncResult:
         with ws(self.workspace_id):
-            await context_for("sources", frozenset()).schedule_source_sync((self.source_id,))
+            await context_for("sources", frozenset()).schedule_source_sync(
+                (await _source_uid(self.source_id),)
+            )
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
@@ -2507,14 +2512,19 @@ async def test_a_sync_in_flight_when_its_connection_goes_writes_nothing_back(
                 await connection.execute(
                     sa.select(sa.func.count())
                     .select_from(tables.source)
-                    .where(tables.source.c.id == source_id)
+                    .where(tables.source.c.uid == source_id)
                 )
             ).scalar_one()
             pages = (
                 await connection.execute(
                     sa.select(sa.func.count())
                     .select_from(tables.page)
-                    .where(tables.page.c.source_id == source_id)
+                    .where(
+                        tables.page.c.source_id
+                        == sa.select(tables.source.c.id)
+                        .where(tables.source.c.uid == source_id)
+                        .scalar_subquery()
+                    )
                 )
             ).scalar_one()
     assert sources == 0
@@ -2595,7 +2605,7 @@ async def test_page_feed_reads_one_immutable_page_version_during_a_sync(
         body_ref, digest = (
             await connection.execute(
                 sa.select(tables.page.c.body_ref, tables.page.c.digest).where(
-                    tables.page.c.id == change.page_id
+                    tables.page.c.uid == change.page_id
                 )
             )
         ).one()
@@ -2777,6 +2787,15 @@ async def test_database_revision_orders_an_old_writer_after_a_new_cursor(
 
     assert change.body == "new body"
     assert change.revision > first_revision
+
+
+async def _source_uid(source_id: UUID) -> UUID:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.source.c.uid).where(tables.source.c.id == source_id)
+            )
+        ).scalar_one()
 
 
 async def _source_state(source_id: UUID) -> sa.RowMapping:
@@ -3636,7 +3655,9 @@ async def test_a_resync_unparks_the_source_it_names(
     await _park(source_id)
 
     with ws(workspace_id):
-        await context_for("sources", frozenset()).schedule_source_sync((source_id,))
+        await context_for("sources", frozenset()).schedule_source_sync(
+            (await _source_uid(source_id),)
+        )
         assert await _claims(driver) == (source_id,)
 
     state = await _source_state(source_id)

@@ -231,6 +231,29 @@ async def test_prune_drops_the_scopes_chunks_outside_the_keep_set(
     assert sorted(hit.chunk_digest for hit in vector) == ["fresh", "other"]
 
 
+async def test_reattribute_moves_only_the_scopes_chunks_to_the_new_owner(
+    ambient_workspace: None, database_url: str
+) -> None:
+    backend = DefaultIndex(transaction=workspace_tx)
+    await backend.upsert(
+        (
+            Chunk("moved-a", "page", "p1", SUBJECT, 0, "apple", vec((0, 1.0))),
+            Chunk("moved-b", "page", "p1", SUBJECT, 1, "apple", vec((0, 1.0))),
+            Chunk("stays", "page", "p2", SUBJECT, 0, "apple", vec((0, 1.0))),
+            Chunk("other-kind", "memory_item", "p1", SUBJECT, 0, "apple", vec((0, 1.0))),
+        )
+    )
+    await backend.reattribute(IndexScope("page", "p1"), "u1")
+    assert not await backend.has_chunks(IndexScope("page", "p1"))
+    lexical = await backend.lexical("apple", frozenset({SUBJECT}), "page", 10)
+    assert {hit.chunk_digest: hit.owner_id for hit in lexical} == {
+        "moved-a": "u1",
+        "moved-b": "u1",
+        "stays": "p2",
+    }
+    assert await backend.has_chunks(IndexScope("memory_item", "p1"))
+
+
 async def test_prune_with_an_empty_keep_set_drops_the_whole_scope(
     ambient_workspace: None, database_url: str
 ) -> None:

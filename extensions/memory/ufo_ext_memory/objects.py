@@ -217,7 +217,7 @@ class MemoryObjects:
                             memory_item.c.item_class,
                             memory_item.c.memory_kind,
                             memory_item.c.created_at,
-                            memory_item.c.created_from_page_id,
+                            memory_item.c.created_from_page_uid.label("created_from_page_id"),
                             memory_item.c.created_from_page_revision,
                         )
                         .where(
@@ -285,13 +285,13 @@ class MemoryObjects:
             )
         if row is None:
             return None
-        if row["created_from_page_id"] is not None:
+        if row["created_from_page_uid"] is not None:
             state = (
                 await ext.readable_page_states(
-                    (row["created_from_page_id"],),
+                    (row["created_from_page_uid"],),
                     reader,
                 )
-            ).get(row["created_from_page_id"])
+            ).get(row["created_from_page_uid"])
             if (
                 state is None
                 or state.subject != row["subject"]
@@ -300,11 +300,11 @@ class MemoryObjects:
             ):
                 return None
         links: list[ObjectLink] = []
-        if row["created_from_page_id"] is not None:
+        if row["created_from_page_uid"] is not None:
             links.append(
                 ObjectLink(
                     relation=CREATED_FROM,
-                    target=ObjectRef(kind=PAGE_OBJECT_KIND, name=str(row["created_from_page_id"])),
+                    target=ObjectRef(kind=PAGE_OBJECT_KIND, name=str(row["created_from_page_uid"])),
                 )
             )
         if row["superseded_by"] is not None:

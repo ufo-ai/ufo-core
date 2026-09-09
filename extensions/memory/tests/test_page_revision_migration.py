@@ -65,11 +65,11 @@ async def _replay_derivation(
                 )
             async with workspace_tx() as connection:
                 return [
-                    (row.id, row.source_id)
+                    (row.id, row.source_uid)
                     for row in (
                         await connection.execute(
-                            sa.select(memory_item.c.id, memory_item.c.source_id).where(
-                                memory_item.c.created_from_page_id == page_id
+                            sa.select(memory_item.c.id, memory_item.c.source_uid).where(
+                                memory_item.c.created_from_page_uid == page_id
                             )
                         )
                     ).all()

@@ -1576,7 +1576,7 @@ class PageBatch:
 class PageFeed(Protocol):
     """The page-substrate seam an indexer reads through `ExtensionContext.pages`: replay every page
     changed since a `revision|page_id` cursor, bodies inlined, in a bounded batch and total order
-    (`ORDER BY revision, id`) — dialect-neutral and replay-safe, so a single-owner cursor advances
+    (`ORDER BY revision, uid`) — dialect-neutral and replay-safe, so a single-owner cursor advances
     monotonically and a restart resumes where it left off."""
 
     async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch: ...
@@ -1596,7 +1596,7 @@ def page_cursor(cursor: object) -> tuple[int, UUID]:
 
 @dataclass(frozen=True)
 class CorePageFeed:
-    """The core `PageFeed`: reads the `page` table in `(revision, id)` order after the cursor and
+    """The core `PageFeed`: reads the `page` table in `(revision, uid)` order after the cursor and
     inlines each non-tombstoned body from the blob store, bounding every batch to
     PAGE_FEED_BATCH_MAX so the inlined bodies stay a small payload. A tombstoned page carries an
     empty body; its reader drops the page's chunks and mirror on that signal."""
@@ -1606,8 +1606,8 @@ class CorePageFeed:
     async def pages_changed_since(self, cursor: str | None, limit: int) -> PageBatch:
         query = (
             sa.select(
-                tables.page.c.id,
-                tables.page.c.source_id,
+                tables.page.c.uid,
+                tables.source.c.uid.label("source_uid"),
                 tables.page.c.subject,
                 tables.page.c.stream,
                 tables.page.c.title,
@@ -1620,7 +1620,10 @@ class CorePageFeed:
                 tables.page.c.created_at,
                 tables.page.c.updated_at,
             )
-            .order_by(tables.page.c.revision, tables.page.c.id)
+            .select_from(
+                tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
+            )
+            .order_by(tables.page.c.revision, tables.page.c.uid)
             .limit(min(limit, PAGE_FEED_BATCH_MAX))
         )
         if cursor is not None:
@@ -1630,7 +1633,7 @@ class CorePageFeed:
                     tables.page.c.revision > revision,
                     sa.and_(
                         tables.page.c.revision == revision,
-                        tables.page.c.id > page_id,
+                        tables.page.c.uid > page_id,
                     ),
                 )
             )
@@ -1642,8 +1645,8 @@ class CorePageFeed:
             record_as_of = row["record_updated_at"] or row["record_created_at"]
             changes.append(
                 PageChange(
-                    page_id=row["id"],
-                    source_id=row["source_id"],
+                    page_id=row["uid"],
+                    source_id=row["source_uid"],
                     subject=row["subject"],
                     stream=row["stream"],
                     title=row["title"],
@@ -1660,5 +1663,5 @@ class CorePageFeed:
                     changed_at=row["updated_at"],
                 )
             )
-        next_cursor = f"{rows[-1]['revision']}|{rows[-1]['id']}" if rows else None
+        next_cursor = f"{rows[-1]['revision']}|{rows[-1]['uid']}" if rows else None
         return PageBatch(changes=tuple(changes), next_cursor=next_cursor)

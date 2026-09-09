@@ -29,8 +29,8 @@ pytestmark = [
 DIGEST = "sha256:page"
 
 
-async def _seed(workspace_id: UUID) -> tuple[UUID, UUID]:
-    connection_id, source_id, page_id = uuid4(), uuid4(), uuid4()
+async def _seed(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
+    connection_id, source_id, page_id, page_uid = uuid4(), uuid4(), uuid4(), uuid7()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -66,7 +66,7 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID]:
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
+                uid=page_uid,
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -85,15 +85,14 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID]:
         ).scalar_one()
         await connection.execute(
             sa.insert(mem_page).values(
-                page_id=page_id,
-                page_uid=uuid7(),
+                page_uid=page_uid,
                 workspace_id=workspace_id,
                 subject="shared",
                 revision=revision,
                 created_at=sa.func.now(),
             )
         )
-    return connection_id, page_id
+    return connection_id, page_id, page_uid
 
 
 async def _mirrors(workspace_id: UUID) -> list[UUID]:
@@ -101,7 +100,7 @@ async def _mirrors(workspace_id: UUID) -> list[UUID]:
         return list(
             (
                 await connection.execute(
-                    sa.select(mem_page.c.page_id).where(mem_page.c.workspace_id == workspace_id)
+                    sa.select(mem_page.c.page_uid).where(mem_page.c.workspace_id == workspace_id)
                 )
             )
             .scalars()
@@ -111,9 +110,9 @@ async def _mirrors(workspace_id: UUID) -> list[UUID]:
 
 async def test_deleting_a_page_takes_its_mirror_row(db: None) -> None:
     workspace_id = uuid4()
-    _connection_id, page_id = await _seed(workspace_id)
+    _connection_id, page_id, page_uid = await _seed(workspace_id)
     with ws(workspace_id):
-        assert await _mirrors(workspace_id) == [page_id]
+        assert await _mirrors(workspace_id) == [page_uid]
         async with workspace_tx() as connection:
             await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_id))
         assert await _mirrors(workspace_id) == []
@@ -124,7 +123,7 @@ async def test_a_mirror_row_cannot_be_written_without_a_revision(db: None) -> No
     claim about which body its chunks came from, and `search_sources` could never serve it — so the
     schema refuses it rather than holding a row nothing can return."""
     workspace_id = uuid4()
-    _connection_id, page_id = await _seed(workspace_id)
+    _connection_id, _page_id, page_uid = await _seed(workspace_id)
     with ws(workspace_id):
         async with workspace_tx() as connection:
             await connection.execute(sa.delete(mem_page))
@@ -132,8 +131,7 @@ async def test_a_mirror_row_cannot_be_written_without_a_revision(db: None) -> No
             async with workspace_tx() as connection:
                 await connection.execute(
                     sa.insert(mem_page).values(
-                        page_id=page_id,
-                        page_uid=uuid7(),
+                        page_uid=page_uid,
                         workspace_id=workspace_id,
                         subject="shared",
                         revision=None,
@@ -147,9 +145,9 @@ async def test_disconnecting_a_connection_takes_the_mirror_rows_of_its_pages(db:
     """The whole chain a member drives: disconnect removes the connection, its source rows and
     their pages follow, and the mirror row goes with the page rather than outliving it."""
     workspace_id = uuid4()
-    connection_id, page_id = await _seed(workspace_id)
+    connection_id, _page_id, page_uid = await _seed(workspace_id)
     with ws(workspace_id):
-        assert await _mirrors(workspace_id) == [page_id]
+        assert await _mirrors(workspace_id) == [page_uid]
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.delete(tables.connection).where(tables.connection.c.id == connection_id)

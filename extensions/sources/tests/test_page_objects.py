@@ -225,8 +225,8 @@ async def _seed_source(
 ) -> UUID:
     """One source row and the shared connection it hangs off — the connection discloses the pages
     the row lands, and the connector grant is what lets one agent beyond main read them."""
-    source_id = uuid4() if source_id is None else source_id
-    connection_id = uuid4()
+    source_id = uuid7() if source_id is None else source_id
+    connection_id, source_key = uuid4(), uuid4()
     seeded_at = datetime(2026, 7, 9, tzinfo=UTC)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -244,8 +244,8 @@ async def _seed_source(
         )
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_id,
+                id=source_key,
                 workspace_id=state.workspace_id,
                 backend=backend,
                 connection_id=connection_id,
@@ -283,17 +283,20 @@ async def _seed_page(
     tombstone: bool = False,
     page_id: UUID | None = None,
 ) -> UUID:
-    page_id = uuid4() if page_id is None else page_id
+    page_id = uuid7() if page_id is None else page_id
     body_ref = f"pages/{page_id}"
     content = f"# {title}\n\nIssue body" if body is None else body
     await blob.put(body_ref, content.encode())
     async with workspace_tx() as connection:
+        source_key = await connection.scalar(
+            sa.select(tables.source.c.id).where(tables.source.c.uid == source_id)
+        )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
-                id=page_id,
+                uid=page_id,
+                id=uuid4(),
                 workspace_id=state.workspace_id,
-                source_id=source_id,
+                source_id=source_key,
                 digest="sha256:abc",
                 body_ref=body_ref,
                 stream=stream,
@@ -314,7 +317,7 @@ async def _tombstone(state: _Workspace, page_id: UUID) -> bool:
         async with workspace_tx() as connection:
             return (
                 await connection.execute(
-                    sa.select(tables.page.c.tombstone).where(tables.page.c.id == page_id)
+                    sa.select(tables.page.c.tombstone).where(tables.page.c.uid == page_id)
                 )
             ).scalar_one()
 
@@ -455,10 +458,10 @@ async def test_pages_list_hides_a_source_this_agent_holds_no_grant_for(
         fetched = await PageObjects().get(ctx, str(ungranted))
         async with workspace_tx() as connection:
             subjects = {
-                row.id: (row.subject, row.tombstone)
+                row.uid: (row.subject, row.tombstone)
                 for row in (
                     await connection.execute(
-                        sa.select(tables.page.c.id, tables.page.c.subject, tables.page.c.tombstone)
+                        sa.select(tables.page.c.uid, tables.page.c.subject, tables.page.c.tombstone)
                     )
                 ).all()
             }

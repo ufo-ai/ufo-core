@@ -104,7 +104,7 @@ async def _workspace() -> UUID:
 
 
 async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -> UUID:
-    source_id, page_id = uuid4(), uuid4()
+    source_id, page_id, page_uid = uuid4(), uuid4(), uuid7()
     when = datetime.now(UTC)
     await blob.put(f"pages/{page_id}", body.encode())
     async with workspace_tx() as connection:
@@ -149,7 +149,7 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
+                uid=page_uid,
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -161,7 +161,7 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
                 updated_at=when,
             )
         )
-    return page_id
+    return page_uid
 
 
 def _runner(

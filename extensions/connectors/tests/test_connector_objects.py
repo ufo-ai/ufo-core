@@ -1606,12 +1606,12 @@ async def test_a_connections_status_lists_the_streams_it_syncs(db: None) -> None
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.source)
-                .where(tables.source.c.id.in_((messages, labels)))
+                .where(tables.source.c.uid.in_((messages, labels)))
                 .values(next_sync_at=datetime(2026, 7, 12, tzinfo=UTC))
             )
             await connection.execute(
                 sa.update(tables.source)
-                .where(tables.source.c.id == labels)
+                .where(tables.source.c.uid == labels)
                 .values(parked_at=datetime(2026, 7, 12, tzinfo=UTC), parked_reason="rate limited")
             )
         fetched = yaml.safe_load(

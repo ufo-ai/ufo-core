@@ -893,7 +893,8 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
     reads it in full — the object surface holds the same source fence recall does, so a fact never
     leaks via a listing."""
     workspace_id = await _workspace()
-    connection_id, source_id, page_id, item_id = uuid4(), uuid4(), uuid4(), uuid4()
+    connection_id, source_id, page_id, item_id = uuid4(), uuid7(), uuid7(), uuid4()
+    source_key, page_key = uuid4(), uuid4()
     now = datetime(2026, 7, 9, tzinfo=UTC)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -911,8 +912,8 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
         )
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_id,
+                id=source_key,
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
@@ -925,10 +926,10 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
-                id=page_id,
+                uid=page_id,
+                id=page_key,
                 workspace_id=workspace_id,
-                source_id=source_id,
+                source_id=source_key,
                 digest="sha256:page",
                 body_ref=f"pages/{page_id}",
                 stream="notes",
@@ -941,7 +942,7 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
         )
         revision = (
             await connection.execute(
-                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
             )
         ).scalar_one()
         await connection.execute(
@@ -953,9 +954,9 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
                 item_class="fact",
                 memory_kind="fact",
                 confidence=5,
-                created_from_page_id=page_id,
+                created_from_page_uid=page_id,
                 created_from_page_revision=revision,
-                source_id=source_id,
+                source_uid=source_id,
                 embedding_digest="sha256:seeded",
                 created_at=now,
                 updated_at=now,

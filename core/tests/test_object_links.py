@@ -187,11 +187,11 @@ async def _conversation(
 
 async def _seed_source(
     workspace_id: UUID, owner_member_id: UUID, account: str = "acct-one"
-) -> UUID:
+) -> tuple[UUID, UUID]:
     """One shared Asana connection a member owns, carrying one stream. The owner is what makes the
     `connection` object readable: an ownerless connection is the workspace's own and only an admin
     may open it, so a walk naming no member would stop at the link rather than follow it."""
-    source_id, connection_id = uuid4(), uuid4()
+    source_id, source_uid, connection_id = uuid4(), uuid7(), uuid4()
     when = datetime(2026, 7, 9, tzinfo=UTC)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -209,7 +209,7 @@ async def _seed_source(
         )
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
+                uid=source_uid,
                 id=source_id,
                 workspace_id=workspace_id,
                 backend="asana",
@@ -231,19 +231,19 @@ async def _seed_source(
                 updated_at=sa.func.now(),
             )
         )
-    return source_id
+    return source_id, source_uid
 
 
 async def _seed_page(
     workspace_id: UUID, source_id: UUID, blob: FilesystemBlobStore, subject: str = SHARED_SUBJECT
 ) -> UUID:
-    page_id = uuid4()
+    page_id, page_uid = uuid4(), uuid7()
     body_ref = f"pages/{page_id}"
     await blob.put(body_ref, PAGE_BODY.encode())
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
+                uid=page_uid,
                 id=page_id,
                 workspace_id=workspace_id,
                 source_id=source_id,
@@ -259,7 +259,7 @@ async def _seed_page(
                 updated_at=datetime(2026, 7, 9, tzinfo=UTC),
             )
         )
-    return page_id
+    return page_uid
 
 
 def _verbs() -> dict[str, ToolDef]:
@@ -329,7 +329,7 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
     tools = _verbs()
     with ws(workspace_id):
         owner_id = await _member(workspace_id)
-        source_id = await _seed_source(workspace_id, owner_id)
+        source_id, source_uid = await _seed_source(workspace_id, owner_id)
         page_id = await _seed_page(workspace_id, source_id, blob)
 
         memory_ext = context_for(
@@ -339,7 +339,7 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
             (
                 PageChange(
                     page_id=page_id,
-                    source_id=source_id,
+                    source_id=source_uid,
                     subject=SHARED_SUBJECT,
                     stream="notes",
                     title="Cannery office",
@@ -628,7 +628,7 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
     with ws(workspace_id):
         member_id = await _member(workspace_id)
         other_id = await _member(workspace_id)
-        source_id = await _seed_source(workspace_id, member_id)
+        source_id, source_uid = await _seed_source(workspace_id, member_id)
         page_id = await _seed_page(workspace_id, source_id, blob, subject=member_subject(member_id))
 
         memory_ext = context_for("memory", frozenset())
@@ -636,7 +636,7 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
         async with workspace_tx() as connection:
             revision = (
                 await connection.execute(
-                    sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+                    sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
                 )
             ).scalar_one()
             await connection.execute(
@@ -649,9 +649,9 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
                     memory_kind="fact",
                     confidence=5,
                     source_ref=None,
-                    created_from_page_id=page_id,
+                    created_from_page_uid=page_id,
                     created_from_page_revision=revision,
-                    source_id=source_id,
+                    source_uid=source_uid,
                     as_of=None,
                     embedding_digest=None,
                     superseded_by=None,

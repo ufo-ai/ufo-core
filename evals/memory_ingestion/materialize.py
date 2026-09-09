@@ -164,16 +164,17 @@ def _derived_corpus_digest(
 
 
 def _derived_corpus(
-    snapshot: IngestionSnapshot, source_id: UUID, memory_rows: list[sa.Row]
+    snapshot: IngestionSnapshot, source_id: UUID, page_rows: list[sa.Row], memory_rows: list[sa.Row]
 ) -> DerivedCorpus:
     source_refs = {
         page_id_for(source_id, page.source_ref): page.source_ref for page in snapshot.pages
     }
+    ref_by_uid = {row.uid: source_refs[row.id] for row in page_rows}
     facts = tuple(
         sorted(
             (
                 DerivedFact(
-                    source_ref=source_refs[row.created_from_page_id],
+                    source_ref=ref_by_uid[row.created_from_page_uid],
                     body=row.body,
                     memory_kind=row.memory_kind,
                     confidence=row.confidence,
@@ -238,12 +239,14 @@ class IngestionAttestor:
             if body.decode() != page.body:
                 raise RuntimeError(f"memory_ingestion page {page.source_ref!r} body differs")
         page_by_id = {page_id: expected_pages[page_id] for page_id in expected_pages}
+        page_id_by_uid = {row.uid: row.id for row in page_rows}
         memory_by_page: dict[UUID, list[sa.Row]] = {}
         for row in memory_rows:
+            derived_from = page_id_by_uid.get(row.created_from_page_uid)
             if (
-                row.created_from_page_id not in expected_pages
-                or row.created_from_page_revision != actual_pages[row.created_from_page_id].revision
-                or row.source_id != self.source_id
+                derived_from not in expected_pages
+                or row.created_from_page_revision != actual_pages[derived_from].revision
+                or row.source_uid != source_row.uid
                 or row.subject != "shared"
                 or row.item_class != "fact"
                 or row.embedding_digest is None
@@ -251,7 +254,7 @@ class IngestionAttestor:
                 or row.superseded_by is not None
             ):
                 raise RuntimeError("memory_ingestion derived memory rows are not ready")
-            memory_by_page.setdefault(row.created_from_page_id, []).append(row)
+            memory_by_page.setdefault(derived_from, []).append(row)
         evidence_refs = sorted({ref for case in self.snapshot.cases for ref in case.evidence_refs})
         evidence = tuple(
             DerivedEvidence(
@@ -277,14 +280,14 @@ class IngestionAttestor:
         }
         if indexed_ids != {row.id for row in memory_rows}:
             raise RuntimeError("memory_ingestion derived memories are not fully indexed")
-        high_water = f"{page_rows[-1].revision}|{page_rows[-1].id}" if page_rows else None
+        high_water = f"{page_rows[-1].revision}|{page_rows[-1].uid}" if page_rows else None
         expected_cursors = {
             "page_change_cursor:derive_facts": high_water,
             "page_change_cursor:index_pages": high_water,
         }
         if cursors != expected_cursors:
             raise RuntimeError("memory_ingestion page consumers are not settled")
-        corpus = _derived_corpus(self.snapshot, self.source_id, memory_rows)
+        corpus = _derived_corpus(self.snapshot, self.source_id, page_rows, memory_rows)
         if self.expected_corpus is not None and corpus != self.expected_corpus:
             raise RuntimeError("memory_ingestion installed corpus differs from its producer")
         readiness = IngestionReadiness(
@@ -310,7 +313,7 @@ class IngestionAttestor:
             page_rows = list(
                 (
                     await connection.execute(
-                        sa.select(tables.page).order_by(tables.page.c.revision, tables.page.c.id)
+                        sa.select(tables.page).order_by(tables.page.c.revision, tables.page.c.uid)
                     )
                 ).all()
             )
@@ -369,7 +372,7 @@ class IngestionAttestor:
                 "memory",
                 str(row.id),
                 row.body,
-                str(row.created_from_page_id),
+                str(row.created_from_page_uid),
                 str(row.created_from_page_revision),
                 row.memory_kind,
                 str(row.confidence),
@@ -634,12 +637,18 @@ class MemoryIngestionMaterializer:
                     await connection.execute(
                         sa.select(
                             tables.page.c.id,
+                            tables.page.c.uid,
                             tables.page.c.revision,
                             tables.page.c.subject,
-                        ).order_by(tables.page.c.revision, tables.page.c.id)
+                        ).order_by(tables.page.c.revision, tables.page.c.uid)
                     )
                 ).all()
             )
+            source_uid = (
+                await connection.execute(
+                    sa.select(tables.source.c.uid).where(tables.source.c.id == source_id)
+                )
+            ).scalar_one()
         pages = {row.id: row for row in page_rows}
         ctx = context_for(memory_manifest.NAME, frozenset())
         store = memory_store.MemoryStore(
@@ -659,16 +668,16 @@ class MemoryIngestionMaterializer:
                     item_class="fact",
                     memory_kind=fact.memory_kind,
                     confidence=fact.confidence,
-                    created_from_page_id=page_id,
+                    created_from_page_id=pages[page_id].uid,
                     created_from_page_revision=pages[page_id].revision,
-                    source_id=source_id,
+                    source_id=source_uid,
                     as_of=fact.as_of,
                 )
             )
-            kept[page_id] = kept.get(page_id, frozenset()) | {item_id}
+            kept[pages[page_id].uid] = kept.get(pages[page_id].uid, frozenset()) | {item_id}
         for page_id, item_ids in kept.items():
             await store.supersede_page_facts(page_id, item_ids)
-        high_water = f"{page_rows[-1].revision}|{page_rows[-1].id}" if page_rows else None
+        high_water = f"{page_rows[-1].revision}|{page_rows[-1].uid}" if page_rows else None
         cursor_store = ScopedStore(extension=memory_manifest.NAME)
         await cursor_store.put("page_change_cursor:derive_facts", high_water)
         await cursor_store.put("page_change_cursor:index_pages", high_water)

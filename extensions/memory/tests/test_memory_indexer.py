@@ -101,8 +101,6 @@ class ReclassifyingPage:
         self.calls += 1
         return {
             self.page_id: PageState(
-                uid=uuid4(),
-                source_uid=uuid4(),
                 subject=self.before if self.calls == 1 else self.after,
                 revision=self.before_revision if self.calls == 1 else self.after_revision,
                 digest="sha256:test",
@@ -222,7 +220,7 @@ async def test_page_narrowed_during_embed_withdraws_the_write_and_keeps_the_row(
         row = (
             await connection.execute(
                 sa.select(memory_item.c.embedding_digest).where(
-                    memory_item.c.created_from_page_id == page_id
+                    memory_item.c.created_from_page_uid == page_id
                 )
             )
         ).one()

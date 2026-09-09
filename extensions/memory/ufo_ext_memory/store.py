@@ -138,9 +138,9 @@ memory_item = sa.Table(
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint(
-        "(created_from_page_id is null and created_from_page_revision is null "
-        "and source_id is null) or (created_from_page_id is not null "
-        "and created_from_page_revision is not null and source_id is not null)",
+        "(created_from_page_uid is null and created_from_page_revision is null "
+        "and source_uid is null) or (created_from_page_uid is not null "
+        "and created_from_page_revision is not null and source_uid is not null)",
         name="memory_item_page_source",
     ),
 )
@@ -150,10 +150,10 @@ memory_source = sa.Table(
     _metadata,
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("memory_item_id", sa.Uuid, nullable=False),
-    sa.Column("source_id", sa.Uuid, nullable=False),
-    sa.Column("source_uid", sa.Uuid, nullable=True),
-    sa.Column("page_id", sa.Uuid, nullable=False),
-    sa.Column("page_uid", sa.Uuid, nullable=True),
+    sa.Column("source_id", sa.Uuid, nullable=True),
+    sa.Column("source_uid", sa.Uuid, nullable=False),
+    sa.Column("page_id", sa.Uuid, nullable=True),
+    sa.Column("page_uid", sa.Uuid, nullable=False),
     sa.Column("revision", sa.BigInteger, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -163,23 +163,25 @@ memory_source = sa.Table(
         ondelete="CASCADE",
         name="memory_source_memory_item_id_fkey",
     ),
-    sa.PrimaryKeyConstraint("memory_item_id", "page_id", name="memory_source_pkey"),
+    sa.PrimaryKeyConstraint("memory_item_id", "page_uid", name="memory_source_pkey"),
+    sa.UniqueConstraint("memory_item_id", "page_id", name="memory_source_item_page_id"),
 )
 
 mem_page = sa.Table(
     "mem_page",
     _metadata,
-    sa.Column("page_id", sa.Uuid, primary_key=True),
-    sa.Column("page_uid", sa.Uuid, nullable=True),
+    sa.Column("page_uid", sa.Uuid, primary_key=True),
+    sa.Column("page_id", sa.Uuid, nullable=True),
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("subject", sa.Text, nullable=False),
     sa.Column("revision", sa.BigInteger, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint("page_id", name="mem_page_page_id"),
     sa.ForeignKeyConstraint(
-        ["page_id"],
-        ["page.id"],
+        ["workspace_id", "page_uid"],
+        ["page.workspace_id", "page.uid"],
         ondelete="CASCADE",
-        name="mem_page_page_id_fkey",
+        name="mem_page_page_uid_fkey",
     ),
 )
 
@@ -209,7 +211,7 @@ def _readable_link(source_ids: frozenset[UUID]) -> ColumnElement[bool]:
     `memory_item.c.id`, so it composes into a read as an `EXISTS` predicate."""
     return sa.exists().where(
         memory_source.c.memory_item_id == memory_item.c.id,
-        memory_source.c.source_id.in_(source_ids),
+        memory_source.c.source_uid.in_(source_ids),
     )
 
 
@@ -278,15 +280,15 @@ async def inventory(
         links: dict[UUID, list[UUID]] = {}
         for link in (
             await connection.execute(
-                sa.select(memory_source.c.memory_item_id, memory_source.c.source_id)
+                sa.select(memory_source.c.memory_item_id, memory_source.c.source_uid)
                 .where(
                     memory_source.c.workspace_id == workspace_id,
                     memory_source.c.memory_item_id.in_([row["id"] for row in rows]),
                 )
-                .order_by(memory_source.c.created_at, memory_source.c.source_id)
+                .order_by(memory_source.c.created_at, memory_source.c.source_uid)
             )
         ).all():
-            links.setdefault(link.memory_item_id, []).append(link.source_id)
+            links.setdefault(link.memory_item_id, []).append(link.source_uid)
     now = datetime.now(UTC)
     return tuple(
         MemoryInventoryItem(
@@ -296,9 +298,9 @@ async def inventory(
             memory_kind=row["memory_kind"],
             confidence=row["confidence"],
             source_ref=row["source_ref"],
-            created_from_page_id=row["created_from_page_id"],
+            created_from_page_id=row["created_from_page_uid"],
             created_from_page_revision=row["created_from_page_revision"],
-            source_id=row["source_id"],
+            source_id=row["source_uid"],
             source_ids=tuple(links.get(row["id"], ())),
             as_of=row["as_of"],
             embedding_digest=row["embedding_digest"],
@@ -345,10 +347,8 @@ class MemoryWrite(BaseModel):
     confidence: int = Field(default=DEFAULT_CONFIDENCE, ge=1, le=MAX_CONFIDENCE)
     source_ref: str | None = None
     created_from_page_id: UUID | None = None
-    created_from_page_uid: UUID | None = None
     created_from_page_revision: int | None = None
     source_id: UUID | None = None
-    source_uid: UUID | None = None
     as_of: datetime | None = None
 
     @model_validator(mode="after")
@@ -660,7 +660,6 @@ class MemoryStore:
             MEMORY_ITEM_NAMESPACE,
             "\x00".join((str(self.workspace_id), write.subject, write.item_class, write.body)),
         )
-        page_uid, source_uid = write.created_from_page_uid, write.source_uid
         async with self.transaction() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             statement = insert(memory_item).values(
@@ -672,19 +671,17 @@ class MemoryStore:
                 memory_kind=write.memory_kind,
                 confidence=write.confidence,
                 source_ref=write.source_ref,
-                created_from_page_id=write.created_from_page_id,
-                created_from_page_uid=page_uid,
+                created_from_page_uid=write.created_from_page_id,
                 created_from_page_revision=write.created_from_page_revision,
-                source_id=write.source_id,
-                source_uid=source_uid,
+                source_uid=write.source_id,
                 as_of=write.as_of,
                 superseded_by=None,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
             rebound = sa.or_(
-                memory_item.c.created_from_page_id.is_distinct_from(
-                    statement.excluded.created_from_page_id
+                memory_item.c.created_from_page_uid.is_distinct_from(
+                    statement.excluded.created_from_page_uid
                 ),
                 memory_item.c.created_from_page_revision.is_distinct_from(
                     statement.excluded.created_from_page_revision
@@ -698,13 +695,13 @@ class MemoryStore:
                         memory_item.c.memory_kind: statement.excluded.memory_kind,
                         memory_item.c.confidence: statement.excluded.confidence,
                         memory_item.c.source_ref: statement.excluded.source_ref,
-                        memory_item.c.created_from_page_id: (
-                            statement.excluded.created_from_page_id
+                        memory_item.c.created_from_page_uid: (
+                            statement.excluded.created_from_page_uid
                         ),
                         memory_item.c.created_from_page_revision: (
                             statement.excluded.created_from_page_revision
                         ),
-                        memory_item.c.source_id: statement.excluded.source_id,
+                        memory_item.c.source_uid: statement.excluded.source_uid,
                         memory_item.c.embedding_digest: sa.case(
                             (rebound, None), else_=memory_item.c.embedding_digest
                         ),
@@ -724,10 +721,8 @@ class MemoryStore:
                 link = insert(memory_source).values(
                     workspace_id=self.workspace_id,
                     memory_item_id=item_id,
-                    source_id=write.source_id,
-                    source_uid=source_uid,
-                    page_id=write.created_from_page_id,
-                    page_uid=page_uid,
+                    source_uid=write.source_id,
+                    page_uid=write.created_from_page_id,
                     revision=write.created_from_page_revision,
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
@@ -736,10 +731,10 @@ class MemoryStore:
                     link.on_conflict_do_update(
                         index_elements=[
                             memory_source.c.memory_item_id,
-                            memory_source.c.page_id,
+                            memory_source.c.page_uid,
                         ],
                         set_={
-                            memory_source.c.source_id: link.excluded.source_id,
+                            memory_source.c.source_uid: link.excluded.source_uid,
                             memory_source.c.revision: link.excluded.revision,
                             memory_source.c.updated_at: sa.func.now(),
                         },
@@ -775,7 +770,7 @@ class MemoryStore:
             raise ValueError("a page that settled no fact retires nothing")
         stale: tuple[ColumnElement[bool], ...] = (
             memory_source.c.workspace_id == self.workspace_id,
-            memory_source.c.page_id == page_id,
+            memory_source.c.page_uid == page_id,
         )
         if kept is not None:
             stale = (*stale, memory_source.c.memory_item_id.not_in(kept))
@@ -795,9 +790,8 @@ class MemoryStore:
                 sa.select(
                     memory_item.c.id,
                     memory_item.c.subject,
-                    memory_item.c.created_from_page_id,
+                    memory_item.c.created_from_page_uid,
                     memory_item.c.created_from_page_revision,
-                    memory_item.c.source_id,
                 )
                 .where(memory_item.c.id.in_(affected))
                 .order_by(memory_item.c.id)
@@ -810,14 +804,12 @@ class MemoryStore:
                 await connection.execute(
                     sa.select(
                         memory_source.c.memory_item_id,
-                        memory_source.c.source_id,
                         memory_source.c.source_uid,
-                        memory_source.c.page_id,
                         memory_source.c.page_uid,
                         memory_source.c.revision,
                     )
                     .where(memory_source.c.memory_item_id.in_(affected))
-                    .order_by(memory_source.c.created_at, memory_source.c.source_id)
+                    .order_by(memory_source.c.created_at, memory_source.c.source_uid)
                 )
             ).all()
             links_by_item: dict[UUID, list[sa.Row]] = {}
@@ -825,14 +817,14 @@ class MemoryStore:
                 links_by_item.setdefault(link.memory_item_id, []).append(link)
             mirror = (
                 {
-                    page.page_id: page
+                    page.page_uid: page
                     for page in (
                         await connection.execute(
                             sa.select(
-                                mem_page.c.page_id, mem_page.c.subject, mem_page.c.revision
+                                mem_page.c.page_uid, mem_page.c.subject, mem_page.c.revision
                             ).where(
                                 mem_page.c.workspace_id == self.workspace_id,
-                                mem_page.c.page_id.in_({link.page_id for link in survivors}),
+                                mem_page.c.page_uid.in_({link.page_uid for link in survivors}),
                             )
                         )
                     ).all()
@@ -848,12 +840,12 @@ class MemoryStore:
                     )
                     deleted.append(row.id)
                     continue
-                if any(link.page_id == row.created_from_page_id for link in links):
+                if any(link.page_uid == row.created_from_page_uid for link in links):
                     continue
                 current = [
                     link
                     for link in links
-                    if (page := mirror.get(link.page_id)) is not None
+                    if (page := mirror.get(link.page_uid)) is not None
                     and page.subject == row.subject
                     and page.revision == link.revision
                 ]
@@ -862,10 +854,8 @@ class MemoryStore:
                     sa.update(memory_item)
                     .where(memory_item.c.id == row.id)
                     .values(
-                        created_from_page_id=survivor.page_id,
                         created_from_page_uid=survivor.page_uid,
                         created_from_page_revision=survivor.revision,
-                        source_id=survivor.source_id,
                         source_uid=survivor.source_uid,
                         embedding_digest=None,
                         embedding_claimed_at=None,
@@ -958,7 +948,7 @@ class MemoryStore:
             return ()
         ids = [UUID(hit.owner_id) for hit in fused]
         conditions: list[ColumnElement[bool]] = [
-            mem_page.c.page_id.in_(ids),
+            sa.or_(mem_page.c.page_uid.in_(ids), mem_page.c.page_id.in_(ids)),
             mem_page.c.workspace_id == self.workspace_id,
             mem_page.c.subject.in_(subjects),
         ]
@@ -971,6 +961,7 @@ class MemoryStore:
                 (
                     await connection.execute(
                         sa.select(
+                            mem_page.c.page_uid,
                             mem_page.c.page_id,
                             mem_page.c.subject,
                             mem_page.c.revision,
@@ -981,21 +972,25 @@ class MemoryStore:
                 .mappings()
                 .all()
             )
-        by_id = {row["page_id"]: row for row in rows}
-        current = await self._readable_states(tuple(by_id), source_reader)
+        by_owner = {row["page_uid"]: row for row in rows} | {
+            row["page_id"]: row for row in rows if row["page_id"] is not None
+        }
+        current = await self._readable_states(
+            tuple({row["page_uid"] for row in rows}), source_reader
+        )
         matches = tuple(
             SourceMatch(
-                page_id=UUID(hit.owner_id),
-                subject=by_id[UUID(hit.owner_id)]["subject"],
+                page_id=page["page_uid"],
+                subject=page["subject"],
                 text=hit.text,
                 score=hit.score,
-                created_at=_aware(by_id[UUID(hit.owner_id)]["created_at"]),
+                created_at=_aware(page["created_at"]),
             )
             for hit in fused
-            if UUID(hit.owner_id) in by_id
-            and (state := current.get(UUID(hit.owner_id))) is not None
-            and state.subject == by_id[UUID(hit.owner_id)]["subject"]
-            and state.revision == by_id[UUID(hit.owner_id)]["revision"]
+            if (page := by_owner.get(UUID(hit.owner_id))) is not None
+            and (state := current.get(page["page_uid"])) is not None
+            and state.subject == page["subject"]
+            and state.revision == page["revision"]
             and state.subject in subjects
         )
         return matches[:limit]
@@ -1038,7 +1033,7 @@ class MemoryStore:
         terms = [term for term in re.split(r"\W+", query.lower()) if term]
         if not terms or not subjects:
             return ()
-        authority: ColumnElement[bool] = memory_item.c.source_id.is_(None)
+        authority: ColumnElement[bool] = memory_item.c.source_uid.is_(None)
         if source_ids:
             authority = sa.or_(authority, _readable_link(source_ids))
         async with self.transaction() as connection:
@@ -1112,7 +1107,7 @@ class MemoryStore:
             memory_item.c.subject.in_(subjects),
             memory_item.c.superseded_by.is_(None),
             memory_item.c.retired_at.is_(None),
-            sa.or_(memory_item.c.source_id.is_(None), _readable_link(source_ids)),
+            sa.or_(memory_item.c.source_uid.is_(None), _readable_link(source_ids)),
         ]
         if start is not None:
             conditions.append(memory_item.c.created_at >= start)
@@ -1130,7 +1125,7 @@ class MemoryStore:
                             memory_item.c.confidence,
                             memory_item.c.body,
                             memory_item.c.source_ref,
-                            memory_item.c.created_from_page_id,
+                            memory_item.c.created_from_page_uid.label("created_from_page_id"),
                             memory_item.c.created_from_page_revision,
                             memory_item.c.as_of,
                             memory_item.c.created_at,
@@ -1233,9 +1228,9 @@ class MemoryIndexer:
                 memory_item.c.body,
                 memory_item.c.item_class,
                 memory_item.c.source_ref,
-                memory_item.c.created_from_page_id,
+                memory_item.c.created_from_page_uid.label("created_from_page_id"),
                 memory_item.c.created_from_page_revision,
-                memory_item.c.source_id,
+                memory_item.c.source_uid.label("source_id"),
                 memory_item.c.embedding_digest,
                 memory_item.c.superseded_by,
                 memory_item.c.retired_at,
@@ -1284,7 +1279,7 @@ class MemoryIndexer:
             binding = (
                 await connection.execute(
                     sa.select(
-                        memory_item.c.created_from_page_id,
+                        memory_item.c.created_from_page_uid.label("created_from_page_id"),
                         memory_item.c.created_from_page_revision,
                     ).where(memory_item.c.id == item.id)
                 )
@@ -1330,9 +1325,9 @@ class MemoryIndexer:
                     memory_item.c.id == item.id,
                     memory_item.c.subject == item.subject,
                     memory_item.c.body == item.body,
-                    memory_item.c.created_from_page_id == item.created_from_page_id,
+                    memory_item.c.created_from_page_uid == item.created_from_page_id,
                     memory_item.c.created_from_page_revision == item.created_from_page_revision,
-                    memory_item.c.source_id == item.source_id,
+                    memory_item.c.source_uid == item.source_id,
                     memory_item.c.embedding_claimed_at.is_not(None),
                 )
             )
@@ -1365,25 +1360,17 @@ class PageIndexer:
     async def _apply(self, change: PageChange) -> None:
         current = (await self.page_states((change.page_id,))).get(change.page_id)
         await self._unsettle_left_behind_facts(change.page_id, current)
+        await self._adopt_chunks(change.page_id)
         if change.tombstone:
-            if current is not None:
-                return
-            await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(change.page_id)))
-            async with self.transaction() as connection:
-                await connection.execute(
-                    sa.delete(mem_page).where(mem_page.c.page_id == change.page_id)
-                )
+            if current is None:
+                await self._drop(change.page_id)
             return
         if (
             current is None
             or current.subject != change.subject
             or current.revision != change.revision
         ):
-            await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(change.page_id)))
-            async with self.transaction() as connection:
-                await connection.execute(
-                    sa.delete(mem_page).where(mem_page.c.page_id == change.page_id)
-                )
+            await self._drop(change.page_id)
             return
         await chunk_embed_upsert(
             self.index,
@@ -1395,11 +1382,7 @@ class PageIndexer:
             change.body,
         )
         if (await self.page_states((change.page_id,))).get(change.page_id) != current:
-            await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(change.page_id)))
-            async with self.transaction() as connection:
-                await connection.execute(
-                    sa.delete(mem_page).where(mem_page.c.page_id == change.page_id)
-                )
+            await self._drop(change.page_id)
             return
         async with self.transaction() as connection:
             updated = await connection.execute(
@@ -1409,19 +1392,65 @@ class PageIndexer:
                     revision=current.revision,
                     created_at=change.created_at,
                 )
-                .where(mem_page.c.page_id == change.page_id)
+                .where(mem_page.c.page_uid == change.page_id)
             )
             if updated.rowcount == 0:
                 await connection.execute(
                     sa.insert(mem_page).values(
-                        page_id=change.page_id,
-                        page_uid=current.uid,
+                        page_uid=change.page_id,
                         workspace_id=self.workspace_id,
                         subject=current.subject,
                         revision=current.revision,
                         created_at=change.created_at,
                     )
                 )
+
+    async def _drop(self, page_id: UUID) -> None:
+        await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(page_id)))
+        async with self.transaction() as connection:
+            await connection.execute(sa.delete(mem_page).where(mem_page.c.page_uid == page_id))
+
+    async def adopt_chunks(self, limit: int) -> int:
+        """Move up to `limit` pages' chunks off the content id the index still files them under and
+        onto the page's id, oldest mirror rows first; returns how many pages moved. The mirror's
+        `page_id` column is the marker: a row still carrying one names chunks the index keyed by it,
+        and clearing it says every chunk of that page now answers to `page_uid`. Idempotent — a
+        repeated pass over an adopted page finds no chunks under the old key and one row to clear —
+        and the per-minute job drains a workspace in bounded batches while `_apply` adopts any page
+        it touches first, so no page is ever indexed under two keys at once."""
+        async with self.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(mem_page.c.page_uid, mem_page.c.page_id)
+                    .where(
+                        mem_page.c.workspace_id == self.workspace_id,
+                        mem_page.c.page_id.is_not(None),
+                    )
+                    .order_by(mem_page.c.page_uid)
+                    .limit(limit)
+                )
+            ).all()
+        for row in rows:
+            await self._adopt(row.page_uid, row.page_id)
+        return len(rows)
+
+    async def _adopt_chunks(self, page_id: UUID) -> None:
+        async with self.transaction() as connection:
+            content_id = await connection.scalar(
+                sa.select(mem_page.c.page_id).where(
+                    mem_page.c.workspace_id == self.workspace_id,
+                    mem_page.c.page_uid == page_id,
+                )
+            )
+        if content_id is not None:
+            await self._adopt(page_id, content_id)
+
+    async def _adopt(self, page_id: UUID, content_id: UUID) -> None:
+        await self.index.reattribute(IndexScope(OWNER_KIND_PAGE, str(content_id)), str(page_id))
+        async with self.transaction() as connection:
+            await connection.execute(
+                sa.update(mem_page).values(page_id=None).where(mem_page.c.page_uid == page_id)
+            )
 
     async def _unsettle_left_behind_facts(self, page_id: UUID, state: PageState | None) -> None:
         """Make every fact of a revision this page has left due for the index job again — each row
@@ -1436,7 +1465,7 @@ class PageIndexer:
         replacement committed."""
         left_behind: tuple[ColumnElement[bool], ...] = (
             memory_item.c.workspace_id == self.workspace_id,
-            memory_item.c.created_from_page_id == page_id,
+            memory_item.c.created_from_page_uid == page_id,
         )
         if state is not None:
             left_behind = (

@@ -77,9 +77,10 @@ class CorpusAttestor:
         fact_rows, ambient_rows = self._partitioned(page_rows, memory_rows)
         self._indexed(page_rows, memory_rows, chunk_rows)
         self._drained(page_rows, cursors)
-        owners: dict[UUID, list[UUID]] = {row.id: [] for row in page_rows}
+        owners: dict[UUID, list[UUID]] = {row.uid: [] for row in page_rows}
         for row in fact_rows:
-            owners[row.created_from_page_id].append(row.id)
+            owners[row.created_from_page_uid].append(row.id)
+        content_id = {row.uid: row.id for row in page_rows}
         by_id = {page_id_for(self.source_id, page.source_ref): page for page in self.pages}
         return CorpusReadiness(
             corpus_digest=corpus_digest(),
@@ -91,12 +92,12 @@ class CorpusAttestor:
             chunk_count=len(chunk_rows),
             pages=tuple(
                 PageOwners(
-                    source_ref=by_id[page_id].source_ref,
-                    page_id=page_id,
+                    source_ref=by_id[content_id[page_uid]].source_ref,
+                    page_id=content_id[page_uid],
                     memory_ids=tuple(sorted(memory_ids)),
                 )
-                for page_id, memory_ids in sorted(
-                    owners.items(), key=lambda item: by_id[item[0]].source_ref
+                for page_uid, memory_ids in sorted(
+                    owners.items(), key=lambda item: by_id[content_id[item[0]]].source_ref
                 )
             ),
             ambient=tuple(
@@ -114,7 +115,7 @@ class CorpusAttestor:
             page_rows = list(
                 (
                     await connection.execute(
-                        sa.select(tables.page).order_by(tables.page.c.revision, tables.page.c.id)
+                        sa.select(tables.page).order_by(tables.page.c.revision, tables.page.c.uid)
                     )
                 ).all()
             )
@@ -204,7 +205,7 @@ class CorpusAttestor:
 
     @staticmethod
     def _mirrored(page_rows: list[sa.Row], mirror_rows: list[sa.Row]) -> None:
-        if {row.page_id for row in mirror_rows} != {row.id for row in page_rows}:
+        if {row.page_uid for row in mirror_rows} != {row.uid for row in page_rows}:
             raise RuntimeError("issue_recall page mirrors are not ready")
 
     def _partitioned(
@@ -212,9 +213,9 @@ class CorpusAttestor:
     ) -> tuple[list[sa.Row], list[sa.Row]]:
         """Split the workspace's durable memory into page-derived facts and the declared ambient
         haystack, refusing a row from neither and an ambient ref that landed twice or not at all."""
-        page_ids = {row.id for row in page_rows}
+        page_ids = {row.uid for row in page_rows}
         declared = {memory.ref for memory in self.ambient}
-        facts = [row for row in memory_rows if row.created_from_page_id in page_ids]
+        facts = [row for row in memory_rows if row.created_from_page_uid in page_ids]
         ambient = [row for row in memory_rows if row.source_ref in declared]
         accounted = {row.id for row in facts} | {row.id for row in ambient}
         foreign = [row for row in memory_rows if row.id not in accounted]
@@ -243,14 +244,14 @@ class CorpusAttestor:
         if any(row.embedding_missing for row in chunk_rows):
             raise RuntimeError("issue_recall index chunks are not embedded")
         owners = {(row.owner_kind, row.owner_id) for row in chunk_rows}
-        missing = {("page", str(row.id)) for row in page_rows} - owners
+        missing = {("page", str(row.uid)) for row in page_rows} - owners
         missing |= {("memory_item", str(row.id)) for row in memory_rows} - owners
         if missing:
             raise RuntimeError(f"issue_recall owners hold no index chunk: {sorted(missing)}")
 
     @staticmethod
     def _drained(page_rows: list[sa.Row], cursors: dict[str, object]) -> None:
-        high_water = f"{page_rows[-1].revision}|{page_rows[-1].id}"
+        high_water = f"{page_rows[-1].revision}|{page_rows[-1].uid}"
         expected = {
             "page_change_cursor:index_pages": high_water,
             "page_change_cursor:derive_facts": high_water,

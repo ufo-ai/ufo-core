@@ -284,6 +284,9 @@ class CountingIndex:
     async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
         return await self.backend.restamp(scope, subject, keep)
 
+    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
+        await self.backend.reattribute(scope, owner_id)
+
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
@@ -423,13 +426,13 @@ async def _seed_page(
     title: str = "",
     stream: str = "",
 ) -> tuple[UUID, UUID]:
-    source_id, page_id = uuid4(), uuid4()
+    source_id, page_id, source_key, page_key = uuid7(), uuid7(), uuid4(), uuid4()
     await blob.put(f"pages/{page_id}", body.encode())
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_id,
+                id=source_key,
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
@@ -443,10 +446,10 @@ async def _seed_page(
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
-                id=page_id,
+                uid=page_id,
+                id=page_key,
                 workspace_id=workspace_id,
-                source_id=source_id,
+                source_id=source_key,
                 digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
                 body_ref=f"pages/{page_id}",
                 subject=SHARED_SUBJECT,
@@ -463,11 +466,12 @@ async def _seed_page(
 async def _seed_page_authority(
     workspace_id: UUID, page_id: UUID, source_id: UUID, subject: str
 ) -> None:
+    source_key, page_key = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_id,
+                id=source_key,
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
@@ -480,10 +484,10 @@ async def _seed_page_authority(
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
-                id=page_id,
+                uid=page_id,
+                id=page_key,
                 workspace_id=workspace_id,
-                source_id=source_id,
+                source_id=source_key,
                 digest="sha256:page",
                 body_ref=f"pages/{page_id}",
                 stream="notes",
@@ -557,7 +561,7 @@ async def _facts(workspace_id: UUID) -> list[sa.Row]:
                         memory_item.c.item_class,
                         memory_item.c.memory_kind,
                         memory_item.c.confidence,
-                        memory_item.c.created_from_page_id,
+                        memory_item.c.created_from_page_uid,
                         memory_item.c.as_of,
                         memory_item.c.superseded_by,
                     ).where(memory_item.c.workspace_id == workspace_id)
@@ -600,7 +604,7 @@ async def _granted_reader(workspace_id: UUID, subject: str, *source_ids: UUID) -
         for source_id in source_ids:
             granted = (
                 await connection.execute(
-                    sa.select(tables.source.c.connection_id).where(tables.source.c.id == source_id)
+                    sa.select(tables.source.c.connection_id).where(tables.source.c.uid == source_id)
                 )
             ).scalar_one()
             await connection.execute(
@@ -693,11 +697,11 @@ async def _rewrite_page(page_id: UUID, digest: str) -> int:
     assigned, so a test binds to the real workspace-monotonic counter rather than guessing it."""
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.page).values(digest=digest).where(tables.page.c.id == page_id)
+            sa.update(tables.page).values(digest=digest).where(tables.page.c.uid == page_id)
         )
         return (
             await connection.execute(
-                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
             )
         ).scalar_one()
 
@@ -708,7 +712,7 @@ async def _page_facts(page_id: UUID) -> dict[str, int | None]:
             (
                 await connection.execute(
                     sa.select(memory_item.c.body, memory_item.c.created_from_page_revision).where(
-                        memory_item.c.created_from_page_id == page_id
+                        memory_item.c.created_from_page_uid == page_id
                     )
                 )
             )
@@ -723,7 +727,7 @@ async def _embedding_state(page_id: UUID) -> tuple[str | None, datetime | None]:
         row = (
             await connection.execute(
                 sa.select(memory_item.c.embedding_digest, memory_item.c.embedding_claimed_at).where(
-                    memory_item.c.created_from_page_id == page_id
+                    memory_item.c.created_from_page_uid == page_id
                 )
             )
         ).one()
@@ -794,7 +798,7 @@ async def test_derive_facts_writes_each_source_supported_fact_through_page_chang
     assert fact.subject == SHARED_SUBJECT
     assert fact.memory_kind == "event"
     assert fact.confidence == 8
-    assert fact.created_from_page_id == page_id
+    assert fact.created_from_page_uid == page_id
 
 
 def test_an_entry_that_covers_another_is_a_restatement_and_a_distinct_claim_is_not() -> None:
@@ -1241,7 +1245,7 @@ async def test_a_tombstoned_pages_facts_are_retired_by_the_derivation_that_settl
         await _index_memory(store, probe)
         async with workspace_tx() as connection:
             await connection.execute(
-                sa.update(tables.page).values(tombstone=True).where(tables.page.c.id == page_id)
+                sa.update(tables.page).values(tombstone=True).where(tables.page.c.uid == page_id)
             )
         retired = replace(
             _change(page_id, source_id, SHARED_SUBJECT, "", 2, "sha256:page"), tombstone=True
@@ -1362,15 +1366,44 @@ async def _insert_fact(
                 memory_kind=KIND_FACT,
                 confidence=5,
                 source_ref=None,
-                created_from_page_id=created_from_page_id,
+                created_from_page_uid=created_from_page_id,
                 created_from_page_revision=(1 if created_from_page_id is not None else None),
-                source_id=source_id,
+                source_uid=source_id,
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
                 created_at=created_at,
                 updated_at=created_at,
             )
         )
+
+
+async def test_adopt_candidates_name_only_workspaces_still_chunked_by_content_id(db: None) -> None:
+    """The per-minute adopt JobSpec binds a workspace only while one of its mirror rows still
+    carries
+    the content id the index filed that page's chunks under; a workspace whose mirrors are all keyed
+    by page id runs no tick."""
+    pending, settled = await _workspace(), await _workspace()
+    for workspace_id, keyed_by_content_id in ((pending, True), (settled, False)):
+        page_id, source_id = uuid7(), uuid7()
+        await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+        async with workspace_tx() as connection:
+            content_id = await connection.scalar(
+                sa.select(tables.page.c.id).where(tables.page.c.uid == page_id)
+            )
+            await connection.execute(
+                sa.insert(mem_page).values(
+                    page_uid=page_id,
+                    page_id=content_id if keyed_by_content_id else None,
+                    workspace_id=workspace_id,
+                    subject=SHARED_SUBJECT,
+                    revision=1,
+                    created_at=WHEN,
+                )
+            )
+    adopt = next(
+        job for job in memory_manifest.manifest().jobs if job.name == memory_manifest.ADOPT_JOB
+    )
+    assert await adopt.candidates() == (pending,)
 
 
 async def test_consolidate_candidates_name_only_workspaces_with_a_clusterable_backlog(
@@ -1446,11 +1479,11 @@ async def _seed_copy(
                 memory_kind=memory_kind,
                 confidence=confidence,
                 source_ref=None,
-                created_from_page_id=created_from_page_id,
+                created_from_page_uid=created_from_page_id,
                 created_from_page_revision=(
                     created_from_page_revision if created_from_page_id is not None else None
                 ),
-                source_id=page_source_id,
+                source_uid=page_source_id,
                 embedding_digest="sha256:seeded",
                 superseded_by=superseded_by,
                 created_at=created_at,
@@ -1462,10 +1495,8 @@ async def _seed_copy(
                 sa.insert(memory_source).values(
                     workspace_id=workspace_id,
                     memory_item_id=item_id,
-                    source_id=page_source_id,
-                    source_uid=uuid7(),
-                    page_id=created_from_page_id,
-                    page_uid=uuid7(),
+                    source_uid=page_source_id,
+                    page_uid=created_from_page_id,
                     revision=created_from_page_revision,
                     created_at=created_at,
                     updated_at=created_at,
@@ -2569,12 +2600,12 @@ async def _seed_wiki_feed(workspace_id: UUID) -> UUID:
     """The synced feed a subject's wiki is written from. A page-derived row reaches a member only
     through a grant on the connection behind the feed its page came from, so one grant on this
     covers the whole page. Which subject its rows carry is the page's, never the feed's."""
-    source_id = uuid4()
+    source_id = uuid7()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_id,
+                id=uuid4(),
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
@@ -2601,14 +2632,17 @@ async def _seed_wiki_source_page(
     the core page through the reader's grant, so a fact seeded without them is one nobody sees. The
     revision is read back rather than chosen, because the feed assigns it on insert: a fact bound to
     any other number is a fact off its page."""
-    page_id = uuid4()
+    page_id = uuid7()
     async with workspace_tx() as connection:
+        source_key = await connection.scalar(
+            sa.select(tables.source.c.id).where(tables.source.c.uid == source_id)
+        )
         await connection.execute(
             sa.insert(tables.page).values(
-                uid=uuid7(),
-                id=page_id,
+                uid=page_id,
+                id=uuid4(),
                 workspace_id=workspace_id,
-                source_id=source_id,
+                source_id=source_key,
                 digest="sha256:page",
                 body_ref=f"pages/{page_id}",
                 subject=subject,
@@ -2621,13 +2655,12 @@ async def _seed_wiki_source_page(
         )
         revision = (
             await connection.execute(
-                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
             )
         ).scalar_one()
         await connection.execute(
             sa.insert(mem_page).values(
-                page_id=page_id,
-                page_uid=uuid7(),
+                page_uid=page_id,
                 workspace_id=workspace_id,
                 subject=subject,
                 revision=revision,
@@ -2722,7 +2755,7 @@ async def _page_moved_on(page_id: UUID) -> None:
     revision = await _rewrite_page(page_id, "sha256:moved")
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(mem_page).values(revision=revision).where(mem_page.c.page_id == page_id)
+            sa.update(mem_page).values(revision=revision).where(mem_page.c.page_uid == page_id)
         )
 
 
@@ -2733,16 +2766,16 @@ async def _every_page_moved_on(workspace_id: UUID) -> None:
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
-                sa.select(memory_item.c.created_from_page_id)
+                sa.select(memory_item.c.created_from_page_uid)
                 .where(
                     memory_item.c.workspace_id == workspace_id,
-                    memory_item.c.created_from_page_id.is_not(None),
+                    memory_item.c.created_from_page_uid.is_not(None),
                 )
                 .distinct()
             )
         ).all()
     for row in rows:
-        await _page_moved_on(row.created_from_page_id)
+        await _page_moved_on(row.created_from_page_uid)
 
 
 def _history_band(client: CurationClient) -> dict[str, object]:

@@ -188,7 +188,7 @@ class DocumentIngest:
         for page_id in page_ids:
             await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(page_id)))
         async with workspace_tx() as connection:
-            await connection.execute(tables.page.delete().where(tables.page.c.id.in_(page_ids)))
+            await connection.execute(tables.page.delete().where(tables.page.c.uid.in_(page_ids)))
             await connection.execute(
                 tables.source.delete().where(tables.source.c.id.in_(source_ids))
             )
@@ -313,7 +313,7 @@ class DocumentIngest:
             return list(
                 (
                     await connection.execute(
-                        sa.select(tables.page.c.id).where(tables.page.c.source_id.in_(source_ids))
+                        sa.select(tables.page.c.uid).where(tables.page.c.source_id.in_(source_ids))
                     )
                 ).scalars()
             )

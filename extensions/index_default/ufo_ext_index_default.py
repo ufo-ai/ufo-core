@@ -109,6 +109,9 @@ HELD = sa.text(
 RESTAMP = sa.text(
     "update chunk set subject = :subject where owner_kind = :owner_kind and owner_id = :owner_id"
 )
+REATTRIBUTE = sa.text(
+    "update chunk set owner_id = :owner_id where owner_kind = :owner_kind and owner_id = :previous"
+)
 HAS_CHUNKS = sa.text(
     "select 1 from chunk where owner_kind = :owner_kind and owner_id = :owner_id limit 1"
 )
@@ -241,6 +244,11 @@ class DefaultIndex:
                 return False
             await connection.execute(RESTAMP, {**params, "subject": subject})
         return True
+
+    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
+        params = {"owner_kind": scope.owner_kind, "previous": scope.owner_id, "owner_id": owner_id}
+        async with self.transaction() as connection:
+            await connection.execute(REATTRIBUTE, params)
 
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         if not keep:

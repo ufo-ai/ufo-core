@@ -840,6 +840,10 @@ class SampleIndex:
             self.chunks[digest] = replace(self.chunks[digest], subject=subject)
         return True
 
+    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
+        for digest in [digest for digest, chunk in self.chunks.items() if _in_scope(chunk, scope)]:
+            self.chunks[digest] = replace(self.chunks[digest], owner_id=owner_id)
+
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         for digest in [
             digest
