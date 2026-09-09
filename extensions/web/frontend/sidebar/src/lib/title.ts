@@ -4,7 +4,8 @@ import type { ChatRow } from "@/lib/rail";
 import { agentHash, type Route } from "@/lib/route";
 import type { Agent, OwnedConversation } from "@/lib/types";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
-import { APP_STORE_TITLE } from "@/views/Store";
+
+export const APP_STORE_TITLE = "App Store";
 
 const PRODUCT = "ufo";
 const TRAIL = " · ";

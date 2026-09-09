@@ -10,9 +10,9 @@ import {
 import { slotOf, titled } from "@/kernel/objects";
 import { agentName } from "@/lib/agentName";
 import { getJson } from "@/lib/api";
+import { subject } from "@/lib/audience";
 import { chatHash, workspaceHash, agentHash, sectionHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
-import { subject } from "@/views/Conversations";
 
 export type Hit = {
   key: string;

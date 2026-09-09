@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 
 import { Search } from "@/components/ui/field";
 import type { Placement } from "@/kernel/pager";
@@ -13,7 +13,9 @@ import {
   PageHead,
   PageSearch,
   Pane,
+  PaneFault,
 } from "@/kernel/pane";
+import { Loading } from "@/kernel/panel";
 import { usePlaceRecorder } from "@/kernel/place";
 import { cn } from "@/lib/cn";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
@@ -131,5 +133,9 @@ function Registered<Tab extends string>({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
-  return views[view].render(place, onPlace);
+  return (
+    <PaneFault at={view}>
+      <Suspense fallback={<Loading />}>{views[view].render(place, onPlace)}</Suspense>
+    </PaneFault>
+  );
 }

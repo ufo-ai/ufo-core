@@ -3,7 +3,7 @@ import { isPortalChat } from "@/lib/audience";
 import type { ChatRow } from "@/lib/rail";
 import { agentHash, workspaceHash, type Route } from "@/lib/route";
 import type { Agent, OwnedConversation } from "@/lib/types";
-import { APP_CREATOR_TITLE } from "@/views/AppBuilder";
+import { APP_CREATOR_TITLE } from "@/lib/wizard";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 
 const PRODUCT = "ufo";

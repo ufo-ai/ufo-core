@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, onTestFinished, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { BUILD_STEP_MS, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
+import { WATCH_MS, type FirstRunPayload } from "@/lib/firstRun";
+import { BUILD_STEP_MS } from "@/views/FirstRun";
 import { resetChatStore } from "@/lib/chatStore";
 import {
   firstRunHash,

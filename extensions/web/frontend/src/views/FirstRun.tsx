@@ -21,22 +21,16 @@ import { BASE, postAction, postIntent, postObjectAction } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
+import {
+  FIRST_RUN_READ,
+  WATCH_MS,
+  type FirstRunPayload,
+  type ProviderTile,
+} from "@/lib/firstRun";
 import { chatSurface } from "@/lib/mainAgent";
 import { openConversation } from "@/lib/turnStream";
-import type { ActionView, Agent, Member } from "@/lib/types";
+import type { Agent, Member } from "@/lib/types";
 import { CONNECT_INSTALLS, Connect, ConnectSurfaces } from "@/views/Surfaces";
-
-type ProviderTile = { name: string; label: string; summary: string; group: string };
-
-type Connector = ProviderTile & { installed: boolean };
-
-export type FirstRunPayload = {
-  providers: ProviderTile[];
-  connectors: Connector[];
-  actions: { member: ActionView[]; memory: ActionView[]; enrichment_profile: ActionView[] };
-  model_key_held: boolean;
-  workspace_domain: string | null;
-};
 
 type Profile = {
   name: string;
@@ -131,13 +125,7 @@ function opening(business: string): string {
   return "I just set up this workspace. My business: " + said(business) + ". " + FIRST_TASK;
 }
 
-export const FIRST_RUN_READ = "/workspace/first-run";
-
 const RECORD_FIRST_RUN_ACTION = "record_first_run";
-
-/** The install happens on the provider's own pages, so nothing here can say when it lands — the wait is
- *  measured in the seconds the member spends over there. */
-export const WATCH_MS = 3_000;
 
 type PoolPayload = { connections: { provider: string }[] };
 

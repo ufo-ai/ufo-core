@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconChevronDown,
@@ -20,32 +20,24 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { AgentSetup } from "@/views/AgentSetup";
-
-import { AgentBuilder, Agents, AppsIndex } from "@/views/Agents";
-import { AppsProvider } from "@/views/Apps";
-import { Chat } from "@/views/Chat";
-import { ChatPane, ConversationSlot } from "@/views/ChatPane";
-import { ConversationSlotPane } from "@/views/ConversationSlotPane";
-import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
+import { AppsIndex } from "@/views/AppsIndex";
 import { MinimalSidebar } from "@/components/MinimalSidebar";
-import { FirstRun } from "@/views/FirstRun";
-import { Home } from "@/views/Home";
 import { SignIn } from "@/views/SignIn";
 import { Shortcuts } from "@/views/Shortcuts";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS, MESSAGING, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
-import { WEB_SURFACE, isPortalChat, Viewer, WorkspaceId, surfaceWord, useViewer } from "@/lib/audience";
+import { WEB_SURFACE, isPortalChat, Viewer, WorkspaceId } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
+import { AppsProvider } from "@/lib/apps";
 import { useAppStatus } from "@/lib/appStatusStore";
 import { DrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
-import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
+import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
 import { Loading } from "@/kernel/panel";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
-import { SETUP, pageCrumb, pageTitle, type Crumb } from "@/lib/title";
+import { SETUP, pageCrumb, pageTitle } from "@/lib/title";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -58,7 +50,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { stampIso, type ChatRow } from "@/lib/rail";
-import { SurfaceMark } from "@/lib/surfaceMark";
 import {
   pickPinned,
   pickSectionShut,
@@ -104,8 +95,41 @@ import {
 } from "@/lib/route";
 import { heldTrack } from "@/lib/tracks";
 import { ALL_SURFACES, SurfacesProvider, useOfferedTabs } from "@/lib/surfaces";
-import type { Agent, ArchivedApp, Member, OwnedConversation, Surfaces } from "@/lib/types";
+import type { Agent, ArchivedApp, Member, Surfaces } from "@/lib/types";
 import { useNarrow } from "@/lib/narrow";
+
+/** One route's pane is one chunk: a member who opens the wizard, a workspace tab or a connector never
+ *  downloads the transcript renderer, and the shell paints before any of them arrives. */
+const AgentSetup = lazy(() =>
+  import("@/views/AgentSetup").then((module) => ({ default: module.AgentSetup })),
+);
+const AgentBuilder = lazy(() =>
+  import("@/views/Agents").then((module) => ({ default: module.AgentBuilder })),
+);
+const Agents = lazy(() => import("@/views/Agents").then((module) => ({ default: module.Agents })));
+const ChatPane = lazy(() =>
+  import("@/views/ChatPane").then((module) => ({ default: module.ChatPane })),
+);
+const ConversationSlotPane = lazy(() =>
+  import("@/views/ConversationSlotPane").then((module) => ({
+    default: module.ConversationSlotPane,
+  })),
+);
+const FirstRun = lazy(() =>
+  import("@/views/FirstRun").then((module) => ({ default: module.FirstRun })),
+);
+const Home = lazy(() => import("@/views/Home").then((module) => ({ default: module.Home })));
+const LinkedPane = lazy(() =>
+  import("@/views/ChatPane").then((module) => ({ default: module.LinkedPane })),
+);
+
+function PaneLoading() {
+  return (
+    <PaneNote>
+      <Loading />
+    </PaneNote>
+  );
+}
 
 export type AppProps = {
   agents: Agent[];
@@ -232,22 +256,26 @@ export function App({
           <SurfacesProvider surfaces={surfaces}>
             <MainAgentProvider agents={agents} onAgents={onAgents}>
               {mainAgent ? (
-                <FirstRun
-                  agent={mainAgent}
-                  agents={agents}
-                  member={member}
-                  step={route.step}
-                  onStep={placeFirstRun}
-                  onClose={() => openNewChat(mainAgent.id)}
-                  onDone={(conversationId) => {
-                    const speaks = chatSurface(agents) ?? mainAgent;
-                    openHomeWithConnectors(
-                      conversationId
-                        ? homeConversationLane(conversationId)
-                        : mintHomeLane(speaks.id, []),
-                    );
-                  }}
-                />
+                <PaneFault at={route.kind}>
+                  <Suspense fallback={<PaneLoading />}>
+                    <FirstRun
+                      agent={mainAgent}
+                      agents={agents}
+                      member={member}
+                      step={route.step}
+                      onStep={placeFirstRun}
+                      onClose={() => openNewChat(mainAgent.id)}
+                      onDone={(conversationId) => {
+                        const speaks = chatSurface(agents) ?? mainAgent;
+                        openHomeWithConnectors(
+                          conversationId
+                            ? homeConversationLane(conversationId)
+                            : mintHomeLane(speaks.id, []),
+                        );
+                      }}
+                    />
+                  </Suspense>
+                </PaneFault>
               ) : (
                 <PaneNote>No such app.</PaneNote>
               )}
@@ -315,18 +343,22 @@ export function App({
                   />
                 ) : null}
                 <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
-                  <RoutedPane
-                    route={route}
-                    agents={agents}
-                    member={member}
-                    mainAgent={mainAgent}
-                    seeking={seeking}
-                    onActive={setActiveLane}
-                    onAgents={onAgents}
-                    onExitBuilder={exitBuild}
-                    onForwardApps={forwardBuild}
-                    buildWanted={wantedBuild}
-                  />
+                  <PaneFault at={route.kind}>
+                    <Suspense fallback={<PaneLoading />}>
+                      <RoutedPane
+                        route={route}
+                        agents={agents}
+                        member={member}
+                        mainAgent={mainAgent}
+                        seeking={seeking}
+                        onActive={setActiveLane}
+                        onAgents={onAgents}
+                        onExitBuilder={exitBuild}
+                        onForwardApps={forwardBuild}
+                        buildWanted={wantedBuild}
+                      />
+                    </Suspense>
+                  </PaneFault>
                 </AppsProvider>
                 <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
               </div>
@@ -968,78 +1000,6 @@ function RoutedPane({
   }
   const missed: never = route;
   return missed;
-}
-
-function LinkedPane({
-  agent,
-  conversation,
-  member,
-  crumb,
-  slot,
-  onActivity,
-  onSelectSlot,
-}: {
-  agent: Agent;
-  conversation: OwnedConversation;
-  member: Member;
-  crumb?: Crumb;
-  slot?: string;
-  onActivity: (conversationId: string) => void;
-  onSelectSlot: (slot: string | null) => void;
-}) {
-  const [disclosed, setDisclosed] = useState(false);
-  const viewer = useViewer();
-  const readable = conversation.readable || disclosed;
-  return (
-    <Pane>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <Header
-          crumb={crumb}
-          title={subject(conversation, viewer)}
-          acts={<SurfaceMark conversation={conversation} />}
-          pinned
-        />
-        {readable ? (
-          conversation.commentable ? (
-            <Chat
-              agent={agent}
-              member={member}
-              conversationId={conversation.id}
-              onActivity={onActivity}
-            />
-          ) : (
-            <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-              <ConversationDetail
-                agent={agent}
-                conversation={conversation}
-                headed
-              />
-              <p className="max-w-hint text-ink-soft">
-                This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
-                continue it.
-              </p>
-            </div>
-          )
-        ) : (
-          <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-            <Disclose
-              agent={agent}
-              conversation={conversation}
-              onOpened={() => setDisclosed(true)}
-            />
-          </div>
-        )}
-      </div>
-      {readable && slot ? (
-        <ConversationSlot
-          agent={agent}
-          conversationId={conversation.id}
-          slot={slot}
-          onClose={() => onSelectSlot(null)}
-        />
-      ) : null}
-    </Pane>
-  );
 }
 
 function NotShared() {

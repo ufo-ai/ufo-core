@@ -3,12 +3,15 @@ import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Sheet } from "@/components/ui/sheet";
 import { Chat, type ChatProps } from "@/views/Chat";
-import { Header, Pane } from "@/kernel/pane";
+import { ConversationDetail, Disclose } from "@/views/Conversations";
+import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
+import { subject, surfaceWord, useViewer } from "@/lib/audience";
 import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
+import { SurfaceMark } from "@/lib/surfaceMark";
 import type { Crumb } from "@/lib/title";
-import type { ConversationAgent } from "@/lib/types";
+import type { Agent, ConversationAgent, Member, OwnedConversation } from "@/lib/types";
 import {
   ConversationSlotPane,
   SlotIcon,
@@ -128,6 +131,78 @@ export function ChatPane({
           slot={slot}
           summary={selected}
           onClose={() => onSelectSlot?.(null)}
+        />
+      ) : null}
+    </Pane>
+  );
+}
+
+export function LinkedPane({
+  agent,
+  conversation,
+  member,
+  crumb,
+  slot,
+  onActivity,
+  onSelectSlot,
+}: {
+  agent: Agent;
+  conversation: OwnedConversation;
+  member: Member;
+  crumb?: Crumb;
+  slot?: string;
+  onActivity: (conversationId: string) => void;
+  onSelectSlot: (slot: string | null) => void;
+}) {
+  const [disclosed, setDisclosed] = useState(false);
+  const viewer = useViewer();
+  const readable = conversation.readable || disclosed;
+  return (
+    <Pane>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <Header
+          crumb={crumb}
+          title={subject(conversation, viewer)}
+          acts={<SurfaceMark conversation={conversation} />}
+          pinned
+        />
+        {readable ? (
+          conversation.commentable ? (
+            <Chat
+              agent={agent}
+              member={member}
+              conversationId={conversation.id}
+              onActivity={onActivity}
+            />
+          ) : (
+            <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
+              <ConversationDetail
+                agent={agent}
+                conversation={conversation}
+                headed
+              />
+              <p className="max-w-hint text-ink-soft">
+                This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
+                continue it.
+              </p>
+            </div>
+          )
+        ) : (
+          <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
+            <Disclose
+              agent={agent}
+              conversation={conversation}
+              onOpened={() => setDisclosed(true)}
+            />
+          </div>
+        )}
+      </div>
+      {readable && slot ? (
+        <ConversationSlot
+          agent={agent}
+          conversationId={conversation.id}
+          slot={slot}
+          onClose={() => onSelectSlot(null)}
         />
       ) : null}
     </Pane>

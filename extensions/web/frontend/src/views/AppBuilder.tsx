@@ -7,17 +7,10 @@ import type { TasksSlotPayload } from "@/views/ConversationSlotPane";
 import { cn } from "@/lib/cn";
 import { chatState, updateChat, useChat } from "@/lib/chatStore";
 import { sendMessage } from "@/lib/turnStream";
+import { APP_CREATOR_TITLE, wizardKey } from "@/lib/wizard";
 import type { Agent, Member } from "@/lib/types";
 
 const OPENING_MESSAGE = "Build me a new app.";
-
-export const APP_CREATOR_TITLE = "App Creator";
-
-/** Not the chat screen's `new:<agentId>`, so neither pane's founding send can ever hold the other's
- *  busy, and a wizard mount finds nothing on the key it watches but its own run. */
-export function wizardKey(agentId: string): string {
-  return "wizard:" + agentId;
-}
 
 export type AppBuilderProps = {
   agent: Agent;

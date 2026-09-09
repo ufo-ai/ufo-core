@@ -6,6 +6,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import {
+  Component,
   Fragment,
   createContext,
   useContext,
@@ -89,6 +90,29 @@ export function PaneNote({ children }: { children: ReactNode }) {
       <Empty>{children}</Empty>
     </Pane>
   );
+}
+
+type Faulting = { at: string; children: ReactNode };
+
+/** A pane whose code arrives over the wire: `Suspense` draws the wait, and a rejected chunk lands here,
+ *  because React reaches a render fault through a class and nothing else. It stands over the route `at`
+ *  names rather than keyed by it: a key would remount the pane on every step, taking the composer's
+ *  draft and the member's place in it with it, so the fault is cleared on the step instead. */
+export class PaneFault extends Component<Faulting, { faulted: boolean }> {
+  state = { faulted: false };
+
+  static getDerivedStateFromError() {
+    return { faulted: true };
+  }
+
+  componentDidUpdate(before: Faulting) {
+    if (this.state.faulted && before.at !== this.props.at) this.setState({ faulted: false });
+  }
+
+  render() {
+    if (this.state.faulted) return <PaneNote>This page did not load — reload to retry.</PaneNote>;
+    return this.props.children;
+  }
 }
 
 const BandedContext = createContext(false);

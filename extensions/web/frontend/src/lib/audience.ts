@@ -1,5 +1,7 @@
 import { createContext, useContext } from "react";
 
+import type { Conversation } from "@/lib/types";
+
 export const Viewer = createContext<string | null>(null);
 
 /** The signed-in member's email, from the provider mountApp installs. */
@@ -97,6 +99,26 @@ export function speakerName(speaker: string): string {
 
 const EVERY_MEMBER = "Every member";
 const NO_MEMBER_GRANTS = "No member grants — admins only";
+
+function who(
+  entry: {
+    member_email: string | null;
+    audience: string;
+    surface_label?: string | null;
+    speakers?: string[];
+  },
+  viewer: string | null,
+): string {
+  if (entry.member_email === null) return audienceLabel(entry, viewer);
+  const owned = ownerLabel(entry.member_email, viewer);
+  if (owned === "You") return owned;
+  const sender = entry.speakers?.find(Boolean);
+  return sender ? speakerName(sender) : owned;
+}
+
+export function subject(conversation: Conversation, viewer: string | null): string {
+  return conversation.description || who(conversation, viewer);
+}
 
 export function webAudienceLabel(main: boolean, audience: string[]): string {
   if (main) return EVERY_MEMBER;

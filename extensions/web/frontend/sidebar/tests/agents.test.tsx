@@ -834,7 +834,7 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
   expect(index.queryByText("Invoice Intake")).toBeNull();
   expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Restore" }));
   const dialog = await screen.findByRole("dialog");
   const name = within(dialog).getByRole("textbox", { name: "Name" });
   await userEvent.clear(name);

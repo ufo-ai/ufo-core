@@ -1,4 +1,4 @@
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
 
 import { resetAppStatusStore } from "@/lib/appStatusStore";
@@ -11,6 +11,10 @@ import { resetStreams } from "@/lib/turnStream";
 // A CI failure's DOM dump is the one record of what actually rendered; the default limit cuts it off
 // inside the page's own top bar.
 process.env.DEBUG_PRINT_LIMIT ??= "30000";
+
+// A pane's code arrives through a dynamic import, which the module runner transforms on the first
+// render of each file — over the 1s a query waits by default on a two-core CI runner.
+configure({ asyncUtilTimeout: 3_000 });
 
 const KEY_FAULT = /unique "key" prop|two children with the same key/;
 let keyFaults: string[] = [];

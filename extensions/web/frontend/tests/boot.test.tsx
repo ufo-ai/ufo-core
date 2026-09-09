@@ -65,11 +65,16 @@ test("the page loads one script, which is the one this test runs", () => {
 
 const DIAGRAM_LIBRARIES = ["cytoscape", "roughjs", "d3-selection", "d3-scale", "elkjs"];
 
-const BUNDLE_CEILING_BYTES = 1_400_000;
+/** Every route's pane is a chunk of its own, so the markdown stack the transcript renders through is
+ *  what a member who never opens a conversation does not download. */
+const TRANSCRIPT_LIBRARIES = ["micromark", "mdast", "streamdown"];
 
-test("the one script carries no diagram library, and stays under its ceiling", () => {
+const BUNDLE_CEILING_BYTES = 680_000;
+
+test("the one script carries no diagram or transcript library, and stays under its ceiling", () => {
   const bundle = readFileSync(join(STATIC, entryAsset()), "utf8");
   expect(DIAGRAM_LIBRARIES.filter((name) => bundle.includes(name))).toEqual([]);
+  expect(TRANSCRIPT_LIBRARIES.filter((name) => bundle.includes(name))).toEqual([]);
   expect(bundle.length).toBeLessThan(BUNDLE_CEILING_BYTES);
 });
 

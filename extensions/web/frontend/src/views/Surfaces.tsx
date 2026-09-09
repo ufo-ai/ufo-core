@@ -14,7 +14,7 @@ import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { ActionView, Agent, Member } from "@/lib/types";
-import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
+import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/lib/firstRun";
 
 export const SURFACES_READ = "/workspace/surfaces";
 

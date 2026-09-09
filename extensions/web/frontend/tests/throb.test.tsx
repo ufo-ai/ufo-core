@@ -88,7 +88,7 @@ async function streaming() {
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.type(screen.getByLabelText("Ask UFO"), "go");
+  await userEvent.type(await screen.findByLabelText("Ask UFO"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   return StreamFake.last();

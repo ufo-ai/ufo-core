@@ -1,8 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Suspense, lazy } from "react";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { PaneFault } from "@/kernel/pane";
+import { Loading } from "@/kernel/panel";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { agentHash } from "@/lib/route";
 import { agentCrumb } from "@/lib/title";
@@ -1371,4 +1374,29 @@ test("a history the read carries whole ends on its last row", async () => {
   await screen.findByRole("button", { name: /^Newest thread \d+(mo|y)$/ });
 
   expect(screen.queryByText(/The newest few/)).toBeNull();
+});
+
+function Standing({ at }: { at: string }) {
+  return (
+    <PaneFault at={at}>
+      <Suspense fallback={<Loading />}>{at === "unreached" ? <Unreached /> : <p>Arrived.</p>}</Suspense>
+    </PaneFault>
+  );
+}
+
+const Unreached = lazy(() => Promise.reject(new Error("chunk")));
+
+test("a pane whose code never arrives says so rather than blanking the screen", async () => {
+  render(<Standing at="unreached" />);
+
+  expect(await screen.findByText("This page did not load — reload to retry.")).toBeTruthy();
+});
+
+test("the pane the member steps to next draws, rather than the fault the last one left", async () => {
+  const view = render(<Standing at="unreached" />);
+  await screen.findByText("This page did not load — reload to retry.");
+
+  view.rerender(<Standing at="arrived" />);
+
+  expect(await screen.findByText("Arrived.")).toBeTruthy();
 });

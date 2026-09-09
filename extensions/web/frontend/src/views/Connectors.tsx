@@ -62,7 +62,7 @@ import { ProviderGlyph } from "@/lib/providerGlyph";
 import { connectArrival } from "@/lib/router";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
-import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/views/FirstRun";
+import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/lib/firstRun";
 import { CONNECT_INSTALLS } from "@/views/Surfaces";
 
 type Stream = {

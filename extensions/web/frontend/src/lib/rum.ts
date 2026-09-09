@@ -10,6 +10,7 @@ const FIELDS = ["applicationId", "clientToken", "site", "env", "version"] as con
 export type RumDeploy = Record<(typeof FIELDS)[number], string>;
 
 let recording: Promise<DatadogRum> | null = null;
+let named: string | null = null;
 
 /** The surface writes the block and refuses to serve a page that declares none, so an absent block is a
  *  page no deploy serves. A block written half-way is said rather than recorded against. */
@@ -47,10 +48,14 @@ export function rumOptions(deploy: RumDeploy): RumInitConfiguration {
 export function startRum(deploy: RumDeploy): void {
   recording = import("@datadog/browser-rum").then(({ datadogRum }) => {
     datadogRum.init(rumOptions(deploy));
+    if (named !== null) datadogRum.setUser({ id: named, email: named });
     return datadogRum;
   });
 }
 
+/** The name is held as well as said: the session read can answer before the recorder has started, and
+ *  a recording that opens without the member is one nobody can find by who it belongs to. */
 export function identifyRum(email: string): void {
+  named = email;
   void recording?.then((rum) => rum.setUser({ id: email, email }));
 }

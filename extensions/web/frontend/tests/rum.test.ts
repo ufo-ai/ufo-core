@@ -1,9 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
-import { heldRum, rumOptions, type RumDeploy } from "@/lib/rum";
+import { heldRum, identifyRum, rumOptions, startRum, type RumDeploy } from "@/lib/rum";
+
+vi.mock("@datadog/browser-rum", () => ({
+  datadogRum: { init: vi.fn(), setUser: vi.fn() },
+}));
 
 const PAGE = join(import.meta.dirname, "..", "index.html");
 const DEPLOY: RumDeploy = {
@@ -49,4 +53,17 @@ test("every field a member types into is masked in the recording", () => {
   expect(options.defaultPrivacyLevel).toBe("mask-user-input");
   expect(options.sessionReplaySampleRate).toBe(100);
   expect(options).toMatchObject({ env: "testing", version: "abc12345", service: "ufo-portal" });
+});
+
+test("a member named before the recorder starts is who the recording opens with", async () => {
+  const { datadogRum } = await import("@datadog/browser-rum");
+  identifyRum("member@example.com");
+  startRum(DEPLOY);
+
+  await vi.waitFor(() =>
+    expect(datadogRum.setUser).toHaveBeenCalledWith({
+      id: "member@example.com",
+      email: "member@example.com",
+    }),
+  );
 });

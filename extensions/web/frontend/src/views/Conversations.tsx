@@ -7,11 +7,9 @@ import { Notice, Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/
 import { agentName } from "@/lib/agentName";
 import { postAction } from "@/lib/api";
 import {
-  audienceLabel,
   origin as surfaceOrigin,
-  ownerLabel,
   slackLink,
-  speakerName,
+  subject,
   useViewer,
 } from "@/lib/audience";
 import { useEarlierMessages, type EarlierMessages } from "@/lib/earlier";
@@ -75,26 +73,6 @@ export function Disclose({
       </Section>
     </>
   );
-}
-
-function who(
-  entry: {
-    member_email: string | null;
-    audience: string;
-    surface_label?: string | null;
-    speakers?: string[];
-  },
-  viewer: string | null,
-): string {
-  if (entry.member_email === null) return audienceLabel(entry, viewer);
-  const owned = ownerLabel(entry.member_email, viewer);
-  if (owned === "You") return owned;
-  const sender = entry.speakers?.find(Boolean);
-  return sender ? speakerName(sender) : owned;
-}
-
-export function subject(conversation: Conversation, viewer: string | null): string {
-  return conversation.description || who(conversation, viewer);
 }
 
 function origin(conversation: Conversation): string {

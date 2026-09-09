@@ -29,7 +29,8 @@ import {
   QUIET,
   Section,
 } from "@/kernel/panel";
-import type { ListingSpec, RowContext } from "@/kernel/listing";
+import { Listing, type ListingSpec, type RowContext } from "@/kernel/listing";
+import type { Placement } from "@/kernel/pager";
 import { BASE, postAction } from "@/lib/api";
 import { useMainAgent } from "@/lib/mainAgent";
 import { BrandMark, BRAND_MARKS } from "@/lib/brandMark";
@@ -120,7 +121,7 @@ function slotName(slot: string) {
     .replace(/^-+|-+$/g, "");
 }
 
-export const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
+const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
   lead: (
     <Section
@@ -734,4 +735,14 @@ function CredentialPromptDialogForm({
       </DialogFooter>
     </>
   );
+}
+
+export function WorkspaceCredentials({
+  place,
+  onPlace,
+}: {
+  place: Placement;
+  onPlace: (place: Placement) => void;
+}) {
+  return <Listing spec={CREDENTIALS} place={place} onPlace={onPlace} />;
 }

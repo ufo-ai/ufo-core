@@ -204,7 +204,7 @@ test("a first message opens a conversation, lands it in the rail, and routes to 
   location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Ask UFO"), "hello there");
+  await userEvent.type(await screen.findByLabelText("Ask UFO"), "hello there");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
@@ -232,12 +232,12 @@ test("a second message sent before the first is answered opens no second convers
   location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Ask UFO"), "first half");
+  await userEvent.type(await screen.findByLabelText("Ask UFO"), "first half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   // Until that POST answers nothing knows which conversation it opened, and a second send to the `new`
   // sentinel opens another one, so the composer holds the words rather than founding again.
-  await userEvent.type(screen.getByLabelText("Ask UFO"), "second half");
+  await userEvent.type(await screen.findByLabelText("Ask UFO"), "second half");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(posts.length).toBe(1);
@@ -265,7 +265,7 @@ test("two submits the page could not re-render between still open one conversati
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Ask UFO"), "one thought");
+  await userEvent.type(await screen.findByLabelText("Ask UFO"), "one thought");
   const form = screen.getByLabelText("Ask UFO").closest("form");
 
   await act(async () => {
@@ -289,7 +289,7 @@ test("a first message sent before the rail resolves still lands, and the rail me
   location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.type(screen.getByLabelText("Ask UFO"), "early words");
+  await userEvent.type(await screen.findByLabelText("Ask UFO"), "early words");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
   expect(within(screen.getByTestId("log")).getByText("early words")).toBeTruthy();

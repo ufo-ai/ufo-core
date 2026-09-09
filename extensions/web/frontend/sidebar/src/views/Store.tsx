@@ -12,11 +12,11 @@ import { postIntent, postObjectAction } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
 import { openAgent } from "@/lib/router";
+import { APP_STORE_TITLE } from "@/lib/title";
 import type { Agent, ArchivedApp, Member } from "@/lib/types";
-import { APP_CREATOR_TITLE } from "@/views/AppBuilder";
-import { useApps } from "@/views/Apps";
+import { APP_CREATOR_TITLE } from "@/lib/wizard";
+import { useApps } from "@/lib/apps";
 
-export const APP_STORE_TITLE = "App Store";
 const APP_CREATOR_PURPOSE = "Build an app of your own with the main agent.";
 const INSTALL = "Install";
 const REMOVE = "Remove";

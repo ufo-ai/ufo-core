@@ -21,7 +21,7 @@ import { PressRow } from "@/components/ui/pressrow";
 import { Header } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
-import { isPortalChat, surfaceWord, useViewer } from "@/lib/audience";
+import { isPortalChat, subject, surfaceWord, useViewer } from "@/lib/audience";
 import { agentName } from "@/lib/agentName";
 import { BUILD_ASK, setPendingAsk } from "@/lib/pendingAsk";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
@@ -29,12 +29,7 @@ import { cn } from "@/lib/cn";
 import type { ChatRow } from "@/lib/rail";
 import type { SetupState } from "@/views/AgentSetup";
 import { Chat } from "@/views/Chat";
-import {
-  ConversationDetail,
-  Disclose,
-  conversationTitle,
-  subject,
-} from "@/views/Conversations";
+import { ConversationDetail, Disclose, conversationTitle } from "@/views/Conversations";
 import {
   COMPOSE,
   agentSetupHash,

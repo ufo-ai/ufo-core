@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type FormEvent, type ReactNode } from "react";
+import { useState, type FormEvent } from "react";
 
 import { IconSettings } from "@tabler/icons-react";
 
@@ -14,6 +14,7 @@ import { DataTable } from "@/kernel/table";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { postObjectAction } from "@/lib/api";
+import { useApps } from "@/lib/apps";
 import { useMainAgent } from "@/lib/mainAgent";
 import { Moment } from "@/lib/moments";
 import { openAgent } from "@/lib/router";
@@ -22,33 +23,6 @@ import { AppSettings } from "@/views/Agents";
 import { SETTINGS_TABS, type SettingsTab } from "@/views/AgentPane";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
-
-type AppsState = {
-  agents: Agent[];
-  archived: ArchivedApp[];
-  onRestored: () => void;
-};
-
-const AppsContext = createContext<AppsState | null>(null);
-
-export function useApps(): AppsState {
-  const state = useContext(AppsContext);
-  if (!state) throw new Error("AppsProvider is required");
-  return state;
-}
-
-export function AppsProvider({
-  agents,
-  archived,
-  onRestored,
-  children,
-}: AppsState & { children: ReactNode }) {
-  return (
-    <AppsContext.Provider value={{ agents, archived, onRestored }}>
-      {children}
-    </AppsContext.Provider>
-  );
-}
 
 const CREATED_BY_ME = "Created by me";
 const ARCHIVED = "Archived";

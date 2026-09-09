@@ -1,7 +1,6 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
-  IconBrandSlack,
   IconBroadcast,
   IconChevronDown,
   IconCirclePlusFilled,
@@ -11,11 +10,9 @@ import {
   IconLayoutSidebarRight,
   IconLogout,
   IconMenu2,
-  IconMessageCircle,
   IconMoon,
   IconPlug,
   IconSun,
-  IconTerminal2,
   IconUsers,
   IconX,
 } from "@tabler/icons-react";
@@ -39,45 +36,32 @@ import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AgentSetup } from "@/views/AgentSetup";
-
-import { Agents, AppsIndex } from "@/views/Agents";
-import { AppsProvider } from "@/views/Apps";
-import { Chat } from "@/views/Chat";
-import { ChatPane, ConversationSlot } from "@/views/ChatPane";
-import { ConversationSlotPane } from "@/views/ConversationSlotPane";
-import { ConversationDetail, Disclose, subject } from "@/views/Conversations";
-import { FirstRun } from "@/views/FirstRun";
+import { AppsIndex } from "./views/AppsIndex";
 import { SignIn } from "@/views/SignIn";
-import { Store } from "./views/Store";
 import { ConnectSurfaces, SURFACES_READ, type SurfacesPayload } from "@/views/Surfaces";
 import { SearchRow, Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
-  IMESSAGE_SURFACE,
-  SLACK_SURFACE,
-  UFO_SURFACE,
   WEB_SURFACE,
   isPortalChat,
   Viewer,
   WorkspaceId,
   origin,
-  slackLink,
   speakerName,
-  surfaceWord,
-  useViewer,
 } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
+import { AppsProvider } from "@/lib/apps";
 import { useAppStatus } from "@/lib/appStatusStore";
+import { SurfaceGlyph } from "@/lib/surfaceMark";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
-import { COLUMN, Header, Pane, PaneNote } from "@/kernel/pane";
+import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
 import { Loading, usePanelRead } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
-import { SETUP, pageCrumb, pageTitle, type Crumb } from "@/lib/title";
+import { SETUP, pageCrumb, pageTitle } from "@/lib/title";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -135,7 +119,37 @@ import {
   type WorkspacePlace,
 } from "@/lib/route";
 import { ALL_SURFACES, SurfacesProvider, useOfferedTabs } from "@/lib/surfaces";
-import type { Agent, ArchivedApp, Member, OwnedConversation, Surfaces } from "@/lib/types";
+import type { Agent, ArchivedApp, Member, Surfaces } from "@/lib/types";
+
+/** One route's pane is one chunk: a member who opens the wizard, the store or a workspace tab never
+ *  downloads the transcript renderer, and the sidebar paints before any of them arrives. */
+const AgentSetup = lazy(() =>
+  import("@/views/AgentSetup").then((module) => ({ default: module.AgentSetup })),
+);
+const Agents = lazy(() => import("@/views/Agents").then((module) => ({ default: module.Agents })));
+const ChatPane = lazy(() =>
+  import("@/views/ChatPane").then((module) => ({ default: module.ChatPane })),
+);
+const ConversationSlotPane = lazy(() =>
+  import("@/views/ConversationSlotPane").then((module) => ({
+    default: module.ConversationSlotPane,
+  })),
+);
+const FirstRun = lazy(() =>
+  import("@/views/FirstRun").then((module) => ({ default: module.FirstRun })),
+);
+const LinkedPane = lazy(() =>
+  import("@/views/ChatPane").then((module) => ({ default: module.LinkedPane })),
+);
+const Store = lazy(() => import("./views/Store").then((module) => ({ default: module.Store })));
+
+function PaneLoading() {
+  return (
+    <PaneNote>
+      <Loading />
+    </PaneNote>
+  );
+}
 
 export type AppProps = {
   agents: Agent[];
@@ -229,16 +243,20 @@ export function App({
         <SurfacesProvider surfaces={surfaces}>
           <MainAgentProvider agents={agents} onAgents={onAgents}>
             {mainAgent ? (
-              <FirstRun
-                agent={mainAgent}
-                agents={agents}
-                member={member}
-                step={route.step}
-                onStep={placeFirstRun}
-                onOpenChat={(conversationId) =>
-                  conversationId ? openChat(conversationId) : openNewChat(mainAgent.id)
-                }
-              />
+              <PaneFault at={route.kind}>
+                <Suspense fallback={<PaneLoading />}>
+                  <FirstRun
+                    agent={mainAgent}
+                    agents={agents}
+                    member={member}
+                    step={route.step}
+                    onStep={placeFirstRun}
+                    onOpenChat={(conversationId) =>
+                      conversationId ? openChat(conversationId) : openNewChat(mainAgent.id)
+                    }
+                  />
+                </Suspense>
+              </PaneFault>
             ) : (
               <PaneNote>No such app.</PaneNote>
             )}
@@ -285,17 +303,21 @@ export function App({
                 />
               ) : null}
               <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
-                <RoutedPane
-                  route={route}
-                  agents={agents}
-                  member={member}
-                  mainAgent={mainAgent}
-                  onAgents={onAgents}
-                  onBuild={startBuild}
-                  onExitBuilder={exitBuild}
-                  onForwardAgents={forwardBuild}
-                  buildWanted={wantedBuild}
-                />
+                <PaneFault at={route.kind}>
+                  <Suspense fallback={<PaneLoading />}>
+                    <RoutedPane
+                      route={route}
+                      agents={agents}
+                      member={member}
+                      mainAgent={mainAgent}
+                      onAgents={onAgents}
+                      onBuild={startBuild}
+                      onExitBuilder={exitBuild}
+                      onForwardAgents={forwardBuild}
+                      buildWanted={wantedBuild}
+                    />
+                  </Suspense>
+                </PaneFault>
               </AppsProvider>
               <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
             </div>
@@ -1070,78 +1092,6 @@ function RoutedPane({
   return missed;
 }
 
-function LinkedPane({
-  agent,
-  conversation,
-  member,
-  crumb,
-  slot,
-  onActivity,
-  onSelectSlot,
-}: {
-  agent: Agent;
-  conversation: OwnedConversation;
-  member: Member;
-  crumb?: Crumb;
-  slot?: string;
-  onActivity: (conversationId: string) => void;
-  onSelectSlot: (slot: string | null) => void;
-}) {
-  const [disclosed, setDisclosed] = useState(false);
-  const viewer = useViewer();
-  const readable = conversation.readable || disclosed;
-  return (
-    <Pane>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <Header
-          crumb={crumb}
-          title={subject(conversation, viewer)}
-          acts={<SurfaceMark conversation={conversation} />}
-          pinned
-        />
-        {readable ? (
-          conversation.commentable ? (
-            <Chat
-              agent={agent}
-              member={member}
-              conversationId={conversation.id}
-              onActivity={onActivity}
-            />
-          ) : (
-            <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-              <ConversationDetail
-                agent={agent}
-                conversation={conversation}
-                headed
-              />
-              <p className="max-w-hint text-ink-soft">
-                This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
-                continue it.
-              </p>
-            </div>
-          )
-        ) : (
-          <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-            <Disclose
-              agent={agent}
-              conversation={conversation}
-              onOpened={() => setDisclosed(true)}
-            />
-          </div>
-        )}
-      </div>
-      {readable && slot ? (
-        <ConversationSlot
-          agent={agent}
-          conversationId={conversation.id}
-          slot={slot}
-          onClose={() => onSelectSlot(null)}
-        />
-      ) : null}
-    </Pane>
-  );
-}
-
 function NotShared() {
   return <PaneNote>This conversation is not shared with this account.</PaneNote>;
 }
@@ -1378,51 +1328,3 @@ function RailRow({
   );
 }
 
-const SURFACE_GLYPH = "size-(--size-glyph) shrink-0 text-ink-faint";
-
-function SurfaceGlyph({ surface }: { surface: string }) {
-  if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_GLYPH} aria-hidden />;
-  if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_GLYPH} aria-hidden />;
-  if (surface === IMESSAGE_SURFACE) {
-    return <IconMessageCircle className={SURFACE_GLYPH} aria-hidden />;
-  }
-  return null;
-}
-
-const SURFACE_MARK = "size-(--size-surface-mark) shrink-0";
-
-function surfaceMark(surface: string): React.ReactNode {
-  if (surface === SLACK_SURFACE) return <IconBrandSlack className={SURFACE_MARK} aria-hidden />;
-  if (surface === UFO_SURFACE) return <IconTerminal2 className={SURFACE_MARK} aria-hidden />;
-  if (surface === IMESSAGE_SURFACE) {
-    return <IconMessageCircle className={SURFACE_MARK} aria-hidden />;
-  }
-  return null;
-}
-
-function SurfaceMark({ conversation }: { conversation: OwnedConversation }) {
-  const mark = surfaceMark(conversation.surface);
-  if (mark === null) return null;
-  const where = origin(conversation);
-  const href = slackLink(conversation.surface, conversation.source);
-  if (href === null) {
-    return (
-      <span className="flex items-center gap-xs whitespace-nowrap text-ink-soft">
-        {mark}
-        {where}
-      </span>
-    );
-  }
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={"Open " + where + " in " + surfaceWord(conversation.surface)}
-      className="flex items-center gap-xs whitespace-nowrap text-inherit no-underline hover:underline focus-visible:underline"
-    >
-      {mark}
-      {where} <span className="text-ink-soft">↗</span>
-    </a>
-  );
-}
