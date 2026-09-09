@@ -378,9 +378,8 @@ export function AgentPane({
         </Button>
       </>
     ),
-    onClose: history
-      ? () => setListing(null)
-      : () => onPlace({ ...place, opens: [] }, "replace"),
+    onClose: history ? undefined : () => onPlace({ ...place, opens: [] }, "replace"),
+    onBack: history ? () => setListing(null) : undefined,
   });
 
   if (beside) {

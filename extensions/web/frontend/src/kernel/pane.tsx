@@ -1,4 +1,5 @@
 import {
+  IconChevronLeft,
   IconFilter,
   IconLayoutGrid,
   IconList,
@@ -174,6 +175,10 @@ const BAND_ACTS =
  *  beside it. Omitted, the name is plain text: a surface the landmark it stands in already names
  *  takes no second name.
  *
+ *  `onBack` leaves a view standing inside the surface without shutting the surface, so it is a
+ *  chevron beside the name it leaves rather than a cross among the acts: the cross states that
+ *  what the band names is going, and here what the band names is where the press lands.
+ *
  *  `crumb` is where the member came from and nothing else. It carries an address, not a verb: a
  *  crumb to a place is navigation, so it is a link that can be opened in a second tab, and shutting
  *  the surface is `onClose` — a verb of the lane, which is a different act with a different word for
@@ -204,6 +209,7 @@ export function Header({
   bar,
   onClose,
   closes,
+  onBack,
   onLift,
   onDoubleClick,
   pinned = false,
@@ -219,13 +225,14 @@ export function Header({
   bar?: ReactNode;
   onClose?: () => void;
   closes?: string;
+  onBack?: () => void;
   onLift?: (event: DragEvent<HTMLDivElement>) => void;
   onDoubleClick?: ComponentProps<"div">["onDoubleClick"];
   pinned?: boolean;
   ruled?: boolean;
 }) {
   const banded = useContext(BandedContext);
-  if (banded && crumb === undefined && onClose === undefined)
+  if (banded && crumb === undefined && onClose === undefined && onBack === undefined)
     return (
       <div data-slot="page-acts" className={BAND_ACTS}>
         {acts}
@@ -257,10 +264,21 @@ export function Header({
           "max-narrow:h-auto max-narrow:flex-col max-narrow:items-stretch",
         )}
       >
-        {crumb === undefined && title === undefined ? (
+        {crumb === undefined && title === undefined && onBack === undefined ? (
           <span className="flex-1 max-narrow:hidden" />
         ) : (
           <div className={cn(NAME, band.name, ruled && "min-w-0")}>
+            {onBack ? (
+              <Button
+                variant={ruled ? "mark" : "quiet"}
+                size={ruled ? "glyph" : "icon"}
+                aria-label="Back"
+                className="-ms-2xs shrink-0"
+                onClick={onBack}
+              >
+                <IconChevronLeft aria-hidden stroke={ruled ? GLYPH_STROKE : undefined} />
+              </Button>
+            ) : null}
             {glyph ? (
               <span
                 aria-hidden

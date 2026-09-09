@@ -823,6 +823,7 @@ export function useSlot(
     describes?: string;
     crumb?: Crumb;
     onClose?: () => void;
+    onBack?: () => void;
   },
 ): ReactNode {
   const {
@@ -856,6 +857,7 @@ export function useSlot(
     describes,
     crumb,
     onClose,
+    onBack,
   } = slot;
   const on = node !== null;
   const held = useRef<HTMLElement | null>(null);
@@ -872,7 +874,7 @@ export function useSlot(
   }, [on, id, kind, title, here, place]);
 
   const arrived = useRef(false);
-  const takes = on && host !== undefined && onClose !== undefined;
+  const takes = on && host !== undefined && (onClose !== undefined || onBack !== undefined);
   useEffect(() => {
     if (!takes) return;
     const before = document.activeElement;
@@ -995,6 +997,7 @@ export function useSlot(
             }
             onClose={expandedHere ? undefined : onClose}
             closes={title}
+            onBack={onBack}
             onLift={
               move && !fixed ? (event) => event.dataTransfer.setData(LIFTED, id) : undefined
             }

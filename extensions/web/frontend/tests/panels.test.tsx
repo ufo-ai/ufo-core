@@ -1321,7 +1321,7 @@ test("the lane's History lists the app's conversations, and one press opens it i
   ).toBe("false");
 });
 
-test("the lane's way out names the list, and shuts it without shutting the lane", async () => {
+test("the list's way back stands beside its name, and leaves it without shutting the lane", async () => {
   location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
   wire(appOnWire([appConversation(CONVO_ID, "Newest thread")]));
   render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
@@ -1329,7 +1329,12 @@ test("the lane's way out names the list, and shuts it without shutting the lane"
   await userEvent.click(await screen.findByRole("button", { name: "History for Assistant" }));
   await screen.findByRole("button", { name: "Newest thread Jul 30 2026" });
 
-  await userEvent.click(screen.getByRole("button", { name: "Close History" }));
+  const back = screen.getByRole("button", { name: "Back" });
+  const name = within(screen.getByRole("region", { name: "History" })).getByText("History");
+  expect(back.compareDocumentPosition(name) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Close History" })).toBeNull();
+
+  await userEvent.click(back);
 
   expect(screen.queryByRole("button", { name: "Newest thread Jul 30 2026" })).toBeNull();
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + CONVO_ID);
