@@ -4318,7 +4318,9 @@ def _check_notification_rules_route_each_environment() -> None:
 def _check_on_call_adopts_the_ui_objects_and_the_daily_rotation() -> None:
     """The team, both memberships, the schedule and the escalation policy were made in the Datadog
     UI, so each carries an import block addressing it by its own id; a literal id anywhere outside
-    an import block is a raw address pasted into a resource."""
+    an import block is a raw address pasted into a resource. The first escalation target declares
+    no position: the provider reads the default back as null, and the apply aborts on a declared
+    "current"."""
     source = NOTIFICATION_RULES["prod"].read_text()
     imports = re.findall(r'import\s*{\s*to\s*=\s*([\w.]+)\s*id\s*=\s*"([^"]+)"\s*}', source)
     assert len(imports) == len(ON_CALL_IMPORTS)
@@ -4335,6 +4337,16 @@ def _check_on_call_adopts_the_ui_objects_and_the_daily_rotation() -> None:
     assert 'effective_date = "2026-09-09T19:00:00Z"' in schedule.group(1)
     assert 'rotation_start = "2026-09-09T19:00:00Z"' in schedule.group(1)
     assert "days = 1" in schedule.group(1)
+    policy = re.search(
+        r'resource "datadog_on_call_escalation_policy" "ufo" {\n(.*?)\n}\n',
+        source,
+        re.DOTALL,
+    )
+    assert policy
+    targets = re.findall(r"target {\n(.*?)\n    }", _code(policy.group(1)), re.DOTALL)
+    assert len(targets) == 2
+    assert "position" not in targets[0]
+    assert 'position = "next"' in targets[1]
 
 
 def test_prod_member_paths_page_only_after_sustained_multi_region_failure() -> None:
