@@ -32,7 +32,10 @@ export function Lightbox({
   const [natural, setNatural] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const zoom = ZOOM_STEPS[step];
-  const pictured = file.preview_url ?? file.url;
+  const pictured =
+    file.media_type.startsWith("image/") && file.url !== null
+      ? file.url
+      : (file.preview_url ?? file.url);
 
   // The width is left standing: the element is keyed per picture, so it measures itself as it attaches,
   // and zeroing it here would land after that measurement and undo it.

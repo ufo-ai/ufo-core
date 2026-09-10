@@ -433,6 +433,45 @@ test("the artifacts list view stays a table rather than stacking into records", 
   expect(name.closest("td")?.className).not.toContain("truncate");
 });
 
+test("a cached picture in the artifacts list becomes visible without a load event", async () => {
+  Object.defineProperty(HTMLImageElement.prototype, "complete", {
+    value: true,
+    configurable: true,
+  });
+  Object.defineProperty(HTMLImageElement.prototype, "naturalWidth", {
+    value: 320,
+    configurable: true,
+  });
+  try {
+    await runPage(
+      "artifacts",
+      {
+        "/objects/site": () => objectIndex(SITE_KIND, []),
+        "/objects/artifact": () =>
+          json({
+            objects: [
+              {
+                ...sharedFile("chart.png", "image/png"),
+                preview_url: "/preview/chart.png",
+              },
+            ],
+          }),
+      },
+      { place: { face: "table" } },
+    );
+
+    await screen.findByText("chart.png");
+    await vi.waitFor(() =>
+      expect(document.querySelector('img[src="/preview/chart.png"]')?.className).toContain(
+        "opacity-100",
+      ),
+    );
+  } finally {
+    Reflect.deleteProperty(HTMLImageElement.prototype, "complete");
+    Reflect.deleteProperty(HTMLImageElement.prototype, "naturalWidth");
+  }
+});
+
 function sharedFile(filename: string, mediaType: string) {
   return {
     name: "conv1-" + filename,

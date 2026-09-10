@@ -16,6 +16,8 @@ const FFMPEG_CPU_SECS: u64 = 120;
 const VIDEO_THUMBNAIL_FRAMES: u32 = 10;
 const CSV_MAX_ROWS: usize = 200;
 const CSV_MAX_COLS: usize = 50;
+const IMAGE_MAX_DIMENSION_PX: u32 = 8192;
+const IMAGE_MAX_DECODE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Convert `input` to a PDF in `workdir`; a `pdf` input passes through untouched. All parsing
 /// happens inside one bounded soffice child with a per-request profile.
@@ -273,8 +275,136 @@ pub async fn video_frame(
     Ok(())
 }
 
+/// Redraw a raster image to fit the requested box without enlarging it or losing transparency.
+pub async fn image_cover(
+    input: &Path,
+    workdir: &Path,
+    max_w: u32,
+    max_h: u32,
+) -> Result<(), Refusal> {
+    let out = workdir.join("out");
+    tokio::fs::create_dir_all(&out)
+        .await
+        .map_err(|e| Refusal::RenderTimeout(format!("outdir: {e}")))?;
+    let frame = out.join("page-01.png");
+    let from = input.to_path_buf();
+    tokio::task::spawn_blocking(move || image_cover_sync(&from, &frame, max_w, max_h))
+        .await
+        .map_err(|e| Refusal::RenderTimeout(format!("image join: {e}")))?
+}
+
+fn image_cover_sync(input: &Path, frame: &Path, max_w: u32, max_h: u32) -> Result<(), Refusal> {
+    use image::{ImageDecoder, ImageEncoder};
+    let mut reader = image::ImageReader::open(input)
+        .map_err(|e| Refusal::UnsupportedType(format!("image open: {e}")))?
+        .with_guessed_format()
+        .map_err(|e| Refusal::UnsupportedType(format!("image sniff: {e}")))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(IMAGE_MAX_DIMENSION_PX);
+    limits.max_image_height = Some(IMAGE_MAX_DIMENSION_PX);
+    limits.max_alloc = Some(IMAGE_MAX_DECODE_BYTES);
+    reader.limits(limits);
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| Refusal::UnsupportedType(format!("image decode: {e}")))?;
+    let orientation = decoder
+        .orientation()
+        .map_err(|e| Refusal::UnsupportedType(format!("image orientation: {e}")))?;
+    let mut decoded = image::DynamicImage::from_decoder(decoder)
+        .map_err(|e| Refusal::UnsupportedType(format!("image decode: {e}")))?;
+    decoded.apply_orientation(orientation);
+    let scaled = if decoded.width() > max_w || decoded.height() > max_h {
+        decoded.thumbnail(max_w, max_h)
+    } else {
+        decoded
+    }
+    .into_rgba8();
+    let writer = std::fs::File::create(frame)
+        .map_err(|e| Refusal::RenderTimeout(format!("frame create: {e}")))?;
+    image::codecs::png::PngEncoder::new(writer)
+        .write_image(
+            scaled.as_raw(),
+            scaled.width(),
+            scaled.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| Refusal::RenderTimeout(format!("image encode: {e}")))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn image_cover_keeps_source_size_and_alpha_below_the_box() {
+        let work = tempfile::tempdir().unwrap();
+        let input = work.path().join("input.png");
+        let frame = work.path().join("out/page-01.png");
+        std::fs::create_dir(work.path().join("out")).unwrap();
+        let mut source = image::RgbaImage::new(2, 1);
+        source.put_pixel(0, 0, image::Rgba([255, 0, 0, 0]));
+        source.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        source.save(&input).unwrap();
+
+        super::image_cover_sync(&input, &frame, 800, 1000).unwrap();
+
+        let cover = image::open(frame).unwrap().into_rgba8();
+        assert_eq!((cover.width(), cover.height()), (2, 1));
+        assert_eq!(cover.get_pixel(0, 0).0, [255, 0, 0, 0]);
+        assert_eq!(cover.get_pixel(1, 0).0, [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn image_cover_scales_down_to_fit_the_box() {
+        let work = tempfile::tempdir().unwrap();
+        let input = work.path().join("input.png");
+        let frame = work.path().join("out/page-01.png");
+        std::fs::create_dir(work.path().join("out")).unwrap();
+        image::RgbaImage::new(4, 2).save(&input).unwrap();
+
+        super::image_cover_sync(&input, &frame, 2, 2).unwrap();
+
+        let cover = image::open(frame).unwrap();
+        assert_eq!((cover.width(), cover.height()), (2, 1));
+    }
+
+    #[test]
+    fn image_cover_refuses_a_source_over_the_dimension_limit() {
+        let work = tempfile::tempdir().unwrap();
+        let input = work.path().join("input.png");
+        let frame = work.path().join("out/page-01.png");
+        std::fs::create_dir(work.path().join("out")).unwrap();
+        image::RgbaImage::new(super::IMAGE_MAX_DIMENSION_PX + 1, 1)
+            .save(&input)
+            .unwrap();
+
+        let error = super::image_cover_sync(&input, &frame, 800, 1000).unwrap_err();
+
+        assert!(matches!(error, crate::refusal::Refusal::UnsupportedType(_)));
+    }
+
+    #[test]
+    fn image_cover_applies_exif_orientation() {
+        let work = tempfile::tempdir().unwrap();
+        let input = work.path().join("input.jpg");
+        let frame = work.path().join("out/page-01.png");
+        std::fs::create_dir(work.path().join("out")).unwrap();
+        image::RgbImage::new(3, 2).save(&input).unwrap();
+        let mut jpeg = std::fs::read(&input).unwrap();
+        jpeg.splice(
+            2..2,
+            [
+                0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'M', b'M', 0, 0x2a, 0, 0, 0,
+                8, 0, 1, 1, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0,
+            ],
+        );
+        std::fs::write(&input, jpeg).unwrap();
+
+        super::image_cover_sync(&input, &frame, 800, 1000).unwrap();
+
+        let cover = image::open(frame).unwrap();
+        assert_eq!((cover.width(), cover.height()), (2, 3));
+    }
+
     #[tokio::test]
     async fn initialized_profile_tree_is_copied() {
         let source = tempfile::tempdir().unwrap();

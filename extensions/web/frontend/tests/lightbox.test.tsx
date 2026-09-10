@@ -41,7 +41,7 @@ test("a picture opens at the size of the window and zooms to its own pixels", as
   const viewer = await screen.findByRole("dialog", { name: DESKTOP.filename });
   expect(within(viewer).getByText("Fit")).toBeTruthy();
   const picture = within(viewer).getByRole("img", { name: DESKTOP.filename });
-  expect(picture.getAttribute("src")).toBe(DESKTOP.preview_url);
+  expect(picture.getAttribute("src")).toBe(DESKTOP.url);
   loaded(picture, 1280);
 
   expect(picture.style.width).toBe("");
@@ -115,7 +115,7 @@ test("the pictures one turn shared open as one set", async () => {
     true,
   );
   expect(screen.getByRole("img", { name: DESKTOP.filename }).getAttribute("src")).toBe(
-    DESKTOP.preview_url,
+    DESKTOP.url,
   );
 });
 
@@ -160,7 +160,7 @@ test("a cached picture stepped to still zooms to its own pixels", async () => {
   Object.defineProperty(HTMLImageElement.prototype, "complete", { value: true, configurable: true });
   Object.defineProperty(HTMLImageElement.prototype, "naturalWidth", {
     get(this: HTMLImageElement) {
-      return this.getAttribute("src") === PHONE.preview_url ? 390 : 1280;
+      return this.getAttribute("src") === PHONE.url ? 390 : 1280;
     },
     configurable: true,
   });

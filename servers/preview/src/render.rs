@@ -162,6 +162,20 @@ impl Render {
             .await
             .map_err(|e| Refusal::RenderTimeout(format!("spool: {e}")))?;
         drop(bytes);
+        if kind.is_image() {
+            convert::image_cover(&input, work.path(), max_w, max_h).await?;
+            let (width, height) = png_size(&work.path().join("out").join("page-01.png")).await?;
+            let meta = WorkerMeta {
+                page_count: 1,
+                pages: vec![WorkerPage {
+                    index: 1,
+                    width,
+                    height,
+                    text: String::new(),
+                }],
+            };
+            return self.package(work.path(), kind, 1, 1, meta, false).await;
+        }
         if kind.is_video() {
             convert::video_frame(&input, work.path(), max_w, max_h, &self.cfg).await?;
             let (width, height) = png_size(&work.path().join("out").join("page-01.png")).await?;

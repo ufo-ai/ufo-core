@@ -108,3 +108,35 @@ async def test_shared_preview_skips_an_ineligible_suffix(
             is None
         )
     assert sandbox.command == ""
+
+
+async def test_shared_preview_renders_a_raster_at_the_preview_box(
+    s3_store: S3BlobStore,
+) -> None:
+    sandbox = _ReplyingSandbox(
+        ExecResult(stdout=json.dumps({"size_bytes": 2048, "page_count": 1}), stderr="", exit_code=0)
+    )
+    ctx = _ctx(WorkspaceBlobStore(backend=s3_store), sandbox)
+    artifact_id = uuid4()
+    with ws(ctx.turn.workspace_id):
+        preview = await builtins._shared_preview(
+            ctx, "/workspace/picture.png", "picture.png", artifact_id, False
+        )
+    assert preview is not None
+    assert preview.blob_key == f"{ARTIFACT_KEY_PREFIX}{artifact_id}/picture.preview.png"
+    assert '"kind": "png"' in sandbox.command
+
+
+async def test_shared_preview_keeps_an_animated_gif_on_its_original_bytes(
+    s3_store: S3BlobStore,
+) -> None:
+    sandbox = _ReplyingSandbox(ExecResult(stdout="", stderr="", exit_code=0))
+    ctx = _ctx(WorkspaceBlobStore(backend=s3_store), sandbox)
+    with ws(ctx.turn.workspace_id):
+        assert (
+            await builtins._shared_preview(
+                ctx, "/workspace/animation.gif", "animation.gif", uuid4(), False
+            )
+            is None
+        )
+    assert sandbox.command == ""

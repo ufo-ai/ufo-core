@@ -171,6 +171,39 @@ async fn kind_magic_mismatch_is_422() {
 }
 
 #[tokio::test]
+async fn raster_inline_round_trip() {
+    use image::ImageEncoder;
+
+    let mut source = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut source)
+        .write_image(
+            &[255, 0, 0, 0, 0, 255, 0, 255],
+            2,
+            1,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+    let base = serve_app(config(None)).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/render"))
+        .bearer_auth("test-token")
+        .multipart(multipart(req_json("png", 1), Some(("f.png", source))))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.headers()["x-preview-width"], "2");
+    assert_eq!(response.headers()["x-preview-height"], "1");
+    let cover = image::load_from_memory(&response.bytes().await.unwrap())
+        .unwrap()
+        .into_rgba8();
+    assert_eq!(cover.get_pixel(0, 0).0, [255, 0, 0, 0]);
+    assert_eq!(cover.get_pixel(1, 0).0, [0, 255, 0, 255]);
+}
+
+#[tokio::test]
 async fn held_capacity_queues_the_next_render() {
     let cfg = config(Some(1));
     let render = ufo_preview::render::Render::new(cfg.clone());

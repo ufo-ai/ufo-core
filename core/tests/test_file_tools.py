@@ -803,8 +803,6 @@ async def test_share_file_leaves_a_plain_file_without_a_rendered_page(
     file_ctx: tuple[ToolContext, Path],
     db: None,
 ) -> None:
-    """Only a document earns a render. A text file has nothing to rasterize, and an image is
-    already its own preview — minted off its own bytes, never a second blob."""
     ctx, _ = file_ctx
     await _seed_turn_rows(ctx.turn)
     await ctx.sandbox.write_file("report.txt", b"the produced report\n")

@@ -27,6 +27,12 @@ from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX
 from ufo.schema import tables
 
 ARTIFACT_PREVIEW_SUFFIXES = frozenset((".csv", ".docx", ".md", ".pdf", ".pptx", ".svg", ".xlsx"))
+RASTER_PREVIEW_SUFFIXES = {
+    ".jpeg": "jpeg",
+    ".jpg": "jpeg",
+    ".png": "png",
+    ".webp": "webp",
+}
 PREVIEW_KINDS = {
     ".csv": "csv",
     ".docx": "docx",
@@ -44,8 +50,8 @@ PREVIEW_KINDS = {
 formats it takes a first frame from. One list answers every caller: the composer rendering a file in
 hand, and the cover drawn for a file a member attached."""
 ARTIFACT_PREVIEW_MEDIA_TYPE = "image/png"
-ARTIFACT_PREVIEW_MAX_WIDTH = 1000
-ARTIFACT_PREVIEW_MAX_HEIGHT = 1400
+ARTIFACT_PREVIEW_MAX_WIDTH = 800
+ARTIFACT_PREVIEW_MAX_HEIGHT = 1000
 PREVIEW_SERVICE_URL_ENV = "UFO_PREVIEW_URL"
 PREVIEW_TOKEN_ENV = "UFO_PREVIEW_TOKEN"
 PREVIEW_RETRY_WINDOW = timedelta(hours=1)

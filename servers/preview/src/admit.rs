@@ -15,11 +15,13 @@ pub enum Kind {
     Mov,
     Webm,
     Mkv,
+    Image,
 }
 
 impl Kind {
     pub fn parse(s: &str) -> Option<Kind> {
         match s {
+            "png" | "jpeg" | "jpg" | "webp" => Some(Kind::Image),
             "pdf" => Some(Kind::Pdf),
             "docx" => Some(Kind::Docx),
             "xlsx" => Some(Kind::Xlsx),
@@ -45,6 +47,11 @@ impl Kind {
                 head.len() >= 12 && matches!(&head[4..8], b"ftyp" | b"moov" | b"mdat")
             }
             Kind::Webm | Kind::Mkv => head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]),
+            Kind::Image => {
+                head.starts_with(b"\x89PNG\r\n\x1a\n")
+                    || (head.len() >= 3 && head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF)
+                    || (head.starts_with(b"RIFF") && head.len() >= 12 && &head[8..12] == b"WEBP")
+            }
         }
     }
 
@@ -61,11 +68,16 @@ impl Kind {
             Kind::Mov => "mov",
             Kind::Webm => "webm",
             Kind::Mkv => "mkv",
+            Kind::Image => "png",
         }
     }
 
     pub fn is_video(&self) -> bool {
         matches!(self, Kind::Mp4 | Kind::Mov | Kind::Webm | Kind::Mkv)
+    }
+
+    pub fn is_image(&self) -> bool {
+        *self == Kind::Image
     }
 }
 
@@ -132,6 +144,25 @@ mod tests {
             assert!(k.check_magic(&ebml));
             assert!(!k.check_magic(b"\0\0\0\x18ftypmp42"));
         }
+    }
+
+    #[test]
+    fn image_kinds_parse_and_sniff_their_containers() {
+        for k in ["png", "jpeg", "jpg", "webp"] {
+            assert!(Kind::parse(k) == Some(Kind::Image), "{k}");
+        }
+        assert!(Kind::parse("gif").is_none());
+        assert!(Kind::parse("tiff").is_none());
+        assert!(Kind::Image.check_magic(b"\x89PNG\r\n\x1a\nrest"));
+        assert!(Kind::Image.check_magic(b"\xff\xd8\xff\xe0jpeg"));
+        let webp = [
+            b"RIFF".as_slice(),
+            4u32.to_le_bytes().as_slice(),
+            b"WEBP".as_slice(),
+        ]
+        .concat();
+        assert!(Kind::Image.check_magic(&webp));
+        assert!(!Kind::Image.check_magic(b"plain text"));
     }
 
     #[test]

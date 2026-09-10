@@ -646,9 +646,37 @@ function Shapes({
 }
 
 function Mark({ card }: { card: Card }) {
-  if (card.image) return <img alt="" src={card.image} className="size-full object-cover" />;
+  if (card.image) return <TileImage src={card.image} />;
   if (!card.file) return <IconWorldWww className="size-icon" aria-hidden />;
   return <MediaIcon mediaType={card.file.media_type} />;
+}
+
+function TileImage({ src }: { src: string }) {
+  const [loaded, setLoaded] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const reveal = useCallback(
+    (held: HTMLImageElement | null) => {
+      if (held !== null && held.complete && held.naturalWidth > 0) setLoaded(src);
+    },
+    [src],
+  );
+  if (failed === src)
+    return <IconWorldWww className="size-icon" aria-hidden />;
+  return (
+    <img
+      ref={reveal}
+      alt=""
+      src={src}
+      loading="lazy"
+      decoding="async"
+      onLoad={() => setLoaded(src)}
+      onError={() => setFailed(src)}
+      className={cn(
+        "size-full object-cover transition-opacity duration-200 ease-control motion-reduce:transition-none",
+        loaded === src ? "opacity-100" : "opacity-0",
+      )}
+    />
+  );
 }
 
 function ArtifactDetails({ entry }: { entry: Artifact }) {

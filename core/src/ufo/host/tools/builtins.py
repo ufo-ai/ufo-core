@@ -81,6 +81,7 @@ from ufo.runtime.media.preview_renderer import (
     ARTIFACT_PREVIEW_MAX_WIDTH,
     ARTIFACT_PREVIEW_MEDIA_TYPE,
     ARTIFACT_PREVIEW_SUFFIXES,
+    RASTER_PREVIEW_SUFFIXES,
 )
 from ufo.runtime.objects import AdminRequired
 from ufo.runtime.skills.runtime import load_skills, loaded_context
@@ -681,8 +682,11 @@ async def _shared_preview(
     the member's file is already stored, and a missing picture is not a reason to lose it. The
     reason is logged, so a format that never renders is visible rather than merely absent."""
     suffix = PurePosixPath(safe_name).suffix.lower()
-    if suffix not in ARTIFACT_PREVIEW_SUFFIXES:
-        return None
+    kind = RASTER_PREVIEW_SUFFIXES.get(suffix)
+    if kind is None:
+        if suffix not in ARTIFACT_PREVIEW_SUFFIXES:
+            return None
+        kind = suffix[1:]
     key = f"{ARTIFACT_KEY_PREFIX}{artifact_id}/{PurePosixPath(safe_name).stem}.preview.png"
     match ctx.blob.backend:
         case S3BlobStore():
@@ -691,7 +695,7 @@ async def _shared_preview(
             return None
     request_json = json.dumps(
         {
-            "kind": suffix[1:],
+            "kind": kind,
             "max_width": ARTIFACT_PREVIEW_MAX_WIDTH,
             "max_height": ARTIFACT_PREVIEW_MAX_HEIGHT,
             "pages": 1,
