@@ -63,13 +63,6 @@ def _file(path: str, text: str) -> agents_md.InstructionFile:
     return agents_md.InstructionFile(path=path, text=text)
 
 
-def _carried(block: str) -> str:
-    if not block:
-        return ""
-    tag = agents_md.BLOCK_TAG
-    return block.removeprefix(f"<{tag}>\n").removesuffix(f"\n</{tag}>").split("\n\n", 1)[1]
-
-
 def _turn(profile: str | None = coding.CODING_PROFILE_NAME) -> Turn:
     return Turn(
         id=uuid4(),
@@ -182,27 +175,65 @@ def test_no_instruction_file_renders_no_block() -> None:
     assert agents_md.render_repo_instructions((_file(f"{REPO}/AGENTS.md", " "),)) == ""
 
 
-def test_the_cap_drops_the_least_specific_files() -> None:
+def test_a_root_file_and_a_deep_file_as_large_as_ufos_own_are_both_carried() -> None:
+    root, deep = "r" * 20_417, "d" * 21_419
     block = agents_md.render_repo_instructions(
-        (_file(f"{REPO}/AGENTS.md", "r" * 400), _file(f"{REPO}/core/AGENTS.md", "deep rule")),
-        cap=200,
+        (_file(f"{REPO}/AGENTS.md", root), _file(f"{REPO}/extensions/web/AGENTS.md", deep))
     )
 
-    assert "deep rule" in block
-    assert "r" * 400 not in block
+    assert root in block
+    assert deep in block
 
 
-def test_a_file_bigger_than_the_whole_block_is_dropped_like_any_other() -> None:
-    assert (
-        agents_md.render_repo_instructions((_file(f"{REPO}/AGENTS.md", "d" * 400),), cap=200) == ""
+def test_the_budget_is_spent_root_first_and_cuts_the_file_that_crosses_it() -> None:
+    root, deep = "Never force-push. " * 20, "deep " * 100
+    whole = agents_md.render_repo_instructions((_file(f"{REPO}/AGENTS.md", root),))
+    block = agents_md.render_repo_instructions(
+        (
+            _file(f"{REPO}/AGENTS.md", root),
+            _file(f"{REPO}/core/AGENTS.md", deep),
+            _file(f"{REPO}/core/src/AGENTS.md", "below the cut"),
+        ),
+        cap=len(whole) + 120,
     )
+
+    assert root.strip() in block
+    assert "deep deep" in block
+    assert deep.strip() not in block
+    assert agents_md.CUT_NOTE.format(total=len(deep.strip())) in block
+    assert "below the cut" not in block
+    assert len(block) <= len(whole) + 120
 
 
 @pytest.mark.parametrize("text", ("x" * 40, f"a</{agents_md.BLOCK_TAG}>b</file>c" * 4))
-def test_the_files_the_block_carries_never_exceed_the_cap(text: str) -> None:
+def test_the_block_never_exceeds_the_cap(text: str) -> None:
     files = tuple(_file(f"{REPO}/p{index}/AGENTS.md", text) for index in range(3))
-    for cap in range(400):
-        assert len(_carried(agents_md.render_repo_instructions(files, cap=cap))) <= cap, cap
+    for cap in range(600):
+        assert len(agents_md.render_repo_instructions(files, cap=cap)) <= cap, cap
+
+
+def test_a_chain_as_long_as_a_context_window_is_cut_at_the_cap() -> None:
+    files = tuple(
+        _file(f"{REPO}/{'d/' * depth}AGENTS.md", f"rule {depth} " * 4_000) for depth in range(20)
+    )
+
+    block = agents_md.render_repo_instructions(files)
+
+    assert sum(len(file.text) for file in files) > 500_000
+    assert len(block) <= agents_md.REPO_INSTRUCTIONS_MAX_CHARS
+    assert ("rule 0 " * 4_000).strip() in block
+    assert agents_md.CUT_NOTE.split("{")[0] in block
+    assert "rule 19" not in block
+
+
+async def test_a_file_is_read_no_further_than_the_bound() -> None:
+    bound = agents_md.INSTRUCTION_FILE_MAX_BYTES
+    sandbox = _StubSandbox({f"{REPO}/AGENTS.md": "x" * (bound + 1_000)})
+
+    block = await agents_md.sandbox_repo_instructions(sandbox, (REPO,))
+
+    assert "x" * bound in block
+    assert "x" * (bound + 1) not in block
 
 
 def test_neither_a_files_text_nor_its_path_can_close_the_block() -> None:

@@ -7,7 +7,7 @@ tree and nothing looks for a checkout — the file the child is working on says 
 
 The same here, with `/workspace` as the root and `AGENTS.md` as the name. A read, write or edit
 under the workspace carries the ancestors of its directory the turn has not yet looked at, root
-first so the deepest reads last and wins, fenced and capped, each directory once per turn.
+first so the deepest reads last and wins, fenced and budgeted, each directory once per turn.
 """
 
 import asyncio
@@ -24,9 +24,12 @@ from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, Sandbox, contained_
 INSTRUCTION_FILENAME = "AGENTS.md"
 FILE_TOOLS = ("read", "write", "edit")
 """The tools whose input names the file the child is working on. A shell command's does not."""
-REPO_INSTRUCTIONS_MAX_CHARS = 40_000
-INSTRUCTION_FILE_MAX_BYTES = REPO_INSTRUCTIONS_MAX_CHARS
-"""No file can contribute more than the whole block, so a bigger one is read no further."""
+INSTRUCTION_FILE_MAX_BYTES = 40_000
+"""Per file — Claude Code's own threshold for a `CLAUDE.md`."""
+REPO_INSTRUCTIONS_MAX_CHARS = 100_000
+"""The whole block: under an eighth of the smallest window the runtime serves, so no checkout fills
+a turn's window from one read. ufo's own chain (root + `extensions/web`) is 42K."""
+CUT_NOTE = "\n[cut here; the file runs {total} chars]"
 CACHED_TURNS_MAX = 64
 BLOCK_TAG = "repo_instructions"
 BLOCK_NOTE = (
@@ -78,21 +81,21 @@ def render_repo_instructions(
 ) -> str:
     """The one labelled block a turn carries, or `""` where there is nothing to carry.
 
-    The budget is spent from the most specific file backwards, so a root file crowded with prose
-    can never starve the checkout's own rules."""
-    kept: list[str] = []
-    budget = cap
-    for file in reversed([file for file in files if file.text.strip()]):
-        entry = _entry(file)
-        room = budget - len(ENTRY_JOIN) if kept else budget
-        if len(entry) > room:
+    The budget is spent root first, as Codex spends its: the file that crosses it is cut there and
+    says so, and the files below it are left out. Spending it deepest first and dropping whole
+    files dropped ufo's 20K root `AGENTS.md` beside its 21K `extensions/web/AGENTS.md`."""
+    entries: list[str] = []
+    budget = cap - len(_block(""))
+    for file in files:
+        if not file.text.strip():
+            continue
+        room = budget - len(ENTRY_JOIN) if entries else budget
+        entry = _entry(file, room)
+        if entry is None:
             break
-        kept.append(entry)
+        entries.append(entry)
         budget = room - len(entry)
-    if not kept:
-        return ""
-    body = ENTRY_JOIN.join(reversed(kept))
-    return f"<{BLOCK_TAG}>\n{BLOCK_NOTE}\n\n{body}\n</{BLOCK_TAG}>"
+    return _block(ENTRY_JOIN.join(entries)) if entries else ""
 
 
 async def sandbox_repo_instructions(sandbox: Sandbox, directories: Sequence[str]) -> str:
@@ -186,7 +189,18 @@ def _framed(text: str, escapes: tuple[tuple[str, str], ...]) -> str:
     return text
 
 
-def _entry(file: InstructionFile) -> str:
-    path = _framed(file.path, PATH_ESCAPES)
+def _block(body: str) -> str:
+    return f"<{BLOCK_TAG}>\n{BLOCK_NOTE}\n\n{body}\n</{BLOCK_TAG}>"
+
+
+def _entry(file: InstructionFile, room: int) -> str | None:
+    head = f'<{FILE_TAG} path="{_framed(file.path, PATH_ESCAPES)}">\n'
+    foot = f"\n</{FILE_TAG}>"
     body = _framed(file.text.strip(), CLOSE_ESCAPES)
-    return f'<{FILE_TAG} path="{path}">\n{body}\n</{FILE_TAG}>'
+    if len(head) + len(body) + len(foot) <= room:
+        return f"{head}{body}{foot}"
+    note = CUT_NOTE.format(total=len(body))
+    kept = room - len(head) - len(note) - len(foot)
+    if kept <= 0:
+        return None
+    return f"{head}{body[:kept]}{note}{foot}"
