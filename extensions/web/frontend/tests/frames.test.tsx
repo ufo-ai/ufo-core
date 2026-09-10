@@ -369,6 +369,27 @@ test("a cost frame meters tokens and priced spend behind the turn's own clock", 
   clock.mockRestore();
 });
 
+test("a settled turn drops its clock and keeps the spend it stood beside", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
+  const stream = await streaming();
+  clock.mockReturnValue(START_MS + 102_000);
+  stream.emit("cost", { tokens: 29_000, cost_micro_usd: 5_000 });
+  expect(await screen.findByText("1m 42s · 29K tok · <$0.01")).toBeTruthy();
+
+  stream.emit("terminal", {
+    status: "done",
+    text: "Looked it over.",
+    model: "gpt-6-astra",
+    tokens: 29_000,
+    cost_micro_usd: 5_000,
+  });
+  const spend = await screen.findByText("29K tok · <$0.01");
+  expect(spend.parentElement!.querySelector('[style*="--brand-openai"]')).toBeTruthy();
+  expect(screen.queryByText("1m 42s · 29K tok · <$0.01")).toBeNull();
+  expect(screen.getByTestId("log").querySelector("time")).toBeNull();
+  clock.mockRestore();
+});
+
 test("a running turn counts its elapsed time before any spend is priced", async () => {
   const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
   const stream = await streaming();

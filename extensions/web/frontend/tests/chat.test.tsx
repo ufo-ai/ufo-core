@@ -2658,7 +2658,7 @@ test("a conversation that never compacted asks for no pages", async () => {
   expect(calls.filter((url) => url.includes("/transcript?cursor="))).toEqual([]);
 });
 
-test("a message states when it landed, whole in the member's own zone under the pointer", () => {
+test("a message draws no time line, and states when it landed under the pointer alone", () => {
   render(
     <TranscriptScroll>
       <MessageLog
@@ -2670,12 +2670,15 @@ test("a message states when it landed, whole in the member's own zone under the 
     </TranscriptScroll>,
   );
 
-  const stamped = screen.getByText("what time").closest("[data-slot=message-scroller-item]");
-  const stamp = stamped?.querySelector("[data-slot=message-stamp] time");
-  expect(stamp?.getAttribute("datetime")).toBe("2026-08-01T09:05:00Z");
-  expect(stamp?.getAttribute("title")).toBe("Aug 1 2026 at 14:35 GMT+5:30");
-  const bare = screen.getByText("just gone nine").closest("[data-slot=message-scroller-item]");
-  expect(bare?.querySelector("[data-slot=message-stamp]")).toBeNull();
+  const stamped = screen.getByText("what time").closest("[data-slot=message-scroller-item]")!;
+  expect(stamped.querySelector("time")).toBeNull();
+  expect(stamped.textContent).toBe("what time");
+  expect(stamped.querySelector("[data-slot=message-content]")?.getAttribute("title")).toBe(
+    "Aug 1 2026 at 14:35 GMT+5:30",
+  );
+  const bare = screen.getByText("just gone nine").closest("[data-slot=message-scroller-item]")!;
+  expect(bare.querySelector("time")).toBeNull();
+  expect(bare.querySelector("[data-slot=message-content]")?.getAttribute("title")).toBeNull();
 });
 
 /** jsdom lays nothing out, so a page landing's geometry is stated by hand: a pane showing three hundred

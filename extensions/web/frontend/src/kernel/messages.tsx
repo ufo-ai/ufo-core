@@ -56,7 +56,7 @@ import { ConsentLink } from "@/lib/consent";
 import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
 import { modelLabel, modelMark } from "@/lib/models";
-import { Moment, spanMoment } from "@/lib/moments";
+import { fullMoment, spanMoment } from "@/lib/moments";
 import { agentHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { turnMeta } from "@/lib/turnMeta";
@@ -230,7 +230,7 @@ export function MessageLog({
       </MessageScrollerItem>
     ) : (
       <MessageScrollerItem key={key} messageId={key}>
-        <Speech mine={message.role === "user"}>
+        <Speech mine={message.role === "user"} at={message.at}>
           {message.role === "user" && message.speaker ? (
             <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
           ) : null}
@@ -272,7 +272,6 @@ export function MessageLog({
             <Meta model={message.summary.model}>{turnMeta(message.summary)}</Meta>
           ) : null}
           {message.question && question ? question(message.question) : null}
-          <Stamp at={message.at} />
         </Speech>
       </MessageScrollerItem>
     );
@@ -309,9 +308,6 @@ export function MessageLog({
                 {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
                 {row.live.connect ? <ConnectLink connect={row.live.connect} /> : null}
                 <LiveMeter started={row.live.started} spend={row.live.meter} />
-                {row.live.summary ? (
-                  <Meta model={row.live.summary.model}>{turnMeta(row.live.summary)}</Meta>
-                ) : null}
               </Speech>
             </MessageScrollerItem>
           ) : (
@@ -337,28 +333,13 @@ type Row =
   | { at: number; said: Spoken; live?: undefined }
   | { at: number; said?: undefined; live: LiveTurn };
 
-function Speech({ mine, children }: { mine: boolean; children: ReactNode }) {
+/** The moment a message landed reaches the member under the pointer, never as a line of its own:
+ *  a transcript reads as words rather than as a log. */
+function Speech({ mine, at, children }: { mine: boolean; at?: string; children: ReactNode }) {
   return (
     <Message align={mine ? "end" : "start"}>
-      <MessageContent>{children}</MessageContent>
+      <MessageContent title={at ? fullMoment(at) : undefined}>{children}</MessageContent>
     </Message>
-  );
-}
-
-/** When a message landed, under the words it belongs to: the smallest chrome the surface draws, so
- *  the transcript still reads as words rather than as a log. */
-function Stamp({ at }: { at?: string }) {
-  if (!at) return null;
-  return (
-    <div
-      data-slot="message-stamp"
-      className={cn(
-        "px-lg text-small tabular-nums text-ink-soft",
-        "group-has-data-[variant=ghost]/message:px-0",
-      )}
-    >
-      <Moment at={at} />
-    </div>
   );
 }
 
