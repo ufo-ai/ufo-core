@@ -21,6 +21,7 @@ from ufo_ext_sites.application_audit import (
     APPLICATION_DESIGN_FOLD,
     APPLICATION_DESIGN_MAX_HEIGHT,
     APPLICATION_DESIGN_WIDTH,
+    APPLICATION_KIT_COMPONENTS,
     APPLICATION_PAGE_GUTTER,
     APPLICATION_REGION_MIN_AREA,
     APPLICATION_REGION_MIN_HEIGHT,
@@ -1478,6 +1479,33 @@ def test_the_skill_names_every_class_the_deploy_refuses() -> None:
         assert " ".join(reason.split()) in skill, f"the skill never tells the child: {reason}"
     for step in COMPOSITION_STEPS:
         assert f"`gap-{step}`" in skill, f"the skill never names the step gap-{step}"
+
+
+def test_the_skill_routes_to_every_recipe_it_ships_and_to_no_other() -> None:
+    """A row naming no file sends the child to a `cat` that fails, and a recipe no row names is
+    never read at all."""
+
+    skill = (APPLICATION_SKILL_DIR / "SKILL.md").read_text()
+    routed = set(re.findall(r"^\| .+ \| `([a-z]+)` \|$", skill, re.MULTILINE))
+    recipes = APPLICATION_SKILL_DIR / "references" / "recipes"
+    shipped = {path.stem for path in recipes.glob("*.md")} - {"README"}
+    assert routed == shipped
+    index = set(
+        re.findall(r"^\| .+ \| `([a-z]+)` \|$", (recipes / "README.md").read_text(), re.MULTILINE)
+    )
+    assert index == shipped
+
+
+def test_every_component_a_recipe_names_is_one_the_kit_publishes() -> None:
+    """These recipes were translated out of a design system the app kit does not export, where
+    `ActionBar`, `Composer` and `StatGrid` would each fail the deploy with `failed to resolve
+    import`."""
+
+    recipes = APPLICATION_SKILL_DIR / "references" / "recipes"
+    named = set()
+    for path in sorted(recipes.glob("*.md")):
+        named |= set(re.findall(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", path.read_text()))
+    assert named <= APPLICATION_KIT_COMPONENTS, sorted(named - APPLICATION_KIT_COMPONENTS)
 
 
 def test_the_scaffold_copies_files_and_never_the_template_directory() -> None:

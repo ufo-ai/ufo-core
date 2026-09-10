@@ -72,32 +72,6 @@ written for a member. Its last section is the one to follow once your first depl
 serve the project with `start_server` and look at it in `js_repl`, because `file://` is
 CORS-refused and mounts nothing, and the deploy's link does not answer from in here.
 
-## The class
-
-Name the class of app the objective describes and read its recipe before you draw:
-
-```
-cat "$UFO_HOME/skills/application-homepage/references/recipes/README.md"
-cat "$UFO_HOME/skills/application-homepage/references/recipes/<class>.md"
-```
-
-| The app is about | Recipe |
-| --- | --- |
-| dated records with people, read one at a time | `meetings` |
-| work whose state a member advances | `tasks` |
-| subjects watched for movement, read and dismissed | `radar` |
-| measures with deltas over a window the member switches | `metrics` |
-| runs scored over a series, the newest one's rows opened | `evals` |
-| a tracker's records a member owns and plans | `issues` |
-| one period's records and measures, questions cleared | `digest` |
-| a queue the member approves or skips one at a time | `triage` |
-
-A recipe names the roles its class needs, the region order that carries them, the controls that
-must change something, and what a correct build shows. It directs every app of its kind rather than
-one instance, so the recipe fixes the shape and the objective fills it. Where the objective is none
-of these eight, draw from `designing-a-homepage.md` alone — a neighbouring class names regions the
-objective never asked for.
-
 ## Scaffold
 
 ```
