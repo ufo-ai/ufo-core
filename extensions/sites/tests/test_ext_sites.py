@@ -475,6 +475,22 @@ def test_website_building_parent_keeps_its_own_subdirs_but_not_the_child_subtree
     assert not any(path.startswith("webapp/") for path in parent_files)
 
 
+def test_the_webapp_template_takes_sqlite_from_a_release_that_ships_a_binary() -> None:
+    """better-sqlite3 before 13 ships no binary for the sandbox's Node in its own tarball, so an app
+    build compiles the addon against the Node 24 headers, whose header-only `node::ObjectWrap`
+    destructor calls `RemoveEnvironmentCleanupHook` while no environment is current. The hosted
+    server then aborts at exit on `hooks.cc:142 Assertion failed: (env) != nullptr` and the site
+    goes dark. Measured on Node 24.19.0 with 500 live statements: a source build aborted in 12 of
+    40 exits, the shipped binary in 0 of 100."""
+
+    registry = skill_registry((sites_manifest.manifest(),))
+    files = dict(registry.named("website-building/webapp").files)
+    package = json.loads(files["template/package.json"])
+    requirement = package["dependencies"]["better-sqlite3"]
+    assert requirement.startswith("^")
+    assert int(requirement.removeprefix("^").split(".")[0]) >= 13, requirement
+
+
 def _page(body: str) -> str:
     return (
         'import { Group, mountApp } from "ufo/kit";\n'
