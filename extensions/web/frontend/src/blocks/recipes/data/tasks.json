@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    { "id": "t1", "title": "Rework the onboarding copy", "status": "ready", "project": "Growth", "assignees": 1, "due": "Oct 2" },
+    { "id": "t2", "title": "Audit the empty states", "status": "ready", "project": "Design", "assignees": 2, "due": "Oct 6" },
+    { "id": "t3", "title": "Name the export formats", "status": "ready", "project": "Platform", "assignees": 1, "due": "Oct 9" },
+    { "id": "t4", "title": "Collect the support themes", "status": "ready", "project": "Support", "assignees": 3, "due": "Oct 13" },
+    { "id": "t5", "title": "Ship the import flow", "status": "started", "project": "Platform", "assignees": 2, "due": "Sept 29" },
+    { "id": "t6", "title": "Split the settings page", "status": "started", "project": "Design", "assignees": 1, "due": "Oct 1" },
+    { "id": "t7", "title": "Add keyboard navigation", "status": "started", "project": "Design", "assignees": 2, "due": "Oct 3" },
+    { "id": "t8", "title": "Rebuild the table block", "status": "working", "project": "Design", "assignees": 2, "due": "Sept 26" },
+    { "id": "t9", "title": "Wire the search index", "status": "working", "project": "Platform", "assignees": 1, "due": "Sept 25" },
+    { "id": "t10", "title": "Trim the bundle", "status": "working", "project": "Platform", "assignees": 1, "due": "Sept 27" },
+    { "id": "t11", "title": "Dark theme tokens", "status": "done", "project": "Design", "assignees": 1, "due": "Sept 19" },
+    { "id": "t12", "title": "Row selection", "status": "done", "project": "Design", "assignees": 2, "due": "Sept 22" }
+  ]
+}

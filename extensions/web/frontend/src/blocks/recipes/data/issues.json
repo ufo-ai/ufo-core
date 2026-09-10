@@ -1,0 +1,36 @@
+{
+  "cadence": "Hourly",
+  "armed": { "Triage": true, "Implement": false },
+  "facts": [
+    { "id": "f1", "text": "180 open issues" },
+    { "id": "f2", "text": "177 carry no comment from me" },
+    { "id": "f3", "text": "first triage today at 4:00 PM" },
+    { "id": "f4", "text": "nothing approved to implement" }
+  ],
+  "notes": [
+    { "id": "n1", "band": "Triage", "label": "Runs", "body": "You set it up from the portal today at 3:24 PM. It has not run yet, so the first sweep is the next one due." },
+    { "id": "n2", "band": "Triage", "label": "Takes", "body": "Open issues in metalcraftai/ufo carrying no comment from me: 177 of the 180 open right now, so the first sweep starts on a long queue and will not clear it in one fire." },
+    { "id": "n3", "band": "Triage", "label": "Writes", "body": "One comment per issue: what it is really asking for, who should own it, the plan I would follow, and anything I could not settle rather than a guess." },
+    { "id": "n4", "band": "Triage", "label": "Skips", "body": "Any issue already carrying a comment from me. Three do, #2040, #1124 and #1044, from earlier review work, so triage leaves those alone until you name one." },
+    { "id": "n5", "band": "Implement", "label": "Would do", "body": "On each sweep, take the issues carrying ufo:implement that have no pull request, write the change for each, and open a pull request naming the issue." },
+    { "id": "n6", "band": "Implement", "label": "To arm it", "body": "Ask me for it and say how often to sweep. I set the sweep up, then do the work once for the issue in front of you, so the ask is answered now and not at the next fire." },
+    { "id": "n7", "band": "Implement", "label": "Approval", "body": "The ufo:implement label does not exist in metalcraftai/ufo yet, so no issue is approved. Approve one in chat and I put the label on it and tell you I did." },
+    { "id": "n8", "band": "Implement", "label": "Off means off", "body": "Until you arm it I write no code and open no pull request, not even for an issue whose plan is settled." }
+  ],
+  "prompts": [
+    { "id": "p1", "band": "Triage", "label": "Change the cadence" },
+    { "id": "p2", "band": "Triage", "label": "Re-triage an issue" },
+    { "id": "p3", "band": "Implement", "label": "Turn on implement" },
+    { "id": "p4", "band": "Implement", "label": "Approve an issue" }
+  ],
+  "queue": [
+    { "id": "i1", "number": "#2419", "title": "Thread-scoped URL watch: follow the URLs a thread mentions for 4 hours", "date": "25 Aug", "approved": false, "running": false },
+    { "id": "i2", "number": "#2349", "title": "Make the apps and sites boundary, and let apps call tools", "date": "24 Aug", "approved": false, "running": false },
+    { "id": "i3", "number": "#2149", "title": "Startup dash: add Stripe and Datadog", "date": "20 Aug", "approved": false, "running": false },
+    { "id": "i4", "number": "#1993", "title": "Delete the extension-registration and agent-setup code: the metaphor is wrong", "date": "19 Aug", "approved": false, "running": false },
+    { "id": "i5", "number": "#1770", "title": "Digest job runs twice when a channel is renamed", "date": "14 Aug", "approved": false, "running": false },
+    { "id": "i6", "number": "#1512", "title": "Credential rotation leaves the old secret readable", "date": "8 Aug", "approved": false, "running": false },
+    { "id": "i7", "number": "#1124", "title": "Slack surface loses the thread id on a retry", "date": "3 Aug", "approved": false, "running": false },
+    { "id": "i8", "number": "#1044", "title": "Site builds drop the theme on a second publish", "date": "2 Aug", "approved": false, "running": false }
+  ]
+}

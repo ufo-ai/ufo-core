@@ -1,0 +1,106 @@
+.blk-data-frame {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.blk-data-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 32px;
+}
+.blk-data-toolbar[data-align="end"] {
+  justify-content: flex-end;
+}
+.blk-data-toolbar .blk-search-field {
+  width: 220px;
+}
+.blk-data-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.blk-data-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  color: inherit;
+}
+.blk-data-header:hover,
+.blk-data-header[data-sorted] {
+  color: var(--blk-text-1);
+}
+.blk-data-header-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blk-data-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 32px;
+  font-size: 11px;
+  color: var(--blk-text-2);
+}
+.blk-data-pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.blk-data-pagination-steps {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.blk-data-pagination-steps .blk-icon-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.blk-data-page {
+  white-space: nowrap;
+}
+
+.blk-data-page-size {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.blk-data-page-size::after {
+  content: "";
+  position: absolute;
+  inset-inline-end: 9px;
+  width: 5px;
+  height: 5px;
+  border-inline-end: 1px solid currentColor;
+  border-block-end: 1px solid currentColor;
+  transform: rotate(45deg) translate(-1px, -2px);
+  pointer-events: none;
+}
+
+.blk-select {
+  height: 28px;
+  padding-block: 0;
+  padding-inline: 8px 22px;
+  border: 0;
+  border-radius: var(--blk-r-1);
+  background: var(--blk-bg-200);
+  font: inherit;
+  color: var(--blk-text-1);
+  appearance: none;
+  cursor: pointer;
+}
+.blk-select:focus-visible {
+  outline: 2px solid var(--blk-primary);
+  outline-offset: 2px;
+}

@@ -1,0 +1,282 @@
+.blk-chart {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 160px;
+  position: relative;
+}
+.blk-chart-square,
+.blk-chart[data-ratio="square"] {
+  aspect-ratio: 1 / 1;
+  max-height: 260px;
+  margin: 0 auto;
+}
+.blk-chart-half,
+.blk-chart[data-ratio="half"] {
+  aspect-ratio: 2 / 1;
+  max-height: 200px;
+  margin: 0 auto;
+}
+.blk-chart .recharts-surface { overflow: visible; }
+.blk-chart .recharts-layer,
+.blk-chart .recharts-sector,
+.blk-chart .recharts-surface { outline: none; }
+.blk-chart .recharts-cartesian-axis-tick text,
+.blk-chart .recharts-polar-angle-axis-tick text {
+  fill: var(--blk-text-2);
+  font-size: 11px;
+}
+.blk-chart .blk-chart-tick {
+  fill: var(--blk-text-2);
+  font-size: 11px;
+}
+.blk-chart .blk-chart-tick-detail {
+  fill: var(--blk-text-2);
+  opacity: 0.7;
+}
+.blk-chart .recharts-cartesian-axis-line,
+.blk-chart .recharts-cartesian-axis-tick-line {
+  stroke: var(--blk-bg-300);
+}
+.blk-chart .recharts-cartesian-grid line,
+.blk-chart .recharts-polar-grid line,
+.blk-chart .recharts-polar-grid path {
+  stroke: var(--blk-bg-300);
+  stroke-dasharray: 4 4;
+}
+.blk-chart .recharts-reference-line line { stroke: var(--blk-bg-300); }
+.blk-chart .recharts-radial-bar-background-sector { fill: var(--blk-bg-200); }
+.blk-chart .recharts-sector[stroke="#fff"],
+.blk-chart .recharts-dot[stroke="#fff"] { stroke: transparent; }
+.blk-chart .recharts-curve.recharts-tooltip-cursor { stroke: var(--blk-bg-300); }
+.blk-chart .recharts-rectangle.recharts-tooltip-cursor { fill: var(--blk-bg-200); }
+.blk-chart .recharts-label-list text,
+.blk-chart .recharts-label text {
+  font-size: 11px;
+  fill: var(--blk-text-1);
+}
+.blk-chart-label-value { fill: var(--blk-text-1); }
+.blk-chart-label-muted { fill: var(--blk-text-2); }
+.blk-chart-label-inverse { fill: var(--blk-bg-100); }
+.blk-chart-figure {
+  fill: var(--blk-text-1);
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.blk-chart-tooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 128px;
+  padding: 8px 10px;
+  border: 1px solid var(--blk-bg-300);
+  border-radius: var(--blk-r-2);
+  background: var(--blk-bg-100);
+  box-shadow: var(--blk-shadow-float);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.blk-chart-tooltip-label {
+  color: var(--blk-text-1);
+  font-weight: 500;
+}
+.blk-chart-tooltip-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.blk-chart-tooltip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+}
+.blk-chart-tooltip-total {
+  display: flex;
+  flex-basis: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--blk-bg-200);
+  color: var(--blk-text-1);
+}
+.blk-chart-tooltip-row[data-indicator="dot"] { align-items: center; }
+.blk-chart-tooltip-row svg {
+  width: 12px;
+  height: 12px;
+  color: var(--blk-text-2);
+}
+.blk-chart-tooltip-mark {
+  flex-shrink: 0;
+  border-radius: 2px;
+  background: var(--blk-chart-mark);
+}
+.blk-chart-tooltip-mark[data-indicator="dot"] {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--blk-r-pill);
+}
+.blk-chart-tooltip-mark[data-indicator="line"] { width: 3px; }
+.blk-chart-tooltip-mark[data-indicator="dashed"] {
+  width: 0;
+  margin: 1px 0;
+  border: 1px dashed var(--blk-chart-mark);
+  background: transparent;
+}
+.blk-chart-tooltip-measure {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  line-height: 1.4;
+}
+.blk-chart-tooltip-measure[data-nested="on"] { align-items: flex-end; }
+.blk-chart-tooltip-names {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.blk-chart-tooltip-name { color: var(--blk-text-2); }
+.blk-chart-tooltip-value {
+  color: var(--blk-text-1);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.blk-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding-top: 12px;
+  font-size: 11px;
+  color: var(--blk-text-2);
+}
+.blk-chart-legend[data-align="top"] {
+  padding-top: 0;
+  padding-bottom: 12px;
+}
+.blk-chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.blk-chart-legend-item svg {
+  width: 12px;
+  height: 12px;
+}
+.blk-chart-legend-mark {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.blk-chart-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+}
+.blk-chart-head-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.blk-chart-head-title {
+  font-size: 15px;
+  font-weight: 500;
+}
+.blk-chart-head-sub {
+  font-size: 11px;
+  color: var(--blk-text-2);
+}
+.blk-chart-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.blk-chart-select::after {
+  content: "";
+  position: absolute;
+  inset-inline-end: 9px;
+  width: 5px;
+  height: 5px;
+  border-inline-end: 1px solid currentColor;
+  border-block-end: 1px solid currentColor;
+  transform: rotate(45deg) translate(-1px, -2px);
+  pointer-events: none;
+}
+
+.blk-chart-toggles {
+  display: flex;
+  border: 1px solid var(--blk-bg-300);
+  border-radius: var(--blk-r-1);
+  overflow: hidden;
+}
+.blk-root .blk-chart-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 16px;
+  text-align: left;
+}
+.blk-root .blk-chart-toggle + .blk-chart-toggle { border-left: 1px solid var(--blk-bg-300); }
+.blk-root .blk-chart-toggle[aria-pressed="true"] { background: var(--blk-bg-200); }
+.blk-chart-toggle-label {
+  font-size: 11px;
+  color: var(--blk-text-2);
+}
+.blk-chart-toggle-value {
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.blk-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+.blk-chart-grid-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.blk-chart-grid-name {
+  font-size: 11px;
+  color: var(--blk-text-2);
+}
+
+.blk-chart-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--blk-text-2);
+}
+
+@keyframes blk-chart-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.blk-chart-loading {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 160px;
+  border-radius: var(--blk-r-2);
+  background: linear-gradient(
+    90deg,
+    var(--blk-bg-200) 0%,
+    var(--blk-bg-300) 50%,
+    var(--blk-bg-200) 100%
+  );
+  background-size: 200% 100%;
+  animation: blk-chart-shimmer 1.6s linear infinite;
+}

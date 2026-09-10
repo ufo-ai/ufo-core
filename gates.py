@@ -106,6 +106,7 @@ FRAMED_STAT = re.compile(r"<Stat[\s>][^>]*?(?<![\w-])(border)(?![\w-])", re.S)
 APP_REBUILD_LINE = "takes the platform kit as it stands today"
 APPS_LIST = re.compile(r"const APPS = \[(?P<apps>[^\]]*)\]")
 PORTAL_ENTRIES = frozenset({PORTAL_SOURCE / "main.tsx", PORTAL_SOURCE / "apps" / "kit.ts"})
+BLOCKS_SOURCE = PORTAL_SOURCE / "blocks"
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
 PORTAL_MODULE_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"})
 STYLESHEET_IMPORT = re.compile(r"""["'][^"']*\.css["']""")
@@ -2054,6 +2055,8 @@ def _portal_style_failures() -> list[str]:
     failures = []
     for path in sorted(source.rglob("*")):
         rel = path.relative_to(ROOT)
+        if BLOCKS_SOURCE in rel.parents:
+            continue
         if path.suffix == ".css" and rel != PORTAL_THEME:
             failures.append(f"{rel}: the theme is the only stylesheet")
         if path.suffix not in PORTAL_MODULE_SUFFIXES:
@@ -2524,6 +2527,31 @@ def _ratio_failures(pairings: list[tuple[str, str, str, float]]) -> list[str]:
     return failures
 
 
+def _blocks_boundary_failures() -> list[str]:
+    """The blocks tree is a second design system: its own tokens, its own stylesheets, its own page.
+    It answers to the portal's style gates only by staying out of the portal — a portal view that
+    imported a block would pull a palette the theme does not own into the fleet's bundle, and the
+    theme excludes the tree from its scan on the same understanding. So the wall is checked from
+    both sides: no portal module reaches into `blocks`, and no block reaches back out."""
+    source = ROOT / PORTAL_SOURCE
+    if not source.is_dir():
+        return [f"{PORTAL_SOURCE}: the portal source is missing"]
+    failures = []
+    for path in sorted(source.rglob("*")):
+        if path.suffix not in PORTAL_MODULE_SUFFIXES:
+            continue
+        rel = path.relative_to(ROOT)
+        text = path.read_text()
+        inside = BLOCKS_SOURCE in rel.parents
+        if not inside and re.search(r"""from ["']@/blocks/""", text):
+            failures.append(f"{rel}: a portal module may not import a block")
+        if inside and re.search(r"""from ["']@/(?!blocks/)""", text):
+            failures.append(f"{rel}: a block may not import the portal")
+    if not any((ROOT / BLOCKS_SOURCE).glob("*.tsx")):
+        failures.append(f"{BLOCKS_SOURCE}: the blocks source is missing")
+    return failures
+
+
 def _prompt_home_failures() -> list[str]:
     """Every prompt lives in a directory named `prompts/`. One glob over the repo — `*/prompts/*.md`
     — is then the whole set, so an agent looking for the text a model reads finds it without knowing
@@ -2729,6 +2757,7 @@ def main() -> int:
     failures.extend(_migration_antijoin_failures(trees))
     failures.extend(_registered_naming_failures())
     failures.extend(_portal_style_failures())
+    failures.extend(_blocks_boundary_failures())
     failures.extend(_composition_rhythm_failures())
     failures.extend(_kit_catalogue_failures())
     failures.extend(_comment_length_failures())

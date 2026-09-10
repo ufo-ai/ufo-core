@@ -1,0 +1,77 @@
+.blk-recipes {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+  width: min(1440px, calc(100vw - 300px));
+}
+
+.blk-recipes-nav {
+  position: sticky;
+  top: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.blk-recipes-nav a {
+  display: block;
+  padding: 6px 8px;
+  border-radius: var(--blk-r-1);
+  color: var(--blk-text-2);
+  text-decoration: none;
+}
+.blk-recipes-nav a:hover { color: var(--blk-text-1); }
+.blk-recipes-nav a[aria-current="page"] { color: var(--blk-text-1); background: var(--blk-bg-200); }
+
+.blk-recipe-brief {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 32px;
+  align-items: start;
+}
+.blk-recipe-brief > .blk-prose .blk-code { font-size: 11px; }
+.blk-recipe-data { position: sticky; top: 40px; }
+.blk-recipe-data .blk-code { max-height: 640px; overflow: auto; }
+
+.blk-recipe-toolbar { display: flex; align-items: center; gap: 16px; }
+.blk-recipe-toggle { display: flex; gap: 4px; }
+.blk-recipe-toggle button {
+  padding: 4px 8px;
+  border-radius: var(--blk-r-1);
+  color: var(--blk-text-2);
+  font-size: 11px;
+}
+.blk-recipe-toggle button[aria-pressed="true"] { color: var(--blk-text-1); background: var(--blk-bg-200); }
+
+.blk-recipe-stage {
+  border: 1px solid var(--blk-bg-300);
+  border-radius: var(--blk-r-2);
+  overflow-x: auto;
+}
+.blk-recipe-scheme {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+}
+.blk-recipe-scheme[data-scheme="light"] { color-scheme: light; }
+.blk-recipe-scheme[data-scheme="dark"] { color-scheme: dark; }
+.blk-recipe-scheme[data-width="lane"] { --blk-recipe-width: 349px; }
+.blk-recipe-scheme[data-width="column"] { --blk-recipe-width: 640px; }
+.blk-recipe-scheme[data-width="wide"] { --blk-recipe-width: 1200px; }
+.blk-recipe-scheme[data-width="fill"] { --blk-recipe-width: 100%; }
+.blk-recipe-scheme:not([data-width="fill"]) { min-width: max-content; }
+
+.blk-recipe-frame {
+  flex: none;
+  width: var(--blk-recipe-width);
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  background: var(--blk-bg-100);
+  color: var(--blk-text-1);
+  border-radius: var(--blk-r-2);
+}
+
+.blk-recipe-checks { padding-left: 32px; }

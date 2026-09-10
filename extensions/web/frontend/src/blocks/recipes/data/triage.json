@@ -1,0 +1,10 @@
+{
+  "messages": [
+    { "id": "x1", "sender": "Priya Raman", "initials": "PR", "subject": "Design sync notes need a decision", "summary": "Priya needs the navigation pattern chosen before Thursday.", "received": "8:42a", "starred": true, "replies": ["Choose the tab pattern", "Ask for a third option", "Move it to Monday"] },
+    { "id": "x2", "sender": "Sam Okafor", "initials": "SO", "subject": "Gmail connector failing for two workspaces", "summary": "Two workspaces have hit the OAuth timeout since the release.", "received": "9:05a", "starred": true, "replies": ["Confirm the rollback", "Ask for the workspace ids", "Assign it to Ada"] },
+    { "id": "x3", "sender": "Northwind Procurement", "initials": "NP", "subject": "SSO and retention before signing", "summary": "Northwind wants SSO and a two-year retention window in the contract.", "received": "9:31a", "starred": true, "replies": ["Send the SSO timeline", "Offer a call this week", "Ask for their deadline"] },
+    { "id": "x4", "sender": "Ada Nwosu", "initials": "AN", "subject": "Audit findings ready for review", "summary": "The security audit closed with four findings and none of them critical.", "received": "10:12a", "starred": false, "replies": ["Approve the remediation order", "Ask about the third finding", "Schedule the review"] },
+    { "id": "x5", "sender": "Finance", "initials": "FI", "subject": "July invoices are reconciled", "summary": "The July run closed with one dunning case still open.", "received": "10:48a", "starred": false, "replies": ["Close the dunning case", "Ask for the detail", "Note it and archive"] },
+    { "id": "x6", "sender": "Ravi Menon", "initials": "RM", "subject": "Pricing review moved to Friday", "summary": "Ravi moved the pricing review and needs the seat model numbers first.", "received": "11:20a", "starred": false, "replies": ["Send the seat numbers", "Confirm Friday", "Ask to keep Tuesday"] }
+  ]
+}

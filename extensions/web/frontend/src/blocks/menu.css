@@ -1,0 +1,106 @@
+button.blk-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--blk-bg-300);
+  border-radius: var(--blk-r-1);
+  font-size: 13px;
+  color: var(--blk-text-1);
+}
+.blk-menu-trigger:hover {
+  background: var(--blk-bg-200);
+}
+.blk-menu-trigger[data-icon="true"] {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-color: transparent;
+  color: var(--blk-text-2);
+}
+
+button.blk-menu-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: none;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--blk-r-1);
+  font-size: 13px;
+  color: var(--blk-text-1);
+}
+button.blk-menu-button > svg {
+  flex: none;
+  color: var(--blk-text-2);
+}
+button.blk-menu-button:hover,
+button.blk-menu-button[data-state="open"] {
+  background: var(--blk-bg-200);
+}
+button.blk-menu-button[data-icon="true"] {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  gap: 0;
+  color: var(--blk-text-2);
+}
+button.blk-menu-button[data-icon="true"]:hover,
+button.blk-menu-button[data-icon="true"][data-state="open"] {
+  color: var(--blk-text-1);
+}
+
+.blk-menu {
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--blk-bg-300);
+  border-radius: var(--blk-r-2);
+  background: var(--blk-bg-100);
+  color: var(--blk-text-1);
+  font-family: var(--blk-font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: var(--blk-shadow-float);
+  z-index: 50;
+}
+.blk-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--blk-r-1);
+  outline: 0;
+  cursor: default;
+  user-select: none;
+}
+.blk-menu-item[data-highlighted] {
+  background: var(--blk-bg-200);
+}
+.blk-menu-item[data-disabled] {
+  color: var(--blk-text-2);
+  opacity: 0.5;
+}
+.blk-menu-item[data-destructive="true"] {
+  color: var(--blk-secondary);
+}
+.blk-menu-check {
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+  align-items: center;
+  justify-content: center;
+}
+.blk-menu-label {
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--blk-text-2);
+}
+.blk-menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--blk-bg-200);
+}

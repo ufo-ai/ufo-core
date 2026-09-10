@@ -1,0 +1,29 @@
+{
+  "windows": { "current": "Mon 31 Aug to Sun 6 Sep", "prior": "Mon 24 Aug to Sun 30 Aug" },
+  "sections": [
+    { "id": "engineering", "name": "Engineering", "scope": "metalcraftai/ufo, branch main.", "on": true, "columns": 4 },
+    { "id": "revenue", "name": "Revenue", "scope": "Burn from QuickBooks, all revenue from Stripe.", "on": true, "columns": 3 },
+    { "id": "product", "name": "Product", "scope": "Portal reads from the web surface.", "on": true, "columns": 3 },
+    { "id": "support", "name": "Support", "scope": "Slack is connected; no support channel is named.", "on": false, "columns": 2 }
+  ],
+  "stats": [
+    { "id": "s1", "section": "engineering", "source": "GitHub", "label": "Shipped", "value": "298", "delta": "56", "direction": "down", "priorValue": "354", "priorDelta": "41", "priorDirection": "up", "counted": "counted as pull requests merged into main inside the window" },
+    { "id": "s2", "section": "engineering", "source": "GitHub", "label": "Median time to merge", "value": "57m", "delta": "1m", "direction": "down", "priorValue": "58m", "priorDelta": "6m", "priorDirection": "down", "counted": "counted from the first commit pushed to the merge, drafts included" },
+    { "id": "s3", "section": "engineering", "source": "GitHub", "label": "Reverted", "value": "7", "delta": "6", "direction": "up", "priorValue": "1", "priorDelta": "2", "priorDirection": "down", "counted": "counted as merges in the window whose title begins Revert, against one the week before" },
+    { "id": "s4", "section": "engineering", "source": "GitHub", "label": "Open past a week", "value": "10", "delta": "oldest 31 days", "direction": "flat", "priorValue": "12", "priorDelta": "oldest 24 days", "priorDirection": "flat", "counted": "counted as open pull requests, drafts left out, whose first commit is over seven days old" },
+    { "id": "s5", "section": "revenue", "source": "QuickBooks", "label": "Net cash flow", "value": "+$20.6k", "delta": "$80.4k", "direction": "up", "priorValue": "-$59.8k", "priorDelta": "$12.1k", "priorDirection": "down", "counted": "counted as the QuickBooks cash-basis result for the week, a surplus because Simple Casual paid a $60,000 invoice and Mercury treasury paid $92,492.84 of dividends" },
+    { "id": "s6", "section": "revenue", "source": "Stripe", "label": "Monthly recurring revenue", "value": "$0", "delta": "flat", "direction": "flat", "priorValue": "$0", "priorDelta": "flat", "priorDirection": "flat", "counted": "counted as active Stripe subscriptions priced by the month, the only place revenue lives; Stripe holds none and no payment since 1 June" },
+    { "id": "s7", "section": "revenue", "source": "QuickBooks", "label": "Model spend", "value": "$10.1k", "delta": "$8.5k", "direction": "down", "priorValue": "$18.6k", "priorDelta": "$3.2k", "priorDirection": "up", "counted": "counted as the Anthropic, OpenAI and OpenRouter rows in the ledger, a subset of outflow rather than an addition to the surplus" },
+    { "id": "s8", "section": "product", "source": "Portal", "label": "Sign-ins", "value": "214", "delta": "19", "direction": "up", "priorValue": "195", "priorDelta": "22", "priorDirection": "up", "counted": "counted as sessions that reached the portal, one per member per day" },
+    { "id": "s9", "section": "product", "source": "Portal", "label": "Apps opened", "value": "96", "delta": "12", "direction": "down", "priorValue": "108", "priorDelta": "9", "priorDirection": "up", "counted": "counted as app pages a member opened, repeat opens in one session left out" },
+    { "id": "s10", "section": "product", "source": "Portal", "label": "Sites published", "value": "8", "delta": "3", "direction": "up", "priorValue": "5", "priorDelta": "1", "priorDirection": "down", "counted": "counted as site builds that finished and answered on their host" },
+    { "id": "s11", "section": "support", "source": "Slack", "label": "Opened", "value": "—", "delta": "", "direction": "", "priorValue": "—", "priorDelta": "", "priorDirection": "", "counted": "would count conversations a customer started in the period" },
+    { "id": "s12", "section": "support", "source": "Slack", "label": "Median first reply", "value": "—", "delta": "", "direction": "", "priorValue": "—", "priorDelta": "", "priorDirection": "", "counted": "would count from a customer's first message to the first reply from us" }
+  ],
+  "asks": [
+    { "id": "a1", "title": "Name where support happens", "body": "Slack is connected here; Zendesk and Intercom are not. Name the channel or the shared inbox customers write to and the support set turns on.", "asked": false },
+    { "id": "a2", "title": "Say what each vendor is", "body": "Burn splits by payee, so payroll, models and one-offs are separable. Nothing in the ledger says which vendor is infrastructure and which is people.", "asked": false },
+    { "id": "a3", "title": "Start billing customers", "body": "Stripe holds no subscription and no payment since 1 June, so recurring revenue reads zero rather than unknown. It moves the week the flat-fee plans bill.", "asked": false },
+    { "id": "a4", "title": "Decide what a fix is", "body": "Reverted counts merges whose title begins Revert. Name the labels that mark a fix and the count reads the label instead of the title.", "asked": false }
+  ]
+}

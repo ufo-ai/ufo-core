@@ -1,0 +1,34 @@
+{
+  "nights": [
+    { "id": "aug26", "night": "aug26", "rate": 80.1, "label": "80.1%", "counts": "422/527", "excluded": 2, "suites": 44, "shardRows": 48, "shards": 26, "delta": "", "direction": "", "previous": "—" },
+    { "id": "aug27", "night": "aug27", "rate": 78.2, "label": "78.2%", "counts": "480/614", "excluded": 3, "suites": 48, "shardRows": 53, "shards": 28, "delta": "1.9 pts", "direction": "down", "previous": "80.1%" },
+    { "id": "aug28", "night": "aug28", "rate": 73.3, "label": "73.3%", "counts": "451/615", "excluded": 1, "suites": 49, "shardRows": 54, "shards": 29, "delta": "4.9 pts", "direction": "down", "previous": "78.2%" },
+    { "id": "aug29", "night": "aug29", "rate": 75.3, "label": "75.3%", "counts": "490/651", "excluded": 4, "suites": 51, "shardRows": 56, "shards": 30, "delta": "2.0 pts", "direction": "up", "previous": "73.3%" },
+    { "id": "aug30", "night": "aug30", "rate": 74.0, "label": "74%", "counts": "1064/1437", "excluded": 6, "suites": 71, "shardRows": 79, "shards": 41, "delta": "1.3 pts", "direction": "down", "previous": "75.3%" },
+    { "id": "aug31", "night": "aug31", "rate": 70.0, "label": "70%", "counts": "1048/1498", "excluded": 5, "suites": 73, "shardRows": 81, "shards": 42, "delta": "4.0 pts", "direction": "down", "previous": "74%" },
+    { "id": "sep1", "night": "sep1", "rate": 71.0, "label": "71%", "counts": "1039/1463", "excluded": 3, "suites": 72, "shardRows": 80, "shards": 42, "delta": "1.0 pts", "direction": "up", "previous": "70%" },
+    { "id": "sep2", "night": "sep2", "rate": 72.5, "label": "72.5%", "counts": "1101/1518", "excluded": 7, "suites": 74, "shardRows": 82, "shards": 43, "delta": "1.5 pts", "direction": "up", "previous": "71%" },
+    { "id": "sep3", "night": "sep3", "rate": 73.7, "label": "73.7%", "counts": "1131/1534", "excluded": 2, "suites": 75, "shardRows": 83, "shards": 44, "delta": "1.2 pts", "direction": "up", "previous": "72.5%" },
+    { "id": "sep4", "night": "sep4", "rate": 73.3, "label": "73.3%", "counts": "1132/1544", "excluded": 5, "suites": 76, "shardRows": 84, "shards": 44, "delta": "0.4 pts", "direction": "down", "previous": "73.7%" },
+    { "id": "sep5", "night": "sep5", "rate": 73.4, "label": "73.4%", "counts": "1132/1543", "excluded": 4, "suites": 76, "shardRows": 84, "shards": 45, "delta": "0.1 pts", "direction": "up", "previous": "73.3%" },
+    { "id": "sep6", "night": "sep6", "rate": 69.6, "label": "69.6%", "counts": "905/1300", "excluded": 6, "suites": 68, "shardRows": 75, "shards": 39, "delta": "3.8 pts", "direction": "down", "previous": "73.4%" },
+    { "id": "sep7", "night": "sep7", "rate": 71.9, "label": "71.9%", "counts": "1187/1652", "excluded": 5, "suites": 79, "shardRows": 88, "shards": 46, "delta": "2.3 pts", "direction": "up", "previous": "69.6%" },
+    { "id": "sep8", "night": "sep8", "rate": 71.5, "label": "71.5%", "counts": "1192/1666", "excluded": 5, "suites": 79, "shardRows": 88, "shards": 46, "delta": "0.4 pts", "direction": "down", "previous": "71.9%" }
+  ],
+  "suites": [
+    { "id": "q1", "suite": "business_goal", "warn": true, "shard": "nightly-assistant-hosted-1", "model": "claude-opus-5", "passed": "0/4", "rate": 0, "previous": "0/4 (same)", "movement": "flat", "detail": "Four cases, none passed on either night. The judge marks the plan as missing the goal statement." },
+    { "id": "q2", "suite": "github_connections", "warn": true, "shard": "nightly-assistant-eval-5", "model": "claude-opus-5", "passed": "0/4", "rate": 0, "previous": "2/4 to 0/4", "movement": "down", "detail": "Both cases that passed the night before now time out waiting on the connection list." },
+    { "id": "q3", "suite": "report_digest", "warn": true, "shard": "nightly-assistant-eval-9", "model": "z-ai/glm-5.3-flash", "passed": "0/2", "rate": 0, "previous": "—", "movement": "none", "detail": "First run of the suite. Both cases end with no digest written." },
+    { "id": "q4", "suite": "non_refusal", "warn": true, "shard": "nightly-assistant-eval-7", "model": "claude-opus-5", "passed": "0/1", "rate": 0, "previous": "—", "movement": "none", "detail": "First run. The one case is graded a refusal." },
+    { "id": "q5", "suite": "skill_tail_search", "warn": true, "shard": "nightly-assistant-eval-9", "model": "z-ai/glm-5.3-flash", "passed": "0/1", "rate": 0, "previous": "—", "movement": "none", "detail": "First run. The case never loads the skill it is scored on." },
+    { "id": "q6", "suite": "delegated_response_register", "warn": true, "shard": "nightly-assistant-eval-9", "model": "z-ai/glm-5.3-flash", "passed": "1/5", "rate": 20, "previous": "—", "movement": "none", "detail": "First run. Four cases answer in the wrong register." },
+    { "id": "q7", "suite": "new_application", "warn": true, "shard": "nightly-assistant-eval-2", "model": "claude-opus-5", "passed": "4/16", "rate": 25, "previous": "1/16 to 4/16", "movement": "up", "detail": "Three more cases pass than the night before. The rest stop before the manifest is written." },
+    { "id": "q8", "suite": "document_read", "warn": true, "shard": "nightly-assistant-eval-8", "model": "claude-opus-5", "passed": "1/3", "rate": 33, "previous": "—", "movement": "none", "detail": "First run. Two cases quote a document they were not given." },
+    { "id": "q9", "suite": "skill_routing", "warn": true, "shard": "nightly-assistant-eval-8", "model": "claude-opus-5", "passed": "1/3", "rate": 33, "previous": "—", "movement": "none", "detail": "First run. Two cases load a neighbouring skill." },
+    { "id": "q10", "suite": "memory_ingestion.locomo.multi_hop", "warn": true, "shard": "memory-ingestion-claude-opus-5", "model": "claude-opus-5", "passed": "7/18", "rate": 39, "previous": "10/18 to 7/18", "movement": "down", "detail": "Three fewer cases pass. The drop is in the two-hop questions." },
+    { "id": "q11", "suite": "memory_ingestion.locomo.multi_hop", "warn": true, "shard": "memory-ingestion-glm-5-3-flash", "model": "z-ai/glm-5.3-flash", "passed": "7/18", "rate": 39, "previous": "8/18 to 7/18", "movement": "down", "detail": "One fewer case passes than the night before." },
+    { "id": "q12", "suite": "closing_message", "warn": true, "shard": "nightly-assistant-eval-7", "model": "claude-opus-5", "passed": "5/10", "rate": 50, "previous": "—", "movement": "none", "detail": "First run. Half the cases close without naming the next step." },
+    { "id": "q13", "suite": "memory_ingestion.longmem.abstention", "warn": false, "shard": "memory-ingestion-glm-5-3-flash", "model": "z-ai/glm-5.3-flash", "passed": "3/6", "rate": 50, "previous": "3/6 (same)", "movement": "flat", "detail": "The same three cases pass as the night before." },
+    { "id": "q14", "suite": "tool_choice", "warn": false, "shard": "nightly-assistant-eval-3", "model": "claude-opus-5", "passed": "9/12", "rate": 75, "previous": "7/12 to 9/12", "movement": "up", "detail": "Two more cases pass. The remaining three pick a read tool for a write." }
+  ]
+}

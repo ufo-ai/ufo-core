@@ -1,5 +1,8 @@
 @import "tailwindcss" source(".");
 @source "../sidebar/src";
+/* The blocks tree is a separate design system with its own tokens and its own entry; scanning it
+   here emitted utility defaults into the portal bundle that no portal view asks for. */
+@source not "./blocks";
 @source "../node_modules/streamdown/dist/*.js";
 /* App pages compile in the browser against the kit, so the sheet must carry their classes too: a
    utility only an app page uses would otherwise vanish from the build no bundler ever sees them in. */

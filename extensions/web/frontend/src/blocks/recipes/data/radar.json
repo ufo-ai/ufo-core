@@ -1,0 +1,28 @@
+{
+  "tags": [
+    { "id": "g1", "label": "tables" },
+    { "id": "g2", "label": "connectors" },
+    { "id": "g3", "label": "search" },
+    { "id": "g4", "label": "security" },
+    { "id": "g5", "label": "theme" }
+  ],
+  "releases": [
+    { "id": "r1", "version": "1.8.0", "day": "26", "summary": "Search moved to the incremental index and the export formats are named." },
+    { "id": "r2", "version": "1.7.0", "day": "12", "summary": "Table density and cross-page row selection landed on every listing." },
+    { "id": "r3", "version": "1.6.0", "day": "29", "summary": "Connectors took their own page and their callbacks now retry." },
+    { "id": "r4", "version": "1.5.0", "day": "15", "summary": "Dark theme tokens and the workspace audit trail." },
+    { "id": "r5", "version": "1.4.0", "day": "1", "summary": "The first release cut from the changelog itself." }
+  ],
+  "entries": [
+    { "id": "e1", "version": "1.8.0", "title": "Search reads the incremental index", "body": "Search answers from the incremental index, so a workspace holding a hundred thousand records returns in under a second. The old index is dropped on first boot.", "tags": ["search", "performance"], "read": false },
+    { "id": "e2", "version": "1.8.0", "title": "Export formats are named", "body": "CSV, JSON and Parquet each carry a name and a description in the export dialog instead of a bare file extension.", "tags": ["export"], "read": false },
+    { "id": "e3", "version": "1.7.0", "title": "Dense tables", "body": "Every listing takes a density control. Dense drops the row height from 34 to 28 pixels and holds the header row at 32.", "tags": ["tables"], "read": true },
+    { "id": "e4", "version": "1.7.0", "title": "Selection survives a page step", "body": "A listing keeps its selection across pages. The count in the toolbar reports the whole selection, not the page.", "tags": ["tables", "listings"], "read": false },
+    { "id": "e5", "version": "1.6.0", "title": "Connector settings moved", "body": "Connectors have a page of their own. The settings page keeps the workspace, the members and the billing.", "tags": ["settings", "connectors"], "read": true },
+    { "id": "e6", "version": "1.6.0", "title": "OAuth callbacks retry", "body": "A callback that fails on a provider timeout retries three times before the connection is marked failed.", "tags": ["connectors"], "read": false },
+    { "id": "e7", "version": "1.5.0", "title": "Dark theme tokens", "body": "Every surface reads its colour from a token, so the theme switch no longer leaves a light border on a dark ground.", "tags": ["theme"], "read": true },
+    { "id": "e8", "version": "1.5.0", "title": "Audit trail", "body": "Every mutation records the member, the verb and the object it acted on. The trail reads from the workspace settings.", "tags": ["audit", "security"], "read": false },
+    { "id": "e9", "version": "1.4.0", "title": "Changelog", "body": "Releases are published here with their entries and tags. A release is cut on the last working day of the fortnight.", "tags": ["docs"], "read": true },
+    { "id": "e10", "version": "1.4.0", "title": "Keyboard navigation", "body": "Arrow keys move between rows in a listing and Enter opens the focused row.", "tags": ["accessibility"], "read": true }
+  ]
+}

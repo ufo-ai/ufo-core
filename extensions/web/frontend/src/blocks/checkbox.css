@@ -1,0 +1,47 @@
+.blk-checkbox {
+  position: relative;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.blk-checkbox input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.blk-checkbox-box {
+  pointer-events: none;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--blk-bg-300);
+  border-radius: 4px;
+  background: var(--blk-bg-100);
+  color: var(--blk-on-ink);
+}
+.blk-checkbox-box svg {
+  opacity: 0;
+}
+.blk-checkbox[data-state="checked"] .blk-checkbox-box,
+.blk-checkbox[data-state="indeterminate"] .blk-checkbox-box {
+  border-color: var(--blk-ink);
+  background: var(--blk-ink);
+}
+.blk-checkbox[data-state="checked"] .blk-checkbox-box svg,
+.blk-checkbox[data-state="indeterminate"] .blk-checkbox-box svg {
+  opacity: 1;
+}
+.blk-checkbox input:focus-visible + .blk-checkbox-box {
+  outline: 2px solid var(--blk-primary);
+  outline-offset: 2px;
+}
+.blk-checkbox input:disabled + .blk-checkbox-box {
+  opacity: 0.5;
+}

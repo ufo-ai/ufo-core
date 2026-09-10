@@ -1,0 +1,128 @@
+.blk-prose {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  font-family: var(--blk-font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--blk-text-1);
+}
+.blk-prose[data-width="prose"] { max-width: 640px; }
+.blk-prose[data-align="center"] { margin-inline: auto; }
+.blk-prose[data-font="mono"] { font-family: var(--blk-font-mono); }
+
+.blk-prose h1,
+.blk-prose h2,
+.blk-prose h3,
+.blk-prose h4,
+.blk-prose p,
+.blk-prose ul,
+.blk-prose ol,
+.blk-prose blockquote,
+.blk-prose figcaption,
+.blk-prose small { text-box: trim-both cap alphabetic; }
+.blk-prose > :first-child { text-box-edge: text alphabetic; }
+.blk-prose > :last-child { text-box-edge: cap text; }
+.blk-prose > :only-child { text-box-edge: text text; }
+
+.blk-prose h1,
+.blk-prose h2,
+.blk-prose h3,
+.blk-prose h4 { margin: 0; font-weight: 500; }
+.blk-prose h1 { font-size: 22px; line-height: 1.3; }
+.blk-prose h2 {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  font-size: 15px;
+  border-bottom: 1px solid var(--blk-bg-200);
+}
+.blk-prose h3 { font-size: 13px; }
+.blk-prose h4 { font-size: 13px; color: var(--blk-text-2); }
+.blk-prose p { margin: 0; }
+.blk-prose strong { font-weight: 500; }
+.blk-prose em { font-style: italic; }
+.blk-prose small { font-size: 11px; font-weight: 500; }
+.blk-prose a { color: var(--blk-text-1); text-decoration: underline; text-underline-offset: 3px; }
+.blk-prose hr { margin: 0; border: 0; border-top: 1px solid var(--blk-bg-200); }
+
+.blk-prose ul,
+.blk-prose ol { margin: 0; padding-left: 16px; }
+.blk-prose ul { list-style: disc; }
+.blk-prose ol { list-style: decimal; }
+.blk-prose li + li { margin-top: 4px; }
+
+.blk-prose blockquote {
+  margin: 0;
+  padding-left: 12px;
+  border-left: 1.5px solid var(--blk-bg-300);
+  color: var(--blk-text-2);
+}
+
+.blk-prose table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.blk-prose th,
+.blk-prose td { padding: 8px 12px 8px 0; border-bottom: 1px solid var(--blk-bg-200); text-align: left; }
+.blk-prose th { font-weight: 500; color: var(--blk-text-2); }
+.blk-prose th:last-child,
+.blk-prose td:last-child { padding-right: 0; }
+
+.blk-prose code {
+  font-family: var(--blk-font-mono);
+  font-size: 12px;
+  background: var(--blk-bg-200);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.blk-prose[data-font="mono"] code {
+  font-family: inherit;
+  font-size: inherit;
+}
+.blk-prose pre,
+.blk-code {
+  position: relative;
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--blk-bg-200);
+  border-radius: var(--blk-r-2);
+  font-family: var(--blk-font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+.blk-prose pre code,
+.blk-code code { font: inherit; background: none; border-radius: 0; padding: 0; }
+.blk-code[data-language] { padding-right: 72px; }
+.blk-code[data-language]::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--blk-text-2);
+}
+.blk-code[data-variant="plain"] { padding: 0; background: none; border-radius: 0; }
+.blk-code[data-variant="plain"][data-language]::before { top: 0; right: 0; }
+.blk-code[data-wrap="true"] { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
+
+.blk-prose img { display: block; max-width: 100%; border-radius: var(--blk-r-2); }
+.blk-prose figure,
+.blk-figure { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.blk-figure-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 96px;
+  background: var(--blk-bg-200);
+  border-radius: var(--blk-r-2);
+  overflow: hidden;
+}
+.blk-figure-frame img { width: auto; height: auto; max-width: 100%; max-height: 100%; border-radius: 0; }
+.blk-prose figcaption,
+.blk-figure figcaption { font-size: 11px; line-height: 1.5; color: var(--blk-text-2); }
+
+.blk-lead { font-size: 15px; line-height: 1.5; color: var(--blk-text-2); }
+.blk-large { font-size: 15px; font-weight: 500; }
+.blk-muted { color: var(--blk-text-2); }

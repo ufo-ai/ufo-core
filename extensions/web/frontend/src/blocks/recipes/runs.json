@@ -1,0 +1,228 @@
+[
+  {
+    "recipe": "meetings",
+    "round": 1,
+    "agent": "opus",
+    "verdict": "fail",
+    "width": "fixed 349 or 880",
+    "notes": [
+      "Static build: no state, no handlers.",
+      "Fixed frame width; the recipe named sample values."
+    ],
+    "at": "2026-09-09T12:30:00+00:00"
+  },
+  {
+    "recipe": "meetings",
+    "round": 2,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Recipe silent on the current group, the narrowing values and the search placement.",
+      "Block gaps: Prose cannot center, a checkbox inside a clickable Item bubbles the click, ActionBarTitle cannot open a menu."
+    ],
+    "at": "2026-09-09T14:00:00+00:00"
+  },
+  {
+    "recipe": "tasks",
+    "round": 1,
+    "agent": "opus",
+    "verdict": "fail",
+    "width": "fixed 349 or 880",
+    "notes": [
+      "Static build: no state, no handlers.",
+      "Fixed frame width; the recipe named sample values."
+    ],
+    "at": "2026-09-09T12:30:00+00:00"
+  },
+  {
+    "recipe": "tasks",
+    "round": 2,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Block gaps: TableHead sorted is inert without onSort, TableSection columns is static under hideBelow, no table cell text edit, MenuContent lacks onCloseAutoFocus."
+    ],
+    "at": "2026-09-09T14:00:00+00:00"
+  },
+  {
+    "recipe": "radar",
+    "round": 1,
+    "agent": "opus",
+    "verdict": "fail",
+    "width": "fixed 349 or 880",
+    "notes": [
+      "Static build: no state, no handlers.",
+      "Fixed frame width; the recipe named sample values."
+    ],
+    "at": "2026-09-09T12:30:00+00:00"
+  },
+  {
+    "recipe": "radar",
+    "round": 2,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Contradiction resolved: secondary text as ItemDescription inside Prose.",
+      "Block gaps: Tag not pressable, ItemSection has no gap before its first row."
+    ],
+    "at": "2026-09-09T14:00:00+00:00"
+  },
+  {
+    "recipe": "triage",
+    "round": 1,
+    "agent": "opus",
+    "verdict": "fail",
+    "width": "fixed 349 or 880",
+    "notes": [
+      "Static build: no state, no handlers.",
+      "Fixed frame width; the recipe named sample values."
+    ],
+    "at": "2026-09-09T12:30:00+00:00"
+  },
+  {
+    "recipe": "triage",
+    "round": 2,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Recipe contradiction: composer disabled without a draft versus the write action opening an empty one.",
+      "Block gaps: ActionBarTitle trigger, styled MenuTrigger, no priority toggle block."
+    ],
+    "at": "2026-09-09T14:00:00+00:00"
+  },
+  {
+    "recipe": "metrics",
+    "round": 1,
+    "agent": "opus",
+    "verdict": "fail",
+    "width": "fixed 349 or 880",
+    "notes": [
+      "Static build: no state, no handlers.",
+      "Fixed frame width; the recipe named sample values."
+    ],
+    "at": "2026-09-09T12:30:00+00:00"
+  },
+  {
+    "recipe": "metrics",
+    "round": 2,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "One line blocked: CardButton has no disabled prop.",
+      "Block gaps: Composer has no focus control, Stat has no text source slot."
+    ],
+    "at": "2026-09-09T14:00:00+00:00"
+  },
+  {
+    "recipe": "evals",
+    "round": 1,
+    "agent": "opus",
+    "verdict": "fail",
+    "width": "fixed 349 or 880",
+    "notes": [
+      "Static build: no state, no handlers.",
+      "Fixed frame width; the recipe named sample values."
+    ],
+    "at": "2026-09-09T12:30:00+00:00"
+  },
+  {
+    "recipe": "evals",
+    "round": 2,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Block gaps: ActionBarTitle trigger, styled MenuTrigger.",
+      "Column widths set to let the table scroll; Shard truncates at 880."
+    ],
+    "at": "2026-09-09T14:00:00+00:00"
+  },
+  {
+    "recipe": "issues",
+    "round": 1,
+    "agent": "opus",
+    "verdict": "fail",
+    "width": "fixed 349 or 880",
+    "notes": [
+      "Static build: no state, no handlers.",
+      "Fixed frame width; the recipe named sample values."
+    ],
+    "at": "2026-09-09T12:30:00+00:00"
+  },
+  {
+    "recipe": "issues",
+    "round": 2,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Contradiction resolved: row acts moved to ItemFooter so the title survives at 349.",
+      "Block gaps: Composer focus, ItemMedia has no font prop, ItemSection has no empty slot."
+    ],
+    "at": "2026-09-09T14:00:00+00:00"
+  },
+  {
+    "recipe": "digest",
+    "round": 1,
+    "agent": "opus",
+    "verdict": "fail",
+    "width": "fixed 349 or 880",
+    "notes": [
+      "Static build: no state, no handlers.",
+      "Fixed frame width; the recipe named sample values."
+    ],
+    "at": "2026-09-09T12:30:00+00:00"
+  },
+  {
+    "recipe": "digest",
+    "round": 2,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Recipe silent on the setting's candidate values.",
+      "Block gaps: CardButton disabled and size sm, ActionBarTitle trigger."
+    ],
+    "at": "2026-09-09T14:00:00+00:00"
+  },
+  {
+    "recipe": "metrics",
+    "round": 3,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Second fresh build passed every line.",
+      "Remaining gap: Stat has no text source slot; the source rides in the label as a Tag."
+    ],
+    "at": "2026-09-09T14:50:00+00:00"
+  },
+  {
+    "recipe": "triage",
+    "round": 3,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Second fresh build passed every line.",
+      "Remaining gaps: no named row toggle block, SearchField cannot fill its own line, the item dropdown docs example uses className."
+    ],
+    "at": "2026-09-09T14:50:00+00:00"
+  },
+  {
+    "recipe": "tasks",
+    "round": 3,
+    "agent": "opus",
+    "verdict": "pass",
+    "width": "fill, lane, column, wide",
+    "notes": [
+      "Second fresh build passes the gates; browser checks not recorded."
+    ],
+    "at": "2026-09-09T14:50:00+00:00"
+  }
+]

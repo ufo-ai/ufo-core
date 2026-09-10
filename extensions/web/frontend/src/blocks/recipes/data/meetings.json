@@ -1,0 +1,17 @@
+{
+  "summary": "Five meetings today, four of them with prep notes. Yesterday's notes are below.",
+  "meetings": [
+    { "id": "m1", "day": "Today", "title": "Design sync : Ana / Priya", "notes": "Agree the navigation pattern and the component library updates before engineering picks them up.", "time": "9:30a", "place": "Google Meet", "attendees": 8, "read": false },
+    { "id": "m2", "day": "Today", "title": "Roadmap review : Ana / Sam", "notes": "Walk the quarter and cut the work that will not land before the release.", "time": "11:00a", "place": "Google Meet", "attendees": 6, "read": true },
+    { "id": "m3", "day": "Today", "title": "Pricing review : Ravi / Ana", "notes": "Compare the two seat models against the last three renewals.", "time": "1:15p", "place": "Zoom", "attendees": 4, "read": false },
+    { "id": "m4", "day": "Today", "title": "Support triage : Ada / Ravi", "notes": "Sort the open connector reports and name an owner for each.", "time": "2:30p", "place": "Google Meet", "attendees": 3, "read": true },
+    { "id": "m5", "day": "Today", "title": "Weekly planning : Team", "notes": "Set the week's priorities and confirm who is on call.", "time": "4:00p", "place": "Google Meet", "attendees": 9, "read": false },
+    { "id": "m6", "day": "Yesterday", "title": "Connector handover : Sam / Ada", "notes": "Sam walked the Gmail connector and handed the open bugs to Ada.", "time": "9:00a", "place": "Google Meet", "attendees": 2, "read": true },
+    { "id": "m7", "day": "Yesterday", "title": "Import walkthrough : Sam / Priya", "notes": "Priya recorded the CSV import path and the two failure cases.", "time": "10:30a", "place": "Google Meet", "attendees": 3, "read": true },
+    { "id": "m8", "day": "Yesterday", "title": "Hiring loop debrief : Ana / Ravi", "notes": "Scored the two backend candidates and agreed to advance one.", "time": "11:45a", "place": "Zoom", "attendees": 5, "read": true },
+    { "id": "m9", "day": "Yesterday", "title": "Billing sync : Ravi / Finance", "notes": "Reconciled the July invoices and closed the dunning question.", "time": "1:00p", "place": "Google Meet", "attendees": 4, "read": true },
+    { "id": "m10", "day": "Yesterday", "title": "Design critique : Priya / Team", "notes": "Reviewed the empty states and the new table density.", "time": "2:30p", "place": "Google Meet", "attendees": 7, "read": true },
+    { "id": "m11", "day": "Yesterday", "title": "Security review : Ada / Sam", "notes": "Went through the audit findings and set the remediation order.", "time": "3:30p", "place": "Zoom", "attendees": 4, "read": false },
+    { "id": "m12", "day": "Yesterday", "title": "Customer call : Ana / Northwind", "notes": "Northwind asked for SSO and a longer retention window.", "time": "4:15p", "place": "Google Meet", "attendees": 6, "read": false }
+  ]
+}

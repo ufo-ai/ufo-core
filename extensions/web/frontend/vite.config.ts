@@ -18,6 +18,12 @@ export default defineConfig({
   build: {
     outDir: "../ufo_ext_web/static",
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        index: new URL("./index.html", import.meta.url).pathname,
+        blocks: new URL("./blocks.html", import.meta.url).pathname,
+      },
+    },
     sourcemap: "hidden",
   },
   server: {

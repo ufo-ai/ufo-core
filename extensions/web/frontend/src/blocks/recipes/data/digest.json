@@ -1,0 +1,39 @@
+{
+  "hour": "9:00a",
+  "filters": [
+    { "id": "k1", "label": "All", "active": true },
+    { "id": "k2", "label": "#eng", "active": false },
+    { "id": "k3", "label": "#social", "active": false },
+    { "id": "k4", "label": "#business", "active": false },
+    { "id": "k5", "label": "#design", "active": false },
+    { "id": "k6", "label": "#ops", "active": false }
+  ],
+  "days": [
+    { "id": "d1", "date": "Sep 06", "quiet": 3, "words": 395 },
+    { "id": "d2", "date": "Sep 05", "quiet": 2, "words": 420 },
+    { "id": "d3", "date": "Sep 04", "quiet": 4, "words": 380 },
+    { "id": "d4", "date": "Sep 03", "quiet": 3, "words": 455 }
+  ],
+  "channels": [
+    { "id": "c1", "date": "Sep 06", "channel": "#eng", "lead": "@marshall", "messages": 14, "summary": "PR #3116 bounds background work at balance lines to fix starvation.", "detail": "Closes #3112 · staging latency 42ms" },
+    { "id": "c2", "date": "Sep 06", "channel": "#social", "lead": "@alex", "messages": 8, "summary": "Competitive notes on Buzz Desktop v0.5.23 and Codex Astra as default.", "detail": "OpenAI wiki disclosure thread" },
+    { "id": "c3", "date": "Sep 06", "channel": "#business", "lead": "@alex", "messages": 5, "summary": "Pioneer fund investment inquiry and eval benchmark proposals.", "detail": "Pioneer $500k inquiry" },
+    { "id": "c4", "date": "Sep 06", "channel": "#design", "lead": "@rae", "messages": 6, "summary": "Block library recipes reviewed; the stat tile keeps its ground.", "detail": "4 recipes merged · 2 open" },
+    { "id": "c5", "date": "Sep 06", "channel": "#ops", "lead": "@marshall", "messages": 4, "summary": "Slot 3 rebuilt after the migrate job timed out.", "detail": "Rebuild 11m · no data lost" },
+    { "id": "c6", "date": "Sep 05", "channel": "#eng", "lead": "@marshall", "messages": 11, "summary": "Migrate job retried after the slot 3 timeout and finished clean.", "detail": "Job 4412 · 11m" },
+    { "id": "c7", "date": "Sep 05", "channel": "#design", "lead": "@rae", "messages": 7, "summary": "Item states reviewed; the checkbox media lands this week.", "detail": "3 states agreed" },
+    { "id": "c8", "date": "Sep 05", "channel": "#business", "lead": "@alex", "messages": 4, "summary": "Two inbound intros routed to next week.", "detail": "Follow up Tuesday" },
+    { "id": "c9", "date": "Sep 05", "channel": "#social", "lead": "@alex", "messages": 6, "summary": "Thread on the Codex Astra defaults collected for the notes.", "detail": "12 links kept" },
+    { "id": "c10", "date": "Sep 04", "channel": "#eng", "lead": "@marshall", "messages": 9, "summary": "Search index rebuild cut cold reads to 380ms.", "detail": "Down from 1.2s" },
+    { "id": "c11", "date": "Sep 04", "channel": "#ops", "lead": "@marshall", "messages": 5, "summary": "Slot 2 upgraded and the fleet rolled with no drop.", "detail": "Roll 6m" },
+    { "id": "c12", "date": "Sep 04", "channel": "#design", "lead": "@rae", "messages": 3, "summary": "Empty states signed off for the listing pages.", "detail": "5 screens" },
+    { "id": "c13", "date": "Sep 03", "channel": "#eng", "lead": "@marshall", "messages": 13, "summary": "Row selection now survives a page step on every listing.", "detail": "PR #3061" },
+    { "id": "c14", "date": "Sep 03", "channel": "#business", "lead": "@alex", "messages": 5, "summary": "Pricing model comparison circulated for comment.", "detail": "2 replies" }
+  ],
+  "blockers": [
+    { "id": "b1", "channel": "#business", "question": "Approve the Pioneer intro call before Friday", "waiting": "Waiting 2 days", "resolved": false },
+    { "id": "b2", "channel": "#eng", "question": "Pick the migration window for the slot 3 rebuild", "waiting": "Waiting 1 day", "resolved": false },
+    { "id": "b3", "channel": "#social", "question": "Say whether the Codex Astra note goes public", "waiting": "Waiting 4 hours", "resolved": false },
+    { "id": "b4", "channel": "#design", "question": "Confirm the stat tile keeps its ground", "waiting": "Waiting 6 hours", "resolved": false }
+  ]
+}
