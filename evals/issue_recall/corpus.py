@@ -18,6 +18,8 @@ from uuid import UUID
 
 from ufo_ext_sources.providers.github import GitHubConnector
 
+from evals.harness.source_wake import woken_inbound
+
 REPO = "northwind/atlas"
 ISSUE_ID_BASE = 2_400_000
 COMMENT_ID_BASE = 3_900_000
@@ -1394,14 +1396,13 @@ class FilingCase:
 
 MID_THREAD = "mid-thread"
 SOURCE_ALERT = "source-alert"
-ALERT_SOURCE_NAME = "github-9c41d2ae"
-ALERT_CONNECTION_ID = "ca_mVtR-qwkoblf"
+ALERT_ACCOUNT = "metalcraftai"
 
 
 def source_alert(filing: Filing) -> str:
-    """The topic reached the way scheduled admissions reach it: a source-change alert whose only
-    topical signal is one related page's title, wrapped in the machine boilerplate — source and
-    connection ids, a stream name, a page uuid — that the recall hook embeds verbatim as the
+    """The topic reached the way a watched source reaches it: the change alert the deploy writes,
+    whose only topical signal is one related page's title, wrapped in the machine boilerplate — a
+    connection name, a stream name, a page uuid — that the recall hook embeds verbatim as the
     query."""
     page = next(page for page in PAGES if page.key == filing.alert_page)
     if not isinstance(page, IssueThread):
@@ -1410,12 +1411,7 @@ def source_alert(filing: Filing) -> str:
         bytes=hashlib.sha256(f"issue-recall/alert/{filing.alert_page}".encode()).digest()[:16],
         version=4,
     )
-    return (
-        f"The source '{ALERT_SOURCE_NAME}' (github ({ALERT_CONNECTION_ID}): {page.stream}) you "
-        f"watch changed — {page.stream}: 1 updated. Changed pages (pass each ref unchanged to "
-        f"object_get): page/{page_uuid} ({page.title}). Then tell the member what is new and why "
-        "it matters."
-    )
+    return woken_inbound("github", ALERT_ACCOUNT, page.stream, page.title, page_uuid)
 
 
 CASES: tuple[FilingCase, ...] = (

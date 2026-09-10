@@ -29,6 +29,7 @@ from ufo_ext_sources.pages import CONNECTION_OBJECT_KIND, PAGE_KIND, PAGE_OBJECT
 from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.resources import resource_digest
 from ufo_ext_sources.tools import (
+    ALERT_CLOSING,
     CHANGE_LOG_DIR,
     SOURCE_TRIGGER_KIND,
     WATCH_OFFER_MAX,
@@ -584,6 +585,34 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
         assert len(await _turns(state.conversation_id)) == 2
 
 
+async def test_alert_opens_on_what_changed_and_asks_for_no_member_report(db: None) -> None:
+    """The first line names the provider, the counts and the changed pages' own titles — a member
+    reading a conversation list sees the alert's opening characters and nothing else, and the
+    connection name, the refs and the machine detail follow underneath. Nothing on the woken turn
+    asks for a report: no member is reading it."""
+    state = await _workspace()
+    feed, source_id = await _feed_with_stream(state)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state), _trigger_manifest(feed, state.conversation_id))
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        shipped = _change(source_id, "# asana tasks: Ship the launch list")
+        legal = _change(source_id, "# asana tasks: Follow up with legal")
+        await on_page_change(
+            HookContext(ext=ext, payload=PageChangeBatch(changes=(shipped, legal)))
+        )
+
+        (turn,) = await _turns(state.conversation_id)
+        headline, connection_line, refs, closing = turn["inbound"].splitlines()
+        assert headline == (
+            f"{ASANA}: asana tasks: Ship the launch list; asana tasks: Follow up with legal "
+            "— tasks: 2 added."
+        )
+        assert connection_line.startswith(f"Connection {feed.name} ")
+        assert refs.endswith(f"{PAGE_KIND}/{shipped.page_id}; {PAGE_KIND}/{legal.page_id}.")
+        assert closing == ALERT_CLOSING
+        assert "tell the member" not in turn["inbound"]
+
+
 async def test_shared_trigger_conversation_carries_no_member_authority(db: None) -> None:
     state = await _workspace()
     feed, source_id = await _feed_with_stream(state)
@@ -859,7 +888,7 @@ async def test_alert_never_surfaces_a_member_private_page(db: None) -> None:
             HookContext(ext=ext, payload=PageChangeBatch(changes=(shared, private)))
         )
         (turn,) = await _turns(state.conversation_id)
-        assert "tasks: 1 added" in turn["inbound"]
+        assert "— tasks added." in turn["inbound"]
         assert f"{PAGE_KIND}/{shared.page_id}" in turn["inbound"]
         assert str(private.page_id) not in turn["inbound"]
 
@@ -891,7 +920,11 @@ async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) ->
         await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=changes)))
 
         (turn,) = await _turns(state.conversation_id)
-        assert "projects: 2 removed; tasks: 3 added, 4 updated" in turn["inbound"]
+        headline, *_ = turn["inbound"].splitlines()
+        assert headline == (
+            f"{ASANA}: gone 1 and 8 other pages changed "
+            "— projects: 2 removed; tasks: 3 added, 4 updated."
+        )
         assert "more" not in turn["inbound"]
         assert not any(str(change.page_id) in turn["inbound"] for change in changes)
 
@@ -1028,7 +1061,7 @@ async def test_a_trigger_narrowed_to_a_link_wakes_on_that_resource_alone(db: Non
     assert PR_URL in turn["inbound"]
     assert f"{PAGE_KIND}/{watched.page_id}" in turn["inbound"]
     assert f"{PAGE_KIND}/{other.page_id}" not in turn["inbound"]
-    assert "pull_requests: 1 added" in turn["inbound"]
+    assert "— pull_requests added." in turn["inbound"]
 
 
 async def test_every_spelling_of_the_link_is_one_trigger(db: None) -> None:

@@ -22,6 +22,7 @@ from evals.harness.capability import (
     WorkspaceFile,
 )
 from evals.harness.harness import Json, JsonObject
+from evals.harness.source_wake import woken_inbound
 from evals.harness.timing import TurnTiming
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
@@ -1401,10 +1402,7 @@ async def _grade_preemption(output: CapabilityOutput) -> CapabilityVerdict:
 
 
 def _source_change(page_id: UUID) -> str:
-    return (
-        "pull_requests: 1 updated. Changed pages (pass each ref unchanged to object_get): "
-        f"page/{page_id}"
-    )
+    return woken_inbound("github", "metalcraftai", "pull_requests", "Review fixture", page_id)
 
 
 CASES = (

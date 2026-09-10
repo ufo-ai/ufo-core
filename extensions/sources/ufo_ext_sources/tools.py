@@ -84,6 +84,10 @@ TRIGGER_NAME_DIGEST_HEX = 8
 TRIGGER_NAME_HEAD_MAX = OBJECT_NAME_MAX_LENGTH - TRIGGER_NAME_DIGEST_HEX - 1
 ALERT_NAMED_MAX = 5
 ALERT_LABEL_CHARS = 60
+ALERT_CLOSING = (
+    "No member is reading this turn. Do what this conversation set the watch for, and write to "
+    "the member only when the change needs them."
+)
 WATCH_OFFER_MAX = 4
 """How many links one message or tool result is offered a trigger for. A board of links is not a
 list of things to watch, and every offer costs the turn context."""
@@ -578,7 +582,7 @@ async def _fire_trigger(
             await ext.invoke(
                 trigger.conversation_id,
                 trigger.agent_id,
-                _alert_message(connection, trigger, authorized, path),
+                alert_message(connection, trigger, authorized, path),
                 idempotency_key=(
                     f"source-trigger:{_trigger_scope(connection, trigger)}:"
                     f"{trigger.conversation_id.hex}:{latest}"
@@ -606,7 +610,7 @@ async def _fire_trigger(
                 await ext.invoke(
                     conversation_id,
                     trigger.agent_id,
-                    _alert_message(connection, trigger, [change], path),
+                    alert_message(connection, trigger, [change], path),
                     idempotency_key=(
                         f"source-trigger:{trigger.id.hex}:{member_key}:"
                         f"{change.page_id.hex}:{change.revision}"
@@ -692,16 +696,18 @@ def _stream_counts(changes: list[PageChange]) -> str:
     )
 
 
-def _alert_message(
+def alert_message(
     connection: FeedConnection,
     trigger: SourceTrigger,
     changes: list[PageChange],
     log_path: str | None,
 ) -> str:
+    """What one trigger's batch of changes says to the conversation it wakes. Evals that stage a
+    woken turn build their inbound here, so a case reads the words the deploy sends."""
     if len(changes) <= ALERT_NAMED_MAX:
         detail = (
-            "Changed pages (pass each ref unchanged to object_get): "
-            f"{'; '.join(_page_reference(change) for change in changes)}."
+            "Those pages in that order (pass each ref unchanged to object_get): "
+            f"{'; '.join(f'{PAGE_KIND}/{change.page_id}' for change in changes)}."
         )
     elif log_path is not None:
         detail = (
@@ -713,22 +719,34 @@ def _alert_message(
             "List them with object_list page, filtered on this source and stream and ordered by "
             "updated_at desc."
         )
-    feed = f"{_feed_name(connection)!r} ({_feed_summary(connection)})"
+    feed = f"{_feed_name(connection)} ({_feed_summary(connection)})"
     watched = (
-        f"{trigger.resource} on the connection {feed}"
-        if trigger.resource
-        else f"The connection {feed}"
+        f"{trigger.resource} on connection {feed}" if trigger.resource else f"Connection {feed}"
     )
-    return (
-        f"{watched} you watch changed — {_stream_counts(changes)}. {detail} Then tell the member "
-        "what is new and why it matters."
-    )
+    return f"{_headline(connection, changes)}\n{watched}.\n{detail}\n{ALERT_CLOSING}"
 
 
-def _page_reference(change: PageChange) -> str:
-    """The changed page as the exact `object_get` ref; the synced title makes it legible."""
-    label = change.title[:ALERT_LABEL_CHARS] if change.title else "an untitled page"
-    return f"{PAGE_KIND}/{change.page_id} ({label})"
+def _headline(connection: FeedConnection, changes: list[PageChange]) -> str:
+    """The words the alert opens on. A conversation an alert opens carries them as its name for
+    good — nothing but the payload names a conversation no member spoke in — and a member scanning
+    a list reads these characters and no others. So a changed page's own title leads and the
+    per-stream counts follow it: under counts alone every batch of one feed reads alike. The feed
+    replays in revision order, so the last change of a long batch is its newest. One page states
+    its stream and what happened to it instead of counting itself — a per_page trigger delivers one
+    page and nothing else, so the count that names its conversation would always read `1`."""
+    if len(changes) == 1:
+        (change,) = changes
+        return f"{connection.provider}: {_label(change)} — {change.stream} {_disposition(change)}."
+    if len(changes) > ALERT_NAMED_MAX:
+        titles = f"{_label(changes[-1])} and {len(changes) - 1} other pages changed"
+    else:
+        titles = "; ".join(_label(change) for change in changes)
+    return f"{connection.provider}: {titles} — {_stream_counts(changes)}."
+
+
+def _label(change: PageChange) -> str:
+    """What a member calls one changed page: its synced title, bounded."""
+    return change.title[:ALERT_LABEL_CHARS] if change.title else "an untitled page"
 
 
 SOURCE_TRIGGER_OBJECT = ObjectKind(
