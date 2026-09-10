@@ -2872,6 +2872,72 @@ async def test_every_model_round_meters_one_observation_and_its_tokens(
     } == {("input", "claude-opus-4-8", 3), ("output", "claude-opus-4-8", 3)}
 
 
+async def test_an_object_read_counts_under_the_kind_it_named(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`object_get` and `object_list` are one tool name over every kind in the workspace, so a
+    dashboard reading the counter alone cannot tell a page read from an agent read. The kind the
+    call named rides the count, taken from the wire input before validation so a read that failed
+    on a name nothing holds still counts under its kind. A ref whose kind no registry holds and a
+    tool that names no object carry no kind at all."""
+    reader = _metric_capture(monkeypatch)
+    turn = await _seed_turn("running", None)
+    registry = object_registry(
+        (
+            BoundKind(
+                kind=ObjectKind(
+                    name="page",
+                    description="d",
+                    guidance="g",
+                    spec_model=sample.WidgetSpec,
+                    store=sample.WidgetStore(),
+                ),
+                extension=sample.NAME,
+                context=context_for(sample.NAME, frozenset()),
+            ),
+        )
+    )
+
+    async def note(ctx: ToolContext, args: BaseModel) -> ToolResult:
+        return ToolResult(content=(TextContent(text="noted"),))
+
+    with ws(turn.workspace_id):
+        engine = replace(
+            _engine(turn, object(), tmp_path),
+            tools=ToolRegistry(
+                (
+                    *ObjectVerbs(registry).tools(),
+                    ToolDef(name="note", description="d", input_model=_NoArgs, handler=note),
+                )
+            ),
+            verbs=ObjectVerbs(registry),
+        )
+        context = _dispatch_context(engine)
+        for call in (
+            ToolUseBlock(id="c1", name="object_get", input={"ref": "page/roadmap"}),
+            ToolUseBlock(id="c2", name="object_get", input={"ref": "widget/anvil"}),
+            ToolUseBlock(id="c3", name="object_get", input={"ref": "page/Roadmap Draft"}),
+            ToolUseBlock(id="c4", name="object_list", input={"kind": "page"}),
+            ToolUseBlock(id="c5", name="note", input={}),
+        ):
+            await _dispatch_step(engine, context, call)
+    points = _exported_metrics(reader)
+    assert {
+        (
+            point.attributes["call"],
+            point.attributes.get("kind", ""),
+            point.attributes["outcome"],
+        )
+        for point in points["ufo.tool_call_total"]
+    } == {
+        ("object_get", "page", "handler_raised"),
+        ("object_get", "", "handler_raised"),
+        ("object_get", "page", "invalid_call"),
+        ("object_list", "page", "ok"),
+        ("note", "", "ok"),
+    }
+
+
 @dataclass
 class StreamTimeoutModel:
     """Times out during iteration rather than on the create call — the shape a streamed round's

@@ -207,6 +207,8 @@ from ufo.runtime.tools.context import (
 )
 from ufo.runtime.tools.registry import (
     OBJECT_ACTION_TOOL,
+    OBJECT_GET_TOOL,
+    OBJECT_LIST_TOOL,
     REQUESTED_BY,
     ToolDef,
     ToolRegistry,
@@ -529,6 +531,7 @@ class EffectiveCall:
     ext: ExtensionContext | None
     action: ObjectActionInput | None = None
     action_args: BaseModel | None = None
+    kind: str = ""
 
     @property
     def parallel_safe(self) -> bool:
@@ -551,10 +554,10 @@ class EffectiveCall:
         )
 
     def meter_dimensions(self) -> dict[str, str]:
-        """The semantic telemetry dimensions beside the wire `tool`: the call id, and for a bound
-        call its kind, binding, and contributor."""
+        """The semantic telemetry dimensions beside the wire `tool`: the call id, the object kind
+        the call names when it names one, and for a bound call its binding and contributor."""
         if self.tool.bound is None:
-            return {"call": self.call_id}
+            return {"call": self.call_id, **({"kind": self.kind} if self.kind else {})}
         return {
             "call": self.call_id,
             "kind": self.tool.bound.kind,
@@ -3199,8 +3202,28 @@ class TurnEngine:
         except KeyError as error:
             return self._rejected(call, error)
         return EffectiveCall(
-            call=call, tool=tool, call_id=tool.name, ext=self.tool_ext.get(call.name)
+            call=call,
+            tool=tool,
+            call_id=tool.name,
+            ext=self.tool_ext.get(call.name),
+            kind=self._called_kind(call),
         )
+
+    def _called_kind(self, call: ToolUseBlock) -> str:
+        """The object kind an `object_get` or `object_list` call names, for the `kind` dimension
+        its dispatch counts under — read from the wire input before validation, so a call that
+        fails on its own arguments still counts under the kind it asked for. A kind the registry
+        does not hold reports as no kind at all: the string arrives on an assistant message the
+        model wrote, so passing it through would mint one series per invented name."""
+        if call.name == OBJECT_GET_TOOL:
+            ref = call.input.get("ref")
+            named = ref.split("/")[0] if isinstance(ref, str) else ""
+        elif call.name == OBJECT_LIST_TOOL:
+            listed = call.input.get("kind")
+            named = listed if isinstance(listed, str) else ""
+        else:
+            return ""
+        return named if named in self.verbs.registry else ""
 
     def _resolve_action(self, call: ToolUseBlock) -> _Resolution:
         """Resolve an `object_action` wire call: parse the structured target, look the action up

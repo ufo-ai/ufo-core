@@ -38,7 +38,9 @@ from ufo.runtime.tools.context import ToolContext, ToolResult
 from ufo.schema.records import FINAL_ACT_FIELDS
 
 OBJECT_ACTION_TOOL = "object_action"
-ACTION_READ_TOOLS = ("object_list", "object_get")
+OBJECT_LIST_TOOL = "object_list"
+OBJECT_GET_TOOL = "object_get"
+ACTION_READ_TOOLS = (OBJECT_LIST_TOOL, OBJECT_GET_TOOL)
 ACTION_ID_PREFIX = "action:"
 REQUESTED_BY = "requested_by"
 REQUESTED_BY_DESCRIPTION = (
