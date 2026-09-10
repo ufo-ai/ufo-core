@@ -54,7 +54,7 @@ import {
 } from "@/lib/route";
 import { navigate } from "@/lib/router";
 import { searchEverywhere, searchThreads, type Group, type Scope } from "@/lib/search";
-import { useOfferedTabs } from "@/lib/surfaces";
+import { useOfferedTabs, useSurfaces } from "@/lib/surfaces";
 import { TRACK_MAX_SLOTS, heldTrack } from "@/lib/tracks";
 import type { Agent } from "@/lib/types";
 import { SECTION_VIEWS } from "@/views/registry";
@@ -140,10 +140,13 @@ type Row = {
 
 type Run = { heading: string; action?: ReactNode; rows: Row[]; note?: string };
 
-function places(landing: WorkspaceTab): { label: string; hash: string; icon: TablerIcon }[] {
+function places(
+  landing: WorkspaceTab,
+  apps: boolean,
+): { label: string; hash: string; icon: TablerIcon }[] {
   return [
     { label: "Home", hash: HOME_HASH, icon: IconMessage },
-    { label: "Apps", hash: AGENTS_HASH, icon: IconApps },
+    ...(apps ? [{ label: "Apps", hash: AGENTS_HASH, icon: IconApps }] : []),
     ...SECTIONS.flatMap((section) => {
       const view = SECTION_VIEWS[section];
       const icon = SECTION_ICONS[section];
@@ -203,6 +206,7 @@ export function Spotlight({
   title?: string;
 }) {
   const tabs = useOfferedTabs();
+  const surfaces = useSurfaces();
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [page, setPage] = useState<Page>({ kind: "root" });
@@ -485,7 +489,7 @@ export function Spotlight({
     };
     const placesRun: Run = {
       heading: PLACES,
-      rows: places(tabs[0])
+      rows: places(tabs[0], surfaces.apps)
         .filter((place) => place.label.toLowerCase().includes(lowered))
         .map((place) => ({
           value: "place " + place.hash,

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  IconApps,
+  IconBuildingStore,
   IconClockPlay,
   IconFile,
   IconMessage,
@@ -31,7 +33,9 @@ import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/
 import { useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import {
+  AGENTS_HASH,
   HOME_HASH,
+  STORE_HASH,
   TASKS_HASH,
   SECTIONS,
   newChatHash,
@@ -42,8 +46,8 @@ import {
 } from "@/lib/route";
 import { navigate } from "@/lib/router";
 import { searchEverywhere, type Group } from "@/lib/search";
-import { useOfferedTabs } from "@/lib/surfaces";
-import type { Agent } from "@/lib/types";
+import { useOfferedTabs, useSurfaces } from "@/lib/surfaces";
+import type { Agent, Surfaces } from "@/lib/types";
 import { SECTION_VIEWS } from "@/views/registry";
 
 /** A search that fired on every keystroke would run one fan-out per letter, and the member is still
@@ -67,10 +71,17 @@ const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
   connectors: IconPlug,
 };
 
-function places(landing: WorkspaceTab): { label: string; hash: string; icon: TablerIcon }[] {
+function places(
+  landing: WorkspaceTab,
+  surfaces: Surfaces,
+): { label: string; hash: string; icon: TablerIcon }[] {
   return [
     { label: "Chat", hash: HOME_HASH, icon: IconMessage },
     { label: "Tasks", hash: TASKS_HASH, icon: IconClockPlay },
+    ...(surfaces.apps ? [{ label: "Apps", hash: AGENTS_HASH, icon: IconApps }] : []),
+    ...(surfaces.apps && surfaces["app-store"]
+      ? [{ label: "App Store", hash: STORE_HASH, icon: IconBuildingStore }]
+      : []),
     ...SECTIONS.flatMap((section) => {
       const view = SECTION_VIEWS[section];
       const icon = SECTION_ICONS[section];
@@ -93,6 +104,7 @@ export function Spotlight({
   label?: React.ReactNode;
 }) {
   const tabs = useOfferedTabs();
+  const surfaces = useSurfaces();
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [groups, setGroups] = useState<Group[] | null>(null);
@@ -167,7 +179,7 @@ export function Spotlight({
   const actions = [!wanted || "new chat".includes(lowered) ? started : null].filter(
     (action) => action !== null,
   );
-  const reachable = places(tabs[0]).filter((place) =>
+  const reachable = places(tabs[0], surfaces).filter((place) =>
     place.label.toLowerCase().includes(lowered),
   );
 

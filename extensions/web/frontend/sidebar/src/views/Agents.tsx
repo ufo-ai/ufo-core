@@ -13,7 +13,8 @@ import { agentName } from "@/lib/agentName";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
-import { openAgents } from "@/lib/router";
+import { openAgents, openHome } from "@/lib/router";
+import { useSurfaces } from "@/lib/surfaces";
 import {
   AgentPane,
   SETTINGS_TABS,
@@ -106,6 +107,7 @@ export function Agents({
   buildWanted,
 }: AgentsProps) {
   const mainAgent = useMainAgent();
+  const surfaces = useSurfaces();
   const shown = selected ?? mainAgent;
   const key = mainAgent ? wizardKey(mainAgent.id) : null;
   const held = useChat(key ?? "");
@@ -173,7 +175,8 @@ export function Agents({
               agent={shown}
               onArchived={() => {
                 setSettling(false);
-                openAgents();
+                if (surfaces.apps) openAgents();
+                else openHome();
                 onAgents();
               }}
             />

@@ -272,8 +272,11 @@ function nameOf(id: string, cards: Card[] | null): string | undefined {
 const SITE_VIEW_PAGE_WIDTH = 1280;
 const SITE_VIEW_PAGE_HEIGHT = 800;
 
-/** The site surface's own page carries the sandbox around the model-authored bytes, so this frame
- *  takes no sandbox attribute — the apps screen's frame states why. */
+/** The same sandbox the apps screen gives a homepage: model-authored bytes, so the frame withholds
+ *  `allow-top-navigation` and sends no referrer to the site's origin. */
+const SITE_SANDBOX =
+  "allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads allow-pointer-lock";
+
 function SiteView({ url, name }: { url: string; name: string }) {
   const [width, setWidth] = useState(SITE_VIEW_PAGE_WIDTH);
   const measure = useCallback((node: HTMLDivElement | null) => {
@@ -292,6 +295,8 @@ function SiteView({ url, name }: { url: string; name: string }) {
       <iframe
         src={url}
         title={name}
+        sandbox={SITE_SANDBOX}
+        referrerPolicy="no-referrer"
         className="absolute left-0 top-0 border-0"
         style={{
           width: SITE_VIEW_PAGE_WIDTH,

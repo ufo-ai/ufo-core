@@ -178,3 +178,27 @@ test("the apps tab and the app index stand with the flag on", async () => {
   expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
   expect(screen.queryByText("This link is not valid.")).toBeNull();
 });
+
+test("the palette offers the apps index and the store only where both flags stand", async () => {
+  location.hash = "";
+  wire({ "/transcript": () => json({ messages: [] }) });
+  const withheld = render(
+    <App
+      agents={[AGENT]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Search" }));
+  expect(screen.queryByRole("option", { name: "Apps" })).toBeNull();
+  expect(screen.queryByRole("option", { name: "App Store" })).toBeNull();
+  withheld.unmount();
+
+  render(<App agents={[AGENT]} member={ADMIN} surfaces={ALL_SURFACES} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Search" }));
+  expect(await screen.findByRole("option", { name: "Apps" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "App Store" })).toBeTruthy();
+});

@@ -213,6 +213,7 @@ function Feed({
                         <RunRow
                           key={run.turn_id}
                           run={run}
+                          after={after}
                           since={since}
                           standing={opens.includes(RUN_PREFIX + run.turn_id)}
                         />
@@ -223,7 +224,7 @@ function Feed({
               })}
               {payload.next_cursor ? null : (
                 <ol className="m-0 flex list-none flex-col border-t border-edge p-0">
-                  <TourRow standing={opens.includes(TOUR_SLOT)} />
+                  <TourRow after={after} standing={opens.includes(TOUR_SLOT)} />
                 </ol>
               )}
             </div>
@@ -285,10 +286,12 @@ function FeedSkeleton() {
 
 function RunRow({
   run,
+  after,
   since,
   standing,
 }: {
   run: RadarRun;
+  after: string;
   since: boolean;
   standing: boolean;
 }) {
@@ -297,7 +300,10 @@ function RunRow({
   const files = run.artifacts.length;
   return (
     <Row
-      href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })}
+      href={sectionHash("radar", {
+        after: after || undefined,
+        opens: [RUN_PREFIX + run.turn_id],
+      })}
       standing={standing}
       when={since ? <Moment at={run.fired_at} /> : clock(run.fired_at)}
       title={run.entry?.title ?? run.task ?? "Scheduled run"}
@@ -325,10 +331,10 @@ function RunRow({
 
 /** The tour on the rail, shaped as a row so a member reads it the way they read every report above
  *  it. It opens the tour in the drawer beside the feed. */
-function TourRow({ standing }: { standing: boolean }) {
+function TourRow({ after, standing }: { after: string; standing: boolean }) {
   return (
     <Row
-      href={sectionHash("radar", { opens: [TOUR_SLOT] })}
+      href={sectionHash("radar", { after: after || undefined, opens: [TOUR_SLOT] })}
       standing={standing}
       when={null}
       title={RADAR_TOUR.title}

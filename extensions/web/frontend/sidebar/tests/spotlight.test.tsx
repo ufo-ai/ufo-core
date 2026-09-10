@@ -358,7 +358,17 @@ test("an unopened term lists what to do and where to go, and reads nothing", asy
   expect(headings()).toEqual(["Actions", "Places"]);
   expect(
     found.getAllByRole("option").map((row) => row.textContent),
-  ).toEqual(["New chat", "Chat", "Tasks", "Radar", "Artifacts", "Connectors", "Workspace"]);
+  ).toEqual([
+    "New chat",
+    "Chat",
+    "Tasks",
+    "Apps",
+    "App Store",
+    "Radar",
+    "Artifacts",
+    "Connectors",
+    "Workspace",
+  ]);
   expect(calls.some((url) => url.includes("q="))).toBe(false);
 });
 

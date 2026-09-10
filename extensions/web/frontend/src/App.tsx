@@ -661,6 +661,7 @@ function WorkspaceSidebar({
 }) {
   const rail = useRail();
   const tabs = useOfferedTabs();
+  const surfaces = useSurfaces();
   const appsShut = rail.sectionsShut.includes(APPS);
   const pinned = rail.pinned ?? defaultPins(agents);
   const chatApp = chatSurface(agents);
@@ -688,42 +689,46 @@ function WorkspaceSidebar({
                 {NEW_CHAT}
               </NavRow>
             </li>
-            <li>
-              <NavRow
-                icon={<CreateAppGlyph />}
-                current={route.kind === "builder"}
-                onClick={onBuild}
-              >
-                {CREATE_APP}
-              </NavRow>
-            </li>
+            {surfaces.apps ? (
+              <li>
+                <NavRow
+                  icon={<CreateAppGlyph />}
+                  current={route.kind === "builder"}
+                  onClick={onBuild}
+                >
+                  {CREATE_APP}
+                </NavRow>
+              </li>
+            ) : null}
           </>
         ) : null}
       </ul>
-      <div className="flex min-h-0 flex-col gap-px px-sm">
-        <SectionHead
-          label={APPS}
-          shut={appsShut}
-          onShut={(shut) => pickSectionShut(APPS, shut)}
-        />
-        {appsShut ? null : (
-        <AppsIndex
-          agents={agents}
-          openId={route.kind === "agent" ? route.agentId : null}
-          building={route.kind === "builder"}
-          pinned={pinned}
-          onPin={(agentId) =>
-            pickPinned(
-              pinned.includes(agentId)
-                ? pinned.filter((id) => id !== agentId)
-                : [...pinned, agentId],
-            )
-          }
-          onOpen={openAgent}
-          onBuild={onBuild}
-        />
-        )}
-      </div>
+      {surfaces.apps ? (
+        <div className="flex min-h-0 flex-col gap-px px-sm">
+          <SectionHead
+            label={APPS}
+            shut={appsShut}
+            onShut={(shut) => pickSectionShut(APPS, shut)}
+          />
+          {appsShut ? null : (
+            <AppsIndex
+              agents={agents}
+              openId={route.kind === "agent" ? route.agentId : null}
+              building={route.kind === "builder"}
+              pinned={pinned}
+              onPin={(agentId) =>
+                pickPinned(
+                  pinned.includes(agentId)
+                    ? pinned.filter((id) => id !== agentId)
+                    : [...pinned, agentId],
+                )
+              }
+              onOpen={openAgent}
+              onBuild={onBuild}
+            />
+          )}
+        </div>
+      ) : null}
       <ul className="m-0 mt-auto flex shrink-0 list-none flex-col gap-px px-sm py-0">
         <li>
           <NavRow

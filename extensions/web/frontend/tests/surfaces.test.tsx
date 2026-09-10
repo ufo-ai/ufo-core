@@ -200,3 +200,23 @@ test("the apps tab is withheld with the flag off, and stands with it on", async 
 
   expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
 });
+
+test("the lanes shell draws no app control while the flag withholds apps", async () => {
+  atPhoneWidth();
+  render(
+    <App
+      agents={[AGENT]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  const rail = await openWorkspaceColumn();
+  const names = within(rail)
+    .getAllByRole("button")
+    .map((row) => row.getAttribute("aria-label") ?? row.textContent);
+  expect(names).not.toContain("Create app");
+  expect(names).not.toContain("Apps");
+  expect(screen.queryByRole("button", { name: "New app" })).toBeNull();
+});

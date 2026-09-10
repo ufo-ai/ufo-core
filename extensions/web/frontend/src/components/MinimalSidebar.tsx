@@ -31,7 +31,7 @@ import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
 import { openHome, placeWorkspace } from "@/lib/router";
 import { setMuted, useMuted } from "@/lib/sound";
-import { useOfferedTabs } from "@/lib/surfaces";
+import { useOfferedTabs, useSurfaces } from "@/lib/surfaces";
 import type { ChatRow } from "@/lib/rail";
 import { Spotlight } from "@/views/Spotlight";
 import type { Agent, Member } from "@/lib/types";
@@ -152,6 +152,7 @@ export function MinimalSidebar({
 }) {
   const { statuses } = useAppStatus();
   const tabs = useOfferedTabs();
+  const surfaces = useSurfaces();
   const muted = useMuted();
   const list = useRef<HTMLUListElement>(null);
   const [mark, setMark] = useState<number | null>(null);
@@ -235,11 +236,13 @@ export function MinimalSidebar({
           );
         })}
       </ul>
-      <RailTip label={NEW_APP}>
-        <button type="button" aria-label={NEW_APP} onClick={onBuild} className={TILE}>
-          <IconCirclePlus className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />
-        </button>
-      </RailTip>
+      {surfaces.apps ? (
+        <RailTip label={NEW_APP}>
+          <button type="button" aria-label={NEW_APP} onClick={onBuild} className={TILE}>
+            <IconCirclePlus className="size-(--size-glyph)" stroke={GLYPH_STROKE} aria-hidden />
+          </button>
+        </RailTip>
+      ) : null}
       {main ? <ChannelsTile agent={main} member={member} /> : null}
       <RailTip label={muted ? UNMUTE : MUTE}>
         <button

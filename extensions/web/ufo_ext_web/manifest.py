@@ -51,7 +51,7 @@ FLAGS = (
     ),
     FlagSpec(
         key=PORTAL_SURFACES["apps"],
-        what="The portal draws the Apps tab, the app index and the app store.",
+        what="The portal draws the Apps tab, the app index, the app creator and the app store.",
     ),
     FlagSpec(key=PORTAL_SURFACES["memory"], what="The workspace Memory tab is drawn."),
     FlagSpec(
