@@ -9,7 +9,9 @@ import {
   type AudienceEntry,
 } from "@/lib/audience";
 
-const AUDIENCE_GLYPH = "size-(--size-glyph) shrink-0";
+/** The title's 13px text has a 9px cap band: a 16px glyph hangs 2.3px under its baseline, and at
+ *  12px the glyph's ink covers that band, so it reads on the line rather than beside it. */
+const AUDIENCE_GLYPH = "size-lg shrink-0";
 
 /** Who reads the conversation the member has open, standing as the glyph alone right of the name
  *  on the title line. It states today's audience and never an act: the marker answers a question
