@@ -41,6 +41,7 @@ import {
   useTakeMeToTheFoot,
 } from "@/kernel/messages";
 import { PressRow, PRESS_ROW, PRESS_ROW_CHEVRON } from "@/components/ui/pressrow";
+import { takeFocus } from "@/kernel/focus";
 import { COLUMN } from "@/kernel/pane";
 import { Empty, usePanelRead } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -126,7 +127,7 @@ export function Chat({
   live.current = target;
 
   useEffect(() => {
-    if (focusComposer) composer.current?.focus();
+    if (focusComposer) takeFocus(composer.current);
   }, [focusComposer]);
 
   useEffect(() => {

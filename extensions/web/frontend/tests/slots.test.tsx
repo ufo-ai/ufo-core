@@ -481,6 +481,26 @@ test("the band's close control leaves a slot, and focus goes back where it came 
   expect(document.activeElement).toBe(act);
 });
 
+test("a lane arriving under an open layer leaves the focus the layer holds", async () => {
+  render(
+    <>
+      <div role="dialog">
+        <input aria-label="Search" />
+      </div>
+      <SlotTrack>
+        <Opener name="New thing" />
+      </SlotTrack>
+    </>,
+  );
+
+  const box = screen.getByLabelText("Search");
+  box.focus();
+  fireEvent.click(screen.getByRole("button", { name: "Open New thing" }));
+
+  expect(screen.getByText("New thing body")).toBeTruthy();
+  expect(document.activeElement).toBe(box);
+});
+
 test("a track handed the whole box lies over it, and holds only its own lanes", async () => {
   render(
     <SlotTrack>

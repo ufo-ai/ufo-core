@@ -28,6 +28,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
+import { takeFocus } from "@/kernel/focus";
 import { Banded, Header } from "@/kernel/pane";
 import { cn } from "@/lib/cn";
 import { GLYPH_STROKE } from "@/lib/glyph";
@@ -879,7 +880,9 @@ export function useSlot(
     if (!takes) return;
     const before = document.activeElement;
     const panel = held.current;
-    if (arrived.current && !panel?.contains(document.activeElement)) panel?.focus(KEEP);
+    if (arrived.current && panel !== null && !panel.contains(document.activeElement)) {
+      takeFocus(panel, KEEP);
+    }
     return () => {
       if (!(before instanceof HTMLElement) || !document.body.contains(before)) return;
       const active = document.activeElement;

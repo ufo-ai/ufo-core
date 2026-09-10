@@ -6,6 +6,7 @@ import { App } from "@/App";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import type { EarlierMessages } from "@/lib/earlier";
 import { chatHash, conversationSlotHash, newChatHash } from "@/lib/route";
+import { Chat } from "@/views/Chat";
 import { ConversationTranscript } from "@/views/Conversations";
 
 import { AGENT, AGENT_ID, ARRIVAL_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
@@ -46,6 +47,36 @@ function follow(hash: string): void {
   location.hash = hash;
   window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
+
+function Layered({ composing }: { composing: boolean }) {
+  return (
+    <>
+      <div role="dialog">
+        <input aria-label="Search" />
+      </div>
+      {composing ? (
+        <Chat agent={AGENT} member={MEMBER} conversationId={CONVO_ID} focusComposer />
+      ) : null}
+    </>
+  );
+}
+
+test("the composer takes focus where it stands, and leaves the focus an open layer holds", async () => {
+  wire(transcript());
+  render(<Chat agent={AGENT} member={MEMBER} conversationId={CONVO_ID} focusComposer />);
+
+  expect(await screen.findByLabelText("Ask UFO")).toBe(document.activeElement);
+
+  cleanup();
+  const { rerender } = render(<Layered composing={false} />);
+  const box = screen.getByLabelText("Search");
+  box.focus();
+  rerender(<Layered composing />);
+
+  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
+  expect(document.activeElement).toBe(box);
+});
+
 const REFUSED_TURN = "44444444-4444-4444-8444-444444444444";
 const REPLY_ID = "66666666-6666-4666-8666-666666666666";
 
