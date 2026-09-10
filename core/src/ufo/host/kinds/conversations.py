@@ -8,7 +8,6 @@ turn, on the subjects their own conversation carries. Surfaces create conversati
 mutation is refused."""
 
 import asyncio
-import re
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -20,7 +19,7 @@ from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import TextBlock
 from ufo.runtime.ext.context import ExtensionContext, JsonValue
-from ufo.runtime.ext.surface import ConversationDirectory, ListedConversation
+from ufo.runtime.ext.surface import ConversationDirectory, ListedConversation, opening_sentence
 from ufo.runtime.kinds.agents import AGENT_KIND
 from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.object_scope import object_agent_id
@@ -51,8 +50,6 @@ from ufo.schema.records import EXTENSION_SURFACE_PREFIX, PORTAL_SURFACE
 
 CONVERSATION_KIND = "conversation"
 TRANSCRIPT_WORKSPACE_DIR = "transcripts"
-OPENING_SENTENCE_CHARS = 160
-SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s")
 CONVERSATION_MINE_LIMIT = 100
 CONVERSATION_OTHERS_LIMIT = 25
 CONVERSATIONS_ARE_SURFACE_MADE = (
@@ -319,17 +316,6 @@ def _visible(subjects: frozenset[str]) -> sa.Select:
     return _agent_conversations().where(tables.conversation.c.audience.in_(subjects))
 
 
-def _opening_sentence(opening: str | None) -> str | None:
-    if opening is None:
-        return None
-    words = " ".join(opening.split())
-    broken = SENTENCE_BREAK.search(words)
-    sentence = words[: broken.start()] if broken else words
-    if len(sentence) <= OPENING_SENTENCE_CHARS:
-        return sentence or None
-    return sentence[:OPENING_SENTENCE_CHARS].rstrip() + "…"
-
-
 def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
     speakers = [who.sender or who.email for who in entry.speakers]
     stamp = entry.summary.last_turn_at or entry.summary.created_at
@@ -341,7 +327,7 @@ def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
         summary=entry.title,
         fields={
             "title": entry.title,
-            "opening": _opening_sentence(entry.summary.opening_message),
+            "opening": opening_sentence(entry.summary.opening_message),
             "mine": mine,
             "speaker": None if mine or not speakers else speakers[0],
             "surface": entry.summary.surface,

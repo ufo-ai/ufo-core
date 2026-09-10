@@ -182,6 +182,53 @@ test("the palette carries no second name for the workspace", async () => {
   expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "apps", place: {} });
 });
 
+test("the apps flag takes away every control that opens an apps address", async () => {
+  location.hash = "";
+  const desk = render(
+    <App
+      agents={[AGENT]}
+      member={MEMBER}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  const rail = within(await screen.findByRole("navigation", { name: "Tabs" }));
+  expect(rail.queryByRole("button", { name: "New app" })).toBeNull();
+  await userEvent.click(rail.getByRole("button", { name: "Launcher" }));
+  expect(await screen.findByRole("option", { name: "Home" })).toBeTruthy();
+  expect(screen.queryByRole("option", { name: "Apps" })).toBeNull();
+  desk.unmount();
+
+  location.hash = "";
+  render(<App agents={[AGENT]} member={MEMBER} surfaces={ALL_SURFACES} onAgents={() => {}} />);
+
+  const offered = within(await screen.findByRole("navigation", { name: "Tabs" }));
+  expect(offered.getByRole("button", { name: "New app" })).toBeTruthy();
+});
+
+test("the sidebar's create-app row goes with the apps flag", async () => {
+  atPhoneWidth();
+  const off = render(
+    <App
+      agents={[AGENT]}
+      member={MEMBER}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  const withheld = within(await openWorkspaceColumn());
+  expect(withheld.getByRole("button", { name: "New chat" })).toBeTruthy();
+  expect(withheld.queryByRole("button", { name: "Create app" })).toBeNull();
+  off.unmount();
+
+  render(<App agents={[AGENT]} member={MEMBER} surfaces={ALL_SURFACES} onAgents={() => {}} />);
+
+  const offered = within(await openWorkspaceColumn());
+  expect(offered.getByRole("button", { name: "Create app" })).toBeTruthy();
+});
+
 test("the apps tab is withheld with the flag off, and stands with it on", async () => {
   location.hash = "#/workspace/apps";
   const off = render(

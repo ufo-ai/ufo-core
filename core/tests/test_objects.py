@@ -59,7 +59,6 @@ from ufo.host.kinds.artifacts import (
 from ufo.host.kinds.conversations import (
     CONVERSATION_KIND,
     CONVERSATION_OBJECT,
-    OPENING_SENTENCE_CHARS,
 )
 from ufo.host.kinds.credential_kind import CredentialObjects
 from ufo.host.kinds.members import MEMBER_OBJECT
@@ -67,7 +66,11 @@ from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ExtensionContext, JsonValue, context_for
 from ufo.runtime.ext.manifest import Manifest
-from ufo.runtime.ext.surface import LIVE_TURN_PRIORITY, ConversationDirectory
+from ufo.runtime.ext.surface import (
+    LIVE_TURN_PRIORITY,
+    OPENING_SENTENCE_CHARS,
+    ConversationDirectory,
+)
 from ufo.runtime.kinds.agents import (
     AGENT_ALREADY_ARCHIVED,
     AGENT_CREATE_GATE,

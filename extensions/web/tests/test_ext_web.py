@@ -3928,7 +3928,9 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
 ) -> None:
     """An emitted `#/c/<id>` link outlives the rail's bound: with the bound at one, the displaced
     older conversation still answers `api/chats?conversation=` with its one row, another member's
-    id answers empty, and a malformed id answers empty."""
+    id answers empty, and a malformed id answers empty. The resolved row states every field the
+    rail's own listing row states, so a row merged in from a permalink draws its opening line and
+    its way back out like the rows it lands beside."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
@@ -3966,6 +3968,9 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     assert rows[0]["audience"] == f"member:{member_id}"
     assert rows[0]["member_email"] == "owner@example.com"
     assert rows[0]["last_at"] is not None
+    assert rows[0]["opening"] == "ask"
+    assert rows[0]["source"] is None
+    assert rows[0]["turn"] == "idle"
     crossed = await client.get(
         f"/surface/web/api/chats?conversation={older_id}",
         headers={"cookie": f"{SESSION_COOKIE}={peer_token}"},

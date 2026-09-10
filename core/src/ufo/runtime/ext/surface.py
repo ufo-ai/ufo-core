@@ -886,6 +886,8 @@ LIST_TURNS_LIMIT = 500
 TRANSCRIPT_ACCESS_WINDOW = timedelta(hours=1)
 CONVERSATION_TITLE_CHARS = 240
 MAX_CONVERSATION_SPEAKERS = 8
+OPENING_SENTENCE_CHARS = 160
+SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s")
 
 
 def conversation_name(inbound: str) -> str:
@@ -894,6 +896,21 @@ def conversation_name(inbound: str) -> str:
     conversation is about — bounded. Every path that opens a conversation names it through this,
     so a run spawned by an agent and a thread opened by a member are named the same way."""
     return member_message_text(inbound).strip()[:CONVERSATION_TITLE_CHARS]
+
+
+def opening_sentence(opening: str | None) -> str | None:
+    """The line a listing draws under a conversation's title: the first sentence of the words that
+    opened it, whitespace run together and bounded. Every row that states an opening states it
+    through this, so the rail row, the permalink resolve and the conversations panel cut it the
+    same way."""
+    if opening is None:
+        return None
+    words = " ".join(opening.split())
+    broken = SENTENCE_BREAK.search(words)
+    sentence = words[: broken.start()] if broken else words
+    if len(sentence) <= OPENING_SENTENCE_CHARS:
+        return sentence or None
+    return sentence[:OPENING_SENTENCE_CHARS].rstrip() + "…"
 
 
 async def retitle_conversation(workspace_id: UUID, conversation_id: UUID, title: str) -> None:

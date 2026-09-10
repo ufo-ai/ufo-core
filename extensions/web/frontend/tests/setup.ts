@@ -107,7 +107,10 @@ beforeEach(() => {
   });
 });
 
+// A test that fails between `vi.useFakeTimers()` and its restore leaves the fakes installed, and
+// every later test then times out waiting on a clock nothing advances.
 afterEach(() => {
+  vi.useRealTimers();
   const faults = keyFaults;
   keyFaults = [];
   resetAppStatusStore();

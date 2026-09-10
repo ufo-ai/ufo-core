@@ -3,10 +3,11 @@ import { join } from "node:path";
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App, NARROW } from "@/App";
 import { agentName } from "@/lib/agentName";
+import { RESTING_STATUS_MS, WORKING_STATUS_MS } from "@/lib/appStatusStore";
 import { fullMoment } from "@/lib/moments";
 import {
   appOrder,
@@ -24,8 +25,9 @@ import {
   railStamp,
   stampIso,
   type ChatRow,
+  type RailTurn,
 } from "@/lib/rail";
-import { pickAppsExpanded, railState, resetRailStore } from "@/lib/railStore";
+import { pickAppsExpanded, pickRailShown, railState, resetRailStore } from "@/lib/railStore";
 import type { Agent } from "@/lib/types";
 
 import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
@@ -51,6 +53,14 @@ async function hoverCard(): Promise<HTMLElement> {
 
 function hoursAgo(hours: number): string {
   return new Date(NOW.getTime() - hours * 3_600_000).toISOString();
+}
+
+async function settle(ms: number): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 }
 
 function row(id: string, last_at: string): ChatRow {
@@ -512,10 +522,12 @@ test("the query holding the narrow rail's groups open is the theme's own breakpo
   expect(NARROW).toBe("(width < " + declared![1] + "px)");
 });
 
-test("bumping a conversation moves it to the top", () => {
+test("bumping a conversation moves it to the top and states the turn it just took", () => {
   const rows = [row("a", hoursAgo(3)), row("b", hoursAgo(4))];
   const bumped = bumpChat(rows, "b", NOW);
   expect(bumped.map((entry) => entry.conversation_id)).toEqual(["b", "a"]);
+  expect(bumped[0].turn).toBe("running");
+  expect(bumped[1].turn).toBe("idle");
 });
 
 test("merging keeps held rows the fetch does not know and prefers fetched rows it does", () => {
@@ -699,6 +711,77 @@ test("a running thread's row draws the live dot and an idle one's rests in the s
   expect(column(live).firstElementChild!.className).toContain("bg-live");
   expect(column(rest).firstElementChild!.className).toContain("scale-0");
   expect(column(rest).firstElementChild!.className).not.toContain("bg-live");
+});
+
+test("a row's dot follows the listing, not the row it was founded with", async () => {
+  const other = "66666666-6666-4666-8666-666666666666";
+  let held: RailTurn[] = ["running", "idle"];
+  vi.useFakeTimers();
+  wire({
+    "/objects/conversation$": () =>
+      json({
+        objects: [
+          { ...CHAT_ROW, turn: held[0] },
+          { ...CHAT_ROW, conversation_id: other, title: "Answered thread", turn: held[1] },
+        ].map(conversationObject),
+      }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await settle(0);
+
+  const dot = (title: string) =>
+    screen.getByRole("button", { name: new RegExp(title) }).querySelector("[data-turn]")!
+      .firstElementChild!.className;
+  expect(dot("Pick one thread")).toContain("bg-live");
+  expect(dot("Answered thread")).toContain("scale-0");
+
+  held = ["idle", "running"];
+  await settle(WORKING_STATUS_MS);
+
+  expect(dot("Pick one thread")).toContain("scale-0");
+  expect(dot("Answered thread")).toContain("bg-live");
+  vi.useRealTimers();
+});
+
+test("a parked turn is not work in flight, so the rail waits out the resting cadence", async () => {
+  vi.useFakeTimers();
+  const { calls } = wire({
+    "/objects/conversation$": () =>
+      json({ objects: [conversationObject({ ...CHAT_ROW, turn: "parked" })] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await settle(0);
+  const listings = () => calls.filter((url) => url.includes("/objects/conversation")).length;
+  const walked = listings();
+
+  await settle(WORKING_STATUS_MS);
+  expect(listings()).toBe(walked);
+
+  await settle(RESTING_STATUS_MS - WORKING_STATUS_MS);
+  expect(listings()).toBe(walked + 1);
+  vi.useRealTimers();
+});
+
+test("a running turn the rail does not draw earns the working cadence only once shown", async () => {
+  vi.useFakeTimers();
+  const slack = { ...CHAT_ROW, surface: "slack", surface_label: "DM", turn: "running" as const };
+  const { calls } = wire({
+    "/objects/conversation$": () => json({ objects: [conversationObject(slack)] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await settle(0);
+  const listings = () => calls.filter((url) => url.includes("/objects/conversation")).length;
+  const walked = listings();
+
+  await settle(WORKING_STATUS_MS);
+  expect(listings()).toBe(walked);
+
+  await act(async () => {
+    pickRailShown(EVERY_SURFACE);
+  });
+  await settle(WORKING_STATUS_MS);
+  expect(listings()).toBe(walked + 1);
+  vi.useRealTimers();
 });
 
 test("a rail row opens its conversation's transcript", async () => {

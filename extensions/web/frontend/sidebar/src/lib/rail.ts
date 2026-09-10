@@ -254,9 +254,13 @@ function moment(row: ChatRow): number {
   return Number.isNaN(at) ? 0 : at;
 }
 
+/** A conversation this tab has just admitted a turn into: its row moves to the top and its dot
+ *  reads live, until the next listing read states the turn the engine holds. */
 export function bumpChat(rows: ChatRow[], conversationId: string, at: Date): ChatRow[] {
   const bumped = rows.map((row) =>
-    row.conversation_id === conversationId ? { ...row, last_at: stampIso(at) } : row,
+    row.conversation_id === conversationId
+      ? { ...row, last_at: stampIso(at), turn: "running" as const }
+      : row,
   );
   bumped.sort((a, b) => moment(b) - moment(a));
   return bumped;

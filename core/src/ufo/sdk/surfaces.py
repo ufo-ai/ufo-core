@@ -181,6 +181,9 @@ from ufo.runtime.ext.surface import (
     mint_marker as mint_marker,
 )
 from ufo.runtime.ext.surface import (
+    opening_sentence as opening_sentence,
+)
+from ufo.runtime.ext.surface import (
     record_transcript_access as record_transcript_access,
 )
 from ufo.runtime.ext.surface import (

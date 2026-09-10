@@ -102,6 +102,7 @@ import {
   readRail,
   seekChat,
   useRail,
+  watchRail,
 } from "@/lib/railStore";
 import {
   forwardAgents,
@@ -217,6 +218,8 @@ export function App({
   useEffect(startRouter, []);
 
   useEffect(readRail, []);
+
+  useEffect(watchRail, []);
 
   useProvisioned(agents, onAgents);
 

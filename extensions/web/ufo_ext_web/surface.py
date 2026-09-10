@@ -157,6 +157,7 @@ from ufo.sdk.surfaces import (
     inbox_name,
     member_message_said,
     member_message_text,
+    opening_sentence,
 )
 from ufo.sdk.tools import ActionBinding
 from ufo_ext_web.anthropic_login import (
@@ -3136,12 +3137,16 @@ async def _resolve_chat(
                         "agent_name": agent.name,
                         "agent_model": agent.model,
                         "title": own.title,
+                        "opening": opening_sentence(own.summary.opening_message),
                         "mine": True,
                         "speaker": None,
                         "surface": own.summary.surface,
                         "surface_label": own.surface_label,
                         "audience": own.audience,
                         "member_email": own.summary.member_email,
+                        # A chat row is reached for a portal conversation alone, and a portal
+                        # source names the portal rather than a thread to open outside it.
+                        "source": None,
                         "last_at": _iso(detail.turn.created_at),
                         "turn": own.turn,
                     }

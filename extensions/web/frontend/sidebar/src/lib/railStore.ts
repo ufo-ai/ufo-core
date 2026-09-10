@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 
 import type { ToastState } from "@/components/ui/toast";
 import { getJson } from "@/lib/api";
+import { RESTING_STATUS_MS, WORKING_STATUS_MS } from "@/lib/appStatusStore";
 import { isPortalChat } from "@/lib/audience";
 import {
   bumpChat,
@@ -19,6 +20,7 @@ import {
   holdSidebar,
   chatRows,
   mergeChats,
+  railGroups,
   type ChatRow,
   type ChatsPayload,
   type ConversationsPayload,
@@ -93,7 +95,7 @@ const RAIL_ROWS_MAX = 300;
 export function readRail(): void {
   const read = ++reads;
   update((held) => ({ ...held, phase: "loading" }));
-  void walkRail(read);
+  void walkRail(read).then(wakeRail);
 }
 
 /** Each page stands as it lands and the walk goes on behind it, so the rail is drawn on the first
@@ -129,6 +131,62 @@ async function walkRail(read: number): Promise<void> {
   }
 }
 
+/** One page answers the whole rail's dots: a running turn's own updates put its conversation at
+ *  the head of the `last_at` order. */
+async function refreshRail(): Promise<void> {
+  const read = reads;
+  const params = new URLSearchParams({ order_by: "last_at", order: "desc" });
+  const result = await getJson<ConversationsPayload>("/objects/conversation?" + params.toString());
+  if (read !== reads || !result.ok) return;
+  const fetched = chatRows(result.payload);
+  update((held) => ({ ...held, rows: mergeChats(fetched, held.rows) }));
+}
+
+let ticking: number | null = null;
+
+function poll(): void {
+  if (ticking !== null || document.visibilityState === "hidden") return;
+  const held = railState();
+  const live = railGroups(held.rows, held.shown).some((group) =>
+    group.rows.some((row) => row.turn === "running" || row.turn === "queued"),
+  );
+  ticking = window.setTimeout(
+    () => {
+      ticking = null;
+      void refreshRail().then(poll);
+    },
+    live ? WORKING_STATUS_MS : RESTING_STATUS_MS,
+  );
+}
+
+function woken(): void {
+  if (document.visibilityState === "hidden") {
+    if (ticking !== null) window.clearTimeout(ticking);
+    ticking = null;
+    return;
+  }
+  poll();
+}
+
+/** The cadence is read off the drawn rows, so whatever lands rows, starts a turn or changes what is
+ *  drawn measures the wait ahead of the next re-read again rather than leaving the one it set. */
+function wakeRail(): void {
+  if (ticking === null) return;
+  window.clearTimeout(ticking);
+  ticking = null;
+  poll();
+}
+
+export function watchRail(): () => void {
+  document.addEventListener("visibilitychange", woken);
+  poll();
+  return () => {
+    document.removeEventListener("visibilitychange", woken);
+    if (ticking !== null) window.clearTimeout(ticking);
+    ticking = null;
+  };
+}
+
 /** An outstanding read is not an outcome, so it is not state a screen draws from: a permalink whose
  *  read has not answered is loading, never unshared. */
 const seeking = new Set<string>();
@@ -162,10 +220,12 @@ export function seekChat(conversationId: string): void {
 
 export function railFounded(row: ChatRow): void {
   update((held) => ({ ...held, rows: mergeChats(held.rows, [row]) }));
+  wakeRail();
 }
 
 export function railActivity(conversationId: string): void {
   update((held) => ({ ...held, rows: bumpChat(held.rows, conversationId, new Date()) }));
+  wakeRail();
 }
 
 export function quietRail(): void {
@@ -175,6 +235,7 @@ export function quietRail(): void {
 export function pickRailShown(shown: RailShown): void {
   holdRailShown(shown);
   update((held) => ({ ...held, shown }));
+  wakeRail();
 }
 
 export function pickRailShut(shut: string[]): void {
@@ -208,4 +269,7 @@ export function resetRailStore(): void {
   state = null;
   reads = 0;
   seeking.clear();
+  if (ticking !== null) window.clearTimeout(ticking);
+  ticking = null;
+  document.removeEventListener("visibilitychange", woken);
 }
