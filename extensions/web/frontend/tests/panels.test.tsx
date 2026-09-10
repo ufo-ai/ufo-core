@@ -1427,6 +1427,38 @@ test("a history the read carries whole ends on its last row", async () => {
   expect(screen.queryByText(/The newest few/)).toBeNull();
 });
 
+test("the conversation beside an app homepage states who reads it on the lane's title line", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
+  wire(appOnWire([appConversation(CONVO_ID, "Newest thread")]));
+  render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
+
+  const lane = await screen.findByRole("region", { name: "Newest thread" });
+  const detail = "Only you read this conversation. " + ADMIN_DISCLOSURE;
+  const mark = audienceMark();
+  expect(lane.querySelector("[data-slot=header]")!.contains(mark)).toBe(true);
+  expect(mark.previousElementSibling!.textContent).toBe("Newest thread");
+  expect(mark.querySelector("svg")).toBeTruthy();
+  expect(mark.textContent).toBe(detail);
+  expect(mark.getAttribute("title")).toBe(detail);
+  fireEvent.focus(mark);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Only you");
+});
+
+test("a conversation beside an app homepage that the whole workspace reads says so", async () => {
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + CONVO_ID;
+  wire(appOnWire([{ ...appConversation(CONVO_ID, "Newest thread"), audience: "shared" }]));
+  render(<App agents={[APP]} member={MEMBER} onAgents={() => {}} />);
+
+  const lane = await screen.findByRole("region", { name: "Newest thread" });
+  const mark = audienceMark();
+  expect(lane.querySelector("[data-slot=header]")!.contains(mark)).toBe(true);
+  expect(mark.getAttribute("title")).toBe(
+    "Every member of the workspace reads this conversation. " + ADMIN_DISCLOSURE,
+  );
+  fireEvent.focus(mark);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Workspace");
+});
+
 function Standing({ at }: { at: string }) {
   return (
     <PaneFault at={at}>

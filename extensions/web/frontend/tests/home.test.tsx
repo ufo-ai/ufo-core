@@ -13,6 +13,7 @@ import {
   useAppStatus,
   type AgentStatus,
 } from "@/lib/appStatusStore";
+import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import { readDraft } from "@/lib/drafts";
 import { heldChatHidden, holdChatHidden } from "@/lib/rail";
 import { setPendingAsk } from "@/lib/pendingAsk";
@@ -28,6 +29,7 @@ import {
 import {
   AGENT,
   AGENT_ID,
+  audienceMark,
   CHAT_APP,
   CHAT_APP_ID,
   CHAT_ROW,
@@ -930,6 +932,36 @@ test("picking a conversation already standing closes the picking lane instead of
 
   await waitFor(() => expect(location.hash).toBe(homeHash({ opens: [CONVERSATION_LANE] })));
   expect(laneNames()).toEqual([CHAT_ROW.title]);
+});
+
+test("a home conversation lane states who reads it on its title line", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  drawHome([CONVERSATION_LANE]);
+
+  const lane = await screen.findByRole("region", { name: CHAT_ROW.title });
+  const detail = "Only you read this conversation. " + ADMIN_DISCLOSURE;
+  const mark = audienceMark();
+  expect(lane.querySelector("[data-slot=header]")!.contains(mark)).toBe(true);
+  expect(mark.previousElementSibling!.textContent).toBe(CHAT_ROW.title);
+  expect(mark.querySelector("svg")).toBeTruthy();
+  expect(mark.textContent).toBe(detail);
+  expect(mark.getAttribute("title")).toBe(detail);
+  fireEvent.focus(mark);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Only you");
+});
+
+test("a home conversation lane the whole workspace reads says so", async () => {
+  wire(chatsOnWire([{ ...CHAT_ROW, audience: "shared" }]));
+  drawHome([CONVERSATION_LANE]);
+
+  const lane = await screen.findByRole("region", { name: CHAT_ROW.title });
+  const mark = audienceMark();
+  expect(lane.querySelector("[data-slot=header]")!.contains(mark)).toBe(true);
+  expect(mark.getAttribute("title")).toBe(
+    "Every member of the workspace reads this conversation. " + ADMIN_DISCLOSURE,
+  );
+  fireEvent.focus(mark);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Workspace");
 });
 
 test("the dot is live while an app works, blocked while it waits on the member, and nothing at rest", () => {

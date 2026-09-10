@@ -353,6 +353,7 @@ export function AgentPane({
       : opened
         ? subject(opened, viewer)
         : (railHeld?.title ?? NEW_CONVERSATION),
+    note: history || !audience ? null : <AudienceMark entry={audience} />,
     acts: (
       <>
         <Button

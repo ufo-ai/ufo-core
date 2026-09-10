@@ -24,6 +24,7 @@ import { COLUMN } from "@/kernel/pane";
 import { Empty, Loading } from "@/kernel/panel";
 import { SlotTrack, opened, useSlot, type Seek } from "@/kernel/slots";
 import { isPortalChat, origin } from "@/lib/audience";
+import { AudienceMark } from "@/lib/audienceMark";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
@@ -235,6 +236,7 @@ function Lane({
   opens,
   title,
   glyph,
+  note,
   tone,
   fixed,
   acts,
@@ -245,6 +247,7 @@ function Lane({
   opens: string[];
   title: string;
   glyph?: ReactNode;
+  note?: ReactNode;
   tone?: string;
   fixed?: boolean;
   acts?: ReactNode;
@@ -255,6 +258,7 @@ function Lane({
     id: lane,
     title,
     glyph,
+    note,
     tone,
     fixed,
     acts,
@@ -650,12 +654,14 @@ function ConversationLane({
     );
   }
   const title = row?.title || linked?.description || agentName(agent.name);
+  const audience = row ?? linked;
   return (
     <Lane
       lane={lane}
       opens={opens}
       title={history ? HISTORY : title}
       glyph={<AgentIcon name={agent.icon} />}
+      note={history || !audience ? null : <AudienceMark entry={audience} />}
       acts={
         <HistoryAct agent={agent} pressed={history} onPress={() => setHistory((held) => !held)} />
       }

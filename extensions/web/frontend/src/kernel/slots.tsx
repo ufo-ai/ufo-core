@@ -818,6 +818,7 @@ export function useSlot(
     kind?: SlotKind;
     title?: string;
     glyph?: ReactNode;
+    note?: ReactNode;
     tone?: string;
     fixed?: boolean;
     acts?: ReactNode;
@@ -852,6 +853,7 @@ export function useSlot(
     kind = "reading",
     title,
     glyph,
+    note,
     tone,
     fixed = false,
     acts,
@@ -984,6 +986,7 @@ export function useSlot(
             {...(glyph !== undefined ? { glyph } : Glyph ? { glyph: <Glyph aria-hidden /> } : {})}
             crumb={crumb}
             title={title}
+            note={note}
             acts={
               acts === undefined && expandAct === null ? undefined : (
                 <span
