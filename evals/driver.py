@@ -1261,7 +1261,8 @@ class WorkspaceDriver:
             ).scalar_one_or_none()
         if await cancel_one_turn(self.dbos, turn_id) is None:
             return False
-        self._cancelled.statuses[turn_id] = held
+        if held is not None:
+            self._cancelled.statuses[turn_id] = held
         return True
 
     def cancelled_from(self, turn_id: UUID) -> TurnStatus | None:
