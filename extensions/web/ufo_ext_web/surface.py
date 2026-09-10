@@ -464,16 +464,25 @@ def _static_response(request: Request) -> Response | None:
     if asset is None:
         return None
     body, media_type = asset
-    return _asset_response(request, body, media_type, STATIC_ETAGS[name])
+    return _asset_response(request, name, body, media_type, STATIC_ETAGS[name])
 
 
-def _asset_response(request: Request, body: bytes, media_type: str, etag: str) -> Response:
-    headers = {"etag": etag, "cache-control": "no-cache"}
+def _asset_response(
+    request: Request, name: str, body: bytes, media_type: str, etag: str
+) -> Response:
+    """A content-hashed name addresses its own bytes, so the browser may hold it without asking
+    again — the shell is `no-store` and names a fresh hash every deploy, so no cached asset outlives
+    the page that names it. Anything else revalidates on every load."""
+    cache = ASSET_IMMUTABLE if HASHED_ASSET_NAME.fullmatch(name) else ASSET_REVALIDATE
+    headers = {"etag": etag, "cache-control": cache}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
     return Response(body, media_type=media_type, headers=headers)
 
 
+HASHED_ASSET_NAME = re.compile(r"assets/.+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+")
+ASSET_IMMUTABLE = "public, max-age=31536000, immutable"
+ASSET_REVALIDATE = "no-cache"
 STATIC_STORE_PREFIX = "static/web/"
 STORED_ASSET_NAME = re.compile(r"assets/[A-Za-z0-9._-]+")
 STORED_ASSETS_MAX = 64
@@ -610,7 +619,7 @@ async def _stored_asset(blob: BlobStore, request: Request) -> Response:
         _STORED_ASSETS[name] = held
         while len(_STORED_ASSETS) > STORED_ASSETS_MAX:
             _STORED_ASSETS.popitem(last=False)
-    return _asset_response(request, *held)
+    return _asset_response(request, name, *held)
 
 
 async def portal_page(ctx: SurfaceContext, request: Request) -> Response:

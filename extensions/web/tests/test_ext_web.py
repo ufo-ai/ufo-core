@@ -4588,6 +4588,37 @@ async def test_a_sessionless_arrival_is_sent_to_sign_in_and_the_posted_token_ope
     assert "Domain" not in cookie
 
 
+async def test_a_hashed_asset_is_held_and_an_unhashed_one_revalidates(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hard refresh cost one origin round trip per asset because every name was `no-cache`. A
+    content-hashed name addresses its own bytes and is held for a year; the shell that names it is
+    `no-store`, so a deploy's new hashes are read on the next load. A name carrying no hash keeps
+    revalidating, and either way `if-none-match` still answers 304."""
+    client, workspace_id, _agent_id = web
+    token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    hashed = next(name for name in web_surface.STATIC_ASSETS if name.endswith(".js"))
+
+    held = await client.get(f"/surface/web/static/{hashed}", headers=headers)
+    assert held.status_code == 200
+    assert held.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    again = await client.get(
+        f"/surface/web/static/{hashed}",
+        headers={**headers, "if-none-match": held.headers["etag"]},
+    )
+    assert again.status_code == 304
+    assert again.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    monkeypatch.setitem(web_surface.STATIC_ASSETS, "assets/plain.css", (b"body{}", "text/css"))
+    monkeypatch.setitem(web_surface.STATIC_ETAGS, "assets/plain.css", '"plain"')
+    unhashed = await client.get("/surface/web/static/assets/plain.css", headers=headers)
+    assert unhashed.status_code == 200
+    assert unhashed.headers["cache-control"] == "no-cache"
+
+
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_failed_asset_publish_fails_the_page_and_the_next_page_retries(
