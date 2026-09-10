@@ -2,14 +2,17 @@
  *  own — the boot read names the served set, and the runtime routes and bills on the same id — so
  *  this table holds only what a member reads: the provider a model stands under, its brand mark,
  *  and its name. It is the portal's single home for those words; a view states a model by asking
- *  here rather than by carrying its own list. */
-
-export type ModelProvider = { id: string; label: string; mark: string };
+ *  here rather than by carrying its own list.
+ *
+ *  `offered: false` holds every model of a provider out of the picker while they keep their names:
+ *  a member whose agent already stores one of those ids still reads the model and its mark. */
+export type ModelProvider = { id: string; label: string; mark: string; offered?: false };
 
 /** `family` names a model's version line: the models that differ from each other only by version
  *  number. A named or a lightweight variant — Sol, Luna, Flash, Mini — stands as its own family,
  *  because a member picks between those rather than between versions. Each family is held newest
- *  first, so the picker offers the head of each one.
+ *  first, so the picker offers the head of each one, and a provider's families stand largest first,
+ *  so the picker reads down from the largest model to the smallest.
  *
  *  `offered: false` holds a model out of the picker while it keeps its name: a member whose agent
  *  already stores that id still reads the model rather than the id. */
@@ -26,11 +29,13 @@ export type ModelGroup = { provider: ModelProvider; models: ModelChoice[] };
 export const MODEL_PROVIDERS: readonly ModelProvider[] = [
   { id: "anthropic", label: "Claude", mark: "anthropic" },
   { id: "openai", label: "GPT", mark: "openai" },
-  { id: "deepseek", label: "DeepSeek", mark: "deepseek" },
-  { id: "zai", label: "GLM", mark: "zai" },
+  { id: "deepseek", label: "DeepSeek", mark: "deepseek", offered: false },
+  { id: "zai", label: "GLM", mark: "zai", offered: false },
 ];
 
 export const MODEL_CHOICES: readonly ModelChoice[] = [
+  { id: "anthropic/claude-fable-5.1", provider: "anthropic", family: "fable", label: "Fable 5.1" },
+  { id: "anthropic/claude-fable-5", provider: "anthropic", family: "fable", label: "Fable 5" },
   { id: "claude-opus-5", provider: "anthropic", family: "opus", label: "Opus 5" },
   { id: "claude-opus-4-8", provider: "anthropic", family: "opus", label: "Opus 4.8" },
   { id: "claude-opus-4-7", provider: "anthropic", family: "opus", label: "Opus 4.7" },
@@ -44,8 +49,6 @@ export const MODEL_CHOICES: readonly ModelChoice[] = [
     label: "Haiku 4.5",
     offered: false,
   },
-  { id: "anthropic/claude-fable-5.1", provider: "anthropic", family: "fable", label: "Fable 5.1" },
-  { id: "anthropic/claude-fable-5", provider: "anthropic", family: "fable", label: "Fable 5" },
   { id: "gpt-6-astra", provider: "openai", family: "gpt-astra", label: "GPT-6 Astra" },
   { id: "gpt-5.6-sol", provider: "openai", family: "gpt-sol", label: "GPT-5.6 Sol" },
   { id: "gpt-5.6-terra", provider: "openai", family: "gpt-terra", label: "GPT-5.6 Terra" },
@@ -127,14 +130,16 @@ function latestOfEachFamily(): ModelChoice[] {
   });
 }
 
-/** The menu the composer draws: a provider per row, in table order, holding the latest model of
- *  each family this deploy serves. A frame that has taken no boot read of its own offers every
- *  family's head, and a model the deploy refuses is refused where the choice is applied. */
+/** The menu the composer draws: an offered provider per row, in table order, holding the latest
+ *  model of each family this deploy serves. A frame that has taken no boot read of its own offers
+ *  every family's head, and a model the deploy refuses is refused where the choice is applied. */
 export function modelMenu(): ModelGroup[] {
   const latest = latestOfEachFamily();
-  const groups = MODEL_PROVIDERS.map((provider) => ({
-    provider,
-    models: latest.filter((choice) => choice.provider === provider.id),
-  }));
+  const groups = MODEL_PROVIDERS.filter((provider) => provider.offered !== false).map(
+    (provider) => ({
+      provider,
+      models: latest.filter((choice) => choice.provider === provider.id),
+    }),
+  );
   return groups.filter((group) => group.models.length > 0);
 }

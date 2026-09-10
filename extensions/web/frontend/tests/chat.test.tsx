@@ -3837,9 +3837,24 @@ test("the model picker offers the latest of each family, a speed variant on its 
     "GPT-5.6 Terra",
     "GPT-5.6 Luna",
   ]);
+});
 
-  await userEvent.click(screen.getByRole("menuitem", { name: "GLM" }));
-  expect(await flyoutRows("GLM 5.3")).toEqual(["GLM 5.3", "GLM 5.3 Flash"]);
+test("the picker offers Claude largest first and stands no provider beyond Claude and GPT", async () => {
+  wire(transcript());
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  const providers = await screen.findByRole("menu");
+  expect(
+    within(providers)
+      .getAllByRole("menuitem")
+      .map((item) => item.textContent),
+  ).toEqual(["Claude", "GPT"]);
+
+  await userEvent.click(screen.getByRole("menuitem", { name: "Claude" }));
+  expect(await flyoutRows("Opus 5")).toEqual(["Fable 5.1", "Opus 5", "Sonnet 5"]);
 });
 
 test("an agent on auto reads Auto on the chip and the picker ticks the Auto row", async () => {
@@ -4044,16 +4059,16 @@ test("at a phone width the picker keeps its flyout, and a tap on a model shuts b
   const providers = await screen.findByRole("menu");
 
   await touch.pointer([
-    { keys: "[TouchA]", target: await screen.findByRole("menuitem", { name: "GLM" }) },
+    { keys: "[TouchA]", target: await screen.findByRole("menuitem", { name: "GPT" }) },
   ]);
-  const flash = await screen.findByRole("menuitemradio", { name: "GLM 5.3 Flash" });
-  expect(flash.closest("[role='menu']")).not.toBe(providers);
+  const luna = await screen.findByRole("menuitemradio", { name: "GPT-5.6 Luna" });
+  expect(luna.closest("[role='menu']")).not.toBe(providers);
 
-  await touch.pointer([{ keys: "[TouchA]", target: flash }]);
+  await touch.pointer([{ keys: "[TouchA]", target: luna }]);
 
   expect(posted).toEqual([
-    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "z-ai/glm-5.3-flash" } },
+    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-luna" } },
   ]);
-  expect(await screen.findByRole("button", { name: "Model: GLM 5.3 Flash" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Luna" })).toBeTruthy();
   await waitFor(() => expect(screen.queryAllByRole("menu")).toEqual([]));
 });
