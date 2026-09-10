@@ -1254,7 +1254,7 @@ class WorkspaceDriver:
         say which one this turn was. A turn claimed inside that read-then-cancel window reads back
         as queued, which archives it as ours — the direction the nightly cohort gate refuses."""
         async with workspace_tx() as connection:
-            held = (
+            held: TurnStatus | None = (
                 await connection.execute(
                     sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
                 )
