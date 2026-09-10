@@ -113,6 +113,7 @@ test("every colour the portal paints resolves through the palette's eight steps"
     "--color-field": String.raw`var\(--bkgd-200\)`,
     "--color-edge": String.raw`var\(--bkgd-300\)`,
     "--color-fill": String.raw`var\(--bkgd-200\)`,
+    "--color-said": String.raw`color-mix\(in srgb, var\(--accent-primary\) 15%, var\(--bkgd-100\)\)`,
     "--color-fill-ink": "#191a1a",
     "--color-link": String.raw`color-mix\(in srgb, var\(--accent-primary\) 70%, var\(--text-primary\)\)`,
     "--color-attention-ink": String.raw`color-mix\(in srgb, var\(--accent-secondary\) 70%, var\(--text-primary\)\)`,
@@ -246,15 +247,6 @@ test("a transcript bubble wraps an unbreakable string instead of widening the pa
 test("the working pulse yields to reduced motion in the built sheet", () => {
   const css = packedStyles();
   expect(/@media\(prefers-reduced-motion:reduce\)\{[^}]*\.motion-reduce\\:animate-none\{animation:none/.test(css)).toBe(true);
-});
-
-test("the throbber's spelling survives the build", () => {
-  const css = packedStyles();
-  expect(css).toContain("@keyframesthrob-1{0%{opacity:1}37.5%{opacity:var(--opacity-muted-strong)}87.5%{opacity:1}}");
-  expect(css).toContain("[data-throb]circle{opacity:var(--opacity-muted-strong);animation-duration:.8s;animation-timing-function:step-end;animation-iteration-count:infinite}");
-  expect(css).toContain('[data-throb]circle[data-cell="1"]{animation-name:throb-1}');
-  expect(css).toContain("[data-throb]circle[data-ahead]{animation-delay:-.1s}");
-  expect(css).toContain("@media(prefers-reduced-motion:reduce){[data-throb]circle{animation:none!important}");
 });
 
 test("the waiting mark holds its threshold in the built sheet", () => {
@@ -451,11 +443,13 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
   expect(agentSaid.className).toContain("leading-reading");
   const agentSide = agentSaid.closest("[data-role=agent]")!;
   expect(agentSide.className).toContain("w-full");
-  expect(agentSide.className).not.toContain("bg-fill");
+  expect(agentSide.className).not.toContain("bg-said");
   expect(agentSide.className).not.toContain("animate-appear");
   const mineSaid = screen.getByText("mine").closest("[data-slot=bubble-content]")!;
   expect(mineSaid.closest("[data-role=me]")!.className).toContain("self-end");
-  expect(mineSaid.closest("[data-role=me]")!.className).toContain("bg-fill");
+  expect(mineSaid.closest("[data-role=me]")!.className).toContain(
+    "*:data-[slot=bubble-content]:bg-said",
+  );
   for (const said of [agentSaid, mineSaid]) expect(said.className).toContain("wrap-anywhere");
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "go");

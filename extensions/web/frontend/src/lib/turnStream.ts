@@ -162,17 +162,10 @@ export function streamTurn(
   REATTACHES.delete(chatKey);
   updateChat(chatKey, (state) => ({
     ...state,
-    live: liveTurn(state.turn?.id === turnId ? state.live?.started : undefined),
+    live: liveTurn(),
     turn: { id: turnId, answering },
   }));
   attach(chatKey, turnId, answering, false, agentModel);
-}
-
-/** The moment a server stamp names, or nothing where the read carried no stamp or an unreadable one. */
-function stamped(iso: string | undefined): number | undefined {
-  if (iso === undefined) return undefined;
-  const at = new Date(iso).getTime();
-  return Number.isNaN(at) ? undefined : at;
 }
 
 function tailed(chatKey: string, turnId: string): boolean {
@@ -227,7 +220,7 @@ function attach(
         messages: (state.messages ?? []).concat({
           role: "assistant",
           text: live.text,
-          elapsed: Date.now() - live.started,
+          ...(live.at ? { at: live.at } : {}),
           ...(live.summary ? { summary: live.summary } : {}),
           ...(live.connect ? { connect: live.connect } : {}),
           ...(live.events.length ? { events: live.events } : {}),
@@ -262,7 +255,7 @@ function attach(
       redrawOnOpen = false;
       updateChat(chatKey, (state) => ({
         ...state,
-        live: liveTurn(state.live?.started),
+        live: liveTurn(),
       }));
     } else {
       onLive((live) => ({ ...live, reconnecting: false }));
@@ -360,7 +353,7 @@ function attach(
           live === null
             ? null
             : {
-                ...liveTurn(live.started),
+                ...liveTurn(),
                 meter: live.meter,
                 reconnecting: live.reconnecting,
                 subagents: live.subagents.map((run) => ({ ...run, at: 0 })),
@@ -429,7 +422,7 @@ function attach(
     const frame = JSON.parse((event as MessageEvent).data);
     onLive((live) => ({
       ...live,
-      meter: tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd),
+      meter: [tokens(frame.tokens) + " tok", money(frame.cost_micro_usd)],
     }));
   });
 
@@ -466,7 +459,8 @@ function attach(
         text = text ? text + "\n" + fallback : fallback;
         if (!answering) handoffs.question = null;
       }
-      return { ...state, handoffs, live: { ...live, text, summary } };
+      const at = frame.status === "done" ? new Date().toISOString() : live.at;
+      return { ...state, handoffs, live: { ...live, text, summary, at } };
     });
     record();
     close();
@@ -560,7 +554,6 @@ export async function refreshTranscript(
     if (!onlyIfEmpty && (current.busy || current.turn)) return current;
     const question = current.handoffs.question ?? null;
     const running = ("turn" in payload && payload.turn) || null;
-    const started = stamped(payload.turn_started_at);
     return {
       ...current,
       messages: payload.messages,
@@ -568,7 +561,7 @@ export async function refreshTranscript(
       fault: null,
       busy: running ? true : current.busy,
       turn: running ? { id: running, answering: false } : current.turn,
-      live: running ? (current.live ?? liveTurn(started)) : current.live,
+      live: running ? (current.live ?? liveTurn()) : current.live,
       handoffs: {
         question,
         credentials: ("credentials" in payload && payload.credentials) || null,
@@ -638,6 +631,7 @@ export async function sendMessage(
     messages: (state.messages ?? []).concat({
       role: "user",
       text: shown,
+      at: new Date().toISOString(),
       sending: token,
       ...(attached.length ? { attached } : {}),
       ...(state.turn !== null ? { queued: true } : {}),

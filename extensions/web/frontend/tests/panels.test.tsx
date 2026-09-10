@@ -568,7 +568,7 @@ test("a Slack conversation names its channel in its heading, and those words are
   expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
-test("a conversation opened here reads as chat, with the reply's whole activity behind it", async () => {
+test("a conversation opened here reads as chat, and a settled reply keeps no activity behind it", async () => {
   const held = "7c4a1e90-0000-4000-8000-000000000005";
   const child = "9d2b7f31-0000-4000-8000-000000000006";
   wire({
@@ -618,18 +618,11 @@ test("a conversation opened here reads as chat, with the reply's whole activity 
 
   expect(await screen.findByText("parent ask")).toBeTruthy();
   expect(screen.getByText("parent answer").tagName).toBe("STRONG");
-  const summary = screen.getByText("Completed 2 steps");
-  expect(summary.closest("summary")).toBeTruthy();
-  expect(screen.queryByText("bash ls")).toBeNull();
-
-  await userEvent.click(summary);
-  expect(screen.getByText("Listing the workspace.")).toBeTruthy();
-  const run = screen.getByText("Subagent · research");
-  expect(run.closest("a")).toBeNull();
-
-  await userEvent.click(run.closest("summary")!);
-  expect(screen.getByText("Reading the deploy job.")).toBeTruthy();
-  expect(screen.getByText("It runs nightly.")).toBeTruthy();
+  expect(document.querySelector("[data-slot=marker]")).toBeNull();
+  expect(screen.queryByText("Listing the workspace.")).toBeNull();
+  expect(screen.queryByText("Subagent · research")).toBeNull();
+  expect(screen.queryByText("Reading the deploy job.")).toBeNull();
+  expect(screen.queryByText("It runs nightly.")).toBeNull();
   expect(screen.queryByRole("link", { name: /Changes/ })).toBeNull();
 });
 
@@ -1364,7 +1357,7 @@ test("the lane's History lists the app's conversations, and one press opens it i
   const other = screen.getByRole("button", { name: /^Older thread Slack \d+(mo|y)$/ });
   const line = within(row).getByText("Newest thread");
   const stamp = row.querySelector("time")!;
-  expect(stamp.getAttribute("title")).toBe("Jul 30 2026 at 10:00 GMT+5:30");
+  expect(stamp.getAttribute("title")).toBe("Jul 30 2026 at 10:00 AM GMT+5:30");
   expect(line.contains(stamp)).toBe(false);
   expect(line.compareDocumentPosition(stamp) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 

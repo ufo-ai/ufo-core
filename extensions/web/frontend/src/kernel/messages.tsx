@@ -2,12 +2,14 @@ import {
   Fragment,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 
-import { IconCheck, IconChevronRight } from "@tabler/icons-react";
+import { IconCheck, IconChevronRight, IconCopy, IconX } from "@tabler/icons-react";
 
 import {
   Attachment,
@@ -22,7 +24,7 @@ import {
 } from "@/components/ui/attachment";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
-import { buttonVariants } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Item,
   ItemContent,
@@ -42,7 +44,6 @@ import {
   MessageScrollerViewport,
   useMessageScroller,
 } from "@/components/ui/message-scroller";
-import { Reveal } from "@/components/ui/reveal";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { FileSheet } from "@/kernel/artifact";
 import { Lightbox } from "@/kernel/lightbox";
@@ -56,27 +57,27 @@ import { ConsentLink } from "@/lib/consent";
 import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
 import { modelLabel, modelMark } from "@/lib/models";
-import { fullMoment, spanMoment } from "@/lib/moments";
+import { brailleOf, randomCell } from "@/lib/braille";
+import { fullMoment, stampMoment } from "@/lib/moments";
 import { agentHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { turnMeta } from "@/lib/turnMeta";
-import { eventLabel, latestActivity } from "@/lib/turnStream";
+import { latestActivity } from "@/lib/turnStream";
 import type { ActivityEvent, Bubble as Spoken, LiveTurn } from "@/lib/chatStore";
 import type { ChatApp, ChatConnect, ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
 
-/** How far from the foot still counts as being at it: judged to the pixel, a reply would stop following
- *  the moment a line landed or the composer grew a row. */
+/** Judged to the pixel, the jump-to-foot button would flicker the moment a line landed or the
+ *  composer grew a row. */
 const AT_THE_FOOT_PX = 40;
 
-/** The counter names whole seconds, so it is re-read at the rate its smallest part moves. */
-const TICK_MS = 1_000;
+const PREVIOUS_TURN_PEEK_PX = 88;
 
 export function TranscriptScroll({ children }: { children: ReactNode }) {
   return (
     <MessageScrollerProvider
-      autoScroll
-      defaultScrollPosition="end"
+      defaultScrollPosition="last-anchor"
       scrollEdgeThreshold={AT_THE_FOOT_PX}
+      scrollPreviousItemPeek={PREVIOUS_TURN_PEEK_PX}
     >
       {children}
     </MessageScrollerProvider>
@@ -85,14 +86,18 @@ export function TranscriptScroll({ children }: { children: ReactNode }) {
 
 export function TranscriptPane({
   className,
+  animate = false,
   children,
 }: {
   className?: string;
+  animate?: boolean;
   children: ReactNode;
 }) {
   return (
     <MessageScroller className={className}>
-      <MessageScrollerViewport data-testid="log">{children}</MessageScrollerViewport>
+      <MessageScrollerViewport data-testid="log" animate={animate}>
+        {children}
+      </MessageScrollerViewport>
       <MessageScrollerButton />
     </MessageScroller>
   );
@@ -223,14 +228,25 @@ export function MessageLog({
     ...(live ? [{ at: settled.length, live }] : []),
     ...queued.map((said, index) => ({ at: settled.length + (live ? 1 : 0) + index, said })),
   ];
-  const bubble = (message: Spoken, key: string) =>
-    message.role === "error" ? (
-      <MessageScrollerItem key={key} messageId={key}>
-        <Meta>{message.text}</Meta>
-      </MessageScrollerItem>
-    ) : (
-      <MessageScrollerItem key={key} messageId={key}>
-        <Speech mine={message.role === "user"} at={message.at}>
+  const bubble = (message: Spoken, key: string, last = false) => {
+    if (message.role === "error")
+      return (
+        <MessageScrollerItem key={key} messageId={key}>
+          <Meta>{message.text}</Meta>
+        </MessageScrollerItem>
+      );
+    const mine = message.role === "user";
+    const stamp = mine && message.at ? stampMoment(message.at) : null;
+    const meta = mine
+      ? stamp
+        ? [stamp]
+        : []
+      : message.summary
+        ? turnMeta(message.summary, message.at)
+        : [];
+    return (
+      <MessageScrollerItem key={key} messageId={key} scrollAnchor={mine}>
+        <Speech mine={mine} at={message.at}>
           {message.role === "user" && message.speaker ? (
             <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
           ) : null}
@@ -241,14 +257,6 @@ export function MessageLog({
               onOpen={setOpened}
             />
           ) : null}
-          {message.role === "user" ? null : (
-            <Activity
-              events={message.events ?? []}
-              runs={message.subagents ?? []}
-              live={false}
-              elapsed={message.elapsed ?? message.summary?.duration_ms}
-            />
-          )}
           {message.role === "user" && !message.text && !message.asked ? null : (
             <Said mine={message.role === "user"}>
               {message.role === "user" && message.asked ? (
@@ -268,13 +276,23 @@ export function MessageLog({
           )}
           {message.role === "user" || !message.apps?.length ? null : <Apps apps={message.apps} />}
           {message.connect ? <ConnectLink connect={message.connect} /> : null}
-          {message.summary ? (
-            <Meta model={message.summary.model}>{turnMeta(message.summary)}</Meta>
+          {meta.length ? (
+            <Meta
+              last={last}
+              mine={mine}
+              model={mine ? null : message.summary?.model}
+              copy={message.text}
+            >
+              {meta.map((part, index) => (
+                <span key={index}>{part}</span>
+              ))}
+            </Meta>
           ) : null}
           {message.question && question ? question(message.question) : null}
         </Speech>
       </MessageScrollerItem>
     );
+  };
   return (
     <>
       <MessageScrollerContent className={className} aria-busy={live !== null}>
@@ -285,7 +303,7 @@ export function MessageLog({
         {earlier?.pages.flatMap((page) =>
           page.messages.map((said, at) => bubble(said, "h" + page.cursor + ":" + at)),
         )}
-        {rows.map((row) =>
+        {rows.map((row, index) =>
           row.live ? (
             <MessageScrollerItem key={"m" + String(row.at)} messageId={"m" + String(row.at)}>
               <Speech mine={false}>
@@ -307,11 +325,10 @@ export function MessageLog({
                 ) : null}
                 {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
                 {row.live.connect ? <ConnectLink connect={row.live.connect} /> : null}
-                <LiveMeter started={row.live.started} spend={row.live.meter} />
               </Speech>
             </MessageScrollerItem>
           ) : (
-            bubble(row.said, "m" + String(row.at))
+            bubble(row.said, "m" + String(row.at), index === rows.length - 1)
           ),
         )}
         {children}
@@ -357,7 +374,10 @@ function Said({
       variant={mine ? "default" : "ghost"}
       align={mine ? "end" : "start"}
       data-role={mine ? "me" : "agent"}
-      className={cn(mine ? "self-end" : "w-full", entering && "animate-appear")}
+      className={cn(
+        mine ? "self-end *:data-[slot=bubble-content]:bg-said" : "w-full",
+        entering && "animate-appear",
+      )}
     >
       <BubbleContent
         className={cn("wrap-anywhere leading-reading [&_a]:text-link", mine && "whitespace-pre-wrap")}
@@ -604,11 +624,34 @@ function OpenedFile({
 
 /** The turn's spend, with its model standing as the mark alone. The picker's name for that model
  *  reaches the member on hover and on focus. The mark is sized in `em` so it stands to the meta
- *  line's own type rather than to the glyph size a marker gives an icon. */
-export function Meta({ model, children }: { model?: string | null; children: string }) {
+ *  line's own type rather than to the glyph size a marker gives an icon.
+ *
+ *  Only the last message in a transcript carries its line openly. An earlier one draws it on hover
+ *  and on keyboard focus, so a long thread reads as speech rather than as a ledger. The line keeps
+ *  its space either way: revealing it must not move the text above it. */
+export function Meta({
+  model,
+  last = true,
+  mine = false,
+  copy,
+  children,
+}: {
+  model?: string | null;
+  last?: boolean;
+  mine?: boolean;
+  copy?: string;
+  children: ReactNode;
+}) {
   const mark = model ? modelMark(model) : null;
   return (
-    <Marker className="mt-2xs font-mono text-small tabular-nums">
+    <Marker
+      className={cn(
+        "mt-2xs gap-md text-small leading-none tabular-nums",
+        "transition-opacity motion-reduce:transition-none",
+        mine && "justify-end text-right",
+        !last && "opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100",
+      )}
+    >
       {mark && model ? (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -620,200 +663,332 @@ export function Meta({ model, children }: { model?: string | null; children: str
           <TooltipContent side="top">{modelLabel(model)}</TooltipContent>
         </Tooltip>
       ) : null}
-      <MarkerContent>{children}</MarkerContent>
+      {copy ? <CopySaid text={copy} /> : null}
+      <MarkerContent className="flex items-center gap-md">{children}</MarkerContent>
     </Marker>
   );
 }
 
-const THROB_DOTS = [
-  { x: 5, y: 5, cell: 1 },
-  { x: 12, y: 5, cell: 4 },
-  { x: 19, y: 5, cell: 1, ahead: true },
-  { x: 5, y: 12, cell: 2 },
-  { x: 12, y: 12, cell: 5 },
-  { x: 19, y: 12, cell: 2, ahead: true },
-  { x: 5, y: 19, cell: 3 },
-  { x: 12, y: 19, cell: 6 },
-  { x: 19, y: 19, cell: 3, ahead: true },
-];
+const COPY_LABELS = {
+  idle: "Copy message",
+  copied: "Copied",
+  failed: "Copy failed",
+} as const;
 
-function Throbber() {
+const COPIED_MS = 2_000;
+
+/** A browser refuses `writeText` when the document is not focused or the permission is withheld,
+ *  and a rejection left unhandled would draw nothing at all. */
+function CopySaid({ text }: { text: string }) {
+  const [state, setState] = useState<keyof typeof COPY_LABELS>("idle");
+  const fades = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (fades.current) window.clearTimeout(fades.current);
+    },
+    [],
+  );
+  const copy = async () => {
+    let next: keyof typeof COPY_LABELS = "copied";
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      next = "failed";
+    }
+    setState(next);
+    if (fades.current) window.clearTimeout(fades.current);
+    fades.current = window.setTimeout(() => setState("idle"), COPIED_MS);
+  };
   return (
-    <svg
-      aria-hidden
-      data-throb
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      // A line box carries the room a descender needs, so its middle falls a pixel below the letters. The
-      // pixel is taken back here — measured against the built sheet, the dots centre on the lowercase band.
-      className="-translate-y-px shrink-0 animate-working motion-reduce:animate-none"
+    <Button
+      variant="mark"
+      size="glyph"
+      aria-label={COPY_LABELS[state]}
+      className={cn(
+        "size-(--size-icon) [&_svg]:size-(--size-icon) text-ink-soft",
+        TAP_FLOOR,
+        "max-narrow:min-w-(--size-control) max-narrow:justify-center",
+        state === "failed" && "text-attention-ink",
+      )}
+      onClick={copy}
     >
-      {THROB_DOTS.map((dot) => (
-        <circle
-          key={dot.x + "-" + dot.y}
-          cx={dot.x}
-          cy={dot.y}
-          r={1}
-          data-cell={dot.cell}
-          data-ahead={dot.ahead === true ? "" : undefined}
-        />
-      ))}
-    </svg>
+      {state === "copied" ? (
+        <IconCheck stroke={1.5} aria-hidden />
+      ) : state === "failed" ? (
+        <IconX stroke={1.5} aria-hidden />
+      ) : (
+        <IconCopy stroke={1.5} aria-hidden />
+      )}
+    </Button>
   );
 }
 
-/** The turn's own clock, beside what it has spent so far, re-read every second while it runs. */
-function LiveMeter({ started, spend }: { started: number; spend: string | null }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const tick = window.setInterval(() => setNow(Date.now()), TICK_MS);
-    return () => window.clearInterval(tick);
-  }, []);
-  const run = spanMoment(now - started);
-  return <Meta>{spend ? run + " · " + spend : run}</Meta>;
+/** The mark surfaces in the static oftener than the rest of the pool, so the shape a member already
+ *  reads as ufo keeps coming back out of the noise. */
+const ACCENTS = Array.from("∴∵∷⁘⁙⋮⋰⋱∧∨⊻⊼△▽◁▷⊳⊲⊙⊚⊛⊕⌾");
+const ACCENT_MARK = "∵";
+const ACCENT_MARK_WEIGHT = 2.5;
+const ACCENT_SHARE = 0.14;
+
+/** The decode splits by fraction of its own length: ciphertext, then a churn the accents drop out
+ *  of, then a resolve front travelling left to right. */
+const DECODE_MS = 1_500;
+const HOLD_MS = 1_200;
+const FRAME_MS = 90;
+const STATIC_END = 0.35;
+const CHURN_END = 0.7;
+
+/** A wait that changes snaps to the new ciphertext and reads as a cut. Entering at the churn takes
+ *  the old words apart and builds the new ones out of the same noise. */
+const CHURN_FRAME = Math.ceil((STATIC_END * DECODE_MS) / FRAME_MS);
+
+/** The accents breathe on their own period, offset per cell so the line shimmers rather than blinks
+ *  in unison; every other unresolved cell takes a slow wave travelling along the line. */
+const PULSE_PERIOD_S = 2.6;
+const PULSE_CELL_PHASE = 0.11;
+const RIPPLE_CELLS_PER_WAVE = 7;
+
+export type DecodeCell = {
+  glyph: string;
+  resolved: boolean;
+  accent: boolean;
+  /** How far along its channel this cell sits, 0 to 100, for `color-mix`. */
+  mix: number;
+};
+
+/** The glyph a cell shows whenever it is not churning, and whether it is one of the ember few. */
+export type SettledCell = { glyph: string; accent: boolean };
+
+function weightedAccent(): string {
+  const total = ACCENTS.length - 1 + ACCENT_MARK_WEIGHT;
+  let ticket = Math.random() * total;
+  for (const accent of ACCENTS) {
+    ticket -= accent === ACCENT_MARK ? ACCENT_MARK_WEIGHT : 1;
+    if (ticket < 0) return accent;
+  }
+  return ACCENT_MARK;
 }
 
+/** The line every phase but the churn draws, settled once: which cells carry an accent and which
+ *  accent each carries, and the one cell a character with no braille of its own — a digit, a
+ *  bracket — stands behind. Rolling either per frame would leave the static phase twitching and
+ *  would multiply the ember. A space is never an accent, and never anything but itself. */
+export function settle(text: string): SettledCell[] {
+  const places = Array.from(text, (character, index) => (character === " " ? -1 : index)).filter(
+    (index) => index !== -1,
+  );
+  const wanted = Math.round(places.length * ACCENT_SHARE);
+  const chosen = new Set<number>();
+  while (chosen.size < wanted && chosen.size < places.length) {
+    chosen.add(places[Math.floor(Math.random() * places.length)]);
+  }
+  return Array.from(text, (character, index) => {
+    if (character === " ") return { glyph: character, accent: false };
+    if (chosen.has(index)) return { glyph: weightedAccent(), accent: true };
+    return { glyph: brailleOf(character) ?? randomCell(), accent: false };
+  });
+}
+
+function pulseMix(index: number, now: number): number {
+  return ((Math.sin((now * 2 * Math.PI) / PULSE_PERIOD_S + index * PULSE_CELL_PHASE) + 1) / 2) * 100;
+}
+
+function rippleMix(index: number, now: number): number {
+  return (
+    ((Math.sin((index / RIPPLE_CELLS_PER_WAVE - now) * 2 * Math.PI) + 1) / 2) * 100
+  );
+}
+
+/** The line as it stands at progress `t` through the decode, on a clock of `now` seconds. Pure: the
+ *  same arguments draw the same line, so the phases can be asserted without a timer. */
+export function decodeFrame(
+  text: string,
+  t: number,
+  now: number,
+  settled: SettledCell[],
+): DecodeCell[] {
+  const characters = Array.from(text);
+  const churning = t >= STATIC_END && t < CHURN_END;
+  const resolved =
+    t >= CHURN_END ? Math.floor(((t - CHURN_END) / (1 - CHURN_END)) * characters.length) : 0;
+  return characters.map((character, index) => {
+    if (character === " ") return { glyph: character, resolved: true, accent: false, mix: 0 };
+    if (index < resolved) return { glyph: character, resolved: true, accent: false, mix: 0 };
+    if (churning) {
+      return { glyph: randomCell(), resolved: false, accent: false, mix: rippleMix(index, now) };
+    }
+    const cell = settled[index];
+    return {
+      glyph: cell.glyph,
+      resolved: false,
+      accent: cell.accent,
+      mix: cell.accent ? pulseMix(index, now) : rippleMix(index, now),
+    };
+  });
+}
+
+/** A wait, spelled. The label arrives as the braille that spells it, churns, and resolves left to
+ *  right — the wait a message states, in place of the `Loading` mark or a skeleton rather than
+ *  beside one.
+ *
+ *  The decode runs once, when the wait changes. A step that stays put has already been read, so the
+ *  resolved words shimmer instead of churning again — the movement says the step is still running
+ *  without asking to be re-read. `loop` restores the repeating cycle; `delay` staggers a line
+ *  against the ones above it; `color` drops the two channels for a dense or low-priority context,
+ *  leaving the glyphs in the resting tone.
+ *
+ *  Reduced motion renders the words and starts no timer at all, and a hidden tab stops the one that
+ *  is running: a line nobody is watching does not churn. */
+export function DecodeLine({
+  text,
+  delay = 0,
+  loop = false,
+  color = true,
+  className,
+}: {
+  text: string;
+  delay?: number;
+  loop?: boolean;
+  color?: boolean;
+  className?: string;
+}) {
+  const still = useReducedMotion();
+  const settled = useMemo(() => settle(text), [text]);
+  const [shown, setShown] = useState(text);
+  const [tick, setTick] = useState(0);
+  const frames = useRef(0);
+
+  /** A new wait glyphs in from the churn rather than inheriting how far the one before it had got,
+   *  which would show a stranger's words already half resolved. */
+  if (shown !== text) {
+    setShown(text);
+    setTick(CHURN_FRAME);
+    frames.current = CHURN_FRAME;
+  }
+
+  useEffect(() => {
+    if (still) return;
+    let timer: number | undefined;
+    let spent = false;
+    const advance = () => {
+      frames.current += 1;
+      if (!loop && frames.current * FRAME_MS >= DECODE_MS) {
+        spent = true;
+        window.clearInterval(timer);
+      }
+      setTick(frames.current);
+    };
+    const start = () => {
+      window.clearInterval(timer);
+      if (!spent) timer = window.setInterval(advance, FRAME_MS);
+    };
+    const opening = window.setTimeout(start, delay);
+    const watch = () => (document.hidden ? window.clearInterval(timer) : start());
+    document.addEventListener("visibilitychange", watch);
+    return () => {
+      window.clearTimeout(opening);
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", watch);
+    };
+  }, [still, text, delay, loop]);
+
+  if (still) return <span className={className}>{text}</span>;
+
+  const elapsed = tick * FRAME_MS;
+  const t = Math.min(1, (loop ? elapsed % (DECODE_MS + HOLD_MS) : elapsed) / DECODE_MS);
+  return (
+    <span className={className}>
+      <span className="sr-only">{text}</span>
+      <Cells cells={decodeFrame(text, t, elapsed / 1_000, settled)} color={color} />
+    </span>
+  );
+}
+
+/** A column one character wide only holds glyphs a face gives one width to: in a proportional face
+ *  a braille cell out of a fallback and an `m` beside it spill their columns and collide. */
+function Cells({ cells, color }: { cells: DecodeCell[]; color: boolean }) {
+  const words: { cell: DecodeCell; at: number }[][] = [[]];
+  cells.forEach((cell, at) => {
+    if (cell.glyph === " ") words.push([]);
+    else words[words.length - 1].push({ cell, at });
+  });
+  return (
+    <span aria-hidden data-slot="decode-text" className="font-mono text-small">
+      {words.map((word, index) => (
+        <span key={index}>
+          {index > 0 ? " " : null}
+          <span className="inline-block whitespace-pre">
+            {word.map(({ cell, at }) => (
+              <span
+                key={at}
+                data-slot="decode-cell"
+                data-resolved={cell.resolved ? "" : undefined}
+                data-accent={cell.accent ? "" : undefined}
+                style={
+                  color && !cell.resolved
+                    ? ({ "--f": cell.mix.toFixed(1) } as CSSProperties)
+                    : undefined
+                }
+                className={cn(
+                  "inline-block w-(--size-decode-cell) text-center",
+                  cell.resolved
+                    ? "font-medium text-foreground"
+                    : color
+                      ? cell.accent
+                        ? "decode-pulse"
+                        : "decode-ripple"
+                      : "text-muted-foreground",
+                )}
+              >
+                {cell.glyph}
+              </span>
+            ))}
+          </span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function useReducedMotion(): boolean {
+  const [still, setStill] = useState(
+    () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+  useEffect(() => {
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const answer = () => setStill(query.matches);
+    query.addEventListener("change", answer);
+    return () => query.removeEventListener("change", answer);
+  }, []);
+  return still;
+}
+
+/** The step a running turn is on. A settled turn draws no line at all: what it did is the reply it
+ *  wrote, and a count of steps is not something a member acts on. */
 function Activity({
   events,
   runs,
   live,
   working,
-  elapsed,
 }: {
   events: ActivityEvent[];
   runs: SubagentRun[];
   live: boolean;
   working?: string;
-  elapsed?: number;
 }) {
-  const [open, setOpen] = useState(false);
-  const steps = events.length + runs.length;
-  if (!steps && working === undefined) return null;
-  const openRuns = runs.filter((run) => run.running).length;
-  const summary = live
-    ? openRuns > 0
-      ? "Awaiting " + openRuns + " subagent" + (openRuns === 1 ? "" : "s")
-      : (working ?? latestActivity(events, runs))
-    : "Completed " +
-      steps +
-      " step" +
-      (steps === 1 ? "" : "s") +
-      (elapsed === undefined ? "" : " in " + spanMoment(elapsed));
-  const shown = steps > 0 && open;
+  if (!live) return null;
+  const waiting = runs.filter((run) => run.running).length;
+  const step =
+    waiting > 0
+      ? "Awaiting " + waiting + " subagent" + (waiting === 1 ? "" : "s")
+      : (working ?? latestActivity(events, runs));
+  if (!step) return null;
   return (
-    <details
-      className="group/activity mt-2xs text-label text-ink-soft"
-      open={shown}
-      // A browser fires `toggle` for the `open` this render writes as well as for a member's own click, so
-      // only a state the fold was not already drawn in came from the member.
-      onToggle={(event) => {
-        if (event.currentTarget.open !== shown) setOpen(event.currentTarget.open);
-      }}
-    >
-      <Marker
-        render={
-          <summary
-            className={cn("list-none", steps ? "cursor-pointer" : "cursor-default")}
-            onClick={steps ? undefined : (event) => event.preventDefault()}
-          />
-        }
-      >
-        {live ? <Throbber /> : null}
-        <MarkerContent className={live ? "text-ink" : undefined}>{summary}</MarkerContent>
-        {steps ? (
-          <IconChevronRight
-            aria-hidden
-            className="size-icon shrink-0 transition-transform group-open/activity:rotate-90"
-          />
-        ) : null}
-      </Marker>
-      {shown ? <ActivityTree events={events} runs={runs} live={live} /> : null}
-    </details>
-  );
-}
-
-function ActivityTree({
-  events,
-  runs,
-  live,
-}: {
-  events: ActivityEvent[];
-  runs: SubagentRun[];
-  live: boolean;
-}) {
-  if (!events.length && !runs.length) return null;
-  const slot = (run: SubagentRun) =>
-    run.at === undefined || run.at > events.length ? events.length : run.at;
-  const rows: ReactNode[] = [];
-  const place = (index: number) => {
-    for (const run of runs) {
-      if (slot(run) === index) {
-        rows.push(<RunRow key={run.conversation_id} run={run} live={live} />);
-      }
-    }
-  };
-  events.forEach((event, index) => {
-    place(index);
-    rows.push(
-      <li key={"event-" + index} className="whitespace-pre-wrap">
-        {event.kind === "note" ? (
-          <Reveal bare>{event.text}</Reveal>
-        ) : (
-          eventLabel(event, "done")
-        )}
-      </li>,
-    );
-  });
-  place(events.length);
-  return (
-    <ul className="m-0 mt-2xs flex list-none flex-col gap-hair p-0 pl-lg">
-      {rows}
-    </ul>
-  );
-}
-
-const AGENT_PROFILE = "agent:";
-
-function RunRow({ run, live }: { run: SubagentRun; live: boolean }) {
-  const [open, setOpen] = useState(false);
-  const running = live && run.running === true;
-  const current = running && run.current ? run.current : "";
-  return (
-    <li className="flex flex-col gap-hair">
-      <details className="group/run" onToggle={(event) => setOpen(event.currentTarget.open)}>
-        <summary className="flex cursor-pointer list-none items-center gap-xs">
-          <span className="shrink-0">
-            {run.name ||
-              (run.profile.startsWith(AGENT_PROFILE)
-                ? "App · " + agentName(run.profile.slice(AGENT_PROFILE.length))
-                : "Subagent · " + run.profile)}
-          </span>
-          {current ? (
-            <span className="shimmer min-w-0 truncate">{"· " + current}</span>
-          ) : null}
-          <IconChevronRight
-            aria-hidden
-            className="size-icon shrink-0 transition-transform group-open/run:rotate-90"
-          />
-        </summary>
-        {open ? (
-          <>
-            <ActivityTree events={run.events} runs={run.subagents} live={live} />
-            {run.output ? (
-              <div className="pl-lg">
-                <Reveal bare>
-                  <Markdown text={run.output} />
-                </Reveal>
-              </div>
-            ) : null}
-          </>
-        ) : null}
-      </details>
-    </li>
+    <Marker className="mt-2xs text-label text-ink-soft">
+      <MarkerContent className="shimmer">
+        <DecodeLine text={step} />
+      </MarkerContent>
+    </Marker>
   );
 }
 

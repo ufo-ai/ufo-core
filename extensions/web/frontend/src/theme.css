@@ -166,6 +166,16 @@
   --blur-scrim: 3px;
 
   --color-affirm: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
+  /* The member's own words: the one place the first accent lands as a surface rather than a mark,
+     so it is held to the same 15% step the tints above use and carries both schemes with them. */
+  --color-said: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
+
+  /* Each channel is a pair the cell mixes between, and both ends are the palette laid over the
+     pane, so a scheme still turns on the seven declarations alone. */
+  --ripple-lo: color-mix(in srgb, var(--text-secondary) 55%, var(--bkgd-100));
+  --ripple-hi: var(--text-secondary);
+  --pulse-lo: color-mix(in srgb, var(--accent-secondary) 25%, var(--text-secondary));
+  --pulse-hi: color-mix(in srgb, var(--accent-secondary) 55%, var(--text-secondary));
   --color-attention: color-mix(in srgb, var(--accent-secondary) 15%, var(--bkgd-100));
   --color-attention-ink: color-mix(in srgb, var(--accent-secondary) 70%, var(--text-primary));
   --color-live: #16A34A;
@@ -336,6 +346,9 @@
   --size-switch-throw: 14px;
   --size-fact: 16ch;
   --size-glyph: 16px;
+  /* One cell of a decoding line. The cipher is set in the mono face, so a character's own width is
+     a column every glyph on the line shares. */
+  --size-decode-cell: 1ch;
   --size-icon: 1em;
   --size-surface-mark: 24px;
   --size-brand-mark: 32px;
@@ -581,7 +594,6 @@ body[data-shell="sidebar"] [data-chat-start-line] {
 @layer base {
   :root {
     color-scheme: light dark;
-    --duration-glyph: 200ms;
   }
 
   :root.light {
@@ -656,26 +668,22 @@ body[data-shell="sidebar"] [data-chat-start-line] {
   }
 }
 
-@keyframes shimmer-sweep {
-  0% {
-    color: var(--color-ink-soft);
-  }
-  10% {
-    color: var(--color-ink);
-  }
-  35%,
-  100% {
-    color: var(--color-ink-soft);
-  }
+/* Braille and the accents both come out of a fallback, where the braille is a small dot pattern
+   and the accents are drawn to full cap height. */
+[data-slot="decode-cell"][data-accent] {
+  font-size: 0.72em;
 }
 
-@utility shimmer {
-  & [data-cut] {
-    animation:
-      cut-reveal 0.32s var(--ease-enter) calc(var(--cut) * 14ms) both,
-      shimmer-sweep 2.4s linear calc(var(--cut) * -80ms) infinite;
-  }
+/* `--f` is written per cell, so the mix has to resolve on the cell: declared at the root it would
+   substitute the root's `--f`, which is nothing at all. */
+@utility decode-ripple {
+  color: color-mix(in srgb, var(--ripple-hi) calc(var(--f) * 1%), var(--ripple-lo));
 }
+
+@utility decode-pulse {
+  color: color-mix(in srgb, var(--pulse-hi) calc(var(--f) * 1%), var(--pulse-lo));
+}
+
 
 @media (prefers-reduced-motion: reduce) {
   [data-cut] {
@@ -684,6 +692,47 @@ body[data-shell="sidebar"] [data-chat-start-line] {
 
   [data-part="skeleton"] {
     animation: var(--animate-waiting);
+  }
+}
+
+/* Built to shadcn's shimmer, whose highlight is `oklch(from currentColor …)` — refused by the
+   palette gate, so the band is that colour held to a fifth of its alpha and mixed in srgb. */
+@utility shimmer {
+  --_spread: var(--shimmer-spread, calc(3ch + 40px));
+  --_base: currentColor;
+  --_highlight: var(--shimmer-color, color-mix(in srgb, currentColor 20%, transparent));
+  --_shoulder: color-mix(in srgb, var(--_highlight), var(--_base) 50%);
+  background-image: linear-gradient(
+    calc(90deg + var(--shimmer-angle, 20deg)),
+    var(--_base) calc(50% - var(--_spread)),
+    var(--_shoulder) calc(50% - var(--_spread) * 0.5),
+    var(--_highlight) 50%,
+    var(--_shoulder) calc(50% + var(--_spread) * 0.5),
+    var(--_base) calc(50% + var(--_spread))
+  );
+  background-repeat: no-repeat;
+  background-size: calc(200% + var(--_spread) * 2) 100%;
+  background-position: 0 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer-pass var(--shimmer-duration, 2s) linear infinite;
+}
+
+@keyframes shimmer-pass {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer {
+    background-image: none;
+    animation: none;
+    -webkit-text-fill-color: currentColor;
   }
 }
 
@@ -739,150 +788,6 @@ body[data-shell="sidebar"] [data-chat-start-line] {
     display: inline-block;
     white-space: pre;
     animation: cut-reveal 0.32s var(--ease-enter) calc(var(--cut) * 14ms) both;
-  }
-
-  @keyframes glyph-out {
-    to {
-      opacity: 0;
-    }
-  }
-
-  @keyframes glyph-in {
-    from {
-      color: transparent;
-    }
-  }
-
-  [data-glyph] {
-    --delay-glyph: calc(
-      min(calc(var(--arrive) * 22ms), 400ms) + min(calc(var(--cell) * 24ms), 180ms)
-    );
-    position: relative;
-    animation: glyph-in var(--duration-glyph) var(--ease-control) var(--delay-glyph) both;
-  }
-
-  [data-glyph]::before {
-    content: attr(data-glyph);
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--color-ink-soft);
-    animation: glyph-out var(--duration-glyph) var(--ease-control) var(--delay-glyph) both;
-  }
-
-  @keyframes throb-1 {
-    from {
-      opacity: 1;
-    }
-
-    37.5% {
-      opacity: var(--opacity-muted-strong);
-    }
-
-    87.5% {
-      opacity: 1;
-    }
-  }
-
-  @keyframes throb-2 {
-    from {
-      opacity: 1;
-    }
-
-    12.5% {
-      opacity: var(--opacity-muted-strong);
-    }
-
-    75% {
-      opacity: 1;
-    }
-  }
-
-  @keyframes throb-3 {
-    from {
-      opacity: var(--opacity-muted-strong);
-    }
-
-    50% {
-      opacity: 1;
-    }
-  }
-
-  @keyframes throb-4 {
-    from {
-      opacity: 1;
-    }
-
-    62.5% {
-      opacity: var(--opacity-muted-strong);
-    }
-  }
-
-  @keyframes throb-5 {
-    from {
-      opacity: var(--opacity-muted-strong);
-    }
-
-    12.5% {
-      opacity: 1;
-    }
-
-    75% {
-      opacity: var(--opacity-muted-strong);
-    }
-  }
-
-  @keyframes throb-6 {
-    from {
-      opacity: var(--opacity-muted-strong);
-    }
-
-    25% {
-      opacity: 1;
-    }
-  }
-
-  [data-throb] circle {
-    opacity: var(--opacity-muted-strong);
-    animation-duration: 0.8s;
-    animation-timing-function: step-end;
-    animation-iteration-count: infinite;
-  }
-
-  [data-throb] circle[data-cell="1"] {
-    animation-name: throb-1;
-  }
-
-  [data-throb] circle[data-cell="2"] {
-    animation-name: throb-2;
-  }
-
-  [data-throb] circle[data-cell="3"] {
-    animation-name: throb-3;
-  }
-
-  [data-throb] circle[data-cell="4"] {
-    animation-name: throb-4;
-  }
-
-  [data-throb] circle[data-cell="5"] {
-    animation-name: throb-5;
-  }
-
-  [data-throb] circle[data-cell="6"] {
-    animation-name: throb-6;
-  }
-
-  [data-throb] circle[data-ahead] {
-    animation-delay: -0.1s;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    [data-throb] circle {
-      animation: none !important;
-    }
   }
 
   .scroll-fade-b[data-scrollable~="end"]::after {

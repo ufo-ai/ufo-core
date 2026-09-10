@@ -64,7 +64,8 @@ test("a dropped stream reattaches and the replay rebuilds the reply without dupl
   expect(screen.queryByText("one one two")).toBeNull();
 
   second.emit("terminal", { status: "done", model: "claude-opus-5", tokens: 3, cost_micro_usd: 0 });
-  expect(await screen.findByText("3 tok · $0.00")).toBeTruthy();
+  expect(await screen.findByText("3 tok")).toBeTruthy();
+  expect(screen.getByText("$0.00")).toBeTruthy();
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false),
   );

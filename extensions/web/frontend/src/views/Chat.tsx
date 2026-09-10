@@ -165,6 +165,14 @@ export function Chat({
   const starting = conversationId === null && settled && !messages?.length;
   const bare = starting && unsaid === undefined;
   const showEmpty = messages !== null && !messages.length && settled;
+  const [animate, setAnimate] = useState(false);
+  const settling = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(settling.current), []);
+  const animateTheSend = () => {
+    setAnimate(true);
+    window.clearTimeout(settling.current);
+    settling.current = window.setTimeout(() => setAnimate(false), SEND_SCROLL_MS);
+  };
   const stalled = messages === null ? state.fault : null;
   const credentials = state.handoffs.credentials;
   const held = state.busy || state.messages === null;
@@ -173,7 +181,7 @@ export function Chat({
     <TranscriptScroll>
       {starting && !bare ? unsaid : null}
       {starting ? null : (
-        <TranscriptPane className="flex-1">
+        <TranscriptPane className="flex-1" animate={animate}>
           <MessageLog
             messages={messages ?? []}
             earlier={earlier}
@@ -244,6 +252,7 @@ export function Chat({
         draftKey={draftKey}
         input={composer}
         starting={bare}
+        onSent={animateTheSend}
         placeholder={conversationId !== null ? FOLLOW_UP_PLACEHOLDER : NEW_CHAT_PLACEHOLDER}
         eyebrow={agent.app === CHAT_SURFACE ? null : agentName(agent.name)}
         eyebrowIcon={agent.icon}
@@ -568,6 +577,10 @@ async function deliver(
   await answerQuestions(target, question.turn_id, given);
 }
 
+/** How long the transcript stays animated after a send: long enough for the anchor scroll the send
+ *  causes to finish, short enough that a reply landing just after it still places instantly. */
+const SEND_SCROLL_MS = 700;
+
 const COMPOSER_LABEL = "Ask UFO";
 const NEW_CHAT_PLACEHOLDER = "Start new chat…";
 const FOLLOW_UP_PLACEHOLDER = "Ask a follow-up…";
@@ -584,6 +597,7 @@ function Composer({
   placeholder,
   eyebrow,
   eyebrowIcon,
+  onSent,
 }: {
   agent: ChatAgent;
   target: ChatTarget;
@@ -593,9 +607,9 @@ function Composer({
   placeholder: string;
   eyebrow: string | null;
   eyebrowIcon?: string;
+  onSent?: () => void;
 }) {
   const state = useChat(target.key);
-  const toTheFoot = useTakeMeToTheFoot();
   const founding = target.conversationId === null;
   const committed = useRef<string | null>(null);
   const [text, setText] = useState(() => {
@@ -684,7 +698,7 @@ function Composer({
       body = form;
     }
     input.current?.focus();
-    toTheFoot();
+    onSent?.();
     void sendMessage(target, body, trimmed, attached, picked);
     return true;
   }

@@ -27,8 +27,39 @@ export function day(iso: string | null): string | null {
 export function fullMoment(iso: string): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return iso;
-  const local = new Date(at.getTime() - at.getTimezoneOffset() * MINUTE_MS).toISOString();
-  return (day(local) ?? local) + " at " + local.slice(11, 16) + " " + zone(at);
+  const local = localMoment(at);
+  return (day(local) ?? local) + " at " + clockOf(local) + " " + zone(at);
+}
+
+/** The stamp a member reads on a message, in their own zone: `1:45 PM` today, `Aug 30, 11:02 AM`
+ *  on any other day, and carrying the year when that day fell in another one. Shifted the way
+ *  `fullMoment` shifts it, so a line a member reads and the hover behind it name one instant. */
+export function stampMoment(iso: string): string | null {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return null;
+  const local = localMoment(at);
+  const today = localMoment(new Date());
+  if (local.slice(0, 10) === today.slice(0, 10)) return clockOf(local);
+  return dateOf(local, today) + ", " + clockOf(local);
+}
+
+function dateOf(local: string, today: string): string {
+  const [year, month, date] = local.slice(0, 10).split("-");
+  const named = MONTHS[Number(month) - 1] + " " + Number(date);
+  return year === today.slice(0, 4) ? named : named + " " + year;
+}
+
+const MERIDIEM_PIVOT = 12;
+
+function clockOf(local: string): string {
+  const hour = Number(local.slice(11, 13));
+  const minute = local.slice(14, 16);
+  const meridiem = hour < MERIDIEM_PIVOT ? "AM" : "PM";
+  return (hour % MERIDIEM_PIVOT || MERIDIEM_PIVOT) + ":" + minute + " " + meridiem;
+}
+
+function localMoment(at: Date): string {
+  return new Date(at.getTime() - at.getTimezoneOffset() * MINUTE_MS).toISOString();
 }
 
 function zone(at: Date): string {

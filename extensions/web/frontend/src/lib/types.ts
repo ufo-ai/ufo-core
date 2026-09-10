@@ -195,7 +195,6 @@ export type Transcript = {
   turn?: string;
   /** When the running turn was admitted, so a page that loads into it counts the clock from the turn's
    *  own start rather than from the load. */
-  turn_started_at?: string;
   credentials?: CredentialRequest | null;
 };
 

@@ -18,7 +18,6 @@ export type { ActivityEvent } from "@/lib/types";
 export type Bubble = Message & {
   /** How long the turn that spoke this ran, in milliseconds, as the portal watching it measured.
    *  A bubble read back from a transcript carries none: its summary holds the duration instead. */
-  elapsed?: number;
   connect?: ChatConnect;
   sending?: string;
   attached?: File[];
@@ -26,11 +25,11 @@ export type Bubble = Message & {
 };
 
 export type LiveTurn = {
-  started: number;
   text: string;
   activity: string | null;
-  meter: string | null;
+  meter: string[];
   summary: TurnSummary | null;
+  at: string | null;
   connect: ChatConnect | null;
   events: ActivityEvent[];
   subagents: SubagentRun[];
@@ -92,13 +91,13 @@ export function updateChat(chatKey: string, change: (state: ChatState) => ChatSt
 
 /** A redraw of a turn already running hands back the start it opened with: the clock counts the turn,
  *  not the source drawing it. */
-export function liveTurn(started: number = Date.now()): LiveTurn {
+export function liveTurn(): LiveTurn {
   return {
-    started,
     text: "",
     activity: null,
-    meter: null,
+    meter: [],
     summary: null,
+    at: null,
     connect: null,
     events: [],
     subagents: [],

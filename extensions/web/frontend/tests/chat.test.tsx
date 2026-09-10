@@ -118,8 +118,10 @@ test("an empty conversation states it, and the composer sends a message and stre
     tokens: 12,
     cost_micro_usd: 2_000_000,
   });
-  const meta = await screen.findByText("12 tok · $2.00");
-  const mark = meta.parentElement!.querySelector<HTMLElement>('[style*="--brand-openai"]')!;
+  const meta = (await screen.findByText("12 tok")).closest("[data-slot=marker]")!;
+  expect(within(meta as HTMLElement).getByText("$2.00")).toBeTruthy();
+  expect(meta.textContent).not.toContain("·");
+  const mark = meta.querySelector<HTMLElement>('[style*="--brand-openai"]')!;
   expect(mark.getAttribute("class")).toContain("size-icon");
   fireEvent.focus(mark.parentElement!);
   expect((await screen.findByRole("tooltip")).textContent).toBe("GPT-6 Astra");
@@ -192,12 +194,13 @@ test("a reply from an agent on auto states its spend and names no model", async 
     tokens: 12,
     cost_micro_usd: 2_000_000,
   });
-  const spend = await screen.findByText("12 tok · $2.00");
-  expect(spend.parentElement!.querySelector('[style*="--brand-"]')).toBeNull();
+  const spend = (await screen.findByText("12 tok")).closest("[data-slot=marker]")!;
+  expect(within(spend as HTMLElement).getByText("$2.00")).toBeTruthy();
+  expect(spend.querySelector('[style*="--brand-"]')).toBeNull();
   expect(screen.queryByText(/GLM 5.3 Flash/)).toBeNull();
 });
 
-test("a settled reply states what it spent and how long it took, with no stream to read it from", async () => {
+test("a settled reply states what it spent, with no stream to read it from", async () => {
   wire(
     transcript({
       messages: [
@@ -219,9 +222,10 @@ test("a settled reply states what it spent and how long it took, with no stream 
   open();
 
   expect(await screen.findByText(saying("Reviewed."))).toBeTruthy();
-  const meta = screen.getByText("12 tok · $2.00");
-  expect(meta.parentElement!.querySelector('[style*="--brand-openai"]')).toBeTruthy();
-  expect(screen.getByText("Completed 1 step in 1m 3s")).toBeTruthy();
+  const meta = screen.getByText("12 tok").closest("[data-slot=marker]")!;
+  expect(within(meta as HTMLElement).getByText("$2.00")).toBeTruthy();
+  expect(meta.querySelector('[style*="--brand-openai"]')).toBeTruthy();
+  expect(screen.queryByText("Reading the diff.")).toBeNull();
   expect(StreamFake.opened.length).toBe(0);
 });
 
@@ -241,8 +245,8 @@ test("a settled reply names no model where the agent runs on the deploy's own ch
   open();
 
   expect(await screen.findByText(saying("Reviewed."))).toBeTruthy();
-  const meta = screen.getByText("12 tok · $2.00");
-  expect(meta.parentElement!.querySelector('[style*="--brand-"]')).toBeNull();
+  const meta = screen.getByText("12 tok").closest("[data-slot=marker]")!;
+  expect(meta.querySelector('[style*="--brand-"]')).toBeNull();
 });
 
 test("the one control carries the act the member has, and stops the turn once", async () => {
@@ -271,7 +275,7 @@ test("the one control carries the act the member has, and stops the turn once", 
   expect(stops()).toHaveLength(1);
 });
 
-test("a reloaded conversation states its latest activity and opens onto the rest", async () => {
+test("a reloaded conversation draws the reply alone, with no line for the steps behind it", async () => {
   wire(
     transcript({
       messages: [
@@ -289,17 +293,10 @@ test("a reloaded conversation states its latest activity and opens onto the rest
   );
   open();
 
-  const summary = await screen.findByText(/^Completed 2 steps/);
-  expect(summary.closest("summary")!.querySelector("svg")).toBeTruthy();
+  expect(await screen.findByText(saying("The tests pass."))).toBeTruthy();
   expect(screen.queryByText("Running the focused tests.")).toBeNull();
   expect(screen.queryByText("Loading coding guidance.")).toBeNull();
-
-  await userEvent.click(summary);
-  expect(screen.getByText("Running the focused tests.")).toBeTruthy();
-  expect(screen.getByText("Loading coding guidance.")).toBeTruthy();
-
-  await userEvent.click(summary);
-  expect(screen.queryByText("Running the focused tests.")).toBeNull();
+  expect(document.querySelector("[data-slot=decode-text]")).toBeNull();
 });
 
 test("a bubble another member spoke names them, and the viewer's own carries no name", async () => {
@@ -385,15 +382,16 @@ test("the working line is not taken down when the turn's first step lands", asyn
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   const opening = await screen.findByText("Thinking…");
   const waiting = opening.closest("[data-slot=marker]")!;
-  expect(waiting.querySelector("[data-throb]")).toBeTruthy();
-  expect(waiting.querySelector("svg.size-icon")).toBeNull();
+  expect(waiting.querySelector("[data-slot=marker-content]")!.classList).toContain("shimmer");
+  const decoded = waiting.querySelector("[data-slot=decode-text]")!;
+  expect(decoded.querySelectorAll("[data-slot=decode-cell]").length).toBeGreaterThan(0);
 
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
   expect(await screen.findByText("Reviewing the pull request.")).toBe(opening);
-  expect(document.querySelector("[data-slot=marker] svg.size-icon")).toBeTruthy();
+  expect(opening.closest("[data-slot=marker]")).toBe(waiting);
 });
 
-test("a running turn keeps its calls behind the line until the member opens them", async () => {
+test("a running turn draws its latest step alone, and takes the line down when it settles", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Review PR 1268." }], turn: TURN_ID }));
   open();
 
@@ -401,12 +399,9 @@ test("a running turn keeps its calls behind the line until the member opens them
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
   StreamFake.last().emit("activity", { text: "Loading coding guidance." });
 
-  const summary = await screen.findByText("Loading coding guidance.");
+  expect(await screen.findByText("Loading coding guidance.")).toBeTruthy();
   expect(screen.queryByText("Reviewing the pull request.")).toBeNull();
-  expect(document.querySelector("[data-slot=marker] [data-throb]")).toBeTruthy();
-
-  await userEvent.click(summary);
-  expect(screen.getByText("Reviewing the pull request.")).toBeTruthy();
+  expect(document.querySelector("[data-slot=marker] [data-slot=decode-text]")).toBeTruthy();
 
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -416,11 +411,11 @@ test("a running turn keeps its calls behind the line until the member opens them
     cost_micro_usd: 1_000_000,
   });
   expect(await screen.findByText("Reviewed it.")).toBeTruthy();
-  expect(screen.getByText(/^Completed 2 steps/)).toBeTruthy();
-  expect(document.querySelector("[data-slot=marker] [data-throb]")).toBeNull();
+  expect(screen.queryByText("Loading coding guidance.")).toBeNull();
+  expect(document.querySelector("[data-slot=marker] [data-slot=decode-text]")).toBeNull();
 });
 
-test("a live subagent run nests under the reply it produced", async () => {
+test("a settled reply draws no row for the run that fed it", async () => {
   const conversationId = "66666666-6666-4666-8666-666666666666";
   wire(transcript({ messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }));
   open();
@@ -441,42 +436,13 @@ test("a live subagent run nests under the reply it produced", async () => {
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText(/^Completed 1 step/);
-  await userEvent.click(summary);
-  const row = screen.getByText("Subagent · general_purpose");
-  expect(row.closest("a")).toBeNull();
+  expect(await screen.findByText(saying("It shipped Tuesday."))).toBeTruthy();
+  expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
   expect(screen.queryByText("Fetching the page.")).toBeNull();
-
-  await userEvent.click(row.closest("summary")!);
-  expect(screen.getByText("Fetching the page.")).toBeTruthy();
-  expect(screen.getByText("The release shipped on Tuesday.")).toBeTruthy();
+  expect(screen.queryByText("The release shipped on Tuesday.")).toBeNull();
 });
 
-test("a run delegated to an agent heads the row with the agent's drawn name", async () => {
-  wire(transcript({ messages: [{ role: "user", text: "Review it." }], turn: TURN_ID }));
-  open();
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("subagent", {
-    profile: "agent:code reviewer",
-    conversation_id: "66666666-6666-4666-8666-666666666666",
-    events: [],
-    output: "Looks right.",
-    subagents: [],
-  });
-  StreamFake.last().emit("terminal", {
-    status: "done",
-    text: "Reviewed.",
-    model: "opus",
-    tokens: 9,
-    cost_micro_usd: 1_000_000,
-  });
-
-  await userEvent.click(await screen.findByText(/^Completed 1 step/));
-  expect(screen.getByText("App \u00b7 Code Reviewer")).toBeTruthy();
-});
-
-test("a live run states its name and current step, and clears the wait when it ends", async () => {
+test("a live run puts the wait on the working line, and gives the line back when it ends", async () => {
   const conversationId = "66666666-6666-4666-8666-666666666666";
   const childTurn = "88888888-8888-4888-8888-888888888888";
   const frame = {
@@ -495,47 +461,25 @@ test("a live run states its name and current step, and clears the wait when it e
   StreamFake.last().emit("activity", { text: "Handing the research off." });
   StreamFake.last().emit("subagent_activity", frame);
   expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
-  await userEvent.click(screen.getByText("Awaiting 1 subagent"));
+  expect(screen.queryByText("Handing the research off.")).toBeNull();
 
   StreamFake.last().emit("subagent_activity", {
     ...frame,
     activity: "Searching for latest MLS news.",
   });
-  expect(await screen.findByText("UK sports news")).toBeTruthy();
-  expect(screen.getByText(/Searching for latest MLS news/)).toBeTruthy();
-  expect(screen.getByText("Handing the research off.")).toBeTruthy();
+  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(screen.queryByText("UK sports news")).toBeNull();
+  expect(screen.queryByText(/Searching for latest MLS news/)).toBeNull();
 
   StreamFake.last().emit("subagent_activity", { ...frame, status: "done" });
   await waitFor(() => expect(screen.queryByText("Awaiting 1 subagent")).toBeNull());
-  expect(screen.getByText("UK sports news")).toBeTruthy();
+  expect(screen.getByText("Handing the research off.")).toBeTruthy();
 });
 
 function order(first: string, second: string): boolean {
   const log = document.body.textContent ?? "";
   return log.indexOf(first) < log.indexOf(second);
 }
-
-test("what a reply did stands above the reply, in the order the turn did it", async () => {
-  wire(
-    transcript({
-      messages: [
-        { role: "user", text: "inspect it" },
-        {
-          role: "assistant",
-          text: "The tests pass.",
-          events: [
-            { kind: "activity", text: "Running the focused tests." },
-          ],
-        },
-      ],
-    }),
-  );
-  open();
-
-  await userEvent.click(await screen.findByText(/^Completed 1 step/));
-  expect(screen.getByText("Running the focused tests.")).toBeTruthy();
-  expect(order("Running the focused tests.", "The tests pass.")).toBe(true);
-});
 
 test("a message that opens a turn stands above the reply it is waiting for", async () => {
   let land: (payload: unknown) => void = () => {};
@@ -902,137 +846,6 @@ test("a settled conversation tails nothing", async () => {
   expect(await screen.findByText("The tests pass.")).toBeTruthy();
   expect(StreamFake.opened.length).toBe(0);
   expect(screen.queryByText("Thinking…")).toBeNull();
-});
-
-test("a reloaded conversation nests its subagent work under the reply", async () => {
-  const conversationId = "66666666-6666-4666-8666-666666666666";
-  const nestedId = "77777777-7777-4777-8777-777777777777";
-  wire(
-    transcript({
-      messages: [
-        {
-          role: "assistant",
-          text: "Done.",
-          events: [{ kind: "activity", text: "Reading the tree." }],
-          subagents: [
-            {
-              profile: "general_purpose",
-              conversation_id: conversationId,
-              events: [
-                { kind: "note", text: "Checking the release notes first." },
-                { kind: "activity", text: "Fetching the page." },
-              ],
-              output: "The release shipped on **Tuesday**.",
-              subagents: [
-                {
-                  profile: "deep_research",
-                  conversation_id: nestedId,
-                  events: [
-                    { kind: "activity", text: "Searching the web." },
-                  ],
-                  output: "Nothing further.",
-                  subagents: [],
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    }),
-  );
-  open();
-
-  const summary = await screen.findByText(/^Completed 2 steps/);
-  expect(screen.queryByText("Reading the tree.")).toBeNull();
-
-  await userEvent.click(summary);
-  expect(screen.getByText("Reading the tree.")).toBeTruthy();
-  const row = screen.getByText("Subagent · general_purpose");
-  expect(row.closest("a")).toBeNull();
-  expect(row.closest("summary")!.querySelector("svg")).toBeTruthy();
-  expect(screen.queryByText("Fetching the page.")).toBeNull();
-
-  await userEvent.click(row.closest("summary")!);
-  expect(screen.getByText("Checking the release notes first.")).toBeTruthy();
-  expect(screen.getByText("Fetching the page.")).toBeTruthy();
-  expect(screen.getByText("Tuesday").tagName).toBe("STRONG");
-  const nested = screen.getByText("Subagent · deep_research");
-  expect(nested.closest("a")).toBeNull();
-  expect(screen.queryByText("Searching the web.")).toBeNull();
-
-  await userEvent.click(nested.closest("summary")!);
-  expect(screen.getByText("Searching the web.")).toBeTruthy();
-  expect(screen.getByText("Nothing further.")).toBeTruthy();
-
-  await userEvent.click(summary);
-  expect(screen.queryByText("Fetching the page.")).toBeNull();
-  expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
-});
-
-/** jsdom lays nothing out, so the fold — the one measurement `Reveal` reads — is stated here. */
-function laid(content: number, fold: number): void {
-  vi.spyOn(Element.prototype, "scrollHeight", "get").mockReturnValue(content);
-  vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(fold);
-}
-
-test("a line longer than the fold opens in place and closes again", async () => {
-  laid(900, 280);
-  const long = "The changelog is long. ".repeat(60).trim();
-  wire(
-    transcript({
-      messages: [
-        {
-          role: "assistant",
-          text: "Done.",
-          events: [
-            { kind: "note", text: long },
-            { kind: "activity", text: "Reading the tree." },
-          ],
-          subagents: [],
-        },
-      ],
-    }),
-  );
-  open();
-
-  await userEvent.click(await screen.findByText(/^Completed 2 steps/));
-  const more = await screen.findByRole("button", { name: "Show more" });
-  const region = document.getElementById(String(more.getAttribute("aria-controls")));
-  expect(more.getAttribute("aria-expanded")).toBe("false");
-  expect(region?.className).toContain("max-h-(--size-reveal)");
-  expect(screen.getByText(long)).toBeTruthy();
-
-  await userEvent.click(more);
-  const less = screen.getByRole("button", { name: "Show less" });
-  expect(less.getAttribute("aria-expanded")).toBe("true");
-  expect(region?.className).not.toContain("max-h-(--size-reveal)");
-
-  await userEvent.click(less);
-  expect(screen.getByRole("button", { name: "Show more" })).toBeTruthy();
-});
-
-test("a line that fits is offered no control that would do nothing", async () => {
-  laid(120, 280);
-  wire(
-    transcript({
-      messages: [
-        {
-          role: "assistant",
-          text: "Done.",
-          events: [
-            { kind: "note", text: "Checked the changelog." },
-            { kind: "activity", text: "Reading the tree." },
-          ],
-          subagents: [],
-        },
-      ],
-    }),
-  );
-  open();
-
-  await userEvent.click(await screen.findByText(/^Completed 2 steps/));
-  expect(screen.getByText("Checked the changelog.")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
 });
 
 test("a conversation opens its file changes and returns to chat", async () => {
@@ -2672,7 +2485,7 @@ test("a conversation that never compacted asks for no pages", async () => {
   expect(calls.filter((url) => url.includes("/transcript?cursor="))).toEqual([]);
 });
 
-test("a message draws no time line, and states when it landed under the pointer alone", () => {
+test("a message states when it landed on its meta line, and in full under the pointer", () => {
   render(
     <TranscriptScroll>
       <MessageLog
@@ -2686,13 +2499,44 @@ test("a message draws no time line, and states when it landed under the pointer 
 
   const stamped = screen.getByText("what time").closest("[data-slot=message-scroller-item]")!;
   expect(stamped.querySelector("time")).toBeNull();
-  expect(stamped.textContent).toBe("what time");
+  const meta = stamped.querySelector("[data-slot=marker]")!;
+  expect(meta.textContent).toBe("Aug 1, 2:35 PM");
+  expect(within(meta as HTMLElement).getByLabelText("Copy message")).toBeTruthy();
   expect(stamped.querySelector("[data-slot=message-content]")?.getAttribute("title")).toBe(
-    "Aug 1 2026 at 14:35 GMT+5:30",
+    "Aug 1 2026 at 2:35 PM GMT+5:30",
   );
   const bare = screen.getByText("just gone nine").closest("[data-slot=message-scroller-item]")!;
-  expect(bare.querySelector("time")).toBeNull();
+  expect(bare.querySelector("[data-slot=marker]")).toBeNull();
   expect(bare.querySelector("[data-slot=message-content]")?.getAttribute("title")).toBeNull();
+});
+
+test("a stamp from another day names the day, and one from another year names that too", () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2026-08-01T09:05:00Z"));
+  try {
+    render(
+      <TranscriptScroll>
+        <MessageLog
+          messages={[
+            { role: "user", text: "today", at: "2026-08-01T05:32:00Z" },
+            { role: "user", text: "earlier this year", at: "2026-08-30T05:32:00Z" },
+            { role: "user", text: "last year", at: "2025-08-30T05:32:00Z" },
+          ]}
+        />
+      </TranscriptScroll>,
+    );
+
+    const line = (text: string) =>
+      screen
+        .getByText(text)
+        .closest("[data-slot=message-scroller-item]")!
+        .querySelector("[data-slot=marker]")!.textContent;
+    expect(line("today")).toBe("11:02 AM");
+    expect(line("earlier this year")).toBe("Aug 30, 11:02 AM");
+    expect(line("last year")).toBe("Aug 30 2025, 11:02 AM");
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 /** jsdom lays nothing out, so a page landing's geometry is stated by hand: a pane showing three hundred
@@ -3191,23 +3035,7 @@ test("a member who scrolls up while a reply streams stays where they scrolled", 
   expect(log.scrollTop).toBe(0);
 });
 
-test("the log follows a line that lands after the render that asked for it", async () => {
-  wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
-  open();
-  await screen.findByText("No messages in this conversation yet.");
-  await userEvent.type(screen.getByLabelText("Ask UFO"), "hi");
-  await userEvent.click(screen.getByRole("button", { name: "Send" }));
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-
-  const log = screen.getByTestId("log");
-  laidLog(log);
-  log.scrollTop = 0;
-
-  lands(log);
-  await waitFor(() => expect(log.scrollTop).toBe(FOOT));
-});
-
-test("sending while scrolled up re-pins the log to the bottom", async () => {
+test("a sent message anchors the log, and the log animates only for the send window", async () => {
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
   await screen.findByText("No messages in this conversation yet.");
@@ -3221,8 +3049,13 @@ test("sending while scrolled up re-pins the log to the bottom", async () => {
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "back to now");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
-  await screen.findByText("back to now");
-  expect(log.scrollTop).toBe(FOOT);
+  const sent = (await screen.findByText("back to now")).closest(
+    "[data-slot=message-scroller-item]",
+  )!;
+  expect(sent.getAttribute("data-scroll-anchor")).toBe("true");
+  expect(log.classList).toContain("scroll-smooth");
+
+  await waitFor(() => expect(log.classList).not.toContain("scroll-smooth"), { timeout: 3_000 });
 });
 
 test("answering a question while scrolled up re-pins the log to the bottom", async () => {
@@ -3277,7 +3110,8 @@ test("switching conversations remounts the log so scroll state never leaks acros
   await userEvent.type(screen.getByLabelText("Ask UFO"), "hello there");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await screen.findByText("hello there");
-  expect(fresh.scrollTop).toBe(FOOT);
+  expect(first.isConnected).toBe(false);
+  expect(fresh.scrollTop).toBe(0);
 });
 
 test("the log opens pinned: loading a transcript lands at the bottom untouched", async () => {
@@ -3318,7 +3152,12 @@ test("a reader inside the tolerance band still counts as at the bottom", async (
   StreamFake.last().emit("message", { text: "nudged" });
   await screen.findByText(saying("nudged"));
   lands(log);
-  await waitFor(() => expect(log.scrollTop).toBe(FOOT));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Jump to bottom" }).getAttribute("data-active")).toBe(
+      "false",
+    ),
+  );
+  expect(log.scrollTop).toBe(FOOT - 10);
 });
 
 test("the composer takes no focus as it mounts", async () => {
@@ -3445,7 +3284,7 @@ test("an address a member sent is a link in the member's own bubble", async () =
   expect(link.closest("[data-role=me]")).not.toBeNull();
 });
 
-test("a turn the fleet picked back up says so among its steps", async () => {
+test("a turn the fleet picked back up says so on its working line", async () => {
   wire(transcript({ messages: [{ role: "user", text: "Run the migration." }], turn: TURN_ID }));
   open();
 
@@ -3454,11 +3293,8 @@ test("a turn the fleet picked back up says so among its steps", async () => {
   StreamFake.last().emit("resumed", { attempt: "attempt-one" });
 
   const resumed = await screen.findByText("Resumed after a restart");
+  expect(resumed.closest("[data-slot=marker]")).toBeTruthy();
   expect(screen.queryByText("Applying the migration.")).toBeNull();
-
-  await userEvent.click(resumed);
-  expect(screen.getAllByText("Resumed after a restart")).toHaveLength(2);
-  expect(screen.getByText("Applying the migration.")).toBeTruthy();
 });
 
 test("an opened thread's box asks for a follow-up, and the start screen's starts a new chat", async () => {

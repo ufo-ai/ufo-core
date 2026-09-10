@@ -32,15 +32,22 @@ export function MessageScroller({
   );
 }
 
+/** The scroller moves itself with `behavior: "auto"`, so the CSS here decides whether those moves
+ *  animate. Only a scroll the member caused should animate: opening a transcript, switching to
+ *  another, and restoring the place when older messages load in above all have to land without
+ *  moving, or they read as the page scrolling itself. `animate` is therefore off by default and the
+ *  caller turns it on around the one scroll it asked for. */
 export function MessageScrollerViewport({
   className,
+  animate = false,
   ...props
-}: ComponentProps<typeof MessageScrollerPrimitive.Viewport>) {
+}: ComponentProps<typeof MessageScrollerPrimitive.Viewport> & { animate?: boolean }) {
   return (
     <MessageScrollerPrimitive.Viewport
       data-slot="message-scroller-viewport"
       className={cn(
         "size-full min-h-0 min-w-0 overflow-y-auto overscroll-contain contain-content",
+        animate && "scroll-smooth motion-reduce:scroll-auto",
         "scrollbar-thin scrollbar-gutter-stable",
         "data-autoscrolling:scrollbar-quiet",
         className,
