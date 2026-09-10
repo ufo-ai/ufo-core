@@ -13,6 +13,7 @@ def run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=metadata,
         render_as_batch=connection.dialect.name == "sqlite",
+        transaction_per_migration=True,
     )
     with context.begin_transaction():
         context.run_migrations()

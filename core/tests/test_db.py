@@ -212,11 +212,16 @@ async def test_reset_wipes_every_application_table_and_keeps_the_stamp(
         await connection.execute(
             sa.text(
                 "insert into memory_item "
-                "(id, workspace_id, subject, body, item_class, memory_kind, confidence, "
-                "created_at, updated_at) values "
-                "(:id, :workspace_id, 'shared', 'probe', 'fact', 'fact', 5, :now, :now)"
+                "(id, workspace_id, subject, body, body_digest, item_class, memory_kind, "
+                "confidence, created_at, updated_at) values "
+                "(:id, :workspace_id, 'shared', 'probe', :digest, 'fact', 'fact', 5, :now, :now)"
             ),
-            {"id": uuid4().hex, "workspace_id": workspace_id.hex, "now": datetime.now(UTC)},
+            {
+                "id": uuid4().hex,
+                "workspace_id": workspace_id.hex,
+                "digest": hashlib.sha256(b"probe").hexdigest(),
+                "now": datetime.now(UTC),
+            },
         )
         if sqlite:
             await connection.execute(
@@ -534,7 +539,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         _core_migration_head(),
         "index_default_0002",
         "objectives_0002",
-        "memory_0023",
+        "memory_0025",
         "sample_ext_note_0001",
         "scheduled_tasks_0001",
         "sources_0004",
@@ -2025,6 +2030,7 @@ async def test_conversation_and_memory_audiences_are_constrained(db: None) -> No
         sa.column("workspace_id", sa.Uuid()),
         sa.column("subject", sa.Text()),
         sa.column("body", sa.Text()),
+        sa.column("body_digest", sa.Text()),
         sa.column("item_class", sa.Text()),
         sa.column("memory_kind", sa.Text()),
         sa.column("confidence", sa.Integer()),
@@ -2086,6 +2092,7 @@ async def test_conversation_and_memory_audiences_are_constrained(db: None) -> No
                         workspace_id=workspace_id,
                         subject="invalid",
                         body="probe",
+                        body_digest=hashlib.sha256(b"probe").hexdigest(),
                         item_class="fact",
                         memory_kind="fact",
                         confidence=5,

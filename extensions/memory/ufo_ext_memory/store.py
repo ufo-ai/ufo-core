@@ -691,12 +691,9 @@ class MemoryStore:
         stamping that column, and the row it retired stays retired through every re-derivation of
         the body behind it. A page-derived row this write inserts is born retired when a retired
         row already states its body under its subject: the judgement was about the statement, and a
-        page that never held it before derives the same statement. A legacy row — one the release
-        being replaced wrote, carrying no digest — counts when it is bound to this very page: its
-        stamp is the page's own judgement, and a legacy row of the same body on another page has
-        digest-bearing copies that carry the stamp themselves. A row a member wrote carries no page
-        and is never fenced by what the pass took — the pass promises never to take what a member
-        wrote."""
+        page that never held it before derives the same statement. A row a member wrote carries no
+        page and is never fenced by what the pass took — the pass promises never to take what a
+        member wrote."""
         digest = body_digest(write.body)
         page_local = write.created_from_page_id is not None
         retired_before = (
@@ -705,16 +702,9 @@ class MemoryStore:
                 memory_item.c.workspace_id == self.workspace_id,
                 memory_item.c.subject == write.subject,
                 memory_item.c.item_class == write.item_class,
+                memory_item.c.body_digest == digest,
                 memory_item.c.created_from_page_uid.is_not(None),
                 memory_item.c.retired_at.is_not(None),
-                sa.or_(
-                    memory_item.c.body_digest == digest,
-                    sa.and_(
-                        memory_item.c.body_digest.is_(None),
-                        memory_item.c.created_from_page_uid == write.created_from_page_id,
-                        memory_item.c.body == write.body,
-                    ),
-                ),
             )
             .scalar_subquery()
         )
@@ -791,23 +781,12 @@ class MemoryStore:
         reading, and a test on the revision could not see it: the statements it replaces sit at the
         very revision it settles on. This is the only path that removes a page-derived memory, and
         the fact deriver its only caller; a replay commits the same rows, so it names the same
-        `kept` and finds nothing left.
-
-        Only rows carrying a digest go. A legacy row — one the release being replaced wrote, with
-        no digest — stays whatever page it is bound to: the outgoing image keeps rebinding legacy
-        rows and minting `memory_source` links while the fleet rolls, so a legacy row deleted here
-        for the page it sits on now could be the only row of a page it still states. Legacy rows
-        are the follow-up's to retire, once no outgoing image remains and every link is final: it
-        copies each legacy row's links whose slot holds no row, `retired_at` included, deletes the
-        legacy rows, backfills the remaining written rows' digests with a dedup step, makes the
-        column NOT NULL, drops `memory_source`, and re-runs the drain marker insert. Until then a
-        legacy row and the fresh row beside it are one statement to every read."""
+        `kept` and finds nothing left."""
         if kept is not None and not kept:
             raise ValueError("a page that settled no fact retires nothing")
         stale: tuple[ColumnElement[bool], ...] = (
             memory_item.c.workspace_id == self.workspace_id,
             memory_item.c.created_from_page_uid == page_id,
-            memory_item.c.body_digest.is_not(None),
         )
         if kept is not None:
             stale = (*stale, memory_item.c.id.not_in(kept))

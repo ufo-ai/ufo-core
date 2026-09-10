@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -378,6 +379,25 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
             ),
             {"id": page_id.hex},
         ).one()
+    engine.dispose()
+    command.upgrade(config, "memory_0023")
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        connection.execute(
+            sa.text(
+                "insert into memory_item (id, workspace_id, subject, body, body_digest, "
+                "item_class, memory_kind, confidence, created_at, updated_at) values (:id, :ws, "
+                "'shared', 'a row the release after the links wrote', :digest, 'fact', 'fact', 5, "
+                ":later, :later)"
+            ),
+            {
+                "id": uuid4().hex,
+                "ws": workspace_id.hex,
+                "digest": hashlib.sha256(b"a row the release after the links wrote").hexdigest(),
+                "later": later,
+            },
+        )
+        connection.commit()
     engine.dispose()
     command.upgrade(config, "heads")
     page_uid, source_uid = UUID(str(minted.page_uid)), UUID(str(minted.source_uid))

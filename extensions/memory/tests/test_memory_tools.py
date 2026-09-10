@@ -28,6 +28,7 @@ from ufo_ext_memory.store import (
     MemoryWrite,
     Recalled,
     SourceMatch,
+    body_digest,
     memory_item,
     store_for,
 )
@@ -1014,6 +1015,7 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
                 workspace_id=workspace_id,
                 subject="shared",
                 body="the vault code is 8842",
+                body_digest=body_digest("the vault code is 8842"),
                 item_class="fact",
                 memory_kind="fact",
                 confidence=5,

@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from ufo_ext_memory.store import memory_item
+from ufo_ext_memory.store import body_digest, memory_item
 from ufo_ext_objectives.store import objective, objective_event, objective_step
 
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
@@ -459,6 +459,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
                     "workspace_id": workspace_id,
                     "subject": "shared",
                     "body": "Finish the brief.",
+                    "body_digest": body_digest("Finish the brief."),
                     "item_class": "fact",
                     "memory_kind": "task",
                     "confidence": 8,
@@ -470,6 +471,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
                     "workspace_id": workspace_id,
                     "subject": f"member:{other_member_id}",
                     "body": "Other member task.",
+                    "body_digest": body_digest("Other member task."),
                     "item_class": "fact",
                     "memory_kind": "task",
                     "confidence": 8,
@@ -615,6 +617,7 @@ async def test_member_context_drops_a_memory_the_page_pass_retired(
                     "workspace_id": workspace_id,
                     "subject": "shared",
                     "body": "Live shared fact.",
+                    "body_digest": body_digest("Live shared fact."),
                     "item_class": "fact",
                     "memory_kind": "fact",
                     "confidence": 8,
@@ -627,6 +630,7 @@ async def test_member_context_drops_a_memory_the_page_pass_retired(
                     "workspace_id": workspace_id,
                     "subject": "shared",
                     "body": "Retired shared fact.",
+                    "body_digest": body_digest("Retired shared fact."),
                     "item_class": "fact",
                     "memory_kind": "fact",
                     "confidence": 8,
@@ -639,6 +643,7 @@ async def test_member_context_drops_a_memory_the_page_pass_retired(
                     "workspace_id": workspace_id,
                     "subject": f"member:{member_id}",
                     "body": "Retired member task.",
+                    "body_digest": body_digest("Retired member task."),
                     "item_class": "fact",
                     "memory_kind": "task",
                     "confidence": 8,

@@ -243,10 +243,6 @@ async def test_the_same_fact_from_two_pages_is_two_rows(db: None) -> None:
         landed_a = await store.commit(await _derived(page_a, source_a))
         landed_b = await store.commit(await _derived(page_b, source_b))
         rows = await _rows(workspace_id)
-        async with workspace_tx() as connection:
-            links = (
-                await connection.execute(sa.text("select count(*) from memory_source"))
-            ).scalar_one()
 
     assert landed_a != landed_b
     assert {(row.id, row.created_from_page_uid, row.source_uid) for row in rows} == {
@@ -254,7 +250,6 @@ async def test_the_same_fact_from_two_pages_is_two_rows(db: None) -> None:
         (landed_b, page_b, source_b),
     }
     assert {row.body_digest for row in rows} == {body_digest(BODY)}
-    assert links == 0
 
 
 async def test_retiring_one_page_keeps_the_other_pages_row_and_chunks(db: None) -> None:
@@ -391,50 +386,3 @@ async def test_the_database_holds_one_row_per_statement_per_page(db: None) -> No
     with pytest.raises(IntegrityError):
         await _insert(workspace_id, BODY, None, None)
     assert len(await _rows(workspace_id)) == 2
-
-
-async def test_a_retired_legacy_row_hands_its_judgement_to_the_fresh_row_and_stays(
-    db: None,
-) -> None:
-    """A row the release being replaced wrote carries no digest. Deriving its page again lands a
-    fresh row beside it, born retired because the legacy row bound to this very page was, and the
-    page's supersede leaves the legacy row in place: the outgoing image may still be rebinding it,
-    so it is the follow-up's to retire."""
-    workspace_id = await _workspace()
-    page_a, source_a = uuid7(), uuid7()
-    await _seed_page(workspace_id, page_a, source_a)
-    legacy, revision = uuid7(), await _revision(page_a)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(memory_item).values(
-                id=legacy,
-                workspace_id=workspace_id,
-                subject=SHARED_SUBJECT,
-                body=BODY,
-                item_class=FACT,
-                created_from_page_uid=page_a,
-                created_from_page_revision=revision,
-                source_uid=source_a,
-                retired_at=WHEN,
-                created_at=WHEN,
-                updated_at=WHEN,
-            )
-        )
-    store = _store(workspace_id)
-    with ws(workspace_id):
-        fresh = await store.commit(await _derived(page_a, source_a))
-        await store.supersede_page_facts(page_a, frozenset({fresh}))
-        async with workspace_tx() as connection:
-            rows = (
-                await connection.execute(
-                    sa.select(memory_item.c.id, memory_item.c.body_digest, memory_item.c.retired_at)
-                    .where(memory_item.c.created_from_page_uid == page_a)
-                    .order_by(memory_item.c.created_at)
-                )
-            ).all()
-
-    assert fresh != legacy
-    assert [(row.id, row.body_digest is None, row.retired_at is not None) for row in rows] == [
-        (legacy, True, True),
-        (fresh, False, True),
-    ]

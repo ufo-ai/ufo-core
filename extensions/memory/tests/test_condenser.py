@@ -357,17 +357,6 @@ class _Resolver:
         return PROVIDER_ANTHROPIC
 
 
-def _model(payload: str) -> ModelAccess:
-    return ModelAccess(
-        _Resolver(
-            AUTO_MODEL,
-            CORE_PRICING,
-            StubModelClient(payload, Usage(input_tokens=10, output_tokens=5)),
-        ),
-        CONSOLIDATE_MODEL_JOB,
-    )
-
-
 def _extraction(page_id: UUID, body: str) -> str:
     return json.dumps(
         {
@@ -509,6 +498,7 @@ async def _seed_aged_fact(
                 workspace_id=workspace_id,
                 subject=SHARED_SUBJECT,
                 body=body,
+                body_digest=body_digest(body),
                 item_class=FACT,
                 memory_kind=KIND_FACT,
                 confidence=confidence,
@@ -1348,13 +1338,15 @@ async def _insert_fact(
     workspace_id: UUID, created_at: datetime, created_from_page_id: UUID | None = None
 ) -> None:
     source_id = uuid4() if created_from_page_id is not None else None
+    body = f"a fact {uuid4().hex}"
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(memory_item).values(
                 id=uuid4(),
                 workspace_id=workspace_id,
                 subject=SHARED_SUBJECT,
-                body="a fact",
+                body=body,
+                body_digest=body_digest(body),
                 item_class=FACT,
                 memory_kind=KIND_FACT,
                 confidence=5,

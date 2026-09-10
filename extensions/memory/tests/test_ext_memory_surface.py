@@ -20,7 +20,7 @@ from httpx import ASGITransport, AsyncClient
 from ufo_ext_memory import store as memory_store
 from ufo_ext_memory import surface as memory_surface
 from ufo_ext_memory.manifest import manifest as memory_manifest
-from ufo_ext_memory.store import memory_item
+from ufo_ext_memory.store import body_digest, memory_item
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     UNREACHED_AMBIENT_REPLY,
@@ -139,6 +139,7 @@ async def _seed_memory(
                 workspace_id=workspace_id,
                 subject=subject,
                 body=body,
+                body_digest=body_digest(body),
                 item_class=item_class,
                 memory_kind=memory_kind,
                 confidence=confidence,

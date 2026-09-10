@@ -220,7 +220,7 @@ def test_content_ids_and_the_frozen_tables_go_and_the_downgrade_rebuilds_them(
         _seed(connection, ids, postgres)
         connection.commit()
 
-    command.upgrade(config, "heads")
+    command.upgrade(config, "memory_0021")
     with engine.connect() as connection:
         if not postgres:
             connection.execute(sa.text("pragma foreign_keys = on"))
@@ -271,7 +271,7 @@ def test_content_ids_and_the_frozen_tables_go_and_the_downgrade_rebuilds_them(
             old_rows = connection.execute(
                 sa.text("select (select count(*) from source_old), (select count(*) from page_old)")
             ).one()
-    command.upgrade(config, "heads")
+    command.upgrade(config, "memory_0021")
     with engine.connect() as connection:
         inspector = sa.inspect(connection)
         dropped_again = _columns(inspector)

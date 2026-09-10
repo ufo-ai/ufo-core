@@ -24,7 +24,7 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import FACT_EXTRACT_TOOL, FactDeriver
 from ufo_ext_memory.manifest import manifest as memory_manifest
 from ufo_ext_memory.objects import MEMORY_KIND, MEMORY_OBJECT
-from ufo_ext_memory.store import memory_item, store_for
+from ufo_ext_memory.store import body_digest, memory_item, store_for
 from ufo_ext_sources.pages import PAGE_KIND, PAGE_OBJECT
 
 from ufo.blob import FilesystemBlobStore
@@ -568,6 +568,7 @@ async def test_superseded_memory_leaves_search_and_links_to_its_replacement(
                         "workspace_id": workspace_id,
                         "subject": SHARED_SUBJECT,
                         "body": body,
+                        "body_digest": body_digest(body),
                         "item_class": "fact",
                         "memory_kind": "fact",
                         "confidence": 5,
@@ -646,6 +647,7 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
                     workspace_id=workspace_id,
                     subject=member_subject(member_id),
                     body="I promised Acme a reply by Monday",
+                    body_digest=body_digest("I promised Acme a reply by Monday"),
                     item_class="fact",
                     memory_kind="fact",
                     confidence=5,
