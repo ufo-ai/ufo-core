@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { ObjectDetail } from "@/kernel/objects";
+import { Pane } from "@/kernel/pane";
 import { railFounded } from "@/lib/railStore";
 import { Viewer } from "@/lib/audience";
 import { chatHash } from "@/lib/route";
@@ -72,13 +73,15 @@ function mount(agents = [AGENT]) {
   render(
     <Viewer.Provider value={MEMBER.email}>
       <MainAgentProvider agents={agents}>
-        <ObjectDetail
-          agentId={AGENT_ID}
-          kind="scheduled_task"
-          name="daily-brief"
-          onOpen={() => {}}
-          onBack={() => {}}
-        />
+        <Pane>
+          <ObjectDetail
+            agentId={AGENT_ID}
+            kind="scheduled_task"
+            name="daily-brief"
+            onOpen={() => {}}
+            onBack={() => {}}
+          />
+        </Pane>
       </MainAgentProvider>
     </Viewer.Provider>,
   );
@@ -276,13 +279,15 @@ test("the chat the task reports into is stated and pressed through, never picked
   taskOnWire();
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <ObjectDetail
-        agentId={AGENT_ID}
-        kind="scheduled_task"
-        name="daily-brief"
-        onOpen={(at) => opened.push(at)}
-        onBack={() => {}}
-      />
+      <Pane>
+        <ObjectDetail
+          agentId={AGENT_ID}
+          kind="scheduled_task"
+          name="daily-brief"
+          onOpen={(at) => opened.push(at)}
+          onBack={() => {}}
+        />
+      </Pane>
     </MainAgentProvider>,
   );
 

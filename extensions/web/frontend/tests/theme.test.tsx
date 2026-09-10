@@ -140,10 +140,6 @@ test("color-scheme carries the scheme, and the appearance class pins it", () => 
   expect(css).toContain(":where(.dark,.dark*)");
 });
 
-test("the drawer fills a narrow viewport rather than overflowing it", () => {
-  expect(packedStyles()).toContain("min(520px,100vw)");
-});
-
 test("the page height tracks the visible viewport and respects device insets", () => {
   const css = packedStyles();
   expect(css).toContain(".h-dvh{height:100dvh}");

@@ -10,6 +10,8 @@ import {
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
+import { SheetHost } from "@/components/ui/sheet";
+
 import { connect, installShims, navigate, onPlaced, type AppInit } from "@/apps/runtime";
 import {
   beginApplicationMount,
@@ -167,7 +169,9 @@ function Booted({
     <TooltipProvider>
       <Viewer.Provider value={init.member.email}>
         <MainAgentProvider agents={agents}>
-          <div className="grid h-dvh min-h-0">{render(init, agents)}</div>
+          <div className="grid h-dvh min-h-0">
+            <SheetHost>{render(init, agents)}</SheetHost>
+          </div>
         </MainAgentProvider>
       </Viewer.Provider>
     </TooltipProvider>

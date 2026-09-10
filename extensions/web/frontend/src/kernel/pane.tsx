@@ -17,6 +17,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { Button, buttonVariants } from "@/components/ui/button";
+import { SheetHost } from "@/components/ui/sheet";
 import type { Crumb } from "@/lib/title";
 import { Empty } from "@/kernel/panel";
 import { SlotTrack } from "@/kernel/slots";
@@ -71,13 +72,15 @@ export function Pane({
   )) {
   return (
     <main {...props} className={cn("flex min-h-0 min-w-0 flex-col", className)}>
-      {opens === undefined ? (
-        <SlotTrack>{children}</SlotTrack>
-      ) : (
-        <SlotTrack opens={opens} onMove={onMove}>
-          {children}
-        </SlotTrack>
-      )}
+      <SheetHost>
+        {opens === undefined ? (
+          <SlotTrack>{children}</SlotTrack>
+        ) : (
+          <SlotTrack opens={opens} onMove={onMove}>
+            {children}
+          </SlotTrack>
+        )}
+      </SheetHost>
     </main>
   );
 }

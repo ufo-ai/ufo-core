@@ -1,15 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { IconChevronDown, IconX } from "@tabler/icons-react";
+import { IconChevronDown } from "@tabler/icons-react";
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb";
-import { Button } from "@/components/ui/button";
+import { Sheet } from "@/components/ui/sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -74,66 +66,32 @@ export function AppSettings({
   children: ReactNode;
 }) {
   return (
-    <DialogPrimitive.Root modal={false} open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogPrimitive.Portal>
-        <div
-          data-slot="app-settings-scrim"
-          className="fixed inset-0 z-10 bg-scrim backdrop-blur-scrim animate-appear"
-          onClick={onClose}
-        />
-        <DialogPrimitive.Content
-          data-slot="app-settings"
-          aria-describedby={undefined}
-          onInteractOutside={(event) => event.preventDefault()}
-          className={cn(
-            "fixed inset-y-0 right-0 left-auto z-10 w-app-settings",
-            "flex min-h-0 flex-col border-l border-edge bg-surface pt-2xl",
-            "[box-shadow:var(--shadow-raised)] animate-slide-in-end",
-          )}
-        >
-          <div className="flex h-(--size-control) shrink-0 items-center gap-md px-2xl">
-            <Breadcrumb className="min-w-0 flex-1">
-              <BreadcrumbList className="flex-nowrap text-body tracking-ui">
-                <BreadcrumbItem className="min-w-0">
-                  <DialogPrimitive.Title asChild>
-                    <span className="truncate">{agentName(agent.name)}</span>
-                  </DialogPrimitive.Title>
-                </BreadcrumbItem>
-                <BreadcrumbSeparator />
-                <BreadcrumbItem className="min-w-0">
-                  <DropdownMenu modal={false}>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        type="button"
-                        className={cn(
-                          "flex min-w-0 cursor-pointer items-center gap-xs border-0 bg-transparent p-0",
-                          "text-inherit transition-colors duration-100 ease-control hover:text-ink",
-                        )}
-                      >
-                        <BreadcrumbPage>{SETTINGS_TAB_LABELS[tab]}</BreadcrumbPage>
-                        <IconChevronDown
-                          className="size-(--size-glyph) shrink-0 text-ink-soft"
-                          aria-hidden
-                        />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-(--container-menu)">
-                      <SettingsTabItems onPick={onTab} />
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </BreadcrumbItem>
-              </BreadcrumbList>
-            </Breadcrumb>
-            <Button variant="quiet" size="icon" aria-label="Close" onClick={onClose}>
-              <IconX aria-hidden />
-            </Button>
-          </div>
-          <div className="flex min-h-0 flex-1 flex-col gap-2xl overflow-y-auto p-2xl">
-            {children}
-          </div>
-        </DialogPrimitive.Content>
-      </DialogPrimitive.Portal>
-    </DialogPrimitive.Root>
+    <Sheet
+      open={open}
+      title={agentName(agent.name)}
+      onClose={onClose}
+      actions={
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              className={cn(
+                "flex min-w-0 cursor-pointer items-center gap-xs border-0 bg-transparent p-0",
+                "text-label text-ink-soft transition-colors duration-100 ease-control hover:text-ink",
+              )}
+            >
+              <span className="min-w-0 truncate">{SETTINGS_TAB_LABELS[tab]}</span>
+              <IconChevronDown className="size-(--size-glyph) shrink-0" aria-hidden />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-(--container-menu)">
+            <SettingsTabItems onPick={onTab} />
+          </DropdownMenuContent>
+        </DropdownMenu>
+      }
+    >
+      {children}
+    </Sheet>
   );
 }
 

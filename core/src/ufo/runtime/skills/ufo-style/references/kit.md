@@ -243,7 +243,7 @@ the theme, both colour schemes and every width at once, and a shape built beside
 
 ## sheet
 
-- **`Sheet`** — A drawer on the right edge that opens over the pane without taking the screen:
+- **`Sheet`** — A column on the right edge of the pane:
 
 ## shell
 

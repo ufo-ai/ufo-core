@@ -727,6 +727,59 @@ test("a page mounted through the kit alone greets the shell, reads over the brid
   await painted();
 });
 
+test("a page mounted on its own opens the kit's sheet beside itself, not over nothing", async () => {
+  vi.resetModules();
+  const { mountApp, Sheet } = await import("@/apps/kit");
+  const { unmountApp } = await import("@/apps/shell");
+  cleanups.push(
+    shell(
+      (message) => {
+        if (message.ufo !== "call") return;
+        window.postMessage(
+          {
+            ufo: "data",
+            id: message.id,
+            ok: true,
+            status: 200,
+            body: JSON.stringify({ agents: [AGENT], member: MEMBER }),
+            refusal: null,
+            fault: null,
+          },
+          "*",
+        );
+      },
+      {
+        member: INIT.member,
+        agentId: INIT.agentId,
+        banded: false,
+        place: INIT.place,
+        portal: INIT.portal,
+      },
+    ),
+  );
+  const root = document.createElement("div");
+  document.body.append(root);
+  cleanups.push(() => {
+    unmountApp(root);
+    root.remove();
+  });
+
+  mountApp(root, () => (
+    <>
+      <p>Page body</p>
+      <Sheet open title="Record" onClose={() => {}}>
+        <p>Record body</p>
+      </Sheet>
+    </>
+  ));
+
+  const sheet = await screen.findByRole("dialog", { name: "Record" });
+  const columns = root.querySelectorAll("[data-slot=resizable-panel]");
+  expect(columns).toHaveLength(2);
+  expect(columns[0].textContent).toContain("Page body");
+  expect(columns[1].contains(sheet)).toBe(true);
+});
+
 test("a page remounted across a deploy reads its audience when its standing shell cannot carry it", async () => {
   vi.resetModules();
   const { mountApp } = await import("@/apps/kit");

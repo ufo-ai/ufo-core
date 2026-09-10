@@ -946,7 +946,9 @@ test("a conversation opens its file changes and returns to chat", async () => {
   const sheet = await screen.findByRole("dialog", { name: "Changes" });
   expect(await screen.findByText("/workspace/ufo/src/answer.ts")).toBeTruthy();
   const column = screen.getByTestId("log").closest("[data-slot=message-scroller]")!.parentElement!;
-  expect(screen.getByRole("main").contains(sheet)).toBe(false);
+  const beside = sheet.closest("[data-slot=resizable-panel]")!;
+  expect(screen.getByRole("main").contains(beside)).toBe(true);
+  expect(beside.contains(column)).toBe(false);
   expect(column.closest("[data-slot=slot-track]")?.className).toContain("contents");
   expect(document.querySelector('[data-slot-icon="diff"]')).toBeTruthy();
   expect(screen.getByText("-old").className).toContain("bg-attention");

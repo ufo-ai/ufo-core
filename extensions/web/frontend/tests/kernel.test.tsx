@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import { expect, onTestFinished, test, vi } from "vitest";
 
 import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
@@ -14,40 +14,102 @@ import { DataTable } from "@/kernel/table";
 import { Clip, Lede, Table, Td, TdWhole, Th } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Search } from "@/components/ui/field";
-import { Sheet } from "@/components/ui/sheet";
+import { Sheet, SheetHost } from "@/components/ui/sheet";
 import { Banded, Header, PageSearch, PageToolbar } from "@/kernel/pane";
 import type { SchemaProperty } from "@/lib/types";
+import { atPhoneWidth } from "./harness";
 
 import { declaredFloor, json, opened } from "./harness";
 
-test("a sheet overlays the page and leads with its close control", async () => {
+function HostedFileSheet(props: ComponentProps<typeof FileSheet>) {
+  return (
+    <SheetHost>
+      <FileSheet {...props} />
+    </SheetHost>
+  );
+}
+
+test("a sheet takes the second column of its pane and leads with its close control", async () => {
   const shut: boolean[] = [];
   render(
-    <main data-testid="page">
+    <SheetHost>
       <p>Page body</p>
       <Sheet open title="Attachment" onClose={() => shut.push(true)}>
         <p>File body</p>
       </Sheet>
-    </main>,
+    </SheetHost>,
   );
 
-  const page = screen.getByTestId("page");
   const sheet = screen.getByRole("dialog", { name: "Attachment" });
   const header = sheet.querySelector("[data-slot=sheet-header]");
   const close = within(sheet).getByRole("button", { name: "Close" });
+  const columns = document.querySelectorAll("[data-slot=resizable-panel]");
 
-  expect(page.contains(sheet)).toBe(false);
-  expect(sheet.className).toContain("fixed");
-  expect(sheet.className).toContain("right-0");
+  expect(columns).toHaveLength(2);
+  expect(columns[0].textContent).toContain("Page body");
+  expect(columns[1].contains(sheet)).toBe(true);
+  expect(sheet.className).not.toContain("fixed");
+  expect(document.querySelector("[data-slot=resizable-handle]")).toBeTruthy();
   expect(header?.firstElementChild).toBe(close);
 
   await userEvent.click(close);
   expect(shut).toEqual([true]);
 });
 
+test("the column beside a sheet keeps its own stacking context, so a lane track cannot cover it", () => {
+  render(
+    <SheetHost>
+      <div className="absolute inset-0 z-10" data-testid="track" />
+      <Sheet open title="Attachment" onClose={() => {}}>
+        <p>File body</p>
+      </Sheet>
+    </SheetHost>,
+  );
+
+  const [body, beside] = document.querySelectorAll("[data-slot=resizable-panel]");
+  const holder = screen.getByTestId("track").parentElement!;
+  expect(holder.className).toContain("relative");
+  expect(holder.className).toContain("isolate");
+  expect(holder.closest("[data-slot=resizable-panel]")).toBe(body);
+  expect(beside.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+});
+
+test("a sheet covers its pane at a phone's width, where there is no room to split", async () => {
+  atPhoneWidth();
+  render(
+    <SheetHost>
+      <p>Page body</p>
+      <Sheet open title="Attachment" onClose={() => {}}>
+        <p>File body</p>
+      </Sheet>
+    </SheetHost>,
+  );
+
+  const sheet = await screen.findByRole("dialog", { name: "Attachment" });
+  expect(document.querySelectorAll("[data-slot=resizable-panel]")).toHaveLength(1);
+  expect(document.querySelector("[data-slot=resizable-handle]")).toBeNull();
+  expect(sheet.closest("[data-slot=resizable-panel]")).toBeNull();
+  expect(screen.getByText("File body")).toBeTruthy();
+});
+
+test("a pane holding no open sheet keeps its whole width and offers no handle", () => {
+  render(
+    <SheetHost>
+      <p>Page body</p>
+      <Sheet open={false} title="Attachment" onClose={() => {}}>
+        <p>File body</p>
+      </Sheet>
+    </SheetHost>,
+  );
+
+  expect(document.querySelectorAll("[data-slot=resizable-panel]")).toHaveLength(1);
+  expect(document.querySelector("[data-slot=resizable-handle]")).toBeNull();
+  expect(screen.queryByText("File body")).toBeNull();
+});
+
 test("a file sheet owns the shared title, metadata, preview, and download", () => {
   render(
-    <FileSheet
+    <HostedFileSheet
       file={{
         filename: "report.png",
         subject: "Quarterly report",
@@ -93,7 +155,7 @@ test("a file sheet stacks a document's pages and renders the next batch on reque
   );
 
   render(
-    <FileSheet
+    <HostedFileSheet
       file={{
         filename: "report.pdf",
         subject: "Quarterly report",
@@ -140,7 +202,7 @@ test("a file sheet draws a one-page document as the picture the store rendered",
   );
 
   render(
-    <FileSheet
+    <HostedFileSheet
       file={{
         filename: "note.pdf",
         subject: "One pager",
@@ -203,12 +265,12 @@ test("a file sheet drops the batch of a file the member has already left", async
     preview_url: "/previews/notes.png",
   };
 
-  const { rerender } = render(<FileSheet file={report} onClose={() => {}} />);
+  const { rerender } = render(<HostedFileSheet file={report} onClose={() => {}} />);
   const pages = () => within(screen.getByRole("dialog")).queryAllByRole("img");
   await waitFor(() => expect(pages().length).toBe(8));
   await userEvent.click(screen.getByRole("button", { name: "Load more pages of report.pdf" }));
 
-  rerender(<FileSheet file={notes} onClose={() => {}} />);
+  rerender(<HostedFileSheet file={notes} onClose={() => {}} />);
   await waitFor(() => expect(pages().length).toBe(3));
   await act(async () => {
     land();
@@ -227,7 +289,7 @@ test("a file sheet draws a video's cover without rendering the file again", asyn
   vi.stubGlobal("fetch", asked);
 
   render(
-    <FileSheet
+    <HostedFileSheet
       file={{
         filename: "demo.mp4",
         subject: "Product demo",
@@ -267,7 +329,7 @@ test("a file sheet stacks the pages of every office document the route renders",
 
   for (const [filename, mediaType] of OFFICE_DOCUMENTS) {
     render(
-      <FileSheet
+      <HostedFileSheet
         file={{
           filename,
           subject: null,
@@ -288,7 +350,7 @@ test("a file sheet stacks the pages of every office document the route renders",
 
 test("a file sheet never draws raw SVG bytes", () => {
   render(
-    <FileSheet
+    <HostedFileSheet
       file={{
         filename: "design.svg",
         subject: "Application wireframe",
@@ -313,7 +375,7 @@ test("a file sheet renders a markdown document instead of its image preview", as
   vi.stubGlobal("fetch", vi.fn(async () => new Response("# Findings\n\nThe number moved.")));
 
   render(
-    <FileSheet
+    <HostedFileSheet
       file={{
         filename: "report.md",
         subject: "Quarterly report",
@@ -337,7 +399,7 @@ test("a file sheet renders a code file's characters instead of stating no previe
   vi.stubGlobal("fetch", vi.fn(async () => new Response("services:\n  web: {}")));
 
   render(
-    <FileSheet
+    <HostedFileSheet
       file={{
         filename: "compose.yaml",
         subject: null,

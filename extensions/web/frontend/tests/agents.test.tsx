@@ -791,7 +791,9 @@ test("a settings action opens the shared right sheet above the dialog", async ()
   const form = await screen.findByRole("dialog", { name: "Add connector" });
   expect(dialog.contains(form)).toBe(false);
   expect(form.getAttribute("data-slot")).toBe("sheet-content");
-  expect(form.className).toContain("fixed");
+  const column = form.parentElement!;
+  expect(column.contains(dialog)).toBe(true);
+  expect([...column.querySelectorAll("[data-slot=sheet-content]")].at(-1)).toBe(form);
 
   await userEvent.click(within(form).getByRole("button", { name: "Close" }));
   expect(await screen.findByRole("dialog", { name: "Assistant" })).toBe(dialog);
@@ -996,7 +998,9 @@ test("scheduled task sheets close back to their settings list", async () => {
 
   const reopened = await openAgentSettings("Assistant", "Scheduled");
   expect(await within(reopened).findByText("daily-brief")).toBeTruthy();
-  expect(document.querySelectorAll("[data-slot=sheet-content]")).toHaveLength(0);
+  const sheets = document.querySelectorAll("[data-slot=sheet-content]");
+  expect(sheets).toHaveLength(1);
+  expect(sheets[0]).toBe(reopened);
 });
 
 test("the main agent keeps the reserved mark, and no offered cell repeats it", async () => {
@@ -1341,9 +1345,8 @@ test("the settings dialog reads the drawn name and the intent it posts carries t
   render(<App agents={[AGENT, REVIEWER]} member={MEMBER} onAgents={() => {}} />);
   const dialog = within(await openAgentSettings("Code Reviewer"));
 
-  expect(dialog.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
-    "Code Reviewer/Settings",
-  );
+  expect(await screen.findByRole("dialog", { name: "Code Reviewer" })).toBeTruthy();
+  expect(dialog.getByRole("button", { name: "Settings" })).toBeTruthy();
 
   await userEvent.click(dialog.getByRole("button", { name: "Edit prompt" }));
   await userEvent.click(dialog.getByRole("button", { name: "Save prompt" }));
@@ -1688,10 +1691,8 @@ test("the app's panel switches reads from its own band, without going back to th
   render(<Portal />);
 
   const panel = within(await openAgentSettings("Research", "Settings"));
-  expect(document.querySelector("[data-slot=app-settings-scrim]")).toBeTruthy();
-  expect(panel.getByRole("navigation", { name: "Breadcrumb" }).textContent).toBe(
-    "Research/Settings",
-  );
+  expect(document.querySelector("[data-slot=sheet-content]")).toBeTruthy();
+  expect(await screen.findByRole("dialog", { name: "Research" })).toBeTruthy();
 
   await userEvent.click(panel.getByRole("button", { name: "Settings" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: "Scheduled" }));

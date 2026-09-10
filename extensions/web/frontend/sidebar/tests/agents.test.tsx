@@ -737,7 +737,9 @@ test("a settings action opens the shared right sheet above the dialog", async ()
   const form = await screen.findByRole("dialog", { name: "Add connector" });
   expect(dialog.contains(form)).toBe(false);
   expect(form.getAttribute("data-slot")).toBe("sheet-content");
-  expect(form.className).toContain("fixed");
+  const column = form.parentElement!;
+  expect(column.contains(dialog)).toBe(true);
+  expect([...column.querySelectorAll("[data-slot=sheet-content]")].at(-1)).toBe(form);
 
   await userEvent.click(within(form).getByRole("button", { name: "Close" }));
   expect(await screen.findByRole("dialog", { name: "Assistant" })).toBe(dialog);

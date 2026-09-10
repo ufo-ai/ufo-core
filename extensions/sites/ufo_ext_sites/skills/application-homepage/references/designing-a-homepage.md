@@ -134,7 +134,7 @@ Does the band have more rows than the fold budget allows?
 └── No → draw them all
 ```
 
-A Sheet is a drawer over the pane, not a page, so the reader keeps their place in the list. A
+A Sheet is the pane's second column, not a page, so the reader keeps their place in the list. A
 "Show all N" reveals in place, so the region grows below the fold rather than pushing the next
 region down before the reader asks.
 

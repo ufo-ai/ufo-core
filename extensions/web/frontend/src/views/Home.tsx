@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { SheetHost } from "@/components/ui/sheet";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -138,7 +139,8 @@ export function Home({
   );
   return (
     <main className="relative flex min-h-0 min-w-0 flex-col">
-      <SlotTrack over opens={standing} onMove={move} seek={seeking} onActive={onActive}>
+      <SheetHost>
+        <SlotTrack over opens={standing} onMove={move} seek={seeking} onActive={onActive}>
         {standing.map((lane) => (
           <HomeLane
             key={lane}
@@ -154,6 +156,7 @@ export function Home({
           />
         ))}
       </SlotTrack>
+      </SheetHost>
     </main>
   );
 }

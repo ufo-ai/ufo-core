@@ -63,7 +63,9 @@ const DIAGRAM_LIBRARIES = ["cytoscape", "roughjs", "d3-selection", "d3-scale", "
  *  what a member who never opens a conversation does not download. */
 const TRANSCRIPT_LIBRARIES = ["micromark", "mdast", "streamdown"];
 
-const BUNDLE_CEILING_BYTES = 680_000;
+/** The resize handle every pane's sheet is dragged by rides the boot script, since a pane splits
+ *  on any route: 35KB of the headroom below went to it. */
+const BUNDLE_CEILING_BYTES = 715_000;
 
 test("the one script carries no diagram or transcript library, and stays under its ceiling", () => {
   const bundle = readFileSync(join(STATIC, entryAsset()), "utf8");

@@ -655,25 +655,27 @@ test("a record header action applies a partial spec and reads back its next stat
   });
   render(
     <MainAgentProvider agents={[AGENT]}>
-      <ObjectDetail
-        agentId={AGENT_ID}
-        kind="source_trigger"
-        name="github-issues"
-        actions={(status, apply) =>
-          status === null ? null : (
-            <button
-              type="button"
-              onClick={() =>
-                void apply({ delivery: status.delivery === "current" ? "per_page" : "current" })
-              }
-            >
-              {status.delivery === "current" ? "Wake per page" : "Wake this chat"}
-            </button>
-          )
-        }
-        onOpen={() => {}}
-        onBack={() => {}}
-      />
+      <Pane>
+        <ObjectDetail
+          agentId={AGENT_ID}
+          kind="source_trigger"
+          name="github-issues"
+          actions={(status, apply) =>
+            status === null ? null : (
+              <button
+                type="button"
+                onClick={() =>
+                  void apply({ delivery: status.delivery === "current" ? "per_page" : "current" })
+                }
+              >
+                {status.delivery === "current" ? "Wake per page" : "Wake this chat"}
+              </button>
+            )
+          }
+          onOpen={() => {}}
+          onBack={() => {}}
+        />
+      </Pane>
     </MainAgentProvider>,
   );
 

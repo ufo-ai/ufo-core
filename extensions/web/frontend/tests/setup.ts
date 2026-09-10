@@ -39,6 +39,13 @@ function installWhatJsdomLacks() {
       reader.readAsArrayBuffer(this);
     });
   };
+  // jsdom lays nothing out, so a pane's resize handle carries the 0x0 rect at the origin every
+  // element gets, and the panel group reads every press in the pane as a press on that handle.
+  const boundingRect = Element.prototype.getBoundingClientRect;
+  Element.prototype.getBoundingClientRect = function rectOf(this: Element): DOMRect {
+    if (this.getAttribute("data-slot") === "resizable-handle") return new DOMRect(-1e6, -1e6, 0, 0);
+    return boundingRect.call(this);
+  };
   Element.prototype.hasPointerCapture = () => false;
   Element.prototype.setPointerCapture = () => {};
   Element.prototype.releasePointerCapture = () => {};
