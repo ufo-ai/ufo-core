@@ -7,6 +7,7 @@ import { ConversationDetail, Disclose } from "@/views/Conversations";
 import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
 import { subject, surfaceWord, useViewer } from "@/lib/audience";
+import { AudienceMark } from "@/lib/audienceMark";
 import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
 import { SurfaceMark } from "@/lib/surfaceMark";
@@ -67,6 +68,7 @@ export function ChatPane({
   agent,
   member,
   conversationId,
+  audience,
   focusComposer,
   onCreated,
   onActivity,
@@ -118,6 +120,7 @@ export function ChatPane({
           agent={agent}
           member={member}
           conversationId={conversationId}
+          audience={audience}
           focusComposer={focusComposer}
           onCreated={onCreated}
           onActivity={onActivity}
@@ -163,6 +166,7 @@ export function LinkedPane({
         <Header
           crumb={crumb}
           title={subject(conversation, viewer)}
+          note={readable && conversation.commentable ? null : <AudienceMark entry={conversation} />}
           acts={<SurfaceMark conversation={conversation} />}
           pinned
         />
@@ -172,6 +176,7 @@ export function LinkedPane({
               agent={agent}
               member={member}
               conversationId={conversation.id}
+              audience={conversation}
               onActivity={onActivity}
             />
           ) : (

@@ -258,6 +258,8 @@ export const CHAT_ROW = {
   last_at: "2026-08-01T09:00:00.000Z",
   surface: "web",
   surface_label: null,
+  audience: "member:m1",
+  member_email: "member@example.com",
   mine: true,
   speaker: null,
 };
@@ -377,6 +379,12 @@ export const FRESH = "New conversation";
 export function openConversation(agentId: string, conversationId: string): void {
   location.hash = "#/agents/" + agentId + "?open=" + conversationId;
   window.dispatchEvent(new HashChangeEvent("hashchange"));
+}
+
+export function audienceMark(): HTMLElement {
+  const mark = document.body.querySelector("[data-slot=audience]");
+  if (!mark) throw new Error("no audience marker is drawn");
+  return mark as HTMLElement;
 }
 
 export async function heldConversation(app = "Assistant"): Promise<string> {

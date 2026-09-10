@@ -6,13 +6,14 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { PaneFault } from "@/kernel/pane";
 import { Loading } from "@/kernel/panel";
+import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { agentHash } from "@/lib/route";
 import { openAgent, placeHome } from "@/lib/router";
 import { agentCrumb } from "@/lib/title";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 
-import { AGENT, AGENT_ID, agentIndex, atPhoneWidth, CHAT_ROW, chatsOnWire, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, agentIndex, atPhoneWidth, audienceMark, CHAT_ROW, chatsOnWire, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 beforeEach(() => {
   useStreamFake();
 });
@@ -1245,6 +1246,7 @@ test("a slot standing in a lane names nothing of its own", async () => {
   expect(await screen.findByText("No artifacts shared in this conversation.")).toBeTruthy();
   expect(screen.queryByRole("complementary")).toBeNull();
   expect(screen.queryByLabelText("Artifacts")).toBeNull();
+  expect(document.body.querySelector("[data-slot=audience]")).toBeNull();
 });
 
 test("a slot standing on its own address is headed by its name under the app", async () => {
@@ -1269,6 +1271,28 @@ test("a slot standing on its own address is headed by its name under the app", a
   expect(within(path).getByRole("link", { name: "Back to Assistant" }).getAttribute("href")).toBe(
     agentHash(AGENT.id),
   );
+});
+
+test("a slot on its own address states who reads the conversation it belongs to", async () => {
+  wire({
+    ["/agents/" + AGENT.id + "/conversations/" + CONVO_ID + "/slots/artifacts"]: () =>
+      json({ type: "artifacts", artifacts: [], truncated: false }),
+  });
+  render(
+    <ConversationSlotPane
+      agent={AGENT}
+      conversationId={CONVO_ID}
+      slot="artifacts"
+      summary={{ id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifact", count: 0 }}
+      audience={{ audience: "member:m1", member_email: null, surface_label: null }}
+      crumb={agentCrumb(AGENT)}
+    />,
+  );
+
+  await screen.findByRole("heading", { level: 1, name: "Artifacts" });
+  const mark = audienceMark();
+  expect(mark.textContent).toContain("Only you");
+  expect(mark.getAttribute("title")).toBe("Only you read this conversation. " + ADMIN_DISCLOSURE);
 });
 
 const APP_SITE = { state: "set", url: "https://tasks.example.test", deploy_generation: 1 } as const;

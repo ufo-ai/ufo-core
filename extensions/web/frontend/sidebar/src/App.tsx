@@ -44,6 +44,7 @@ import { SearchRow, Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
+  MEMBER_SUBJECT,
   WEB_SURFACE,
   isPortalChat,
   Viewer,
@@ -80,6 +81,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   RAIL_SHOWN_OPTIONS,
+  railAudience,
   railGroups,
   railShut,
   railStamp,
@@ -352,6 +354,8 @@ function founded(agent: Agent, conversationId: string, title: string): void {
     last_at: stampIso(new Date()),
     surface: WEB_SURFACE,
     surface_label: null,
+    audience: MEMBER_SUBJECT,
+    member_email: null,
     mine: true,
     speaker: null,
   });
@@ -1011,6 +1015,7 @@ function RoutedPane({
           conversationId={route.conversationId}
           slot={route.slot}
           rootConversationId={route.rootConversationId}
+          audience={railAudience(rail.rows, rail.linked, route.conversationId)}
           crumb={crumb}
         />
       );
@@ -1076,6 +1081,7 @@ function RoutedPane({
           agent={agent}
           member={member}
           conversationId={row.conversation_id}
+          audience={row}
           focusComposer={!narrow}
           onActivity={railActivity}
           title={row.title}

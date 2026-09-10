@@ -54,6 +54,8 @@ function row(id: string, last_at: string): ChatRow {
     last_at,
     surface: "web",
     surface_label: null,
+    audience: "member:m1",
+    member_email: "member@example.com",
     mine: true,
     speaker: null,
   };

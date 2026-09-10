@@ -57,15 +57,54 @@ export function slackLink(
 
 export const SHARED_SUBJECT = "shared";
 
+/** What a wire audience naming one member opens with. A chat the portal founds is private to the
+ *  member who founded it, and the row standing in the rail before the listing read answers is the
+ *  prefix alone: it is that member, and every reading of it says so. */
+export const MEMBER_SUBJECT = "member:";
+
 /** Whether a wire audience names one member rather than a room, the workspace, or another org. */
 export function isMemberAudience(audience: string): boolean {
-  return audience.startsWith("member:");
+  return audience.startsWith(MEMBER_SUBJECT);
 }
 
-export function audienceLabel(
-  entry: { audience: string; member_email: string | null; surface_label?: string | null },
-  viewer: string | null,
-): string {
+/** What a conversation on the wire carries about who reads it. Every producer of a conversation
+ *  row carries these three, so one formatter answers for a listing row and an open thread alike. */
+export type AudienceEntry = {
+  audience: string;
+  member_email: string | null;
+  surface_label?: string | null;
+};
+
+/** Said wherever the audience is said. An admin opens another member's conversation through a
+ *  recorded acknowledgement, so no marker may read as a promise that nobody else can look. */
+export const ADMIN_DISCLOSURE = "A workspace admin can open it, and the opening is recorded.";
+
+/** The whole audience in one sentence: who reads the conversation, then what an admin can still
+ *  do. The label beside the title is a word or two and carries neither. */
+export function audienceDetail(entry: AudienceEntry, viewer: string | null): string {
+  return readers(entry, viewer) + " " + ADMIN_DISCLOSURE;
+}
+
+function readers(entry: AudienceEntry, viewer: string | null): string {
+  if (entry.audience === SHARED_SUBJECT) {
+    return "Every member of the workspace reads this conversation.";
+  }
+  if (isMemberAudience(entry.audience)) {
+    if (entry.member_email && entry.member_email !== viewer) {
+      return "Only " + entry.member_email + " reads this conversation.";
+    }
+    return "Only you read this conversation.";
+  }
+  if (entry.audience.startsWith("room:")) {
+    return "Everyone in " + (entry.surface_label || "the channel") + " reads this conversation.";
+  }
+  if (entry.audience.startsWith("foreign:")) {
+    return "Another organization reads this conversation.";
+  }
+  return "Who reads this conversation is not known.";
+}
+
+export function audienceLabel(entry: AudienceEntry, viewer: string | null): string {
   if (entry.audience === SHARED_SUBJECT) return "Workspace";
   if (isMemberAudience(entry.audience)) {
     if (entry.member_email && entry.member_email !== viewer) {

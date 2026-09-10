@@ -46,6 +46,8 @@ import { COLUMN } from "@/kernel/pane";
 import { Empty, usePanelRead } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
+import type { AudienceEntry } from "@/lib/audience";
+import { AudienceMark } from "@/lib/audienceMark";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
@@ -87,6 +89,9 @@ export type ChatProps = {
   agent: ChatAgent;
   member: Member;
   conversationId: string | null;
+  /** Who reads the open conversation, as the row that named it carries it. A conversation the
+   *  member has not founded yet has no audience to state. */
+  audience?: AudienceEntry;
   foundingKey?: string;
   focusComposer?: boolean;
   unsaid?: ReactNode;
@@ -99,6 +104,7 @@ export function Chat({
   agent,
   member,
   conversationId,
+  audience,
   foundingKey,
   focusComposer = false,
   unsaid,
@@ -172,6 +178,11 @@ export function Chat({
 
   return (
     <TranscriptScroll>
+      {conversationId !== null && audience ? (
+        <div className={cn(COLUMN, "flex shrink-0 justify-end px-2xl pt-sm")}>
+          <AudienceMark entry={audience} />
+        </div>
+      ) : null}
       {starting && !bare ? unsaid : null}
       {starting ? null : (
         <TranscriptPane className="flex-1">

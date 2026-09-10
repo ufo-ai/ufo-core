@@ -1,6 +1,13 @@
 import { expect, test } from "vitest";
 
-import { audienceLabel, ownerLabel, subjectLabel, surfaceWord } from "@/lib/audience";
+import {
+  ADMIN_DISCLOSURE,
+  audienceDetail,
+  audienceLabel,
+  ownerLabel,
+  subjectLabel,
+  surfaceWord,
+} from "@/lib/audience";
 
 const VIEWER = "member@example.com";
 
@@ -29,6 +36,31 @@ test("an audience the map does not know reads as Unknown, never as nothing", () 
   expect(subjectLabel(null)).toBe("Unknown");
   expect(subjectLabel("shared")).toBe("Workspace");
   expect(subjectLabel("member:m1")).toBe("Only you");
+});
+
+test("the detail names the readers and states what an admin can still do", () => {
+  const said = (audience: string, member_email: string | null, surface_label?: string) =>
+    audienceDetail({ audience, member_email, surface_label: surface_label ?? null }, VIEWER);
+
+  expect(said("shared", null)).toBe(
+    "Every member of the workspace reads this conversation. " + ADMIN_DISCLOSURE,
+  );
+  expect(said("member:m1", VIEWER)).toBe("Only you read this conversation. " + ADMIN_DISCLOSURE);
+  expect(said("member:m2", "mel@example.com")).toBe(
+    "Only mel@example.com reads this conversation. " + ADMIN_DISCLOSURE,
+  );
+  expect(said("room:C1", null, "#ops")).toBe(
+    "Everyone in #ops reads this conversation. " + ADMIN_DISCLOSURE,
+  );
+  expect(said("room:C1", null)).toBe(
+    "Everyone in the channel reads this conversation. " + ADMIN_DISCLOSURE,
+  );
+  expect(said("foreign:org", null)).toBe(
+    "Another organization reads this conversation. " + ADMIN_DISCLOSURE,
+  );
+  expect(said("queue:q1", null)).toBe(
+    "Who reads this conversation is not known. " + ADMIN_DISCLOSURE,
+  );
 });
 
 test("a surface the map does not name reads as its own word", () => {

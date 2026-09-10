@@ -4,12 +4,13 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
+import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import type { EarlierMessages } from "@/lib/earlier";
 import { chatHash, conversationSlotHash, newChatHash } from "@/lib/route";
 import { Chat } from "@/views/Chat";
 import { ConversationTranscript } from "@/views/Conversations";
 
-import { AGENT, AGENT_ID, ARRIVAL_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, ARRIVAL_ID, atPhoneWidth, audienceMark, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -127,6 +128,33 @@ test("an empty conversation states it, and the composer sends a message and stre
   fireEvent.focus(mark.parentElement!);
   expect((await screen.findByRole("tooltip")).textContent).toBe("GPT-6 Astra");
   expect(StreamFake.last().closed).toBe(true);
+});
+
+test("the open chat states who reads it, from the audience its row carried", async () => {
+  wire(transcript());
+  open();
+
+  await screen.findByText("No messages in this conversation yet.");
+  const mark = audienceMark();
+  expect(mark.textContent).toContain("Only you");
+  expect(mark.getAttribute("title")).toBe(
+    "Only you read this conversation. " + ADMIN_DISCLOSURE,
+  );
+});
+
+test("a chat another member owns states its audience by that address", async () => {
+  wire({
+    ...transcript(),
+    ...chatsOnWire([{ ...CHAT_ROW, audience: "member:m2", member_email: "mel@example.com" }]),
+  });
+  open();
+
+  await screen.findByText("No messages in this conversation yet.");
+  const mark = audienceMark();
+  expect(mark.textContent).toContain("Private to mel@example.com");
+  expect(mark.getAttribute("title")).toBe(
+    "Only mel@example.com reads this conversation. " + ADMIN_DISCLOSURE,
+  );
 });
 
 test("a reply from an agent on auto states its spend and names no model", async () => {
@@ -1292,9 +1320,10 @@ test("sites slot renders hosted links with when they were made and last changed"
   open();
 
   await userEvent.click(await screen.findByRole("button", { name: "Sites 1" }));
-  expect(await screen.findByText("team-dashboard")).toBeTruthy();
-  expect(screen.getByText(/^Created/)).toBeTruthy();
-  expect(screen.queryByText(/workspace/)).toBeNull();
+  const sheet = await screen.findByRole("dialog", { name: "Sites" });
+  expect(await within(sheet).findByText("team-dashboard")).toBeTruthy();
+  expect(within(sheet).getByText(/^Created/)).toBeTruthy();
+  expect(within(sheet).queryByText(/workspace/)).toBeNull();
   const link = screen.getByRole("link", { name: "Open site" });
   expect(link.getAttribute("href")).toBe(url);
   expect(link.getAttribute("target")).toBe("_blank");

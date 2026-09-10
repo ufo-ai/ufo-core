@@ -3055,6 +3055,8 @@ async def _resolve_chat(
                         "speaker": None,
                         "surface": own.summary.surface,
                         "surface_label": own.surface_label,
+                        "audience": own.audience,
+                        "member_email": own.summary.member_email,
                         "last_at": _iso(detail.turn.created_at),
                     }
                 ]

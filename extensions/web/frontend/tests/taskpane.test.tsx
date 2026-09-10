@@ -306,6 +306,8 @@ test("the conversation the task belongs to stands in the pane by its title", asy
     last_at: "2026-08-01T09:00:00.000Z",
     surface: "web",
     surface_label: null,
+    audience: "member:m1",
+    member_email: "member@example.com",
     mine: true,
     speaker: null,
   });

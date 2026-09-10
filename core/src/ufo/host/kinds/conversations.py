@@ -326,6 +326,8 @@ def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
             "speaker": None if mine or not speakers else speakers[0],
             "surface": entry.summary.surface,
             "surface_label": entry.surface_label,
+            "audience": entry.audience,
+            "member_email": entry.summary.member_email,
             "portal": (
                 entry.summary.surface == PORTAL_SURFACE
                 or entry.summary.surface.startswith(EXTENSION_SURFACE_PREFIX)
@@ -386,7 +388,8 @@ CONVERSATION_OBJECT = ObjectKind(
         "Filter or order a listing on `surface` and on `surface_label`, the surface's own name for "
         "where the conversation runs — a Slack channel as `#general`, a Slack DM as `DM`. A "
         "conversation whose surface names no origin carries no `surface_label`. "
-        "A member listing also carries `title`, `mine`, `speaker`, and `last_at` — order by "
+        "A member listing also carries `title`, `mine`, `speaker`, `audience`, `member_email`, "
+        "and `last_at` — order by "
         "`last_at` desc for the newest activity first. "
         "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
         "cannot be created, changed, or deleted through objects."
@@ -394,7 +397,18 @@ CONVERSATION_OBJECT = ObjectKind(
     spec_model=ConversationSpec,
     store=ConversationObjects(),
     list_fields=frozenset(
-        {"surface", "surface_label", "title", "mine", "speaker", "portal", "last_at", "private"}
+        {
+            "surface",
+            "surface_label",
+            "title",
+            "mine",
+            "speaker",
+            "portal",
+            "audience",
+            "member_email",
+            "last_at",
+            "private",
+        }
     ),
     agent_target_verbs=frozenset({"list", "get"}),
 )

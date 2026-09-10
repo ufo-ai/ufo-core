@@ -3776,6 +3776,8 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     assert [row["conversation_id"] for row in rows] == [str(older_id)]
     assert rows[0]["title"] == "Displaced but linked"
     assert rows[0]["agent_name"] == "assistant"
+    assert rows[0]["audience"] == f"member:{member_id}"
+    assert rows[0]["member_email"] == "owner@example.com"
     assert rows[0]["last_at"] is not None
     crossed = await client.get(
         f"/surface/web/api/chats?conversation={older_id}",

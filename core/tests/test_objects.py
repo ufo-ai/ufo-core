@@ -4157,12 +4157,16 @@ async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
     assert mine_row.fields["surface"] == "web"
     assert mine_row.fields["surface_label"] is None
     assert mine_row.fields["portal"] is True
+    assert mine_row.fields["audience"] == str(conversation_audience(alice))
+    assert mine_row.fields["member_email"] == f"{alice.hex[:8]}@x.test"
     assert isinstance(mine_row.fields["last_at"], str)
     assert shared_row.fields["mine"] is False
     assert shared_row.fields["speaker"] == f"{bob.hex[:8]}@x.test"
     assert shared_row.fields["surface"] == "slack"
     assert shared_row.fields["surface_label"] == "#ops"
     assert shared_row.fields["portal"] is False
+    assert shared_row.fields["audience"] == str(SHARED_AUDIENCE)
+    assert shared_row.fields["member_email"] is None
     assert [row.name for row in widened.rows] == [row.name for row in page.rows]
     bob_rows = {row.name: row for row in bob_page.rows}
     assert set(bob_rows) == {str(shared_id), str(private_id)}

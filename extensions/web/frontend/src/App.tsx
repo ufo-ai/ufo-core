@@ -27,7 +27,7 @@ import { Shortcuts } from "@/views/Shortcuts";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS, MESSAGING, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
-import { WEB_SURFACE, isPortalChat, Viewer, WorkspaceId } from "@/lib/audience";
+import { MEMBER_SUBJECT, WEB_SURFACE, isPortalChat, Viewer, WorkspaceId } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { AppsProvider } from "@/lib/apps";
 import { useAppStatus } from "@/lib/appStatusStore";
@@ -49,7 +49,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { stampIso, type ChatRow } from "@/lib/rail";
+import { railAudience, stampIso, type ChatRow } from "@/lib/rail";
 import {
   pickPinned,
   pickSectionShut,
@@ -384,6 +384,8 @@ function founded(agent: Agent, conversationId: string, title: string): void {
     last_at: stampIso(new Date()),
     surface: WEB_SURFACE,
     surface_label: null,
+    audience: MEMBER_SUBJECT,
+    member_email: null,
     mine: true,
     speaker: null,
   });
@@ -893,6 +895,7 @@ function RoutedPane({
           conversationId={route.conversationId}
           slot={route.slot}
           rootConversationId={route.rootConversationId}
+          audience={railAudience(rail.rows, rail.linked, route.conversationId)}
           crumb={crumb}
         />
       );
@@ -958,6 +961,7 @@ function RoutedPane({
           agent={agent}
           member={member}
           conversationId={row.conversation_id}
+          audience={row}
           onActivity={railActivity}
           title={row.title}
           conversationOnly={!listedAgent}

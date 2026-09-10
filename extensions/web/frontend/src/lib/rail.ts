@@ -1,7 +1,13 @@
 import { useSyncExternalStore } from "react";
 
 import { agentName } from "@/lib/agentName";
-import { IMESSAGE_SURFACE, SLACK_SURFACE, UFO_SURFACE, isPortalChat } from "@/lib/audience";
+import {
+  IMESSAGE_SURFACE,
+  SLACK_SURFACE,
+  UFO_SURFACE,
+  isPortalChat,
+  type AudienceEntry,
+} from "@/lib/audience";
 import type { Agent, OwnedConversation } from "@/lib/types";
 
 export type ChatRow = {
@@ -12,6 +18,8 @@ export type ChatRow = {
   last_at: string;
   surface: string;
   surface_label: string | null;
+  audience: string;
+  member_email: string | null;
   mine: boolean;
   speaker: string | null;
 };
@@ -26,6 +34,8 @@ export type ConversationRow = {
   last_at: string;
   surface: string;
   surface_label: string | null;
+  audience: string;
+  member_email: string | null;
   mine: boolean;
   speaker: string | null;
 };
@@ -41,9 +51,22 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
     last_at: row.last_at,
     surface: row.surface,
     surface_label: row.surface_label,
+    audience: row.audience,
+    member_email: row.member_email,
     mine: row.mine,
     speaker: row.speaker,
   }));
+}
+
+/** Who reads one conversation, from whichever rail record names it: the listing row for a chat
+ *  the portal carries, the resolved projection for one another surface holds. A conversation the
+ *  rail has not answered for yet has no audience to state, and the pane states none. */
+export function railAudience(
+  rows: ChatRow[],
+  linked: Readonly<Record<string, OwnedConversation>>,
+  conversationId: string,
+): AudienceEntry | undefined {
+  return rows.find((row) => row.conversation_id === conversationId) ?? linked[conversationId];
 }
 
 export const CHAT_SHOWN_OPTIONS: { surface: string; label: string }[] = [

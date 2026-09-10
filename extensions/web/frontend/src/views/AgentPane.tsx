@@ -304,6 +304,7 @@ export function AgentPane({
           agent={agent}
           member={member}
           conversationId={opened?.id ?? railHeld?.conversation_id ?? null}
+          audience={opened ?? railHeld ?? undefined}
           onCreated={(conversationId, title) => {
             onCreated(conversationId, title);
             setSettles((count) => count + 1);
@@ -449,6 +450,7 @@ export function AgentPane({
           agent={railAgent}
           member={member}
           conversationId={target}
+          audience={railRow}
           onCreated={onCreated}
           onSettled={() => setSettles((count) => count + 1)}
         />

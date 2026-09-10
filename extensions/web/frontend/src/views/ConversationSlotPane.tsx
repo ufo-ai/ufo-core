@@ -1,6 +1,8 @@
 import { useState } from "react";
 
 import { FileSheet } from "@/kernel/artifact";
+import type { AudienceEntry } from "@/lib/audience";
+import { AudienceMark } from "@/lib/audienceMark";
 import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
@@ -124,6 +126,7 @@ export function ConversationSlotPane({
   slot,
   rootConversationId,
   summary,
+  audience,
   embedded = false,
   crumb,
 }: {
@@ -132,6 +135,9 @@ export function ConversationSlotPane({
   slot: string;
   rootConversationId?: string;
   summary?: ConversationSlotSummary;
+  /** Who reads the conversation this slot belongs to. A slot standing in a lane draws no marker:
+   *  the pane beside it states the audience once. */
+  audience?: AudienceEntry;
   embedded?: boolean;
   crumb?: Crumb;
 }) {
@@ -173,11 +179,14 @@ export function ConversationSlotPane({
         crumb={crumb}
         title={label}
         note={
-          resolved ? (
-            <span className="shrink-0 text-ink-soft" aria-hidden>
-              <SlotIcon icon={resolved.icon} />
-            </span>
-          ) : null
+          <>
+            {resolved ? (
+              <span className="shrink-0 text-ink-soft" aria-hidden>
+                <SlotIcon icon={resolved.icon} />
+              </span>
+            ) : null}
+            {audience ? <AudienceMark entry={audience} /> : null}
+          </>
         }
         pinned
       />

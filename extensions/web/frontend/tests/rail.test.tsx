@@ -4,12 +4,13 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { agentName } from "@/lib/agentName";
+import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import { appOrder, bumpChat, mergeChats, stampIso, type ChatRow } from "@/lib/rail";
 import { railState } from "@/lib/railStore";
 import { newChatHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
-import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, atPhoneWidth, audienceMark, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -38,6 +39,8 @@ function row(id: string, last_at: string): ChatRow {
     last_at,
     surface: "web",
     surface_label: null,
+    audience: "member:m1",
+    member_email: "member@example.com",
     mine: true,
     speaker: null,
   };
@@ -540,6 +543,48 @@ test("a terminal conversation is marked with its surface and no way out", async 
   expect(header.getByText("Terminal").closest("a")).toBeNull();
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
   expect(screen.queryByText(/read-only here/)).toBeNull();
+});
+
+test("a read-only conversation is headed by who reads it, as its projection carried", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  const readOnly = slackConversation({ commentable: false });
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? json({ chats: [], conversation: readOnly })
+        : json({ chats: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByText(/read-only here/);
+  const mark = audienceMark();
+  expect(mark.textContent).toContain("Workspace");
+  expect(mark.getAttribute("title")).toBe(
+    "Every member of the workspace reads this conversation. " + ADMIN_DISCLOSURE,
+  );
+});
+
+test("a conversation an admin opened states the member it is private to", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  const other = slackConversation({
+    commentable: false,
+    audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
+    member_email: "mel@example.com",
+  });
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=") ? json({ chats: [], conversation: other }) : json({ chats: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
+
+  await screen.findByText(/read-only here/);
+  const mark = audienceMark();
+  expect(mark.textContent).toContain("Private to mel@example.com");
+  expect(mark.getAttribute("title")).toBe(
+    "Only mel@example.com reads this conversation. " + ADMIN_DISCLOSURE,
+  );
 });
 
 test("a markdown file in a Slack conversation opens the attachment sheet", async () => {
