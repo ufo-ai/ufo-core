@@ -909,6 +909,7 @@ function RoutedPane({
 }) {
   const rail = useRail();
   const tabs = useOfferedTabs();
+  const narrow = useNarrow();
   const crumb = pageCrumb(route, agents, rail.rows, rail.linked, mainAgent);
   switch (route.kind) {
     case "agent-setup": {
@@ -1075,6 +1076,7 @@ function RoutedPane({
           agent={agent}
           member={member}
           conversationId={row.conversation_id}
+          focusComposer={!narrow}
           onActivity={railActivity}
           title={row.title}
           conversationOnly={!listedAgent}

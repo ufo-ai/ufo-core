@@ -8,7 +8,7 @@ import type { EarlierMessages } from "@/lib/earlier";
 import { chatHash, conversationSlotHash, newChatHash } from "@/lib/route";
 import { ConversationTranscript } from "@/views/Conversations";
 
-import { AGENT, AGENT_ID, ARRIVAL_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, ARRIVAL_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -3316,6 +3316,23 @@ test("a new conversation opens with the composer focused", async () => {
 
   const box = await screen.findByLabelText("Ask UFO");
   expect(document.activeElement).toBe(box);
+});
+
+test("a thread opened from the rail lands the cursor in the composer", async () => {
+  wire({ ...transcript() });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const box = await screen.findByLabelText("Ask UFO");
+  await waitFor(() => expect(document.activeElement).toBe(box));
+});
+
+test("a thread opened at a phone width leaves the composer alone, so no keyboard rises", async () => {
+  atPhoneWidth();
+  wire({ ...transcript() });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const box = await screen.findByLabelText("Ask UFO");
+  expect(document.activeElement).not.toBe(box);
 });
 
 test("a route renaming the start screen keeps the same box, and the place in its words", async () => {
