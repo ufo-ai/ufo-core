@@ -2178,6 +2178,8 @@ class _TranscriptRenderer:
     connects: Mapping[str, dict[str, object]]
     attached: Mapping[str, Mapping[str, dict[str, object]]]
     answers: frozenset[str]
+    spoken_at: Mapping[str, str]
+    answered_at: Mapping[str, str]
 
     def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]:
         activity = {
@@ -2246,6 +2248,9 @@ class _TranscriptRenderer:
         answered = None if turn_id is None else self.asked.get(turn_id)
         if answered is not None:
             bubble["asked"] = answered
+        moment = None if turn_id is None else self.spoken_at.get(turn_id)
+        if moment is not None:
+            bubble["at"] = moment
         rendered.append(bubble)
         return state
 
@@ -2285,6 +2290,11 @@ class _TranscriptRenderer:
             reply["apps"] = made
         if control is not None:
             reply["connect"] = control
+        moment = (
+            None if state.current_turn_id is None else self.answered_at.get(state.current_turn_id)
+        )
+        if moment is not None:
+            reply["at"] = moment
         rendered.append(reply)
         return replace(state, pending=(), answer="", answer_at=0, notes=0)
 
@@ -2302,6 +2312,8 @@ def _rendered_messages(
     connects: Mapping[str, dict[str, object]] | None = None,
     attached: Mapping[str, Mapping[str, dict[str, object]]] | None = None,
     answers: frozenset[str] = frozenset(),
+    spoken_at: Mapping[str, str] | None = None,
+    answered_at: Mapping[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
     one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
@@ -2338,6 +2350,10 @@ def _rendered_messages(
     asked for it, and stays there while later turns run, drawn as the account it made once the
     connect landed.
 
+    `spoken_at` and `answered_at` name when each turn's words landed and when the turn that wrote
+    them settled, keyed like `questions`: a bubble and a reply each state their own time, which
+    nothing in the words themselves says.
+
     A member's own bubble carries what they attached the same way, off the note admission wrote at
     the foot of their words: `attach` turns each saved path into the file the bubble draws, so the
     portal shows the picture rather than the sentence naming where it landed.
@@ -2363,6 +2379,8 @@ def _rendered_messages(
         connects=connects or {},
         attached=attached or {},
         answers=answers,
+        spoken_at=spoken_at or {},
+        answered_at=answered_at or {},
     )
     return renderer.render(messages)
 
@@ -2422,9 +2440,9 @@ def _asks(
 class _TranscriptAids:
     """Everything the transcript renderer needs beside the messages themselves — subagent runs,
     speaker and question attribution, what the member answered, shared files, the applications each
-    turn created, where a member's own attachment is drawn from, and whether the conversation ran a
-    profile — gathered once so the live window and an earlier page render one message
-    identically."""
+    turn created, where a member's own attachment is drawn from, when each turn landed and settled,
+    and whether the conversation ran a profile — gathered once so the live window and an earlier
+    page render one message identically."""
 
     subagents: SubagentRuns
     turn_ids: frozenset[str]
@@ -2436,6 +2454,8 @@ class _TranscriptAids:
     apps: dict[str, list[dict[str, object]]]
     connects: dict[str, dict[str, object]]
     attached: dict[str, dict[str, dict[str, object]]]
+    spoken_at: dict[str, str]
+    answered_at: dict[str, str]
     run_conversation: bool
 
     def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]:
@@ -2452,6 +2472,8 @@ class _TranscriptAids:
             self.connects,
             self.attached,
             self.asks.stated,
+            self.spoken_at,
+            self.answered_at,
         )
         if self.run_conversation:
             for reply in rendered:
@@ -2513,6 +2535,10 @@ async def _transcript_aids(
             if turn.context is not None and turn.context.question is not None
         },
         asks=_asks(conversation_id, turns, admitted),
+        spoken_at={str(turn.id): turn.created_at.isoformat() for turn in turns},
+        answered_at={
+            str(turn.id): (turn.updated_at or turn.created_at).isoformat() for turn in turns
+        },
         files=files,
         apps=drawn,
         connects=await _connect_controls(ctx, conversation_id, turns, viewer),
@@ -2668,6 +2694,7 @@ async def _conversation_messages(
             prompt["speaker"] = detail.turn.context.sender
         if detail.turn.context is not None and detail.turn.context.question is not None:
             prompt["asked"] = detail.turn.context.question
+        prompt["at"] = detail.turn.created_at.isoformat()
         rendered.append(prompt)
     draining = detail.turn.id if detail.turn.terminal is None else None
     for arrival in await ctx.queued_arrivals(conversation_id, draining):

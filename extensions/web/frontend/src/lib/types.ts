@@ -149,10 +149,12 @@ export type SubagentRun = {
 };
 
 /** `arrival_id` names the inbound-queue row a message admitted mid-turn landed on, carried only while
- *  that turn has not taken the message up. */
+ *  that turn has not taken the message up. `at` is when the message landed: the member's words as
+ *  their turn was admitted, the reply as the turn that wrote it settled. */
 export type Message = {
   role: string;
   text: string;
+  at?: string;
   speaker?: string;
   asked?: string;
   arrival_id?: string;

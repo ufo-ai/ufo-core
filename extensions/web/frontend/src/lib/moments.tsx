@@ -22,8 +22,18 @@ export function day(iso: string | null): string | null {
   return MONTHS[Number(month) - 1] + " " + Number(date) + " " + year;
 }
 
+/** The whole stamp in the member's own zone, named with the zone it reads in: a member asks the
+ *  hover what time this was for them, and a stamp in UTC makes them do the arithmetic. */
 export function fullMoment(iso: string): string {
-  return (day(iso) ?? iso) + " at " + iso.slice(11, 16) + " UTC";
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  const local = new Date(at.getTime() - at.getTimezoneOffset() * MINUTE_MS).toISOString();
+  return (day(local) ?? local) + " at " + local.slice(11, 16) + " " + zone(at);
+}
+
+function zone(at: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZoneName: "short" }).formatToParts(at);
+  return parts.find((part) => part.type === "timeZoneName")?.value ?? "";
 }
 
 function relativeMoment(raw: string, now: Date): string {

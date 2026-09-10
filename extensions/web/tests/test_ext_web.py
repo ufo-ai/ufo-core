@@ -1427,6 +1427,7 @@ async def test_an_agent_origin_arrival_states_its_prompt_and_claims_no_wait_of_t
     assert reloaded.status_code == 200
     body = reloaded.json()
     assert datetime.fromisoformat(body.pop("turn_started_at")) == admitted
+    body["messages"] = _unstamped(body["messages"])
     assert body == {
         "messages": [
             {"role": "user", "text": "Review PR 1268."},
@@ -1506,6 +1507,7 @@ async def test_a_pending_subagent_result_is_no_member_bubble(
     assert reloaded.status_code == 200
     body = reloaded.json()
     assert datetime.fromisoformat(body.pop("turn_started_at")) == admitted
+    body["messages"] = _unstamped(body["messages"])
     assert body == {
         "messages": [
             {"role": "user", "text": "Review PR 1268."},
@@ -5308,6 +5310,49 @@ def test_a_members_bubble_carries_what_they_attached_rather_than_the_note() -> N
     assert rendered[1] == {"role": "assistant", "text": "a lamp"}
 
 
+def test_a_bubble_and_its_reply_each_carry_the_moment_they_landed() -> None:
+    """Nothing in a transcript's words says when they were said, so the projection carries the
+    moment: the member's bubble states when their turn was admitted and the reply states when the
+    turn that wrote it settled."""
+    turn_id = uuid4()
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {turn_id}\nsource: web\n</context>\nwhat time",
+            ),
+            Message(role="assistant", content="just gone nine"),
+        ),
+        turn_ids=frozenset({str(turn_id)}),
+        spoken_at={str(turn_id): "2026-09-09T09:00:00+00:00"},
+        answered_at={str(turn_id): "2026-09-09T09:00:12+00:00"},
+    )
+    assert rendered == [
+        {"role": "user", "text": "what time", "at": "2026-09-09T09:00:00+00:00"},
+        {"role": "assistant", "text": "just gone nine", "at": "2026-09-09T09:00:12+00:00"},
+    ]
+
+
+def test_a_transcript_without_turn_moments_carries_no_stamp() -> None:
+    """A projection given no turn moments — a run's own transcript, a page rendered without the turn
+    rows — draws the words it always drew and states no time it cannot stand behind."""
+    turn_id = uuid4()
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {turn_id}\nsource: web\n</context>\nwhat time",
+            ),
+            Message(role="assistant", content="just gone nine"),
+        ),
+        turn_ids=frozenset({str(turn_id)}),
+    )
+    assert rendered == [
+        {"role": "user", "text": "what time"},
+        {"role": "assistant", "text": "just gone nine"},
+    ]
+
+
 def test_a_message_folded_into_a_turn_draws_its_own_attachment() -> None:
     """A message a member sends while the turn still runs folds into it and shares its turn id, so
     the turn holds two member messages. Each draws the files its own note names, matched by name
@@ -9043,6 +9088,12 @@ async def _seed_listed_turn(
     return turn_id
 
 
+def _unstamped(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The transcript's messages without the moment each landed at, which the seeded turn takes off
+    the clock: an assertion about what the transcript says reads the words, not the time."""
+    return [{key: value for key, value in message.items() if key != "at"} for message in messages]
+
+
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_the_conversations_search_narrows_the_read_not_the_page(
@@ -9350,7 +9401,7 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert read.status_code == 200
-    assert read.json()["messages"] == [
+    assert _unstamped(read.json()["messages"]) == [
         {"role": "user", "text": "research"},
         {
             "role": "assistant",
@@ -9540,7 +9591,7 @@ async def test_earlier_names_only_records_the_transcript_reflects(
     compacted = await client.get(path, headers=headers)
     assert compacted.status_code == 200
     compacted_payload = compacted.json()
-    assert compacted_payload["messages"] == [
+    assert _unstamped(compacted_payload["messages"]) == [
         {"role": "user", "text": "third ask"},
         {"role": "assistant", "text": "third reply"},
     ]
@@ -9548,14 +9599,66 @@ async def test_earlier_names_only_records_the_transcript_reflects(
         path, headers=headers, params={"cursor": compacted_payload["earlier_cursor"]}
     )
     assert page.status_code == 200
-    assert page.json() == {
-        "messages": [
-            {"role": "user", "text": "first ask"},
-            {"role": "assistant", "text": "first reply"},
-            {"role": "user", "text": "second ask"},
-            {"role": "assistant", "text": "second reply"},
-        ]
-    }
+    assert _unstamped(page.json()["messages"]) == [
+        {"role": "user", "text": "first ask"},
+        {"role": "assistant", "text": "first reply"},
+        {"role": "user", "text": "second ask"},
+        {"role": "assistant", "text": "second reply"},
+    ]
+    assert "earlier_cursor" not in page.json()
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_transcript_states_when_each_message_landed(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The words hold no clock, so the projection reads one off the turn they belong to: the
+    member's bubble states when the turn was admitted and the reply states when it settled."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "m@example.com",
+        TerminalFrame(status="done", text="just gone nine"),
+    )
+    admitted = datetime(2026, 9, 9, 9, 0, tzinfo=UTC)
+    settled = datetime(2026, 9, 9, 9, 0, 12, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(created_at=admitted, updated_at=settled)
+        )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nwhat time",
+                ),
+                Message(role="assistant", content="just gone nine"),
+            ),
+        ),
+    )
+
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert read.status_code == 200
+    assert read.json()["messages"] == [
+        {"role": "user", "text": "what time", "at": admitted.isoformat()},
+        {"role": "assistant", "text": "just gone nine", "at": settled.isoformat()},
+    ]
 
 
 async def _acknowledge(
@@ -9701,7 +9804,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
 
     opened = await client.get(transcript_path, headers=admin_cookie)
     assert opened.status_code == 200
-    assert opened.json()["messages"] == [
+    assert _unstamped(opened.json()["messages"]) == [
         {"role": "user", "text": "private question"},
         {
             "role": "assistant",
@@ -10391,7 +10494,7 @@ async def test_an_agents_own_reply_is_never_read_as_a_payload(
     )
 
     assert read.status_code == 200
-    assert read.json()["messages"] == [
+    assert _unstamped(read.json()["messages"]) == [
         {"role": "user", "text": "Give me the json."},
         {"role": "assistant", "text": reply},
     ]
@@ -10614,7 +10717,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     )
 
     assert settled.status_code == 200
-    assert settled.json()["messages"] == [
+    assert _unstamped(settled.json()["messages"]) == [
         {"role": "user", "text": "draft the tweets", "speaker": "Sam Frost (peer@example.com)"},
         {"role": "assistant", "text": "Drafted."},
         {"role": "user", "text": "thanks"},
@@ -10666,7 +10769,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     )
 
     assert mid.status_code == 200
-    tail = mid.json()["messages"][-2:]
+    tail = _unstamped(mid.json()["messages"][-2:])
     assert tail[0] == {
         "role": "user",
         "text": "now the launch email",
@@ -10718,7 +10821,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     )
 
     assert written.status_code == 200
-    settled = written.json()["messages"][-3:]
+    settled = _unstamped(written.json()["messages"][-3:])
     assert settled[0] == {
         "role": "user",
         "text": "now the launch email",

@@ -1327,7 +1327,7 @@ test("the lane's History lists the app's conversations, and one press opens it i
   const other = screen.getByRole("button", { name: /^Older thread Slack \d+(mo|y)$/ });
   const line = within(row).getByText("Newest thread");
   const stamp = row.querySelector("time")!;
-  expect(stamp.getAttribute("title")).toBe("Jul 30 2026 at 10:00 UTC");
+  expect(stamp.getAttribute("title")).toBe("Jul 30 2026 at 10:00 GMT+5:30");
   expect(line.contains(stamp)).toBe(false);
   expect(line.compareDocumentPosition(stamp) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 

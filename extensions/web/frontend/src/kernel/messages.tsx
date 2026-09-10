@@ -56,7 +56,7 @@ import { ConsentLink } from "@/lib/consent";
 import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
 import { modelLabel, modelMark } from "@/lib/models";
-import { spanMoment } from "@/lib/moments";
+import { Moment, spanMoment } from "@/lib/moments";
 import { agentHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
@@ -265,6 +265,7 @@ export function MessageLog({
           {message.connect ? <ConnectLink connect={message.connect} /> : null}
           {message.meta ? <Meta model={message.model}>{message.meta}</Meta> : null}
           {message.question && question ? question(message.question) : null}
+          <Stamp at={message.at} />
         </Speech>
       </MessageScrollerItem>
     );
@@ -332,6 +333,23 @@ function Speech({ mine, children }: { mine: boolean; children: ReactNode }) {
     <Message align={mine ? "end" : "start"}>
       <MessageContent>{children}</MessageContent>
     </Message>
+  );
+}
+
+/** When a message landed, under the words it belongs to: the smallest chrome the surface draws, so
+ *  the transcript still reads as words rather than as a log. */
+function Stamp({ at }: { at?: string }) {
+  if (!at) return null;
+  return (
+    <div
+      data-slot="message-stamp"
+      className={cn(
+        "px-lg text-small tabular-nums text-ink-soft",
+        "group-has-data-[variant=ghost]/message:px-0",
+      )}
+    >
+      <Moment at={at} />
+    </div>
   );
 }
 

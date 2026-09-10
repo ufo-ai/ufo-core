@@ -312,8 +312,10 @@ test("a running span reads as minutes and seconds, and drops its seconds past th
   expect(spanMoment(-5_000)).toBe("0s");
 });
 
-test("the whole stamp behind a friendly one names the day and the time it fell on", () => {
-  expect(fullMoment("2026-08-01T09:05:00Z")).toBe("Aug 1 2026 at 09:05 UTC");
+test("the whole stamp behind a friendly one reads in the member's own zone", () => {
+  expect(fullMoment("2026-08-01T09:05:00Z")).toBe("Aug 1 2026 at 14:35 GMT+5:30");
+  expect(fullMoment("2026-08-01T20:05:00Z")).toBe("Aug 2 2026 at 01:35 GMT+5:30");
+  expect(fullMoment("not a moment")).toBe("not a moment");
 });
 
 test("an index carries the name and the two facts a prose-less kind leads with", async () => {

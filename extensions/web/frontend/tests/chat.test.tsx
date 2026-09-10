@@ -2564,6 +2564,26 @@ test("a conversation that never compacted asks for no pages", async () => {
   expect(calls.filter((url) => url.includes("/transcript?cursor="))).toEqual([]);
 });
 
+test("a message states when it landed, whole in the member's own zone under the pointer", () => {
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "user", text: "what time", at: "2026-08-01T09:05:00Z" },
+          { role: "assistant", text: "just gone nine" },
+        ]}
+      />
+    </TranscriptScroll>,
+  );
+
+  const stamped = screen.getByText("what time").closest("[data-slot=message-scroller-item]");
+  const stamp = stamped?.querySelector("[data-slot=message-stamp] time");
+  expect(stamp?.getAttribute("datetime")).toBe("2026-08-01T09:05:00Z");
+  expect(stamp?.getAttribute("title")).toBe("Aug 1 2026 at 14:35 GMT+5:30");
+  const bare = screen.getByText("just gone nine").closest("[data-slot=message-scroller-item]");
+  expect(bare?.querySelector("[data-slot=message-stamp]")).toBeNull();
+});
+
 /** jsdom lays nothing out, so a page landing's geometry is stated by hand: a pane showing three hundred
  *  pixels, every row a hundred tall at its index. */
 test("loading a page above holds the line being read where it was", async () => {
