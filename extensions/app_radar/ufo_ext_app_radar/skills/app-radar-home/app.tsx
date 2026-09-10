@@ -4,6 +4,7 @@
 import {
   ARTIFACT_TEXT_BYTES,
   AgentIcon,
+  COLUMN,
   FileSheet,
   Header,
   Markdown,
@@ -476,7 +477,9 @@ function Radar({
     <>
       {band}
       <Section>
-        <Feed place={place} onPlace={onPlace} />
+        <div className={COLUMN}>
+          <Feed place={place} onPlace={onPlace} />
+        </div>
       </Section>
       {opens.slice(-1).map((id) =>
         id === TOUR_SLOT ? (
