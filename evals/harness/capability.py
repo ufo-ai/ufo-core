@@ -29,6 +29,7 @@ from evals.harness.harness import (
     infra_owned_fault,
     is_transient_fault,
     provider_owned_error,
+    provider_owned_fault,
 )
 from evals.harness.judge import (
     JUDGE_REVISION,
@@ -669,14 +670,30 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
     return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
 
 
+def expired_after_model_output(
+    result: TargetResult, current_output: CapabilityOutput | None = None
+) -> bool:
+    """Whether the harness's wait expired on a turn the evaluated model was already answering. A
+    turn that produced prose or one of its own tool calls spent the deadline itself, so its expiry
+    is incomplete model behavior and stays scored — excluding it would let a model loop on tools
+    until the deadline and leave the fixed cohort as an infra exclusion. Every suite that archives
+    an expired wait asks this first, so one answer covers the cohort."""
+    output = current_output or result.output
+    return result.failure_reason == WAIT_EXPIRED and bool(
+        output.response or output.own_calls or (current_output is not None and output.calls)
+    )
+
+
 def _unclean_verdict(
     result: TargetResult, current_output: CapabilityOutput | None = None
 ) -> CapabilityVerdict:
     """The verdict for a turn that never reached a grader. A provider fault, rejected eval
-    credential, or harness wait with no model output is excluded rather than scored. A wait that
-    expires after a model response or tool call is model behavior, as is every other unclean end.
-    Exclusion reaches only turns that never put the capability question to the model, so a graded
-    answer, refusal, failed rubric, and incomplete agent loop remain scored."""
+    credential, or wait that expired with no model output is excluded rather than scored. A wait
+    that expires after a model response or tool call is model behavior, as is every other unclean
+    end. Exclusion reaches only turns that never put the capability question to the model, so a
+    graded answer, refusal, failed rubric, and incomplete agent loop remain scored. The owner the
+    reason names and the `provider_fault` the record carries come out of that one exclusion, so the
+    nightly cohort gate reads the line this verdict drew."""
     status = result.trajectory.status if result.trajectory is not None else None
     provider_configuration = result.error_class == "APIError" and bool(
         infra_error((result.error_message,))
@@ -686,33 +703,33 @@ def _unclean_verdict(
         and "/tmp/ufo-local/bin/ufo" in result.error_message
         and "cannot execute binary file" in result.error_message.casefold()
     )
-    output = current_output or result.output
-    expired_after_model_output = result.failure_reason == WAIT_EXPIRED and bool(
-        output.response or output.own_calls or (current_output is not None and output.calls)
-    )
     if (
         not provider_configuration
         and not local_client_execution
         and (
-            expired_after_model_output
+            expired_after_model_output(result, current_output)
             or not infra_owned_fault(result.error_class, result.failure_reason, status)
         )
     ):
         return CapabilityVerdict(False, result.failure_reason)
-    transient = is_transient_fault(result.error_class)
-    if transient:
+    provider = provider_owned_fault(
+        result.error_class, result.failure_reason, result.expiry_status, result.work_started
+    )
+    if is_transient_fault(result.error_class):
         owner = "the provider owns this fault"
     elif result.error_class == "CredentialValueInvalid" or provider_configuration:
         owner = "the eval configuration owns this fault"
     elif local_client_execution:
         owner = "the eval runner owns this fault"
+    elif provider:
+        owner = "the wait expired on a turn the provider was holding"
     else:
-        owner = "the harness's own wait expired on a working turn"
+        owner = "the wait expired on a turn we still held"
     return CapabilityVerdict(
         False,
         f"{result.failure_reason}; {owner}",
         excluded=True,
-        provider_fault=transient,
+        provider_fault=provider,
     )
 
 

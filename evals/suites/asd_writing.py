@@ -1362,6 +1362,7 @@ class AsdWritingSuite:
                 }
             )
         scored = len(written) - excluded
+        dropped = scored == 0
         note = f" ({excluded} infra-excluded)" if excluded else ""
         told = f": {stated[0]}" if stated else ""
         return EvalCaseResult(
@@ -1376,7 +1377,8 @@ class AsdWritingSuite:
                 "attempts": attempts,
                 "excludedSamples": excluded,
             },
-            excluded=scored == 0,
+            excluded=dropped,
+            provider_fault=dropped,
         )
 
 

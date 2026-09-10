@@ -23,13 +23,13 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from evals.harness.capability import WorkspaceFile, source_digest
+from evals.harness.capability import WorkspaceFile, expired_after_model_output, source_digest
 from evals.harness.harness import (
     EvalCaseResult,
     Json,
     JsonObject,
     infra_owned_fault,
-    is_transient_fault,
+    provider_owned_fault,
 )
 from evals.harness.target import CapabilityTarget
 from ufo.db import workspace_tx
@@ -196,6 +196,9 @@ class ArcRun:
             )
             if not opening.clean:
                 status = opening.trajectory.status if opening.trajectory is not None else None
+                excluded = not expired_after_model_output(opening) and infra_owned_fault(
+                    opening.error_class, opening.failure_reason, status
+                )
                 return EvalCaseResult(
                     name=self.case.name,
                     passed=False,
@@ -205,8 +208,14 @@ class ArcRun:
                         "openingStatus": status or NO_TRAJECTORY,
                         "openingErrorClass": opening.error_class or "",
                     },
-                    excluded=infra_owned_fault(opening.error_class, opening.failure_reason, status),
-                    provider_fault=is_transient_fault(opening.error_class),
+                    excluded=excluded,
+                    provider_fault=excluded
+                    and provider_owned_fault(
+                        opening.error_class,
+                        opening.failure_reason,
+                        opening.expiry_status,
+                        opening.work_started,
+                    ),
                 )
             await self._quiesce(conversation_id)
         finally:

@@ -183,11 +183,12 @@ def render(root: Path, smoke: bool, memory_ingestion: bool = False) -> str:
 def require_comparable(root: Path, smoke: bool, memory_ingestion: bool = False) -> None:
     """Require one complete fixed case cohort before the sweep becomes a trend point.
 
-    An exclusion the record attributes to the provider — a timeout, an overload, a 429 — is the
-    night's weather, not cohort drift: it lands on whichever case the provider dropped, so listing
-    it ahead of time is impossible and refusing it costs the sweep its trend point over a fault the
-    harness already decided not to score. `render` names those cases in the summary instead. Every
-    other exclusion still has to be one this file lists.
+    An exclusion the record attributes to the provider — a timeout, an overload, a 429, a wait that
+    expired on a turn the provider held — is the night's weather, not cohort drift: it lands on
+    whichever case the provider dropped, so listing it ahead of time is impossible and refusing it
+    costs the sweep its trend point over a fault the harness already decided not to score. `render`
+    names those cases in the summary instead. Every other exclusion still has to be one this file
+    lists, a turn that never left our own queue included.
     """
     planned_runs = _planned_runs(smoke, memory_ingestion)
     planned = tuple(suite for _, suite, _ in planned_runs)

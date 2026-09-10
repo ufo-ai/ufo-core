@@ -1539,7 +1539,10 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
     """A case whose model round outlives the eval driver's wait must not leak a running turn into
     the next case: settle's deadline commits the cancelled terminal and durably cancels the DBOS
     workflow before returning, the harness records the case as an infrastructure failure, and the
-    following case runs clean on a turn whose predecessor is already terminal."""
+    following case runs clean on a turn whose predecessor is already terminal. The record also
+    carries what the harness archives that failure under: the status the cancel wrote over, and
+    that the turn had reached the engine — a turn cancelled before its first step holds `running`
+    from the dispatch claim alone and its expiry belongs to the rig."""
     _, _, blob = dbos_runtime
     STREAM_GATE.reset()
     await _bootstrap()
@@ -1571,6 +1574,7 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
         agent_id=agent_id,
         conversations=overdue_driver,
         outcome=overdue_driver,
+        turn_steps=overdue_driver,
     )
 
     with ws(workspace_id):
@@ -1584,6 +1588,8 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
     assert overdue.trajectory is not None
     assert overdue.trajectory.turn_id is not None
     assert overdue.trajectory.status == "cancelled"
+    assert overdue.expiry_status == "running"
+    assert overdue.work_started
     status, conversation_id = await _turn_row(str(overdue.trajectory.turn_id))
     assert status == "cancelled"
     assert await _sandbox_handle(conversation_id) is None
@@ -1649,6 +1655,51 @@ async def test_eval_reads_a_setup_faults_class_off_the_turn_row(
     assert result.trajectory is not None
     assert result.trajectory.status == "failed"
     assert "NotRegisteredError" in result.trajectory.error
+
+
+async def test_a_cancelled_turn_still_names_the_status_the_wait_expired_on(
+    db: None, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
+) -> None:
+    """`cancel_one_turn` commits `cancelled` over `queued`, `parked` and `running` alike, so once
+    the cancel lands the row cannot say who held the turn when the eval driver's wait expired. The
+    driver reads that status first and keeps it: a turn still behind our own workers reads back
+    `queued`, and the nightly cohort gate needs that to refuse the exclusion as ours instead of
+    archiving it as provider weather."""
+    _, _, blob = dbos_runtime
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seed = await _bootstrap()
+    driver = WorkspaceDriver(
+        seed.workspace_id,
+        seed.agent_id,
+        "be brief",
+        blob,
+        runtime.dbos,
+        runtime.sandboxes.workspace_root,
+    )
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=seed.workspace_id,
+                conversation_id=seed.conversation_id,
+                agent_id=seed.agent_id,
+                seq=1,
+                status="queued",
+                inbound="slow",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    with ws(seed.workspace_id):
+        assert await driver.cancel(turn_id)
+
+    status, _ = await _turn_row(str(turn_id))
+    assert status == "cancelled"
+    assert driver.cancelled_from(turn_id) == "queued"
+    assert driver.cancelled_from(uuid4()) is None
 
 
 async def test_eval_timing_reads_the_engines_own_step_record_for_every_turn(

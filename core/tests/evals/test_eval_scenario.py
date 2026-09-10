@@ -43,6 +43,7 @@ from evals.harness.scenario import (
     ScenarioUser,
     UserSimulator,
     _infra_owned_result,
+    _provider_owned_result,
     run_scenario_case,
 )
 from evals.harness.scorers import exact_scorer
@@ -1174,6 +1175,40 @@ def test_scenario_wait_expiry_after_an_own_tool_call_is_scored() -> None:
 
     assert _infra_owned_result(untouched)
     assert not _infra_owned_result(looping)
+
+
+def test_a_trial_the_wait_cancelled_names_who_held_the_turn() -> None:
+    """An excluded trial that names no owner reaches the nightly cohort gate as drift and reds the
+    sweep. The harness cancels the overdue turn before it reads the status back, so every expired
+    trial records `cancelled`: only the status the wait expired on, and the turn's own first step
+    beside it, say whether the provider was answering or the turn was still behind our own workers
+    or inside the rig's own startup, which holds `running` from the dispatch claim onwards."""
+    trajectory = EvalTrajectory(
+        conversation_id=uuid4(),
+        turn_id=uuid4(),
+        status="cancelled",
+        messages=(),
+    )
+    expired = TargetResult(
+        CapabilityOutput("", ()),
+        clean=False,
+        failure_reason=WAIT_EXPIRED,
+        trajectory=trajectory,
+    )
+    answering = replace(expired, expiry_status="running", work_started=True)
+    booting = replace(expired, expiry_status="running")
+    queued = replace(expired, expiry_status="queued", work_started=True)
+    credential = replace(answering, error_class="CredentialValueInvalid")
+
+    assert _provider_owned_result(answering)
+    assert _infra_owned_result(booting)
+    assert not _provider_owned_result(booting)
+    assert _infra_owned_result(queued)
+    assert not _provider_owned_result(queued)
+    assert _infra_owned_result(expired)
+    assert not _provider_owned_result(expired)
+    assert _infra_owned_result(credential)
+    assert not _provider_owned_result(credential)
 
 
 @dataclass

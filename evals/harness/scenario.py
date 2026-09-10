@@ -14,6 +14,7 @@ from evals.harness.capability import (
     CapabilityOutput,
     CapabilityVerdict,
     EvalSeed,
+    expired_after_model_output,
     grading_statement,
     judge_unavailable_verdict,
     linked_artifacts,
@@ -22,12 +23,12 @@ from evals.harness.capability import (
 )
 from evals.harness.handoff import SubagentHandoff
 from evals.harness.harness import (
-    WAIT_EXPIRED,
     EvalCaseResult,
     Json,
     JsonObject,
     infra_owned_fault,
     is_transient_fault,
+    provider_owned_fault,
 )
 from evals.harness.judge import JUDGE_REVISION, CriterionVerdict, JudgeLeg, rubric_pass
 from evals.harness.target import CapabilityTarget, TargetResult
@@ -248,13 +249,18 @@ def _infra_owned_result(result: TargetResult) -> bool:
     and disappear from the fixed cohort as an infra exclusion. Once the turn has produced prose or
     one of its own tool calls, expiry is scored as incomplete model behavior.
     """
-    expired_after_model_output = result.failure_reason == WAIT_EXPIRED and bool(
-        result.output.response or result.output.own_calls
-    )
-    return not expired_after_model_output and infra_owned_fault(
+    return not expired_after_model_output(result) and infra_owned_fault(
         result.error_class,
         result.failure_reason,
         result.trajectory.status if result.trajectory is not None else None,
+    )
+
+
+def _provider_owned_result(result: TargetResult) -> bool:
+    """Who owns the fault `_infra_owned_result` excluded the trial on, read off that same
+    exclusion. A trial excluded without an owner reaches the nightly cohort gate as drift."""
+    return _infra_owned_result(result) and provider_owned_fault(
+        result.error_class, result.failure_reason, result.expiry_status, result.work_started
     )
 
 
@@ -405,7 +411,7 @@ class _ScenarioRun:
                     tokens,
                     cost_micro_usd,
                     infra=_infra_owned_result(result),
-                    provider_fault=is_transient_fault(result.error_class),
+                    provider_fault=_provider_owned_result(result),
                 )
         if last is None:
             return _Trial(
@@ -433,7 +439,7 @@ class _ScenarioRun:
                     tokens,
                     cost_micro_usd,
                     infra=infra_owned_fault(type(error).__name__, reason, None),
-                    provider_fault=is_transient_fault(type(error).__name__),
+                    provider_fault=provider_owned_fault(type(error).__name__, reason, None, False),
                 )
             followups = returned if isinstance(returned, tuple) else (returned,)
             for index, followup in enumerate(followups):
@@ -470,7 +476,7 @@ class _ScenarioRun:
                         tokens,
                         cost_micro_usd,
                         infra=_infra_owned_result(followup),
-                        provider_fault=is_transient_fault(followup.error_class),
+                        provider_fault=_provider_owned_result(followup),
                         followups=followups[: index + 1],
                     )
             last = await self._capture_artifacts(last, followups[-1])

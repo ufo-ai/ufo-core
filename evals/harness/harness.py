@@ -11,7 +11,7 @@ from json import dumps
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, TurnStatus
+from ufo.schema.records import CANCELLED, NON_TERMINAL_STATUSES, RUNNING, TurnStatus
 
 type Json = str | int | float | bool | None | list[Json] | dict[str, Json]
 type JsonObject = dict[str, Json]
@@ -33,10 +33,11 @@ class EvalCaseResult(BaseModel):
     evidence: JsonObject
     excluded: bool = False
     provider_fault: bool = False
-    """Whether this case excluded on a provider-owned transient — a timeout, an overload, a 429 —
-    rather than on the sweep's own shape. A transient lands on whichever case the provider happened
-    to drop, so no list can name it ahead of time: the nightly cohort gate reads this flag to tell
-    a night of provider weather from a suite that quietly stopped scoring a case."""
+    """Whether this case excluded on a fault the provider owns — a timeout, an overload, a 429, a
+    wait that expired on a turn the provider held — rather than on the sweep's own shape. Such a
+    fault lands on whichever case the provider happened to drop, so no list can name it ahead of
+    time: the nightly cohort gate reads this flag to tell a night of provider weather from a suite
+    that quietly stopped scoring a case."""
     tier: int | None = None
 
 
@@ -322,6 +323,16 @@ harness's own stopwatch against the model (measured on three cases of the 2026-0
 each at 300.0s wall with no transcript). Any other failure reason on a cancelled turn is
 untouched."""
 
+PROVIDER_WAIT_EXPIRY_STATUSES = frozenset({RUNNING})
+"""The one status an expired wait can be the provider's on, read off what the turn held when the
+deadline fired. Only `running` can have had the turn with the model. A turn still `queued` never
+reached a model — it sat behind our own worker backlog — and a `parked` one waits on us, so an
+expiry there is the sweep's own shape and stays the cohort drift the nightly gate refuses.
+`cancelled` is no member of this set: the harness writes it over every overdue turn through
+`cancel_one_turn`, queued ones included, so that terminal names the harness rather than whoever
+held the turn. The status alone does not settle it — the row turns `running` at the dispatch claim
+— so `provider_owned_fault` asks for the turn's own first step beside it."""
+
 
 def infra_owned_fault(
     error_class: str | None, failure_reason: str, status: TurnStatus | None
@@ -334,3 +345,37 @@ def infra_owned_fault(
     if is_transient_fault(error_class) or error_class in CONFIGURATION_ERROR_CLASSES:
         return True
     return failure_reason == WAIT_EXPIRED and status in WAIT_EXPIRY_STATUSES
+
+
+def provider_owned_fault(
+    error_class: str | None,
+    failure_reason: str,
+    expiry_status: TurnStatus | None,
+    work_started: bool,
+) -> bool:
+    """Who owns the fault an exclusion rests on, read off that same exclusion so the two cannot
+    disagree. A transient is the provider's, and so is a wait that expired on a turn the provider
+    held — `PROVIDER_WAIT_EXPIRY_STATUSES` names that one. Rejected eval credentials, a turn that
+    never left our queue, and a parked turn are ours, and stay the cohort drift the nightly gate
+    refuses. Weather lands on whichever case it lands on, so no list names it ahead of the night,
+    and a gate that refuses it costs the sweep its trend point over a case the harness already
+    declined to score.
+
+    `expiry_status` is `TargetResult.expiry_status`: the status the turn held when the wait expired,
+    read before the harness's own cancel terminalized it. Never the status the record carries
+    afterwards — `cancel_one_turn` commits `cancelled` over `queued`, `parked` and `running` alike,
+    so once the cancel lands a turn that never left our queue reads exactly like one the provider
+    was holding. An expiry whose status is unknown is ours.
+
+    `work_started` is `TargetResult.work_started`: whether the turn had recorded a step of its own.
+    A turn turns `running` at the dispatch claim, before the engine steps, so a `running` turn with
+    no step is still inside the rig's own startup — the claim, the sandbox boot, the preloaded
+    mounts, the latency `mounts.START_DEADLINE_SECONDS` bounds separately — and no model ever saw
+    it. That expiry is ours, exactly as a queued one is."""
+    if not infra_owned_fault(error_class, failure_reason, expiry_status):
+        return False
+    if error_class in CONFIGURATION_ERROR_CLASSES:
+        return False
+    return is_transient_fault(error_class) or (
+        work_started and expiry_status in PROVIDER_WAIT_EXPIRY_STATUSES
+    )

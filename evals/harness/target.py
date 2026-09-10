@@ -113,6 +113,16 @@ class TargetResult:
     error_class: str | None = None
     trajectory: EvalTrajectory | None = None
     error_message: str = ""
+    expiry_status: TurnStatus | None = None
+    """The status the turn held when the harness's wait expired on it, read before the cancel that
+    expiry fired. `trajectory.status` is that cancel's own terminal — `cancelled` for a turn the
+    provider was holding and for one still queued behind our workers alike — so this is the only
+    field that names who spent the deadline."""
+    work_started: bool = False
+    """Whether the turn had recorded a durable engine step of its own when the wait expired. The
+    row turns `running` at the dispatch claim, so the status alone cannot separate a turn the
+    provider is answering from one still inside the rig's startup; the engine reaches its first
+    step only after that claim, the sandbox boot and the preloaded mounts."""
 
 
 @dataclass(frozen=True)
@@ -279,6 +289,11 @@ class TurnOutcome(Protocol):
     async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None: ...
 
     async def cancel(self, turn_id: UUID) -> bool: ...
+
+    def cancelled_from(self, turn_id: UUID) -> TurnStatus | None:
+        """The status this outcome's own cancel found the turn in, None for a turn it never
+        cancelled: what the wait expired on, before the cancel wrote its terminal over it."""
+        ...
 
 
 class TurnLogReader(Protocol):
@@ -952,6 +967,8 @@ class InProcessTarget:
                 error_class=error_class or None,
                 trajectory=snapshot,
                 error_message=error_message,
+                expiry_status=self.outcome.cancelled_from(turn_id),
+                work_started=any(step.started_at_epoch_ms is not None for step in steps),
             ),
             descendant_ids,
         )

@@ -206,9 +206,24 @@ async def test_a_probe_for_a_skill_that_was_never_saved_is_excluded() -> None:
     suite = SkillAuthoringSuite(name="test", cases=(CASE,), digest="sha256:test")
 
     for probe in (LOADS, DECLINES):
-        result = await suite._probe(CASE, probe, cast("Any", None), frozenset())
+        result = await suite._probe(CASE, probe, cast("Any", None), frozenset(), frozenset())
         assert result.excluded, probe.name
         assert not result.passed, probe.name
+
+
+async def test_a_probe_lost_to_provider_weather_archives_the_provider_as_its_owner() -> None:
+    """The authoring turn the probe rests on died on a transient, so the probe measured the
+    weather. An excluded case that names no owner reaches the nightly cohort gate as drift: five
+    `skill_gtm` and `skill_authoring` trios did that to the 2026-09-06 run."""
+    suite = SkillAuthoringSuite(name="test", cases=(CASE,), digest="sha256:test")
+
+    weathered = await suite._probe(
+        CASE, LOADS, cast("Any", None), frozenset(), frozenset({CASE.name})
+    )
+    unwritten = await suite._probe(CASE, LOADS, cast("Any", None), frozenset(), frozenset())
+
+    assert weathered.provider_fault
+    assert not unwritten.provider_fault
 
 
 def test_an_instruction_carried_by_a_bundled_file_counts() -> None:
@@ -222,7 +237,7 @@ def test_an_instruction_carried_by_a_bundled_file_counts() -> None:
         },
     )
 
-    results = suite._instruction_results(CASE, skill)
+    results = suite._instruction_results(CASE, skill, False)
 
     assert [result.name for result in results] == ["escalation-triage:says-escalations-channel"]
     assert results[0].passed
@@ -232,7 +247,9 @@ def test_a_rule_stated_only_in_the_description_does_not_count() -> None:
     suite = SkillAuthoringSuite(name="test", cases=(CASE,), digest="sha256:test")
 
     results = suite._instruction_results(
-        CASE, _skill(description="Load when a member posts to #escalations.", body="Rate it.")
+        CASE,
+        _skill(description="Load when a member posts to #escalations.", body="Rate it."),
+        False,
     )
 
     assert not results[0].passed
@@ -241,10 +258,23 @@ def test_a_rule_stated_only_in_the_description_does_not_count() -> None:
 def test_instructions_are_excluded_when_no_skill_was_saved() -> None:
     suite = SkillAuthoringSuite(name="test", cases=(CASE,), digest="sha256:test")
 
-    results = suite._instruction_results(CASE, None)
+    results = suite._instruction_results(CASE, None, False)
 
     assert results[0].excluded
     assert not results[0].passed
+    assert not results[0].provider_fault
+
+
+def test_instructions_lost_to_provider_weather_carry_that_owner() -> None:
+    """The rules of a skill the provider never let the agent save are weather, not a suite that
+    quietly stopped scoring them, and the nightly cohort gate reads the difference off the
+    record."""
+    suite = SkillAuthoringSuite(name="test", cases=(CASE,), digest="sha256:test")
+
+    results = suite._instruction_results(CASE, None, True)
+
+    assert results[0].excluded
+    assert results[0].provider_fault
 
 
 @pytest.mark.parametrize(("name", "cases"), TRIOS)

@@ -26,7 +26,15 @@ from uuid import UUID
 
 from ufo_ext_skill_create.store import UserSkillStore
 
-from evals.harness.harness import EvalCaseResult, EvalReport, JsonObject, digest_payload
+from evals.harness.capability import expired_after_model_output
+from evals.harness.harness import (
+    EvalCaseResult,
+    EvalReport,
+    JsonObject,
+    digest_payload,
+    infra_owned_fault,
+    provider_owned_fault,
+)
 from evals.harness.mounts import (
     START_DEADLINE_SECONDS,
     TERMINAL_STATUSES,
@@ -257,6 +265,10 @@ class Authored:
 
     skill: RuntimeSkill | None
     results: tuple[EvalCaseResult, ...]
+    provider_fault: bool = False
+    """Whether the authoring turn ended on a fault the provider owns. The probes this trio runs
+    later read it, so a skill that never reached the store because the provider dropped the turn
+    excludes its probes under that owner instead of as cohort drift."""
 
 
 def skill_authoring_task(name: str, cases: tuple[SkillAuthorCase, ...]) -> EvalTask:
@@ -308,10 +320,15 @@ class SkillAuthoringSuite:
                 for case, outcome in zip(self.cases, authored, strict=True)
                 if outcome.skill is not None
             )
+            weather = frozenset(
+                case.name
+                for case, outcome in zip(self.cases, authored, strict=True)
+                if outcome.provider_fault
+            )
             probes = await gather_cases(
                 slots,
                 tuple(
-                    partial(self._probe, case, probe, run_target, saved)
+                    partial(self._probe, case, probe, run_target, saved, weather)
                     for case in self.cases
                     for probe in case.probes
                 ),
@@ -340,14 +357,31 @@ class SkillAuthoringSuite:
         result = await target.step(conversation_id, case.request, f"{case.name}:{conversation_id}")
         skill, parse_error = await self._saved(case, target)
         passed, reason = authored_verdict(case, skill)
+        status = result.trajectory.status if result.trajectory is not None else None
+        unwritten = skill is None and not result.clean
+        excluded = (
+            unwritten
+            and not expired_after_model_output(result)
+            and infra_owned_fault(result.error_class, result.failure_reason, status)
+        )
+        provider = excluded and provider_owned_fault(
+            result.error_class, result.failure_reason, result.expiry_status, result.work_started
+        )
         if not result.clean and not passed:
             reason = f"{reason} (turn {result.failure_reason})"
         evidence = self._authoring_evidence(case, skill, parse_error, conversation_id, result)
         results = (
-            EvalCaseResult(name=case.saved_case, passed=passed, reason=reason, evidence=evidence),
-            *self._instruction_results(case, skill),
+            EvalCaseResult(
+                name=case.saved_case,
+                passed=passed,
+                reason=reason,
+                evidence=evidence,
+                excluded=excluded,
+                provider_fault=provider,
+            ),
+            *self._instruction_results(case, skill, provider),
         )
-        return Authored(skill=skill, results=results)
+        return Authored(skill=skill, results=results, provider_fault=provider)
 
     async def _saved(
         self, case: SkillAuthorCase, target: SkillAuthoringRunTarget
@@ -403,14 +437,15 @@ class SkillAuthoringSuite:
         return evidence
 
     def _instruction_results(
-        self, case: SkillAuthorCase, skill: RuntimeSkill | None
+        self, case: SkillAuthorCase, skill: RuntimeSkill | None, provider_fault: bool
     ) -> tuple[EvalCaseResult, ...]:
         """One case per rule the member stated, read over the skill's instructions and every file
         it bundled, so partial credit names which rule the agent dropped. The frontmatter is not
         part of that text: a description naming `#exec-brief` is a routing trigger, not an
         instruction to post there, and a rule an agent stated only in its description is a rule the
         skill does not carry. A skill that was never saved carries its failure on the authoring
-        case alone; its rules are excluded."""
+        case alone; its rules are excluded, under the owner of the fault that stopped the authoring
+        turn."""
         text = (
             ""
             if skill is None
@@ -436,6 +471,7 @@ class SkillAuthoringSuite:
                         reason=f"no skill named {case.name!r} was saved to read",
                         evidence=evidence,
                         excluded=True,
+                        provider_fault=provider_fault,
                     )
                 )
                 continue
@@ -456,6 +492,7 @@ class SkillAuthoringSuite:
         probe: LoadProbe,
         target: SkillAuthoringRunTarget,
         saved: frozenset[str],
+        weather: frozenset[str],
     ) -> EvalCaseResult:
         """One later query, watched against every skill this suite saved: the case's own is what a
         loading probe must mount, and the rest are the neighbours it must not be confused with. A
@@ -481,6 +518,7 @@ class SkillAuthoringSuite:
                 reason=f"skill {case.name!r} was never saved to route on",
                 evidence=evidence,
                 excluded=True,
+                provider_fault=case.name in weather,
             )
         if not watch:
             return EvalCaseResult(

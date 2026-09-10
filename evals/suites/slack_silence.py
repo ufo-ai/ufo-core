@@ -773,6 +773,7 @@ class SlackSilenceSuite:
                 reason=f"the decision raised: {fault}: {error}",
                 evidence=self._evidence(case, None, await self._spend_since(booked)),
                 excluded=is_transient_fault(fault),
+                provider_fault=is_transient_fault(fault),
             )
         spend = await self._spend_since(booked)
         passed = decision == case.expected

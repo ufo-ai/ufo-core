@@ -75,6 +75,7 @@ from ufo.schema.records import (
     ToolIntent,
     TurnContext,
     TurnRuntimeConfig,
+    TurnStatus,
     Usage,
 )
 from ufo.sdk.models import (
@@ -163,6 +164,11 @@ class RemoteTurnTimeout(Exception):
 @dataclass
 class _StoredEnvironment:
     digest: str | None = None
+
+
+@dataclass
+class _CancelledFrom:
+    statuses: dict[UUID, TurnStatus] = field(default_factory=dict)
 
 
 async def _resolved_environment_files(
@@ -665,6 +671,7 @@ class WorkspaceDriver:
     remote: RemoteClient | None = None
     environment_document: Path | None = None
     _environment: _StoredEnvironment = field(default_factory=_StoredEnvironment, init=False)
+    _cancelled: _CancelledFrom = field(default_factory=_CancelledFrom, init=False)
 
     async def open(
         self,
@@ -1240,8 +1247,28 @@ class WorkspaceDriver:
         subagents a delegated turn spawned are cancelled by the serve process's cancel reconciler,
         which sweeps any turn left live under a cancelled ancestor; the primitive's
         cancel-before-commit ordering keeps a crash mid-cancel from orphaning this root, which the
-        reconciler never re-examines."""
-        return await cancel_one_turn(self.dbos, turn_id) is not None
+        reconciler never re-examines.
+
+        The status the turn holds is read first and kept for `cancelled_from`, because the cancel
+        commits `cancelled` over `queued`, `parked` and `running` alike and the row can no longer
+        say which one this turn was. A turn claimed inside that read-then-cancel window reads back
+        as queued, which archives it as ours — the direction the nightly cohort gate refuses."""
+        async with workspace_tx() as connection:
+            held = (
+                await connection.execute(
+                    sa.select(tables.turn.c.status).where(tables.turn.c.id == turn_id)
+                )
+            ).scalar_one_or_none()
+        if await cancel_one_turn(self.dbos, turn_id) is None:
+            return False
+        self._cancelled.statuses[turn_id] = held
+        return True
+
+    def cancelled_from(self, turn_id: UUID) -> TurnStatus | None:
+        """The status this driver's own cancel found the turn in, None for a turn it never
+        cancelled. This is who held the turn when the harness's wait expired on it; the status the
+        turn carries afterwards is the terminal that cancel wrote."""
+        return self._cancelled.statuses.get(turn_id)
 
     async def _cancel_overdue(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
         """The wait's deadline fired: terminalize the turn before the runner advances. A turn that
