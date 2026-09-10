@@ -612,19 +612,6 @@ project installs none — and the deploy's config carries every file of the proj
 so the document or asset ships with the page rather than being fetched at runtime. The shipped Radar
 page reads its tour as `?raw` and the Artifacts page names its logo sheet as `?url`; a member's
 redeploy of either page builds the same import again."""
-NAMED_KIT_IMPORT = re.compile(
-    r"(?ms)^[ \t]*import\s+(?P<type>type\s+)?\{(?P<names>[^{}]*)\}"
-    r"\s*from\s*['\"]ufo/kit['\"]\s*;?"
-)
-KIT_IMPORT_NAME = re.compile(
-    r"(?:(?P<type>type)\s+)?(?P<export>[A-Za-z_$][\w$]*)"
-    r"(?:\s+as\s+(?P<local>[A-Za-z_$][\w$]*))?"
-)
-SOURCE_LITERAL_OR_COMMENT = re.compile(
-    r"//[^\n]*|/\*.*?\*/|(?<![\w$])'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`",
-    re.DOTALL,
-)
-JSX_COMPONENT = re.compile(r"<\s*([A-Z][A-Za-z0-9_$]*)\b")
 LOCAL_NAMED_DECLARATION = re.compile(r"\b(?:class|function|const|let|var)\s+([A-Za-z_$][\w$]*)")
 LOCAL_DESTRUCTURED_DECLARATION = re.compile(r"\b(?:const|let|var)\s*\{(?P<bindings>[^{}]*)\}\s*=")
 LOCAL_DESTRUCTURED_BINDING = re.compile(
@@ -774,18 +761,7 @@ PAGE_CLASS_REFUSALS = (
     (re.compile(r"overflow-hidden text-ellipsis whitespace-nowrap"), "truncate says this"),
     (re.compile(r"className=\{`"), "compose classes with cn()"),
 )
-STYLE_TAG = re.compile(r"<style[\s/>]")
-DATA_SLOT_ATTRIBUTE = re.compile(r"(?<![\w-])data-slot\s*=")
-
-LITERAL_WHITE_ON_SCHEME_INK = re.compile(
-    r"\bstyle\s*=\s*\{\{"
-    r"(?=(?:(?!\}\}).)*\bbackground(?:Color)?\s*:(?:(?!\}\}).)*var\(--color-ink\))"
-    r"(?=(?:(?!\}\}).)*\bcolor\s*:(?:(?!\}\}).)*['\"](?:#fff(?:fff)?|white)['\"])",
-    re.DOTALL | re.IGNORECASE,
-)
 APPLICATION_DESIGN_REGION = re.compile(r"[a-z][a-z0-9-]{0,79}")
-APPLICATION_DESIGN_KIT_COMPONENT = re.compile(r"[A-Z][A-Za-z0-9]*")
-APPLICATION_SOURCE_REGION = re.compile(r"""data-app-region\s*=\s*[{\s]*["']([a-z][a-z0-9-]*)["']""")
 
 
 def _validate_application_imports(source: str) -> None:
