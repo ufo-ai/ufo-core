@@ -481,6 +481,12 @@ jobs:
             -target=cloudflare_ruleset.flyingobject_redirect \
             -target=cloudflare_ruleset.shipped_app_cache \
             -target=cloudflare_zone_setting.always_use_https \
+            -target=aws_sesv2_email_identity.ufo_ai \
+            -target=aws_sesv2_email_identity_mail_from_attributes.ufo_ai \
+            -target=aws_sesv2_contact_list.ufo_users \
+            -target=cloudflare_dns_record.ufo_ai_dkim \
+            -target=cloudflare_dns_record.ufo_ai_bounce_mx \
+            -target=cloudflare_dns_record.ufo_ai_bounce_spf \
             -out="$RUNNER_TEMP/shared-edge.tfplan"
 
       - name: Reject destructive shared edge changes

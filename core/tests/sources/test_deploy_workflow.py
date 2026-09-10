@@ -1409,6 +1409,12 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
             (
                 "cloudflare_ruleset.shipped_app_cache",
                 "cloudflare_flagship_flag.testing_portal",
+                "aws_sesv2_email_identity.ufo_ai",
+                "aws_sesv2_email_identity_mail_from_attributes.ufo_ai",
+                "aws_sesv2_contact_list.ufo_users",
+                "cloudflare_dns_record.ufo_ai_dkim",
+                "cloudflare_dns_record.ufo_ai_bounce_mx",
+                "cloudflare_dns_record.ufo_ai_bounce_spf",
                 "module.testing",
             ),
             "flagship_testing_api_token",
@@ -1687,6 +1693,12 @@ def _check_production_shared_edge_uses_current_main() -> None:
         "cloudflare_ruleset.flyingobject_redirect",
         "cloudflare_ruleset.shipped_app_cache",
         "cloudflare_zone_setting.always_use_https",
+        "aws_sesv2_email_identity.ufo_ai",
+        "aws_sesv2_email_identity_mail_from_attributes.ufo_ai",
+        "aws_sesv2_contact_list.ufo_users",
+        "cloudflare_dns_record.ufo_ai_dkim",
+        "cloudflare_dns_record.ufo_ai_bounce_mx",
+        "cloudflare_dns_record.ufo_ai_bounce_spf",
     )
     assert '-out="$RUNNER_TEMP/shared-edge.tfplan"' in plan["run"]
     assert guard["run"] == (
@@ -2291,7 +2303,7 @@ def _check_only_testing_owns_account_global_resources() -> None:
         path.relative_to(ROOT)
         for path in terraform
         if re.search(r'resource\s+"aws_sesv2_email_identity"\s+"', path.read_text())
-    } == {Path("infra/modules/platform/ses.tf")}
+    } == {Path("infra/modules/platform/ses.tf"), Path("infra/envs/edge/email.tf")}
     assert not {
         path.relative_to(ROOT)
         for path in terraform

@@ -654,6 +654,12 @@ jobs:
           terraform plan -input=false -no-color -lock="$LOCK" -lock-timeout=10m \
             -target=cloudflare_ruleset.shipped_app_cache \
             -target=cloudflare_flagship_flag.testing_portal \
+            -target=aws_sesv2_email_identity.ufo_ai \
+            -target=aws_sesv2_email_identity_mail_from_attributes.ufo_ai \
+            -target=aws_sesv2_contact_list.ufo_users \
+            -target=cloudflare_dns_record.ufo_ai_dkim \
+            -target=cloudflare_dns_record.ufo_ai_bounce_mx \
+            -target=cloudflare_dns_record.ufo_ai_bounce_spf \
             -target=module.testing \
             -out="$RUNNER_TEMP/edge.tfplan"
 
