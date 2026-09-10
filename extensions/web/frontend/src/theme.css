@@ -376,15 +376,6 @@ body[data-shell="sidebar"] {
   --size-logo: 72px;
 }
 
-body[data-shell="sidebar"] [data-chat-start-line] {
-  display: flex;
-  height: var(--size-row);
-  flex-shrink: 0;
-  align-items: center;
-  margin-top: var(--spacing-xl);
-  padding-top: 0;
-}
-
 :root {
   --brand-airtable: url("./assets/brands/airtable.png");
   --brand-anthropic: url("./assets/brands/anthropic.svg");

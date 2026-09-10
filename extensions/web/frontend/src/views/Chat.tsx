@@ -254,8 +254,6 @@ export function Chat({
         starting={bare}
         onSent={animateTheSend}
         placeholder={conversationId !== null ? FOLLOW_UP_PLACEHOLDER : NEW_CHAT_PLACEHOLDER}
-        eyebrow={agent.app === CHAT_SURFACE ? null : agentName(agent.name)}
-        eyebrowIcon={agent.icon}
       />
       <Toast
         state={stalled ? SILENT : state.fault ?? SILENT}
@@ -318,8 +316,6 @@ export function FoundingChat({
         input={composer}
         starting={false}
         placeholder={NEW_CHAT_PLACEHOLDER}
-        eyebrow={agent.app === CHAT_SURFACE ? null : agentName(agent.name)}
-        eyebrowIcon={agent.icon}
       />
     </TranscriptScroll>
   );
@@ -584,7 +580,6 @@ const SEND_SCROLL_MS = 700;
 const COMPOSER_LABEL = "Ask UFO";
 const NEW_CHAT_PLACEHOLDER = "Start new chat…";
 const FOLLOW_UP_PLACEHOLDER = "Ask a follow-up…";
-const START_INTRO = "What can UFO do for you?";
 
 /** A composition in flight — an IME candidate — takes its own Enter, so the guard reads `isComposing`
  *  before claiming the key. */
@@ -595,8 +590,6 @@ function Composer({
   input,
   starting,
   placeholder,
-  eyebrow,
-  eyebrowIcon,
   onSent,
 }: {
   agent: ChatAgent;
@@ -605,8 +598,6 @@ function Composer({
   input: RefObject<HTMLTextAreaElement | null>;
   starting: boolean;
   placeholder: string;
-  eyebrow: string | null;
-  eyebrowIcon?: string;
   onSent?: () => void;
 }) {
   const state = useChat(target.key);
@@ -621,7 +612,10 @@ function Composer({
   const [dismissed, setDismissed] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);
   const model = picked ?? agent.model;
-  const showsEyebrow = eyebrow !== null && !dismissed;
+  /** A conversation's agent reaches this box as a `ConversationAgent`, which carries no `app`, so the
+   *  chat surface arrives named but unclassed. */
+  const addressed = [agent.app, agent.name].includes(CHAT_SURFACE) ? null : agentName(agent.name);
+  const showsEyebrow = addressed !== null && !dismissed;
   const running = state.turn;
   const disabled = state.messages === null || (target.conversationId === null && state.busy);
 
@@ -708,11 +702,11 @@ function Composer({
       {showsEyebrow ? (
         <PromptInputEyebrow
           glyph={
-            eyebrowIcon ? (
-              <AgentIcon name={eyebrowIcon} className="size-(--size-glyph) shrink-0" />
+            agent.icon ? (
+              <AgentIcon name={agent.icon} className="size-(--size-glyph) shrink-0" />
             ) : null
           }
-          label={eyebrow}
+          label={addressed}
           onDismiss={() => setDismissed(true)}
         />
       ) : null}
@@ -753,7 +747,7 @@ function Composer({
   return (
     <div
       data-testid={starting ? "start" : undefined}
-      className={starting ? "flex flex-1 flex-col justify-between overflow-y-auto" : undefined}
+      className={starting ? "flex flex-1 flex-col overflow-y-auto" : undefined}
       onMouseDown={
         starting
           ? (event) => {
@@ -765,19 +759,15 @@ function Composer({
           : undefined
       }
     >
-      {starting ? (
-        <div data-chat-start-line className={cn(COLUMN, "px-2xl pt-lg")}>
-          <p className="m-0 text-ui text-ink-soft">{START_INTRO}</p>
-        </div>
-      ) : null}
       <div
         className={cn(
           COLUMN,
           "px-2xl pt-lg pb-[max(var(--spacing-lg),env(safe-area-inset-bottom))]",
+          starting && "my-auto",
         )}
       >
-        {starting ? <Starters agentId={target.agentId} /> : null}
         {box}
+        {starting ? <Starters agentId={target.agentId} /> : null}
       </div>
     </div>
   );
@@ -853,7 +843,7 @@ function Starters({ agentId }: { agentId: string }) {
     if (next !== agentId) navigate(newChatHash(next));
   };
   return (
-    <div className="mb-2xl flex flex-col">
+    <div className="mt-2xl flex flex-col">
       {rows.map((row) => (
         <PressRow
           key={row.agent_id ?? `${row.kind}:${row.ask}`}

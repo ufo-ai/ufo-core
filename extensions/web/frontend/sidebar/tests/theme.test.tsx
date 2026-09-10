@@ -475,23 +475,6 @@ test("the wordmark is the drawn ufo mark in the top bar", async () => {
   expect(packedStyles()).toContain(
     'body[data-shell=sidebar]{--size-wordmark:18px;--size-logo:72px}',
   );
-  const startLine = /body\[data-shell=sidebar\]\[data-chat-start-line\]\{([^}]*)\}/.exec(
-    packedStyles(),
-  );
-  if (!startLine) throw new Error("the shared sheet has no sidebar start line");
-  for (const declaration of [
-    "display:flex",
-    "height:var(--size-row)",
-    "flex-shrink:0",
-    "align-items:center",
-    "margin-top:var(--spacing-xl)",
-    "padding-top:0",
-  ]) {
-    expect(startLine[1]).toContain(declaration);
-  }
-  expect(
-    screen.getByText("What can UFO do for you?").parentElement?.hasAttribute("data-chat-start-line"),
-  ).toBe(true);
 });
 
 test("the favicons use the exact light and dark brand marks", () => {
