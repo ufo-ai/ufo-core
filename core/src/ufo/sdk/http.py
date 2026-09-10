@@ -5,7 +5,8 @@ tail as a `StreamingResponse`; `UploadFile` is the inbound type a multipart form
 arrive as; `FormParserError` is what a malformed form body raises out of `Request.form()`
 (starlette converts only its own `MultiPartException`), so a route that parses a form catches it
 and answers the client's 400. A surface serving a socket takes the connection as a `WebSocket` and
-reads `WebSocketDisconnect` as the viewer having gone."""
+reads `WebSocketDisconnect` as the viewer having gone, and `same_origin_handshake` is the check
+every cookie-authorized handshake passes before it is admitted."""
 
 from typing import Literal
 from urllib.parse import urlsplit
@@ -22,6 +23,25 @@ from starlette.responses import Response as Response
 from starlette.responses import StreamingResponse as StreamingResponse
 from starlette.websockets import WebSocket as WebSocket
 from starlette.websockets import WebSocketDisconnect as WebSocketDisconnect
+
+
+def same_origin_handshake(websocket: WebSocket) -> bool:
+    """Whether this WebSocket handshake was opened by a page on the very host it addresses.
+
+    Every socket a session cookie authorizes needs this, because a handshake is the one
+    authenticated request a browser makes that no other rule constrains: CORS governs what a page
+    reads from another origin's HTTP response and exempts a handshake, and `SameSite` counts hosts
+    by registrable domain, so a page served under a sibling label of the host it addresses is
+    same-site and its handshake carries that host's own cookie. A deploy serves hosted sites and
+    app frames under such labels, so without this check a script on one of those pages holds a
+    bidirectional channel into the addressed host's authenticated socket, with the authority of
+    whoever is viewing it.
+
+    Host rather than the whole origin, so the scheme a deploy terminates at does not enter it;
+    absent rather than mismatched is refused too, since the browser this exists to constrain always
+    sends one."""
+    origin = websocket.headers.get("origin")
+    return bool(origin) and urlsplit(origin).hostname == websocket.url.hostname
 
 
 def cookie_secure(published_scheme: str) -> bool:

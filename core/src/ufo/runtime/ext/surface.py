@@ -5429,7 +5429,9 @@ class SurfaceSocket:
     """One WebSocket a surface serves, mounted at `/surface/<name>/<path>` beside its HTTP routes
     and gated by the same `identify` resolver — a handshake carries the surface's own session
     cookie, so the workspace is resolved off it before the handler sees the connection, and a
-    refusal is sent as the very response the equivalent GET would have answered.
+    refusal is sent as the very response the equivalent GET would have answered. Core admits the
+    handshake only from a page on the host it addresses, ahead of that resolver, since the cookie
+    rides a handshake no CORS rule constrains.
 
     Separate from `SurfaceRoute` because the two hand back different things: a route returns one
     Response, while a socket handler owns the connection until it ends and returns nothing. A

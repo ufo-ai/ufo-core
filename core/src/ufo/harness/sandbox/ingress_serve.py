@@ -72,7 +72,7 @@ from ufo.proxy_serve import OTLP_ENDPOINT_ENV, owner_dsn
 from ufo.runtime.ext.manifest import CarrierSpec
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.sdk.http import cookie_secure, plain_local, set_session_cookie
+from ufo.sdk.http import cookie_secure, plain_local, same_origin_handshake, set_session_cookie
 
 HOP_BY_HOP_HEADERS = frozenset(
     {
@@ -1094,11 +1094,15 @@ class IngressServe:
         request/response works through the frame — a dev server's live reload, and an app that
         pushes.
 
-        The gate is the proxy's — same Host, same session cookie, same dial — plus one check the
-        proxy has no use for. Nothing is accepted until the site's own server has agreed to the
-        connection, so a viewer never holds an open socket to a site that refused one, and the
-        subprotocol the viewer is told is the one the site chose, not an echo of what was asked."""
-        if not self._same_origin(websocket):
+        The gate is the proxy's — same Host, same session cookie, same dial — plus the origin check
+        the proxy has no use for: every site is a label under one `base_host`, so the browser counts
+        them same-site and attaches the addressed site's host-only `ufo_site` cookie to a socket
+        opened from any other label, which would hand site B a bidirectional channel into site A's
+        own server for the hour that session lasts. Nothing is accepted until the site's own server
+        has agreed to the connection, so a viewer never holds an open socket to a site that refused
+        one, and the subprotocol the viewer is told is the one the site chose, not an echo of what
+        was asked."""
+        if not same_origin_handshake(websocket):
             return await self._refuse(websocket, SiteRefusal(403, FOREIGN_ORIGIN))
         authorized = self._authorized(websocket)
         if isinstance(authorized, SiteRefusal):
@@ -1141,20 +1145,6 @@ class IngressServe:
                         error=repr(error),
                     )
                     await self._end(websocket, WEBSOCKET_CLOSE_UPSTREAM_GONE, SITE_NOT_ANSWERING)
-
-    def _same_origin(self, websocket: WebSocket) -> bool:
-        """Whether this handshake was opened by the very site it addresses.
-
-        The socket's own check, with no counterpart on the proxy: a navigation or a subresource GET
-        carries no `Origin` at all, and CORS already keeps one site from *reading* another's HTTP
-        response. A handshake is exempt from CORS. Every site is a label under one `base_host`, so
-        the browser counts them same-site and attaches the addressed site's host-only `ufo_site`
-        cookie to a socket opened from any other label — which would hand site B a bidirectional
-        channel into site A's own server for the hour that session lasts. Host rather than the whole
-        origin, so the scheme a deploy terminates at does not enter it; absent rather than
-        mismatched is refused too, since the browser this exists to constrain always sends one."""
-        origin = websocket.headers.get("origin")
-        return bool(origin) and urlsplit(origin).hostname == websocket.url.hostname
 
     async def _refuse(self, websocket: WebSocket, refusal: SiteRefusal) -> None:
         """Refuse the handshake with the very response the proxy would have sent, through the

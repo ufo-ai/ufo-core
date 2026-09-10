@@ -276,7 +276,7 @@ from ufo.sdk.manifest import (
     SetupSchedule,
     SubagentProfile,
 )
-from ufo.serve import _mount_shared_surfaces
+from ufo.serve import FOREIGN_HANDSHAKE, _mount_shared_surfaces
 
 SECRET = "artifact-signing-secret"
 
@@ -10648,6 +10648,9 @@ async def test_automations_slot_follows_the_conversation_audience(
 
 
 SHELL_SOCKET_TIMEOUT_SECONDS = 5.0
+PORTAL_ORIGIN = "https://web"
+"""The origin the portal's own page opens a socket from — the very host the handshake below
+addresses, as a browser states it."""
 
 
 @dataclass
@@ -10731,13 +10734,18 @@ class _Viewer:
 
 @asynccontextmanager
 async def _shell_socket(
-    client: AsyncClient, path: str, token: str
+    client: AsyncClient, path: str, token: str, origin: str | None = PORTAL_ORIGIN
 ) -> AsyncIterator[tuple[_Viewer, asyncio.Task[None]]]:
-    """One handshake against the mounted app, carrying the portal's session cookie as the browser's
-    own would. httpx has no websocket transport, so the frames are driven at the ASGI seam: the
-    routing, the workspace resolver and the surface's gate are all the served ones."""
+    """One handshake against the mounted app, carrying the portal's session cookie and the origin
+    of the page that opened it as the browser's own would; `origin=None` is the handshake that
+    states none. httpx has no websocket transport, so the frames are driven at the ASGI seam: the
+    routing, the origin check, the workspace resolver and the surface's gate are all the served
+    ones."""
     viewer = _Viewer(asyncio.Queue(), asyncio.Queue())
     await viewer.sent.put({"type": "websocket.connect"})
+    headers = [(b"host", b"web"), (b"cookie", f"{SESSION_COOKIE}={token}".encode())]
+    if origin is not None:
+        headers.append((b"origin", origin.encode()))
     scope: dict[str, object] = {
         "type": "websocket",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -10749,7 +10757,7 @@ async def _shell_socket(
         "path": path,
         "raw_path": path.encode(),
         "query_string": b"",
-        "headers": [(b"host", b"web"), (b"cookie", f"{SESSION_COOKIE}={token}".encode())],
+        "headers": headers,
         "subprotocols": [],
         "extensions": {"websocket.http.response": {}},
     }
@@ -10954,6 +10962,42 @@ async def test_the_shell_socket_relays_the_terminal_it_is_gated_on(
         await viewer.leaves()
         async with asyncio.timeout(SHELL_SOCKET_TIMEOUT_SECONDS):
             await shell.ended.wait()
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_shell_socket_refuses_a_handshake_another_page_opened(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The origin decides admission before the session does. A handshake is exempt from CORS, and
+    the portal's session cookie is host-only but same-site with every other label the deploy serves
+    — a hosted site and an app frame among them — so a script on one of those pages opens this
+    socket with the viewing member's own cookie attached and would hold a shell in their sandbox. A
+    page on another host is refused 403 as a response, a handshake stating no origin is refused the
+    same way, and neither one has a PTY attached for it; the portal's own page is admitted."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "coder@example.com")
+    conversation_id = await _seed_coding_conversation(
+        workspace_id, agent_id, member_id, queue_key="spawned"
+    )
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/shell"
+    started = _stand_in_shells(monkeypatch)
+
+    for origin in ("https://sites.web", "https://web.attacker.example", "null", None):
+        async with _shell_socket(client, path, token, origin=origin) as (foreign, _served):
+            refusal = await foreign.frame()
+            assert refusal["type"] == "websocket.http.response.start", origin
+            assert refusal["status"] == 403, origin
+            assert (await foreign.frame())["body"] == FOREIGN_HANDSHAKE.encode(), origin
+    assert started == []
+
+    async with _shell_socket(client, path, token) as (viewer, _served):
+        await viewer.accepted()
+        await viewer.grid(80, 24)
+        await viewer.types(b"ls\n")
+        assert await viewer.frame() == {"type": "websocket.send", "bytes": b"echo ls\n"}
+        assert started[-1].cwd == "/workspace"
 
 
 @pytest.mark.usefixtures("database_url")

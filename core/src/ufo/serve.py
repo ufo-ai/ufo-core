@@ -221,8 +221,10 @@ from ufo.schema.records import (
     TURN_QUEUE_NAME,
     RuntimeIdentity,
 )
+from ufo.sdk.http import same_origin_handshake
 
 RESERVED_HOST_PREFIXES = (LOGIN_PATH, LOGOUT_PATH, JOIN_PATH, "/v1/onboard", "/ufo")
+FOREIGN_HANDSHAKE = "This connection did not come from the page it addresses."
 RUNTIME_REVISION_ENV = "UFO_RUNTIME_REVISION"
 RUNTIME_IMAGE_ENV = "UFO_RUNTIME_IMAGE"
 
@@ -1199,13 +1201,24 @@ def _mount_surface_socket(
     auth: SurfaceAuth,
     context_for: Callable[[UUID, str], SurfaceContext],
 ) -> None:
-    """Mount one surface socket behind the resolver its HTTP routes are mounted behind. A refusal
-    is sent as the very response the equivalent GET would have answered, before the handshake is
-    accepted; an admitted connection runs inside the workspace binding for as long as it is held,
-    since the socket handler owns the connection rather than returning a response the middleware
-    could release around."""
+    """Mount one surface socket behind the resolver its HTTP routes are mounted behind, and behind
+    the same-origin check the resolver's cookie cannot make for itself. A refusal is sent as the
+    very response the equivalent GET would have answered, before the handshake is accepted; an
+    admitted connection runs inside the workspace binding for as long as it is held, since the
+    socket handler owns the connection rather than returning a response the middleware could
+    release around.
+
+    The origin is read before the session is, because a handshake off a foreign page is refused
+    whoever it authenticates as: the surface's cookie is host-only but same-site with every other
+    label the deploy serves, so the browser attaches it to a socket a hosted site or an app frame
+    opens, and a socket admitted from there would carry that page's script into the member's own
+    session."""
 
     async def endpoint(websocket: WebSocket) -> None:
+        if not same_origin_handshake(websocket):
+            return await websocket.send_denial_response(
+                Response(FOREIGN_HANDSHAKE, status_code=403)
+            )
         resolution = await identify(handshake_request(websocket), auth)
         if isinstance(resolution, Response):
             return await websocket.send_denial_response(resolution)
