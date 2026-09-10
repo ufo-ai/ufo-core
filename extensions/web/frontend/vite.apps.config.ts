@@ -39,8 +39,13 @@ export default defineConfig({
         APPS.map((app) => [app, new URL(`./apps/${app}/index.html`, import.meta.url).pathname]),
       ),
       output: {
-        manualChunks(id) {
-          if (id.startsWith(FRONTEND)) return "kit";
+        manualChunks(id, { getModuleInfo }) {
+          if (!id.startsWith(FRONTEND)) return;
+          // A view nothing imports statically keeps the chunk its `lazy` asked for: folded into the
+          // kit, its terminal emulator would land in the first paint of every page.
+          const held = getModuleInfo(id);
+          if (held && held.importers.length === 0 && held.dynamicImporters.length > 0) return;
+          return "kit";
         },
         assetFileNames: (asset) =>
           asset.names.some((name) => name.endsWith(".css"))

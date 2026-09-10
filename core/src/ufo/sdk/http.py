@@ -4,7 +4,8 @@ concrete response classes re-exported here — so an extension serving routes ne
 tail as a `StreamingResponse`; `UploadFile` is the inbound type a multipart form's file parts
 arrive as; `FormParserError` is what a malformed form body raises out of `Request.form()`
 (starlette converts only its own `MultiPartException`), so a route that parses a form catches it
-and answers the client's 400."""
+and answers the client's 400. A surface serving a socket takes the connection as a `WebSocket` and
+reads `WebSocketDisconnect` as the viewer having gone."""
 
 from typing import Literal
 from urllib.parse import urlsplit
@@ -19,6 +20,8 @@ from starlette.responses import PlainTextResponse as PlainTextResponse
 from starlette.responses import RedirectResponse as RedirectResponse
 from starlette.responses import Response as Response
 from starlette.responses import StreamingResponse as StreamingResponse
+from starlette.websockets import WebSocket as WebSocket
+from starlette.websockets import WebSocketDisconnect as WebSocketDisconnect
 
 
 def cookie_secure(published_scheme: str) -> bool:

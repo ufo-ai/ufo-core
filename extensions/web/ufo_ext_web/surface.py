@@ -70,6 +70,7 @@ from ufo.sdk.http import (
     Response,
     StreamingResponse,
     UploadFile,
+    WebSocket,
     set_session_cookie,
 )
 from ufo.sdk.hub import (
@@ -146,11 +147,13 @@ from ufo.sdk.surfaces import (
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
+    SurfaceSocket,
     TerminalFrame,
     ToolIntent,
     Turn,
     TurnContext,
     TurnRuntimeConfig,
+    handshake_request,
     inbox_name,
     member_message_said,
     member_message_text,
@@ -207,6 +210,7 @@ from ufo_ext_web.panels import (
     submit_action,
     submit_intent,
 )
+from ufo_ext_web.shell import ShellRelay, shell_state
 from ufo_ext_web.starters import (
     MEMORY_LIMIT,
     MEMORY_TEXT_CHARS,
@@ -3898,6 +3902,28 @@ async def conversation_slot(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(payload.model_dump(mode="json"))
 
 
+async def conversation_shell(ctx: SurfaceContext, request: Request) -> Response:
+    """Whether this conversation has a terminal, and whether its sandbox is up. Gated as the slot
+    reads are, so a terminal is offered exactly where the conversation's own content is readable —
+    a subagent's conversation included, named through its root the same way."""
+    authorized = await _slot_target(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    return JSONResponse(await shell_state(ctx, authorized.conversation_id))
+
+
+async def conversation_shell_socket(ctx: SurfaceContext, websocket: WebSocket) -> None:
+    """The member's terminal on this conversation's sandbox. The handshake carries the portal's own
+    session cookie, so it is admitted through the gate the sibling GET answers — the same member,
+    the same audience, the same 404 for a conversation they may not read, refused as a response
+    before the socket is ever accepted."""
+    authorized = await _slot_target(ctx, handshake_request(websocket))
+    if isinstance(authorized, Response):
+        await websocket.send_denial_response(authorized)
+        return
+    await ShellRelay(ctx, websocket, authorized.conversation_id).run()
+
+
 def _changes_projection(ctx: ConversationSlotContext) -> WorkspaceChanges:
     if not isinstance(ctx.projection, WorkspaceChanges):
         raise RuntimeError("changes slot needs the host workspace projection")
@@ -5543,6 +5569,11 @@ ROUTES = (
     ),
     SurfaceRoute(
         method="GET",
+        path="agents/{agent_id}/conversations/{conversation_id}/shell",
+        handler=conversation_shell,
+    ),
+    SurfaceRoute(
+        method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/slots/{slot_id}",
         handler=conversation_slot,
     ),
@@ -5571,5 +5602,12 @@ ROUTES = (
     SurfaceRoute(method="POST", path=ANTHROPIC_CODE_PATH, handler=anthropic_code),
     SurfaceRoute(
         method="POST", path="accounts/{provider}/" + DISCONNECT_SUFFIX, handler=account_disconnect
+    ),
+)
+
+SOCKETS = (
+    SurfaceSocket(
+        path="agents/{agent_id}/conversations/{conversation_id}/shell",
+        handler=conversation_shell_socket,
     ),
 )

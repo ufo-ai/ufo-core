@@ -25,6 +25,7 @@ from ufo_ext_web.surface import (
     ROUTES,
     SEED_JOB_NAME,
     SEED_JOB_SCHEDULE,
+    SOCKETS,
     SURFACE_WEB,
     TITLE_JOB_NAME,
     TITLE_JOB_SCHEDULE,
@@ -73,7 +74,13 @@ def manifest() -> Manifest:
         tools=WEB_ACCESS_TOOLS,
         conversation_slots=(CHANGES_SLOT, ARTIFACTS_SLOT),
         surfaces=(
-            SurfaceSpec(name=SURFACE_WEB, routes=ROUTES, identify=resolve_workspace, home=True),
+            SurfaceSpec(
+                name=SURFACE_WEB,
+                routes=ROUTES,
+                sockets=SOCKETS,
+                identify=resolve_workspace,
+                home=True,
+            ),
         ),
         jobs=(
             JobSpec(

@@ -233,6 +233,13 @@ class ConversationSandbox:
             )
         )
 
+    async def bound(self, conversation_id: UUID) -> bool:
+        """Whether the row records a sandbox for this conversation. The cheapest of the three
+        questions a caller can ask about one: `open` provisions, `existing` asks the provider
+        whether its container is still there, and this reads the handle alone — what a portal poll
+        needs to say a conversation has a sandbox at all."""
+        return await self._stored(conversation_id) is not None
+
     async def claim_terminal(self, conversation_id: UUID, cwd: str) -> bool:
         """Bind an unbound conversation to the terminal at `cwd`, reporting whether this call made
         the claim. Admission calls it while the member's connection is live, so a turn whose first

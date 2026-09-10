@@ -4104,3 +4104,24 @@ test("at a phone width the picker keeps its flyout, and a tap on a model shuts b
 
   expect(sent).toEqual(["gpt-5.6-luna"]);
 });
+
+test("the shell chip is drawn for a conversation that did coding work, and for no other", async () => {
+  wire({
+    ...transcript(),
+    "/shell$": () => json({ available: false, active: false, cwd: "/workspace" }),
+  });
+  open();
+
+  expect(await screen.findByRole("button", { name: "Changes" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Shell" })).toBeNull();
+  cleanup();
+
+  wire({
+    ...transcript(),
+    "/shell$": () => json({ available: true, active: true, cwd: "/workspace" }),
+  });
+  open();
+
+  const chip = await screen.findByRole("button", { name: "Shell, sandbox running" });
+  expect(chip.getAttribute("aria-pressed")).toBe("false");
+});

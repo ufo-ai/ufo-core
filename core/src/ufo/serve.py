@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from dbos import DBOS, DBOSClient
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from openfeature.provider import FeatureProvider
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -148,8 +148,12 @@ from ufo.runtime.ext.surface import (
     SurfaceIdentityContext,
     SurfaceListenerRunner,
     SurfaceModel,
+    SurfaceRoute,
+    SurfaceSocket,
     SurfaceSpec,
+    WorkspaceResolver,
     WritebackPoller,
+    handshake_request,
     mid_turn_reply_workspaces,
     writeback_workspaces,
 )
@@ -1164,6 +1168,55 @@ class WorkspaceScopeBoundary:
             current_workspace.set(None)
 
 
+def _mount_surface_route(
+    app: FastAPI,
+    surface: str,
+    route: SurfaceRoute,
+    identify: WorkspaceResolver,
+    auth: SurfaceAuth,
+    context_for: Callable[[UUID, str], SurfaceContext],
+) -> None:
+    """Mount one surface route behind the surface's resolver, which binds the request's workspace
+    before the handler reads anything."""
+
+    async def endpoint(request: Request) -> Response:
+        resolution = await identify(request, auth)
+        if isinstance(resolution, Response):
+            return resolution
+        if resolution is None:
+            return Response("unauthorized", status_code=401)
+        current_workspace.set(resolution)
+        return await route.handler(context_for(resolution, surface), request)
+
+    app.add_route(f"/surface/{surface}/{route.path}".rstrip("/"), endpoint, methods=[route.method])
+
+
+def _mount_surface_socket(
+    app: FastAPI,
+    surface: str,
+    socket: SurfaceSocket,
+    identify: WorkspaceResolver,
+    auth: SurfaceAuth,
+    context_for: Callable[[UUID, str], SurfaceContext],
+) -> None:
+    """Mount one surface socket behind the resolver its HTTP routes are mounted behind. A refusal
+    is sent as the very response the equivalent GET would have answered, before the handshake is
+    accepted; an admitted connection runs inside the workspace binding for as long as it is held,
+    since the socket handler owns the connection rather than returning a response the middleware
+    could release around."""
+
+    async def endpoint(websocket: WebSocket) -> None:
+        resolution = await identify(handshake_request(websocket), auth)
+        if isinstance(resolution, Response):
+            return await websocket.send_denial_response(resolution)
+        if resolution is None:
+            return await websocket.send_denial_response(Response("unauthorized", status_code=401))
+        with ws(resolution):
+            await socket.handler(context_for(resolution, surface), websocket)
+
+    app.add_api_websocket_route(f"/surface/{surface}/{socket.path}".rstrip("/"), endpoint)
+
+
 def _mount_shared_surfaces(
     app: FastAPI,
     manifests: tuple[Manifest, ...],
@@ -1308,31 +1361,15 @@ def _mount_shared_surfaces(
                         _context_for=context_for,
                     )
                 )
-            if spec.routes and resolver is None:
-                raise RuntimeError(f"surface {spec.name!r} has routes but no workspace resolver")
-            for route in spec.routes:
-
-                async def endpoint(
-                    request: Request,
-                    handler=route.handler,
-                    identify=resolver,
-                    surface=spec.name,
-                    surface_auth=auth,
-                ) -> Response:
-                    resolution = await identify(request, surface_auth)
-                    if isinstance(resolution, Response):
-                        return resolution
-                    if resolution is None:
-                        return Response("unauthorized", status_code=401)
-                    workspace_id = resolution
-                    current_workspace.set(workspace_id)
-                    return await handler(context_for(workspace_id, surface), request)
-
-                app.add_route(
-                    f"/surface/{spec.name}/{route.path}".rstrip("/"),
-                    endpoint,
-                    methods=[route.method],
-                )
+            if spec.routes or spec.sockets:
+                if resolver is None:
+                    raise RuntimeError(
+                        f"surface {spec.name!r} serves traffic but has no workspace resolver"
+                    )
+                for route in spec.routes:
+                    _mount_surface_route(app, spec.name, route, resolver, auth, context_for)
+                for socket in spec.sockets:
+                    _mount_surface_socket(app, spec.name, socket, resolver, auth, context_for)
             log("serve.shared_surface.mounted", surface=spec.name)
     app.state.surface_listeners = tuple(listeners)
     _mount_home(app, manifests)

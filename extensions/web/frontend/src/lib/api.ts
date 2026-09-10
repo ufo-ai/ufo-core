@@ -2,6 +2,12 @@ import type { ActionCall, ActionInput, ActionView, CredentialRequest } from "@/l
 
 export const BASE = "/surface/web";
 
+/** The conversation's terminal, read as a report and held open as a socket. Spelled here rather
+ *  than in the pane, so a chat header that names it downloads no terminal emulator. */
+export function shellPath(agentId: string, conversationId: string): string {
+  return "/agents/" + agentId + "/conversations/" + conversationId + "/shell";
+}
+
 export type UploadRef = { key: string; sig: string };
 
 export async function uploadAttachment(file: File): Promise<UploadRef | null> {

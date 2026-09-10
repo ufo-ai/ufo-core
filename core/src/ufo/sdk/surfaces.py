@@ -136,6 +136,9 @@ from ufo.runtime.ext.surface import (
     SurfaceRoute as SurfaceRoute,
 )
 from ufo.runtime.ext.surface import (
+    SurfaceSocket as SurfaceSocket,
+)
+from ufo.runtime.ext.surface import (
     SurfaceSpec as SurfaceSpec,
 )
 from ufo.runtime.ext.surface import (
@@ -155,6 +158,9 @@ from ufo.runtime.ext.surface import (
 )
 from ufo.runtime.ext.surface import (
     fence_member_message as fence_member_message,
+)
+from ufo.runtime.ext.surface import (
+    handshake_request as handshake_request,
 )
 from ufo.runtime.ext.surface import (
     inbox_name as inbox_name,

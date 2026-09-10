@@ -48,6 +48,9 @@ from ufo.harness.sandbox.session import SandboxProviderUnavailable as SandboxPro
 from ufo.harness.sandbox.session import SandboxSession as SandboxSession
 from ufo.harness.sandbox.session import SandboxSpec as SandboxSpec
 from ufo.harness.sandbox.session import SandboxUnreachable as SandboxUnreachable
+from ufo.harness.sandbox.session import ShellSession as ShellSession
+from ufo.harness.sandbox.session import ShellSize as ShellSize
+from ufo.harness.sandbox.session import ShellUnsupported as ShellUnsupported
 from ufo.harness.sandbox.session import SkillExecuting as SkillExecuting
 from ufo.harness.sandbox.session import egress_proxy_env as egress_proxy_env
 from ufo.harness.sandbox.session import sandbox_runtime_root as sandbox_runtime_root

@@ -169,6 +169,7 @@ export function wire(routes: Record<string, Route>) {
     "/connections": () => json({ connections: [] }),
     "/homepage": () => json({ state: "none" }),
     "/conversations$": () => json({ conversations: [] }),
+    "/shell$": () => json({ available: false, active: false, cwd: "/workspace" }),
     ...routes,
   };
   const matches = (url: string, pattern: string) =>

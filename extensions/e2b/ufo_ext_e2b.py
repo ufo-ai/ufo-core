@@ -46,13 +46,15 @@ import os
 import re
 import shlex
 import time
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast, overload
 from uuid import UUID, uuid4
 
 import httpx
 from e2b import AsyncSandbox as E2BSdkSandbox
+from e2b import PtySize
 from e2b.exceptions import (
     FileNotFoundException,
     SandboxException,
@@ -77,6 +79,8 @@ from ufo.sdk.sandbox import (
     SandboxProviderUnavailable,
     SandboxSpec,
     SandboxUnreachable,
+    ShellSession,
+    ShellSize,
     client_binary,
     egress_proxy_env,
     sandbox_runtime_root,
@@ -102,6 +106,13 @@ CDP session, a site request's stream — so no carrier call renews while the exc
 pause severs it with nothing upstream that reconnects. The dial guarantees the autosuspend span
 ahead and renews to this, so a conversation that dialed holds its slot up to fifteen minutes;
 everything else frees at the autosuspend span."""
+SHELL_KEEPALIVE_SECONDS = 120
+"""How much lease a held shell asks to still have. The PTY stream is consumed off-carrier exactly
+as a dial's exchange is, so a member typing renews nothing at the provider: the holder ticks while
+someone is watching, and a tick that finds less than this left buys `DIAL_LEASE_SECONDS` more."""
+SHELL_TIMEOUT_UNBOUNDED = 0
+"""What e2b's PTY reads as no session deadline at all. A shell ends when the member ends it or the
+sandbox pauses under it, never on a clock the provider keeps."""
 EXEC_TIMEOUT_CODE = 124
 SESSION_LEADER_CMD = "setsid"
 """What makes a command its own process group leader, so its pid names the whole tree it forks.
@@ -233,11 +244,46 @@ class E2BFiles(Protocol):
     async def read(self, path: str, format: str) -> E2BFileStream: ...
 
 
+class E2BPtyHandle(Protocol):
+    """A running PTY: the pid every later call names it by, and the wait that ends when the shell
+    does. Output does not come back through any of these — the SDK drives its own reader task and
+    hands each chunk to the `on_data` the create was given."""
+
+    pid: int
+
+    async def wait(self) -> object: ...
+
+    async def disconnect(self) -> None: ...
+
+
+class E2BPty(Protocol):
+    """The SDK's PTY module, mirrored: `timeout` is e2b's own session deadline rather than one this
+    repo imposes, and `on_data` is awaited by the SDK when it returns an awaitable."""
+
+    async def create(
+        self,
+        size: PtySize,
+        on_data: Callable[[bytes], Awaitable[None]],
+        *,
+        user: str | None = None,
+        cwd: str | None = None,
+        envs: dict[str, str] | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> E2BPtyHandle: ...
+
+    async def send_stdin(self, pid: int, data: bytes) -> None: ...
+
+    async def resize(self, pid: int, size: PtySize) -> None: ...
+
+    async def kill(self, pid: int) -> bool: ...
+
+
 class E2BSandbox(Protocol):
     sandbox_id: str
     traffic_access_token: str | None
     commands: E2BCommands
     files: E2BFiles
+    pty: E2BPty
 
     def get_host(self, port: int) -> str: ...
 
@@ -916,6 +962,33 @@ class E2BCarrier:
             headers={TRAFFIC_ACCESS_HEADER: token} if token else {},
         )
 
+    async def attach_shell(
+        self,
+        handle: SandboxHandle,
+        cwd: str,
+        size: ShellSize,
+        output: Callable[[bytes], Awaitable[None]],
+    ) -> ShellSession:
+        """A bash PTY in the sandbox, run as the sandbox user under the environment the open bound
+        to this handle — a shell opened off a turn carries that open's egress and no more. The
+        session takes no deadline of e2b's: it ends when the member ends it, and the lease is what
+        holds the container under it, renewed by whoever holds the session."""
+        try:
+            sandbox = await self._sandbox(
+                handle, SANDBOX_LEASE_SECONDS, span_floor=DIAL_LEASE_SECONDS
+            )
+            running = await sandbox.pty.create(
+                PtySize(rows=size.rows, cols=size.cols),
+                output,
+                user=SANDBOX_USER,
+                cwd=cwd,
+                envs={**SANDBOX_ENV, **handle.egress_env},
+                timeout=SHELL_TIMEOUT_UNBOUNDED,
+            )
+        except SandboxNotFoundException as error:
+            raise SandboxUnreachable(f"e2b sandbox {handle.container_id!r} is gone") from error
+        return _E2BShell(carrier=self, handle=handle, running=running)
+
     async def _sandbox(
         self,
         handle: SandboxHandle,
@@ -966,6 +1039,46 @@ class E2BCarrier:
         saying it no longer does, whatever the clock here still reads."""
         self._live.pop(conversation_id, None)
         log("sandbox.e2b.lease_dropped", conversation_id=str(conversation_id), during=during)
+
+
+@dataclass(frozen=True)
+class _E2BShell:
+    """One PTY the carrier started, addressed by its pid for the rest of its life.
+
+    Every call reaches the provider through the carrier's lease rather than through a sandbox
+    object held here: a container that paused and auto-resumed under an idle shell answers on a new
+    connection, and the pid — not the connection — is what the PTY is named by."""
+
+    carrier: E2BCarrier
+    handle: SandboxHandle
+    running: E2BPtyHandle
+
+    async def send(self, data: bytes) -> None:
+        sandbox = await self.carrier._sandbox(self.handle, LEASE_MARGIN_SECONDS)
+        await sandbox.pty.send_stdin(self.running.pid, data)
+
+    async def resize(self, size: ShellSize) -> None:
+        sandbox = await self.carrier._sandbox(self.handle, LEASE_MARGIN_SECONDS)
+        await sandbox.pty.resize(self.running.pid, PtySize(rows=size.rows, cols=size.cols))
+
+    async def renew(self) -> None:
+        await self.carrier._sandbox(
+            self.handle, SHELL_KEEPALIVE_SECONDS, span_floor=DIAL_LEASE_SECONDS
+        )
+
+    async def wait(self) -> None:
+        with suppress(CommandExitException):
+            await self.running.wait()
+
+    async def close(self) -> None:
+        """Kill the PTY and stop reading it. A shell nobody is on would otherwise hold its own
+        process in the container for as long as the container lives, and the SDK's reader task
+        outlives the connection that made it."""
+        with suppress(Exception):
+            sandbox = await self.carrier._sandbox(self.handle, LEASE_MARGIN_SECONDS)
+            await sandbox.pty.kill(self.running.pid)
+        with suppress(Exception):
+            await self.running.disconnect()
 
 
 def sandbox_templates(value: str) -> dict[str, str]:

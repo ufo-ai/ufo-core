@@ -655,6 +655,12 @@ class SandboxProviderUnavailable(RuntimeError):
     """A sandbox carrier's external control plane did not recover inside its short retry."""
 
 
+class ShellUnsupported(RuntimeError):
+    """The carrier this conversation runs on offers no PTY channel, so no interactive shell can be
+    attached to it. The caller states that to whoever asked instead of falling back to something a
+    terminal is not."""
+
+
 class Carrier(Protocol):
     """Create-or-attach a per-conversation container and reach its `/workspace`: run commands in it,
     write bytes in, stream bytes out. `/workspace` is the carrier's own storage and the only copy of
@@ -756,6 +762,59 @@ class CommandStopping(Protocol):
     kill the in-flight commands of turns nobody cancelled."""
 
     async def stop_commands(self, handle: SandboxHandle) -> None: ...
+
+
+@dataclass(frozen=True)
+class ShellSize:
+    """A terminal's character grid, as the viewer's own emulator measures it."""
+
+    cols: int
+    rows: int
+
+
+class ShellSession(Protocol):
+    """One interactive PTY running inside a sandbox, held open by whoever types into it.
+
+    Output does not arrive by return value: a shell speaks whenever it likes, so the carrier hands
+    each chunk to the callback the attach was given, and the holder writes that where the member
+    reads it. `renew` is what a viewer's open connection buys — a carrier that leases its sandbox
+    extends the lease, one that does not has nothing to do. `close` ends the PTY alone: the
+    container stays, because it holds the conversation's whole workspace."""
+
+    async def send(self, data: bytes) -> None: ...
+
+    async def resize(self, size: ShellSize) -> None: ...
+
+    async def renew(self) -> None: ...
+
+    async def wait(self) -> None:
+        """Return once the shell itself has ended — a member typing `exit` ends the session, and the
+        holder closes its side rather than watching a PTY nobody is on."""
+        ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
+class ShellAttaching(Protocol):
+    """A carrier that runs an interactive PTY in the sandbox and streams it both ways.
+
+    Separate from `Carrier` because a PTY is not `exec`: a command is one argv with an end, while a
+    shell is a session a member drives keystroke by keystroke and resizes as they go. A backend
+    whose provider offers no PTY channel implements none of this, and the caller says so to the
+    member rather than degrading a terminal into a command box."""
+
+    async def attach_shell(
+        self,
+        handle: SandboxHandle,
+        cwd: str,
+        size: ShellSize,
+        output: Callable[[bytes], Awaitable[None]],
+    ) -> ShellSession:
+        """Start a shell in `cwd` at `size` and stream its output to `output` until the session is
+        closed. A sandbox the provider no longer has raises `SandboxUnreachable`, the one error
+        every carrier's inbound seam raises."""
+        ...
 
 
 @runtime_checkable
@@ -1231,6 +1290,17 @@ class Sandbox:
         reachability map — address, TLS, and any header the wire requires (e2b's traffic token)."""
         bound = await self._bound()
         return await bound.carrier.dial(bound.handle, port)
+
+    async def attach_shell(
+        self, cwd: str, size: ShellSize, output: Callable[[bytes], Awaitable[None]]
+    ) -> ShellSession:
+        """An interactive PTY in this sandbox, streaming to `output` until it is closed. A carrier
+        with no PTY channel raises `ShellUnsupported`."""
+        bound = await self._bound()
+        carrier = bound.carrier
+        if not isinstance(carrier, ShellAttaching):
+            raise ShellUnsupported(f"{type(carrier).__name__} runs no interactive shell")
+        return await carrier.attach_shell(bound.handle, cwd, size, output)
 
 
 @dataclass(frozen=True)

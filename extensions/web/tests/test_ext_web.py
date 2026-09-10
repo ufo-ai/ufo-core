@@ -4,8 +4,14 @@ import json
 import re
 import secrets
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
-from contextlib import AbstractAsyncContextManager, aclosing, contextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import (
+    AbstractAsyncContextManager,
+    aclosing,
+    asynccontextmanager,
+    contextmanager,
+    suppress,
+)
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
@@ -61,6 +67,7 @@ from ufo_ext_slack.surface import (
 from ufo_ext_sources.manifest import manifest as sources_manifest
 from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT
 from ufo_ext_web import panels as web_panels
+from ufo_ext_web import shell as web_shell
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.anthropic_login import (
     AUTHORIZE_URL as ANTHROPIC_AUTHORIZE_URL,
@@ -91,6 +98,7 @@ from ufo_ext_web.panels import (
     _action_intent,
     _outcome,
 )
+from ufo_ext_web.shell import SHELL_UNSUPPORTED_MESSAGE
 from ufo_ext_web.starters import SLATE_DIGEST, RankedUnlock, Slate, starters_key
 from ufo_ext_web.surface import (
     DEFAULT_APP_SETUP_ASK,
@@ -157,7 +165,12 @@ from ufo.harness.sandbox.conversation import (
     ConversationSandbox,
 )
 from ufo.harness.sandbox.local import LocalCarrier
-from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
+from ufo.harness.sandbox.session import (
+    ProxyEndpoint,
+    RunTokenCodec,
+    SandboxHandle,
+    ShellSize,
+)
 from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import (
     member_object_registry,
@@ -10632,6 +10645,351 @@ async def test_automations_slot_follows_the_conversation_audience(
     )
     walled = await client.get(private_base, headers={"cookie": f"{SESSION_COOKIE}={viewer_token}"})
     assert walled.status_code == 404
+
+
+SHELL_SOCKET_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass
+class _StandInShell:
+    """The PTY a carrier with a provider would have started. It echoes what is typed, keeps the
+    grids it was handed, counts the renewals it was asked for, and ends when the relay closes it."""
+
+    output: Callable[[bytes], Awaitable[None]]
+    cwd: str
+    grids: list[ShellSize]
+    typed: list[bytes] = dataclass_field(default_factory=list)
+    renewals: int = 0
+    renewed: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+    ended: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+
+    async def send(self, data: bytes) -> None:
+        self.typed.append(data)
+        await self.output(b"echo " + data)
+
+    async def resize(self, size: ShellSize) -> None:
+        self.grids.append(size)
+
+    async def renew(self) -> None:
+        self.renewals += 1
+        self.renewed.set()
+
+    async def wait(self) -> None:
+        await self.ended.wait()
+
+    async def close(self) -> None:
+        self.ended.set()
+
+
+def _stand_in_shells(monkeypatch: pytest.MonkeyPatch) -> list[_StandInShell]:
+    """Give the local carrier the PTY channel it has none of, so the relay runs whole against no
+    provider. Every attach lands in the returned list, newest last."""
+    started: list[_StandInShell] = []
+
+    async def attach_shell(
+        _carrier: LocalCarrier,
+        _handle: SandboxHandle,
+        cwd: str,
+        size: ShellSize,
+        output: Callable[[bytes], Awaitable[None]],
+    ) -> _StandInShell:
+        started.append(_StandInShell(output=output, cwd=cwd, grids=[size]))
+        return started[-1]
+
+    monkeypatch.setattr(LocalCarrier, "attach_shell", attach_shell, raising=False)
+    return started
+
+
+@dataclass
+class _Viewer:
+    """The browser's end of one portal socket: what it sends, what the app sends back."""
+
+    sent: asyncio.Queue[dict[str, object]]
+    received: asyncio.Queue[dict[str, object]]
+
+    async def grid(self, cols: int, rows: int) -> None:
+        await self.sent.put(
+            {"type": "websocket.receive", "text": json.dumps({"cols": cols, "rows": rows})}
+        )
+
+    async def says(self, text: str) -> None:
+        await self.sent.put({"type": "websocket.receive", "text": text})
+
+    async def types(self, data: bytes) -> None:
+        await self.sent.put({"type": "websocket.receive", "bytes": data})
+
+    async def leaves(self) -> None:
+        await self.sent.put({"type": "websocket.disconnect", "code": 1001})
+
+    async def frame(self) -> dict[str, object]:
+        async with asyncio.timeout(SHELL_SOCKET_TIMEOUT_SECONDS):
+            return await self.received.get()
+
+    async def accepted(self) -> None:
+        assert (await self.frame())["type"] == "websocket.accept"
+
+
+@asynccontextmanager
+async def _shell_socket(
+    client: AsyncClient, path: str, token: str
+) -> AsyncIterator[tuple[_Viewer, asyncio.Task[None]]]:
+    """One handshake against the mounted app, carrying the portal's session cookie as the browser's
+    own would. httpx has no websocket transport, so the frames are driven at the ASGI seam: the
+    routing, the workspace resolver and the surface's gate are all the served ones."""
+    viewer = _Viewer(asyncio.Queue(), asyncio.Queue())
+    await viewer.sent.put({"type": "websocket.connect"})
+    scope: dict[str, object] = {
+        "type": "websocket",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "scheme": "wss",
+        "server": ("web", 443),
+        "client": ("127.0.0.1", 123),
+        "root_path": "",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [(b"host", b"web"), (b"cookie", f"{SESSION_COOKIE}={token}".encode())],
+        "subprotocols": [],
+        "extensions": {"websocket.http.response": {}},
+    }
+    transport = client._transport
+    assert isinstance(transport, ASGITransport)
+    served = asyncio.create_task(transport.app(scope, viewer.sent.get, viewer.received.put))
+    try:
+        yield viewer, served
+    finally:
+        served.cancel()
+        with suppress(asyncio.CancelledError):
+            await served
+
+
+async def _seed_coding_conversation(
+    workspace_id: UUID, agent_id: UUID, member_id: UUID, *, queue_key: str
+) -> UUID:
+    """A conversation whose work was done by a coding subagent, as the records carry it: the
+    member's turn, the child conversation it spawned, and that child's turn on the coding
+    profile."""
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=queue_key,
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    parent = await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=1, inbound="fix the failing test"
+    )
+    child = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=str(parent),
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface=SUBAGENT_SURFACE,
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        child,
+        agent_id,
+        seq=1,
+        inbound="patch it",
+        parent_turn_id=parent,
+        subagent_profile="coding",
+    )
+    return conversation_id
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_shell_read_answers_off_records_and_never_provisions(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What the terminal chip draws itself from. A conversation whose work ran on the coding
+    profile has a terminal, and so does one whose own round loaded the coding skill; a conversation
+    that did neither has none. `active` is the stored handle alone, so a conversation whose sandbox
+    is absent still answers the chip, and no read provisions one. A conversation the member may not
+    read answers 404 rather than saying whether it codes."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+
+    async def refuse_open(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the shell read provisioned a sandbox")
+
+    monkeypatch.setattr(ConversationSandbox, "open", refuse_open)
+    member_id, token = await _seed_member(workspace_id, "coder@example.com")
+    other_id, other_token = await _seed_member(workspace_id, "eve@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    spawned = await _seed_coding_conversation(
+        workspace_id, agent_id, member_id, queue_key="spawned"
+    )
+    skilled = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="skilled",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    plain = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="plain",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    hidden = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="hidden",
+        audience=str(conversation_audience(other_id)),
+        member_id=other_id,
+    )
+    for conversation_id, skill in ((skilled, "coding"), (plain, "pdf")):
+        await _write_transcript(
+            blob,
+            conversation_id,
+            Conversation(
+                seq=1,
+                messages=(
+                    Message(role="user", content="read the repository"),
+                    Message(
+                        role="assistant",
+                        content=(
+                            TextBlock(text="Loading what I need."),
+                            ToolUseBlock(id="skill-call", name="load_skill", input={"name": skill}),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(tables.conversation.c.id == skilled)
+            .values(sandbox_handle="local:sandbox-1")
+        )
+
+    async def report(conversation_id: UUID, headers: dict[str, str]) -> Response:
+        return await client.get(
+            f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/shell",
+            headers=headers,
+        )
+
+    assert (await report(spawned, cookie)).json() == {
+        "available": True,
+        "active": False,
+        "cwd": "/workspace",
+    }
+    assert (await report(skilled, cookie)).json() == {
+        "available": True,
+        "active": True,
+        "cwd": "/workspace",
+    }
+    assert (await report(plain, cookie)).json()["available"] is False
+    assert (await report(hidden, cookie)).status_code == 404
+    intruder = {"cookie": f"{SESSION_COOKIE}={other_token}"}
+    assert (await report(spawned, intruder)).status_code == 404
+    assert (await report(spawned, {})).status_code == 401
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_shell_socket_relays_the_terminal_it_is_gated_on(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal end to end over one connection. A member who may not read the conversation is
+    refused as a response before the handshake is accepted and no sandbox work is done for them; an
+    opening frame that is not a grid is refused the same way; a carrier with no PTY channel is
+    named to the member. The admitted socket starts the shell in the workspace at the grid it
+    stated, carries keystrokes and output as bytes, resizes on a later grid, and kills the PTY when
+    the member's tab goes."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "coder@example.com")
+    _other_id, other_token = await _seed_member(workspace_id, "eve@example.com")
+    conversation_id = await _seed_coding_conversation(
+        workspace_id, agent_id, member_id, queue_key="spawned"
+    )
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/shell"
+
+    async with _shell_socket(client, path, other_token) as (intruder, _served):
+        refusal = await intruder.frame()
+        assert refusal["type"] == "websocket.http.response.start"
+        assert refusal["status"] == 404
+
+    async with _shell_socket(client, path, token) as (mistaken, _served):
+        await mistaken.accepted()
+        await mistaken.says("hello")
+        assert await mistaken.frame() == {
+            "type": "websocket.close",
+            "code": 1011,
+            "reason": "A terminal opens with its size.",
+        }
+
+    async with _shell_socket(client, path, token) as (unserved, _served):
+        await unserved.accepted()
+        await unserved.grid(80, 24)
+        assert await unserved.frame() == {
+            "type": "websocket.close",
+            "code": 1011,
+            "reason": SHELL_UNSUPPORTED_MESSAGE,
+        }
+
+    started = _stand_in_shells(monkeypatch)
+    async with _shell_socket(client, path, token) as (viewer, _served):
+        await viewer.accepted()
+        await viewer.grid(100, 30)
+        await viewer.types(b"ls\n")
+        assert await viewer.frame() == {"type": "websocket.send", "bytes": b"echo ls\n"}
+        await viewer.grid(120, 40)
+        await viewer.types(b"pwd\n")
+        assert await viewer.frame() == {"type": "websocket.send", "bytes": b"echo pwd\n"}
+        shell = started[-1]
+        assert shell.cwd == "/workspace"
+        assert shell.grids == [ShellSize(cols=100, rows=30), ShellSize(cols=120, rows=40)]
+        assert shell.typed == [b"ls\n", b"pwd\n"]
+        await viewer.leaves()
+        async with asyncio.timeout(SHELL_SOCKET_TIMEOUT_SECONDS):
+            await shell.ended.wait()
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_watched_shell_holds_the_sandbox_awake_and_an_unwatched_one_lets_it_go(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The keep-alive. A member reading build output types nothing for minutes, so the terminal's
+    own beat is what renews the sandbox lease — and a tab hidden behind another window stops
+    beating, so the container is left to pause on the carrier's clock while the shell stays open."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "coder@example.com")
+    conversation_id = await _seed_coding_conversation(
+        workspace_id, agent_id, member_id, queue_key="spawned"
+    )
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/shell"
+    started = _stand_in_shells(monkeypatch)
+    monkeypatch.setattr(web_shell, "SHELL_RENEW_SECONDS", 0.01)
+
+    async with _shell_socket(client, path, token) as (watching, _served):
+        await watching.accepted()
+        await watching.grid(80, 24)
+        await watching.types(b"make\n")
+        assert await watching.frame() == {"type": "websocket.send", "bytes": b"echo make\n"}
+        async with asyncio.timeout(SHELL_SOCKET_TIMEOUT_SECONDS):
+            await started[-1].renewed.wait()
+
+    monkeypatch.setattr(web_shell, "SHELL_PRESENCE_SECONDS", 0.0)
+    async with _shell_socket(client, path, token) as (hidden, _served):
+        await hidden.accepted()
+        await hidden.grid(80, 24)
+        await hidden.types(b"make\n")
+        assert await hidden.frame() == {"type": "websocket.send", "bytes": b"echo make\n"}
+        await asyncio.sleep(0.2)
+        assert started[-1].renewals == 0
 
 
 @pytest.mark.usefixtures("database_url")

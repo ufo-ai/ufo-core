@@ -56,6 +56,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.websockets import WebSocket
 
 from ufo.blob import BlobNotFound, FleetBlobStore, S3BlobStore, WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
@@ -65,12 +66,13 @@ from ufo.harness.models.interface import Message, ModelRequest, TextBlock
 from ufo.harness.o11y import emit_metric, log, warn
 from ufo.harness.replies import marked_artifacts
 from ufo.harness.sandbox.conversation import (
+    UNSIGNED_RUN_TOKEN,
     WORKSPACE_WRITE_MAX_BYTES,
     ConversationSandbox,
     WorkspaceFile,
 )
 from ufo.harness.sandbox.ingress_url import mint_ingress_view_url
-from ufo.harness.sandbox.session import shell_path, workspace_path
+from ufo.harness.sandbox.session import ShellSession, ShellSize, shell_path, workspace_path
 from ufo.harness.sandbox.terminal import TerminalOp
 from ufo.runtime.access.connectors import CatalogPage, ConnectorRegistry
 from ufo.runtime.access.credentials import (
@@ -4758,6 +4760,35 @@ class SurfaceContext:
             return None
         return await self._sandboxes.read(conversation_id, rel)
 
+    async def conversation_sandbox_bound(self, conversation_id: UUID) -> bool:
+        """Whether this conversation has a sandbox recorded at all. Nothing is provisioned and no
+        provider is asked — the question a page polls to say whether the workspace is up."""
+        if not await self._owned_conversation(conversation_id):
+            return False
+        return await self._sandboxes.bound(conversation_id)
+
+    @asynccontextmanager
+    async def conversation_shell(
+        self,
+        conversation_id: UUID,
+        cwd: str,
+        size: ShellSize,
+        output: Callable[[bytes], Awaitable[None]],
+    ) -> AsyncIterator[ShellSession]:
+        """An interactive PTY on the conversation's sandbox, created or resumed for it, streaming
+        to `output` until the block ends.
+
+        The open is off-turn and unsigned exactly as a workspace read is, so the shell reaches the
+        network no further than any other off-turn call: a member typing here is not a turn, and
+        nothing they run carries a turn's egress. The PTY is killed on the way out; the container
+        stays, because it holds the conversation's whole workspace."""
+        session = await self._sandboxes.open(conversation_id, None, UNSIGNED_RUN_TOKEN, {})
+        shell = await session.attach_shell(cwd, size, output)
+        try:
+            yield shell
+        finally:
+            await shell.close()
+
     def terminal_connect(
         self, conversation_id: UUID, cwd: str, member_id: UUID | None, runtime_id: str
     ) -> None:
@@ -5101,6 +5132,7 @@ class NothingDelivered:
 NOTHING_DELIVERED = NothingDelivered()
 
 RouteHandler = Callable[[SurfaceContext, Request], Awaitable[Response]]
+SocketHandler = Callable[[SurfaceContext, WebSocket], Awaitable[None]]
 PostHandler = Callable[[SurfaceContext, Writeback], Awaitable[str | NothingDelivered]]
 AttachHandler = Callable[[SurfaceContext, Writeback, str], Awaitable[None]]
 SpeakHandler = Callable[[SurfaceContext, MidTurnReply], Awaitable[str]]
@@ -5384,6 +5416,30 @@ class SurfaceRoute:
     handler: RouteHandler
 
 
+def handshake_request(websocket: WebSocket) -> Request:
+    """The handshake as a request gate reads it: same host, cookies, path and query as the GET it
+    upgrades from, so one gate answers both protocols instead of a socket growing a second one. A
+    WebSocket scope names no method and a Request requires one, so the copy states the GET the
+    handshake is."""
+    return Request({**websocket.scope, "type": "http", "method": "GET"})
+
+
+@dataclass(frozen=True)
+class SurfaceSocket:
+    """One WebSocket a surface serves, mounted at `/surface/<name>/<path>` beside its HTTP routes
+    and gated by the same `identify` resolver — a handshake carries the surface's own session
+    cookie, so the workspace is resolved off it before the handler sees the connection, and a
+    refusal is sent as the very response the equivalent GET would have answered.
+
+    Separate from `SurfaceRoute` because the two hand back different things: a route returns one
+    Response, while a socket handler owns the connection until it ends and returns nothing. A
+    surface declares one only for traffic that is not request/response — an interactive terminal,
+    where each keystroke and each byte of output is its own frame."""
+
+    path: str
+    handler: SocketHandler
+
+
 @dataclass(frozen=True)
 class SurfaceSpec:
     """One surface an extension registers. Core mounts each of `routes` under `/surface/<name>`
@@ -5407,6 +5463,7 @@ class SurfaceSpec:
 
     name: str
     routes: tuple[SurfaceRoute, ...] = ()
+    sockets: tuple[SurfaceSocket, ...] = ()
     identify: WorkspaceResolver | None = None
     """How the shared fleet resolves a request's workspace before binding it. The async resolver
     uses `SurfaceAuth` to map an installation and verify that workspace's credential. A UUID binds
