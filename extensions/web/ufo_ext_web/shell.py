@@ -99,7 +99,7 @@ async def shell_state(ctx: SurfaceContext, conversation_id: UUID) -> dict[str, o
         ctx.conversation_sandbox_bound(conversation_id),
     )
     available = coding_intent(spawned, () if recorded is None else recorded.messages)
-    return {"available": available, "active": bound, "cwd": WORKSPACE_DIR}
+    return {"available": available, "active": bound}
 
 
 @dataclass(frozen=True)

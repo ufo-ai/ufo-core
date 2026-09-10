@@ -105,6 +105,11 @@ export function Sheet({ open, onClose, title, children, actions, describedBy }: 
           data-slot="sheet-content"
           aria-describedby={describedBy}
           onInteractOutside={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => {
+            // Escape is a keystroke a terminal sends on, so a focused one keeps it: a member in vim
+            // is leaving insert mode, not leaving the sheet.
+            if (document.activeElement?.closest("[data-keeps-escape]")) event.preventDefault();
+          }}
           className="absolute inset-0 flex min-h-0 flex-col bg-surface"
         >
           <div

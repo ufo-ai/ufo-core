@@ -11021,16 +11021,8 @@ async def test_the_shell_read_answers_off_records_and_never_provisions(
             headers=headers,
         )
 
-    assert (await report(spawned, cookie)).json() == {
-        "available": True,
-        "active": False,
-        "cwd": "/workspace",
-    }
-    assert (await report(skilled, cookie)).json() == {
-        "available": True,
-        "active": True,
-        "cwd": "/workspace",
-    }
+    assert (await report(spawned, cookie)).json() == {"available": True, "active": False}
+    assert (await report(skilled, cookie)).json() == {"available": True, "active": True}
     assert (await report(plain, cookie)).json()["available"] is False
     assert (await report(hidden, cookie)).status_code == 404
     intruder = {"cookie": f"{SESSION_COOKIE}={other_token}"}

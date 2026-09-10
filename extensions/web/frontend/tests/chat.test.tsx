@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -3946,7 +3946,7 @@ test("at a phone width the picker keeps its flyout, and a tap on a model shuts b
 test("the shell chip is drawn for a conversation that did coding work, and for no other", async () => {
   wire({
     ...transcript(),
-    "/shell$": () => json({ available: false, active: false, cwd: "/workspace" }),
+    "/shell$": () => json({ available: false, active: false }),
   });
   open();
 
@@ -3956,7 +3956,7 @@ test("the shell chip is drawn for a conversation that did coding work, and for n
 
   wire({
     ...transcript(),
-    "/shell$": () => json({ available: true, active: true, cwd: "/workspace" }),
+    "/shell$": () => json({ available: true, active: true }),
   });
   open();
 
@@ -3990,4 +3990,77 @@ test("a read-only chat stops only the run it names, never the conversation's oth
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
   expect(screen.queryByRole("textbox")).toBeNull();
+});
+
+/** The shell socket, which jsdom has none of. A terminal opened here states its grid, takes the
+ *  bytes the member types, and ends when the test says the far end closed. */
+class SocketFake {
+  static opened: SocketFake[] = [];
+  static OPEN = 1;
+  readyState = SocketFake.OPEN;
+  binaryType = "";
+  onopen: (() => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+  sent: unknown[] = [];
+
+  constructor(readonly url: string) {
+    SocketFake.opened.push(this);
+  }
+
+  send(data: unknown) {
+    this.sent.push(data);
+  }
+
+  close() {}
+
+  static last(): SocketFake {
+    const socket = SocketFake.opened.at(-1);
+    if (!socket) throw new Error("no shell socket was opened");
+    return socket;
+  }
+}
+
+async function openShell(): Promise<HTMLElement> {
+  SocketFake.opened = [];
+  vi.stubGlobal("WebSocket", SocketFake);
+  wire({ ...transcript(), "/shell$": () => json({ available: true, active: true }) });
+  open();
+  await userEvent.click(await screen.findByRole("button", { name: "Shell, sandbox running" }));
+  const terminal = await screen.findByTestId("shell");
+  act(() => SocketFake.last().onopen?.());
+  await waitFor(() => expect(terminal.textContent).toContain("Starting the sandbox"));
+  return terminal;
+}
+
+test("the terminal keeps Escape while it is focused, and the sheet closes when the shell exits", async () => {
+  const terminal = await openShell();
+  expect(screen.queryByText("/workspace")).toBeNull();
+
+  fireEvent.keyDown(terminal.querySelector("textarea") as HTMLTextAreaElement, {
+    key: "Escape",
+    keyCode: 27,
+  });
+
+  expect(screen.getByTestId("shell")).toBeTruthy();
+  expect(Array.from(SocketFake.last().sent.at(-1) as Uint8Array)).toEqual([27]);
+
+  act(() => SocketFake.last().onclose?.(new CloseEvent("close")));
+
+  await waitFor(() => expect(screen.queryByTestId("shell")).toBeNull());
+});
+
+test("a shell that gets no sandbox says so in the terminal it was opened in", async () => {
+  const terminal = await openShell();
+
+  act(() =>
+    SocketFake.last().onclose?.(
+      new CloseEvent("close", { reason: "This conversation's sandbox is not reachable." }),
+    ),
+  );
+
+  await waitFor(() =>
+    expect(terminal.textContent).toContain("This conversation's sandbox is not reachable."),
+  );
+  expect(screen.getByTestId("shell")).toBeTruthy();
 });

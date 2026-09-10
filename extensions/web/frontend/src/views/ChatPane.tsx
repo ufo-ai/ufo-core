@@ -106,6 +106,7 @@ export function ChatPane({
   const selected =
     slots.phase === "ready" ? slots.payload.slots.find((entry) => entry.id === slot) : undefined;
   const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
+  const closeShell = useCallback(() => setShellOpen(false), []);
   const terminal =
     !conversationOnly && shell.phase === "ready" && shell.payload.available ? shell.payload : null;
   const header =
@@ -165,9 +166,9 @@ export function ChatPane({
         />
       </div>
       {conversationId && terminal && shellOpen ? (
-        <Sheet open title="Shell" onClose={() => setShellOpen(false)}>
+        <Sheet open title="Shell" onClose={closeShell}>
           <Suspense fallback={<Loading />}>
-            <ShellPane agent={agent} conversationId={conversationId} cwd={terminal.cwd} />
+            <ShellPane agent={agent} conversationId={conversationId} onEnded={closeShell} />
           </Suspense>
         </Sheet>
       ) : null}
