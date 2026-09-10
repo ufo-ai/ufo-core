@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Item,
@@ -35,6 +36,10 @@ const ACCOUNTS_READ = "/workspace/accounts";
 const SETTINGS_URL = "https://chatgpt.com/#settings/Security";
 const SIGN_IN_REFUSAL = "Your session ended. Sign in again to connect an account.";
 const NETWORK_REFUSAL = "Could not reach the workspace. Try again.";
+const AVAILABLE_IN = "Available in";
+/** Every row this list draws is a coding provider, and the coding subagent is what runs on one, so
+ *  the chip stands on the row whether the account is connected yet or not. */
+const CODING_SUBAGENT = "Coding subagent";
 
 type Account = { provider: string; label: string; connected: boolean };
 type Grant = { user_code: string; verification_uri: string; interval: number } | { error: string };
@@ -286,14 +291,18 @@ export function ConnectAccount({
           {accounts.map((account, index) => (
             <Fragment key={account.provider}>
               {index ? <ItemSeparator /> : null}
-              <Item>
+              <Item className="max-narrow:flex-wrap max-narrow:gap-y-sm">
                 <MarkTile>
                   <BrandMark provider={account.provider} className="text-ink" />
                 </MarkTile>
                 <ItemContent>
                   <ItemTitle>{account.label}</ItemTitle>
+                  <span className="flex flex-wrap items-center gap-sm text-small text-ink-soft">
+                    {AVAILABLE_IN}
+                    <Badge tone="affirm">{CODING_SUBAGENT}</Badge>
+                  </span>
                 </ItemContent>
-                <ItemActions>
+                <ItemActions className="max-narrow:w-full max-narrow:justify-end">
                   {account.connected ? (
                     <span className="flex items-center gap-xs text-label text-ink-soft">
                       <IconCheck

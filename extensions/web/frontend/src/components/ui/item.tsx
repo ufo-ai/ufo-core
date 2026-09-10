@@ -87,6 +87,6 @@ export function ItemDescription({
   );
 }
 
-export function ItemActions({ children }: { children: ReactNode }) {
-  return <div className="flex shrink-0 items-center gap-sm">{children}</div>;
+export function ItemActions({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={cn("flex shrink-0 items-center gap-sm", className)}>{children}</div>;
 }

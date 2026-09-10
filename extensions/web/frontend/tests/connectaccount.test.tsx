@@ -37,6 +37,22 @@ test("both accounts are offered, whatever the member already holds", async () =>
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy();
 });
 
+test("every coding provider states the coding subagent it is available in", async () => {
+  open({ "/workspace/accounts": () => accounts(true, false) });
+
+  expect(await screen.findByText("ChatGPT")).toBeTruthy();
+  expect(screen.getAllByText("Available in")).toHaveLength(2);
+  expect(screen.getAllByText("Coding subagent")).toHaveLength(2);
+});
+
+test("the first run's stacked shape draws no availability chip", async () => {
+  wire({ "/workspace/accounts": () => accounts() });
+  render(<ConnectAccount stacked />);
+
+  expect(await screen.findByRole("button", { name: "Connect ChatGPT" })).toBeTruthy();
+  expect(screen.queryByText("Coding subagent")).toBeNull();
+});
+
 test("the ChatGPT asking draws the code and the setting the grant needs", async () => {
   open({ "/openai/device$": () => json(DEVICE), "/openai/device/poll": () => json({ status: "pending" }) });
 
