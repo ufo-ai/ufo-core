@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import (
+    ADOPT_CONCURRENCY,
     FACT,
     RECALL_COSINE_FLOOR,
     RECALL_ITEM_MAX_CHARS,
@@ -2000,6 +2001,161 @@ async def test_a_page_indexed_under_its_content_id_is_found_then_adopted(db: Non
     assert {match.page_id for match in after} == {page_id, untouched}
     assert (moved, left, kept) == (True, False, True)
     assert markers == {page_id: None, untouched: kept_id}
+
+
+@dataclass
+class ObservedIndex:
+    backend: DefaultIndex
+    before_reattribute: Callable[[IndexScope], Awaitable[None]]
+
+    async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
+        await self.backend.upsert(chunks)
+
+    async def delete(self, scope: IndexScope) -> None:
+        await self.backend.delete(scope)
+
+    async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
+        await self.backend.prune(scope, keep)
+
+    async def has_chunks(self, scope: IndexScope) -> bool:
+        return await self.backend.has_chunks(scope)
+
+    async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
+        return await self.backend.restamp(scope, subject, keep)
+
+    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
+        await self.before_reattribute(scope)
+        await self.backend.reattribute(scope, owner_id)
+
+    async def lexical(
+        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]:
+        return await self.backend.lexical(query, subjects, owner_kind, limit)
+
+    async def vector(
+        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
+    ) -> tuple[Hit, ...]:
+        return await self.backend.vector(embedding, subjects, owner_kind, limit)
+
+
+async def _mark_pages(workspace_id: UUID, count: int) -> dict[UUID, UUID]:
+    """`count` pages each chunked under its content id and mirrored with the marker set, as the
+    release before uid keys left them; returns page uid to content id."""
+    marked: dict[UUID, UUID] = {}
+    for _ in range(count):
+        page_id, source_id = uuid7(), uuid7()
+        await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+        async with workspace_tx() as connection:
+            content_id, revision = (
+                await connection.execute(
+                    sa.select(tables.page.c.id, tables.page.c.revision).where(
+                        tables.page.c.uid == page_id
+                    )
+                )
+            ).one()
+            await connection.execute(
+                sa.insert(mem_page).values(
+                    page_uid=page_id,
+                    page_id=content_id,
+                    workspace_id=workspace_id,
+                    subject=SHARED_SUBJECT,
+                    revision=revision,
+                    created_at=sa.func.now(),
+                )
+            )
+        chunk = Chunk(
+            f"p-{content_id}",
+            OWNER_KIND_PAGE,
+            str(content_id),
+            SHARED_SUBJECT,
+            0,
+            "runway",
+            vec((7, 1.0)),
+        )
+        with ws(workspace_id):
+            await DefaultIndex(transaction=workspace_tx).upsert((chunk,))
+        marked[page_id] = content_id
+    return marked
+
+
+def _indexer(workspace_id: UUID, index: ObservedIndex) -> PageIndexer:
+    return PageIndexer(
+        index=index,
+        embed=StubEmbed(vec((7, 1.0))),
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
+    )
+
+
+async def _chunk_keys(
+    index: ObservedIndex, marked: dict[UUID, UUID]
+) -> dict[UUID, tuple[bool, bool]]:
+    return {
+        page_id: (
+            await index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(page_id))),
+            await index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(content_id))),
+        )
+        for page_id, content_id in marked.items()
+    }
+
+
+async def test_a_drain_pass_moves_its_pages_concurrently_and_no_more_than_the_bound(
+    db: None,
+) -> None:
+    """A pass moves ADOPT_CONCURRENCY pages at once and no more. The index here releases a move only
+    once that many are in flight together, so a pass moving one page at a time would never clear a
+    marker; the batch holds one page over the bound, and that page waits for a slot."""
+    workspace_id = await _workspace()
+    marked = await _mark_pages(workspace_id, ADOPT_CONCURRENCY + 1)
+    in_flight = 0
+    peak = 0
+    bound_reached = asyncio.Event()
+
+    async def hold_until_bound(scope: IndexScope) -> None:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        if in_flight == ADOPT_CONCURRENCY:
+            bound_reached.set()
+        await asyncio.wait_for(bound_reached.wait(), timeout=1)
+        in_flight -= 1
+
+    index = ObservedIndex(DefaultIndex(transaction=workspace_tx), hold_until_bound)
+    with ws(workspace_id):
+        moved = await _indexer(workspace_id, index).adopt_chunks(len(marked))
+        keys = await _chunk_keys(index, marked)
+    async with workspace_tx() as connection:
+        mirrors = sa.select(mem_page.c.page_uid, mem_page.c.page_id)
+        markers = dict((await connection.execute(mirrors)).all())
+    assert (moved, peak) == (ADOPT_CONCURRENCY + 1, ADOPT_CONCURRENCY)
+    assert markers == dict.fromkeys(marked)
+    assert keys == dict.fromkeys(marked, (True, False))
+
+
+async def test_a_page_whose_move_fails_keeps_its_marker_while_its_batch_drains(db: None) -> None:
+    """The index refuses to move the first page of the batch. The pass still moves every other page
+    and clears their markers, then raises so the tick fails; the refused page keeps its marker and
+    its chunks under its content id, which is what the next pass finds."""
+    workspace_id = await _workspace()
+    marked = await _mark_pages(workspace_id, 3)
+    refused = min(marked)
+
+    async def refuse_first(scope: IndexScope) -> None:
+        if scope.owner_id == str(marked[refused]):
+            raise RuntimeError("index unavailable")
+
+    index = ObservedIndex(DefaultIndex(transaction=workspace_tx), refuse_first)
+    with ws(workspace_id):
+        with pytest.raises(RuntimeError, match="index unavailable"):
+            await _indexer(workspace_id, index).adopt_chunks(len(marked))
+        keys = await _chunk_keys(index, marked)
+    async with workspace_tx() as connection:
+        mirrors = sa.select(mem_page.c.page_uid, mem_page.c.page_id)
+        markers = dict((await connection.execute(mirrors)).all())
+    assert markers == dict.fromkeys(marked) | {refused: marked[refused]}
+    assert keys == dict.fromkeys(marked, (True, False)) | {refused: (False, True)}
 
 
 async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: None) -> None:

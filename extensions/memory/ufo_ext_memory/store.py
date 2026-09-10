@@ -1348,6 +1348,9 @@ class MemoryIndexer:
             )
 
 
+ADOPT_CONCURRENCY = 16
+
+
 @dataclass(frozen=True)
 class PageIndexer:
     """The page derivation the memory extension's `page_change` hook drives: turn each replayed
@@ -1425,19 +1428,45 @@ class PageIndexer:
         async with self.transaction() as connection:
             await connection.execute(sa.delete(mem_page).where(mem_page.c.page_uid == page_id))
 
-    async def _adopt_chunks(self, page_id: UUID) -> None:
-        """Move a page's chunks off the content id the index still files them under and onto the
-        page's id, so no page is ever indexed under two keys at once. The mirror's `page_id` column
-        is the marker: a row still carrying one names chunks the index keyed by it, and clearing it
-        says every chunk of that page now answers to `page_uid`. Idempotent — a repeated pass over
-        an adopted page finds no marker and moves nothing.
+    async def adopt_chunks(self, limit: int) -> int:
+        """Move up to `limit` pages' chunks off the content id the index still files them under and
+        onto the page's id, oldest mirror rows first; returns how many pages moved. The mirror's
+        `page_id` column is the marker: a row still carrying one names chunks the index keyed by it,
+        and clearing it says every chunk of that page now answers to `page_uid` — so the index moves
+        before the marker clears, and a page whose move fails keeps its marker for the next pass
+        while the rest of the batch completes. The per-minute job drains a workspace in these
+        batches while `_apply` adopts any page it touches first, so no page is indexed under two
+        keys at once; search resolves a hit through either key meanwhile. Pages move
+        `ADOPT_CONCURRENCY` at a time: each is two index round trips, and one at a time a batch
+        drained at 120 pages a minute (testing, 2026-09-09) against 441,984 marked rows in
+        production."""
+        async with self.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(mem_page.c.page_uid, mem_page.c.page_id)
+                    .where(
+                        mem_page.c.workspace_id == self.workspace_id,
+                        mem_page.c.page_id.is_not(None),
+                    )
+                    .order_by(mem_page.c.page_uid)
+                    .limit(limit)
+                )
+            ).all()
+        gate = asyncio.Semaphore(ADOPT_CONCURRENCY)
 
-        Only a page this pass re-indexes is adopted, and that is what keeps the roll safe: the
-        release being replaced reads a page hit back through `mem_page.page_id` and resolves it
-        against `page.id`, so a page whose chunks moved out from under it is a page it can no longer
-        answer with. A page this pass touches is one it re-keys anyway. Draining every other page
-        is the work of the release after this one, once no serving image reads a page chunk by its
-        content id."""
+        async def adopt(page_id: UUID, content_id: UUID) -> None:
+            async with gate:
+                await self._adopt(page_id, content_id)
+
+        outcomes = await asyncio.gather(
+            *(adopt(row.page_uid, row.page_id) for row in rows), return_exceptions=True
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        return len(rows)
+
+    async def _adopt_chunks(self, page_id: UUID) -> None:
         async with self.transaction() as connection:
             content_id = await connection.scalar(
                 sa.select(mem_page.c.page_id).where(

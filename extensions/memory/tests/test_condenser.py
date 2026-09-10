@@ -1383,6 +1383,34 @@ async def _insert_fact(
         )
 
 
+async def test_adopt_candidates_name_only_workspaces_still_chunked_by_content_id(db: None) -> None:
+    """The per-minute adopt JobSpec binds a workspace only while one of its mirror rows still
+    carries the content id the index filed that page's chunks under; a workspace whose mirrors are
+    all keyed by page id runs no tick."""
+    pending, settled = await _workspace(), await _workspace()
+    for workspace_id, keyed_by_content_id in ((pending, True), (settled, False)):
+        page_id, source_id = uuid7(), uuid7()
+        await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
+        async with workspace_tx() as connection:
+            content_id = await connection.scalar(
+                sa.select(tables.page.c.id).where(tables.page.c.uid == page_id)
+            )
+            await connection.execute(
+                sa.insert(mem_page).values(
+                    page_uid=page_id,
+                    page_id=content_id if keyed_by_content_id else None,
+                    workspace_id=workspace_id,
+                    subject=SHARED_SUBJECT,
+                    revision=1,
+                    created_at=WHEN,
+                )
+            )
+    adopt = next(
+        job for job in memory_manifest.manifest().jobs if job.name == memory_manifest.ADOPT_JOB
+    )
+    assert await adopt.candidates() == (pending,)
+
+
 async def test_consolidate_candidates_name_only_workspaces_with_a_clusterable_backlog(
     db: None,
 ) -> None:
