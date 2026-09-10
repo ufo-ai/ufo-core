@@ -27,6 +27,7 @@ import { agentName } from "@/lib/agentName";
 import { BUILD_ASK, setPendingAsk } from "@/lib/pendingAsk";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
+import { useNarrow } from "@/lib/narrow";
 import type { ChatRow } from "@/lib/rail";
 import type { SetupState } from "@/views/AgentSetup";
 import { Chat } from "@/views/Chat";
@@ -137,6 +138,7 @@ export function AgentPane({
   onPlace,
 }: AgentPaneProps) {
   const [settles, setSettles] = useState(0);
+  const narrow = useNarrow();
   const viewer = useViewer();
   const agents = useAgents();
   const target = place.opens?.[0];
@@ -307,6 +309,7 @@ export function AgentPane({
           agent={agent}
           member={member}
           conversationId={opened?.id ?? railHeld?.conversation_id ?? null}
+          focusComposer={!narrow && held !== undefined}
           onCreated={(conversationId, title) => {
             onCreated(conversationId, title);
             setSettles((count) => count + 1);

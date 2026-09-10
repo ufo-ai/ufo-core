@@ -3360,6 +3360,35 @@ test("a thread opened at a phone width leaves the composer alone, so no keyboard
   expect(document.activeElement).not.toBe(box);
 });
 
+test("a thread pressed in the rail lands the cursor in the composer of the pane it opens", async () => {
+  const owned = { ...CHAT_ROW, agent_id: CHAT_APP_ID, agent_name: "chat" };
+  wire({ ...transcript(), ...chatsOnWire([owned]) });
+  location.hash = "#/";
+  render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
+
+  await waitFor(() => expect(location.hash).toContain("open=" + CONVO_ID));
+  const box = await screen.findByLabelText("Ask UFO");
+  await waitFor(() => expect(document.activeElement).toBe(box));
+});
+
+test("a thread pressed in the rail at a phone width leaves the composer alone", async () => {
+  atPhoneWidth();
+  const owned = { ...CHAT_ROW, agent_id: CHAT_APP_ID, agent_name: "chat" };
+  wire({ ...transcript(), ...chatsOnWire([owned]) });
+  location.hash = "#/";
+  render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  await userEvent.click(await within(drawer).findByRole("button", { name: /Pick one thread/ }));
+
+  await waitFor(() => expect(location.hash).toContain("open=" + CONVO_ID));
+  const box = await screen.findByLabelText("Ask UFO");
+  expect(document.activeElement).not.toBe(box);
+});
+
 test("a route renaming the start screen keeps the same box, and the place in its words", async () => {
   wire({ ...transcript() });
   location.hash = "#/";
