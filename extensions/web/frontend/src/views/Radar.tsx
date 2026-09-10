@@ -3,6 +3,7 @@ import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 
 import { buttonVariants } from "@/components/ui/button";
 import { Sheet } from "@/components/ui/sheet";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ARTIFACT_TEXT_BYTES, FileSheet, MediaIcon, useTextArtifact } from "@/kernel/artifact";
 import { ObjectDetail, objectAt, slotOf } from "@/kernel/objects";
 import type { ObjectAddress } from "@/kernel/objects";
@@ -186,7 +187,7 @@ function Feed({
   const state = usePanelRead<ReportsPayload>("/objects/report?" + params.toString());
   const now = dateKey(new Date().toISOString());
   return (
-    <Panel state={state} shape="cards">
+    <Panel state={state} loading={() => <FeedSkeleton />}>
       {(payload) => {
         const runs = payload.objects.map(toRun);
         const days = [...new Set(runs.map((run) => dateKey(run.fired_at)))];
@@ -250,6 +251,35 @@ function Feed({
         );
       }}
     </Panel>
+  );
+}
+
+const SKELETON_ROWS = 4;
+
+/** The feed's placeholder: a day heading over rows drawn where the reports will stand, at the row's
+ *  own gutter, column and picture, so nothing on the page moves when the read lands. */
+function FeedSkeleton() {
+  return (
+    <div className="flex flex-col">
+      <div className="py-2xl">
+        <Skeleton className="h-(--size-notice) w-1/6" />
+      </div>
+      <ol className="m-0 flex list-none flex-col border-t border-edge p-0">
+        {Array.from({ length: SKELETON_ROWS }, (_, index) => (
+          <li key={index} className="border-b border-edge">
+            <div className="flex items-start gap-2xl px-sm py-2xl">
+              <Skeleton className="h-(--size-notice) w-8xl shrink-0" />
+              <div className="flex min-w-0 flex-1 flex-col gap-2xs">
+                <Skeleton className="h-(--size-notice) w-2/5" />
+                <Skeleton className="h-(--size-notice) w-full" />
+                <Skeleton className="h-(--size-notice) w-1/3" />
+              </div>
+              <Skeleton className="h-(--size-digest-picture) w-(--size-thumbnail) shrink-0 rounded-panel" />
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
@@ -486,7 +516,7 @@ function StorySheet({
       {detail.phase === "failed" && detail.status === 404 ? (
         <PanelBlank body="This report does not exist or is not shared with you." />
       ) : (
-        <Panel state={detail} shape="cards">
+        <Panel state={detail} loading={() => <StorySkeleton />}>
           {(payload) => (
             <ol className="m-0 flex list-none flex-col p-0">
               <Story
@@ -506,6 +536,23 @@ function StorySheet({
         </Panel>
       )}
     </Sheet>
+  );
+}
+
+/** The drawer's placeholder: the story's heading, its byline and its meta line over the first lines
+ *  of the report, each at the size the story draws it. */
+function StorySkeleton() {
+  return (
+    <div className="flex flex-col gap-sm">
+      <Skeleton className="h-(--size-notice) w-3/5 text-title" />
+      <Skeleton className="h-(--size-notice) w-2/5" />
+      <Skeleton className="h-(--size-notice) w-1/3" />
+      <div className="flex flex-col gap-2xs">
+        <Skeleton className="h-(--size-notice) w-full" />
+        <Skeleton className="h-(--size-notice) w-full" />
+        <Skeleton className="h-(--size-notice) w-4/5" />
+      </div>
+    </div>
   );
 }
 
