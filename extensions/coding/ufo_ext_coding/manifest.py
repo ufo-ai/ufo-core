@@ -53,7 +53,7 @@ CODING_TOOL_NAMES = (
     "fetch_url",
 )
 CODING_PROMPT = (Path(__file__).parent / "prompts" / "subagent_coding.md").read_text()
-CODING_ROUND_LIMIT = 100
+CODING_ROUND_LIMIT = 200
 """What the coding profile runs on where no member account can be held: the deploy's own Opus
 key."""
 CODING_MODEL = "claude-opus-5"
