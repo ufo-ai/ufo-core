@@ -2,14 +2,14 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
-import { devLocalPath } from "../dev-routing";
+import { devLocalPath, outsideRootPaths } from "../dev-routing";
 import { tablerMarks } from "../vite-marks";
 
 const BASE = "/surface/web/static/";
 export default defineConfig({
   root: new URL(".", import.meta.url).pathname,
   base: BASE,
-  plugins: [react(), tailwindcss(), tablerMarks()],
+  plugins: [react(), tailwindcss(), tablerMarks(), outsideRootPaths()],
   resolve: {
     alias: [
       { find: "@/App", replacement: new URL("./src/App.tsx", import.meta.url).pathname },

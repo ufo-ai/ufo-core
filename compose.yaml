@@ -129,6 +129,20 @@ services:
       init: {condition: service_completed_successfully}
     restart: unless-stopped
 
+  web:
+    build: {context: ., dockerfile: dev/web.Dockerfile}
+    image: ${UFO_DEV_IMAGE:-ufo-dev}-web
+    environment:
+      UFO_WEB_VITE_CONFIG: ${UFO_WEB_VITE_CONFIG:-sidebar/vite.config.ts}
+      UFO_STACK_ORIGIN: http://front:8080
+    volumes:
+      - ./dev:/app/dev:ro
+      - ./assets:/app/assets:ro
+      - ./extensions:/app/extensions:ro
+      - web-modules:/app/deps/node_modules
+      - web-modules:/app/extensions/web/frontend/node_modules
+    restart: unless-stopped
+
   front:
     image: nginx:1.27-alpine
     ports:
@@ -138,6 +152,7 @@ services:
     depends_on:
       gateway: {condition: service_started}
       serve: {condition: service_started}
+      web: {condition: service_started}
     restart: unless-stopped
 
   ingress:
@@ -183,3 +198,4 @@ volumes:
   pgdata:
   blobs:
   egress-ca:
+  web-modules:

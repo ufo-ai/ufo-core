@@ -193,6 +193,9 @@ export function mountApp(
   root: HTMLElement,
   render: (init: AppInit, agents: Agent[]) => ReactNode,
 ): void {
+  // A hot-updated entry re-runs whole; its mount is already standing, and with no exports to refresh
+  // the React plugin invalidates the module next, which reloads the frame onto the new code.
+  if (import.meta.hot && mountedApps.has(root)) return;
   root.dataset.ufoApplication = "";
   const mounted = {
     active: true,

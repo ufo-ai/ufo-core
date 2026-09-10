@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -133,48 +134,75 @@ def _check_local_workspaces_stay_out_of_the_image_and_mount_per_project() -> Non
     assert "blobs" in compose["volumes"]
 
 
-def _check_web_reloads_from_source_against_each_slot() -> None:
-    for stack, host, web, front in [
-        ("1", "ufo-1.localhost", "15173", "18080"),
-        ("2", "ufo-2.localhost", "15273", "18180"),
-        ("3", "ufo-3.localhost", "15373", "18280"),
-        ("4", "ufo-4.localhost", "15473", "18380"),
-        ("5", "ufo-5.localhost", "15573", "18480"),
+def _check_stack_serves_the_shell_and_the_app_pages_from_source() -> None:
+    compose = yaml.safe_load((REPO / "compose.yaml").read_text())
+    web = compose["services"]["web"]
+    assert web["build"] == {"context": ".", "dockerfile": "dev/web.Dockerfile"}
+    assert web["image"] == "${UFO_DEV_IMAGE:-ufo-dev}-web"
+    assert (
+        web["environment"]["UFO_WEB_VITE_CONFIG"]
+        == "${UFO_WEB_VITE_CONFIG:-sidebar/vite.config.ts}"
+    )
+    assert web["environment"]["UFO_STACK_ORIGIN"] == "http://front:8080"
+    for mount in [
+        "./dev:/app/dev:ro",
+        "./assets:/app/assets:ro",
+        "./extensions:/app/extensions:ro",
+        "web-modules:/app/deps/node_modules",
+        "web-modules:/app/extensions/web/frontend/node_modules",
     ]:
+        assert mount in web["volumes"]
+    assert "web-modules" in compose["volumes"]
+    assert compose["services"]["front"]["depends_on"]["web"] == {"condition": "service_started"}
+
+    dockerfile = (REPO / "dev/web.Dockerfile").read_text()
+    assert f"FROM node:{NODE_VERSION}-bookworm-slim" in dockerfile
+    assert "WORKDIR /app/deps" in dockerfile
+    assert "RUN corepack enable && corepack install" in dockerfile
+    assert 'ENTRYPOINT ["/app/dev/web.sh"]' in dockerfile
+    script = (REPO / "dev/web.sh").read_text()
+    assert os.access(REPO / "dev/web.sh", os.X_OK)
+    assert "/app/extensions/web/frontend/pnpm-lock.yaml" in script
+    assert (
+        "(cd /app/deps && pnpm install --frozen-lockfile "
+        "--store-dir /app/deps/node_modules/.pnpm-store)"
+    ) in script
+    assert "\ncd /app/extensions/web/frontend\n" in script
+    assert script.count("node_modules/.bin/vite --config ") == 2
+    assert '--config "$UFO_WEB_VITE_CONFIG" --host 0.0.0.0 --port 5173 --strictPort &' in script
+    assert "--config vite.apps.config.ts --host 0.0.0.0 --port 5174 --strictPort &" in script
+
+    conf = (REPO / "dev/front.conf").read_text()
+    assert re.search(r"map \$http_upgrade \$connection_upgrade \{\s*default upgrade;", conf)
+    assert re.search(
+        r"map \$request_method \$portal_page \{\s*GET\s+http://web:5173;\s*default\s+http://serve:8710;",
+        conf,
+    )
+    assert "set $web http://web:5173;" in conf
+    assert "location ~ ^/surface/web/?$ { proxy_pass $portal_page; }" in conf
+    assert "location /surface/web/static/ { proxy_pass $web; }" in conf
+    assert "proxy_set_header Upgrade $http_upgrade;" in conf
+    assert "proxy_set_header Connection $connection_upgrade;" in conf
+    assert 'apps_dev_server = "http://web:5174"' in (REPO / "dev/ufo.toml").read_text()
+
+    for shell, config in [("sidebar", "sidebar/vite.config.ts"), ("lanes", "vite.config.ts")]:
         command = subprocess.run(
-            ["make", "--no-print-directory", "-n", "web", f"STACK={stack}"],
+            ["make", "--no-print-directory", "-n", "stack-down", f"SHELL_NAME={shell}"],
             cwd=REPO,
             capture_output=True,
             text=True,
             check=True,
         ).stdout
-
-        assert f"UFO_STACK_ORIGIN=http://{host}:{front}" in command
-        assert "pnpm -C extensions/web/frontend run dev --config sidebar/vite.config.ts" in command
-        assert f"--host {host} --port {web} --strictPort" in command
-        assert f"http://{host}:{web}/surface/web" in command
-
-    lanes = subprocess.run(
-        ["make", "--no-print-directory", "-n", "web", "SHELL_NAME=lanes"],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    assert "--config" not in lanes
-
+        assert f"UFO_WEB_VITE_CONFIG={config} docker compose" in command
     refused = subprocess.run(
-        ["make", "--no-print-directory", "-n", "web", "SHELL_NAME=both"],
+        ["make", "--no-print-directory", "-n", "stack-down", "SHELL_NAME=both"],
         cwd=REPO,
         capture_output=True,
         text=True,
     )
     assert refused.returncode != 0
     assert "SHELL_NAME must be one of: sidebar lanes" in refused.stderr
-
-    for config in ["vite.config.ts", "sidebar/vite.config.ts"]:
-        source = (REPO / "extensions/web/frontend" / config).read_text()
-        assert "process.env.UFO_STACK_ORIGIN" in source
+    assert "web:" not in (REPO / "Makefile").read_text().split("stack-down:")[1].split("db:")[0]
 
 
 def _check_signin_seats_the_dev_email_on_the_stack_origin() -> None:

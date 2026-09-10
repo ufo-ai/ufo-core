@@ -233,6 +233,10 @@ class SandboxConfig(BaseModel):
     proxy_public_url: str | None = None
     ingress_port: int = DEFAULT_INGRESS_PORT
     ingress_public_url: str | None = None
+    apps_dev_server: str | None = None
+    """`http://host:port` of a dev server holding the app pages from source. Set, the ingress relays
+    a shipped app page there — its root at `/<slug>/`, every other path verbatim — in place of the
+    published bundle: the local stack's edit loop. Unset, a shipped page is the bundle."""
     cache_daemon: str | None = None
     """`host:port` of the sandbox cache daemon co-located on the proxy pod (RFC 0032). Set enables
     the cache: the proxy relays the cache host to it and internet-holding sandboxes route git and
@@ -278,6 +282,26 @@ class SandboxConfig(BaseModel):
                 "sandbox.ingress_public_url is a scheme and a host only, with no path, query, "
                 "fragment, or credentials (e.g. https://example.com) — every site's address "
                 "is a label put in front of that host"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _apps_dev_server_is_an_origin(self) -> "SandboxConfig":
+        if self.apps_dev_server is None:
+            return self
+        base = urlsplit(self.apps_dev_server)
+        if (
+            base.scheme not in {"http", "https"}
+            or not base.hostname
+            or base.path
+            or base.query
+            or base.fragment
+            or base.username
+            or base.password
+        ):
+            raise ValueError(
+                "sandbox.apps_dev_server is an http(s) scheme and a host only (e.g. "
+                "http://web:5174) — the ingress relays a shipped page's own path onto it"
             )
         return self
 

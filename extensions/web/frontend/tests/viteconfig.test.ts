@@ -1,10 +1,12 @@
 // @vitest-environment node
 // Loading the config runs esbuild, which needs the real platform globals jsdom replaces.
 import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { expect, test } from "vitest";
-import { loadConfigFromFile, type ProxyOptions } from "vite";
+import { loadConfigFromFile, type IndexHtmlTransformContext, type ProxyOptions } from "vite";
+
+import { outsideRootPaths } from "../dev-routing";
 
 const proxyRule = async (config = "vite.config.ts"): Promise<[string, ProxyOptions]> => {
   const loaded = await loadConfigFromFile(
@@ -111,6 +113,63 @@ test("the rule routes each request through the predicate", async () => {
   expect(routed("POST", "/surface/web")).toBeUndefined();
   expect(routed("GET", "/surface/web/api/agents")).toBeUndefined();
   expect(routed("GET", "/ext/metronome/billing")).toBeUndefined();
+});
+
+test("every dev server may serve the whole repository, resolved from its own root", async () => {
+  // vite resolves `server.fs.allow` against `root`, and the three roots sit at two depths: the app
+  // entries live in their extensions and the brand marks under `assets/`, both above every root.
+  const frontend = join(import.meta.dirname, "..");
+  const repository = resolve(frontend, "..", "..", "..");
+  for (const [config, root] of [
+    ["vite.config.ts", frontend],
+    ["sidebar/vite.config.ts", join(frontend, "sidebar")],
+    ["vite.apps.config.ts", join(frontend, "apps")],
+  ]) {
+    const loaded = await loadConfigFromFile(
+      { command: "serve", mode: "development" },
+      join(frontend, config)
+    );
+    if (!loaded) throw new Error(`${config} did not load`);
+    const allow = loaded.config.server?.fs?.allow ?? [];
+    expect(allow.map((dir) => resolve(root, dir))).toEqual([repository]);
+  }
+});
+
+test("the app pages serve from source behind the ingress relay", async () => {
+  const loaded = await loadConfigFromFile(
+    { command: "serve", mode: "development" },
+    join(import.meta.dirname, "..", "vite.apps.config.ts")
+  );
+  if (!loaded) throw new Error("vite.apps.config.ts did not load");
+  // The ingress dials this server by its own name, which vite's host check refuses.
+  expect(loaded.config.server?.allowedHosts).toBe(true);
+  expect(loaded.config.cacheDir).toBe(join(import.meta.dirname, "..", "node_modules", ".vite-apps"));
+  const aliases = loaded.config.resolve?.alias;
+  if (!Array.isArray(aliases)) throw new Error("the app pages declare no ordered aliases");
+  expect(aliases[0]).toEqual({ find: "ufo/kit/jsx-dev-runtime", replacement: "react/jsx-dev-runtime" });
+});
+
+test("every page's paths that climb out of the root are served through /@fs while developing", async () => {
+  for (const config of ["vite.config.ts", "sidebar/vite.config.ts", "vite.apps.config.ts"]) {
+    const loaded = await loadConfigFromFile(
+      { command: "serve", mode: "development" },
+      join(import.meta.dirname, "..", config)
+    );
+    if (!loaded) throw new Error(`${config} did not load`);
+    const names = (loaded.config.plugins ?? []).flat().map((plugin) => (plugin as { name: string }).name);
+    expect(names).toContain("outside-root-paths");
+  }
+  const plugin = outsideRootPaths();
+  const transform = plugin.transformIndexHtml as { handler: (html: string, ctx: IndexHtmlTransformContext) => string };
+  const frontend = join(import.meta.dirname, "..");
+  const page = join(frontend, "sidebar", "sidebar.html");
+  const shell = transform.handler(readFileSync(page, "utf8"), { filename: page } as IndexHtmlTransformContext);
+  // Root-relative, not under the base: vite's own html transform prefixes the base after this one.
+  expect(shell).toContain(`href="/@fs${join(frontend, "..", "..", "..", "assets", "brand", "ufo-mark.svg")}"`);
+  expect(shell).toContain('src="/src/main.tsx"');
+  const app = join(frontend, "apps", "chat", "index.html");
+  const framed = transform.handler(readFileSync(app, "utf8"), { filename: app } as IndexHtmlTransformContext);
+  expect(framed).toContain(`src="/@fs${join(frontend, "..", "..", "app_chat", "ufo_ext_app_chat", "skills", "app-chat-home", "app.tsx")}"`);
 });
 
 test("the pages and the SDK build into the trees that serve and materialize them", async () => {

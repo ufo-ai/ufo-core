@@ -409,6 +409,7 @@ def _server(
     blob: FilesystemBlobStore = UNREAD_BLOBS,
     site_scheme: str = "https",
     reporter: SiteReporter | None = None,
+    apps_dev_server: DialTarget | None = None,
 ) -> IngressServe:
     """Annotated as the `Carrier` it stands in for, with no suppression: a stub that drifts from the
     protocol it fakes stops standing in for the dependency, and mypy is what catches the drift.
@@ -429,6 +430,7 @@ def _server(
         site_scheme=site_scheme,
         site_port_suffix="",
         resume_carriers=resume if resume is not None else {},
+        apps_dev_server=apps_dev_server,
     )
 
 
@@ -2711,6 +2713,91 @@ async def test_a_stored_page_carries_no_heartbeat_tag(db, stored_ingress) -> Non
     got = await client.get(f"{_origin(conversation_id)}/")
     assert got.content == INDEX_BYTES
     assert HEARTBEAT_TAG not in got.content
+
+
+def _dev_target(port: int) -> DialTarget:
+    return DialTarget(host=f"127.0.0.1:{port}", tls=False)
+
+
+def test_the_apps_dev_server_dial_is_the_knobs_authority_and_scheme(database_url: str) -> None:
+    assert ingress_serve.apps_dev_target(None) is None
+    assert ingress_serve.apps_dev_target("http://web:5174") == DialTarget(
+        host="web:5174", tls=False
+    )
+    assert ingress_serve.apps_dev_target("https://apps.example.com") == DialTarget(
+        host="apps.example.com", tls=True
+    )
+
+
+async def test_a_shipped_page_is_relayed_to_the_apps_dev_server_a_deploy_names(
+    db, origin_port: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The local stack's edit loop: with `[sandbox] apps_dev_server` set, a shipped claim is dialed
+    there in place of the fleet store — the root lands on the slug's own page with the query kept,
+    every other path goes verbatim, under the relay's own cache and framing headers. No tree was
+    ever published under the digest and the store root does not exist, so a store read would be
+    the failure."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id = uuid4()
+    anchor = shipped_anchor(workspace_id, SHIPPED_SLUG)
+    async with upstream_client() as upstream:
+        server = _server(
+            _NeverDialCarrier(port=0), upstream, apps_dev_server=_dev_target(origin_port)
+        )
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app())) as client:
+            await _open_shipped(client, workspace_id, anchor, SHIPPED_SLUG, SHIPPED_DIGEST)
+            page = await client.get(f"{_origin(anchor)}/?{SHIPPED_VERSION_PARAM}={SHIPPED_DIGEST}")
+            assert page.status_code == 200
+            assert (
+                page.json()["path"] == f"/{SHIPPED_SLUG}/?{SHIPPED_VERSION_PARAM}={SHIPPED_DIGEST}"
+            )
+            assert page.json()["probe"] == ""
+            assert page.headers["cache-control"] == UNCACHEABLE
+            assert page.headers[CONTENT_SECURITY_POLICY].startswith(FRAME_ANCESTORS_DIRECTIVE)
+            module = await client.get(f"{_origin(anchor)}/@vite/client")
+            assert module.status_code == 200
+            assert module.json()["path"] == "/@vite/client"
+
+
+async def test_a_shipped_pages_socket_reaches_the_apps_dev_server(
+    db, socket_origin: _SocketOrigin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shipped page speaks no socket protocol until a dev server holds it, whose reload channel
+    the frame opens at the page's own origin. The handshake reaches that server at the path the
+    viewer named — the root stays the root, the channel being the server's rather than a page's —
+    with the subprotocol negotiated and frames relayed, and nothing dialed."""
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id = uuid4()
+    anchor = shipped_anchor(workspace_id, SHIPPED_SLUG)
+    async with upstream_client() as upstream:
+        app = _server(
+            _NeverDialCarrier(port=0), upstream, apps_dev_server=_dev_target(socket_origin.port)
+        ).app()
+        async with _serving(
+            app, ws_max_size=WEBSOCKET_MAX_MESSAGE_BYTES, ws_per_message_deflate=False
+        ) as server:
+            session = mint_ingress_token(
+                IngressClaims(
+                    workspace_id=workspace_id,
+                    conversation_id=anchor,
+                    port=8000,
+                    expires_at=int(datetime.now(UTC).timestamp()) + 900,
+                    shipped=ShippedClaim(slug=SHIPPED_SLUG, digest=SHIPPED_DIGEST),
+                ),
+                INGRESS_SESSION_KIND,
+            )
+            async with _socket(
+                _bound_port(server),
+                anchor,
+                "/",
+                session=session,
+                subprotocols=[VITE_SUBPROTOCOL],
+            ) as viewer:
+                assert viewer.subprotocol == VITE_SUBPROTOCOL
+                await viewer.send('{"type":"ping"}')
+                assert await viewer.recv() == 'echo:{"type":"ping"}'
+    assert [handshake.path for handshake in socket_origin.handshakes] == ["/"]
+    assert socket_origin.handshakes[0].subprotocol == VITE_SUBPROTOCOL
 
 
 async def test_a_shipped_page_ping_renews_nothing(db, stored_ingress) -> None:

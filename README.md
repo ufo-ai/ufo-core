@@ -70,6 +70,8 @@ Use this mode to run the full hosted topology on your machine. One command start
 - the front: one nginx origin per slot, split as the hosted ingress splits the app host. `/login`,
   `/logout`, `/join`, `/v1/onboard`, and `/ufo` go to the gateway; every other path goes to serve.
 - the sandbox ingress for hosted sites
+- the `web` dev servers: the portal shell and the app pages, served from source and reloading on
+  every frontend change
 - the ufo-egress data plane: the Rust egress proxy, in the network namespace of serve
 
 ```bash
@@ -103,16 +105,15 @@ own browser origin, `ufo-N.localhost`, so the session cookies of the slots stay 
 
 Slot 1 uses the front :18080, serve :18710, ingress :18100, Postgres :15541, and Redis :15543. Each
 slot after slot 1 adds 100 to each port. The browser uses the front only. To change the host ports,
-set `UFO_PG_PORT`, `UFO_STACK_PORT_HOST`, `UFO_SERVE_PORT_HOST`, `UFO_INGRESS_PORT_HOST`,
-`UFO_REDIS_PORT`, and `UFO_WEB_PORT_HOST`.
+set `UFO_PG_PORT`, `UFO_STACK_PORT_HOST`, `UFO_SERVE_PORT_HOST`, `UFO_INGRESS_PORT_HOST`, and
+`UFO_REDIS_PORT`.
 
 ### Commands
 
 - `make stack STACK=N` builds the image of the slot from the current code. Then it starts the slot.
-- `make web STACK=N` serves the portal from source against the slot and reloads it on each
-  frontend change. Sign in at the gateway of the slot first, then open
-  `http://ufo-N.localhost:15173/surface/web` (add 100 per slot after slot 1). `SHELL_NAME=lanes`
-  serves the lanes shell in place of the sidebar shell. Keep `make stack` for a backend change.
+  The portal shell and the app pages are served from source: a frontend change reloads the open
+  page and every open app frame. `SHELL_NAME=lanes` serves the lanes shell in place of the sidebar
+  shell. A backend change needs `make stack` again.
 - `make stack-logs STACK=N` shows the logs of the slot, with the sign-in code.
 - `make stack-down STACK=N` stops the slot. The image, the volumes, and the workspaces stay.
 - To remove the schema and the data of the previous branch, run

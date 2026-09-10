@@ -79,13 +79,15 @@ Two of these running at once need different `[serve] port` values in their `$UFO
 
 ### Edit loop against a Docker stack
 
-`make web STACK=N` runs the same dev server against slot N of `make stack`: it points the proxy at
-the slot's published serve port and binds `ufo-N.localhost` on the slot's own port (15173 for slot
-1, plus 100 per slot after it), which is the origin the slot's session cookie is bound to. Sign in
-once at the slot's gateway, then edit against `http://ufo-N.localhost:15173/surface/web`. It serves
-the sidebar shell; `SHELL_NAME=lanes` serves the lanes shell instead. A frontend change reloads
-there, so `make stack` earns a re-run for a backend change and nothing else — the image carries the
-Python tree and the built portal, and a rebuild is minutes.
+`make stack STACK=N` serves both frontends from source through a `web` service beside the slot: the
+front routes the portal page and its modules to the shell's dev server, and the ingress relays every
+shipped app page to the app pages' dev server (`[sandbox] apps_dev_server` in `dev/ufo.toml`). Sign
+in at the slot's gateway, then edit against `http://ufo-N.localhost:18080/surface/web` (add 100 per
+slot after slot 1): a frontend change hot-updates the open page and every open app frame, except
+that an edit to an app's own entry re-runs it whole and so reloads that frame. It serves the sidebar
+shell; `SHELL_NAME=lanes` serves the lanes shell instead. `make stack` earns a re-run for a backend
+change and nothing else — the image carries the Python tree and the built app bundle, whose digest
+the homepage read still names.
 
 ### What does not need re-running
 

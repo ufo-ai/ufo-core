@@ -409,6 +409,10 @@ class IngressServe:
     """The hop that tells a site's own conversation the site is down. This process runs no turn
     engine, so a dead site is reported to serve rather than acted on here, and only for a request
     reading a page — the member's frame is what makes it worth an agent's turn."""
+    apps_dev_server: DialTarget | None = None
+    """Where a shipped app page is relayed from in place of the fleet store — `[sandbox]
+    apps_dev_server`, a dev server holding the pages from source with each at `/<slug>/`. The local
+    stack's edit loop; a deploy leaves it unset and serves the published bundle."""
     shipped_manifests: dict[ShippedClaim, dict[str, StoredFile]] = field(default_factory=dict)
     renewals: dict[tuple[UUID, int], float] = field(default_factory=dict)
     """When each dialed site last had its lease renewed by a viewer's ping, keyed by conversation
@@ -727,6 +731,10 @@ class IngressServe:
                 status_code=authorized.status,
                 media_type=authorized.media_type,
             )
+        if authorized.shipped is not None and self.apps_dev_server is not None:
+            return await self._relay_request(
+                request, authorized, self.apps_dev_server, path or f"{authorized.shipped.slug}/"
+            )
         files = await self._stored_manifest(authorized)
         if files is not None:
             return await self._serve_stored(request, authorized, files, path)
@@ -735,6 +743,11 @@ class IngressServe:
         dialed = await self._dial_site(authorized)
         if isinstance(dialed, SiteRefusal):
             return Response(dialed.message, status_code=dialed.status, media_type=dialed.media_type)
+        return await self._relay_request(request, authorized, dialed, path)
+
+    async def _relay_request(
+        self, request: Request, authorized: IngressClaims, dialed: DialTarget, path: str
+    ) -> Response:
         scheme = "https" if dialed.tls else "http"
         url = self._upstream_url(scheme, dialed.host, path, request.scope["query_string"])
         framed = any(header in request.headers for header in BODY_FRAMING_HEADERS)
@@ -1107,9 +1120,12 @@ class IngressServe:
         authorized = self._authorized(websocket)
         if isinstance(authorized, SiteRefusal):
             return await self._refuse(websocket, authorized)
-        if await self._stored_manifest(authorized) is not None or authorized.shipped is not None:
+        if authorized.shipped is not None and self.apps_dev_server is not None:
+            dialed: DialTarget | SiteRefusal = self.apps_dev_server
+        elif await self._stored_manifest(authorized) is not None or authorized.shipped is not None:
             return await self._refuse(websocket, SiteRefusal(501, SITE_HAS_NO_SOCKET))
-        dialed = await self._dial_site(authorized)
+        else:
+            dialed = await self._dial_site(authorized)
         if isinstance(dialed, SiteRefusal):
             return await self._refuse(websocket, dialed)
         scheme = "wss" if dialed.tls else "ws"
@@ -1233,6 +1249,15 @@ def ingress_base_host(configured: str | None) -> str:
     return host
 
 
+def apps_dev_target(configured: str | None) -> DialTarget | None:
+    """The dial for `[sandbox] apps_dev_server`, or None where a deploy serves the published bundle.
+    The knob's shape is held at config load; this reads the authority and the scheme off it."""
+    if configured is None:
+        return None
+    base = urlsplit(configured)
+    return DialTarget(host=base.netloc, tls=base.scheme == "https")
+
+
 def ingress_frame_ancestor(configured: str | None) -> str:
     """The deploy-wide source expression a hosted site may be framed by: the origin of
     `[connect] public_base_url` — scheme, host and port, never its path — which is where the frame
@@ -1241,9 +1266,9 @@ def ingress_frame_ancestor(configured: str | None) -> str:
     is not a reason to allow what a set base would forbid.
 
     A plain-http `localhost` base names every port on it: the host never leaves the machine, so
-    the portal served from source on another port (`make web`) is the same developer's page, and
-    the exact port would refuse the frame it opens with a browser-generated error no reply can
-    explain. An https base keeps its one port."""
+    the portal served from source on another port (the zero-services dev server) is the same
+    developer's page, and the exact port would refuse the frame it opens with a browser-generated
+    error no reply can explain. An https base keeps its one port."""
     base = urlsplit(configured or "")
     if not (base.scheme and base.hostname):
         return NO_FRAME_ANCESTOR
@@ -1300,6 +1325,7 @@ def run() -> None:
         reporter=SiteReporter(client=client, serve_base_url=config.connect.public_base_url),
         site_scheme=ingress_base.scheme,
         site_port_suffix=f":{ingress_base.port}" if ingress_base.port else "",
+        apps_dev_server=apps_dev_target(config.sandbox.apps_dev_server),
     )
     log("ingress.starting", port=config.sandbox.ingress_port)
     uvicorn.run(

@@ -249,6 +249,29 @@ def test_plain_local_names_the_one_http_base_that_never_leaves_the_machine() -> 
         assert plain_local(other) is False
 
 
+def test_apps_dev_server_is_an_http_origin_and_nothing_else(tmp_path: Path) -> None:
+    """The ingress puts a shipped page's own path after this value, so anything beyond scheme and
+    authority would be silently folded into every relayed URL. Unset is the deploy that serves the
+    published bundle."""
+    path = tmp_path / "ufo.toml"
+    for rejected in (
+        "web:5174",
+        "ws://web:5174",
+        "http://web:5174/",
+        "http://web:5174/apps",
+        "http://web:5174?x=1",
+        "http://user@web:5174",
+    ):
+        path.write_text(VALID + f'\n[sandbox]\napps_dev_server = "{rejected}"\n')
+        with pytest.raises(ValidationError):
+            load_config(path)
+    for accepted in ("http://web:5174", "https://apps.example.com"):
+        path.write_text(VALID + f'\n[sandbox]\napps_dev_server = "{accepted}"\n')
+        assert load_config(path).sandbox.apps_dev_server == accepted
+    path.write_text(VALID)
+    assert load_config(path).sandbox.apps_dev_server is None
+
+
 def test_ingress_public_url_is_a_scheme_and_a_host_and_nothing_else(tmp_path: Path) -> None:
     """The knob's two readers take it apart differently — the ingress strips its `hostname` off each
     request's Host, `SurfaceContext.ingress_url` puts a label in front of its `netloc` — so anything

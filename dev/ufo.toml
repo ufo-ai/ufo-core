@@ -25,6 +25,7 @@ backend = "in_process"
 backend = "local"
 workspace_root = "/data/workspaces"
 ingress_public_url = "__INGRESS_PUBLIC_URL__"
+apps_dev_server = "http://web:5174"
 
 [connect]
 public_base_url = "__PUBLIC_BASE_URL__"

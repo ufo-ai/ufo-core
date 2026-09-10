@@ -31,24 +31,23 @@ UFO_REDIS_PORT ?= $(shell expr 15543 + $(STACK_OFFSET))
 UFO_STACK_PORT_HOST ?= $(shell expr 18080 + $(STACK_OFFSET))
 UFO_SERVE_PORT_HOST ?= $(shell expr 18710 + $(STACK_OFFSET))
 UFO_INGRESS_PORT_HOST ?= $(shell expr 18100 + $(STACK_OFFSET))
-UFO_WEB_PORT_HOST ?= $(shell expr 15173 + $(STACK_OFFSET))
 UFO_WORKSPACE_ROOT ?= $(REPOSITORY_ROOT)/.local/$(STACK_NAME)/workspaces
+# `portal_page` serves the sidebar shell, so the slot's dev server serves that shell by default.
+WEB_VITE_CONFIG := $(if $(filter sidebar,$(SHELL_NAME)),sidebar/vite.config.ts,vite.config.ts)
 STACK_ENV := UFO_DEV_IMAGE=$(STACK_NAME)-dev UFO_STACK_HOST=$(STACK_HOST) \
 	UFO_PG_PORT=$(UFO_PG_PORT) UFO_REDIS_PORT=$(UFO_REDIS_PORT) \
 	UFO_STACK_PORT_HOST=$(UFO_STACK_PORT_HOST) \
 	UFO_SERVE_PORT_HOST=$(UFO_SERVE_PORT_HOST) \
 	UFO_INGRESS_PORT_HOST=$(UFO_INGRESS_PORT_HOST) \
-	UFO_WORKSPACE_ROOT="$(UFO_WORKSPACE_ROOT)"
+	UFO_WORKSPACE_ROOT="$(UFO_WORKSPACE_ROOT)" \
+	UFO_WEB_VITE_CONFIG=$(WEB_VITE_CONFIG)
 COMPOSE := $(STACK_ENV) docker compose --project-name $(STACK_NAME)
 STACK_ORIGIN := http://$(STACK_HOST):$(UFO_STACK_PORT_HOST)
 # Where `make signin` opens the signed-in portal. Chrome, because it treats `*.localhost` as a
 # secure origin and holds the portal's `Secure` cookie there; Safari drops it.
 BROWSER ?= open -a "Google Chrome" %s
-# `portal_page` serves the sidebar shell, so the dev server serves that shell too; the lanes shell
-# is the frontend root's own config and the sidebar shell keeps its config beside its root.
-SHELL_CONFIG := $(if $(filter sidebar,$(SHELL_NAME)),--config sidebar/vite.config.ts,)
 
-.PHONY: help install reinstall build init serve portal setup stack stack-down stack-logs signin web db \
+.PHONY: help install reinstall build init serve portal setup stack stack-down stack-logs signin db \
 	check fmt test test-one test-control test-preview test-client test-client-load \
 	cover-client bench-client test-web test-integration
 
@@ -96,7 +95,7 @@ setup: ## Set up local developer env
 		echo "Created .env. Set API keys, then run make stack."; \
 	fi
 
-stack: ## Bring up stack 1-5 in Docker (STACK=1); WT=<worktree> copies .env there and runs in it
+stack: ## Bring up stack 1-5 in Docker; the portal and the app pages reload on every frontend change (STACK=1, SHELL_NAME=sidebar|lanes); WT=<worktree> copies .env there and runs in it
 	@test -f .env || { echo ".env is required: configure it before running make stack, with 'make setup'" >&2; exit 1; }
 ifneq ($(WT),)
 	@set -e; \
@@ -120,7 +119,7 @@ else
 		done; \
 		$(MAKE) build; \
 		echo "Sign in: $(STACK_ORIGIN)/login, or seat UFO_DEV_EMAIL and open the portal: make signin STACK=$(STACK)"; \
-		echo "Portal from source, reloading on every frontend change: make web STACK=$(STACK)"; \
+		echo "Portal: $(STACK_ORIGIN)/surface/web. The shell and the app pages reload on every frontend change."; \
 		$(COMPOSE) up --build
 endif
 
@@ -135,12 +134,6 @@ signin: ## Seat UFO_DEV_EMAIL on stack 1-5 through the console sign-in and open 
 		set -a; . ./.env; set +a; \
 		test -n "$$UFO_DEV_EMAIL" || { echo "UFO_DEV_EMAIL is empty in .env: the address make signin seats." >&2; exit 1; }; \
 		BROWSER='$(BROWSER)' uv run python dev/signin.py --origin $(STACK_ORIGIN) --email "$$UFO_DEV_EMAIL"
-
-web: $(WEB)/node_modules ## Serve the portal from source against stack 1-5, reloading on every frontend change (STACK=1, SHELL_NAME=sidebar|lanes)
-	@echo "Portal: http://$(STACK_HOST):$(UFO_WEB_PORT_HOST)/surface/web"
-	UFO_STACK_ORIGIN=$(STACK_ORIGIN) \
-		pnpm -C $(WEB) run dev $(SHELL_CONFIG) \
-		--host $(STACK_HOST) --port $(UFO_WEB_PORT_HOST) --strictPort
 
 db: ## Start only Postgres for tests and evals on :5541
 	docker compose up -d postgres
