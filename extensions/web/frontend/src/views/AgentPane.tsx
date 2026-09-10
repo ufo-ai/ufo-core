@@ -22,6 +22,7 @@ import { Header } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
 import { isPortalChat, subject, surfaceWord, useViewer } from "@/lib/audience";
+import { AudienceMark } from "@/lib/audienceMark";
 import { agentName } from "@/lib/agentName";
 import { BUILD_ASK, setPendingAsk } from "@/lib/pendingAsk";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
@@ -243,6 +244,7 @@ export function AgentPane({
     railAgent === null &&
     listed.phase === "ready";
   const framed = mergePlace(place, conversational ? { opens: undefined } : {});
+  const audience = opened ?? railHeld;
 
   const conversation = (
     <section aria-label={agentName(agent.name)} className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -256,6 +258,7 @@ export function AgentPane({
                 : subject(opened, viewer)
               : (railHeld?.title ?? NEW_CONVERSATION)
           }
+          note={audience ? <AudienceMark entry={audience} /> : null}
           acts={
             <>
               {beside ? null : (
@@ -304,7 +307,6 @@ export function AgentPane({
           agent={agent}
           member={member}
           conversationId={opened?.id ?? railHeld?.conversation_id ?? null}
-          audience={opened ?? railHeld ?? undefined}
           onCreated={(conversationId, title) => {
             onCreated(conversationId, title);
             setSettles((count) => count + 1);
@@ -444,13 +446,17 @@ export function AgentPane({
         aria-label={railRow.title}
         className="flex min-h-0 min-w-0 flex-1 flex-col"
       >
-        <Header heading={2} title={railRow.title} pinned />
+        <Header
+          heading={2}
+          title={railRow.title}
+          note={<AudienceMark entry={railRow} />}
+          pinned
+        />
         <Chat
           key={target}
           agent={railAgent}
           member={member}
           conversationId={target}
-          audience={railRow}
           onCreated={onCreated}
           onSettled={() => setSettles((count) => count + 1)}
         />

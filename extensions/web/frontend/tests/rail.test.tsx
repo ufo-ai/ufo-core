@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -559,10 +559,11 @@ test("a read-only conversation is headed by who reads it, as its projection carr
 
   await screen.findByText(/read-only here/);
   const mark = audienceMark();
-  expect(mark.textContent).toContain("Workspace");
   expect(mark.getAttribute("title")).toBe(
     "Every member of the workspace reads this conversation. " + ADMIN_DISCLOSURE,
   );
+  fireEvent.focus(mark);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Workspace");
 });
 
 test("a conversation an admin opened states the member it is private to", async () => {
@@ -581,10 +582,11 @@ test("a conversation an admin opened states the member it is private to", async 
 
   await screen.findByText(/read-only here/);
   const mark = audienceMark();
-  expect(mark.textContent).toContain("Private to mel@example.com");
   expect(mark.getAttribute("title")).toBe(
     "Only mel@example.com reads this conversation. " + ADMIN_DISCLOSURE,
   );
+  fireEvent.focus(mark);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Private to mel@example.com");
 });
 
 test("a markdown file in a Slack conversation opens the attachment sheet", async () => {

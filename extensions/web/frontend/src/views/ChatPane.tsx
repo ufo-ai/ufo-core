@@ -6,7 +6,7 @@ import { Chat, type ChatProps } from "@/views/Chat";
 import { ConversationDetail, Disclose } from "@/views/Conversations";
 import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { usePanelRead } from "@/kernel/panel";
-import { subject, surfaceWord, useViewer } from "@/lib/audience";
+import { subject, surfaceWord, useViewer, type AudienceEntry } from "@/lib/audience";
 import { AudienceMark } from "@/lib/audienceMark";
 import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
@@ -21,6 +21,9 @@ import {
 } from "@/views/ConversationSlotPane";
 
 export type ChatPaneProps = ChatProps & {
+  /** Who reads the open conversation, as the row that named it carries it. A conversation the
+   *  member has not founded yet has no audience to state, and the title line states none. */
+  audience?: AudienceEntry;
   title?: string;
   conversationOnly?: boolean;
   slot?: string;
@@ -92,6 +95,7 @@ export function ChatPane({
     <Header
       crumb={crumb}
       title={title ?? agentName(agent.name)}
+      note={audience ? <AudienceMark entry={audience} /> : null}
       acts={
         !conversationOnly && slots.phase === "ready" && slots.payload.slots.length
           ? slots.payload.slots.map((entry) => (
@@ -120,7 +124,6 @@ export function ChatPane({
           agent={agent}
           member={member}
           conversationId={conversationId}
-          audience={audience}
           focusComposer={focusComposer}
           onCreated={onCreated}
           onActivity={onActivity}
@@ -166,7 +169,7 @@ export function LinkedPane({
         <Header
           crumb={crumb}
           title={subject(conversation, viewer)}
-          note={readable && conversation.commentable ? null : <AudienceMark entry={conversation} />}
+          note={<AudienceMark entry={conversation} />}
           acts={<SurfaceMark conversation={conversation} />}
           pinned
         />
@@ -176,7 +179,6 @@ export function LinkedPane({
               agent={agent}
               member={member}
               conversationId={conversation.id}
-              audience={conversation}
               onActivity={onActivity}
             />
           ) : (

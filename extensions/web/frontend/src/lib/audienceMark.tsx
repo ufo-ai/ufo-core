@@ -1,5 +1,6 @@
 import { IconLock, IconUsers } from "@tabler/icons-react";
 
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   audienceDetail,
   audienceLabel,
@@ -10,32 +11,38 @@ import {
 
 const AUDIENCE_GLYPH = "size-(--size-glyph) shrink-0";
 
-/** Who reads the conversation the member has open, drawn beside its name in every pane that
- *  draws one. It states today's audience and never an act: the marker answers a question the
- *  member asks while typing — who sees this — so it stands in the header rather than behind a
- *  menu, and it says in the same breath that an admin can still open the thread, because a marker
- *  that reads as a promise of privacy is worse than none.
+/** Who reads the conversation the member has open, standing as the glyph alone right of the name
+ *  on the title line. It states today's audience and never an act: the marker answers a question
+ *  the member asks while typing — who sees this — so it stands on the title line rather than
+ *  behind a menu, and it says in the same breath that an admin can still open the thread, because
+ *  a marker that reads as a promise of privacy is worse than none.
  *
- *  The word is the answer and the glyph separates a private thread from a shared one at a glance;
- *  the whole sentence rides in `title` and for a reader who cannot see the marker in the text
- *  beside it, because "Only you" alone leaves the admin's reach implicit. */
+ *  The glyph separates a private thread from a shared one at a glance and the word reaches the
+ *  member on hover and on focus; the whole sentence rides in `title` and in the text beside the
+ *  glyph for a reader who cannot see it, because "Only you" alone leaves the admin's reach
+ *  implicit. */
 export function AudienceMark({ entry }: { entry: AudienceEntry }) {
   const viewer = useViewer();
   const detail = audienceDetail(entry, viewer);
   const own = isMemberAudience(entry.audience);
   return (
-    <span
-      data-slot="audience"
-      title={detail}
-      className="flex items-center gap-2xs whitespace-nowrap text-ink-soft"
-    >
-      {own ? (
-        <IconLock className={AUDIENCE_GLYPH} aria-hidden />
-      ) : (
-        <IconUsers className={AUDIENCE_GLYPH} aria-hidden />
-      )}
-      {audienceLabel(entry, viewer)}
-      <span className="sr-only">{detail}</span>
-    </span>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          data-slot="audience"
+          tabIndex={0}
+          title={detail}
+          className="flex shrink-0 items-center text-ink-soft"
+        >
+          {own ? (
+            <IconLock className={AUDIENCE_GLYPH} aria-hidden />
+          ) : (
+            <IconUsers className={AUDIENCE_GLYPH} aria-hidden />
+          )}
+          <span className="sr-only">{detail}</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{audienceLabel(entry, viewer)}</TooltipContent>
+    </Tooltip>
   );
 }

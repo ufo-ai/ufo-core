@@ -6,6 +6,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { PaneFault } from "@/kernel/pane";
 import { Loading } from "@/kernel/panel";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { agentHash } from "@/lib/route";
@@ -1279,20 +1280,32 @@ test("a slot on its own address states who reads the conversation it belongs to"
       json({ type: "artifacts", artifacts: [], truncated: false }),
   });
   render(
-    <ConversationSlotPane
-      agent={AGENT}
-      conversationId={CONVO_ID}
-      slot="artifacts"
-      summary={{ id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifact", count: 0 }}
-      audience={{ audience: "member:m1", member_email: null, surface_label: null }}
-      crumb={agentCrumb(AGENT)}
-    />,
+    <TooltipProvider>
+      <ConversationSlotPane
+        agent={AGENT}
+        conversationId={CONVO_ID}
+        slot="artifacts"
+        summary={{
+          id: "artifacts",
+          label: "Artifacts",
+          icon: "artifact",
+          kind: "artifact",
+          count: 0,
+        }}
+        audience={{ audience: "member:m1", member_email: null, surface_label: null }}
+        crumb={agentCrumb(AGENT)}
+      />
+    </TooltipProvider>,
   );
 
-  await screen.findByRole("heading", { level: 1, name: "Artifacts" });
+  const head = await screen.findByRole("heading", { level: 1, name: "Artifacts" });
+  const detail = "Only you read this conversation. " + ADMIN_DISCLOSURE;
   const mark = audienceMark();
-  expect(mark.textContent).toContain("Only you");
-  expect(mark.getAttribute("title")).toBe("Only you read this conversation. " + ADMIN_DISCLOSURE);
+  expect(mark.parentElement!.contains(head)).toBe(true);
+  expect(mark.textContent).toBe(detail);
+  expect(mark.getAttribute("title")).toBe(detail);
+  fireEvent.focus(mark);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Only you");
 });
 
 const APP_SITE = { state: "set", url: "https://tasks.example.test", deploy_generation: 1 } as const;

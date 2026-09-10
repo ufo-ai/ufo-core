@@ -96,14 +96,19 @@ test("an empty conversation states it, and the composer sends a message and stre
   expect(StreamFake.last().closed).toBe(true);
 });
 
-test("the open chat states who reads it, from the audience its row carried", async () => {
+test("the open chat states who reads it on its title line, as the glyph alone", async () => {
   wire(transcript());
   open();
 
   await screen.findByText("No messages in this conversation yet.");
+  const detail = "Only you read this conversation. " + ADMIN_DISCLOSURE;
   const mark = audienceMark();
-  expect(mark.textContent).toContain("Only you");
-  expect(mark.getAttribute("title")).toBe("Only you read this conversation. " + ADMIN_DISCLOSURE);
+  expect(mark.parentElement!.textContent).toContain(CHAT_ROW.title);
+  expect(mark.querySelector("svg")).toBeTruthy();
+  expect(mark.textContent).toBe(detail);
+  expect(mark.getAttribute("title")).toBe(detail);
+  fireEvent.focus(mark);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Only you");
 });
 
 test("a chat another member owns states its audience by that address", async () => {
@@ -114,7 +119,8 @@ test("a chat another member owns states its audience by that address", async () 
   open();
 
   await screen.findByText("No messages in this conversation yet.");
-  expect(audienceMark().textContent).toContain("Private to mel@example.com");
+  fireEvent.focus(audienceMark());
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Private to mel@example.com");
 });
 
 test("a reply from an agent on auto states its spend and names no model", async () => {

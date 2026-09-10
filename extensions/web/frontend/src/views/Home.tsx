@@ -676,7 +676,6 @@ function ConversationLane({
               agent={agent}
               member={member}
               conversationId={conversationId}
-              audience={row ?? linked}
               onActivity={onActivity}
             />
           </div>
