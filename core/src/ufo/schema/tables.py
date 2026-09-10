@@ -493,7 +493,9 @@ object_change = sa.Table(
     "object_change",
     metadata,
     sa.Column("id", sa.Uuid, primary_key=True),
-    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column(
+        "workspace_id", sa.Uuid, sa.ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False
+    ),
     sa.Column("kind", sa.Text, nullable=False),
     sa.Column("name", sa.Text, nullable=False),
     sa.Column("verb", sa.Text, nullable=False),
@@ -519,7 +521,9 @@ credential = sa.Table(
 credential_fulfillment = sa.Table(
     "credential_fulfillment",
     metadata,
-    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), primary_key=True),
+    sa.Column(
+        "workspace_id", sa.Uuid, sa.ForeignKey("workspace.id", ondelete="CASCADE"), primary_key=True
+    ),
     sa.Column("request_id", sa.Uuid, primary_key=True),
     sa.Column("slot", sa.Text, primary_key=True),
     sa.Column("member_id", sa.Uuid, nullable=False),
