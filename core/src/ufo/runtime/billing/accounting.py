@@ -2,7 +2,7 @@
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
@@ -1013,6 +1013,14 @@ class UsageDetails:
 
 
 @dataclass(frozen=True, slots=True)
+class _LedgerRollup:
+    total_micro_usd: int
+    by_dimension: tuple[DimensionTotal, ...]
+    by_price_digest: tuple[PriceDigestTotal, ...]
+    usage: UsageDetails
+
+
+@dataclass(frozen=True, slots=True)
 class SpendReport:
     """A selected range and all-time workspace ledger, with daily, execution, model, dimension,
     member, agent, origin, and price-table totals."""
@@ -1047,6 +1055,9 @@ class MemberSpendReport:
 
 TOKEN_DIMENSIONS = (TOKENS_DIMENSION, SANDBOX_TOKENS_DIMENSION)
 WORKSPACE_JOB_LABEL = "Workspace jobs"
+SELECTED_PERIOD = "selected"
+PREVIOUS_PERIOD = "previous"
+EARLIER_PERIOD = "earlier"
 
 
 def _token_sum() -> sa.ColumnElement[int]:
@@ -1075,130 +1086,144 @@ def _token_cost_sum() -> sa.ColumnElement[int]:
     )
 
 
-async def _usage_details(
+async def _ledger_rollup(
     connection: AsyncConnection,
     source: sa.FromClause,
     scope: sa.ColumnElement[bool],
     cutoff: datetime | None,
     now: datetime,
-) -> UsageDetails:
-    selected_scope = scope if cutoff is None else scope & (tables.ledger.c.created_at >= cutoff)
-    selected_row = (
-        await connection.execute(
-            sa.select(
-                _token_sum().label("tokens"),
-                _token_cost_sum().label("token_cost"),
-                sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0).label("cost"),
+    execution_column: sa.ColumnElement[str] | None,
+) -> _LedgerRollup:
+    created_at = tables.ledger.c.created_at
+    selected = sa.true() if cutoff is None else created_at >= cutoff
+    previous_start = None if cutoff is None else cutoff - (now - cutoff)
+    period = (
+        sa.literal(SELECTED_PERIOD)
+        if previous_start is None
+        else sa.case(
+            (selected, SELECTED_PERIOD),
+            (created_at >= previous_start, PREVIOUS_PERIOD),
+            else_=EARLIER_PERIOD,
+        )
+    ).label("period")
+    token = tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS).label("token")
+    day = sa.case((selected, sa.func.date(created_at))).label("day")
+    dimension = sa.case((selected, tables.ledger.c.dimension)).label("dimension")
+    model = sa.case((selected & token, tables.ledger.c.model)).label("model")
+    price_digest = sa.case((selected, tables.ledger.c.price_digest)).label("price_digest")
+    execution = (
+        sa.cast(sa.null(), sa.Text)
+        if execution_column is None
+        else sa.case(
+            (
+                selected & token & tables.ledger.c.turn_id.isnot(None),
+                sa.func.coalesce(execution_column, ""),
             )
-            .select_from(source)
-            .where(selected_scope)
         )
-    ).one()
-    all_time_row = (
-        await connection.execute(
-            sa.select(
-                _token_sum().label("tokens"),
-                _token_cost_sum().label("token_cost"),
-                sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0).label("cost"),
-                sa.func.min(tables.ledger.c.created_at).label("first_used_at"),
-            )
-            .select_from(source)
-            .where(scope)
+    ).label("execution")
+    rows = await connection.execute(
+        sa.select(
+            period,
+            token,
+            day,
+            dimension,
+            model,
+            price_digest,
+            execution,
+            sa.func.sum(tables.ledger.c.amount).label("amount"),
+            sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+            sa.func.min(created_at).label("first_used_at"),
         )
-    ).one()
-    day = sa.func.date(tables.ledger.c.created_at).label("day")
-    daily_rows = {
-        date.fromisoformat(str(row.day)): DailyUsageTotal(
-            day=str(row.day),
-            tokens=int(row.tokens),
-            token_micro_usd=int(row.token_cost),
-            total_micro_usd=int(row.cost),
+        .select_from(source)
+        .where(scope)
+        .group_by(period, token, day, dimension, model, price_digest, execution)
+    )
+    selected_tokens = 0
+    selected_token_cost = 0
+    selected_cost = 0
+    all_time_tokens = 0
+    all_time_token_cost = 0
+    all_time_cost = 0
+    previous_tokens = 0
+    first_used_at: datetime | None = None
+    dimensions: dict[str, tuple[int, int]] = {}
+    digests: dict[str, int] = {}
+    daily_totals: dict[date, tuple[int, int, int]] = {}
+    executions: dict[str, tuple[int, int]] = {}
+    models: dict[str, tuple[int, int]] = {}
+    for row in rows:
+        amount = int(row.amount)
+        priced = int(row.priced)
+        is_token = bool(row.token)
+        all_time_cost += priced
+        if is_token:
+            all_time_tokens += amount
+            all_time_token_cost += priced
+        used_at = row.first_used_at
+        if used_at is not None and (first_used_at is None or used_at < first_used_at):
+            first_used_at = used_at
+        if row.period == PREVIOUS_PERIOD:
+            if is_token:
+                previous_tokens += amount
+            continue
+        if row.period != SELECTED_PERIOD:
+            continue
+        selected_cost += priced
+        if is_token:
+            selected_tokens += amount
+            selected_token_cost += priced
+        if row.dimension is not None:
+            prior_amount, prior_priced = dimensions.get(row.dimension, (0, 0))
+            dimensions[row.dimension] = prior_amount + amount, prior_priced + priced
+        if row.price_digest is not None:
+            digests[row.price_digest] = digests.get(row.price_digest, 0) + priced
+        current_day = date.fromisoformat(str(row.day))
+        day_tokens, day_token_cost, day_cost = daily_totals.get(current_day, (0, 0, 0))
+        daily_totals[current_day] = (
+            day_tokens + (amount if is_token else 0),
+            day_token_cost + (priced if is_token else 0),
+            day_cost + priced,
         )
-        for row in await connection.execute(
-            sa.select(
-                day,
-                _token_sum().label("tokens"),
-                _token_cost_sum().label("token_cost"),
-                sa.func.sum(tables.ledger.c.priced_micro_usd).label("cost"),
-            )
-            .select_from(source)
-            .where(selected_scope)
-            .group_by(day)
-            .order_by(day)
-        )
-    }
-    first_day = cutoff.date() if cutoff is not None else min(daily_rows, default=None)
+        if row.execution is not None:
+            execution_tokens, execution_priced = executions.get(row.execution, (0, 0))
+            executions[row.execution] = execution_tokens + amount, execution_priced + priced
+        if row.model is not None:
+            model_tokens, model_priced = models.get(row.model, (0, 0))
+            models[row.model] = model_tokens + amount, model_priced + priced
+    first_day = cutoff.date() if cutoff is not None else min(daily_totals, default=None)
     daily: tuple[DailyUsageTotal, ...] = ()
     if first_day is not None:
         days = (now.date() - first_day).days + 1
         daily = tuple(
-            daily_rows.get(current, DailyUsageTotal(str(current), 0, 0, 0))
+            DailyUsageTotal(str(current), *daily_totals.get(current, (0, 0, 0)))
             for current in (first_day + timedelta(days=offset) for offset in range(days))
         )
-    execution = sa.func.coalesce(tables.turn.c.subagent_profile, "").label("execution")
-    by_execution = tuple(
-        UsageBreakdown(row.execution, int(row.tokens), int(row.priced))
-        for row in await connection.execute(
-            sa.select(
-                execution,
-                sa.func.sum(tables.ledger.c.amount).label("tokens"),
-                sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
-            )
-            .select_from(source)
-            .where(
-                selected_scope,
-                tables.ledger.c.turn_id.isnot(None),
-                tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS),
-            )
-            .group_by(execution)
-            .order_by(execution)
-        )
-    )
-    by_model = tuple(
-        UsageBreakdown(row.model, int(row.tokens), int(row.priced))
-        for row in await connection.execute(
-            sa.select(
-                tables.ledger.c.model,
-                sa.func.sum(tables.ledger.c.amount).label("tokens"),
-                sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
-            )
-            .select_from(source)
-            .where(selected_scope, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
-            .group_by(tables.ledger.c.model)
-            .order_by(tables.ledger.c.model)
-        )
-    )
-    previous_tokens: int | None = None
-    if cutoff is not None:
-        previous_start = cutoff - (now - cutoff)
-        previous_tokens = int(
-            (
-                await connection.execute(
-                    sa.select(_token_sum())
-                    .select_from(source)
-                    .where(
-                        scope,
-                        tables.ledger.c.created_at >= previous_start,
-                        tables.ledger.c.created_at < cutoff,
-                    )
-                )
-            ).scalar_one()
-        )
-    first_used_at = all_time_row.first_used_at
     if first_used_at is not None and first_used_at.tzinfo is None:
         first_used_at = first_used_at.replace(tzinfo=UTC)
-    return UsageDetails(
-        selected=UsageTotal(
-            int(selected_row.tokens), int(selected_row.token_cost), int(selected_row.cost)
+    return _LedgerRollup(
+        total_micro_usd=selected_cost,
+        by_dimension=tuple(
+            DimensionTotal(name, amount, priced)
+            for name, (amount, priced) in sorted(dimensions.items())
         ),
-        all_time=UsageTotal(
-            int(all_time_row.tokens), int(all_time_row.token_cost), int(all_time_row.cost)
+        by_price_digest=tuple(
+            PriceDigestTotal(digest, priced) for digest, priced in sorted(digests.items())
         ),
-        first_used_at=first_used_at,
-        previous_tokens=previous_tokens,
-        daily=daily,
-        by_execution=by_execution,
-        by_model=by_model,
+        usage=UsageDetails(
+            selected=UsageTotal(selected_tokens, selected_token_cost, selected_cost),
+            all_time=UsageTotal(all_time_tokens, all_time_token_cost, all_time_cost),
+            first_used_at=first_used_at,
+            previous_tokens=None if cutoff is None else previous_tokens,
+            daily=daily,
+            by_execution=tuple(
+                UsageBreakdown(name, tokens, priced)
+                for name, (tokens, priced) in sorted(executions.items())
+            ),
+            by_model=tuple(
+                UsageBreakdown(name, tokens, priced)
+                for name, (tokens, priced) in sorted(models.items())
+            ),
+        ),
     )
 
 
@@ -1217,27 +1242,13 @@ class SpendRollup:
         if cutoff is not None:
             window &= tables.ledger.c.created_at >= cutoff
         member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
-        total = int(
-            (
-                await connection.execute(
-                    sa.select(
-                        sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0)
-                    ).where(window)
-                )
-            ).scalar_one()
-        )
-        by_dimension = tuple(
-            DimensionTotal(row.dimension, int(row.amount), int(row.priced))
-            for row in await connection.execute(
-                sa.select(
-                    tables.ledger.c.dimension,
-                    sa.func.sum(tables.ledger.c.amount).label("amount"),
-                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
-                )
-                .where(window)
-                .group_by(tables.ledger.c.dimension)
-                .order_by(tables.ledger.c.dimension)
-            )
+        ledger = await _ledger_rollup(
+            connection,
+            tables.ledger,
+            tables.ledger.c.workspace_id == self.workspace_id,
+            cutoff,
+            now,
+            None,
         )
         by_member = tuple(
             SubjectTotal(row.member_id, row.email, int(row.tokens), int(row.priced))
@@ -1261,59 +1272,63 @@ class SpendRollup:
                 .order_by(tables.member.c.email)
             )
         )
-        by_agent = tuple(
-            SubjectTotal(
-                row.agent_id,
-                row.name if row.agent_id is not None else WORKSPACE_JOB_LABEL,
-                int(row.tokens),
-                int(row.priced),
+        execution = sa.case(
+            (
+                tables.ledger.c.turn_id.isnot(None),
+                sa.func.coalesce(tables.turn.c.subagent_profile, ""),
             )
-            for row in await connection.execute(
-                sa.select(
-                    tables.turn.c.agent_id,
-                    member_name.label("name"),
-                    _token_sum().label("tokens"),
-                    _token_cost_sum().label("priced"),
-                )
-                .select_from(
-                    tables.ledger.outerjoin(tables.turn).outerjoin(
-                        tables.agent, tables.turn.c.agent_id == tables.agent.c.id
-                    )
-                )
-                .where(window, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
-                .group_by(tables.turn.c.agent_id, member_name)
-                .order_by(member_name.nulls_last())
+        ).label("execution")
+        agent_rows = await connection.execute(
+            sa.select(
+                tables.turn.c.agent_id,
+                member_name.label("name"),
+                execution,
+                _token_sum().label("tokens"),
+                _token_cost_sum().label("priced"),
             )
+            .select_from(
+                tables.ledger.outerjoin(tables.turn).outerjoin(
+                    tables.agent, tables.turn.c.agent_id == tables.agent.c.id
+                )
+            )
+            .where(window, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
+            .group_by(tables.turn.c.agent_id, member_name, execution)
+            .order_by(member_name.nulls_last(), execution)
         )
-        by_price_digest = tuple(
-            PriceDigestTotal(row.price_digest, int(row.priced))
-            for row in await connection.execute(
-                sa.select(
-                    tables.ledger.c.price_digest,
-                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
-                )
-                .where(window & tables.ledger.c.price_digest.isnot(None))
-                .group_by(tables.ledger.c.price_digest)
-                .order_by(tables.ledger.c.price_digest)
+        agents: dict[UUID | None, tuple[str, int, int]] = {}
+        executions: dict[str, tuple[int, int]] = {}
+        for row in agent_rows:
+            name = row.name if row.agent_id is not None else WORKSPACE_JOB_LABEL
+            _prior_name, prior_tokens, prior_priced = agents.get(row.agent_id, (name, 0, 0))
+            agents[row.agent_id] = (
+                name,
+                prior_tokens + int(row.tokens),
+                prior_priced + int(row.priced),
             )
+            if row.execution is not None:
+                execution_tokens, execution_priced = executions.get(row.execution, (0, 0))
+                executions[row.execution] = (
+                    execution_tokens + int(row.tokens),
+                    execution_priced + int(row.priced),
+                )
+        by_agent = tuple(
+            SubjectTotal(agent_id, name, tokens, priced)
+            for agent_id, (name, tokens, priced) in agents.items()
+        )
+        by_execution = tuple(
+            UsageBreakdown(name, tokens, priced)
+            for name, (tokens, priced) in sorted(executions.items())
         )
         by_origin = await self._by_origin(connection, window)
-        usage = await _usage_details(
-            connection,
-            tables.ledger.outerjoin(tables.turn),
-            tables.ledger.c.workspace_id == self.workspace_id,
-            cutoff,
-            now,
-        )
         return SpendReport(
             window_seconds,
-            total,
-            by_dimension,
+            ledger.total_micro_usd,
+            ledger.by_dimension,
             by_member,
             by_agent,
             by_origin,
-            by_price_digest,
-            usage,
+            ledger.by_price_digest,
+            replace(ledger.usage, by_execution=by_execution),
         )
 
     async def _by_origin(
@@ -1398,19 +1413,14 @@ class SpendRollup:
         )
         if cutoff is not None:
             window &= tables.ledger.c.created_at >= cutoff
-        by_dimension = tuple(
-            DimensionTotal(row.dimension, int(row.amount), int(row.priced))
-            for row in await connection.execute(
-                sa.select(
-                    tables.ledger.c.dimension,
-                    sa.func.sum(tables.ledger.c.amount).label("amount"),
-                    sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
-                )
-                .select_from(joined)
-                .where(window)
-                .group_by(tables.ledger.c.dimension)
-                .order_by(tables.ledger.c.dimension)
-            )
+        ledger = await _ledger_rollup(
+            connection,
+            joined,
+            (tables.ledger.c.workspace_id == self.workspace_id)
+            & (tables.conversation.c.member_id == member_id),
+            cutoff,
+            now,
+            tables.turn.c.subagent_profile,
         )
         caps = tuple(
             SpendCapLine(int(row.window_seconds), int(row.limit_micro_usd), row.on_breach)
@@ -1430,17 +1440,10 @@ class SpendRollup:
         )
         return MemberSpendReport(
             window_seconds,
-            sum(line.priced_micro_usd for line in by_dimension),
-            by_dimension,
+            ledger.total_micro_usd,
+            ledger.by_dimension,
             caps,
-            await _usage_details(
-                connection,
-                joined,
-                (tables.ledger.c.workspace_id == self.workspace_id)
-                & (tables.conversation.c.member_id == member_id),
-                cutoff,
-                now,
-            ),
+            ledger.usage,
         )
 
 

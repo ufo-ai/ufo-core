@@ -717,6 +717,53 @@ async def test_usage_details_report_history_models_execution_and_all_time(db: No
     ]
 
 
+@pytest.mark.parametrize("database_url", ["sqlite", "postgres"], indirect=True)
+async def test_spend_rollup_reads_each_report_in_a_bounded_statement_count(db: None) -> None:
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        member_id = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+    async with workspace_tx() as connection:
+        statements: list[str] = []
+
+        def record(
+            sync_connection: sa.Connection,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            if statement.lstrip().startswith(("SELECT", "WITH")):
+                statements.append(statement)
+
+        sa.event.listen(connection.sync_connection, "before_cursor_execute", record)
+        try:
+            workspace = await SpendRollup(workspace_id).read(connection, 3600)
+            workspace_statements = len(statements)
+            statements.clear()
+            member = await SpendRollup(workspace_id).read_member(connection, member_id, 3600)
+            member_statements = len(statements)
+            statements.clear()
+            all_time = await SpendRollup(workspace_id).read(connection, None)
+            all_time_statements = len(statements)
+        finally:
+            sa.event.remove(connection.sync_connection, "before_cursor_execute", record)
+    assert workspace_statements == 4
+    assert member_statements == 2
+    assert all_time_statements == 4
+    assert workspace.usage == member.usage
+    assert workspace.usage.selected.tokens == 10_000
+    assert workspace.usage.by_execution == (accounting.UsageBreakdown("", 10_000, 96_500),)
+    assert all_time.usage.previous_tokens is None
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_workspace_usage_counts_in_total_not_member_or_agent(db: None) -> None:
     """A background job's metered spend lands in the workspace total and the per-dimension token
