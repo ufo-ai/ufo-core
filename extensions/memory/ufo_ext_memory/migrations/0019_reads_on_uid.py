@@ -65,6 +65,9 @@ mem_page = sa.table("mem_page", sa.column("page_id", sa.Uuid()))
 
 def _resync_twins() -> None:
     postgres = op.get_bind().dialect.name == "postgresql"
+    # A database built after RFC 0046 unit D has no content id to re-sync from, and no row.
+    if "id" not in {column["name"] for column in sa.inspect(op.get_bind()).get_columns("page")}:
+        return
     for table, by, column, parent in TWINS:
         if postgres:
             op.execute(

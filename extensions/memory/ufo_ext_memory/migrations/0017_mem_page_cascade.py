@@ -43,18 +43,26 @@ STALE_MIRROR = ~sa.exists(sa.select(sa.literal(1)).where(page.c.id == mem_page.c
 
 def upgrade() -> None:
     connection = op.get_bind()
+    # A database built after RFC 0046 unit D has no `page.id`; after unit C `page` is keyed by
+    # `(workspace_id, uid)`, so no key can name `page (id)` — `memory_0019` carries the cascade.
+    content_ids = "id" in {column["name"] for column in sa.inspect(connection).get_columns("page")}
     # Read the strays, then delete them by key. Postgres parallelizes no DML, so the anti-join runs
     # once here over two workers and an index-only scan rather than serially inside the delete.
-    stale = connection.scalars(sa.select(mem_page.c.page_id).where(STALE_MIRROR)).all()
+    stale = (
+        connection.scalars(sa.select(mem_page.c.page_id).where(STALE_MIRROR)).all()
+        if content_ids
+        else []
+    )
     if stale:
         connection.execute(sa.delete(mem_page).where(mem_page.c.page_id.in_(stale)))
     connection.execute(sa.delete(mem_page).where(mem_page.c.revision.is_(None)))
-    # A database built after RFC 0046 unit C keys `page` by `(workspace_id, uid)`, and no key can
-    # name `page (id)` there; `memory_0019` carries the cascade on the new key for every database.
-    page_keyed_by_id = connection.dialect.name != "postgresql" or connection.scalar(
-        sa.text(
-            "select count(*) from pg_constraint where conrelid = 'page'::regclass "
-            "and contype = 'p' and pg_get_constraintdef(oid) = 'PRIMARY KEY (id)'"
+    page_keyed_by_id = content_ids and (
+        connection.dialect.name != "postgresql"
+        or connection.scalar(
+            sa.text(
+                "select count(*) from pg_constraint where conrelid = 'page'::regclass "
+                "and contype = 'p' and pg_get_constraintdef(oid) = 'PRIMARY KEY (id)'"
+            )
         )
     )
     with op.batch_alter_table("mem_page") as batch:

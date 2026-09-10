@@ -9,6 +9,20 @@ branch_labels: tuple[str, ...] | None = ("coding",)
 depends_on: str | None = "0059"
 
 
+def _source_key() -> list[sa.ForeignKeyConstraint]:
+    """A database built after RFC 0046 unit D has no `source.id` for this key to name, and
+    `coding_0004` drops both tables before a row could need it."""
+    if "id" not in {column["name"] for column in sa.inspect(op.get_bind()).get_columns("source")}:
+        return []
+    return [
+        sa.ForeignKeyConstraint(
+            ["workspace_id", "source_id"],
+            ["source.workspace_id", "source.id"],
+            ondelete="CASCADE",
+        )
+    ]
+
+
 def upgrade() -> None:
     with op.batch_alter_table("turn") as batch:
         batch.create_unique_constraint("coding_turn_workspace_identity", ("workspace_id", "id"))
@@ -22,11 +36,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspace.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(
-            ["workspace_id", "source_id"],
-            ["source.workspace_id", "source.id"],
-            ondelete="CASCADE",
-        ),
+        *_source_key(),
         sa.ForeignKeyConstraint(
             ["workspace_id", "conversation_id"],
             ["conversation.workspace_id", "conversation.id"],
@@ -52,11 +62,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["workspace_id"], ["workspace.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(
-            ["workspace_id", "source_id"],
-            ["source.workspace_id", "source.id"],
-            ondelete="CASCADE",
-        ),
+        *_source_key(),
         sa.ForeignKeyConstraint(
             ["workspace_id", "conversation_id"],
             ["conversation.workspace_id", "conversation.id"],

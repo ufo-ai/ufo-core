@@ -91,9 +91,9 @@ ever be.
 |---|---|---|---|---|
 | **0** | Persist `source`'s natural key; `page` already holds one | 317 | none | merged #3245 → `4a2f545fb`; on testing, migrate Job 24s |
 | **A** | Surrogate `uid` on `source` and `page`; nullable `uid` twins on every citer, dual-written | 2.33M | none | merged #3254 → `08f8defa5`; on testing, migrate Job 48s, twins 0 null / 0 wrong |
-| **B** | Reads and the Turbopuffer `owner_id` attribute move onto `uid`; twins become required; content ids stop being written | 1.9M (no corpus rewrite — the `owner_id` patch is per page) | none | PR #3310, CI green |
-| **C** | Shadow partitioned tables with the final shape, cut over | 2.33M | none | two revisions: shadows + mirrors PR #3311, the swap PR #3314; both green locally |
-| **D** | Contract: drop the content-id columns | — | none | — |
+| **B** | Reads and the Turbopuffer `owner_id` attribute move onto `uid`; twins become required | 1.9M (no corpus rewrite — the `owner_id` patch is per page) | none | merged #3310 → `70c0f7806` |
+| **C** | Shadow partitioned tables with the final shape, cut over | 2.33M | none | two revisions: shadows + mirrors merged #3311 → `35d7bc3d1`, the swap merged #3314 → `ca74e0619`; on testing, migrate Jobs 43 s and 22 s |
+| **D** | Content ids stop being written, then go | — | none | two revisions: unwritten PR #3321, dropped PR #3339 stacked on it |
 
 Unit 0 is small and is the whole prerequisite: without a stored natural key there is nothing for a
 surrogate to be unique against, and sync keeps relying on the computed id. `page` needed nothing —
@@ -217,6 +217,37 @@ tables in the same logical shape, both ways.
 **What moved to unit B.** `mem_page.page_id → page (id)` names the content id alone, which no
 partitioned `page` can hold; it is dropped in `memory_0019`, where the last release that wrote the
 column left, and its downgrade restores it workspace-qualified once `page` is partitioned.
+
+### Unit D — the content ids go (as built, two revisions)
+
+**D-a, unwritten (`20260909204543`, `memory_0020`).** `source.id`, `page.id` and `page.source_id`
+become nullable and no writer names them: sync, context, surfaces, grants and the memory extension
+key by `uid` and by the natural keys unit 0 stored — a page within its source is `source_identity`,
+a stream within its connection is `(connection_id, stream)`. Core's own `page ⨝ source` joins move
+onto `(workspace_id, source_uid)`. The adopt job and `IndexBackend.reattribute` go with the last
+chunk filed under a content id: `memory_0020` refuses to land while any `mem_page.page_id` marker
+remains, so the deploy waits for the drain rather than orphaning a page's chunks. A page synced
+before `source_identity` existed carries none and is never matched by a fetch again; it stays as
+uid-keyed history, and a snapshot source tombstones it on its next pass and lands the ref again
+under a new uid.
+
+**D-b, dropped (`20260909233938`, `memory_0021`).** `source_old` and `page_old` go, then the three
+columns with the five indexes that served them (`source_workspace_identity`, `source_id`,
+`page_workspace_identity`, `page_source_id`, `page_id` — a drop on the partitioned parent reaches
+every partition); the memory tables lose `created_from_page_id`, both `source_id`s, both `page_id`s
+and the two id-keyed unique indexes `memory_0019` kept as `ON CONFLICT` arbiters. The downgrade is
+the release being replaced's shape: the columns return nullable with their indexes, and
+`source_old`/`page_old` return empty in the pre-swap shape under the `_old` names the swap's
+downgrade strips — content ids NOT NULL as they were, since D-a's downgrade runs before the copy and
+refuses a live row that lacks one. A test compares the migrated `source`, `page` and memory tables
+against `tables.py` and the memory store's metadata with alembic's `compare_metadata` and holds them
+equal. Alembic runs core to its head before any extension branch on a fresh database, so every
+extension revision that ever named `page.id` or `source.id` (memory 0004, 0012, 0017, 0018, 0019;
+coding_0001) skips that statement where the column is gone — there is no row for it to touch.
+
+**No renames.** `uid`, `source_uid`, `page_uid` and `created_from_page_uid` are the permanent
+names. Renaming them to `id` is a catalog write no statement of the outgoing image survives, so it
+would need a quiesced fleet, and it buys nothing a reader needs.
 
 ## Risks
 

@@ -28,6 +28,7 @@ DERIVED_BODY = "the acme renewal closes on september 30"
 MANUAL_BODY = "the office wifi password rotates monthly"
 PAGELESS_BODY = "the pilot ended in march"
 UNREPLAYED_BODY = "the security review slipped a week"
+CONTENT_IDS_UNWRITTEN = "20260909204543"
 
 
 class _UnreachedEmbed:
@@ -351,8 +352,8 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
     assert links == {(derived_id, source_id, page_id, 1)}
     assert bodies == {DERIVED_BODY, UNREPLAYED_BODY, MANUAL_BODY, PAGELESS_BODY}
 
-    # The store is current code and names `uid` columns that exist only at the heads. On the way
-    # there, `0056` refuses a workspace with no member and no agent, so this seed supplies one each.
+    # `0056` refuses a workspace with no member and no agent, so this seed supplies one each. The
+    # store speaks uid, minted by the backfill and read at the last revision keeping the seeded ids.
     engine = sa.create_engine(sync_url)
     with engine.connect() as connection:
         connection.execute(
@@ -371,7 +372,7 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
         )
         connection.commit()
     engine.dispose()
-    command.upgrade(config, "heads")
+    command.upgrade(config, CONTENT_IDS_UNWRITTEN)
     engine = sa.create_engine(sync_url)
     with engine.connect() as connection:
         minted = connection.execute(
@@ -382,6 +383,7 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
             {"id": page_id.hex},
         ).one()
     engine.dispose()
+    command.upgrade(config, "heads")
     page_uid, source_uid = UUID(str(minted.page_uid)), UUID(str(minted.source_uid))
     rebuilt = asyncio.run(_replay_derivation(migration_url, workspace_id, page_uid, source_uid))
     assert rebuilt == [(derived_id, source_uid)]

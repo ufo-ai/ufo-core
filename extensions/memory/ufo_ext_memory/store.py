@@ -122,8 +122,8 @@ memory_item = sa.Table(
     sa.Column("subject", sa.Text, nullable=False),
     sa.Column("body", sa.Text, nullable=False),
     sa.Column("item_class", sa.Text, nullable=False),
-    sa.Column("memory_kind", sa.Text, nullable=False),
-    sa.Column("confidence", sa.Integer, nullable=False),
+    sa.Column("memory_kind", sa.Text, nullable=False, server_default=KIND_FACT),
+    sa.Column("confidence", sa.Integer, nullable=False, server_default="5"),
     sa.Column("source_ref", sa.Text, nullable=True),
     sa.Column("created_from_page_uid", sa.Uuid, nullable=True),
     sa.Column("created_from_page_revision", sa.BigInteger, nullable=True),
@@ -140,6 +140,21 @@ memory_item = sa.Table(
         "and source_uid is null) or (created_from_page_uid is not null "
         "and created_from_page_revision is not null and source_uid is not null)",
         name="memory_item_page_source",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id"],
+        ["workspace.id"],
+        ondelete="CASCADE",
+        name="memory_item_workspace_id_fkey",
+    ),
+    sa.Index("memory_item_due", "embedding_digest"),
+    sa.Index("memory_item_inventory", "workspace_id", "created_at"),
+    sa.Index(
+        "memory_item_consolidate",
+        "workspace_id",
+        "created_at",
+        postgresql_where=sa.text("item_class = 'fact' and superseded_by is null"),
+        sqlite_where=sa.text("item_class = 'fact' and superseded_by is null"),
     ),
 )
 
@@ -170,6 +185,12 @@ mem_page = sa.Table(
     sa.Column("subject", sa.Text, nullable=False),
     sa.Column("revision", sa.BigInteger, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["workspace_id"],
+        ["workspace.id"],
+        ondelete="CASCADE",
+        name="mem_page_workspace_id_fkey",
+    ),
     sa.ForeignKeyConstraint(
         ["workspace_id", "page_uid"],
         ["page.workspace_id", "page.uid"],

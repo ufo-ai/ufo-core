@@ -752,8 +752,8 @@ source = sa.Table(
     sa.PrimaryKeyConstraint("workspace_id", "uid", name="source_pkey"),
     sa.Index("source_due", "next_sync_at"),
     sa.Index("source_authority", "workspace_id", "connection_id"),
-    sa.UniqueConstraint(
-        "workspace_id", "connection_id", "backend", "feed_handle", name="source_feed_handle"
+    sa.Index(
+        "source_feed_handle", "workspace_id", "connection_id", "backend", "feed_handle", unique=True
     ),
     sa.ForeignKeyConstraint(
         ["workspace_id", "connection_id"],
@@ -795,8 +795,8 @@ page = sa.Table(
     sa.Column("source_identity", sa.Text, nullable=True),
     sa.Column("digest", sa.Text, nullable=False),
     sa.Column("body_ref", sa.Text, nullable=False),
-    sa.Column("stream", sa.Text, nullable=False),
-    sa.Column("title", sa.Text, nullable=False),
+    sa.Column("stream", sa.Text, nullable=False, server_default=""),
+    sa.Column("title", sa.Text, nullable=False, server_default=""),
     sa.Column("record_created_at", sa.Text, nullable=True),
     sa.Column("record_updated_at", sa.Text, nullable=True),
     sa.Column("subject", sa.Text, nullable=False),

@@ -27,8 +27,14 @@ CITERS = (
 
 def upgrade() -> None:
     postgres = op.get_bind().dialect.name == "postgresql"
+    # A database built after RFC 0046 unit D has no content id to fill the twins from, and no row.
+    content_ids = "id" in {
+        column["name"] for column in sa.inspect(op.get_bind()).get_columns("page")
+    }
     for table, by, column, parent in CITERS:
         op.add_column(table, sa.Column(column, sa.Uuid(), nullable=True))
+        if not content_ids:
+            continue
         if postgres:
             op.execute(
                 f"update {table} set {column} = {parent}.uid from {parent} "

@@ -56,19 +56,21 @@ def upgrade() -> None:
         .where(page.c.id == memory_item.c.created_from_page_id, page.c.source_id.is_not(None))
         .scalar_subquery()
     )
-    connection.execute(
-        sa.update(memory_item)
-        .where(
-            memory_item.c.created_from_page_id.is_not(None),
-            sa.or_(memory_item.c.created_from_page_revision.is_(None), page_source.is_(None)),
+    # A database built after RFC 0046 unit D has no `page.id` to join on, and no row to bind.
+    if "id" in {column["name"] for column in sa.inspect(connection).get_columns("page")}:
+        connection.execute(
+            sa.update(memory_item)
+            .where(
+                memory_item.c.created_from_page_id.is_not(None),
+                sa.or_(memory_item.c.created_from_page_revision.is_(None), page_source.is_(None)),
+            )
+            .values(created_from_page_id=None, created_from_page_revision=None)
         )
-        .values(created_from_page_id=None, created_from_page_revision=None)
-    )
-    connection.execute(
-        sa.update(memory_item)
-        .where(memory_item.c.created_from_page_id.is_not(None))
-        .values(source_id=page_source)
-    )
+        connection.execute(
+            sa.update(memory_item)
+            .where(memory_item.c.created_from_page_id.is_not(None))
+            .values(source_id=page_source)
+        )
     with op.batch_alter_table("memory_item") as batch:
         batch.create_check_constraint("memory_item_page_source", PAGE_SOURCE_CHECK)
     op.create_table(
