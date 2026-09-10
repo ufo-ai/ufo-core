@@ -604,6 +604,14 @@ body[data-shell="sidebar"] [data-chat-start-line] {
     -webkit-font-smoothing: antialiased;
   }
 
+  /* A boot screen centres with auto margins and a percentage height, both of which need a
+     laid-out parent with a real height. App and Frame carry `h-dvh`, so the shell is unchanged. */
+  #root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
   h1,
   h2,
   h3 {

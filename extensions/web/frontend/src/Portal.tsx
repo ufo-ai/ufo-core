@@ -73,24 +73,14 @@ export function Portal() {
     if (next.phase === "ready") setBoot(next);
   }, []);
 
-  if (boot.phase === "loading")
-    return (
-      <Empty>
-        <Loading />
-      </Empty>
-    );
+  if (boot.phase === "loading") return <Loading />;
   if (boot.phase === "signed-out" && boot.fault !== "expired")
     return (
       <Frame>
         <SignIn fault={boot.fault} />
       </Frame>
     );
-  if (boot.phase === "signed-out")
-    return (
-      <Empty>
-        <Loading />
-      </Empty>
-    );
+  if (boot.phase === "signed-out") return <Loading />;
   if (boot.phase === "failed") return <Empty>{boot.message}</Empty>;
   return (
     <App

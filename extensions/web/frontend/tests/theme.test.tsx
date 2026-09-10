@@ -149,6 +149,12 @@ test("the page height tracks the visible viewport and respects device insets", (
   expect(page).toContain("viewport-fit=cover");
 });
 
+/** The mount carries no class, so its layout reaches a boot screen only through the sheet and only
+ *  the emitted bytes can show it standing. */
+test("the mount hands a boot screen the body's height to centre down", () => {
+  expect(packedStyles()).toContain("#root{flex-direction:column;height:100%;display:flex}");
+});
+
 test("reply headings carry an emitted scale, not just declared tokens", () => {
   const css = packedStyles();
   expect(css).toContain(":where(h2){font-size:var(--text-subtitle)");
