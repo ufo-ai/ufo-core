@@ -10,6 +10,7 @@ import {
   AGENTS_HASH,
   BUILDER_HASH,
   STORE_HASH,
+  TASKS_HASH,
   FIRST_RUN_HASH,
   agentHash,
   artifactTarget,
@@ -168,17 +169,18 @@ test("an address naming an inherited property of an object names no workspace ta
   expect(parseHash("#/constructor")).toEqual({ kind: "bad-link" });
 });
 
-test("a screen moved onto the workspace tabs still answers at the section address it had", () => {
-  expect(parseHash("#/tasks")).toEqual({ kind: "workspace", view: "tasks", place: {} });
-  expect(parseHash("#/tasks?q=nightly")).toEqual({
-    kind: "workspace",
-    view: "tasks",
-    place: { q: "nightly" },
-  });
+test("the tasks screen and the tasks settings answer at addresses of their own", () => {
+  expect(parseHash(TASKS_HASH)).toEqual({ kind: "tasks" });
+  expect(parseHash(TASKS_HASH + "?q=nightly")).toEqual({ kind: "tasks" });
   expect(parseHash(workspaceHash("tasks"))).toEqual({
     kind: "workspace",
     view: "tasks",
     place: {},
+  });
+  expect(parseHash(workspaceHash("tasks", { opens: ["object/a/scheduled_task/nightly"] }))).toEqual({
+    kind: "workspace",
+    view: "tasks",
+    place: { opens: ["object/a/scheduled_task/nightly"] },
   });
 });
 

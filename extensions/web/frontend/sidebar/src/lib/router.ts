@@ -4,6 +4,7 @@ import {
   AGENTS_HASH,
   BUILDER_HASH,
   STORE_HASH,
+  TASKS_HASH,
   HOME_HASH,
   agentHash,
   artifactTarget,
@@ -197,6 +198,10 @@ export function openBuilder(): void {
 
 export function openStore(): void {
   navigate(STORE_HASH);
+}
+
+export function openTasks(): void {
+  navigate(TASKS_HASH);
 }
 
 export function openAgent(agentId: string): void {

@@ -12,6 +12,7 @@ import {
   IconLogout,
   IconMenu2,
   IconMoon,
+  IconClockPlay,
   IconPlug,
   IconSettings,
   IconSun,
@@ -114,6 +115,7 @@ import {
   openNewChat,
   openSlot,
   openStore,
+  openTasks,
   placeAgent,
   placeFirstRun,
   placeSection,
@@ -154,6 +156,9 @@ const LinkedPane = lazy(() =>
   import("@/views/ChatPane").then((module) => ({ default: module.LinkedPane })),
 );
 const Store = lazy(() => import("./views/Store").then((module) => ({ default: module.Store })));
+const TaskThreads = lazy(() =>
+  import("@/views/TaskThreads").then((module) => ({ default: module.TaskThreads })),
+);
 
 function PaneLoading() {
   return (
@@ -830,6 +835,13 @@ function WorkspaceSidebar({
           />
         ) : null}
         <SearchRow agents={agents} collapsed={collapsed} />
+        <NavRow
+          icon={<IconClockPlay className={GLYPH} aria-hidden />}
+          current={standing(route, "tasks")}
+          collapsed={collapsed}
+          label={WORKSPACE_VIEWS.tasks.label}
+          onClick={openTasks}
+        />
       </ul>
       <div className="flex min-h-0 flex-col gap-px px-sm">
         <SectionHead
@@ -936,6 +948,8 @@ function RoutedPane({
       return <PaneNote>This link is not valid.</PaneNote>;
     case "store":
       return <Store member={member} onBuild={onBuild} />;
+    case "tasks":
+      return <TaskThreads />;
     case "workspace":
       return (
         <TabbedPane

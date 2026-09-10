@@ -98,6 +98,8 @@ function where(
       return [{ label: APPS }];
     case "store":
       return [{ label: APP_STORE_TITLE }];
+    case "tasks":
+      return [{ label: WORKSPACE_VIEWS.tasks.label }];
     case "agent":
       return [named(route.agentId)];
     case "agent-setup":

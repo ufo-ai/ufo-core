@@ -42,6 +42,7 @@ export type Route =
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents"; build?: boolean }
   | { kind: "store" }
+  | { kind: "tasks" }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "agent-setup"; agentId: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
@@ -170,6 +171,8 @@ export const BUILDER_HASH = AGENTS_HASH + "/builder";
 
 export const STORE_HASH = AGENTS_HASH + "/store";
 
+export const TASKS_HASH = "#/tasks";
+
 export const FIRST_RUN_HASH = "#/first-run";
 
 /** A pattern and the builder that answers it are built from the same constant, so a prefix cannot be
@@ -254,6 +257,13 @@ const STORE = row(
   bare(STORE_HASH),
   () => ({ kind: "store" }),
   () => STORE_HASH,
+);
+
+const TASKS = row(
+  "tasks",
+  bare(TASKS_HASH),
+  () => ({ kind: "tasks" }),
+  () => TASKS_HASH,
 );
 
 const CHAT = row(
@@ -345,20 +355,14 @@ const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
     WORKSPACE_PREFIX + view + serializePlace(place),
 );
 
-/* Tasks stood as its own section before it shipped as an app, and links to that address exist outside
-   this code, so this row reads to either kind. */
-const TAB_SECTIONS: readonly WorkspaceTab[] = ["tasks"];
-
-const SECTION = row<"section" | "workspace", [Section, WorkspacePlace?]>(
+const SECTION = row<"section", [Section, WorkspacePlace?]>(
   "section",
   new RegExp(`^#/(${SECTION_NAME})${PLACE_TAIL}`),
   (match) => {
     const name = match[1];
     const place = parsePlace(match[2]);
     if (!place) return null;
-    if (isSection(name)) return { kind: "section", section: name, place };
-    const moved = TAB_SECTIONS.find((tab) => tab === name);
-    return moved === undefined ? null : { kind: "workspace", view: moved, place };
+    return isSection(name) ? { kind: "section", section: name, place } : null;
   },
   (section: Section, place: WorkspacePlace = {}) => "#/" + section + serializePlace(place),
 );
@@ -373,6 +377,7 @@ const ROUTES: readonly RouteReader[] = [
   BUILDER,
   STORE,
   AGENTS,
+  TASKS,
   CHAT,
   CONVERSATION_SLOT,
   NEW_CHAT,
@@ -404,6 +409,7 @@ const FRAMED: { [Kind in RouteKind]: boolean } = {
   "first-run": false,
   agents: false,
   store: false,
+  tasks: false,
   chat: true,
   "conversation-slot": false,
   "new-chat": true,
@@ -418,7 +424,12 @@ export function framedNavigation(to: string): boolean {
   return FRAMED[parseHash(to).kind];
 }
 
-export type Stand = `agent:${string}` | `open:${string}` | "workspace" | `section:${Section}`;
+export type Stand =
+  | `agent:${string}`
+  | `open:${string}`
+  | "workspace"
+  | "tasks"
+  | `section:${Section}`;
 
 export const COMPOSING: Stand = `open:${COMPOSE}`;
 
@@ -441,6 +452,8 @@ function stands(route: Route): Stand[] {
       return [`agent:${route.agentId}`];
     case "workspace":
       return ["workspace"];
+    case "tasks":
+      return ["tasks"];
     case "section":
       return [`section:${route.section}`];
     case "agents":
