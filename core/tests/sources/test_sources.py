@@ -27,7 +27,8 @@ from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
 from ufo.harness import o11y
 from ufo.product import PRODUCT_CENSUS_JOB
-from ufo.runtime.access.grants import GrantStore
+from ufo.runtime import jobs
+from ufo.runtime.access.grants import INDEX_REAP_KEY_PREFIX, GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import authority_member_id
 from ufo.runtime.billing.balance import credit, set_reserve
@@ -47,9 +48,10 @@ from ufo.runtime.ext.manifest import (
     Manifest,
     PageChangeBatch,
 )
-from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
+from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, IndexScope, TextChunker
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
+    INDEX_REAP_JOB,
     PAGE_CHANGE_JOB,
     RESULT_DELIVERY_JOB,
     TURN_DISPATCH_JOB,
@@ -59,6 +61,7 @@ from ufo.runtime.jobs import (
     TurnDispatcher,
     bindings_from,
     core_jobs,
+    reap_index_queue,
 )
 from ufo.runtime.sources import rest, sync
 from ufo.runtime.sources.backend import ConnectorSourceConfig
@@ -1036,6 +1039,87 @@ async def test_synced_page_content_is_found_via_memory_search(
     found = await _search(service, uuid4(), tmp_path / "blobs", "fire assembly point")
     assert "[source]" in found
     assert "north car park" in found
+
+
+async def test_disconnect_reaps_the_index_of_the_pages_its_cascade_takes(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "wiki.md").write_text("the office fire assembly point is the north car park")
+    driver, index_pages, service = _wire(
+        database_url, vec((8, 1.0)), tmp_path / "blobs", workspace_id
+    )
+    await _register_folder(root)
+    await _sync(driver)
+    await index_pages()
+    connection_id = (await _configured_roots(workspace_id))[0]["connection_id"]
+    admin = await _member(workspace_id, "admin@example.com")
+    async with workspace_tx() as connection:
+        page_uid = (await connection.execute(sa.select(tables.page.c.uid))).scalar_one()
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=True).where(tables.member.c.id == admin)
+        )
+    scope = IndexScope(OWNER_KIND_PAGE, str(page_uid))
+
+    with ws(workspace_id):
+        assert await service.index.has_chunks(scope)
+        assert await GrantStore().disconnect(connection_id, actor_member_id=admin)
+        assert await service.index.has_chunks(scope)
+        await reap_index_queue(ScopedStore(extension=CORE_EXTENSION), service.index)
+        assert not await service.index.has_chunks(scope)
+
+
+@dataclass(frozen=True)
+class _IndexRefusingAfterOne(DefaultIndex):
+    deleted: list[str] = field(default_factory=list)
+
+    async def delete(self, scope: IndexScope) -> None:
+        if self.deleted:
+            raise RuntimeError("index unavailable")
+        self.deleted.append(scope.owner_id)
+        await super().delete(scope)
+
+
+async def test_a_faulted_index_reap_keeps_what_is_left_and_the_next_tick_finishes_it(
+    db: None, database_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(jobs, "INDEX_REAP_BATCH", 1)
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "wiki.md").write_text("the office fire assembly point is the north car park")
+    (root / "map.md").write_text("the north car park is behind the loading bay")
+    (root / "bay.md").write_text("the loading bay is locked outside office hours")
+    driver, index_pages, service = _wire(
+        database_url, vec((8, 1.0)), tmp_path / "blobs", workspace_id
+    )
+    await _register_folder(root)
+    await _sync(driver)
+    await index_pages()
+    connection_id = (await _configured_roots(workspace_id))[0]["connection_id"]
+    admin = await _member(workspace_id, "admin@example.com")
+    async with workspace_tx() as connection:
+        page_uids = (await connection.execute(sa.select(tables.page.c.uid))).scalars().all()
+        await connection.execute(
+            sa.update(tables.member).values(is_admin=True).where(tables.member.c.id == admin)
+        )
+    scopes = [IndexScope(OWNER_KIND_PAGE, str(page_uid)) for page_uid in page_uids]
+    assert len(scopes) == 3
+    store = ScopedStore(extension=CORE_EXTENSION)
+
+    with ws(workspace_id):
+        assert await GrantStore().disconnect(connection_id, actor_member_id=admin)
+        refusing = _IndexRefusingAfterOne(transaction=workspace_tx)
+        with pytest.raises(RuntimeError):
+            await reap_index_queue(store, refusing)
+        assert len(refusing.deleted) == 1
+        assert [len(value) for _, value in await store.list(INDEX_REAP_KEY_PREFIX)] == [2]
+        assert [await service.index.has_chunks(scope) for scope in scopes].count(True) == 2
+        await reap_index_queue(store, service.index)
+        assert [await service.index.has_chunks(scope) for scope in scopes] == [False, False, False]
+        assert await store.list(INDEX_REAP_KEY_PREFIX) == ()
 
 
 async def test_unchanged_doc_resync_does_not_reindex_or_duplicate(
@@ -4510,6 +4594,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         SOURCE_SYNC_JOB,
         TURN_DISPATCH_JOB,
         RESULT_DELIVERY_JOB,
+        INDEX_REAP_JOB,
         PRODUCT_CENSUS_JOB,
     ]
     assert all(spec.schedule is not None for spec in specs)
@@ -4518,6 +4603,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}",
         f"{CORE_EXTENSION}:{TURN_DISPATCH_JOB}",
         f"{CORE_EXTENSION}:{RESULT_DELIVERY_JOB}",
+        f"{CORE_EXTENSION}:{INDEX_REAP_JOB}",
         f"{CORE_EXTENSION}:{PRODUCT_CENSUS_JOB}",
     }
 

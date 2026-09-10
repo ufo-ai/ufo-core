@@ -43,6 +43,7 @@ from ufo.product import (
     onboarding_census,
     product_census,
 )
+from ufo.runtime.access.grants import INDEX_REAP_EXTENSION, INDEX_REAP_KEY_PREFIX
 from ufo.runtime.authority import MemberAuthority, authority_member_id, turn_authority
 from ufo.runtime.billing.accounting import (
     ALLOW,
@@ -51,7 +52,7 @@ from ufo.runtime.billing.accounting import (
     SpendEvaluator,
 )
 from ufo.runtime.billing.balance import funded
-from ufo.runtime.candidates import WorkspaceCandidates
+from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
     SPEND_REFUSAL_NOTICE_KEY,
@@ -74,7 +75,7 @@ from ufo.runtime.ext.manifest import (
     Manifest,
     PageChangeBatch,
 )
-from ufo.runtime.indexing import EmbedClient, IndexBackend
+from ufo.runtime.indexing import OWNER_KIND_PAGE, EmbedClient, IndexBackend, IndexScope
 from ufo.runtime.kinds.provisioning import AgentProvisioning
 from ufo.runtime.media.preview_renderer import PreviewRenderer
 from ufo.runtime.seats import Seats
@@ -128,6 +129,9 @@ PAGE_CHANGE_JOB = "page_change"
 PAGE_CHANGE_SCHEDULE = "0 * * * * *"
 RENDER_PREVIEWS_JOB = "render_previews"
 RENDER_PREVIEWS_SCHEDULE = "0 * * * * *"
+INDEX_REAP_JOB = "index_reap"
+INDEX_REAP_SCHEDULE = "0 * * * * *"
+INDEX_REAP_BATCH = 50
 PAGE_CHANGE_BATCH = 50
 PAGE_CHANGE_PARKED_KEY = "page_change_parked"
 PAGE_CHANGE_REFUSED_KEY = "page_change_refused"
@@ -796,6 +800,27 @@ def model_key_slots(registry: ModelRegistry | None) -> tuple[str, ...]:
     return tuple(sorted({spec.key_slot for spec in registry.specs.values() if spec.key_slot}))
 
 
+async def reap_index_queue(store: ScopedStore, index: IndexBackend | None) -> None:
+    """Drop the index chunks of the pages a disconnect deleted. Each queue row holds the page uids
+    one disconnect left behind; the drain takes them `INDEX_REAP_BATCH` at a time and writes back
+    what is left after each batch, so a tick that faults costs only the batch it was in — the row
+    keeps the rest, the candidates read leaves the workspace due while any row remains, and the
+    next tick resumes there. A scope delete is idempotent, so a batch replayed after a fault
+    re-deletes scopes already empty. A row goes once its last uid does."""
+    if index is None:
+        return
+    for key, value in await store.list(INDEX_REAP_KEY_PREFIX):
+        queued = value if isinstance(value, list) else []
+        pending = [uid for uid in queued if isinstance(uid, str)]
+        while pending:
+            batch, pending = pending[:INDEX_REAP_BATCH], pending[INDEX_REAP_BATCH:]
+            for page_uid in batch:
+                await index.delete(IndexScope(OWNER_KIND_PAGE, page_uid))
+            if pending:
+                await store.put(key, list(pending))
+        await store.delete(key)
+
+
 def core_jobs(
     sync_driver: SyncDriver,
     turn_dispatcher: TurnDispatcher,
@@ -833,6 +858,9 @@ def core_jobs(
         await product_census()
         await onboarding_census()
 
+    async def _reap_index(context: ExtensionContext) -> None:
+        await reap_index_queue(context.store, context.index)
+
     async def _render_previews(context: ExtensionContext) -> None:
         assert preview_renderer is not None
         await preview_renderer.run()
@@ -854,6 +882,13 @@ def core_jobs(
             return await page_change_runner.workspaces_with_changes(consumer)
 
         return _candidates
+
+    def _reap_candidates() -> WorkspaceCandidates:
+        due = sa.select(tables.ext_store.c.workspace_id.distinct()).where(
+            tables.ext_store.c.extension == INDEX_REAP_EXTENSION,
+            tables.ext_store.c.key.startswith(INDEX_REAP_KEY_PREFIX, autoescape=True),
+        )
+        return owner_candidates(lambda: due)
 
     page_change = tuple(
         JobSpec(
@@ -883,6 +918,12 @@ def core_jobs(
             schedule=RESULT_DELIVERY_SCHEDULE,
             handler=_deliver_results,
             candidates=delivery_sweep.candidate_workspaces,
+        ),
+        JobSpec(
+            name=INDEX_REAP_JOB,
+            schedule=INDEX_REAP_SCHEDULE,
+            handler=_reap_index,
+            candidates=_reap_candidates(),
         ),
         JobSpec(
             name=PRODUCT_CENSUS_JOB,

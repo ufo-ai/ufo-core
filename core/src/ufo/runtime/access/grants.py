@@ -343,6 +343,12 @@ class ConnectState(BaseModel):
     either way, since the stamp is what a surface draws and never what makes the connection."""
 
 
+INDEX_REAP_EXTENSION = "core"
+INDEX_REAP_KEY_PREFIX = "index_reap:"
+"""Where a disconnect queues the page uids its cascade takes, for `reap_index_queue` to drain — the
+core extension's key space, spelled here because `ufo.runtime.ext` imports this module."""
+
+
 @dataclass(frozen=True)
 class GrantStore:
     """Persists member-owned connections and their per-agent grant edges. Edges bind to the
@@ -777,17 +783,52 @@ class GrantStore:
     async def disconnect(self, connection_id: UUID, *, actor_member_id: UUID) -> bool:
         """Remove a connection. Its source rows, their synced pages, and every connector-grant edge
         follow by cascade, so the account stops syncing and stops being recallable in one statement
-        — nothing outlives the authority that fetched it."""
+        — nothing outlives the authority that fetched it.
+
+        The index chunks those pages hold are derived state, so their reap is queued in the same
+        transaction as the delete — never inline: the index has no rollback, a post-commit loop
+        leaves the tail behind on a fault with no retry (the rows are gone, so a second attempt
+        finds nothing to read), and an unbounded per-page walk would hold the member's turn for
+        every page the account ever synced. `core_jobs`'s reap job drains the queue in bounded
+        batches, resuming after any fault from the queue row that survives it."""
         async with workspace_tx() as connection:
             selected = await self._connection_for_actor(connection, connection_id, actor_member_id)
             if selected is None:
                 return False
+            indexed = (
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.uid).where(
+                            tables.page.c.workspace_id == self.workspace_id,
+                            tables.page.c.source_uid.in_(
+                                sa.select(tables.source.c.uid).where(
+                                    tables.source.c.workspace_id == self.workspace_id,
+                                    tables.source.c.connection_id == selected,
+                                )
+                            ),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
             await connection.execute(
                 sa.delete(tables.connection).where(
                     tables.connection.c.workspace_id == self.workspace_id,
                     tables.connection.c.id == selected,
                 )
             )
+            if indexed:
+                await connection.execute(
+                    sa.insert(tables.ext_store).values(
+                        workspace_id=self.workspace_id,
+                        extension=INDEX_REAP_EXTENSION,
+                        key=f"{INDEX_REAP_KEY_PREFIX}{uuid4()}",
+                        value=[str(page_uid) for page_uid in indexed],
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
         return True
 
     async def set_feed(
