@@ -177,6 +177,9 @@ from ufo.runtime.ext.surface import (
 from ufo.runtime.ext.surface import (
     record_transcript_access as record_transcript_access,
 )
+from ufo.runtime.ext.surface import (
+    writeback_says_nothing as writeback_says_nothing,
+)
 from ufo.runtime.kinds.agent_setup import (
     SetupState as SetupState,
 )

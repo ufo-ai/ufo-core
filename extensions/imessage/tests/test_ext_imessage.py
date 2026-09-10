@@ -67,6 +67,9 @@ from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import ScopedStore, context_for
 from ufo.runtime.ext.surface import (
+    NOTHING_DELIVERED,
+    SILENCE_LINE_BREAK,
+    SILENCE_SENTINEL,
     SharedArtifact,
     SurfaceAuth,
     SurfaceContext,
@@ -666,6 +669,37 @@ async def test_direct_writeback_mints_the_requesting_members_connect_url() -> No
 
     assert await surface.post(Context(), writeback) == "message"
     assert sent == ["https://ufo.example.test/connect"]
+
+
+@pytest.mark.parametrize("answer", [SILENCE_SENTINEL, SILENCE_LINE_BREAK])
+async def test_a_turn_answering_with_silence_sends_no_message_at_all(answer: str) -> None:
+    """A notification the member's standing orders cover reaches them as nothing at all: the relay
+    turn answers with the sentinel and the chat gets no message, rather than a text whose whole
+    body is the tag. Reporting that it delivered nothing settles the writeback, so no drain
+    re-sends it."""
+    sent: list[str] = []
+
+    class Provider:
+        async def send_text(self, _conversation_id: str, text: str, _idempotency_key: str) -> str:
+            sent.append(text)
+            return "message"
+
+    class Context:
+        public_base_url = "https://ufo.example.test"
+
+    provider = Provider()
+    surface = ImessageSurface(provider=lambda _base: provider)
+    writeback = Writeback(
+        turn_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        queue_key=queue_key("direct-chat", direct=True),
+        terminal=TerminalFrame(status="done", text=answer),
+        artifacts=(),
+    )
+
+    assert await surface.post(Context(), writeback) is NOTHING_DELIVERED
+    assert sent == []
 
 
 async def test_a_file_the_reply_carried_is_a_link_in_the_reply_and_no_attachment() -> None:

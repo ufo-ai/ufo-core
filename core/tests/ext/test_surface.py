@@ -105,6 +105,7 @@ from ufo.runtime.ext.surface import (
     mint_marker,
     record_transcript_access,
     scheduled_runs,
+    writeback_says_nothing,
     writeback_workspaces,
 )
 from ufo.runtime.hub import InProcessHub
@@ -136,6 +137,11 @@ from ufo.schema.records import (
     MAIN_AGENT_ICON,
     SUBAGENT_SURFACE,
     WRITEBACK_PENDING,
+    AskQuestion,
+    AskUserInput,
+    ConnectRequest,
+    CredentialPrompt,
+    CredentialRequest,
     TerminalFrame,
     ToolIntent,
     TurnContext,
@@ -1687,6 +1693,70 @@ def test_a_bare_line_break_answer_says_nothing_in_every_form_a_model_writes_it()
     assert not is_silence_sentinel("Use `<br>` to break the line.")
     assert not is_silence_sentinel("<break>")
     assert not is_silence_sentinel("<br>done</br>")
+
+
+def test_a_delivery_says_nothing_only_when_the_turn_owes_the_member_nothing_else() -> None:
+    """Every durable surface reads this before it posts, so what it counts as silence is what a
+    member never sees. The words are only part of it: a shared file, a question, a connect handoff
+    and a credential prompt each reach the member through this one reply and nothing later re-asks,
+    so the reply posts whatever the words say. The failed and cancelled lines are the surface's own
+    words rather than the agent's, so they are never silence either."""
+    silent = Writeback(
+        turn_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        queue_key="CQUIET:1.0",
+        terminal=TerminalFrame(status="done", text=SILENCE_SENTINEL),
+        artifacts=(),
+    )
+
+    assert writeback_says_nothing(silent)
+    assert writeback_says_nothing(
+        replace(silent, terminal=TerminalFrame(status="done", text=SILENCE_LINE_BREAK))
+    )
+    assert not writeback_says_nothing(
+        replace(silent, terminal=TerminalFrame(status="done", text="Filed it."))
+    )
+    assert not writeback_says_nothing(replace(silent, artifacts=(_shared_page("quiet"),)))
+    assert not writeback_says_nothing(
+        replace(silent, terminal=TerminalFrame(status="failed", text=SILENCE_SENTINEL))
+    )
+    assert not writeback_says_nothing(
+        replace(
+            silent,
+            terminal=TerminalFrame(
+                status="done",
+                text=SILENCE_SENTINEL,
+                question=AskUserInput(
+                    title="Which one?", questions=(AskQuestion(question="Now?"),)
+                ),
+            ),
+        )
+    )
+    assert not writeback_says_nothing(
+        replace(
+            silent,
+            terminal=TerminalFrame(
+                status="done",
+                text=SILENCE_SENTINEL,
+                connect_request=ConnectRequest(provider="github", requester_member_id=uuid4()),
+            ),
+        )
+    )
+    assert not writeback_says_nothing(
+        replace(
+            silent,
+            terminal=TerminalFrame(
+                status="done",
+                text=SILENCE_SENTINEL,
+                credential_request=CredentialRequest(
+                    reason="the API key",
+                    prompts=(CredentialPrompt(slot="api_key", prompt="The key"),),
+                    sealed="sealed",
+                ),
+            ),
+        )
+    )
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

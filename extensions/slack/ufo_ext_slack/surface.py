@@ -166,8 +166,8 @@ from ufo.sdk.surfaces import (
     Writeback,
     fence_member_message,
     inbox_name,
-    is_silence_sentinel,
     mint_marker,
+    writeback_says_nothing,
 )
 from ufo_ext_slack.attribution import addressing_mention, message_bodies
 from ufo_ext_slack.mentions import (
@@ -4435,18 +4435,11 @@ async def _reply_mentions_mapped(
 
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelivered:
     """Post the reply parts and return the first message ref (`channel:ts`), the delivery record.
-    A done turn whose whole answer says nothing — the silence sentinel, in any of the forms a model
-    writes it — sends no message at all, so the thread gets neither a footer nor the `(no reply)`
-    placeholder, and reports that it delivered nothing, which settles the writeback instead of
-    retrying it. Silence is only the whole delivery: a turn still owes the member every act the
-    frame carries besides its words — a shared file, a pending question, a connect handoff, a
-    credential prompt — and any one of them posts as usual whatever the text says, because this
-    surface is the only place the member reaches them and nothing later re-asks. A shared file needs
-    the message for its own sake too, since `attach` only runs once a reply exists. The failed and
-    cancelled lines are this surface's own words rather than the agent's, so they are never silence
-    either. A suppressed reply records no ref, so `attach` never runs and this path drops the turn's
-    own delivery records and DM anchors itself — the one cleanup it still owes, and all of it, since
-    it posts nothing and has no file to upload.
+    A delivery that says nothing sends no message at all, so the thread gets neither a footer nor
+    the `(no reply)` placeholder, and reports that it delivered nothing, which settles the writeback
+    instead of retrying it. That reply records no ref, so `attach` never runs and this path drops
+    the turn's own delivery records and DM anchors itself — the one cleanup it still owes, and all
+    of it, since it posts nothing and has no file to upload.
 
     Only the last part carries the standard footer (`_slack_footer`), with the turn's settled
     accounting and the model it ran on, so a reply split across messages ends with exactly one. An
@@ -4460,14 +4453,7 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
     accepted the message. The completed checkpoint survives until `attach`, after core has durably
     recorded the first message as the delivery ref."""
     channel = writeback.queue_key.partition(":")[0]
-    if (
-        writeback.terminal.status == "done"
-        and not writeback.artifacts
-        and writeback.terminal.question is None
-        and writeback.terminal.connect_request is None
-        and writeback.terminal.credential_request is None
-        and is_silence_sentinel(writeback.terminal.text)
-    ):
+    if writeback_says_nothing(writeback):
         log("slack.reply_suppressed", turn=str(writeback.turn_id), channel=channel)
         await _drop_turn_reply_records(ScopedStore(SLACK_EXTENSION), writeback.turn_id)
         return NOTHING_DELIVERED

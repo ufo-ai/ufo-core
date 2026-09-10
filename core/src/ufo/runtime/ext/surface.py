@@ -827,6 +827,25 @@ class Writeback:
     artifacts: tuple[SharedArtifact, ...]
 
 
+def writeback_says_nothing(writeback: Writeback) -> bool:
+    """Whether this delivery is to send nothing at all: a turn that finished, whose whole answer is
+    the silence sentinel, and whose frame owes the member nothing else. Silence is only ever the
+    whole delivery — a question, a connect handoff, or a credential prompt reaches the member
+    through this reply and nothing later re-asks, and a shared file needs the reply for its own
+    sake, since `attach` runs only once one exists — so any of them posts whatever the words say.
+    A failed or cancelled turn carries the surface's own line rather than the agent's words, which
+    is never silence. Every durable surface reads this before it posts, since one that skipped it
+    would send the sentinel to the member as text."""
+    return (
+        writeback.terminal.status == "done"
+        and not writeback.artifacts
+        and writeback.terminal.question is None
+        and writeback.terminal.connect_request is None
+        and writeback.terminal.credential_request is None
+        and is_silence_sentinel(writeback.terminal.text)
+    )
+
+
 @dataclass(frozen=True)
 class MidTurnReply:
     """One reply delivered while a turn runs: words the model marked for delivery or a notice that a

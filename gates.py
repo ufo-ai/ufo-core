@@ -167,6 +167,7 @@ EXT_SCAFFOLD_DIRS = frozenset({"tests"})
 SDK_PUBLIC_PREFIX = "ufo.sdk"
 MANIFEST_MODULE = RUNTIME_SRC / "ext" / "manifest.py"
 SAMPLE_MODULE = Path(EXTENSIONS_ROOT) / "sample" / "ufo_ext_sample.py"
+SILENCE_CONSUMER = "writeback_says_nothing"
 CORE_SKILLS_DIR = RUNTIME_SRC / "skills"
 CORE_SKILL_NAMES = frozenset({"sandbox", "create-application", "ufo-style"})
 SKILL_MANIFEST = "SKILL.md"
@@ -677,6 +678,38 @@ def _conformance_failures(trees: dict[Path, ast.Module]) -> list[str]:
             for point in sorted(declared - points)
         ),
     ]
+
+
+def _silence_consumer_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """Every durable surface drops the silence sentinel. A turn whose whole answer says nothing is
+    delivered by sending nothing, and any prompt can ask for that answer on any surface, so a
+    `post` whose extension never reads `writeback_says_nothing` would send `<response></response>`
+    to the member as text."""
+    consumers = {
+        Path(*rel.parts[:2])
+        for rel, tree in trees.items()
+        if rel.parts[0] == EXTENSIONS_ROOT
+        and not _is_ext_scaffold(rel)
+        and SILENCE_CONSUMER in _call_names(tree)
+    }
+    failures = []
+    for rel, tree in trees.items():
+        if rel.parts[0] != EXTENSIONS_ROOT or Path(*rel.parts[:2]) in consumers:
+            continue
+        for node in ast.walk(tree):
+            match node:
+                case ast.Call(func=ast.Name(id="SurfaceSpec"), keywords=keywords) if any(
+                    keyword.arg == "post"
+                    and not (
+                        isinstance(keyword.value, ast.Constant) and keyword.value.value is None
+                    )
+                    for keyword in keywords
+                ):
+                    failures.append(
+                        f"{rel}:{node.lineno}: a durable surface declares post and its extension "
+                        f"never reads {SILENCE_CONSUMER} — it would post the silence sentinel"
+                    )
+    return failures
 
 
 def _job_selector_failures(trees: dict[Path, ast.Module]) -> list[str]:
@@ -2668,6 +2701,7 @@ def main() -> int:
     failures.extend(_harness_import_failures(trees))
     failures.extend(_layering_failures(trees))
     failures.extend(_conformance_failures(trees))
+    failures.extend(_silence_consumer_failures(trees))
     failures.extend(_job_selector_failures(trees))
     failures.extend(_schedule_authority_failures(trees))
     failures.extend(_execution_authority_failures(trees))

@@ -149,13 +149,16 @@ from ufo.sdk.search import (
 from ufo.sdk.skills import LoadedSkills
 from ufo.sdk.sources import Page, SourceAuth, SyncResult
 from ufo.sdk.surfaces import (
+    NOTHING_DELIVERED,
     AskQuestion,
     AskUserInput,
+    NothingDelivered,
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
     SurfaceSpec,
     Writeback,
+    writeback_says_nothing,
 )
 from ufo.sdk.terminal import Terminals
 from ufo.sdk.tools import (
@@ -1182,7 +1185,9 @@ async def _surface_ingest(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
-async def _surface_post(ctx: SurfaceContext, writeback: Writeback) -> str:
+async def _surface_post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelivered:
+    if writeback_says_nothing(writeback):
+        return NOTHING_DELIVERED
     return SURFACE_POST_REF
 
 

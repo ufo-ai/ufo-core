@@ -14,8 +14,13 @@ act. Against those stands the restraint half: the relay acts on nothing before t
 never mentions the app, the queue, or that anything was notified — a member reads a colleague's
 message, not a system's.
 
-The deterministic grader holds the restraint half and the rubric holds the content, so a reply that
-does the work anyway fails before a judge ever reads it."""
+Then the silence half, which the app cannot decide for the member: a standing order of theirs
+covers the notification, or they already read the same fact from this agent. The relay writes the
+silence sentinel as its whole reply, the surface posts nothing, and the member reads zero
+characters. A message saying the agent is staying quiet is the failure, not the pass.
+
+The deterministic grader holds the restraint half and the silence half, and the rubric holds the
+content, so a reply that does the work anyway fails before a judge ever reads it."""
 
 import re
 
@@ -29,6 +34,7 @@ from evals.harness.capability import (
     Grader,
 )
 from ufo.harness.untrusted import wall
+from ufo.sdk.surfaces import is_silence_sentinel
 
 MENTIONS_THE_APP = re.compile(r"\bnotif|\bqueue|\binbox\b", re.IGNORECASE)
 
@@ -49,6 +55,24 @@ CUSTOMER_TURNING = (
     "month and nobody has answered their ticket. They are evaluating alternatives before the "
     "renewal on the 15th."
 )
+CI_FAILURE = (
+    "The nightly build of ufo failed again on main: 14 tests red in the billing suite and the "
+    "image never published. The deploy job for ufo-hosted failed behind it for the same reason."
+)
+STOP_THE_CI_REPORTS = (
+    "Stop reporting the CI and deploy failures on ufo and ufo-hosted. That build is going to be "
+    "broken a while and I do not want to hear about it again."
+)
+STOP_ACCEPTED = "Understood."
+EXPORT_ASK = "Did the Marrow & Finch export job ever finish last night?"
+EXPORT_ANSWERED = (
+    "No. It failed at 02:14 on the same timeout as the two before it, so their September file is "
+    "still missing. I can re-run it against the smaller batch size if you want that now."
+)
+EXPORT_AGAIN = (
+    "The Marrow & Finch export job failed at 02:14 with a timeout, the third failure this month, "
+    "and their September file has not been produced."
+)
 
 
 def _relayed(text: str) -> str:
@@ -66,6 +90,8 @@ def _relays_without_acting() -> Grader:
             return CapabilityVerdict(
                 False, f"acted before the member answered: {', '.join(output.tools)}"
             )
+        if is_silence_sentinel(output.response):
+            return CapabilityVerdict(False, "stayed silent on a notification the member is owed")
         said = MENTIONS_THE_APP.search(output.response)
         if said is not None:
             return CapabilityVerdict(False, f"named the machinery: {said.group(0)!r}")
@@ -74,7 +100,24 @@ def _relays_without_acting() -> Grader:
     return DescribedGrader("relays the message without acting on it or naming the app", grade)
 
 
-CASES = (
+def _stays_silent() -> Grader:
+    """The silence half: the whole reply is the sentinel, so the surface posts nothing and the
+    member reads zero characters. A sentence about staying quiet is a delivered message and fails
+    here, and so does any tool call, because a suppressed notification buys no work either."""
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        if output.calls:
+            return CapabilityVerdict(
+                False, f"acted on a notification it should have dropped: {', '.join(output.tools)}"
+            )
+        if not is_silence_sentinel(output.response):
+            return CapabilityVerdict(False, f"delivered {len(output.response.strip())} characters")
+        return CapabilityVerdict(True, "said nothing")
+
+    return DescribedGrader("drops the notification with the silence sentinel", grade)
+
+
+DELIVERED_CASES = (
     CapabilityCase(
         name="three-things-at-once",
         message=_relayed(CHURN_AND_DEPLOY_AND_INVESTOR),
@@ -118,3 +161,20 @@ CASES = (
         digest_tag="notify-relay:customer-turning",
     ),
 )
+SILENT_CASES = (
+    CapabilityCase(
+        name="standing-order-covers-it",
+        message=_relayed(CI_FAILURE),
+        grader=_stays_silent(),
+        prior_messages=(STOP_THE_CI_REPORTS, STOP_ACCEPTED),
+        digest_tag="notify-relay:standing-order",
+    ),
+    CapabilityCase(
+        name="they-already-read-it",
+        message=_relayed(EXPORT_AGAIN),
+        grader=_stays_silent(),
+        prior_messages=(EXPORT_ASK, EXPORT_ANSWERED),
+        digest_tag="notify-relay:already-read-it",
+    ),
+)
+CASES = DELIVERED_CASES + SILENT_CASES

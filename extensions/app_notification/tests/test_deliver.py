@@ -55,6 +55,7 @@ from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn
+from ufo.sdk.surfaces import SILENCE_SENTINEL, is_silence_sentinel
 
 pytestmark = pytest.mark.usefixtures("database_url")
 
@@ -272,6 +273,13 @@ async def _rows(workspace_id: UUID) -> list[sa.RowMapping]:
             .mappings()
             .all()
         )
+
+
+def test_the_relay_instruction_carries_the_silence_sentinel() -> None:
+    """The skip path: a notification the member's standing orders cover reaches them as nothing at
+    all, which the surface can only do when the relay writes the sentinel it suppresses on."""
+    assert SILENCE_SENTINEL in RELAY_INSTRUCTION
+    assert is_silence_sentinel(SILENCE_SENTINEL)
 
 
 async def test_deliver_founds_one_relay_turn_in_the_members_newest_durable_conversation(

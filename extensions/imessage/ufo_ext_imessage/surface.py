@@ -12,9 +12,11 @@ from ufo.sdk.audience import conversation_audience, room_audience
 from ufo.sdk.context import ScopedStore
 from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
+    NOTHING_DELIVERED,
     AddressClaim,
     AmbientMessage,
     MidTurnReply,
+    NothingDelivered,
     SurfaceContext,
     SurfaceListenerContext,
     TurnContext,
@@ -22,6 +24,7 @@ from ufo.sdk.surfaces import (
     fence_member_message,
     inbox_name,
     mint_marker,
+    writeback_says_nothing,
 )
 from ufo_ext_imessage.provider import (
     InboundMessage,
@@ -435,8 +438,11 @@ class ImessageSurface:
             notes.append(f"Skipped files, unavailable to download: {files}")
         return "\n".join(notes)
 
-    async def post(self, ctx: SurfaceContext, writeback: Writeback) -> str:
-        """Send one terminal turn reply to its iMessage chat."""
+    async def post(self, ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelivered:
+        """Send one terminal turn reply to its iMessage chat, or nothing at all when the turn's
+        whole answer says nothing: the chat gets no message and the writeback settles delivered."""
+        if writeback_says_nothing(writeback):
+            return NOTHING_DELIVERED
         conversation = conversation_from_queue(writeback.queue_key)
         return await self.provider(ctx.public_base_url).send_text(
             conversation.id,

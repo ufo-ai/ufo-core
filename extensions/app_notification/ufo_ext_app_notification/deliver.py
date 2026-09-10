@@ -14,6 +14,11 @@ thread they already use. A conversation whose agent was archived between the rea
 is skipped for the next; a member with no durable conversation is not pushed, and the rows are
 marked delivered to the portal alone, where the kind already lists them.
 
+The relay turn holds the skip the app cannot: the member's own agent reads their standing orders and
+what it already said to them, so the instruction gives it the silence sentinel as a whole reply and
+the surface posts nothing. The rows still count as delivered, because the app spent the batch on
+them and the portal keeps them readable.
+
 Two bounds hold the push rate by structure. The relay's idempotency key is the delivering turn, so a
 second `deliver` in one turn admits nothing new: admission answers the relay the first call founded,
 the handler finds that turn already recorded on rows and refuses, and the second call's rows stay
@@ -25,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.authority import MemberAuthority, authority_member_id
 from ufo.sdk.context import AgentArchived, ExtensionContext
+from ufo.sdk.surfaces import SILENCE_SENTINEL
 from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo.sdk.untrusted import wall
 from ufo_ext_app_notification.drain import DRAIN_BATCH
@@ -45,12 +51,18 @@ RELAY_INSTRUCTION = (
     "\nThe Notification app decided the member should hear this now. Say it to them in your own "
     "voice, in one message: what happened, what it means for them, and the one thing you could do "
     "about it if they want it. Do nothing else until they answer."
+    "\nSay nothing at all when a standing order of theirs covers this, or when you already told "
+    f"them the same thing: write {SILENCE_SENTINEL} as your whole reply and the member reads "
+    "nothing. A member who said to stop reporting CI failures on ufo while it is broken gets no "
+    "CI failure from you, and no message about staying quiet either: a message that says you are "
+    "silent is not silence."
 )
 DELIVER_DESCRIPTION = (
     "Brief the member's own agent on the notifications named in `refs`, on the chat surface they "
     "used most recently. `text` is what that agent is told, not what the member reads: it says "
     "the message in its own voice, in the conversation it already has with them. Say what "
-    "happened and what it means for them, and leave the wording to it. Every call costs the "
+    "happened and what it means for them, and leave the wording to it. That agent says nothing "
+    "at all when a standing order of the member's covers what you sent. Every call costs the "
     "member a message: use it for what they would act on today, and at most once per batch. "
     "Notifications you do not name stay readable on the portal and nowhere else."
 )
