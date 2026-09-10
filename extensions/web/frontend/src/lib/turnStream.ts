@@ -232,6 +232,7 @@ function attach(
           text: live.text,
           elapsed: Date.now() - live.started,
           ...(live.meta ? { meta: live.meta } : {}),
+          ...(live.model ? { model: live.model } : {}),
           ...(live.connect ? { connect: live.connect } : {}),
           ...(live.events.length ? { events: live.events } : {}),
           ...(live.subagents.length ? { subagents: live.subagents } : {}),
@@ -448,10 +449,11 @@ function attach(
       const handoffs = { ...state.handoffs };
       let text = live.text;
       let meta = live.meta;
+      let model = live.model;
       if (frame.status === "done") {
         if (frame.text) text = frame.text;
-        const spend = tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd);
-        meta = agentModel === AUTO_MODEL ? spend : frame.model + " · " + spend;
+        meta = tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd);
+        model = agentModel === AUTO_MODEL ? null : frame.model;
         if (frame.question) {
           handoffs.question = { turn_id: turnId, ...frame.question };
         } else if (!answering) {
@@ -466,7 +468,7 @@ function attach(
         text = text ? text + "\n" + fallback : fallback;
         if (!answering) handoffs.question = null;
       }
-      return { ...state, handoffs, live: { ...live, text, meta } };
+      return { ...state, handoffs, live: { ...live, text, meta, model } };
     });
     record();
     close();

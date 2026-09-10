@@ -16,6 +16,9 @@ export type { ActivityEvent } from "@/lib/types";
 
 export type Bubble = Message & {
   meta?: string;
+  /** The model the turn ran on, held as the id: the meta line draws the name and the mark the
+   *  picker draws for that id. An agent on the auto sentinel carries none. */
+  model?: string;
   /** How long the turn that spoke this ran, in milliseconds. A bubble read back from a transcript
    *  carries none, so its fold states the steps alone. */
   elapsed?: number;
@@ -31,6 +34,7 @@ export type LiveTurn = {
   activity: string | null;
   meter: string | null;
   meta: string | null;
+  model: string | null;
   connect: ChatConnect | null;
   events: ActivityEvent[];
   subagents: SubagentRun[];
@@ -99,6 +103,7 @@ export function liveTurn(started: number = Date.now()): LiveTurn {
     activity: null,
     meter: null,
     meta: null,
+    model: null,
     connect: null,
     events: [],
     subagents: [],

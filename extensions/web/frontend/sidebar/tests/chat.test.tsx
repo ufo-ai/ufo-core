@@ -83,11 +83,15 @@ test("an empty conversation states it, and the composer sends a message and stre
 
   StreamFake.last().emit("terminal", {
     status: "done",
-    model: "opus",
+    model: "gpt-6-astra",
     tokens: 12,
     cost_micro_usd: 2_000_000,
   });
-  expect(await screen.findByText("opus · 12 tok · $2.00")).toBeTruthy();
+  const meta = await screen.findByText("12 tok · $2.00");
+  const mark = meta.parentElement!.querySelector<HTMLElement>('[style*="--brand-openai"]')!;
+  expect(mark.getAttribute("class")).toContain("size-icon");
+  fireEvent.focus(mark.parentElement!);
+  expect((await screen.findByRole("tooltip")).textContent).toBe("GPT-6 Astra");
   expect(StreamFake.last().closed).toBe(true);
 });
 
@@ -112,8 +116,9 @@ test("a reply from an agent on auto states its spend and names no model", async 
     tokens: 12,
     cost_micro_usd: 2_000_000,
   });
-  expect(await screen.findByText("12 tok · $2.00")).toBeTruthy();
-  expect(screen.queryByText(/glm-5.3-flash/)).toBeNull();
+  const spend = await screen.findByText("12 tok · $2.00");
+  expect(spend.parentElement!.querySelector('[style*="--brand-"]')).toBeNull();
+  expect(screen.queryByText(/GLM 5.3 Flash/)).toBeNull();
 });
 
 test("the one control carries the act the member has, and stops the turn once", async () => {

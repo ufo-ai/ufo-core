@@ -43,6 +43,7 @@ import {
   useMessageScroller,
 } from "@/components/ui/message-scroller";
 import { Reveal } from "@/components/ui/reveal";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { FileSheet } from "@/kernel/artifact";
 import { Lightbox } from "@/kernel/lightbox";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -54,6 +55,7 @@ import { cn } from "@/lib/cn";
 import { ConsentLink } from "@/lib/consent";
 import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
+import { modelLabel, modelMark } from "@/lib/models";
 import { spanMoment } from "@/lib/moments";
 import { agentHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
@@ -261,7 +263,7 @@ export function MessageLog({
           )}
           {message.role === "user" || !message.apps?.length ? null : <Apps apps={message.apps} />}
           {message.connect ? <ConnectLink connect={message.connect} /> : null}
-          {message.meta ? <Meta>{message.meta}</Meta> : null}
+          {message.meta ? <Meta model={message.model}>{message.meta}</Meta> : null}
           {message.question && question ? question(message.question) : null}
         </Speech>
       </MessageScrollerItem>
@@ -299,7 +301,7 @@ export function MessageLog({
                 {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
                 {row.live.connect ? <ConnectLink connect={row.live.connect} /> : null}
                 <LiveMeter started={row.live.started} spend={row.live.meter} />
-                {row.live.meta ? <Meta>{row.live.meta}</Meta> : null}
+                {row.live.meta ? <Meta model={row.live.model}>{row.live.meta}</Meta> : null}
               </Speech>
             </MessageScrollerItem>
           ) : (
@@ -592,9 +594,24 @@ function OpenedFile({
   return <FileSheet file={{ ...file, subject: null }} onClose={onClose} />;
 }
 
-export function Meta({ children }: { children: ReactNode }) {
+/** The turn's spend, with its model standing as the mark alone. The picker's name for that model
+ *  reaches the member on hover and on focus. The mark is sized in `em` so it stands to the meta
+ *  line's own type rather than to the glyph size a marker gives an icon. */
+export function Meta({ model, children }: { model?: string | null; children: string }) {
+  const mark = model ? modelMark(model) : null;
   return (
     <Marker className="mt-2xs font-mono text-small tabular-nums">
+      {mark && model ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span tabIndex={0} className="flex shrink-0 items-center">
+              <BrandMark provider={mark} className="size-icon" />
+              <span className="sr-only">{modelLabel(model)}</span>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="top">{modelLabel(model)}</TooltipContent>
+        </Tooltip>
+      ) : null}
       <MarkerContent>{children}</MarkerContent>
     </Marker>
   );

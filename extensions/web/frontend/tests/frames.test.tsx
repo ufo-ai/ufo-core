@@ -575,11 +575,13 @@ test("a done terminal meters the model, tokens, and spend of the turn", async ()
   stream.emit("terminal", {
     status: "done",
     text: "Answered.",
-    model: "opus",
+    model: "claude-opus-5",
     tokens: 800,
     cost_micro_usd: 12000,
   });
-  expect(await screen.findByText("opus · 800 tok · $0.01")).toBeTruthy();
+  const meta = await screen.findByText("800 tok · $0.01");
+  const mark = meta.parentElement!.querySelector<HTMLElement>('[style*="--brand-anthropic"]')!;
+  expect(mark.parentElement!.querySelector(".sr-only")!.textContent).toBe("Opus 5");
   expect(await screen.findByText("Answered.")).toBeTruthy();
 });
 
