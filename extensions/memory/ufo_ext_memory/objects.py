@@ -51,7 +51,7 @@ from ufo.sdk.objects import (
 from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.tools import ToolContext
 from ufo_ext_memory.condenser import memory_profile
-from ufo_ext_memory.store import _aware, clip_to_word, memory_item
+from ufo_ext_memory.store import _aware, clip_to_word, memory_item, one_row_per_statement
 
 MEMORY_KIND = "memory"
 PROFILE_KIND = "profile"
@@ -208,55 +208,56 @@ class MemoryObjects:
         subjects = reader.subjects
         async with ext.transaction() as connection:
             rows = (
-                (
-                    await connection.execute(
-                        sa.select(
-                            memory_item.c.id,
-                            memory_item.c.body,
-                            memory_item.c.subject,
-                            memory_item.c.item_class,
-                            memory_item.c.memory_kind,
-                            memory_item.c.created_at,
-                            memory_item.c.created_from_page_uid.label("created_from_page_id"),
-                            memory_item.c.created_from_page_revision,
-                        )
-                        .where(
-                            memory_item.c.workspace_id == ext.store.workspace_id,
-                            memory_item.c.subject.in_(subjects),
-                            memory_item.c.superseded_by.is_(None),
-                            memory_item.c.retired_at.is_(None),
-                        )
-                        .order_by(memory_item.c.created_at.desc(), memory_item.c.id)
-                        .limit(MEMORY_LIST_MAX)
+                await connection.execute(
+                    sa.select(
+                        memory_item.c.id,
+                        memory_item.c.body,
+                        memory_item.c.subject,
+                        memory_item.c.item_class,
+                        memory_item.c.memory_kind,
+                        memory_item.c.as_of,
+                        memory_item.c.created_at,
+                        memory_item.c.created_from_page_uid.label("created_from_page_id"),
+                        memory_item.c.created_from_page_revision,
                     )
+                    .where(
+                        memory_item.c.workspace_id == ext.store.workspace_id,
+                        memory_item.c.subject.in_(subjects),
+                        memory_item.c.superseded_by.is_(None),
+                        memory_item.c.retired_at.is_(None),
+                    )
+                    .order_by(memory_item.c.created_at.desc(), memory_item.c.id)
+                    .limit(MEMORY_LIST_MAX)
                 )
-                .mappings()
-                .all()
-            )
+            ).all()
         page_ids = tuple(
-            row["created_from_page_id"] for row in rows if row["created_from_page_id"] is not None
+            row.created_from_page_id for row in rows if row.created_from_page_id is not None
         )
         cited = await ext.readable_page_states(page_ids, reader)
+        servable = one_row_per_statement(
+            row
+            for row in rows
+            if row.created_from_page_id is None
+            or (
+                (state := cited.get(row.created_from_page_id)) is not None
+                and state.subject == row.subject
+                and state.revision == row.created_from_page_revision
+                and state.subject in subjects
+            )
+        )
         return object_page(
             tuple(
                 _row(
-                    str(row["id"]),
-                    row["body"],
-                    row["subject"],
-                    row["item_class"],
-                    row["memory_kind"],
-                    row["created_at"],
-                    row["created_from_page_id"],
+                    str(row.id),
+                    row.body,
+                    row.subject,
+                    row.item_class,
+                    row.memory_kind,
+                    row.created_at,
+                    row.created_from_page_id,
                     cited,
                 )
-                for row in rows
-                if row["created_from_page_id"] is None
-                or (
-                    (state := cited.get(row["created_from_page_id"])) is not None
-                    and state.subject == row["subject"]
-                    and state.revision == row["created_from_page_revision"]
-                    and state.subject in subjects
-                )
+                for row in servable
             ),
             query,
         )

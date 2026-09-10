@@ -5,7 +5,7 @@ import sqlalchemy as sa
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy.engine import make_url
-from ufo_ext_memory.store import mem_page, memory_item, memory_source
+from ufo_ext_memory.store import mem_page, memory_item
 
 from ufo.db import apply_migrations
 from ufo.schema import tables
@@ -15,7 +15,7 @@ PARTITION = re.compile(r".+_p\d{2}")
 
 def _declared() -> sa.MetaData:
     metadata = sa.MetaData()
-    for table in (*tables.metadata.tables.values(), memory_item, memory_source, mem_page):
+    for table in (*tables.metadata.tables.values(), memory_item, mem_page):
         table.to_metadata(metadata)
     return metadata
 

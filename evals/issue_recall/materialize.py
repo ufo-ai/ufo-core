@@ -18,7 +18,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
@@ -28,8 +28,8 @@ from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
     FACT,
     KIND_FACT,
-    MEMORY_ITEM_NAMESPACE,
     MemoryIndexer,
+    body_digest,
     memory_item,
 )
 
@@ -63,6 +63,7 @@ from ufo.runtime.sources.sync import (
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 
 PAGE_CONSUMERS = frozenset({("memory", "index_pages"), ("memory", "derive_facts")})
 
@@ -262,26 +263,21 @@ class Materializer:
 
     async def _commit_ambient(self) -> None:
         """Commit the haystack the graded facts compete against: durable shared memory that no page
-        produced, seeded by a raw content-addressed insert rather than the store's own upsert. The
-        haystack models the accreted store a live deploy holds before the dedup job heals it, so it
-        carries the reworded copies and the grown operations ledger a live workspace grew before the
-        write path bounded a body at all — that ledger is past MEMORY_BODY_MAX_CHARS, which `commit`
-        now refuses. `on_conflict_do_nothing` keeps a re-materialization of the same corpus a
-        no-op."""
+        produced, seeded by a raw insert under the store's own written-fact key rather than its
+        upsert. The haystack models the accreted store a live deploy holds before the dedup job
+        heals it, so it carries the reworded copies and the grown operations ledger a live workspace
+        grew before the write path bounded a body at all — that ledger is past
+        MEMORY_BODY_MAX_CHARS, which `commit` now refuses. `on_conflict_do_nothing` on that key
+        keeps a re-materialization of the same corpus a no-op."""
         async with workspace_tx() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             for memory in self.ambient:
-                item_id = uuid5(
-                    MEMORY_ITEM_NAMESPACE,
-                    "\x00".join(
-                        (str(ws_current().workspace_id), SHARED_SUBJECT, FACT, memory.body)
-                    ),
-                )
                 statement = insert(memory_item).values(
-                    id=item_id,
+                    id=uuid7(),
                     workspace_id=ws_current().workspace_id,
                     subject=SHARED_SUBJECT,
                     body=memory.body,
+                    body_digest=body_digest(memory.body),
                     item_class=FACT,
                     memory_kind=KIND_FACT,
                     confidence=DEFAULT_CONFIDENCE,
@@ -291,7 +287,15 @@ class Materializer:
                     updated_at=sa.func.now(),
                 )
                 await connection.execute(
-                    statement.on_conflict_do_nothing(index_elements=[memory_item.c.id])
+                    statement.on_conflict_do_nothing(
+                        index_elements=[
+                            memory_item.c.workspace_id,
+                            memory_item.c.subject,
+                            memory_item.c.item_class,
+                            memory_item.c.body_digest,
+                        ],
+                        index_where=memory_item.c.created_from_page_uid.is_(None),
+                    )
                 )
 
     async def _drain_memory_index(self) -> None:

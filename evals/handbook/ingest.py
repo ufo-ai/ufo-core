@@ -253,11 +253,6 @@ class DocumentIngest:
             return
         async with workspace_tx() as connection:
             await connection.execute(
-                MEMORY_STORE.memory_source.delete().where(
-                    MEMORY_STORE.memory_source.c.memory_item_id.in_(item_ids)
-                )
-            )
-            await connection.execute(
                 MEMORY_STORE.memory_item.delete().where(MEMORY_STORE.memory_item.c.id.in_(item_ids))
             )
 
@@ -282,11 +277,6 @@ class DocumentIngest:
         if not derived:
             return
         async with workspace_tx() as connection:
-            await connection.execute(
-                MEMORY_STORE.memory_source.delete().where(
-                    MEMORY_STORE.memory_source.c.memory_item_id.in_(derived)
-                )
-            )
             await connection.execute(
                 MEMORY_STORE.memory_item.delete().where(MEMORY_STORE.memory_item.c.id.in_(derived))
             )

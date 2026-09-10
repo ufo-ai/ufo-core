@@ -47,6 +47,7 @@ from ufo.runtime.sources.sync import (
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 from ufo.schema.records import DEFAULT_AGENT_NAME
 
 index_default = import_module("ufo_ext_index_default")
@@ -269,26 +270,22 @@ class Memory100Materializer:
         """Seed the snapshot's memories by a raw content-addressed insert rather than the store's
         own upsert. A haystack memory is a whole recorded session, so most bodies run well past
         MEMORY_BODY_MAX_CHARS — a bound the live write path holds over what an agent authors, and
-        one this fixed corpus predates. The id repeats what `commit` addresses over
-        `(workspace, subject, item_class, body)`, because readiness evidence and the grader's maps
-        key off it. `embedding_digest` stays NULL, leaving the index job the sole producer of chunks
-        and embeddings, and `on_conflict_do_nothing` keeps a second materialization of the same
-        snapshot a no-op."""
+        one this fixed corpus predates. The row goes in under the store's own written-fact key,
+        `(workspace, subject, item_class, body_digest)`. `embedding_digest` stays NULL, leaving the
+        index job the sole producer of chunks and embeddings, and `on_conflict_do_nothing` on that
+        key keeps a second materialization of the same snapshot a no-op."""
         members = {binding.alias: binding.member_id for binding in audiences}
         async with workspace_tx() as connection:
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             for memory in self.snapshot.memories:
                 member_id = members[memory.audience]
                 subject = SHARED_SUBJECT if member_id is None else member_subject(member_id)
-                item_id = uuid5(
-                    memory_store.MEMORY_ITEM_NAMESPACE,
-                    "\x00".join((str(workspace_id), subject, memory.item_class, memory.body)),
-                )
                 statement = insert(memory_store.memory_item).values(
-                    id=item_id,
+                    id=uuid7(),
                     workspace_id=workspace_id,
                     subject=subject,
                     body=memory.body,
+                    body_digest=memory_store.body_digest(memory.body),
                     item_class=memory.item_class,
                     memory_kind=memory.memory_kind,
                     confidence=memory.confidence,
@@ -298,7 +295,15 @@ class Memory100Materializer:
                     updated_at=sa.func.now(),
                 )
                 await connection.execute(
-                    statement.on_conflict_do_nothing(index_elements=[memory_store.memory_item.c.id])
+                    statement.on_conflict_do_nothing(
+                        index_elements=[
+                            memory_store.memory_item.c.workspace_id,
+                            memory_store.memory_item.c.subject,
+                            memory_store.memory_item.c.item_class,
+                            memory_store.memory_item.c.body_digest,
+                        ],
+                        index_where=memory_store.memory_item.c.created_from_page_uid.is_(None),
+                    )
                 )
 
     async def _drain_memory_index(self) -> None:

@@ -750,6 +750,72 @@ async def test_memory_search_merges_and_dedups_across_queries(db: None, tmp_path
         assert text.count("apple and banana smoothie") == 1
 
 
+def test_memory_search_merge_serves_a_statement_in_the_slot_it_first_reached() -> None:
+    """Recall dedups within one query, so two twins of one body reach the merge only when two
+    queries' candidate pools differ and each recalls a different one. The statement keeps the slot
+    the first twin reached — query one's top hit stays first when its newer twin ranked eighth for
+    query two — and every distinct statement follows in round-robin order."""
+    when = datetime(2026, 1, 1, tzinfo=UTC)
+    older = Recalled(
+        uuid4(), "shared", "fact", "the launch date is June 12", None, 0.9, created_at=when
+    )
+    newer = Recalled(
+        uuid4(),
+        "shared",
+        "fact",
+        "the launch date is June 12",
+        None,
+        0.2,
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    fillers = tuple(
+        Recalled(uuid4(), "shared", "fact", f"filler {n}", None, 0.9 - n / 10, created_at=when)
+        for n in range(7)
+    )
+    service = memory.MemorySearchService(
+        ctx=_ext(DefaultIndex(transaction=workspace_tx), StubEmbed(vec((0, 1.0))))
+    )
+
+    merged = service._merged([(older,), (*fillers, newer)])
+    assert merged[0] == older
+    assert newer not in merged
+    assert merged == (older, *fillers)[: memory.MEMORY_SEARCH_LIMIT]
+
+
+def test_memory_search_merge_serves_an_episodic_item_recalled_at_two_ranks_once() -> None:
+    """Recall rewrites an episodic hit to a topic pointer carrying its rank, so one item recalled
+    first by one query and second by another is two bodies and one ref. The merge dedups by memory
+    id before it dedups by statement, and the agent gets the ref once."""
+    when = datetime(2026, 1, 1, tzinfo=UTC)
+    episode = uuid4()
+    at_first = Recalled(
+        episode,
+        "shared",
+        "episodic",
+        f"Memory topic 1 (item {episode})",
+        None,
+        0.9,
+        created_at=when,
+        recall_mode="topic",
+    )
+    at_second = Recalled(
+        episode,
+        "shared",
+        "episodic",
+        f"Memory topic 2 (item {episode})",
+        None,
+        0.6,
+        created_at=when,
+        recall_mode="topic",
+    )
+    other = Recalled(uuid4(), "shared", "fact", "the auditor is booked", None, 0.8, created_at=when)
+    service = memory.MemorySearchService(
+        ctx=_ext(DefaultIndex(transaction=workspace_tx), StubEmbed(vec((0, 1.0))))
+    )
+
+    assert service._merged([(at_first,), (other, at_second)]) == (at_first, other)
+
+
 async def test_memory_search_bounds_the_merged_result_across_queries(
     db: None, tmp_path: Path
 ) -> None:

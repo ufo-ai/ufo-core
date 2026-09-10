@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -13,7 +13,6 @@ from alembic.config import Config
 from sqlalchemy.engine import make_url
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import (
-    MEMORY_ITEM_NAMESPACE,
     MemoryStore,
     MemoryWrite,
     memory_item,
@@ -125,13 +124,13 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
     migration_urls: tuple[str, str],
 ) -> None:
     """`memory_0010` binds derivations to a page revision and asks every page-change consumer to
-    replay; `memory_0012` records each derivation's source as a link. The id stays content-addressed
-    over `(workspace, subject, item_class, body)`, so every seeded row keeps its id across the
-    migration — nothing is re-keyed, nothing in the index is orphaned — and a page derivation that
-    resolves a complete origin gains one `memory_source` link from it. The derivations the replay
-    has not reached (`memory_0010` backfills no revision) and one whose page is gone cannot form a
-    complete origin, so their origin is cleared and they take no link rather than break the check;
-    a later replay lands on the very row the migration kept."""
+    replay; `memory_0012` records each derivation's source as a link. Every seeded row keeps its id
+    across the migration — nothing is re-keyed, nothing in the index is orphaned — and a page
+    derivation that resolves a complete origin gains one `memory_source` link from it. The
+    derivations the replay has not reached (`memory_0010` backfills no revision) and one whose page
+    is gone cannot form a complete origin, so their origin is cleared and they take no link rather
+    than break the check; a later replay lands one page-local row for the page beside the rows the
+    migration kept."""
     migration_url, sync_url = migration_urls
     config = _alembic(migration_url)
     command.upgrade(config, "0053")
@@ -141,10 +140,7 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
     workspace_id, source_id, page_id, later_page_id, manual_id, pageless_id = (
         uuid4() for _ in range(6)
     )
-    derived_id, unreplayed_id = (
-        uuid5(MEMORY_ITEM_NAMESPACE, "\x00".join((str(workspace_id), "shared", "fact", body)))
-        for body in (DERIVED_BODY, UNREPLAYED_BODY)
-    )
+    derived_id, unreplayed_id = uuid4(), uuid4()
     now = datetime(2026, 7, 27, tzinfo=UTC)
     later = datetime(2026, 7, 28, tzinfo=UTC)
     with engine.connect() as connection:
@@ -386,7 +382,8 @@ def test_page_revision_migration_invalidates_derivations_and_requests_full_repla
     command.upgrade(config, "heads")
     page_uid, source_uid = UUID(str(minted.page_uid)), UUID(str(minted.source_uid))
     rebuilt = asyncio.run(_replay_derivation(migration_url, workspace_id, page_uid, source_uid))
-    assert rebuilt == [(derived_id, source_uid)]
+    assert [source for _row_id, source in rebuilt] == [source_uid]
+    assert rebuilt[0][0] != derived_id
 
     command.downgrade(config, "memory_0011")
     engine = sa.create_engine(sync_url)
@@ -418,12 +415,7 @@ def test_source_partition_backfills_one_link_per_source_without_rekeying(
     command.upgrade(config, "memory_0011")
 
     workspace_id, source_id, page_id = uuid4(), uuid4(), uuid4()
-    live_id = uuid5(
-        MEMORY_ITEM_NAMESPACE, "\x00".join((str(workspace_id), "shared", "fact", DERIVED_BODY))
-    )
-    orphan_id = uuid5(
-        MEMORY_ITEM_NAMESPACE, "\x00".join((str(workspace_id), "shared", "fact", PAGELESS_BODY))
-    )
+    live_id, orphan_id = uuid4(), uuid4()
     now = datetime(2026, 7, 27, tzinfo=UTC)
     engine = sa.create_engine(sync_url)
     with engine.connect() as connection:

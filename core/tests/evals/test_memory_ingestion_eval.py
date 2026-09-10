@@ -438,7 +438,11 @@ async def test_materializer_derives_once_and_installs_the_same_corpus_for_each_t
     assert consumed.corpus == produced.corpus
     assert consumed.readiness.derived_corpus_digest == readiness.derived_corpus_digest
     assert consumed.readiness.corpus_digest != readiness.corpus_digest
-    assert consumed.readiness.evidence == readiness.evidence
+    assert [(entry.source_ref, len(entry.memory_ids)) for entry in consumed.readiness.evidence] == [
+        (entry.source_ref, len(entry.memory_ids)) for entry in readiness.evidence
+    ]
+    assert {memory_id for entry in consumed.readiness.evidence for memory_id in entry.memory_ids}
+    assert consumed.readiness.evidence != readiness.evidence
     assert consumed.readiness.source_id != readiness.source_id
     async with workspace_tx() as connection:
         consumer_subjects = set(

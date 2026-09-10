@@ -76,6 +76,7 @@ from ufo_ext_memory.store import (
     clip_to_word,
     mem_page,
     memory_item,
+    one_row_per_statement,
 )
 
 PROMPTS = Path(__file__).parent / "prompts"
@@ -310,11 +311,11 @@ class FactDeriver:
     extraction the pass cannot read is no settlement either, and settles nothing by raising: like a
     batch with no model wired, it holds the cursor where it stands so the next tick replays those
     pages, rather than advancing past facts nothing will ever derive again. Once-delivery is the
-    cursor's guarantee — each changed page reaches this handler once; the content-addressed commit
-    dedups an identical re-derivation onto the same row, so a replayed batch names the same rows and
-    the retirement finds nothing left. What each pass retires is every other link the page still
-    carries, which is what makes a rebuild work: the cursor is sent back over pages whose revisions
-    never moved, and the statements being replaced sit at the very revision the pass settles on."""
+    cursor's guarantee — each changed page reaches this handler once; `commit` lands an identical
+    re-derivation on the page's own row, so a replayed batch names the same rows and the retirement
+    finds nothing left. What each pass retires is every other row the page still holds, which is
+    what makes a rebuild work: the cursor is sent back over pages whose revisions never moved, and
+    the statements being replaced sit at the very revision the pass settles on."""
 
     store: MemoryStore
     model: ModelAccess
@@ -388,9 +389,9 @@ class FactDeriver:
         Each page carries its title and stream into the payload, because a fact naming "the pull
         request" reads as a subject to a model holding the page and as nothing to the member who
         meets that row alone. One reply is also the one place a page's restatements of a single
-        claim are visible to each other — the store's content address catches only identical text,
-        and the dedup sweep never reads a page-derived row — so a restatement collapses here onto
-        the entry that carries the most.
+        claim are visible to each other — the store's key catches only identical text from one
+        page, and the dedup sweep never reads a page-derived row — so a restatement collapses here
+        onto the entry that carries the most.
         The request asks for reasoning off to avoid paying for optional background thinking; a
         model that requires reasoning uses its minimum adaptive effort, which supports forced tool
         use."""
@@ -1075,11 +1076,11 @@ class SectionWriter:
     async def _sections(self) -> tuple[_Standing, ...]:
         """The workspace's bands worth a paragraph, in a fixed order: those holding at least
         MIN_SECTION_FACTS of the facts `_facts` would send. The floor counts what the paragraph
-        would be written from, or a band whose rows a member cannot be served would be neither
-        written nor retired — absent from the payload, present in this read, and so keeping for ever
-        the paragraph its rows no longer support. A memory_kind the subject's own headings do not
-        name is a band nobody could read the paragraph under, so it raises rather than being written
-        into a section that does not exist."""
+        would be written from — distinct bodies, as `_facts` serves them — or a band whose rows a
+        member cannot be served would be neither written nor retired — absent from the payload,
+        present in this read, and so keeping for ever the paragraph its rows no longer support. A
+        memory_kind the subject's own headings do not name is a band nobody could read the paragraph
+        under, so it raises rather than being written into a section that does not exist."""
         async with self.transaction() as connection:
             rows = (
                 await connection.execute(
@@ -1092,7 +1093,7 @@ class SectionWriter:
                         memory_item.c.retired_at.is_(None),
                     )
                     .group_by(memory_item.c.subject, memory_item.c.memory_kind)
-                    .having(sa.func.count() >= MIN_SECTION_FACTS)
+                    .having(sa.func.count(sa.distinct(memory_item.c.body)) >= MIN_SECTION_FACTS)
                     .order_by(memory_item.c.subject, memory_item.c.memory_kind)
                 )
             ).all()
@@ -1134,7 +1135,13 @@ class SectionWriter:
         async with self.transaction() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(memory_item.c.body, memory_item.c.confidence)
+                    sa.select(
+                        memory_item.c.subject,
+                        memory_item.c.body,
+                        memory_item.c.confidence,
+                        memory_item.c.as_of,
+                        memory_item.c.created_at,
+                    )
                     .where(member_servable())
                     .where(
                         memory_item.c.workspace_id == self.workspace_id,
@@ -1148,7 +1155,7 @@ class SectionWriter:
                     .limit(MAX_BUCKET_FACTS)
                 )
             ).all()
-        return tuple(_SectionFact(row.body, row.confidence) for row in rows)
+        return tuple(_SectionFact(row.body, row.confidence) for row in one_row_per_statement(rows))
 
     async def _summarize(
         self, model: ModelAccess, section: _Standing, facts: tuple[_SectionFact, ...]
@@ -1224,7 +1231,13 @@ class OverviewWriter:
         async with self.transaction() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(memory_item.c.body, memory_item.c.confidence)
+                    sa.select(
+                        memory_item.c.subject,
+                        memory_item.c.body,
+                        memory_item.c.confidence,
+                        memory_item.c.as_of,
+                        memory_item.c.created_at,
+                    )
                     .where(member_servable())
                     .where(
                         memory_item.c.workspace_id == self.workspace_id,
@@ -1237,7 +1250,7 @@ class OverviewWriter:
                     .limit(OVERVIEW_FACTS_MAX)
                 )
             ).all()
-        return tuple(_SectionFact(row.body, row.confidence) for row in rows)
+        return tuple(_SectionFact(row.body, row.confidence) for row in one_row_per_statement(rows))
 
     async def _write(
         self, model: ModelAccess, domain: str | None, facts: tuple[_SectionFact, ...]
@@ -1382,7 +1395,12 @@ class ProfileWriter:
         async with self.transaction() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(memory_item.c.body)
+                    sa.select(
+                        memory_item.c.subject,
+                        memory_item.c.body,
+                        memory_item.c.as_of,
+                        memory_item.c.created_at,
+                    )
                     .where(member_servable())
                     .where(
                         memory_item.c.workspace_id == self.workspace_id,
@@ -1395,7 +1413,7 @@ class ProfileWriter:
                     .limit(PROFILE_FACTS_MAX)
                 )
             ).all()
-        return tuple(row.body for row in rows)
+        return tuple(row.body for row in one_row_per_statement(rows))
 
     async def _write(
         self, model: ModelAccess, roster: tuple[_Rostered, ...], facts: tuple[str, ...]
@@ -1626,7 +1644,8 @@ class PagePass:
             curated = await self._curate(self.model, bands)
             retiring = self._retiring(subject, bands, curated.retire)
             if retiring:
-                await self._apply(retiring)
+                sent = frozenset(row.id for band in bands for row in band.rows)
+                await self._apply(retiring, sent - retiring)
 
     async def _subjects(self) -> tuple[str, ...]:
         async with self.transaction() as connection:
@@ -1640,7 +1659,7 @@ class PagePass:
                         memory_item.c.retired_at.is_(None),
                     )
                     .group_by(memory_item.c.subject)
-                    .having(sa.func.count() >= PAGE_PASS_MIN_ROWS)
+                    .having(sa.func.count(sa.distinct(memory_item.c.body)) >= PAGE_PASS_MIN_ROWS)
                     .order_by(memory_item.c.subject)
                 )
             ).all()
@@ -1651,22 +1670,30 @@ class PagePass:
         index = 0
         async with self.transaction() as connection:
             for memory_kind, heading in section_headings(subject).items():
-                rows = (
-                    await connection.execute(
-                        sa.select(memory_item.c.id, memory_item.c.body)
-                        .join(mem_page, live_page_link())
-                        .where(
-                            memory_item.c.workspace_id == self.workspace_id,
-                            memory_item.c.subject == subject,
-                            memory_item.c.item_class == FACT,
-                            memory_item.c.memory_kind == memory_kind,
-                            memory_item.c.superseded_by.is_(None),
-                            memory_item.c.retired_at.is_(None),
+                rows = one_row_per_statement(
+                    (
+                        await connection.execute(
+                            sa.select(
+                                memory_item.c.id,
+                                memory_item.c.subject,
+                                memory_item.c.body,
+                                memory_item.c.as_of,
+                                memory_item.c.created_at,
+                            )
+                            .join(mem_page, live_page_link())
+                            .where(
+                                memory_item.c.workspace_id == self.workspace_id,
+                                memory_item.c.subject == subject,
+                                memory_item.c.item_class == FACT,
+                                memory_item.c.memory_kind == memory_kind,
+                                memory_item.c.superseded_by.is_(None),
+                                memory_item.c.retired_at.is_(None),
+                            )
+                            .order_by(memory_item.c.created_at.desc(), memory_item.c.id.desc())
+                            .limit(PAGE_PASS_SECTION_ROWS)
                         )
-                        .order_by(memory_item.c.created_at.desc(), memory_item.c.id.desc())
-                        .limit(PAGE_PASS_SECTION_ROWS)
-                    )
-                ).all()
+                    ).all()
+                )
                 if not rows:
                     continue
                 summary = (
@@ -1758,7 +1785,17 @@ class PagePass:
             row.id for band in bands for row in band.rows if row.index in admitted.retiring
         )
 
-    async def _apply(self, retiring: frozenset[UUID]) -> None:
+    async def _apply(self, retiring: frozenset[UUID], kept: frozenset[UUID]) -> None:
+        """Stamp every live page-derived row stating what a retired row states, except the rows the
+        model saw and kept in this pass. Each band was read one row per statement, so the row the
+        model named stands for every page's copy of it; a copy left live would be the newest row of
+        that statement and back on the wiki by morning. The same bytes filed under another kind are
+        another band's row the model judged on its own, and a row it kept stands whatever it
+        says."""
+        named = memory_item.alias("named")
+        statements = sa.select(named.c.subject, named.c.body).where(
+            named.c.id.in_(sorted(retiring))
+        )
         async with self.transaction() as connection:
             await connection.execute(
                 sa.update(memory_item)
@@ -1770,7 +1807,10 @@ class PagePass:
                 )
                 .where(
                     memory_item.c.workspace_id == self.workspace_id,
-                    memory_item.c.id.in_(sorted(retiring)),
+                    memory_item.c.item_class == FACT,
+                    memory_item.c.created_from_page_uid.is_not(None),
+                    sa.tuple_(memory_item.c.subject, memory_item.c.body).in_(statements),
+                    memory_item.c.id.not_in(sorted(kept)),
                     memory_item.c.superseded_by.is_(None),
                     memory_item.c.retired_at.is_(None),
                 )

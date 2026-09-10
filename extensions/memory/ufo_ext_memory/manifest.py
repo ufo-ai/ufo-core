@@ -106,6 +106,7 @@ from ufo_ext_memory.store import (
     SourceMatch,
     UnindexedPageDrain,
     _aware,
+    body_digest,
     memory_item,
     recall_subjects,
     store_for,
@@ -325,11 +326,6 @@ class MemorySearchService:
                 )
             ),
         )
-        recalled: dict[UUID, Recalled] = {}
-        for recall_tier in zip_longest(*recalled_legs):
-            for item in recall_tier:
-                if item is not None and item.memory_id not in recalled:
-                    recalled[item.memory_id] = item
         sources: dict[tuple[UUID, str], SourceMatch] = {}
         for source_tier in zip_longest(*source_legs):
             for match in source_tier:
@@ -343,7 +339,7 @@ class MemorySearchService:
                 created_at=item.created_at,
                 subject=item.subject,
             )
-            for item in list(recalled.values())[:MEMORY_SEARCH_LIMIT]
+            for item in self._merged(recalled_legs)
         )
         return matches + tuple(
             MemoryMatch(
@@ -355,6 +351,25 @@ class MemorySearchService:
             )
             for match in list(sources.values())[:MEMORY_SEARCH_LIMIT]
         )
+
+    def _merged(self, legs: list[tuple[Recalled, ...]]) -> tuple[Recalled, ...]:
+        """Every query's recall interleaved round-robin — each query's top hit, then each second —
+        one row per memory id and then one per statement, each in the slot it first reached,
+        bounded to MEMORY_SEARCH_LIMIT. The id comes first because recall rewrites an episodic hit
+        to a topic pointer that carries its rank, so one item recalled at two ranks is two bodies
+        and one ref. Two pages stating one body are two rows, and two queries whose candidate pools
+        differ can each recall a different one of them; the bytes are identical, so which id is
+        served is immaterial and a query's top hit keeps its slot rather than falling to where its
+        twin ranked."""
+        by_id: dict[UUID, Recalled] = {}
+        for tier in zip_longest(*legs):
+            for item in tier:
+                if item is not None:
+                    by_id.setdefault(item.memory_id, item)
+        statements: dict[tuple[str, str], Recalled] = {}
+        for item in by_id.values():
+            statements.setdefault((item.subject, body_digest(item.body)), item)
+        return tuple(statements.values())[:MEMORY_SEARCH_LIMIT]
 
     def listable_kinds(self) -> tuple[str, ...]:
         """The item classes this store writes, read off `ItemClass` itself so a class added there

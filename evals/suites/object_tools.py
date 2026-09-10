@@ -17,15 +17,15 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
-from uuid import UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 import yaml
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
     FACT,
-    MEMORY_ITEM_NAMESPACE,
     MemoryKind,
+    body_digest,
     memory_item,
 )
 from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
@@ -53,6 +53,7 @@ from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.schema import tables
+from ufo.schema.ids import uuid7
 
 KIND = "scheduled_task"
 ENVELOPE_KEYS = frozenset({"kind", "name", "spec"})
@@ -472,21 +473,26 @@ async def _graded_operational_task_stays_open(output: CapabilityOutput) -> Capab
 
 
 async def _remember_cadence(workspace_id: UUID, agent_id: UUID, blob: BlobStore) -> None:
-    """The cadence preference as a durable memory row. The id is content-addressed exactly as the
-    memory extension addresses it, so a re-run reseeds the one row instead of piling up copies, and
-    the un-embedded row is recallable through the tail leg without the index job."""
-    item_id = uuid5(
-        MEMORY_ITEM_NAMESPACE,
-        "\x00".join((str(workspace_id), SHARED_SUBJECT, FACT, REMEMBERED_CADENCE)),
-    )
+    """The cadence preference as a durable memory row. The row before it goes by the store's own
+    written-fact key, so a re-run reseeds the one row instead of piling up copies, and the
+    un-embedded row is recallable through the tail leg without the index job."""
     async with workspace_tx() as connection:
-        await connection.execute(sa.delete(memory_item).where(memory_item.c.id == item_id))
+        await connection.execute(
+            sa.delete(memory_item).where(
+                memory_item.c.workspace_id == workspace_id,
+                memory_item.c.subject == SHARED_SUBJECT,
+                memory_item.c.item_class == FACT,
+                memory_item.c.body_digest == body_digest(REMEMBERED_CADENCE),
+                memory_item.c.created_from_page_uid.is_(None),
+            )
+        )
         await connection.execute(
             sa.insert(memory_item).values(
-                id=item_id,
+                id=uuid7(),
                 workspace_id=workspace_id,
                 subject=SHARED_SUBJECT,
                 body=REMEMBERED_CADENCE,
+                body_digest=body_digest(REMEMBERED_CADENCE),
                 item_class=FACT,
                 memory_kind=PREFERENCE_KIND,
                 confidence=DEFAULT_CONFIDENCE,

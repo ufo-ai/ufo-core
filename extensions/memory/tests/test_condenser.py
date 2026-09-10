@@ -64,9 +64,9 @@ from ufo_ext_memory.store import (
     MemoryStore,
     MemoryWrite,
     PageIndexer,
+    body_digest,
     mem_page,
     memory_item,
-    memory_source,
 )
 
 from ufo.blob import FilesystemBlobStore
@@ -1191,9 +1191,9 @@ async def test_a_committed_replacement_retires_the_prior_revision_exactly_once(d
 
 
 async def test_replaying_a_settled_batch_writes_and_retires_nothing_new(db: None) -> None:
-    """Replay is idempotent across the whole pass: the content-addressed commit lands on the same
-    row and the retirement finds nothing left, so a page delivered twice settles on exactly the rows
-    the first delivery produced."""
+    """Replay is idempotent across the whole pass: `commit` lands the identical body on the page's
+    own row and the retirement finds nothing left, so a page delivered twice settles on exactly the
+    rows the first delivery produced."""
     workspace_id = await _workspace()
     page_id, source_id = uuid4(), uuid4()
     await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
@@ -1425,9 +1425,7 @@ async def _seed_copy(
     """One memory row exactly as history left it, seeded at a chosen `created_at` rather than
     committed — the ages the sweep reads are what a test fixes, and they are what makes the newest
     copy of a group deterministic. `memory_kind` is what files a row under one band of the wiki, so
-    it is what a section test seeds by. A page-derived row carries the `memory_source` link `commit`
-    writes beside its primary binding, because that link is what a granted reader reaches the row
-    through — a binding without one is a row no reader could have found."""
+    it is what a section test seeds by."""
     item_id = uuid4()
     page_source_id = None
     if created_from_page_id is not None:
@@ -1439,6 +1437,7 @@ async def _seed_copy(
                 workspace_id=workspace_id,
                 subject=subject,
                 body=body,
+                body_digest=body_digest(body),
                 item_class=item_class,
                 memory_kind=memory_kind,
                 confidence=confidence,
@@ -1454,18 +1453,6 @@ async def _seed_copy(
                 updated_at=created_at,
             )
         )
-        if created_from_page_id is not None:
-            await connection.execute(
-                sa.insert(memory_source).values(
-                    workspace_id=workspace_id,
-                    memory_item_id=item_id,
-                    source_uid=page_source_id,
-                    page_uid=created_from_page_id,
-                    revision=created_from_page_revision,
-                    created_at=created_at,
-                    updated_at=created_at,
-                )
-            )
     return item_id
 
 
@@ -2771,6 +2758,10 @@ async def _stamp_retired(item_id: UUID) -> None:
 
 
 async def _wiki_listing(workspace_id: UUID, reader: SourceReader) -> set[str]:
+    return {text for _name, text in await _wiki_rows(workspace_id, reader)}
+
+
+async def _wiki_rows(workspace_id: UUID, reader: SourceReader) -> list[tuple[str, str]]:
     """The rows the wiki page reads, through the `memory` object listing its homepage fetches, for
     the agent holding the feed its pages came from — the listing fences a page-derived row on that
     grant and on the revision its page carries now, so a row off either is a row a member cannot
@@ -2799,15 +2790,66 @@ async def _wiki_listing(workspace_id: UUID, reader: SourceReader) -> set[str]:
         listed = await MemoryObjects().list(
             reading, ObjectListQuery(supported_fields=MEMORY_OBJECT.list_fields)
         )
-    return {str(row.fields["text"]) for row in listed.rows}
+    return [(row.name, str(row.fields["text"])) for row in listed.rows]
+
+
+async def test_two_pages_stating_one_body_list_as_one_memory_object(db: None) -> None:
+    """Two source pages stating identical bytes are two rows, and the listing the wiki homepage
+    fetches shows the statement once — the newer row, since a member reads a fact, not the pages
+    that repeated it."""
+    workspace_id = await _workspace()
+    source_id = await _seed_wiki_feed(workspace_id)
+    start = datetime.now(UTC) - timedelta(hours=1)
+    await _seed_wiki_row(workspace_id, source_id, KEPT_DUPLICATE, start, "event")
+    newer = await _seed_wiki_row(
+        workspace_id, source_id, KEPT_DUPLICATE, start + timedelta(minutes=1), "event"
+    )
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
+
+    assert await _wiki_rows(workspace_id, reader) == [(str(newer), KEPT_DUPLICATE)]
+
+
+async def test_retiring_a_statement_retires_every_pages_copy_of_it(db: None) -> None:
+    """The pass reads a page one row per statement, so the row it names stands for every page's
+    copy of that statement. A second page restating the newest History row word for word is hidden
+    behind it in the payload; retiring the row it sees stamps both, and the next night's page holds
+    neither — a copy left live would be the newest row of the statement and back on the wiki."""
+    workspace_id = await _workspace()
+    source_id = await _seed_wiki_feed(workspace_id)
+    await _seed_wiki_page(workspace_id, source_id)
+    twin = await _seed_wiki_row(
+        workspace_id, source_id, DUPLICATE_ROWS[5], datetime.now(UTC) - timedelta(hours=2), "event"
+    )
+    first = CurationClient(_curation(retire=(7,), keeper=12))
+    second = CurationClient(_curation())
+    with ws(workspace_id):
+        await _page_pass(workspace_id, first).run()
+        async with workspace_tx() as connection:
+            stamped = (
+                await connection.execute(
+                    sa.select(memory_item.c.id, memory_item.c.retired_at).where(
+                        memory_item.c.workspace_id == workspace_id,
+                        memory_item.c.body == DUPLICATE_ROWS[5],
+                    )
+                )
+            ).all()
+        await _page_pass(workspace_id, second).run()
+
+    assert [row["body"] for row in _history_band(first)["rows"]] == list(reversed(DUPLICATE_ROWS))
+    assert twin in {row.id for row in stamped}
+    assert len(stamped) == 2
+    assert all(row.retired_at is not None for row in stamped)
+    assert [row["body"] for row in _history_band(second)["rows"]] == list(
+        reversed(DUPLICATE_ROWS[:5])
+    )
 
 
 async def test_a_retired_row_stays_retired_when_the_next_derivation_commits_it_again(
     db: None,
 ) -> None:
     """The judgement this pass makes has to outlive the pass that produced the row. A page still
-    synced re-derives the same body every rebuild and every revision, and `commit` addresses it to
-    the same uuid5 row — so a retirement kept in `superseded_by`, which the upsert clears, would be
+    synced re-derives the same body every rebuild and every revision, and `commit` lands it on the
+    page's own row — so a retirement kept in `superseded_by`, which the upsert clears, would be
     undone by the next tick and the row would be back on the wiki by morning. `retired_at` is the
     one column the upsert leaves alone, and this is what proves it."""
     workspace_id = await _workspace()
@@ -3045,6 +3087,131 @@ async def test_a_retired_row_leaves_the_wiki_listing_recall_and_the_bands_next_p
         if json.loads(request.messages[0].content)["section"] == "History"
     )
     assert json.loads(history.messages[0].content)["facts"] == list(reversed(DUPLICATE_ROWS[:4]))
+
+
+async def test_retiring_a_statement_spares_the_rows_the_model_kept_and_takes_every_other_twin(
+    db: None,
+) -> None:
+    """Retirement is of the statement, and the rows the model kept in the pass are the exception.
+    The same bytes filed as a decision and as an event are two rows the model saw: the History row
+    retired against the Decisions row leaves that keeper standing, while a third twin on another
+    page, hidden behind the History row in its band, goes with the statement."""
+    workspace_id = await _workspace()
+    source_id = await _seed_wiki_feed(workspace_id)
+    await _seed_wiki_page(workspace_id, source_id)
+    decided = await _seed_wiki_row(
+        workspace_id,
+        source_id,
+        DUPLICATE_ROWS[5],
+        datetime.now(UTC) - timedelta(hours=2),
+        "decision",
+    )
+    hidden = await _seed_wiki_row(
+        workspace_id, source_id, DUPLICATE_ROWS[5], datetime.now(UTC) - timedelta(days=1), "event"
+    )
+    client = CurationClient(_curation(retire=(8,), keeper=1))
+    with ws(workspace_id):
+        await _page_pass(workspace_id, client).run()
+        async with workspace_tx() as connection:
+            stamped = (
+                await connection.execute(
+                    sa.select(
+                        memory_item.c.id, memory_item.c.memory_kind, memory_item.c.retired_at
+                    ).where(
+                        memory_item.c.workspace_id == workspace_id,
+                        memory_item.c.body == DUPLICATE_ROWS[5],
+                    )
+                )
+            ).all()
+
+    sent = json.loads(client.requests[0].messages[0].content)
+    assert sent["sections"][0]["rows"][0] == {"id": 1, "body": DUPLICATE_ROWS[5]}
+    assert [row["body"] for row in _history_band(client)["rows"]] == list(reversed(DUPLICATE_ROWS))
+    assert len(stamped) == 3
+    assert {row.id for row in stamped if row.retired_at is None} == {decided}
+    assert hidden in {row.id for row in stamped if row.retired_at is not None}
+
+
+async def test_a_retired_statement_stays_retired_when_a_new_page_derives_it(db: None) -> None:
+    """The judgement is about the statement. A page that never held the body derives it after the
+    pass retired it, and the fresh page-local row is born retired: off the listing, off recall, and
+    withheld from the index like the row it repeats."""
+    workspace_id = await _workspace()
+    source_id = await _seed_wiki_feed(workspace_id)
+    retired = await _seed_wiki_row(
+        workspace_id, source_id, KEPT_DUPLICATE, datetime.now(UTC) - timedelta(hours=1), "event"
+    )
+    await _stamp_retired(retired)
+    page_id, revision = await _seed_wiki_source_page(workspace_id, source_id, datetime.now(UTC))
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
+    probe = vec((13, 1.0))
+    store = _store(workspace_id, probe)
+    with ws(workspace_id):
+        landed = await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT,
+                body=KEPT_DUPLICATE,
+                item_class=FACT,
+                memory_kind="event",
+                created_from_page_id=page_id,
+                created_from_page_revision=revision,
+                source_id=source_id,
+            )
+        )
+        await _index_memory(store, probe)
+        recalled = await store.recall(
+            "pull request 2482", frozenset({SHARED_SUBJECT}), 10, source_reader=reader
+        )
+        async with workspace_tx() as connection:
+            stamps = (
+                await connection.execute(
+                    sa.select(memory_item.c.id, memory_item.c.retired_at).where(
+                        memory_item.c.workspace_id == workspace_id,
+                        memory_item.c.body == KEPT_DUPLICATE,
+                    )
+                )
+            ).all()
+
+    assert landed != retired
+    assert {row.id for row in stamps} == {retired, landed}
+    assert all(row.retired_at is not None for row in stamps)
+    assert recalled == ()
+    assert await _wiki_rows(workspace_id, reader) == []
+
+
+async def test_a_members_own_statement_is_never_born_retired(db: None) -> None:
+    """The pass promises never to take what a member wrote. The page twins it retired fence the next
+    page that derives the body and nothing else: a member restating the same body through
+    `memory_update` lands live, recalled and listed."""
+    workspace_id = await _workspace()
+    source_id = await _seed_wiki_feed(workspace_id)
+    retired = await _seed_wiki_row(
+        workspace_id, source_id, KEPT_DUPLICATE, datetime.now(UTC) - timedelta(hours=1), "event"
+    )
+    await _stamp_retired(retired)
+    reader = await _granted_reader(workspace_id, SHARED_SUBJECT, source_id)
+    probe = vec((14, 1.0))
+    store = _store(workspace_id, probe)
+    with ws(workspace_id):
+        written = await store.commit(
+            MemoryWrite(
+                subject=SHARED_SUBJECT, body=KEPT_DUPLICATE, item_class=FACT, memory_kind="event"
+            )
+        )
+        await _index_memory(store, probe)
+        recalled = await store.recall(
+            "pull request 2482", frozenset({SHARED_SUBJECT}), 10, source_reader=reader
+        )
+        async with workspace_tx() as connection:
+            stamp = (
+                await connection.execute(
+                    sa.select(memory_item.c.retired_at).where(memory_item.c.id == written)
+                )
+            ).scalar_one()
+
+    assert stamp is None
+    assert [item.memory_id for item in recalled] == [written]
+    assert await _wiki_rows(workspace_id, reader) == [(str(written), KEPT_DUPLICATE)]
 
 
 async def test_a_retired_rows_chunks_leave_the_index_on_the_next_job_tick(db: None) -> None:

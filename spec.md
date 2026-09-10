@@ -324,10 +324,10 @@ state commits on the failure path too.
   derives nothing destroys nothing, and no consumer that cannot replace a fact can remove it. A page
   that is gone is the one unconditional retirement: nothing can ever replace what a deleted or
   tombstoned page derived, so what it derived retires outright rather than waiting for a replacement
-  that cannot arrive. The same fact learned from two feeds is one row carrying a link per page it was
-  derived from, so a reader granted any one of those sources reaches it: retiring one page drops only
-  that page's link and re-points the row to a feed that still holds it, and the row is removed, index
-  scope and all, only when its last link is gone. A source-derived candidate is kept only for a
+  that cannot arrive. One fact from one page is one row, keyed by the page and the body's digest,
+  so a page can never retract another page's fact: retiring a page deletes its rows, index scope and
+  all, and every read that serves a member deduplicates identical statements by subject and body,
+  serving the newest. A source-derived candidate is kept only for a
   reader granted one of its sources — filtered by grant over an over-fetched candidate pool rather
   than an index partition, so the grant fence never starves a small recall limit — then rechecked
   against the live page, audience, and grant state before return. The main agent's owner exception
