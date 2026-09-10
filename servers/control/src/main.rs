@@ -2,10 +2,13 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use ufo_control::campaign::Campaigns;
+use ufo_control::campaign_feedback::{self, CampaignFeedback, FeedbackQueue};
+use ufo_control::campaign_send::{self, CampaignSends};
 use ufo_control::db;
 use ufo_control::email::{
-    apex_host, email_sender_from_env, invite_email, public_apex_host_from_env,
-    DEFAULT_PUBLIC_BASE_URL, PUBLIC_BASE_URL_ENV,
+    apex_host, email_sender_from_env, founder_sender_from_env, invite_email,
+    public_apex_host_from_env, DEFAULT_PUBLIC_BASE_URL, PUBLIC_BASE_URL_ENV,
 };
 use ufo_control::gateway::{
     parse_invite_required, router, stamped_script, GatewayState, Onboarding, CLIENT_BIN_DIR_ENV,
@@ -177,14 +180,27 @@ async fn gateway() -> Result<(), String> {
     let store = OnboardStore::new(pool.clone());
     let pool_for_slack = pool.clone();
     let pool_for_invites = pool.clone();
+    let pool_for_campaigns = pool.clone();
+    let pool_for_sends = pool.clone();
+    let pool_for_feedback = pool.clone();
     let apex_for_slack = apex.clone();
     let apex_for_invites = apex.clone();
+    let apex_for_campaigns = apex.clone();
+    let apex_for_sends = apex.clone();
     let core_for_invites = SharedWorkspaces {
         workspace_url: workspace_url.clone(),
         serve_internal_url: serve_internal_url.clone(),
         control_token: control_token.clone(),
     };
+    let core_for_campaigns = core_for_invites.clone();
     let sender = email_sender_from_env().map_err(|error| error.to_string())?;
+    let founder = founder_sender_from_env().map_err(|error| error.to_string())?;
+    let campaigns = founder.as_ref().map(|(sender, _)| Campaigns {
+        pool: pool_for_campaigns,
+        core: core_for_campaigns,
+        sender: sender.clone(),
+        apex_host: apex_for_campaigns,
+    });
     let state = GatewayState {
         onboarding: Onboarding {
             claims: ClaimWorkflow::new(store.clone(), verifier.clone()),
@@ -205,6 +221,7 @@ async fn gateway() -> Result<(), String> {
         client_bin_dir: std::env::var(CLIENT_BIN_DIR_ENV).ok(),
         client_version: std::env::var(CLIENT_VERSION_ENV).unwrap_or_default(),
         console_mode,
+        campaigns,
     };
 
     let worker_id = format!(
@@ -221,6 +238,41 @@ async fn gateway() -> Result<(), String> {
         }
         Ok(None) => tracing::info!(target: "ufo_control::main", "gateway.slack_connect.disabled"),
         Err(error) => return Err(error.to_string()),
+    }
+
+    match founder {
+        Some((sender, queue_url)) => {
+            let queue = FeedbackQueue {
+                url: queue_url,
+                region: sender.region.clone(),
+                role_arn: sender.role_arn.clone(),
+                token_file: sender.token_file.clone(),
+                sts: sender.endpoints.sts.clone(),
+            };
+            tokio::spawn(
+                CampaignSends {
+                    pool: pool_for_sends,
+                    sender,
+                    apex_host: apex_for_sends,
+                    worker_id: worker_id.clone(),
+                    poll_interval: std::time::Duration::from_secs(
+                        campaign_send::POLL_INTERVAL_SECONDS,
+                    ),
+                }
+                .run(),
+            );
+            tokio::spawn(
+                CampaignFeedback {
+                    pool: pool_for_feedback,
+                    queue,
+                    poll_interval: std::time::Duration::from_secs(
+                        campaign_feedback::POLL_INTERVAL_SECONDS,
+                    ),
+                }
+                .run(),
+            );
+        }
+        None => tracing::info!(target: "ufo_control::main", "gateway.founder_email.disabled"),
     }
 
     tokio::spawn(

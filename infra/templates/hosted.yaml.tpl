@@ -112,6 +112,13 @@ spec:
             - {name: UFO_CLIENT_VERSION, value: "${client_version}"}
             - {name: UFO_SES_SENDER, value: "${ses_sender}"}
             - {name: UFO_SES_REGION, value: "${ses_region}"}
+            # Founder campaigns: every From the same identity may send as, with the configuration
+            # set that publishes each delivery event into the queue the gateway drains.
+            - {name: UFO_FOUNDER_SENDERS, value: "${founder_email.senders}"}
+            - {name: UFO_FOUNDER_CONFIGURATION_SET, value: "${founder_email.configuration_set}"}
+            - {name: UFO_FOUNDER_CONTACT_LIST, value: "${founder_email.contact_list}"}
+            - {name: UFO_FOUNDER_TOPIC, value: "${founder_email.topic}"}
+            - {name: UFO_FOUNDER_FEEDBACK_QUEUE_URL, value: "${founder_email.feedback_queue_url}"}
             # The gateway's own role: granted the `ufo_control` schema and no privilege on any
             # table in `public`, so this pod cannot read a tenant's rows even by mistake. The owner
             # DSN reaches the migrate and rls-bootstrap Jobs above, never here.
@@ -886,6 +893,14 @@ spec:
                 name: ufo-gateway
                 port: {name: http}
           - path: /ufo
+            pathType: Prefix
+            backend:
+              service:
+                name: ufo-gateway
+                port: {name: http}
+          # The one `/surface/*` route that is not a product surface: the founder-email HUD reads
+          # the campaign ledger, which lives in the gateway's schema and nowhere core can reach.
+          - path: /surface/email
             pathType: Prefix
             backend:
               service:

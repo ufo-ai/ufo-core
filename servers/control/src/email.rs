@@ -10,6 +10,7 @@ use hmac::{Hmac, Mac};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const DOMAIN_LABEL: &str = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
@@ -676,13 +677,26 @@ const INVITE_HTML: &str = r##"<!doctype html>
 "##;
 
 pub const SES_SERVICE: &str = "ses";
-pub const SES_PATH: &str = "/v2/email/outbound-emails";
-pub const SES_TIMEOUT_SECONDS: u64 = 10;
+pub const SQS_SERVICE: &str = "sqs";
+pub const SES_OUTBOUND_PATH: &str = "/v2/email/outbound-emails";
+pub const JSON_CONTENT_TYPE: &str = "application/json";
+pub const AWS_TIMEOUT_SECONDS: u64 = 10;
 pub const ERROR_BODY_CHARS: usize = 1000;
 pub const MAX_RETRY_AFTER_SECONDS: f64 = 60.0;
+pub const CONTACT_PAGE: u32 = 1000;
+
+const THROTTLED_SES_ERRORS: &[&str] = &["TooManyRequestsException", "ThrottlingException"];
+
+pub const SEND_EMAIL: &str = "SendEmail";
+pub const LIST_CONTACTS: &str = "ListContacts";
 
 pub const SES_SENDER_ENV: &str = "UFO_SES_SENDER";
 pub const SES_REGION_ENV: &str = "UFO_SES_REGION";
+pub const FOUNDER_SENDERS_ENV: &str = "UFO_FOUNDER_SENDERS";
+pub const FOUNDER_CONFIGURATION_SET_ENV: &str = "UFO_FOUNDER_CONFIGURATION_SET";
+pub const FOUNDER_CONTACT_LIST_ENV: &str = "UFO_FOUNDER_CONTACT_LIST";
+pub const FOUNDER_TOPIC_ENV: &str = "UFO_FOUNDER_TOPIC";
+pub const FOUNDER_FEEDBACK_QUEUE_ENV: &str = "UFO_FOUNDER_FEEDBACK_QUEUE_URL";
 pub const AWS_ROLE_ARN_ENV: &str = "AWS_ROLE_ARN";
 pub const AWS_WEB_IDENTITY_TOKEN_FILE_ENV: &str = "AWS_WEB_IDENTITY_TOKEN_FILE";
 pub const DEFAULT_SES_REGION: &str = "us-east-1";
@@ -833,26 +847,36 @@ pub enum EmailConfigError {
          (expected {SES_EMAIL_MODE:?} or {CONSOLE_EMAIL_MODE:?})"
     )]
     UnknownMode(String),
+    #[error("{FOUNDER_SENDERS_ENV} entry {0:?} is not an address or a `Name <address>`")]
+    BadSender(String),
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SendError {
-    #[error("SES SendEmail returned {status}: {body}")]
-    Ses {
+pub enum AwsError {
+    #[error("{service} {operation} returned {status}: {body}")]
+    Api {
+        service: &'static str,
+        operation: &'static str,
         status: u16,
         body: String,
         retry_after: Option<f64>,
     },
     #[error("STS AssumeRoleWithWebIdentity returned {status}: {body}")]
     Sts { status: u16, body: String },
-    /// The credential exchange never completed, so the SES POST was never made — which is what tells a
-    /// caller a resend cannot duplicate anything.
+    /// The credential exchange never completed, so the call it was for was never made — which is what
+    /// tells a caller a repeat cannot duplicate anything.
     #[error("STS AssumeRoleWithWebIdentity could not be reached: {0}")]
     StsUnreachable(String),
     #[error("STS AssumeRoleWithWebIdentity response is missing {0}")]
     MissingCredential(&'static str),
     #[error("STS AssumeRoleWithWebIdentity response is not XML: {0}")]
     MalformedXml(String),
+    #[error("{service} answered with no {field}: {body}")]
+    Unreadable {
+        service: &'static str,
+        field: &'static str,
+        body: String,
+    },
     #[error("the projected web identity token at {path} is unreadable: {source}")]
     TokenFile {
         path: PathBuf,
@@ -860,6 +884,89 @@ pub enum SendError {
     },
     #[error(transparent)]
     Http(#[from] reqwest::Error),
+}
+
+/// What an AWS refusal means for the row that caused it. `Transient` is a certain non-send — the
+/// credential exchange failed, nothing opened, or SES throttled — so repeating it duplicates
+/// nothing. `Unanswered` is a send whose outcome is unknown, which no caller may repeat.
+#[derive(Debug, thiserror::Error)]
+pub enum SendVerdict {
+    #[error("{message}")]
+    Transient {
+        message: String,
+        retry_after: Option<f64>,
+    },
+    #[error("{0}")]
+    Terminal(String),
+    #[error("{0}")]
+    Unanswered(String),
+}
+
+pub fn verdict(error: AwsError) -> SendVerdict {
+    match error {
+        AwsError::Api {
+            status: 429,
+            body,
+            retry_after,
+            ..
+        } => SendVerdict::Transient {
+            message: format!("SES SendEmail returned 429: {body}"),
+            retry_after,
+        },
+        AwsError::Api { status, body, .. } if status >= 500 => SendVerdict::Transient {
+            message: format!("SES SendEmail returned {status}: {body}"),
+            retry_after: None,
+        },
+        AwsError::Api { status, body, .. } => {
+            let message = format!("SES SendEmail returned {status}: {body}");
+            match THROTTLED_SES_ERRORS.iter().any(|name| body.contains(name)) {
+                true => SendVerdict::Transient {
+                    message,
+                    retry_after: None,
+                },
+                false => SendVerdict::Terminal(message),
+            }
+        }
+        AwsError::Sts { status, body } if status == 429 || status >= 500 => {
+            SendVerdict::Transient {
+                message: format!("STS AssumeRoleWithWebIdentity returned {status}: {body}"),
+                retry_after: None,
+            }
+        }
+        AwsError::Sts { status, body } => SendVerdict::Terminal(format!(
+            "STS AssumeRoleWithWebIdentity returned {status}: {body}"
+        )),
+        AwsError::StsUnreachable(message) => SendVerdict::Transient {
+            message: format!("STS AssumeRoleWithWebIdentity: {message}"),
+            retry_after: None,
+        },
+        AwsError::TokenFile { path, source } => SendVerdict::Transient {
+            message: format!(
+                "the projected web identity token at {path:?} is unreadable: {source}"
+            ),
+            retry_after: None,
+        },
+        AwsError::MissingCredential(name) => SendVerdict::Terminal(format!(
+            "STS AssumeRoleWithWebIdentity response is missing {name}"
+        )),
+        AwsError::MalformedXml(message) => SendVerdict::Terminal(format!(
+            "STS AssumeRoleWithWebIdentity response is not XML: {message}"
+        )),
+        AwsError::Unreadable {
+            service,
+            field,
+            body,
+        } => SendVerdict::Terminal(format!("{service} answered with no {field}: {body}")),
+        AwsError::Http(error) if error.is_builder() || error.is_connect() => {
+            SendVerdict::Transient {
+                message: format!("SES SendEmail never opened: {error}"),
+                retry_after: None,
+            }
+        }
+        AwsError::Http(error) => {
+            SendVerdict::Unanswered(format!("SES SendEmail was not answered: {error}"))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -877,8 +984,86 @@ impl AwsEndpoints {
     }
 }
 
-/// The projected token is exchanged for `role_arn` at STS on every send: `AssumeRoleWithWebIdentity`
+/// One signed POST to an AWS JSON API. `target` carries SQS's `x-amz-target`, which SES v2 does not
+/// use; it is signed as well as sent, because a header covered by the signature and then omitted
+/// signs a request AWS refuses.
+#[derive(Debug, Clone)]
+pub struct AwsCall<'a> {
+    pub service: &'static str,
+    pub operation: &'static str,
+    pub url: &'a str,
+    pub content_type: &'a str,
+    pub target: Option<&'a str>,
+    pub timeout_seconds: u64,
+}
+
+/// The projected token is exchanged for `role_arn` at STS on every call: `AssumeRoleWithWebIdentity`
 /// is unsigned, so no bootstrap credential exists.
+pub async fn assume_role(
+    sts: &str,
+    role_arn: &str,
+    token_file: &std::path::Path,
+) -> Result<SesCredentials, AwsError> {
+    let token = tokio::fs::read_to_string(token_file)
+        .await
+        .map_err(|source| AwsError::TokenFile {
+            path: token_file.to_path_buf(),
+            source,
+        })?;
+    let response = client(STS_TIMEOUT_SECONDS)
+        .map_err(|error| AwsError::StsUnreachable(error.to_string()))?
+        .post(sts)
+        .form(&[
+            ("Action", "AssumeRoleWithWebIdentity"),
+            ("Version", STS_VERSION),
+            ("RoleArn", role_arn),
+            ("RoleSessionName", STS_SESSION_NAME),
+            ("WebIdentityToken", token.trim()),
+            ("DurationSeconds", &STS_SESSION_SECONDS.to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|error| AwsError::StsUnreachable(error.to_string()))?;
+    let status = response.status();
+    let payload = response
+        .text()
+        .await
+        .map_err(|error| AwsError::StsUnreachable(error.to_string()))?;
+    if status.is_client_error() || status.is_server_error() {
+        return Err(AwsError::Sts {
+            status: status.as_u16(),
+            body: clipped(&payload),
+        });
+    }
+    parse_assume_role_credentials(&payload)
+}
+
+pub async fn signed_post(
+    call: &AwsCall<'_>,
+    body: Vec<u8>,
+    region: &str,
+    credentials: &SesCredentials,
+) -> Result<String, AwsError> {
+    let headers = sigv4_headers(call, &body, region, credentials, Utc::now());
+    let mut request = client(call.timeout_seconds)?.post(call.url).body(body);
+    for (name, value) in &headers {
+        request = request.header(name, value);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    if status.is_client_error() || status.is_server_error() {
+        let retry_after = retry_after_seconds(response.headers());
+        return Err(AwsError::Api {
+            service: call.service,
+            operation: call.operation,
+            status: status.as_u16(),
+            body: clipped(&response.text().await?),
+            retry_after,
+        });
+    }
+    Ok(response.text().await?)
+}
+
 #[derive(Debug, Clone)]
 pub struct SesEmailSender {
     pub source: String,
@@ -895,8 +1080,9 @@ impl SesEmailSender {
         subject: &str,
         text: &str,
         html: Option<&str>,
-    ) -> Result<(), SendError> {
-        let credentials = self.assume_role().await?;
+    ) -> Result<(), AwsError> {
+        let credentials =
+            assume_role(&self.endpoints.sts, &self.role_arn, &self.token_file).await?;
         let mut content = serde_json::Map::new();
         content.insert("Text".to_string(), serde_json::json!({"Data": text}));
         if let Some(html) = html {
@@ -914,60 +1100,207 @@ impl SesEmailSender {
         })
         .to_string()
         .into_bytes();
-        let url = format!("{}{SES_PATH}", self.endpoints.ses);
-        let host = host_of(&url);
-        let headers = sigv4_headers(&host, &body, &self.region, &credentials, Utc::now());
-        let mut request = client(SES_TIMEOUT_SECONDS)?.post(&url).body(body);
-        for (name, value) in &headers {
-            request = request.header(name, value);
-        }
-        let response = request.send().await?;
-        let status = response.status();
-        if status.is_client_error() || status.is_server_error() {
-            let retry_after = retry_after_seconds(response.headers());
-            return Err(SendError::Ses {
-                status: status.as_u16(),
-                body: clipped(&response.text().await?),
-                retry_after,
-            });
-        }
+        let url = format!("{}{SES_OUTBOUND_PATH}", self.endpoints.ses);
+        signed_post(
+            &ses_call(&url, SEND_EMAIL),
+            body,
+            &self.region,
+            &credentials,
+        )
+        .await?;
         Ok(())
     }
+}
 
-    async fn assume_role(&self) -> Result<SesCredentials, SendError> {
-        let token = tokio::fs::read_to_string(&self.token_file)
-            .await
-            .map_err(|source| SendError::TokenFile {
-                path: self.token_file.clone(),
-                source,
-            })?;
-        let response = client(STS_TIMEOUT_SECONDS)
-            .map_err(|error| SendError::StsUnreachable(error.to_string()))?
-            .post(&self.endpoints.sts)
-            .form(&[
-                ("Action", "AssumeRoleWithWebIdentity"),
-                ("Version", STS_VERSION),
-                ("RoleArn", self.role_arn.as_str()),
-                ("RoleSessionName", STS_SESSION_NAME),
-                ("WebIdentityToken", token.trim()),
-                ("DurationSeconds", &STS_SESSION_SECONDS.to_string()),
-            ])
-            .send()
-            .await
-            .map_err(|error| SendError::StsUnreachable(error.to_string()))?;
-        let status = response.status();
-        let payload = response
-            .text()
-            .await
-            .map_err(|error| SendError::StsUnreachable(error.to_string()))?;
-        if status.is_client_error() || status.is_server_error() {
-            return Err(SendError::Sts {
-                status: status.as_u16(),
-                body: clipped(&payload),
-            });
-        }
-        parse_assume_role_credentials(&payload)
+/// One address a campaign may be sent from. `label` is what SES puts in the From header; `address`
+/// is what the IAM condition and the Reply-To name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Sender {
+    pub label: String,
+    pub address: String,
+}
+
+/// The configured list, in the order an operator sees it. A malformed entry raises rather than
+/// being skipped: a display name carrying a comma would otherwise split into two senders, one of
+/// which SES would refuse.
+pub fn parse_senders(configured: &str) -> Result<Vec<Sender>, EmailConfigError> {
+    let mut senders = Vec::new();
+    for entry in configured
+        .split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        let address = match entry.split_once('<') {
+            Some((_, rest)) => rest.trim_end_matches('>').trim(),
+            None => entry,
+        };
+        let (normalized, _) =
+            normalize_email(address).map_err(|_| EmailConfigError::BadSender(entry.to_string()))?;
+        senders.push(Sender {
+            label: entry.to_string(),
+            address: normalized,
+        });
     }
+    if senders.is_empty() {
+        return Err(EmailConfigError::BadSender(configured.to_string()));
+    }
+    Ok(senders)
+}
+
+/// The founder campaign sender. It differs from the transactional one in everything a bulk message
+/// needs and a transactional one must not have: a reply-to a person reads, the configuration set
+/// that publishes delivery events, and the contact list SES enforces the unsubscribe against.
+#[derive(Debug, Clone)]
+pub struct FounderSender {
+    pub senders: Vec<Sender>,
+    pub configuration_set: String,
+    pub contact_list: String,
+    pub topic: String,
+    pub region: String,
+    pub role_arn: String,
+    pub token_file: PathBuf,
+    pub endpoints: AwsEndpoints,
+}
+
+impl FounderSender {
+    /// The SES message id, which every delivery event this send later produces is keyed by. The
+    /// campaign names the address it froze, and `Reply-To` is that same address: a reply to one
+    /// founder reaches that founder, not a shared alias none of them reads.
+    pub async fn send(
+        &self,
+        from: &Sender,
+        email: &str,
+        subject: &str,
+        text: &str,
+        html: &str,
+    ) -> Result<String, AwsError> {
+        let credentials =
+            assume_role(&self.endpoints.sts, &self.role_arn, &self.token_file).await?;
+        let body = serde_json::json!({
+            "FromEmailAddress": from.label,
+            "ReplyToAddresses": [from.address],
+            "Destination": {"ToAddresses": [email]},
+            "Content": {
+                "Simple": {
+                    "Subject": {"Data": subject},
+                    "Body": {"Text": {"Data": text}, "Html": {"Data": html}},
+                }
+            },
+            "ConfigurationSetName": self.configuration_set,
+            "ListManagementOptions": {
+                "ContactListName": self.contact_list,
+                "TopicName": self.topic,
+            },
+        })
+        .to_string()
+        .into_bytes();
+        let url = format!("{}{SES_OUTBOUND_PATH}", self.endpoints.ses);
+        let answered = signed_post(
+            &ses_call(&url, SEND_EMAIL),
+            body,
+            &self.region,
+            &credentials,
+        )
+        .await?;
+        let sent: SentMessage =
+            serde_json::from_str(&answered).map_err(|_| AwsError::Unreadable {
+                service: SES_SERVICE,
+                field: "MessageId",
+                body: clipped(&answered),
+            })?;
+        Ok(sent.message_id)
+    }
+
+    /// Every address SES holds as opted out of the topic — the gate's own answer, which outranks the
+    /// unsubscribe events this deploy happened to consume. Only an explicit preference counts: the
+    /// topic default is OPT_IN, and a contact who has said nothing has not opted out.
+    pub async fn opted_out(&self) -> Result<HashSet<String>, AwsError> {
+        let credentials =
+            assume_role(&self.endpoints.sts, &self.role_arn, &self.token_file).await?;
+        let url = format!(
+            "{}/v2/email/contact-lists/{}/contacts/list",
+            self.endpoints.ses, self.contact_list
+        );
+        let mut excluded = HashSet::new();
+        let mut next: Option<String> = None;
+        loop {
+            let body = serde_json::json!({
+                "Filter": {
+                    "FilteredStatus": "OPT_OUT",
+                    "TopicFilter": {
+                        "TopicName": self.topic,
+                        "UseDefaultIfPreferenceUnavailable": false,
+                    },
+                },
+                "PageSize": CONTACT_PAGE,
+                "NextToken": next,
+            })
+            .to_string()
+            .into_bytes();
+            let answered = signed_post(
+                &ses_call(&url, LIST_CONTACTS),
+                body,
+                &self.region,
+                &credentials,
+            )
+            .await?;
+            let page: ContactPage =
+                serde_json::from_str(&answered).map_err(|_| AwsError::Unreadable {
+                    service: SES_SERVICE,
+                    field: "Contacts",
+                    body: clipped(&answered),
+                })?;
+            excluded.extend(
+                page.contacts
+                    .into_iter()
+                    .map(|contact| contact.email_address.trim().to_lowercase()),
+            );
+            if page.next_token.is_none() {
+                return Ok(excluded);
+            }
+            // A cursor that repeats would walk forever, and stopping on it would quietly return a
+            // suppression set missing everyone past page one. Neither is safe, so it raises.
+            if page.next_token == next {
+                return Err(AwsError::Unreadable {
+                    service: SES_SERVICE,
+                    field: "NextToken",
+                    body: clipped(&answered),
+                });
+            }
+            next = page.next_token;
+        }
+    }
+}
+
+fn ses_call<'a>(url: &'a str, operation: &'static str) -> AwsCall<'a> {
+    AwsCall {
+        service: SES_SERVICE,
+        operation,
+        url,
+        content_type: JSON_CONTENT_TYPE,
+        target: None,
+        timeout_seconds: AWS_TIMEOUT_SECONDS,
+    }
+}
+
+#[derive(Deserialize)]
+struct SentMessage {
+    #[serde(rename = "MessageId")]
+    message_id: String,
+}
+
+#[derive(Deserialize)]
+struct ContactPage {
+    #[serde(rename = "Contacts", default)]
+    contacts: Vec<Contact>,
+    #[serde(rename = "NextToken")]
+    next_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Contact {
+    #[serde(rename = "EmailAddress")]
+    email_address: String,
 }
 
 fn client(timeout_seconds: u64) -> Result<reqwest::Client, reqwest::Error> {
@@ -997,49 +1330,50 @@ fn host_of(url: &str) -> String {
         .to_string()
 }
 
+fn path_of(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    match after_scheme.find('/') {
+        Some(start) => after_scheme[start..].to_string(),
+        None => "/".to_string(),
+    }
+}
+
 /// Read positionally rather than by XPath: the response carries fields this never needs, and the
-/// element names inside `Credentials` are unambiguous.
-pub fn parse_assume_role_credentials(payload: &str) -> Result<SesCredentials, SendError> {
+/// three it does are the only ones under `Credentials`.
+pub fn parse_assume_role_credentials(payload: &str) -> Result<SesCredentials, AwsError> {
     let mut reader = Reader::from_str(payload);
-    let mut inside_credentials = false;
-    let mut current = String::new();
+    let mut path: Vec<String> = Vec::new();
+    let mut field: Option<String> = None;
     let mut found: BTreeMap<String, String> = BTreeMap::new();
-    let mut buffer = Vec::new();
     loop {
-        match reader.read_event_into(&mut buffer) {
-            Ok(Event::Start(element)) => {
-                let name = local_name(element.name().as_ref());
-                if name == "Credentials" {
-                    inside_credentials = true;
-                } else if inside_credentials {
-                    current = name;
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                let name = local_name(start.name().as_ref());
+                path.push(name.clone());
+                field = (path.len() >= 2 && path[path.len() - 2] == "Credentials").then_some(name);
+            }
+            Ok(Event::Text(text)) => {
+                if let Some(name) = &field {
+                    let value = text
+                        .unescape()
+                        .map_err(|error| AwsError::MalformedXml(error.to_string()))?;
+                    found.insert(name.clone(), value.to_string());
                 }
             }
-            Ok(Event::Text(text)) if inside_credentials && !current.is_empty() => {
-                let value = text
-                    .unescape()
-                    .map_err(|error| SendError::MalformedXml(error.to_string()))?
-                    .to_string();
-                found.entry(current.clone()).or_insert(value);
-            }
-            Ok(Event::End(element)) => {
-                if local_name(element.name().as_ref()) == "Credentials" {
-                    inside_credentials = false;
-                }
-                current.clear();
+            Ok(Event::End(_)) => {
+                path.pop();
+                field = None;
             }
             Ok(Event::Eof) => break,
-            Err(error) => return Err(SendError::MalformedXml(error.to_string())),
+            Err(error) => return Err(AwsError::MalformedXml(error.to_string())),
             _ => {}
         }
-        buffer.clear();
     }
-    let take = |name: &'static str| -> Result<String, SendError> {
+    let mut take = |name: &'static str| {
         found
-            .get(name)
+            .remove(name)
             .filter(|value| !value.is_empty())
-            .cloned()
-            .ok_or(SendError::MissingCredential(name))
+            .ok_or(AwsError::MissingCredential(name))
     };
     Ok(SesCredentials {
         access_key: take("AccessKeyId")?,
@@ -1056,7 +1390,7 @@ fn local_name(qualified: &[u8]) -> String {
 /// Every header the signature covers is also sent, and the session token is among them — an omitted
 /// `x-amz-security-token` signs a request AWS refuses.
 pub fn sigv4_headers(
-    host: &str,
+    call: &AwsCall<'_>,
     body: &[u8],
     region: &str,
     credentials: &SesCredentials,
@@ -1066,8 +1400,8 @@ pub fn sigv4_headers(
     let date_stamp = now.format("%Y%m%d").to_string();
     let payload_hash = format!("{:x}", Sha256::digest(body));
     let mut headers = BTreeMap::from([
-        ("content-type".to_string(), "application/json".to_string()),
-        ("host".to_string(), host.to_string()),
+        ("content-type".to_string(), call.content_type.to_string()),
+        ("host".to_string(), host_of(call.url)),
         ("x-amz-content-sha256".to_string(), payload_hash.clone()),
         ("x-amz-date".to_string(), amz_date.clone()),
         (
@@ -1075,19 +1409,24 @@ pub fn sigv4_headers(
             credentials.session_token.clone(),
         ),
     ]);
+    if let Some(target) = call.target {
+        headers.insert("x-amz-target".to_string(), target.to_string());
+    }
     let signed_headers = headers.keys().cloned().collect::<Vec<_>>().join(";");
     let canonical_headers = headers
         .iter()
         .map(|(key, value)| format!("{key}:{value}\n"))
         .collect::<String>();
-    let canonical_request =
-        format!("POST\n{SES_PATH}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
-    let scope = format!("{date_stamp}/{region}/{SES_SERVICE}/aws4_request");
+    let canonical_request = format!(
+        "POST\n{}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
+        path_of(call.url)
+    );
+    let scope = format!("{date_stamp}/{region}/{}/aws4_request", call.service);
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{:x}",
         Sha256::digest(canonical_request.as_bytes())
     );
-    let signing_key = signing_key(&credentials.secret_key, &date_stamp, region);
+    let signing_key = signing_key(&credentials.secret_key, &date_stamp, region, call.service);
     let mut mac =
         <Hmac<Sha256>>::new_from_slice(&signing_key).expect("hmac-sha256 accepts any key length");
     mac.update(string_to_sign.as_bytes());
@@ -1103,9 +1442,9 @@ pub fn sigv4_headers(
     headers
 }
 
-fn signing_key(secret_key: &str, date_stamp: &str, region: &str) -> Vec<u8> {
+fn signing_key(secret_key: &str, date_stamp: &str, region: &str, service: &str) -> Vec<u8> {
     let mut key = format!("AWS4{secret_key}").into_bytes();
-    for message in [date_stamp, region, SES_SERVICE, "aws4_request"] {
+    for message in [date_stamp, region, service, "aws4_request"] {
         let mut mac =
             <Hmac<Sha256>>::new_from_slice(&key).expect("hmac-sha256 accepts any key length");
         mac.update(message.as_bytes());
@@ -1127,7 +1466,7 @@ impl EmailSender {
         subject: &str,
         text: &str,
         html: Option<&str>,
-    ) -> Result<(), SendError> {
+    ) -> Result<(), AwsError> {
         match self {
             Self::Ses(sender) => sender.send(email, subject, text, html).await,
             Self::Console => {
@@ -1149,7 +1488,7 @@ pub fn email_sender_from_env() -> Result<EmailSender, EmailConfigError> {
     if mode != SES_EMAIL_MODE {
         return Err(EmailConfigError::UnknownMode(mode));
     }
-    let region = std::env::var(SES_REGION_ENV).unwrap_or_else(|_| DEFAULT_SES_REGION.to_string());
+    let region = ses_region();
     Ok(EmailSender::Ses(Box::new(SesEmailSender {
         source: require_env(SES_SENDER_ENV)?,
         endpoints: AwsEndpoints::for_region(&region),
@@ -1157,6 +1496,35 @@ pub fn email_sender_from_env() -> Result<EmailSender, EmailConfigError> {
         role_arn: require_env(AWS_ROLE_ARN_ENV)?,
         token_file: PathBuf::from(require_env(AWS_WEB_IDENTITY_TOKEN_FILE_ENV)?),
     })))
+}
+
+/// The campaign sender, or `None` where this deploy sends no campaigns: a self-hosted install and a
+/// local stack have no SES identity, no configuration set, and no feedback queue.
+pub fn founder_sender_from_env() -> Result<Option<(FounderSender, String)>, EmailConfigError> {
+    let Some(configured) = std::env::var(FOUNDER_SENDERS_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let region = ses_region();
+    Ok(Some((
+        FounderSender {
+            senders: parse_senders(&configured)?,
+            configuration_set: require_env(FOUNDER_CONFIGURATION_SET_ENV)?,
+            contact_list: require_env(FOUNDER_CONTACT_LIST_ENV)?,
+            topic: require_env(FOUNDER_TOPIC_ENV)?,
+            endpoints: AwsEndpoints::for_region(&region),
+            region,
+            role_arn: require_env(AWS_ROLE_ARN_ENV)?,
+            token_file: PathBuf::from(require_env(AWS_WEB_IDENTITY_TOKEN_FILE_ENV)?),
+        },
+        require_env(FOUNDER_FEEDBACK_QUEUE_ENV)?,
+    )))
+}
+
+fn ses_region() -> String {
+    std::env::var(SES_REGION_ENV).unwrap_or_else(|_| DEFAULT_SES_REGION.to_string())
 }
 
 pub fn public_apex_host_from_env() -> Result<String, EmailConfigError> {

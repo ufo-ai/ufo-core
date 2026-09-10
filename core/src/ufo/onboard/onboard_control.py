@@ -8,16 +8,17 @@ of a system prompt. None of it is reimplemented on the edge, so none of it can d
 
 The routes live under `/internal/onboard/`, gated by `Authorization: Bearer <control_token>` — its
 own secret, never the egress control token, so the sign-in gateway's credential reaches nothing
-but these five routes.
+but these six routes.
 
-Three of them are workspace-scoped and run under the normal RLS-scoped role. `choices`, `fleet`,
-and `invitations` are not: listing the workspaces a verified address may enter, counting the
-fleet, and enumerating who was invited across it all have to look outside any one workspace, so
-they run through `owner_tx`, which core already designates as the one cross-tenant path. `choices`
-and `fleet` log a warning per call, because a read that leaves a workspace on behalf of a person
-signing in is one an operator should see rather than infer. `invitations` logs none, under RFC
-0036's rule: its caller is a sweep that repeats forever, and a record per poll would bury the two
-reads worth seeing.
+Two of them are workspace-scoped and run under the normal RLS-scoped role. `choices`, `fleet`,
+`invitations`, and `recipients` are not: listing the workspaces a verified address may enter,
+counting the fleet, enumerating who was invited across it, and naming every member a founder
+campaign could reach all have to look outside any one workspace, so they run through `owner_tx`,
+which core already designates as the one cross-tenant path. `choices`, `fleet`, and `recipients`
+log a warning per call, because a read that leaves a workspace on behalf of a person signing in,
+or to build a mailing list, is one an operator should see rather than infer. `invitations` logs
+none, under RFC 0036's rule: its caller is a sweep that repeats forever, and a record per poll
+would bury the reads worth seeing.
 """
 
 from collections.abc import Sequence
@@ -63,6 +64,7 @@ SIGNUP_RESERVE_MICRO_USD = 2_000_000
 CROSS_WORKSPACE_READ = "onboard.cross_workspace_read"
 
 INVITATION_PAGE = 500
+RECIPIENT_PAGE = 500
 
 CHOICES_SQL = (
     "with first_member as ("
@@ -175,6 +177,21 @@ class Invitations(BaseModel):
     invitations: list[Invitation] = Field(default_factory=list)
 
 
+class Recipient(BaseModel):
+    """One seated member a campaign could reach: the address it would go to, the member row that
+    address belongs to, and the workspace that row sits in. The stamp and the member id are the
+    page cursor."""
+
+    workspace_id: str
+    member_id: str
+    email: str
+    created_at: datetime
+
+
+class Recipients(BaseModel):
+    recipients: list[Recipient] = Field(default_factory=list)
+
+
 def _inert(answer: str) -> str:
     """A form answer with the prompt's own variable syntax in it, defused.
     `render_system_prompt` substitutes against an empty mapping, so a single `{{anything}}` raises
@@ -277,7 +294,7 @@ def _verified_signup(
 
 @dataclass(frozen=True)
 class OnboardControl:
-    """The five routes, and the workflows they run. `control_token` gates every one of them; a
+    """The six routes, and the workflows they run. `control_token` gates every one of them; a
     request without it is refused before any read."""
 
     control_token: str
@@ -289,6 +306,7 @@ class OnboardControl:
         router.add_api_route("/choices", self._choices, methods=["GET"])
         router.add_api_route("/fleet", self._fleet, methods=["GET"])
         router.add_api_route("/invitations", self._invitations, methods=["GET"])
+        router.add_api_route("/recipients", self._recipients, methods=["GET"])
         return router
 
     async def _guard(self, authorization: Annotated[str, Header()] = "") -> None:
@@ -517,6 +535,64 @@ class OnboardControl:
                     invited_by=row.invited_by,
                     workspace_label=workspace_subject(row.first_email, row.workspace_id),
                     invited_at=row.invited_at,
+                )
+                for row in rows
+            ]
+        )
+
+    async def _recipients(
+        self, after_created_at: datetime | None = None, after_member_id: UUID | None = None
+    ) -> Recipients:
+        """One page of every seated member in the fleet, oldest first, strictly after the cursor.
+
+        The cursor is the ordering key itself — the stamp plus the member id, which is unique — so a
+        caller walks one enumeration to its end without a page boundary hiding a row. It orders one
+        walk and is never a mark to resume a later one from, for the reason `invitations` gives.
+
+        Seated only. A revoked seat keeps its member row with `seated_at` cleared, and someone an
+        admin removed from the product is not someone a campaign may mail — so the filter every
+        other fleet-level member read applies is applied here too.
+
+        This is the campaign audience before any exclusion: an address appears once per member row,
+        so the same person seated in two workspaces appears twice and the caller is the one that
+        holds them to one message."""
+        cursor = (after_created_at, after_member_id)
+        if any(part is not None for part in cursor) and not all(
+            part is not None for part in cursor
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="a page cursor is after_created_at and after_member_id",
+            )
+        warn(CROSS_WORKSPACE_READ, route="recipients")
+        page = (
+            sa.select(
+                tables.member.c.workspace_id,
+                tables.member.c.id,
+                tables.member.c.email,
+                tables.member.c.created_at,
+            )
+            .where(tables.member.c.seated_at.is_not(None))
+            .order_by(tables.member.c.created_at, tables.member.c.id)
+            .limit(RECIPIENT_PAGE)
+        )
+        if after_created_at is not None:
+            page = page.where(
+                sa.tuple_(tables.member.c.created_at, tables.member.c.id)
+                > sa.tuple_(
+                    sa.literal(after_created_at, sa.DateTime(timezone=True)),
+                    sa.literal(after_member_id, sa.Uuid),
+                )
+            )
+        async with owner_tx() as connection:
+            rows = (await connection.execute(page)).all()
+        return Recipients(
+            recipients=[
+                Recipient(
+                    workspace_id=str(row.workspace_id),
+                    member_id=str(row.id),
+                    email=row.email,
+                    created_at=row.created_at,
                 )
                 for row in rows
             ]

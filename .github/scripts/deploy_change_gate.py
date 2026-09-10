@@ -35,6 +35,7 @@ BOUNDARY_ERROR = (
 )
 DENY_EFFECT = '"Deny"'
 BLOCK_HEADER = re.compile(r'(resource|data|module)\s+"([^"]+)"(?:\s+"([^"]+)")?')
+STATEMENT_BLOCK = re.compile(r"^\s+statement\s*\{")
 PRINCIPAL_ARGUMENT = re.compile(r"^\s*(?:role|roles|user|users|group|groups)\s*=\s*(.+)$")
 REFERENCE = re.compile(r"\b(?:data\.\w+\.\w+|\w+\.\w+)")
 WHITESPACE_RUN = re.compile(r"\s+")
@@ -88,8 +89,12 @@ def _without_realignments(authorization_diff: str) -> list[str]:
     return kept
 
 
-def _opens_top_level_block(line: str) -> bool:
-    return not line[:1].isspace() and "{" in line
+def _opens_addable_block(line: str) -> bool:
+    """A block the diff may add whole to a parent it did not open. Top level is one: a resource,
+    data source or locals block stands on its own. A policy document's `statement` is the other —
+    the document unions its statements, so one more only ever grants more and cannot reach inside a
+    sibling. Every other nested block narrows the block that holds it."""
+    return "{" in line and (not line[:1].isspace() or bool(STATEMENT_BLOCK.match(line)))
 
 
 def _declared_block(line: str) -> str | None:
@@ -105,14 +110,15 @@ def _declared_block(line: str) -> str | None:
 
 
 def _authorization_contracts(authorization_diff: str) -> bool:
-    """True unless the authorization diff only adds whole new blocks at the top level that stand on
-    their own. A removed content line drops a grant a live consumer may still hold. An added line
-    inside a block that already exists narrows that block's grant just as easily — an
-    "assume_role_condition_test" argument, a "condition" block — so an added line counts only
-    inside a block the diff itself opens and closes. New blocks narrow too when they reach a
-    principal that outlives the diff: a Deny denies whoever holds the policy, and a "role"/"user"/
-    "group" argument naming a principal the diff does not declare rewrites what that live principal
-    may do. Blank and comment lines change no grant."""
+    """True unless the authorization diff only adds blocks that stand on their own — a whole block
+    at the top level, or one more `statement` in a policy document. A removed content line drops a
+    grant a live consumer may still hold. An added line dropped into a block that already exists
+    narrows that block's grant just as easily — an "assume_role_condition_test" argument, a
+    "condition" on a statement that had none — so any other added line counts only inside a block
+    the diff itself opens and closes. New blocks narrow too when they reach a principal that
+    outlives the diff: a Deny denies whoever holds the policy, and a "role"/"user"/"group" argument
+    naming a principal the diff does not declare rewrites what that live principal may do. Blank
+    and comment lines change no grant."""
     open_blocks = 0
     declared: set[str] = set()
     bound: list[frozenset[str]] = []
@@ -124,7 +130,7 @@ def _authorization_contracts(authorization_diff: str) -> bool:
             if not _is_grant_content(body):
                 continue
             if open_blocks == 0:
-                if not _opens_top_level_block(body):
+                if not _opens_addable_block(body):
                     return True
                 identifier = _declared_block(body)
                 if identifier is not None:

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
-use crate::email::{EmailSender, SendError};
+use crate::email::{verdict, EmailSender, SendVerdict};
 use crate::gateway::INVITATION_LOGIN_PATH;
 use crate::shared::{Invitation, SeatError, SharedWorkspaces};
 use crate::web::LOGO_PNG_PATH;
@@ -85,8 +85,6 @@ pub const INVITATION_HTML: &str = r##"<!doctype html>
 const AMBIGUOUS_SEND: &str = "a previous attempt reached SES and no answer was recorded; re-arm \
                               this row only once it is known the message never landed";
 
-const TRANSIENT_SES_ERRORS: &[&str] = &["TooManyRequestsException", "ThrottlingException"];
-
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
     #[error(transparent)]
@@ -127,80 +125,6 @@ pub async fn rearm_failed_delivery(
         )
         .await?;
     Ok(row.map(|row| row.get("updated_at")))
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum SendVerdict {
-    #[error("{message}")]
-    Transient {
-        message: String,
-        retry_after: Option<f64>,
-    },
-    #[error("{0}")]
-    Terminal(String),
-    #[error("{0}")]
-    Unanswered(String),
-}
-
-pub fn verdict(error: SendError) -> SendVerdict {
-    match error {
-        SendError::Ses {
-            status: 429,
-            body,
-            retry_after,
-        } => SendVerdict::Transient {
-            message: format!("SES SendEmail returned 429: {body}"),
-            retry_after,
-        },
-        SendError::Ses { status, body, .. } if status >= 500 => SendVerdict::Transient {
-            message: format!("SES SendEmail returned {status}: {body}"),
-            retry_after: None,
-        },
-        SendError::Ses { status, body, .. } => {
-            let message = format!("SES SendEmail returned {status}: {body}");
-            match TRANSIENT_SES_ERRORS.iter().any(|name| body.contains(name)) {
-                true => SendVerdict::Transient {
-                    message,
-                    retry_after: None,
-                },
-                false => SendVerdict::Terminal(message),
-            }
-        }
-        SendError::Sts { status, body } if status == 429 || status >= 500 => {
-            SendVerdict::Transient {
-                message: format!("STS AssumeRoleWithWebIdentity returned {status}: {body}"),
-                retry_after: None,
-            }
-        }
-        SendError::Sts { status, body } => SendVerdict::Terminal(format!(
-            "STS AssumeRoleWithWebIdentity returned {status}: {body}"
-        )),
-        SendError::StsUnreachable(message) => SendVerdict::Transient {
-            message: format!("STS AssumeRoleWithWebIdentity: {message}"),
-            retry_after: None,
-        },
-        SendError::TokenFile { path, source } => SendVerdict::Transient {
-            message: format!(
-                "the projected web identity token at {path:?} is unreadable: {source}"
-            ),
-            retry_after: None,
-        },
-        SendError::MissingCredential(name) => SendVerdict::Terminal(format!(
-            "STS AssumeRoleWithWebIdentity response is missing {name}"
-        )),
-        SendError::MalformedXml(message) => SendVerdict::Terminal(format!(
-            "STS AssumeRoleWithWebIdentity response is not XML: {message}"
-        )),
-        SendError::Http(error) if error.is_builder() || error.is_connect() => {
-            SendVerdict::Transient {
-                message: format!("SES SendEmail never opened: {error}"),
-                retry_after: None,
-            }
-        }
-        SendError::Http(error) => {
-            SendVerdict::Unanswered(format!("SES SendEmail was not answered: {error}"))
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

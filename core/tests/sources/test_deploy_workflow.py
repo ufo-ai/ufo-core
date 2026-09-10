@@ -617,7 +617,7 @@ def _check_pull_request_plans_active_deployment_inputs() -> None:
     assert environment["DEPLOY_PATHS_PATTERN"] == (
         r"^(\.github/(workflows/deploy(-production)?\.yml|"
         r"scripts/(billing_export_plan_(check\.py|gate\.sh)|deploy_change_gate\.py|"
-        r"terraform_plan_guard\.py|"
+        r"founder_email_prerequisites\.sh|terraform_plan_guard\.py|"
         r"production_prerequisites\.sh))$|"
         r"infra/(production_secrets|testing_secrets)\.py$|"
         r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
@@ -772,6 +772,21 @@ _LIVE_ROLE_ATTACHMENT_AUTH_DIFF = (
     "+  role       = module.irsa_app_s3.iam_role_name\n"
     "+  policy_arn = aws_iam_policy.app_s3_scoped.arn\n+}\n"
 )
+_EXPANSION_STATEMENT_AUTH_DIFF = (
+    "--- a/infra/modules/platform/ses.tf\n+++ b/infra/modules/platform/ses.tf\n"
+    '@@ -80,6 +80,15 @@ data "aws_iam_policy_document" "gateway_ses" {\n'
+    "   }\n"
+    "+\n+  statement {\n"
+    '+    sid       = "ReadTheContactList"\n'
+    '+    actions   = ["ses:ListContacts"]\n'
+    '+    resources = ["${local.ses_arn_prefix}:contact-list/${local.founder_contact_list}"]\n'
+    "+  }\n"
+    "+\n+  statement {\n"
+    '+    sid       = "ConsumeSendFeedback"\n'
+    '+    actions   = ["sqs:ReceiveMessage"]\n'
+    "+    resources = [aws_sqs_queue.founder_feedback.arn]\n"
+    "+  }\n"
+)
 _EXPANSION_BLOCK_GROUP_AUTH_DIFF = (
     "--- a/infra/modules/platform/iam.tf\n+++ b/infra/modules/platform/iam.tf\n"
     '@@ -72,3 +72,24 @@ module "irsa_app_s3" {\n'
@@ -807,6 +822,10 @@ def _check_authorization_expansions_co_deploy_but_contractions_split() -> None:
     gate.validate_deploy_change(
         ("infra/modules/platform/iam.tf", "core/src/ufo/serve.py"),
         _EXPANSION_BLOCK_GROUP_AUTH_DIFF,
+    )
+    gate.validate_deploy_change(
+        ("infra/modules/platform/ses.tf", "servers/control/src/email.rs"),
+        _EXPANSION_STATEMENT_AUTH_DIFF,
     )
     for runtime_path in (
         "infra/envs/testing/ufo.tf",

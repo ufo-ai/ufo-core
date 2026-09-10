@@ -30,7 +30,7 @@ from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.runtime.access.credentials import CredentialStore, member_slot
 from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.balance import read_balance
-from ufo.runtime.seats import create_member, signup_workspace_id
+from ufo.runtime.seats import Seats, create_member, signup_workspace_id
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME
@@ -859,3 +859,76 @@ async def test_the_invitation_page_logs_no_cross_workspace_read_warning(
     assert page.status_code == 200
     assert swept == []
     assert _warned_routes(caplog) == ["fleet", "choices"]
+
+
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
+async def test_recipients_page_every_seat_in_the_fleet_once_per_member_row(
+    onboard_client: AsyncClient, database_url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the recipient read crosses workspaces, which sqlite never serves")
+    for domain in ("acme.com", "globex.com"):
+        workspace_id = signup_workspace_id(domain)
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.insert(tables.workspace).values(
+                        id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                    )
+                )
+                await create_member(connection, workspace_id, f"founder@{domain}", is_admin=True)
+                await create_member(connection, workspace_id, "shared@acme.com")
+    async with onboard_client as client:
+        with caplog.at_level(logging.WARNING, logger="ufo"):
+            whole = (await client.get("/internal/onboard/recipients")).json()["recipients"]
+            after_first = await client.get(
+                "/internal/onboard/recipients",
+                params={
+                    "after_created_at": whole[0]["created_at"],
+                    "after_member_id": whole[0]["member_id"],
+                },
+            )
+            refused = await client.get(
+                "/internal/onboard/recipients", params={"after_member_id": whole[0]["member_id"]}
+            )
+
+    assert sorted(row["email"] for row in whole) == [
+        "founder@acme.com",
+        "founder@globex.com",
+        "shared@acme.com",
+        "shared@acme.com",
+    ], "one row per seat, so the caller is what holds a repeated address to one message"
+    assert len({row["workspace_id"] for row in whole}) == 2
+    assert len(after_first.json()["recipients"]) == len(whole) - 1
+    assert refused.status_code == 422
+    assert _warned_routes(caplog) == ["recipients", "recipients"], (
+        "an operator building a mailing list out of every workspace is a read to record, and a "
+        "refused cursor never reaches one"
+    )
+
+
+@pytest.mark.parametrize("database_url", ["postgres"], indirect=True)
+async def test_recipients_drop_a_member_whose_seat_an_admin_revoked(
+    onboard_client: AsyncClient, database_url: str
+) -> None:
+    """A revoked seat keeps its member row with `seated_at` cleared. Someone an admin removed from
+    the product is not someone a campaign may mail, and the campaign freezes whatever this page
+    answers, so the filter belongs here rather than in the caller."""
+    if not database_url.startswith("postgresql"):
+        pytest.skip("the recipient read crosses workspaces, which sqlite never serves")
+    workspace_id = signup_workspace_id("acme.com")
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.workspace).values(
+                    id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+                )
+            )
+            await create_member(connection, workspace_id, "admin@acme.com", is_admin=True)
+            await create_member(connection, workspace_id, "leaver@acme.com")
+        async with workspace_tx() as connection:
+            await Seats(workspace_id=workspace_id).revoke(connection, "leaver@acme.com")
+    async with onboard_client as client:
+        listed = (await client.get("/internal/onboard/recipients")).json()["recipients"]
+
+    assert [row["email"] for row in listed] == ["admin@acme.com"]

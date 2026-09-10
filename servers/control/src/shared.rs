@@ -56,6 +56,21 @@ struct Invitations {
     invitations: Vec<Invitation>,
 }
 
+/// One seated member a founder campaign could reach. The stamp and the member id are the page
+/// cursor; the address is what the campaign is prepared against.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SeatedMember {
+    pub workspace_id: Uuid,
+    pub member_id: Uuid,
+    pub email: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct SeatedMembers {
+    recipients: Vec<SeatedMember>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct Membership {
     admin: bool,
@@ -140,6 +155,25 @@ impl SharedWorkspaces {
             None => self.get("invitations", &[]).await?,
         };
         Ok(listed.invitations)
+    }
+
+    pub async fn recipients(
+        &self,
+        after: Option<&SeatedMember>,
+    ) -> Result<Vec<SeatedMember>, SeatError> {
+        let listed: SeatedMembers = match after {
+            Some(row) => {
+                let stamp = row.created_at.to_rfc3339();
+                let member = row.member_id.to_string();
+                self.get(
+                    "recipients",
+                    &[("after_created_at", &stamp), ("after_member_id", &member)],
+                )
+                .await?
+            }
+            None => self.get("recipients", &[]).await?,
+        };
+        Ok(listed.recipients)
     }
 
     pub async fn create(

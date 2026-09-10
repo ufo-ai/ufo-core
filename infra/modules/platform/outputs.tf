@@ -64,6 +64,19 @@ output "gateway_ses_role_arn" {
   value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.gateway_ses_role_name}"
 }
 
+output "founder_email" {
+  description = "What the gateway needs to send a founder campaign and read its delivery feedback."
+  value = {
+    # Comma-separated, and the gateway refuses to start on an entry it cannot read as `Name <addr>`,
+    # so a display name carrying a comma fails loud instead of splitting into two senders.
+    senders            = join(",", local.founder_senders)
+    configuration_set  = local.founder_configuration_set
+    contact_list       = local.founder_contact_list
+    topic              = local.founder_topic
+    feedback_queue_url = local.founder_queue_url
+  }
+}
+
 output "serve_dsn" {
   value     = local.serve_dsn
   sensitive = true

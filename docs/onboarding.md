@@ -388,8 +388,9 @@ The whole browser sign-in flow is same-origin on the **app host** (`app.<apex>`)
 authenticated host. The apex 302s both browser doors there (edge worker): `GET /login` and
 `GET /logout`, query and all — an apex door is only a hop to the host that binds the cookie, and the
 ask a link carries is read there. On the app host the ingress routes the front-door prefixes
-(`ufo.serve.RESERVED_HOST_PREFIXES`: `/login`, `/logout`, `/v1/onboard`, `/ufo`) to `ufo-gateway`,
-while `/` and `/surface/*` stay on `ufo-serve` (nginx longest-prefix). Two invariants hold this up
+(`ufo.serve.RESERVED_HOST_PREFIXES`: `/login`, `/logout`, `/v1/onboard`, `/ufo`, and the
+founder-email HUD at `/surface/email`) to `ufo-gateway`, while `/` and every other `/surface/*` stay
+on `ufo-serve` (nginx longest-prefix). Two invariants hold this up
 by construction rather than by convention: the serve fleet **fails its boot** if it mounts any route
 under a reserved prefix (`_assert_no_reserved_routes`), and every session cookie is set through
 `ufo.sdk.http.set_session_cookie`, which takes no `Domain` — so a cookie is always host-only and a

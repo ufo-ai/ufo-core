@@ -14,14 +14,15 @@ date: 2026-09-09
 
 ## Decision
 
-Amazon SES is the hosted email transport. Founder campaigns send from
-`ufo founders <founders@ufo.ai>` and replies go to `founders@ufo.ai`, a Google mailbox both
-founders read.
+Amazon SES is the hosted email transport. A campaign is sent from one of a configured list of
+`@ufo.ai` addresses the operator picks in the HUD, and replies go to that same address — a Google
+mailbox someone reads.
 
 | Fact | Consequence |
 |---|---|
 | SES is the transport | one verified identity, `ufo.ai`, with DKIM and a custom MAIL FROM |
-| `founders@ufo.ai` sends campaigns | replies reach people, not a no-reply void |
+| The From is a per-campaign choice | one identity carries every address; the ledger freezes the one it was approved under |
+| Reply-To is the From | a reply to a person reaches that person, not a shared alias |
 | Transactional stays separate | the invitation keeps `no-reply@ufo.ai`, its own words, and no list management |
 | Control owns campaign execution | `servers/control/`: the ledger, the sender, the feedback consumer, the HUD |
 | SES is the final unsubscribe gate | a send carries `ListManagementOptions`; SES refuses an unsubscribed contact |

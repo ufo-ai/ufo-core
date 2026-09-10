@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Founder Email</title>
+<style>
+:root {
+  --ink: #191A1A; --paper: #FAF9F7; --line: #EBEAE9; --muted: #919090; --bad: #A4342A;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink);
+       font: 14px/1.5 system-ui, sans-serif; }
+header { display: flex; align-items: baseline; gap: 12px; padding: 16px 24px;
+         border-bottom: 1px solid var(--line); }
+header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+header span { color: var(--muted); font-size: 13px; }
+main { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 57px); }
+aside { border-right: 1px solid var(--line); padding: 16px; }
+section { padding: 16px 24px; min-width: 0; }
+button { font: inherit; padding: 6px 12px; border: 1px solid var(--ink); border-radius: 4px;
+         background: var(--ink); color: var(--paper); cursor: pointer; }
+button.plain { background: transparent; color: var(--ink); border-color: var(--line); }
+button[disabled] { opacity: 0.4; cursor: default; }
+ul { list-style: none; margin: 12px 0 0; padding: 0; }
+li { padding: 8px; border: 1px solid var(--line); border-radius: 4px; margin-bottom: 6px;
+     cursor: pointer; background: transparent; }
+li[aria-current="true"] { border-color: var(--ink); }
+li b { display: block; font-weight: 500; }
+li em { font-style: normal; color: var(--muted); font-size: 12px; }
+label { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--muted); }
+input, textarea, select { width: 100%; font: inherit; padding: 6px 8px; border-radius: 4px;
+                          border: 1px solid var(--line); background: #FFF; color: var(--ink); }
+textarea { min-height: 220px; resize: vertical; }
+nav { display: flex; gap: 8px; margin-bottom: 16px; }
+nav button { background: transparent; color: var(--muted); border-color: transparent; padding: 4px 0;
+             margin-right: 12px; border-radius: 0; }
+nav button[aria-current="true"] { color: var(--ink); border-bottom: 2px solid var(--ink); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+            padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--line); }
+.controls input[type="datetime-local"] { width: auto; }
+table { border-collapse: collapse; width: 100%; max-width: 460px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+th { font-weight: 500; color: var(--muted); }
+td { text-align: right; font-variant-numeric: tabular-nums; }
+pre { white-space: pre-wrap; background: #FFF; border: 1px solid var(--line); border-radius: 4px;
+      padding: 12px; overflow-x: auto; }
+iframe { width: 100%; height: 460px; border: 1px solid var(--line); border-radius: 4px;
+         background: #FFF; }
+#alert { color: var(--bad); min-height: 20px; margin-bottom: 12px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 16px; }
+dt { color: var(--muted); }
+dd { margin: 0; }
+@media (max-width: 720px) { main { grid-template-columns: 1fr; }
+                            aside { border-right: 0; border-bottom: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Founder Email</h1>
+  <span id="operator"></span>
+</header>
+<main>
+  <aside>
+    <button id="new" class="plain">New Campaign</button>
+    <ul id="campaigns"></ul>
+  </aside>
+  <section>
+    <div id="alert" role="alert"></div>
+    <nav>
+      <button data-view="compose" aria-current="true">Compose</button>
+      <button data-view="preview">Preview</button>
+      <button data-view="results">Results</button>
+    </nav>
+
+    <div id="compose">
+      <label for="from">From</label>
+      <select id="from"></select>
+      <label for="subject">Subject</label>
+      <input id="subject" placeholder="What changed this month">
+      <label for="body">Body</label>
+      <textarea id="body" placeholder="Plain text. A blank line starts a paragraph."></textarea>
+      <label for="action-label">Action Label</label>
+      <input id="action-label" placeholder="Open the changelog">
+      <label for="action-url">Action URL</label>
+      <input id="action-url" placeholder="https://ufo.ai/changelog">
+      <label for="audience">Audience</label>
+      <select id="audience">
+        <option value="members">Every member</option>
+        <option value="operators">Operators only</option>
+      </select>
+    </div>
+
+    <div id="preview" hidden>
+      <dl>
+        <dt>From</dt><dd id="p-sender"></dd>
+        <dt>Recipients</dt><dd id="p-count"></dd>
+        <dt>Excluded</dt><dd id="p-excluded"></dd>
+        <dt>Sample</dt><dd id="p-sample"></dd>
+      </dl>
+      <iframe id="p-html" sandbox title="Rendered message"></iframe>
+      <pre id="p-text"></pre>
+    </div>
+
+    <div id="results" hidden>
+      <table>
+        <tbody id="r-counts"></tbody>
+      </table>
+    </div>
+
+    <div class="controls">
+      <button id="save">Save</button>
+      <button id="test" class="plain">Send a Test</button>
+      <button id="prepare" class="plain">Prepare the Audience</button>
+      <button id="approve" class="plain">Approve</button>
+      <button id="send" class="plain">Send Now</button>
+      <input id="at" type="datetime-local">
+      <button id="schedule" class="plain">Schedule</button>
+      <button id="cancel" class="plain">Cancel Unsent</button>
+    </div>
+  </section>
+</main>
+<script>
+const ROOT = '/surface/email';
+const el = (id) => document.getElementById(id);
+const state = {
+  csrf: '', senders: [], campaigns: [], selected: null, preview: null, view: 'compose',
+};
+
+function say(message) { el('alert').textContent = message; }
+
+async function call(path, method, body) {
+  const headers = { 'x-ufo-csrf': state.csrf };
+  if (body) headers['content-type'] = 'application/json';
+  const response = await fetch(ROOT + path, {
+    method, headers, credentials: 'same-origin',
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || ('The request failed with ' + response.status));
+  return payload;
+}
+
+function draft() {
+  return {
+    sender: el('from').value,
+    subject: el('subject').value,
+    body: el('body').value,
+    action_label: el('action-label').value || null,
+    action_url: el('action-url').value || null,
+    audience: el('audience').value,
+  };
+}
+
+function fill(campaign) {
+  el('from').value = campaign ? campaign.sender : (state.senders[0] || {}).label || '';
+  el('subject').value = campaign ? campaign.subject : '';
+  el('body').value = campaign ? campaign.body : '';
+  el('action-label').value = campaign && campaign.action_label ? campaign.action_label : '';
+  el('action-url').value = campaign && campaign.action_url ? campaign.action_url : '';
+  el('audience').value = campaign ? campaign.audience : 'members';
+}
+
+function show(view) {
+  state.view = view;
+  for (const name of ['compose', 'preview', 'results']) el(name).hidden = name !== view;
+  for (const tab of document.querySelectorAll('nav button')) {
+    tab.setAttribute('aria-current', String(tab.dataset.view === view));
+  }
+}
+
+function controls() {
+  const held = state.selected;
+  const at = held ? held.state : 'none';
+  const shown = {
+    save: at === 'none' || ['draft', 'prepared', 'approved'].includes(at),
+    test: at !== 'none',
+    prepare: ['draft', 'prepared'].includes(at),
+    approve: at === 'prepared',
+    send: at === 'approved',
+    schedule: at === 'approved',
+    cancel: ['draft', 'prepared', 'approved', 'sending'].includes(at),
+  };
+  for (const [name, on] of Object.entries(shown)) el(name).hidden = !on;
+  el('at').hidden = !shown.schedule;
+  el('save').textContent = at === 'none' ? 'Create' : 'Save Revision';
+}
+
+function listed() {
+  const list = el('campaigns');
+  list.textContent = '';
+  for (const campaign of state.campaigns) {
+    const row = document.createElement('li');
+    row.setAttribute('aria-current', String(state.selected && state.selected.id === campaign.id));
+    const subject = document.createElement('b');
+    subject.textContent = campaign.subject;
+    const line = document.createElement('em');
+    line.textContent = campaign.state + ' · revision ' + campaign.revision;
+    row.append(subject, line);
+    row.onclick = () => select(campaign.id);
+    list.append(row);
+  }
+}
+
+function rendered() {
+  const preview = state.preview;
+  if (!preview) return;
+  el('p-sender').textContent = preview.campaign.sender;
+  el('p-count').textContent = preview.frozen
+    ? preview.counts.audience + ' frozen'
+    : preview.counts.audience + ' frozen, ' + (preview.exclusions.operator
+      + preview.exclusions.suppressed + preview.exclusions.duplicate) + ' would be excluded';
+  el('p-excluded').textContent = preview.frozen
+    ? 'Frozen at prepare time.'
+    : preview.exclusions.operator + ' by audience, ' + preview.exclusions.suppressed
+      + ' unsubscribed or bounced, ' + preview.exclusions.duplicate + ' duplicate.';
+  el('p-sample').textContent = preview.sample.length ? preview.sample.join(', ') : 'None yet.';
+  el('p-html').srcdoc = preview.message.html;
+  el('p-text').textContent = preview.message.text;
+  const counts = el('r-counts');
+  counts.textContent = '';
+  const rows = [
+    ['Submitted', preview.counts.submitted], ['Delivered', preview.counts.delivered],
+    ['Delayed', preview.counts.delayed], ['Bounced', preview.counts.bounced],
+    ['Complained', preview.counts.complained], ['Unsubscribed', preview.counts.unsubscribed],
+    ['Failed', preview.counts.failed], ['Cancelled', preview.counts.cancelled],
+    ['Tests', preview.counts.tests],
+  ];
+  for (const [name, value] of rows) {
+    const row = document.createElement('tr');
+    const head = document.createElement('th');
+    head.textContent = name;
+    const cell = document.createElement('td');
+    cell.textContent = value;
+    row.append(head, cell);
+    counts.append(row);
+  }
+}
+
+async function refresh() {
+  const payload = await call('/campaigns', 'GET');
+  state.csrf = payload.csrf;
+  state.senders = payload.senders;
+  state.campaigns = payload.campaigns;
+  const from = el('from');
+  from.textContent = '';
+  for (const sender of state.senders) {
+    const choice = document.createElement('option');
+    choice.value = sender.label;
+    choice.textContent = sender.label;
+    from.append(choice);
+  }
+  el('operator').textContent = payload.operator;
+  const held = state.selected;
+  state.selected = held ? state.campaigns.find((one) => one.id === held.id) || null : null;
+  listed();
+  controls();
+}
+
+async function select(id) {
+  state.preview = await guarded(() => call('/campaigns/' + id, 'GET'));
+  if (!state.preview) return;
+  state.selected = state.preview.campaign;
+  fill(state.selected);
+  listed();
+  controls();
+  rendered();
+}
+
+async function guarded(work) {
+  say('');
+  try {
+    return await work();
+  } catch (error) {
+    say(error.message);
+    return null;
+  }
+}
+
+async function act(path, body) {
+  const done = await guarded(() => call(path, 'POST', body));
+  if (!done) return;
+  await refresh();
+  await select(state.selected ? state.selected.id : done.id || done.campaign.id);
+}
+
+el('new').onclick = () => {
+  state.selected = null;
+  state.preview = null;
+  fill(null);
+  listed();
+  controls();
+  show('compose');
+};
+
+el('save').onclick = async () => {
+  if (!state.selected) {
+    const created = await guarded(() => call('/campaigns', 'POST', draft()));
+    if (!created) return;
+    await refresh();
+    await select(created.id);
+    return;
+  }
+  const held = state.selected;
+  await act('/campaigns/' + held.id + '/content',
+            Object.assign({ revision: held.revision }, draft()));
+};
+
+for (const [name, path] of [['test', 'test'], ['prepare', 'prepare'], ['cancel', 'cancel']]) {
+  el(name).onclick = () => act('/campaigns/' + state.selected.id + '/' + path,
+                               { revision: state.selected.revision });
+}
+
+el('approve').onclick = () => act('/campaigns/' + state.selected.id + '/approve',
+                                  { revision: state.selected.revision,
+                                    count: state.preview.counts.audience });
+
+el('send').onclick = () => act('/campaigns/' + state.selected.id + '/send',
+                               { revision: state.selected.revision, at: null });
+
+el('schedule').onclick = () => {
+  const at = el('at').value;
+  if (!at) return say('Pick a time to schedule the send.');
+  act('/campaigns/' + state.selected.id + '/send',
+      { revision: state.selected.revision, at: new Date(at).toISOString() });
+};
+
+for (const tab of document.querySelectorAll('nav button')) {
+  tab.onclick = () => show(tab.dataset.view);
+}
+
+guarded(refresh).then(controls);
+</script>
+</body>
+</html>

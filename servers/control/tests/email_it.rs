@@ -6,10 +6,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use ufo_control::email::{
     apex_host, email_sender_from_env, invite_email, normalize_email, parse_assume_role_credentials,
-    sigv4_headers, AwsEndpoints, EmailError, EmailSender, SesCredentials, SesEmailSender,
-    SignupEmailPolicy, AWS_ROLE_ARN_ENV, AWS_WEB_IDENTITY_TOKEN_FILE_ENV, CONSOLE_EMAIL_MODE,
-    DEFAULT_SES_REGION, DISPOSABLE_EMAIL_DOMAINS, EMAIL_MODE_ENV, FREE_EMAIL_DOMAINS,
-    SES_REGION_ENV, SES_SENDER_ENV,
+    sigv4_headers, AwsCall, AwsEndpoints, EmailError, EmailSender, SesCredentials, SesEmailSender,
+    SignupEmailPolicy, AWS_ROLE_ARN_ENV, AWS_TIMEOUT_SECONDS, AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
+    CONSOLE_EMAIL_MODE, DEFAULT_SES_REGION, DISPOSABLE_EMAIL_DOMAINS, EMAIL_MODE_ENV,
+    FREE_EMAIL_DOMAINS, JSON_CONTENT_TYPE, SEND_EMAIL, SES_REGION_ENV, SES_SENDER_ENV, SES_SERVICE,
 };
 
 const STS_RESPONSE: &str = r#"<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -124,8 +124,15 @@ fn sigv4_headers_sign_the_session_token() {
         session_token: "token".to_string(),
     };
     let headers = sigv4_headers(
-        "email.us-east-1.amazonaws.com",
-        br#"{"FromEmailAddress": "no-reply@flyingobject.ai"}"#,
+        &AwsCall {
+            service: SES_SERVICE,
+            operation: SEND_EMAIL,
+            url: "https://email.us-east-1.amazonaws.com/v2/email/outbound-emails",
+            content_type: JSON_CONTENT_TYPE,
+            target: None,
+            timeout_seconds: AWS_TIMEOUT_SECONDS,
+        },
+        br#"{"FromEmailAddress": "no-reply@ufo.ai"}"#,
         "us-east-1",
         &credentials,
         Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap(),
@@ -393,7 +400,7 @@ async fn send_surfaces_the_ses_denial_body() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(refused.contains("SES SendEmail returned 400"), "{refused}");
+    assert!(refused.contains("SendEmail returned 400"), "{refused}");
     assert!(refused.contains("not verified"), "{refused}");
 }
 

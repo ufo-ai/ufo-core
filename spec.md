@@ -763,6 +763,7 @@ surface never reads the existing secrets.
 | iMessage | `extensions/imessage` | durable (provider stream + writeback; Spectrum adapter) | phone → member, fleet-wide (half-hour per-claim `UFO <code>` requested in signed-in chat and completed by one direct provider message) | provider conversation id; DM = member, group = room |
 | Debug | `extensions/debugger` | live (hub tail) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
 | Memory explorer | `extensions/memory` | live (page + JSON read) | gateway bearer whose email domain is `OPERATOR_EMAIL_DOMAIN`; `?ws=` re-scopes to any workspace | — (read-only; admits nothing) |
+| Founder email | `servers/control` | live (page + JSON) | the same operator session cookie, read by the gateway rather than by core | — (a campaign ledger in `ufo_control`, addressed by no workspace and no conversation) |
 
 The web surface is the member portal and its own audience authority: every member reaches every
 agent whose `visibility` is `workspace` — an agent-kind spec field, `private` by default; main is

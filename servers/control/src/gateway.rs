@@ -8,8 +8,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 
+use crate::campaign::Campaigns;
 use crate::claim::ClaimWorkflow;
 use crate::directives::{client_install, directive, render, PROMPT};
+use crate::hud;
 use crate::invite::{InviteCodes, InviteError, Redemption, SignupProfile};
 use crate::shared::{EnsuredWorkspace, SeatError, SharedWorkspaces, WorkspaceChoice};
 use crate::store::{OnboardClaim, OnboardStore};
@@ -451,6 +453,9 @@ pub struct GatewayState {
     pub client_bin_dir: Option<String>,
     pub client_version: String,
     pub console_mode: bool,
+    /// Absent where this deploy sends no campaigns, which is what keeps the operator surface off a
+    /// self-hosted install rather than serving a page every act of which would fail.
+    pub campaigns: Option<Campaigns>,
 }
 
 pub fn router(state: GatewayState) -> Router {
@@ -474,6 +479,9 @@ pub fn router(state: GatewayState) -> Router {
         .route("/v1/onboard/{channel}", post(onboard));
     if state.console_mode {
         router = router.route(AUTH_CONSOLE_PATH, get(auth_console));
+    }
+    if state.campaigns.is_some() {
+        router = router.merge(hud::routes());
     }
     router.with_state(state)
 }

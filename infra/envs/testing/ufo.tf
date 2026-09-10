@@ -248,6 +248,7 @@ data "kubectl_file_documents" "hosted" {
     ses_sender           = var.ses_sender
     ses_region           = var.region
     gateway_ses_role_arn = module.platform.gateway_ses_role_arn
+    founder_email        = module.platform.founder_email
 
     slack_connect_enabled = var.slack_connect_enabled ? "true" : "false"
     slack_connect_team_id = var.slack_connect_team_id

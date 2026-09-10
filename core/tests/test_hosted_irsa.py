@@ -135,11 +135,11 @@ def _check_ingress_reads_the_blob_bucket_under_a_read_only_role() -> None:
     assert "ufo-serve" not in INGRESS_DEPLOYMENT.split("containers:", maxsplit=1)[0]
 
 
-def _check_cache_outputs_are_plan_known() -> None:
-    """The cache bucket name and role ARN render into the hosted manifest, whose keys feed a
-    for_each that must be known at plan time. So the outputs are built from plan-known inputs, never
-    from an apply-time attribute like `aws_s3_bucket.cache.id` that would break the plan on a fresh
-    bucket."""
+def _check_manifest_outputs_are_plan_known() -> None:
+    """Every output that renders into the hosted manifest feeds a for_each whose keys must be known
+    at plan time. So each is built from plan-known inputs, never from an apply-time attribute — an
+    `aws_s3_bucket.cache.id` or an `aws_sqs_queue.founder_feedback.url` breaks the whole plan the
+    first time its resource does not exist yet."""
     outputs = (
         Path(__file__).resolve().parents[2] / "infra/modules/platform/outputs.tf"
     ).read_text()
@@ -152,6 +152,11 @@ def _check_cache_outputs_are_plan_known() -> None:
     assert "aws_s3_bucket.cache.id" not in bucket
     assert "${local.name}-ufo-cache-${data.aws_caller_identity.current.account_id}" in bucket
     assert "role/${local.cache_s3_role_name}" in value_line("cache_s3_role_arn")
+
+    founder = outputs.split('output "founder_email"', maxsplit=1)[1].split("\noutput ", 1)[0]
+    assert not re.search(r"\baws_(sqs_queue|sesv2_\w+)\.", founder), founder
+    assert "local.founder_queue_url" in founder
+    assert "local.founder_configuration_set" in founder
 
 
 def _check_platform_grants_the_proxy_only_cache_scoped_s3() -> None:

@@ -137,6 +137,9 @@ jobs:
       - name: Check production prerequisites
         run: bash .github/scripts/production_prerequisites.sh
 
+      - name: Check founder email prerequisites
+        run: bash .github/scripts/founder_email_prerequisites.sh
+
       - name: Reject an unsplit authorization change
         env:
           GH_TOKEN: ${{ github.token }}

@@ -223,7 +223,17 @@ from ufo.schema.records import (
 )
 from ufo.sdk.http import same_origin_handshake
 
-RESERVED_HOST_PREFIXES = (LOGIN_PATH, LOGOUT_PATH, JOIN_PATH, "/v1/onboard", "/ufo")
+# The one `/surface/*` prefix the gateway answers: the founder-email HUD reads a ledger in the
+# gateway's own schema, which no core surface can reach.
+FOUNDER_EMAIL_PATH = "/surface/email"
+RESERVED_HOST_PREFIXES = (
+    LOGIN_PATH,
+    LOGOUT_PATH,
+    JOIN_PATH,
+    "/v1/onboard",
+    "/ufo",
+    FOUNDER_EMAIL_PATH,
+)
 FOREIGN_HANDSHAKE = "This connection did not come from the page it addresses."
 RUNTIME_REVISION_ENV = "UFO_RUNTIME_REVISION"
 RUNTIME_IMAGE_ENV = "UFO_RUNTIME_IMAGE"
