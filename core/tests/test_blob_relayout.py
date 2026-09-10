@@ -27,8 +27,9 @@ def _relayout_module():
 
 
 async def _seed_rows(artifact_key: str, body_ref: str):
+    source_uid = uuid7()
     workspace_id, agent_id = uuid4(), uuid4()
-    conversation_id, turn_id, source_id, page_id = uuid4(), uuid4(), uuid4(), uuid4()
+    conversation_id, turn_id = uuid4(), uuid4()
     connection_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -102,8 +103,7 @@ async def _seed_rows(artifact_key: str, body_ref: str):
         )
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_uid,
                 workspace_id=workspace_id,
                 backend=FOLDER_BACKEND,
                 config={"root": "/seed"},
@@ -120,12 +120,8 @@ async def _seed_rows(artifact_key: str, body_ref: str):
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=uuid7(),
-                id=page_id,
                 workspace_id=workspace_id,
-                source_id=source_id,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_id)
-                .scalar_subquery(),
+                source_uid=source_uid,
                 digest="sha256:seed",
                 body_ref=body_ref,
                 stream="files",

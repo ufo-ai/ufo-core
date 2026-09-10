@@ -462,8 +462,8 @@ async def _seed_page(
     body_ref = f"pages/{page_id}"
     await blob.put(body_ref, body)
     async with workspace_tx() as connection:
-        await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_id))
-        await connection.execute(sa.delete(tables.source).where(tables.source.c.id == source_id))
+        await connection.execute(sa.delete(tables.page).where(tables.page.c.uid == page_id))
+        await connection.execute(sa.delete(tables.source).where(tables.source.c.uid == source_id))
         held = (
             await connection.execute(
                 sa.select(tables.connection.c.id).where(
@@ -504,7 +504,6 @@ async def _seed_page(
         )
         await connection.execute(
             sa.insert(tables.source).values(
-                id=source_id,
                 workspace_id=workspace_id,
                 backend=FIXTURE_PROVIDER,
                 config={},
@@ -516,12 +515,8 @@ async def _seed_page(
         )
         await connection.execute(
             sa.insert(tables.page).values(
-                id=page_id,
                 workspace_id=workspace_id,
-                source_id=source_id,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_id)
-                .scalar_subquery(),
+                source_uid=source_id,
                 digest=f"sha256:{hashlib.sha256(body).hexdigest()}",
                 body_ref=body_ref,
                 stream="pull_requests",

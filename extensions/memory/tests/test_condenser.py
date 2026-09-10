@@ -284,9 +284,6 @@ class CountingIndex:
     async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
         return await self.backend.restamp(scope, subject, keep)
 
-    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
-        await self.backend.reattribute(scope, owner_id)
-
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
@@ -426,13 +423,12 @@ async def _seed_page(
     title: str = "",
     stream: str = "",
 ) -> tuple[UUID, UUID]:
-    source_id, page_id, source_key, page_key = uuid7(), uuid7(), uuid4(), uuid4()
+    source_id, page_id = uuid7(), uuid7()
     await blob.put(f"pages/{page_id}", body.encode())
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
                 uid=source_id,
-                id=source_key,
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
@@ -447,12 +443,8 @@ async def _seed_page(
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=page_id,
-                id=page_key,
                 workspace_id=workspace_id,
-                source_id=source_key,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_key)
-                .scalar_subquery(),
+                source_uid=source_id,
                 digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
                 body_ref=f"pages/{page_id}",
                 subject=SHARED_SUBJECT,
@@ -469,12 +461,10 @@ async def _seed_page(
 async def _seed_page_authority(
     workspace_id: UUID, page_id: UUID, source_id: UUID, subject: str
 ) -> None:
-    source_key, page_key = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
                 uid=source_id,
-                id=source_key,
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
@@ -488,12 +478,8 @@ async def _seed_page_authority(
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=page_id,
-                id=page_key,
                 workspace_id=workspace_id,
-                source_id=source_key,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_key)
-                .scalar_subquery(),
+                source_uid=source_id,
                 digest="sha256:page",
                 body_ref=f"pages/{page_id}",
                 stream="notes",
@@ -529,9 +515,9 @@ async def _seed_aged_fact(
                 memory_kind=KIND_FACT,
                 confidence=confidence,
                 source_ref=None,
-                created_from_page_id=created_from_page_id,
+                created_from_page_uid=created_from_page_id,
                 created_from_page_revision=(1 if created_from_page_id is not None else None),
-                source_id=source_id,
+                source_uid=source_id,
                 embedding_digest="sha256:seeded",
                 superseded_by=None,
                 created_at=created,
@@ -1381,34 +1367,6 @@ async def _insert_fact(
                 updated_at=created_at,
             )
         )
-
-
-async def test_adopt_candidates_name_only_workspaces_still_chunked_by_content_id(db: None) -> None:
-    """The per-minute adopt JobSpec binds a workspace only while one of its mirror rows still
-    carries the content id the index filed that page's chunks under; a workspace whose mirrors are
-    all keyed by page id runs no tick."""
-    pending, settled = await _workspace(), await _workspace()
-    for workspace_id, keyed_by_content_id in ((pending, True), (settled, False)):
-        page_id, source_id = uuid7(), uuid7()
-        await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
-        async with workspace_tx() as connection:
-            content_id = await connection.scalar(
-                sa.select(tables.page.c.id).where(tables.page.c.uid == page_id)
-            )
-            await connection.execute(
-                sa.insert(mem_page).values(
-                    page_uid=page_id,
-                    page_id=content_id if keyed_by_content_id else None,
-                    workspace_id=workspace_id,
-                    subject=SHARED_SUBJECT,
-                    revision=1,
-                    created_at=WHEN,
-                )
-            )
-    adopt = next(
-        job for job in memory_manifest.manifest().jobs if job.name == memory_manifest.ADOPT_JOB
-    )
-    assert await adopt.candidates() == (pending,)
 
 
 async def test_consolidate_candidates_name_only_workspaces_with_a_clusterable_backlog(
@@ -2610,7 +2568,6 @@ async def _seed_wiki_feed(workspace_id: UUID) -> UUID:
         await connection.execute(
             sa.insert(tables.source).values(
                 uid=source_id,
-                id=uuid4(),
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
@@ -2640,17 +2597,13 @@ async def _seed_wiki_source_page(
     page_id = uuid7()
     async with workspace_tx() as connection:
         source_key = await connection.scalar(
-            sa.select(tables.source.c.id).where(tables.source.c.uid == source_id)
+            sa.select(tables.source.c.uid).where(tables.source.c.uid == source_id)
         )
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=page_id,
-                id=uuid4(),
                 workspace_id=workspace_id,
-                source_id=source_key,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_key)
-                .scalar_subquery(),
+                source_uid=source_key,
                 digest="sha256:page",
                 body_ref=f"pages/{page_id}",
                 subject=subject,

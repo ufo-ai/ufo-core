@@ -3654,7 +3654,7 @@ class SurfaceContext:
             )
             sources = await connection.scalar(
                 sa.select(
-                    sa.select(tables.source.c.id)
+                    sa.select(tables.source.c.uid)
                     .select_from(
                         tables.source.join(
                             tables.connection,
@@ -4104,7 +4104,7 @@ class SurfaceContext:
         a stream discloses nothing its account does not."""
         query = (
             sa.select(
-                tables.source.c.id,
+                tables.source.c.uid,
                 tables.source.c.connection_id,
                 tables.source.c.backend,
                 tables.source.c.consecutive_errors,
@@ -4136,7 +4136,7 @@ class SurfaceContext:
             rows = (await connection.execute(query)).all()
         return tuple(
             SourceView(
-                id=row.id,
+                id=row.uid,
                 connection_id=row.connection_id,
                 backend=row.backend,
                 stream=_stream_name(row.config),

@@ -265,7 +265,7 @@ async def _rows(state: _Workspace) -> list[sa.RowMapping]:
                             tables.source.c.workspace_id == state.workspace_id,
                             tables.source.c.backend.in_(GBRAIN_BACKENDS),
                         )
-                        .order_by(tables.source.c.id)
+                        .order_by(tables.source.c.uid)
                     )
                 )
                 .mappings()
@@ -293,18 +293,14 @@ async def _connections(state: _Workspace) -> list[sa.RowMapping]:
 
 
 async def _seed_page(state: _Workspace, source_id: UUID, subject: str) -> UUID:
-    page_id = uuid4()
+    page_id = uuid7()
     with ws(state.workspace_id), agent(state.agent_id):
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.insert(tables.page).values(
-                    uid=uuid7(),
-                    id=page_id,
+                    uid=page_id,
                     workspace_id=state.workspace_id,
-                    source_id=source_id,
-                    source_uid=sa.select(tables.source.c.uid)
-                    .where(tables.source.c.id == source_id)
-                    .scalar_subquery(),
+                    source_uid=source_id,
                     digest="sha256:x",
                     body_ref=f"pages/{page_id}",
                     subject=subject,
@@ -317,7 +313,7 @@ async def _seed_page(state: _Workspace, source_id: UUID, subject: str) -> UUID:
 
 
 async def _page_ids(state: _Workspace) -> list[UUID]:
-    return [row["id"] for row in await _pages(state)]
+    return [row["uid"] for row in await _pages(state)]
 
 
 async def _page_subjects(state: _Workspace) -> list[str]:
@@ -332,7 +328,7 @@ async def _pages(state: _Workspace) -> list[sa.RowMapping]:
                     await connection.execute(
                         sa.select(tables.page)
                         .where(tables.page.c.workspace_id == state.workspace_id)
-                        .order_by(tables.page.c.id)
+                        .order_by(tables.page.c.uid)
                     )
                 )
                 .mappings()
@@ -500,7 +496,7 @@ async def test_sharing_a_private_source_restamps_its_pages(db: None) -> None:
     with ws(state.workspace_id), agent(state.agent_id):
         await _apply(ctx, _manifest_text(name, repo=REPO))
         [row] = await _rows(state)
-        await _seed_page(state, row["id"], member_subject(state.member_id))
+        await _seed_page(state, row["uid"], member_subject(state.member_id))
         flipped = await _apply(ctx, _manifest_text(name, repo=REPO, shared=True))
         fetched = await _get(ctx, name)
     assert flipped == {"kind": GBRAIN_KIND, "name": name, "result": "updated"}
@@ -552,8 +548,8 @@ async def test_delete_disconnects_one_origin_and_leaves_its_neighbour(db: None) 
         await _apply(ctx, _manifest_text(other, repo=OTHER_REPO))
         [row] = [source for source in await _rows(state) if source["config"]["repo"] == REPO]
         [kept] = [source for source in await _rows(state) if source["config"]["repo"] == OTHER_REPO]
-        page_id = await _seed_page(state, row["id"], member_subject(state.member_id))
-        kept_page = await _seed_page(state, kept["id"], member_subject(state.member_id))
+        page_id = await _seed_page(state, row["uid"], member_subject(state.member_id))
+        kept_page = await _seed_page(state, kept["uid"], member_subject(state.member_id))
         deleted = json.loads(
             (
                 await delete_tool.handler(

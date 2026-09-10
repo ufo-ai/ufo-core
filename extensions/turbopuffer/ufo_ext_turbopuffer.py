@@ -222,27 +222,6 @@ class TurbopufferIndex:
             response.raise_for_status()
         return True
 
-    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
-        """Turbopuffer patches at most 50,000 rows per `patch_by_filter` and refuses a wider match
-        outright unless told to take part of it; a page of 50,586 chunks was seen on 2026-09-09.
-        Each pass re-patches what the last left, and the filter matches nothing once every chunk
-        carries the new owner."""
-        headers = await self._auth()
-        body = {
-            "patch_by_filter": {
-                "filters": scope_filters(scope, None),
-                "patch": {"owner_id": owner_id},
-            },
-            "patch_by_filter_allow_partial": True,
-        }
-        while True:
-            response = await self._api().post(self._path(), json=body, headers=headers)
-            if response.status_code == httpx.codes.NOT_FOUND:
-                return
-            response.raise_for_status()
-            if response.json()["rows_affected"] == 0:
-                return
-
     async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
         headers = await self._auth()
         chunks = await self._scope_chunks(scope, headers)

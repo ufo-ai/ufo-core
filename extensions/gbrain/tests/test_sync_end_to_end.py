@@ -31,7 +31,6 @@ from ufo.runtime.sources.sync import (
     SOURCE_SYNC_JOB,
     CorePageFeed,
     SyncDriver,
-    page_id_for,
     register_sources,
 )
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
@@ -98,8 +97,9 @@ async def _pages() -> list[sa.RowMapping]:
             (
                 await connection.execute(
                     sa.select(
-                        tables.page.c.id,
-                        tables.page.c.source_id,
+                        tables.page.c.uid,
+                        tables.page.c.source_uid,
+                        tables.page.c.source_identity,
                         tables.page.c.title,
                         tables.page.c.digest,
                         tables.page.c.body_ref,
@@ -147,11 +147,7 @@ async def test_folder_markdown_lands_and_searches(
 
     rows = await _pages()
     assert [row["title"] for row in rows] == ["Bob Smith", "Team Handbook"]
-    source_id = rows[0]["source_id"]
-    assert [row["id"] for row in rows] == [
-        page_id_for(source_id, "notes/bob.md"),
-        page_id_for(source_id, "README.md"),
-    ]
+    assert [row["source_identity"] for row in rows] == ["notes/bob.md", "README.md"]
     assert all(row["subject"] == SHARED_SUBJECT and not row["tombstone"] for row in rows)
     bob_body = await blob.get(rows[0]["body_ref"])
     assert bob_body.decode().startswith("Bob works at Acme")
@@ -210,10 +206,9 @@ async def test_folder_file_removal_tombstones(db: None, database_url: str, tmp_p
     await _sync(driver)
 
     rows = await _pages()
-    source_id = rows[0]["source_id"]
-    tombstoned = {row["id"]: bool(row["tombstone"]) for row in rows}
-    assert tombstoned[page_id_for(source_id, "README.md")] is True
-    assert tombstoned[page_id_for(source_id, "notes/bob.md")] is False
+    tombstoned = {row["source_identity"]: bool(row["tombstone"]) for row in rows}
+    assert tombstoned["README.md"] is True
+    assert tombstoned["notes/bob.md"] is False
 
 
 def _repo_tarball() -> bytes:
@@ -272,7 +267,7 @@ async def test_git_repo_syncs_then_idles_on_304(
 
     rows = await _pages()
     assert [row["title"] for row in rows] == ["Bob Smith"]
-    assert rows[0]["id"] == page_id_for(rows[0]["source_id"], "wiki/bob.md")
+    assert rows[0]["source_identity"] == "wiki/bob.md"
     async with workspace_tx() as connection:
         cursor = (await connection.execute(sa.select(tables.source.c.cursor))).scalar_one()
     assert TARBALL_SHA in cursor

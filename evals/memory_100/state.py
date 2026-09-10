@@ -15,9 +15,7 @@ from ufo.db import workspace_tx
 from ufo.runtime.indexing import OWNER_KIND_MEMORY_ITEM, OWNER_KIND_PAGE, TextChunker
 from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
-    page_id_for,
     source_body_ref_matches,
-    source_row_id,
 )
 from ufo.schema import tables
 
@@ -87,13 +85,7 @@ class CorpusAttestor:
         page_rows, memory_rows, mirror_rows, chunk_rows, source_row, cursors = await self._rows()
         if source_row is None:
             raise RuntimeError("memory_100 folder source is missing")
-        expected_source_id = source_row_id(
-            self.workspace_id,
-            FOLDER_BACKEND,
-            {"root": str(self.pages_root)},
-            connection_id=source_row.connection_id,
-        )
-        if self.source_id != expected_source_id:
+        if source_row.uid != self.source_id:
             raise RuntimeError("memory_100 folder source id is not canonical")
         if (
             source_row.workspace_id != self.workspace_id
@@ -110,19 +102,19 @@ class CorpusAttestor:
             )
             for binding in self.audiences
         }
-        page_by_id = self._page_by_id()
+        page_by_identity = self._page_by_identity()
         expected_pages = {
-            page_id: (page, subjects[page.audience]) for page_id, page in page_by_id.items()
+            identity: (page, subjects[page.audience]) for identity, page in page_by_identity.items()
         }
-        actual_pages = {row.id: row for row in page_rows}
+        actual_pages = {row.source_identity: row for row in page_rows}
         if set(actual_pages) != set(expected_pages):
             raise RuntimeError("memory_100 page rows do not match the snapshot")
-        for page_id, (page, subject) in expected_pages.items():
-            row = actual_pages[page_id]
+        for identity, (page, subject) in expected_pages.items():
+            row = actual_pages[identity]
             if (
                 row.workspace_id != self.workspace_id
-                or row.source_id != self.source_id
-                or not source_body_ref_matches(row.body_ref, self.source_id, page_id, page.digest)
+                or row.source_uid != self.source_id
+                or not source_body_ref_matches(row.body_ref, self.source_id, row.uid, page.digest)
                 or row.digest != page.digest
                 or row.subject != subject
                 or row.tombstone
@@ -222,9 +214,9 @@ class CorpusAttestor:
                 (
                     *(
                         EvidenceOwner(
-                            source_ref=page_by_id[row.id].source_ref,
+                            source_ref=page_by_identity[row.source_identity].source_ref,
                             owner_kind="page",
-                            owner_id=row.id,
+                            owner_id=row.uid,
                             subject=row.subject,
                         )
                         for row in page_rows
@@ -305,7 +297,7 @@ class CorpusAttestor:
             )
             source_row = (
                 await connection.execute(
-                    sa.select(tables.source).where(tables.source.c.id == self.source_id)
+                    sa.select(tables.source).where(tables.source.c.uid == self.source_id)
                 )
             ).one_or_none()
             cursor_rows = (
@@ -334,7 +326,7 @@ class CorpusAttestor:
     def _expected_chunks(
         self, page_rows: list[sa.Row], memory_rows: list[sa.Row]
     ) -> tuple[_ExpectedChunk, ...]:
-        page_by_id = self._page_by_id()
+        page_by_identity = self._page_by_identity()
         memory_by_ref = {memory.source_ref: memory for memory in self.snapshot.memories}
         chunks: list[_ExpectedChunk] = []
         chunker = TextChunker()
@@ -347,12 +339,12 @@ class CorpusAttestor:
                     chunk.ordinal,
                     chunk.chunk_digest,
                     chunk.text,
-                    page_by_id[row.id].source_ref,
+                    page_by_identity[row.source_identity].source_ref,
                 )
                 for chunk in chunker.chunk(
-                    page_by_id[row.id].body,
+                    page_by_identity[row.source_identity].body,
                     OWNER_KIND_PAGE,
-                    str(row.id),
+                    str(row.uid),
                     row.subject,
                 )
             )
@@ -383,7 +375,7 @@ class CorpusAttestor:
         chunks: tuple[_ExpectedChunk, ...],
         indexed_chunks: tuple[_IndexedChunk, ...],
     ) -> str:
-        page_by_id = self._page_by_id()
+        page_by_identity = self._page_by_identity()
         memory_by_ref = {memory.source_ref: memory for memory in self.snapshot.memories}
         embedding_by_chunk = {
             chunk.chunk_digest: chunk.embedding_digest for chunk in indexed_chunks
@@ -391,9 +383,9 @@ class CorpusAttestor:
         records: list[tuple[str, ...]] = [
             (
                 "page",
-                page_by_id[row.id].source_ref,
+                page_by_identity[row.source_identity].source_ref,
                 row.subject,
-                page_by_id[row.id].digest,
+                page_by_identity[row.source_identity].digest,
             )
             for row in page_rows
         ]
@@ -424,5 +416,5 @@ class CorpusAttestor:
         payload = json.dumps(sorted(records), separators=(",", ":")).encode()
         return "sha256:" + hashlib.sha256(payload).hexdigest()
 
-    def _page_by_id(self) -> dict[UUID, SnapshotPage]:
-        return {page_id_for(self.source_id, page.source_ref): page for page in self.snapshot.pages}
+    def _page_by_identity(self) -> dict[str, SnapshotPage]:
+        return {page.source_ref: page for page in self.snapshot.pages}

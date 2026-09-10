@@ -20,7 +20,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import (
-    ADOPT_CONCURRENCY,
     FACT,
     RECALL_COSINE_FLOOR,
     RECALL_ITEM_MAX_CHARS,
@@ -53,7 +52,6 @@ from ufo.runtime.sources.sync import PageChange, feed_handle_for
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.ids import uuid7
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -151,9 +149,6 @@ class RebindingIndex:
     async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
         return await self.backend.restamp(scope, subject, keep)
 
-    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
-        await self.backend.reattribute(scope, owner_id)
-
     async def lexical(
         self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
     ) -> tuple[Hit, ...]:
@@ -182,7 +177,7 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
     `source_id` are the rows' ids as the SDK names them; the content-addressed keys are minted here
     and never handed back, so a lookup by the wrong one finds nothing."""
     now = datetime(2025, 1, 1, tzinfo=UTC)
-    connection_id, source_key, page_key = uuid4(), uuid4(), uuid4()
+    connection_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.connection).values(
@@ -200,7 +195,6 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
         await connection.execute(
             sa.insert(tables.source).values(
                 uid=source_id,
-                id=source_key,
                 workspace_id=workspace_id,
                 backend="test",
                 config={},
@@ -214,12 +208,8 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=page_id,
-                id=page_key,
                 workspace_id=workspace_id,
-                source_id=source_key,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_key)
-                .scalar_subquery(),
+                source_uid=source_id,
                 digest=PAGE_DIGEST,
                 body_ref=f"pages/{page_id}",
                 stream="notes",
@@ -324,7 +314,7 @@ async def _seed_item(
                     sa.select(tables.page.c.revision, tables.source.c.uid)
                     .select_from(
                         tables.page.join(
-                            tables.source, tables.page.c.source_id == tables.source.c.id
+                            tables.source, tables.page.c.source_uid == tables.source.c.uid
                         )
                     )
                     .where(tables.page.c.uid == created_from_page_id)
@@ -429,56 +419,6 @@ async def test_commit_persists_item_and_derives_no_chunk(db: None) -> None:
     assert row.item_class == FACT
     assert row.embedding_digest is None
     assert chunks == 0
-
-
-async def test_a_page_derived_row_is_no_members_row_to_the_release_being_replaced(
-    db: None,
-) -> None:
-    """The release being replaced fences every recall on the content-id columns and reads a null
-    `source_id` there as a row a member wrote, which would serve one connection's facts to an agent
-    holding no grant on that connection. Every column it fences on therefore carries the page's and
-    the source's id: no source id it can read matches one, so its fence withholds the row. A row a
-    member wrote still reads as a member's, since it names no page and no source at all."""
-    workspace_id = await _workspace()
-    page_id, source_id = uuid7(), uuid7()
-    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    store = _store(StubEmbed(vec((0, 1.0))), workspace_id)
-    derived = await store.commit(
-        MemoryWrite(
-            subject=SHARED_SUBJECT,
-            body="the launch date is June 12",
-            created_from_page_id=page_id,
-            created_from_page_revision=PAGE_REVISION,
-            source_id=source_id,
-        )
-    )
-    written = await store.commit(
-        MemoryWrite(subject=SHARED_SUBJECT, body="the member asked for a weekly digest")
-    )
-    keys = sa.select(
-        memory_source.c.source_id,
-        memory_source.c.page_id,
-        memory_source.c.source_uid,
-        memory_source.c.page_uid,
-    )
-    async with workspace_tx() as connection:
-        grantable = sa.select(tables.source.c.id)
-        readable = frozenset((await connection.execute(grantable)).scalars().all())
-        bound = sa.select(memory_item.c.id, memory_item.c.source_id)
-        bindings = dict((await connection.execute(bound)).all())
-        links = (await connection.execute(keys)).all()
-        fence = sa.or_(
-            memory_item.c.source_id.is_(None),
-            sa.exists().where(
-                memory_source.c.memory_item_id == memory_item.c.id,
-                memory_source.c.source_id.in_(readable),
-            ),
-        )
-        replaced = sa.select(memory_item.c.id).where(fence)
-        served = set((await connection.execute(replaced)).scalars().all())
-    assert bindings == {derived: source_id, written: None}
-    assert links == [(source_id, page_id, source_id, page_id)]
-    assert served == {written}
 
 
 async def test_recommitting_a_fact_updates_in_place_not_duplicated(db: None) -> None:
@@ -608,9 +548,7 @@ async def test_deleting_one_source_keeps_a_fact_its_other_source_still_provides(
             await connection.execute(
                 sa.select(
                     memory_item.c.id,
-                    memory_item.c.created_from_page_id,
                     memory_item.c.created_from_page_uid,
-                    memory_item.c.source_id,
                     memory_item.c.source_uid,
                     memory_item.c.embedding_digest,
                 )
@@ -623,7 +561,7 @@ async def test_deleting_one_source_keeps_a_fact_its_other_source_still_provides(
         ).all()
     assert row.created_from_page_uid == page_a
     assert row.source_uid == source_a
-    assert (row.created_from_page_id, row.source_id) == (page_a, source_a)
+    assert (row.created_from_page_uid, row.source_uid) == (page_a, source_a)
     assert row.embedding_digest is None
     assert set(links) == {(source_a, page_a)}
 
@@ -656,11 +594,7 @@ async def test_two_pages_of_one_source_each_keep_the_fact_they_share(db: None) -
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=page_2,
-                id=uuid4(),
                 workspace_id=workspace_id,
-                source_id=sa.select(tables.source.c.id)
-                .where(tables.source.c.uid == source_id)
-                .scalar_subquery(),
                 source_uid=source_id,
                 digest=PAGE_DIGEST,
                 body_ref=f"pages/{page_2}",
@@ -1074,7 +1008,7 @@ async def test_connector_grants_filter_before_recall_ranking(db: None) -> None:
             await connection.execute(
                 sa.select(tables.source.c.uid)
                 .select_from(
-                    tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
+                    tables.page.join(tables.source, tables.page.c.source_uid == tables.source.c.uid)
                 )
                 .where(tables.page.c.uid == granted_page)
             )
@@ -1902,260 +1836,6 @@ async def test_recommitting_an_unchanged_body_at_the_same_binding_never_re_embed
     assert first is not None
     assert second == (first, PAGE_REVISION)
     assert embed.calls == after_first
-
-
-async def test_a_page_indexed_under_its_content_id_is_found_then_adopted(db: None) -> None:
-    """The release being replaced filed a page's chunks under the page's content id and left that
-    id on the mirror row. Search still resolves such a hit through the mirror, so nothing goes dark
-    while the corpus moves; indexing the page again re-keys its chunks and clears the marker, after
-    which the hit resolves through the page's id alone. A page this pass never touches keeps its
-    chunks under the content id and keeps its marker, which is what the release being replaced
-    reads a page hit back by."""
-    workspace_id = await _workspace()
-    ext = context_for("memory", frozenset())
-    page_id, source_id = uuid7(), uuid7()
-    probe = vec((7, 1.0))
-    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
-    async with workspace_tx() as connection:
-        content_id = await connection.scalar(
-            sa.select(tables.page.c.id).where(tables.page.c.uid == page_id)
-        )
-    with ws(workspace_id):
-        await DefaultIndex(transaction=workspace_tx).upsert(
-            (Chunk("p-old", OWNER_KIND_PAGE, str(content_id), SHARED_SUBJECT, 0, "runway", probe),)
-        )
-    async with workspace_tx() as connection:
-        revision = (
-            await connection.execute(
-                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
-            )
-        ).scalar_one()
-        await connection.execute(
-            sa.insert(mem_page).values(
-                page_uid=page_id,
-                page_id=content_id,
-                workspace_id=workspace_id,
-                subject=SHARED_SUBJECT,
-                revision=revision,
-                created_at=sa.func.now(),
-            )
-        )
-    store = _store(StubEmbed(probe), workspace_id)
-    indexer = PageIndexer(
-        index=store.index,
-        embed=store.embed,
-        transaction=workspace_tx,
-        chunker=TextChunker(),
-        workspace_id=workspace_id,
-        page_states=ext.page_states,
-    )
-    untouched, untouched_source = uuid7(), uuid7()
-    await _seed_page(workspace_id, untouched, untouched_source, SHARED_SUBJECT)
-    async with workspace_tx() as connection:
-        kept_id, kept_revision = (
-            await connection.execute(
-                sa.select(tables.page.c.id, tables.page.c.revision).where(
-                    tables.page.c.uid == untouched
-                )
-            )
-        ).one()
-        await connection.execute(
-            sa.insert(mem_page).values(
-                page_uid=untouched,
-                page_id=kept_id,
-                workspace_id=workspace_id,
-                subject=SHARED_SUBJECT,
-                revision=kept_revision,
-                created_at=sa.func.now(),
-            )
-        )
-    chunk = Chunk("p-kept", OWNER_KIND_PAGE, str(kept_id), SHARED_SUBJECT, 0, "runway", probe)
-    with ws(workspace_id):
-        await DefaultIndex(transaction=workspace_tx).upsert((chunk,))
-    subjects = frozenset({SHARED_SUBJECT})
-    change = PageChange(
-        page_id=page_id,
-        source_id=source_id,
-        subject=SHARED_SUBJECT,
-        stream="notes",
-        title="Page",
-        body="the runway is eighteen months",
-        digest=PAGE_DIGEST,
-        revision=revision,
-        tombstone=False,
-        created_at=datetime(2025, 1, 1, tzinfo=UTC),
-        as_of=datetime(2025, 1, 1, tzinfo=UTC),
-        changed_at=datetime(2025, 1, 1, tzinfo=UTC),
-    )
-    with ws(workspace_id):
-        before = await store.search_sources("runway", subjects, 5, source_reader=_reader(subjects))
-        await indexer.apply((change,))
-        after = await store.search_sources("runway", subjects, 5, source_reader=_reader(subjects))
-        moved = await store.index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(page_id)))
-        left = await store.index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(content_id)))
-        kept = await store.index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(kept_id)))
-    async with workspace_tx() as connection:
-        mirrors = sa.select(mem_page.c.page_uid, mem_page.c.page_id)
-        markers = dict((await connection.execute(mirrors)).all())
-    assert {match.page_id for match in before} == {page_id, untouched}
-    assert {match.page_id for match in after} == {page_id, untouched}
-    assert (moved, left, kept) == (True, False, True)
-    assert markers == {page_id: None, untouched: kept_id}
-
-
-@dataclass
-class ObservedIndex:
-    backend: DefaultIndex
-    before_reattribute: Callable[[IndexScope], Awaitable[None]]
-
-    async def upsert(self, chunks: tuple[Chunk, ...]) -> None:
-        await self.backend.upsert(chunks)
-
-    async def delete(self, scope: IndexScope) -> None:
-        await self.backend.delete(scope)
-
-    async def prune(self, scope: IndexScope, keep: frozenset[str]) -> None:
-        await self.backend.prune(scope, keep)
-
-    async def has_chunks(self, scope: IndexScope) -> bool:
-        return await self.backend.has_chunks(scope)
-
-    async def restamp(self, scope: IndexScope, subject: str, keep: frozenset[str]) -> bool:
-        return await self.backend.restamp(scope, subject, keep)
-
-    async def reattribute(self, scope: IndexScope, owner_id: str) -> None:
-        await self.before_reattribute(scope)
-        await self.backend.reattribute(scope, owner_id)
-
-    async def lexical(
-        self, query: str, subjects: frozenset[str], owner_kind: str, limit: int
-    ) -> tuple[Hit, ...]:
-        return await self.backend.lexical(query, subjects, owner_kind, limit)
-
-    async def vector(
-        self, embedding: tuple[float, ...], subjects: frozenset[str], owner_kind: str, limit: int
-    ) -> tuple[Hit, ...]:
-        return await self.backend.vector(embedding, subjects, owner_kind, limit)
-
-
-async def _mark_pages(workspace_id: UUID, count: int) -> dict[UUID, UUID]:
-    """`count` pages each chunked under its content id and mirrored with the marker set, as the
-    release before uid keys left them; returns page uid to content id."""
-    marked: dict[UUID, UUID] = {}
-    for _ in range(count):
-        page_id, source_id = uuid7(), uuid7()
-        await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
-        async with workspace_tx() as connection:
-            content_id, revision = (
-                await connection.execute(
-                    sa.select(tables.page.c.id, tables.page.c.revision).where(
-                        tables.page.c.uid == page_id
-                    )
-                )
-            ).one()
-            await connection.execute(
-                sa.insert(mem_page).values(
-                    page_uid=page_id,
-                    page_id=content_id,
-                    workspace_id=workspace_id,
-                    subject=SHARED_SUBJECT,
-                    revision=revision,
-                    created_at=sa.func.now(),
-                )
-            )
-        chunk = Chunk(
-            f"p-{content_id}",
-            OWNER_KIND_PAGE,
-            str(content_id),
-            SHARED_SUBJECT,
-            0,
-            "runway",
-            vec((7, 1.0)),
-        )
-        with ws(workspace_id):
-            await DefaultIndex(transaction=workspace_tx).upsert((chunk,))
-        marked[page_id] = content_id
-    return marked
-
-
-def _indexer(workspace_id: UUID, index: ObservedIndex) -> PageIndexer:
-    return PageIndexer(
-        index=index,
-        embed=StubEmbed(vec((7, 1.0))),
-        transaction=workspace_tx,
-        chunker=TextChunker(),
-        workspace_id=workspace_id,
-        page_states=context_for("memory", frozenset()).page_states,
-    )
-
-
-async def _chunk_keys(
-    index: ObservedIndex, marked: dict[UUID, UUID]
-) -> dict[UUID, tuple[bool, bool]]:
-    return {
-        page_id: (
-            await index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(page_id))),
-            await index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(content_id))),
-        )
-        for page_id, content_id in marked.items()
-    }
-
-
-async def test_a_drain_pass_moves_its_pages_concurrently_and_no_more_than_the_bound(
-    db: None,
-) -> None:
-    """A pass moves ADOPT_CONCURRENCY pages at once and no more. The index here releases a move only
-    once that many are in flight together, so a pass moving one page at a time would never clear a
-    marker; the batch holds one page over the bound, and that page waits for a slot."""
-    workspace_id = await _workspace()
-    marked = await _mark_pages(workspace_id, ADOPT_CONCURRENCY + 1)
-    in_flight = 0
-    peak = 0
-    bound_reached = asyncio.Event()
-
-    async def hold_until_bound(scope: IndexScope) -> None:
-        nonlocal in_flight, peak
-        in_flight += 1
-        peak = max(peak, in_flight)
-        if in_flight == ADOPT_CONCURRENCY:
-            bound_reached.set()
-        await asyncio.wait_for(bound_reached.wait(), timeout=1)
-        in_flight -= 1
-
-    index = ObservedIndex(DefaultIndex(transaction=workspace_tx), hold_until_bound)
-    with ws(workspace_id):
-        moved = await _indexer(workspace_id, index).adopt_chunks(len(marked))
-        keys = await _chunk_keys(index, marked)
-    async with workspace_tx() as connection:
-        mirrors = sa.select(mem_page.c.page_uid, mem_page.c.page_id)
-        markers = dict((await connection.execute(mirrors)).all())
-    assert (moved, peak) == (ADOPT_CONCURRENCY + 1, ADOPT_CONCURRENCY)
-    assert markers == dict.fromkeys(marked)
-    assert keys == dict.fromkeys(marked, (True, False))
-
-
-async def test_a_page_whose_move_fails_keeps_its_marker_while_its_batch_drains(db: None) -> None:
-    """The index refuses to move the first page of the batch. The pass still moves every other page
-    and clears their markers, then raises so the tick fails; the refused page keeps its marker and
-    its chunks under its content id, which is what the next pass finds."""
-    workspace_id = await _workspace()
-    marked = await _mark_pages(workspace_id, 3)
-    refused = min(marked)
-
-    async def refuse_first(scope: IndexScope) -> None:
-        if scope.owner_id == str(marked[refused]):
-            raise RuntimeError("index unavailable")
-
-    index = ObservedIndex(DefaultIndex(transaction=workspace_tx), refuse_first)
-    with ws(workspace_id):
-        with pytest.raises(RuntimeError, match="index unavailable"):
-            await _indexer(workspace_id, index).adopt_chunks(len(marked))
-        keys = await _chunk_keys(index, marked)
-    async with workspace_tx() as connection:
-        mirrors = sa.select(mem_page.c.page_uid, mem_page.c.page_id)
-        markers = dict((await connection.execute(mirrors)).all())
-    assert markers == dict.fromkeys(marked) | {refused: marked[refused]}
-    assert keys == dict.fromkeys(marked, (True, False)) | {refused: (False, True)}
 
 
 async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: None) -> None:

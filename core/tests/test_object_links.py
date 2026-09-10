@@ -187,11 +187,11 @@ async def _conversation(
 
 async def _seed_source(
     workspace_id: UUID, owner_member_id: UUID, account: str = "acct-one"
-) -> tuple[UUID, UUID]:
+) -> UUID:
     """One shared Asana connection a member owns, carrying one stream. The owner is what makes the
     `connection` object readable: an ownerless connection is the workspace's own and only an admin
     may open it, so a walk naming no member would stop at the link rather than follow it."""
-    source_id, source_uid, connection_id = uuid4(), uuid7(), uuid4()
+    source_uid, connection_id = uuid7(), uuid4()
     when = datetime(2026, 7, 9, tzinfo=UTC)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -210,7 +210,6 @@ async def _seed_source(
         await connection.execute(
             sa.insert(tables.source).values(
                 uid=source_uid,
-                id=source_id,
                 workspace_id=workspace_id,
                 backend="asana",
                 config={"stream": "issues"},
@@ -231,7 +230,7 @@ async def _seed_source(
                 updated_at=sa.func.now(),
             )
         )
-    return source_id, source_uid
+    return source_uid
 
 
 async def _seed_page(
@@ -244,12 +243,8 @@ async def _seed_page(
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=page_uid,
-                id=page_id,
                 workspace_id=workspace_id,
-                source_id=source_id,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_id)
-                .scalar_subquery(),
+                source_uid=source_id,
                 digest="sha256:abc",
                 body_ref=body_ref,
                 stream="issues",
@@ -332,8 +327,8 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
     tools = _verbs()
     with ws(workspace_id):
         owner_id = await _member(workspace_id)
-        source_id, source_uid = await _seed_source(workspace_id, owner_id)
-        page_id = await _seed_page(workspace_id, source_id, blob)
+        source_uid = await _seed_source(workspace_id, owner_id)
+        page_id = await _seed_page(workspace_id, source_uid, blob)
 
         memory_ext = context_for(
             "memory", frozenset(), index=DefaultIndex(transaction=workspace_tx), embed=_StubEmbed()
@@ -631,8 +626,10 @@ async def test_links_stay_visibility_congruent_and_hidden_targets_fail_closed(
     with ws(workspace_id):
         member_id = await _member(workspace_id)
         other_id = await _member(workspace_id)
-        source_id, source_uid = await _seed_source(workspace_id, member_id)
-        page_id = await _seed_page(workspace_id, source_id, blob, subject=member_subject(member_id))
+        source_uid = await _seed_source(workspace_id, member_id)
+        page_id = await _seed_page(
+            workspace_id, source_uid, blob, subject=member_subject(member_id)
+        )
 
         memory_ext = context_for("memory", frozenset())
         item_id = uuid4()

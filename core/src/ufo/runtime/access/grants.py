@@ -764,8 +764,8 @@ class GrantStore:
             .values(subject=subject, updated_at=now)
             .where(
                 tables.page.c.workspace_id == self.workspace_id,
-                tables.page.c.source_id.in_(
-                    sa.select(tables.source.c.id).where(
+                tables.page.c.source_uid.in_(
+                    sa.select(tables.source.c.uid).where(
                         tables.source.c.workspace_id == self.workspace_id,
                         tables.source.c.connection_id == connection_id,
                     )

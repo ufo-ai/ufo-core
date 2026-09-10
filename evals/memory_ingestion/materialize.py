@@ -48,10 +48,8 @@ from ufo.runtime.sources.sync import (
     FolderSource,
     SyncDriver,
     feed_handle,
-    page_id_for,
     register_sources,
     source_body_ref_matches,
-    source_row_id,
 )
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
@@ -164,12 +162,9 @@ def _derived_corpus_digest(
 
 
 def _derived_corpus(
-    snapshot: IngestionSnapshot, source_id: UUID, page_rows: list[sa.Row], memory_rows: list[sa.Row]
+    snapshot: IngestionSnapshot, page_rows: list[sa.Row], memory_rows: list[sa.Row]
 ) -> DerivedCorpus:
-    source_refs = {
-        page_id_for(source_id, page.source_ref): page.source_ref for page in snapshot.pages
-    }
-    ref_by_uid = {row.uid: source_refs[row.id] for row in page_rows}
+    ref_by_uid = {row.uid: row.source_identity for row in page_rows}
     facts = tuple(
         sorted(
             (
@@ -202,14 +197,8 @@ class IngestionAttestor:
         page_rows, memory_rows, chunk_rows, source_row, cursors = await self._rows()
         if source_row is None:
             raise RuntimeError("memory_ingestion folder source is missing")
-        expected_source_id = source_row_id(
-            self.workspace_id,
-            FOLDER_BACKEND,
-            {"root": str(self.pages_root)},
-            connection_id=source_row.connection_id,
-        )
-        if self.source_id != expected_source_id:
-            raise RuntimeError("memory_ingestion folder source id is not canonical")
+        if source_row.uid != self.source_id:
+            raise RuntimeError("memory_ingestion folder source is not the registered row")
         if (
             source_row.workspace_id != self.workspace_id
             or source_row.backend != FOLDER_BACKEND
@@ -218,18 +207,16 @@ class IngestionAttestor:
             or source_row.consecutive_errors != 0
         ):
             raise RuntimeError("memory_ingestion folder source is not settled")
-        expected_pages = {
-            page_id_for(self.source_id, page.source_ref): page for page in self.snapshot.pages
-        }
-        actual_pages = {row.id: row for row in page_rows}
+        expected_pages = {page.source_ref: page for page in self.snapshot.pages}
+        actual_pages = {row.source_identity: row for row in page_rows}
         if set(actual_pages) != set(expected_pages):
             raise RuntimeError("memory_ingestion page rows do not match the snapshot")
-        for page_id, page in expected_pages.items():
-            row = actual_pages[page_id]
+        for identity, page in expected_pages.items():
+            row = actual_pages[identity]
             if (
                 row.workspace_id != self.workspace_id
-                or row.source_id != self.source_id
-                or not source_body_ref_matches(row.body_ref, self.source_id, page_id, page.digest)
+                or row.source_uid != self.source_id
+                or not source_body_ref_matches(row.body_ref, self.source_id, row.uid, page.digest)
                 or row.digest != page.digest
                 or row.subject != "shared"
                 or row.tombstone
@@ -238,14 +225,14 @@ class IngestionAttestor:
             body = await self.blob.get(row.body_ref)
             if body.decode() != page.body:
                 raise RuntimeError(f"memory_ingestion page {page.source_ref!r} body differs")
-        page_by_id = {page_id: expected_pages[page_id] for page_id in expected_pages}
-        page_id_by_uid = {row.uid: row.id for row in page_rows}
+        page_by_uid = {row.uid: expected_pages[row.source_identity] for row in page_rows}
+        revision_by_uid = {row.uid: row.revision for row in page_rows}
         memory_by_page: dict[UUID, list[sa.Row]] = {}
         for row in memory_rows:
-            derived_from = page_id_by_uid.get(row.created_from_page_uid)
+            derived_from = row.created_from_page_uid
             if (
-                derived_from not in expected_pages
-                or row.created_from_page_revision != actual_pages[derived_from].revision
+                derived_from not in page_by_uid
+                or row.created_from_page_revision != revision_by_uid[derived_from]
                 or row.source_uid != source_row.uid
                 or row.subject != "shared"
                 or row.item_class != "fact"
@@ -263,9 +250,9 @@ class IngestionAttestor:
                     sorted(
                         (
                             row.id
-                            for page_id, page in page_by_id.items()
+                            for page_uid, page in page_by_uid.items()
                             if page.evidence_ref == source_ref
-                            for row in memory_by_page.get(page_id, [])
+                            for row in memory_by_page.get(page_uid, [])
                         ),
                         key=str,
                     )
@@ -287,7 +274,7 @@ class IngestionAttestor:
         }
         if cursors != expected_cursors:
             raise RuntimeError("memory_ingestion page consumers are not settled")
-        corpus = _derived_corpus(self.snapshot, self.source_id, page_rows, memory_rows)
+        corpus = _derived_corpus(self.snapshot, page_rows, memory_rows)
         if self.expected_corpus is not None and corpus != self.expected_corpus:
             raise RuntimeError("memory_ingestion installed corpus differs from its producer")
         readiness = IngestionReadiness(
@@ -336,7 +323,7 @@ class IngestionAttestor:
             )
             source_row = (
                 await connection.execute(
-                    sa.select(tables.source).where(tables.source.c.id == self.source_id)
+                    sa.select(tables.source).where(tables.source.c.uid == self.source_id)
                 )
             ).one_or_none()
             cursor_rows = (
@@ -365,7 +352,7 @@ class IngestionAttestor:
         self, page_rows: list[sa.Row], memory_rows: list[sa.Row], chunk_rows: list[sa.Row]
     ) -> str:
         records: list[tuple[str, ...]] = [
-            ("page", str(row.id), str(row.revision), row.digest, row.subject) for row in page_rows
+            ("page", str(row.uid), str(row.revision), row.digest, row.subject) for row in page_rows
         ]
         records.extend(
             (
@@ -471,16 +458,8 @@ class MemoryIngestionMaterializer:
         )
         with ws(workspace_id):
             ext = context_for(memory_manifest.NAME, frozenset())
-            connection_id = await ext.register_connection(
-                FOLDER_BACKEND, account_id=feed_handle(entry.config)
-            )
-            source_id = source_row_id(
-                workspace_id,
-                FOLDER_BACKEND,
-                entry.config.model_dump(mode="json"),
-                connection_id=connection_id,
-            )
-            await register_sources((entry,))
+            await ext.register_connection(FOLDER_BACKEND, account_id=feed_handle(entry.config))
+            (source_id,) = await register_sources((entry,))
             await SyncDriver(
                 backends={FOLDER_BACKEND: FolderSource()},
                 blob=self.blob,
@@ -625,31 +604,24 @@ class MemoryIngestionMaterializer:
     async def _install_corpus(
         self, workspace_id: UUID, source_id: UUID, corpus: DerivedCorpus
     ) -> None:
-        page_by_ref = {
-            page.source_ref: page_id_for(source_id, page.source_ref) for page in self.snapshot.pages
-        }
-        missing = sorted({fact.source_ref for fact in corpus.facts} - page_by_ref.keys())
-        if missing:
-            raise ValueError(f"memory_ingestion corpus names unknown pages: {', '.join(missing)}")
         async with workspace_tx() as connection:
             page_rows = list(
                 (
                     await connection.execute(
                         sa.select(
-                            tables.page.c.id,
                             tables.page.c.uid,
+                            tables.page.c.source_identity,
                             tables.page.c.revision,
                             tables.page.c.subject,
                         ).order_by(tables.page.c.revision, tables.page.c.uid)
                     )
                 ).all()
             )
-            source_uid = (
-                await connection.execute(
-                    sa.select(tables.source.c.uid).where(tables.source.c.id == source_id)
-                )
-            ).scalar_one()
-        pages = {row.id: row for row in page_rows}
+        page_by_ref = {row.source_identity: row.uid for row in page_rows}
+        missing = sorted({fact.source_ref for fact in corpus.facts} - page_by_ref.keys())
+        if missing:
+            raise ValueError(f"memory_ingestion corpus names unknown pages: {', '.join(missing)}")
+        pages = {row.uid: row for row in page_rows}
         ctx = context_for(memory_manifest.NAME, frozenset())
         store = memory_store.MemoryStore(
             index=self.index,
@@ -668,9 +640,9 @@ class MemoryIngestionMaterializer:
                     item_class="fact",
                     memory_kind=fact.memory_kind,
                     confidence=fact.confidence,
-                    created_from_page_id=pages[page_id].uid,
+                    created_from_page_id=page_id,
                     created_from_page_revision=pages[page_id].revision,
-                    source_id=source_uid,
+                    source_id=source_id,
                     as_of=fact.as_of,
                 )
             )

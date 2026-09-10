@@ -560,7 +560,7 @@ async def test_brokered_source_reaches_memory_search(
     assert query.lower() in recalled.lower()
     async with workspace_tx() as connection:
         (rebound,) = (
-            await connection.execute(sa.select(tables.source.c.id, tables.source.c.connection_id))
+            await connection.execute(sa.select(tables.source.c.uid, tables.source.c.connection_id))
         ).all()
         connection_owner = (
             await connection.execute(
@@ -574,7 +574,7 @@ async def test_brokered_source_reaches_memory_search(
                 sa.select(sa.func.count())
                 .select_from(tables.page)
                 .where(
-                    tables.page.c.source_id == rebound.id,
+                    tables.page.c.source_uid == rebound.uid,
                     tables.page.c.tombstone.is_(False),
                 )
             )

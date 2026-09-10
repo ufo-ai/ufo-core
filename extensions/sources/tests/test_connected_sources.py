@@ -270,7 +270,7 @@ async def _rows(state: _Workspace) -> list[sa.RowMapping]:
                     await connection.execute(
                         sa.select(tables.source)
                         .where(tables.source.c.workspace_id == state.workspace_id)
-                        .order_by(tables.source.c.backend, tables.source.c.id)
+                        .order_by(tables.source.c.backend, tables.source.c.uid)
                     )
                 )
                 .mappings()
@@ -413,7 +413,7 @@ async def test_a_stream_newly_marked_canonical_joins_a_connection_that_already_s
     rows = await _rows(state)
     assert {row["config"]["stream"] for row in held} == {first}
     assert {row["config"]["stream"] for row in rows} == _canonical(ASANA)
-    assert held[0]["id"] in {row["id"] for row in rows}
+    assert held[0]["uid"] in {row["uid"] for row in rows}
 
 
 async def test_a_source_declaring_no_stream_leaves_a_connection_its_feeds(db: None) -> None:
@@ -511,12 +511,8 @@ async def test_a_cleared_credential_slot_removes_its_connection_and_pages(db: No
             await connection.execute(
                 sa.insert(tables.page).values(
                     uid=uuid7(),
-                    id=page_id,
                     workspace_id=state.workspace_id,
-                    source_id=landed["id"],
-                    source_uid=sa.select(tables.source.c.uid)
-                    .where(tables.source.c.id == landed["id"])
-                    .scalar_subquery(),
+                    source_uid=landed["uid"],
                     digest="d" * 64,
                     body_ref="pages/seed",
                     stream=landed["config"]["stream"],
@@ -537,7 +533,7 @@ async def test_a_cleared_credential_slot_removes_its_connection_and_pages(db: No
         async with workspace_tx() as connection:
             pages = (
                 await connection.execute(
-                    sa.select(tables.page.c.id).where(tables.page.c.id == page_id)
+                    sa.select(tables.page.c.uid).where(tables.page.c.uid == page_id)
                 )
             ).all()
     assert pages == []
@@ -687,7 +683,7 @@ async def test_a_row_that_took_the_streams_declared_window_repins_from_that_wind
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.source.c.id, tables.source.c.config).where(
+                    sa.select(tables.source.c.uid, tables.source.c.config).where(
                         tables.source.c.workspace_id == state.workspace_id
                     )
                 )
@@ -696,7 +692,7 @@ async def test_a_row_that_took_the_streams_declared_window_repins_from_that_wind
                 await connection.execute(
                     sa.update(tables.source)
                     .values(config={**row.config, "backfill_days": None})
-                    .where(tables.source.c.id == row.id)
+                    .where(tables.source.c.uid == row.uid)
                 )
 
     await _set_window(state, connection_id, RAISED_WINDOW_DAYS)
@@ -771,15 +767,13 @@ async def _connection_the_outgoing_release_minted(state: _Workspace) -> tuple[UU
     with ws(state.workspace_id), agent(state.main_id):
         await ConnectedSources(ext=_ext()).register(connection_id)
     landed = next(row for row in await _rows(state) if row["connection_id"] == connection_id)
-    page_id = uuid4()
+    page_id = uuid7()
     with ws(state.workspace_id):
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.insert(tables.page).values(
-                    uid=uuid7(),
-                    id=page_id,
+                    uid=page_id,
                     workspace_id=state.workspace_id,
-                    source_id=landed["id"],
                     source_uid=landed["uid"],
                     digest="e" * 64,
                     body_ref="pages/monitor",
@@ -799,7 +793,7 @@ async def _page_ids(state: _Workspace) -> list[UUID]:
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.page.c.id).where(
+                    sa.select(tables.page.c.uid).where(
                         tables.page.c.workspace_id == state.workspace_id
                     )
                 )
@@ -839,6 +833,6 @@ async def test_the_carried_slots_keep_the_connection_the_last_release_minted(db:
 
     settled = await _rows(state)
     assert [row["id"] for row in await _connections(state)] == [connection_id]
-    assert [row["id"] for row in settled] == [row["id"] for row in rows]
+    assert [row["uid"] for row in settled] == [row["uid"] for row in rows]
     assert {row["config"]["stream"] for row in settled} == _canonical(DATADOG)
     assert await _page_ids(state) == [page_id]

@@ -8,7 +8,7 @@ import socket
 import sqlite3
 import threading
 import warnings
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -52,7 +52,7 @@ from ufo.db import (
 )
 from ufo.harness import o11y
 from ufo.host.ext.loader import migration_locations
-from ufo.runtime.sources.sync import feed_handle, source_row_id
+from ufo.runtime.sources.sync import feed_handle, feed_handle_for
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
@@ -534,7 +534,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         _core_migration_head(),
         "index_default_0002",
         "objectives_0002",
-        "memory_0019",
+        "memory_0020",
         "sample_ext_note_0001",
         "scheduled_tasks_0001",
         "sources_0004",
@@ -1078,6 +1078,21 @@ SOURCE_AUTHORITY_REVISION = "20260907150257"
 SOURCE_AUTHORITY_DOWN_REVISION = "20260906225812"
 CONNECTOR_NON_IDENTITY_KEYS = frozenset({"backfill_days", "backfill_after"})
 
+
+def _source_row_id(
+    workspace_id: UUID,
+    backend: str,
+    config: Mapping[str, object],
+    *,
+    connection_id: UUID,
+    non_identity_keys: frozenset[str] = frozenset(),
+) -> UUID:
+    handle = feed_handle_for(config, non_identity_keys)
+    return uuid5(
+        NAMESPACE_URL, f"{workspace_id}/source/{backend}/{handle}/connection/{connection_id}"
+    )
+
+
 SOURCE_WITH_ITS_OWN_AUTHORITY = sa.table(
     "source",
     sa.column("id", sa.Uuid()),
@@ -1199,10 +1214,26 @@ def _workspace_rows(
     )
 
 
+PAGE_BEFORE_UID = sa.table(
+    "page",
+    sa.column("id", sa.Uuid()),
+    sa.column("workspace_id", sa.Uuid()),
+    sa.column("source_id", sa.Uuid()),
+    sa.column("digest", sa.Text()),
+    sa.column("body_ref", sa.Text()),
+    sa.column("stream", sa.Text()),
+    sa.column("title", sa.Text()),
+    sa.column("subject", sa.Text()),
+    sa.column("tombstone", sa.Boolean()),
+    sa.column("created_at", sa.DateTime(timezone=True)),
+    sa.column("updated_at", sa.DateTime(timezone=True)),
+)
+
+
 def _page_row(
     page_id: UUID, workspace_id: UUID, source_id: UUID, subject: str, now: datetime
 ) -> sa.Executable:
-    return sa.insert(tables.page).values(
+    return sa.insert(PAGE_BEFORE_UID).values(
         id=page_id,
         workspace_id=workspace_id,
         source_id=source_id,
@@ -1246,7 +1277,7 @@ def test_source_authority_unshares_a_connection_carrying_private_streams(
         )
     }
     before = {
-        stream: source_row_id(
+        stream: _source_row_id(
             workspace_id,
             "github",
             stored[stream],
@@ -1256,7 +1287,7 @@ def test_source_authority_unshares_a_connection_carrying_private_streams(
         for stream, connection_id in (("issues", narrowed), ("pulls", narrowed), ("notes", open_))
     }
     after = {
-        stream: source_row_id(
+        stream: _source_row_id(
             workspace_id,
             "github",
             {
@@ -1329,11 +1360,19 @@ def test_source_authority_unshares_a_connection_carrying_private_streams(
         }
         streams = {
             row["id"]: row["connection_id"]
-            for row in _execute(url, sa.select(tables.source.c.id, tables.source.c.connection_id))
+            for row in _execute(
+                url,
+                sa.select(
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.id,
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.connection_id,
+                ),
+            )
         }
         pages = [
             (row["source_id"], row["subject"])
-            for row in _execute(url, sa.select(tables.page.c.source_id, tables.page.c.subject))
+            for row in _execute(
+                url, sa.select(PAGE_BEFORE_UID.c.source_id, PAGE_BEFORE_UID.c.subject)
+            )
         ]
         command.downgrade(config, SOURCE_AUTHORITY_DOWN_REVISION)
         restored = {
@@ -1431,21 +1470,29 @@ def test_source_authority_mints_one_connection_per_repository(
         assert set(minted) == set(handles.values())
         connection_of = {name: minted[handles[name]][0] for name in repos}
         after = {
-            name: source_row_id(
+            name: _source_row_id(
                 workspace_id, "gbrain_git", repos[name], connection_id=connection_of[name]
             )
             for name in repos
         }
         streams = {
             row["id"]: row["connection_id"]
-            for row in _execute(url, sa.select(tables.source.c.id, tables.source.c.connection_id))
+            for row in _execute(
+                url,
+                sa.select(
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.id,
+                    SOURCE_WITH_ITS_OWN_AUTHORITY.c.connection_id,
+                ),
+            )
         }
         _execute(
             url,
             sa.delete(tables.connection).where(tables.connection.c.id == connection_of["ufo"]),
         )
-        left_sources = [row["id"] for row in _execute(url, sa.select(tables.source.c.id))]
-        left_pages = [row["id"] for row in _execute(url, sa.select(tables.page.c.id))]
+        left_sources = [
+            row["id"] for row in _execute(url, sa.select(SOURCE_WITH_ITS_OWN_AUTHORITY.c.id))
+        ]
+        left_pages = [row["id"] for row in _execute(url, sa.select(PAGE_BEFORE_UID.c.id))]
         command.downgrade(config, SOURCE_AUTHORITY_DOWN_REVISION)
         restored = {
             row["id"]: (row["subject"], row["connection_id"], row["owner_member_id"])

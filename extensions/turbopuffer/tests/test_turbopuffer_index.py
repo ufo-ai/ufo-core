@@ -165,38 +165,6 @@ async def test_delete_enumerates_a_scope_then_posts_id_deletes(db: None) -> None
     assert delete_body == {"deletes": [tpuf.turbopuffer_id(d1)]}
 
 
-async def test_reattribute_patches_a_scope_in_passes_until_no_chunk_matches(db: None) -> None:
-    workspace_id = await _workspace()
-    affected = iter((50000, 586, 0))
-    seen: list[dict[str, object]] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        seen.append(json.loads(request.content.decode()))
-        return httpx.Response(200, json={"rows_affected": next(affected)})
-
-    index = tpuf.TurbopufferIndex(
-        credentials=await _access(workspace_id), transport=httpx.MockTransport(handle)
-    )
-    with ws(workspace_id):
-        await index.reattribute(IndexScope("page", "content-id"), "page-uid")
-    assert (
-        seen
-        == [
-            {
-                "patch_by_filter": {
-                    "filters": [
-                        "And",
-                        [["owner_kind", "Eq", "page"], ["owner_id", "Eq", "content-id"]],
-                    ],
-                    "patch": {"owner_id": "page-uid"},
-                },
-                "patch_by_filter_allow_partial": True,
-            }
-        ]
-        * 3
-    )
-
-
 async def test_has_chunks_is_false_for_an_empty_scope_or_missing_namespace(db: None) -> None:
     workspace_id = await _workspace()
     transport, _ = _recorder([])

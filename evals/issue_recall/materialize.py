@@ -58,9 +58,7 @@ from ufo.runtime.sources.sync import (
     FolderSource,
     SyncDriver,
     feed_handle,
-    page_id_for,
     register_sources,
-    source_row_id,
 )
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
@@ -89,21 +87,15 @@ class Materializer:
         workspace_id = await self._workspace()
         entry = SourceEntry(backend="folder", config=SourceConfig(root=str(self.pages_root)))
         with ws(workspace_id):
-            connection_id = await context_for("memory", frozenset()).register_connection(
+            await context_for("memory", frozenset()).register_connection(
                 FOLDER_BACKEND, account_id=feed_handle(entry.config)
             )
-            source_id = source_row_id(
-                workspace_id,
-                FOLDER_BACKEND,
-                entry.config.model_dump(mode="json"),
-                connection_id=connection_id,
-            )
+            (source_id,) = await register_sources((entry,))
             await self._refuse_foreign_state(source_id)
         await asyncio.to_thread(self._stage_pages)
         if self.run_budget is not None:
             await self.run_budget.install(workspace_id)
         with ws(workspace_id):
-            await register_sources((entry,))
             await SyncDriver(
                 backends={FOLDER_BACKEND: FolderSource()},
                 blob=self.blob,
@@ -141,7 +133,6 @@ class Materializer:
         run would commit some 470 ambient rows plus a sync into a workspace it does not own, leaving
         the attestor to discover it afterwards."""
         declared = {memory.ref for memory in self.ambient}
-        page_ids = {page_id_for(source_id, page.source_ref) for page in self.pages}
         async with workspace_tx() as connection:
             rows = (
                 (
@@ -155,7 +146,7 @@ class Materializer:
             page_uids = set(
                 (
                     await connection.execute(
-                        sa.select(tables.page.c.uid).where(tables.page.c.id.in_(page_ids))
+                        sa.select(tables.page.c.uid).where(tables.page.c.source_uid == source_id)
                     )
                 ).scalars()
             )
@@ -163,7 +154,7 @@ class Materializer:
                 await connection.execute(
                     sa.select(sa.func.count())
                     .select_from(tables.page)
-                    .where(tables.page.c.source_id != source_id)
+                    .where(tables.page.c.source_uid != source_id)
                 )
             ).scalar_one()
         foreign = sorted(

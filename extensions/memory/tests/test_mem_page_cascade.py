@@ -29,8 +29,9 @@ pytestmark = [
 DIGEST = "sha256:page"
 
 
-async def _seed(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
-    connection_id, source_id, page_id, page_uid = uuid4(), uuid4(), uuid4(), uuid7()
+async def _seed(workspace_id: UUID) -> tuple[UUID, UUID]:
+    source_uid = uuid7()
+    connection_id, page_uid = uuid4(), uuid7()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
@@ -52,8 +53,7 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
         )
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_uid,
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
@@ -67,14 +67,10 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=page_uid,
-                id=page_id,
                 workspace_id=workspace_id,
-                source_id=source_id,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_id)
-                .scalar_subquery(),
+                source_uid=source_uid,
                 digest=DIGEST,
-                body_ref=f"pages/{page_id}",
+                body_ref=f"pages/{page_uid}",
                 subject="shared",
                 tombstone=False,
                 created_at=sa.func.now(),
@@ -83,7 +79,7 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
         )
         revision = (
             await connection.execute(
-                sa.select(tables.page.c.revision).where(tables.page.c.id == page_id)
+                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_uid)
             )
         ).scalar_one()
         await connection.execute(
@@ -95,7 +91,7 @@ async def _seed(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
                 created_at=sa.func.now(),
             )
         )
-    return connection_id, page_id, page_uid
+    return connection_id, page_uid
 
 
 async def _mirrors(workspace_id: UUID) -> list[UUID]:
@@ -113,11 +109,11 @@ async def _mirrors(workspace_id: UUID) -> list[UUID]:
 
 async def test_deleting_a_page_takes_its_mirror_row(db: None) -> None:
     workspace_id = uuid4()
-    _connection_id, page_id, page_uid = await _seed(workspace_id)
+    _connection_id, page_uid = await _seed(workspace_id)
     with ws(workspace_id):
         assert await _mirrors(workspace_id) == [page_uid]
         async with workspace_tx() as connection:
-            await connection.execute(sa.delete(tables.page).where(tables.page.c.id == page_id))
+            await connection.execute(sa.delete(tables.page).where(tables.page.c.uid == page_uid))
         assert await _mirrors(workspace_id) == []
 
 
@@ -126,7 +122,7 @@ async def test_a_mirror_row_cannot_be_written_without_a_revision(db: None) -> No
     claim about which body its chunks came from, and `search_sources` could never serve it — so the
     schema refuses it rather than holding a row nothing can return."""
     workspace_id = uuid4()
-    _connection_id, _page_id, page_uid = await _seed(workspace_id)
+    _connection_id, page_uid = await _seed(workspace_id)
     with ws(workspace_id):
         async with workspace_tx() as connection:
             await connection.execute(sa.delete(mem_page))
@@ -148,7 +144,7 @@ async def test_disconnecting_a_connection_takes_the_mirror_rows_of_its_pages(db:
     """The whole chain a member drives: disconnect removes the connection, its source rows and
     their pages follow, and the mirror row goes with the page rather than outliving it."""
     workspace_id = uuid4()
-    connection_id, _page_id, page_uid = await _seed(workspace_id)
+    connection_id, page_uid = await _seed(workspace_id)
     with ws(workspace_id):
         assert await _mirrors(workspace_id) == [page_uid]
         async with workspace_tx() as connection:

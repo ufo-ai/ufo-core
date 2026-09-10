@@ -894,7 +894,6 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
     leaks via a listing."""
     workspace_id = await _workspace()
     connection_id, source_id, page_id, item_id = uuid4(), uuid7(), uuid7(), uuid4()
-    source_key, page_key = uuid4(), uuid4()
     now = datetime(2026, 7, 9, tzinfo=UTC)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -913,7 +912,6 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
         await connection.execute(
             sa.insert(tables.source).values(
                 uid=source_id,
-                id=source_key,
                 workspace_id=workspace_id,
                 backend="folder",
                 config={},
@@ -927,12 +925,8 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=page_id,
-                id=page_key,
                 workspace_id=workspace_id,
-                source_id=source_key,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_key)
-                .scalar_subquery(),
+                source_uid=source_id,
                 digest="sha256:page",
                 body_ref=f"pages/{page_id}",
                 stream="notes",

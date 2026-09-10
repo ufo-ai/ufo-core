@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar, Protocol, TypeVar
-from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 import asyncpg
 import httpx
@@ -104,10 +104,11 @@ class SourceRowConfig(BaseModel):
     fields that say WHICH dataset it is. A backend with no such parameters needs neither this base
     nor its declarations; the default is that every field identifies the row.
 
-    `non_identity_fields` are left out of `source_row_id`'s hash, so changing one settles on the row
-    already syncing that dataset. `resolved_fields` is the subset each caller resolves for itself
-    against its own `now`, so `register_source` holds a live row only to the difference: what was
-    asked for must match, what it resolved to is the winner's to set. Each is declared by the model
+    `non_identity_fields` are left out of the row's `feed_handle`, so changing one settles on the
+    row already syncing that dataset. `resolved_fields` is the subset each caller resolves for
+    itself against its own `now`, so `register_source` holds a live row only to the difference: what
+    was asked for must match, what it resolved to is the winner's to set. Each is declared by the
+    model
     that owns the fields, never by a name core matches across every backend."""
 
     non_identity_fields: ClassVar[frozenset[str]] = frozenset()
@@ -374,32 +375,9 @@ class FolderSource:
         )
 
 
-def source_row_id(
-    workspace_id: UUID,
-    backend: str,
-    config: Mapping[str, object],
-    *,
-    connection_id: UUID,
-    non_identity_keys: frozenset[str] = frozenset(),
-) -> UUID:
-    """The deterministic source row id: the connection generation this row hangs off, and what of
-    its config says which dataset it is.
-
-    `non_identity_keys` — the caller's `SourceRowConfig.non_identity_fields`, empty for a model that
-    declares none — stay out of the hash: a backfill window is a parameter of the dataset a row
-    syncs, not part of which dataset it is, so one stream settles on one row however far back it was
-    told to reach. The set is the config model's to declare rather than core's to match by name, so
-    one backend naming a field cannot drop it from another's identity."""
-    return uuid5(
-        NAMESPACE_URL,
-        f"{workspace_id}/source/{backend}/{feed_handle_for(config, non_identity_keys)}"
-        f"/connection/{connection_id}",
-    )
-
-
 def feed_handle_for(config: Mapping[str, object], non_identity_keys: frozenset[str]) -> str:
-    """The identity string `source_row_id` hashes and `source.feed_handle` stores: the config minus
-    its declared non-identity keys, dumped with sorted keys so one dataset spells one string."""
+    """The identity string `source.feed_handle` stores: the config minus its declared non-identity
+    keys, dumped with sorted keys so one dataset spells one string."""
     return json.dumps(
         {key: value for key, value in config.items() if key not in non_identity_keys},
         sort_keys=True,
@@ -408,9 +386,9 @@ def feed_handle_for(config: Mapping[str, object], non_identity_keys: frozenset[s
 
 def feed_handle(config: BaseModel) -> str:
     """The connection `account_id` of a feed that names no broker account and no member — a
-    repository, a folder root: its config's identity, the very string `source_row_id` hashes. The
-    `[[sources]]` boot path and an extension's object kind both mint the connection from it, so one
-    root registered by either settles on one connection, and two roots of one backend are two
+    repository, a folder root: its config's identity, the very string `source.feed_handle` stores.
+    The `[[sources]]` boot path and an extension's object kind both mint the connection from it,
+    so one root registered by either settles on one connection, and two roots of one backend are two
     connections — deleting one cascades none of the other's rows or pages. It begins `{`, which no
     broker's account id does, so `brokered_account` reads it as no account and the feed routes to
     the workspace's key."""
@@ -420,12 +398,6 @@ def feed_handle(config: BaseModel) -> str:
         else frozenset[str]()
     )
     return feed_handle_for(config.model_dump(mode="json"), non_identity)
-
-
-def page_id_for(source_id: UUID, source_ref: str) -> UUID:
-    """The deterministic id of a page within a source, so an upsert, a re-fetch of an unchanged
-    document, and an explicit `deletes` entry for one `source_ref` all settle on the same row."""
-    return uuid5(NAMESPACE_URL, f"{source_id}/page/{source_ref}")
 
 
 def source_body_ref_matches(body_ref: str, source_id: UUID, page_id: UUID, digest: str) -> bool:
@@ -441,15 +413,17 @@ def source_body_ref_matches(body_ref: str, source_id: UUID, page_id: UUID, diges
     )
 
 
-async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
+async def register_sources(configured: tuple[SourceEntry, ...]) -> tuple[UUID, ...]:
     """Ensure a source row exists for each configured `[[sources]]` entry, each hanging off a
     connection of its own keyed by `feed_handle` — the authority a feed no member owns runs under,
     shared because nobody owns it, and one per feed so removing one root never takes another's
-    pages. The row id is derived from the workspace, backend, connection, and config, so a restart
-    re-registers the same rows without duplicating them. Runs once at boot, off the sync poll."""
+    pages. A row is keyed by workspace, connection, backend and feed handle, so a restart
+    re-registers the same rows without duplicating them; the rows settled on come back in entry
+    order. Runs once at boot, off the sync poll."""
     if not configured:
-        return
+        return ()
     now = datetime.now(UTC)
+    settled: list[UUID] = []
     async with workspace_tx() as connection:
         workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
         insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
@@ -490,9 +464,6 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
                 insert(tables.source)
                 .values(
                     uid=uuid7(),
-                    id=source_row_id(
-                        workspace_id, entry.backend, config, connection_id=connection_id
-                    ),
                     workspace_id=workspace_id,
                     backend=entry.backend,
                     config=config,
@@ -506,14 +477,31 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> None:
                     updated_at=sa.func.now(),
                 )
                 .on_conflict_do_nothing(
-                    index_elements=[tables.source.c.workspace_id, tables.source.c.id]
+                    index_elements=[
+                        tables.source.c.workspace_id,
+                        tables.source.c.connection_id,
+                        tables.source.c.backend,
+                        tables.source.c.feed_handle,
+                    ]
                 )
             )
+            settled.append(
+                (
+                    await connection.execute(
+                        sa.select(tables.source.c.uid).where(
+                            tables.source.c.workspace_id == workspace_id,
+                            tables.source.c.connection_id == connection_id,
+                            tables.source.c.backend == entry.backend,
+                            tables.source.c.feed_handle == feed_handle_for(config, frozenset()),
+                        )
+                    )
+                ).scalar_one()
+            )
+    return tuple(settled)
 
 
 @dataclass(frozen=True)
 class ClaimedSource:
-    source_id: UUID
     source_uid: UUID
     workspace_id: UUID
     claim: str
@@ -557,7 +545,7 @@ def _check_tags(source: ClaimedSource) -> dict[str, str]:
     failing row's CRITICAL, no run accumulates a second consecutive CRITICAL, and a source that
     cannot sync raises no alert. The id stays off the metric dimensions, which the backends' own
     vocabulary bounds."""
-    return {**_stream_tags(source), "source_id": str(source.source_id)}
+    return {**_stream_tags(source), "source_id": str(source.source_uid)}
 
 
 def _config_value(source: ClaimedSource, key: str) -> str:
@@ -742,7 +730,7 @@ class SyncDriver:
         claim = uuid4().hex
         sources = await self._claim_due(claim)
         renewals = {
-            source.source_id: asyncio.create_task(self._renew_claim(source)) for source in sources
+            source.source_uid: asyncio.create_task(self._renew_claim(source)) for source in sources
         }
         grouped: dict[UUID, list[ClaimedSource]] = {}
         for source in sources:
@@ -766,16 +754,16 @@ class SyncDriver:
     ) -> None:
         async with limit:
             for index, source in enumerate(sources):
-                rate_limited = await self._run_with_lease(source, renewals[source.source_id])
+                rate_limited = await self._run_with_lease(source, renewals[source.source_uid])
                 if not rate_limited:
                     continue
                 remaining = sources[index + 1 :]
                 for sibling in remaining:
-                    renewal = renewals[sibling.source_id]
+                    renewal = renewals[sibling.source_uid]
                     if not renewal.done():
                         renewal.cancel()
                 await asyncio.gather(
-                    *(renewals[sibling.source_id] for sibling in remaining),
+                    *(renewals[sibling.source_uid] for sibling in remaining),
                     return_exceptions=True,
                 )
                 return
@@ -795,7 +783,7 @@ class SyncDriver:
                 raise error
             return await sync_task
         except _SourceClaimLost:
-            log("source_sync.claim_lost", source_id=str(source.source_id), **_stream_tags(source))
+            log("source_sync.claim_lost", source_id=str(source.source_uid), **_stream_tags(source))
             return False
         finally:
             for task in (sync_task, renewal):
@@ -807,7 +795,7 @@ class SyncDriver:
         with suppress(Exception):
             log(
                 "source_sync.started",
-                source_id=str(source.source_id),
+                source_id=str(source.source_uid),
                 **_stream_tags(source),
                 account_id=source.account_id,
             )
@@ -821,7 +809,7 @@ class SyncDriver:
             with suppress(Exception):
                 log(
                     "source_sync.skipped",
-                    source_id=str(source.source_id),
+                    source_id=str(source.source_uid),
                     **_stream_tags(source),
                     reason=skipped.reason,
                 )
@@ -848,7 +836,7 @@ class SyncDriver:
             renewed = await connection.execute(
                 sa.update(tables.source)
                 .where(
-                    tables.source.c.id == source.source_id,
+                    tables.source.c.uid == source.source_uid,
                     tables.source.c.claimed_by == source.claim,
                 )
                 .values(
@@ -857,13 +845,12 @@ class SyncDriver:
                 )
             )
         if renewed.rowcount != 1:
-            raise _SourceClaimLost(str(source.source_id))
+            raise _SourceClaimLost(str(source.source_uid))
 
     async def _claim_due(self, claim: str) -> tuple[ClaimedSource, ...]:
         now = datetime.now(UTC)
         due = (
             sa.select(
-                tables.source.c.id,
                 tables.source.c.uid,
                 tables.source.c.workspace_id,
                 tables.source.c.backend,
@@ -884,7 +871,7 @@ class SyncDriver:
                 _readers_remain(),
                 funded(tables.source.c.workspace_id, self.own_key_slots),
             )
-            .order_by(tables.source.c.next_sync_at, tables.source.c.id)
+            .order_by(tables.source.c.next_sync_at, tables.source.c.uid)
             .limit(DUE_BATCH_MAX_SOURCES)
         )
         if self.postgres:
@@ -896,11 +883,10 @@ class SyncDriver:
                 await connection.execute(
                     sa.update(tables.source)
                     .values(claimed_by=claim, claim_expires_at=expires, updated_at=sa.func.now())
-                    .where(tables.source.c.id.in_([row["id"] for row in rows]))
+                    .where(tables.source.c.uid.in_([row["uid"] for row in rows]))
                 )
         return tuple(
             ClaimedSource(
-                source_id=row["id"],
                 source_uid=row["uid"],
                 workspace_id=row["workspace_id"],
                 claim=claim,
@@ -937,19 +923,10 @@ class SyncDriver:
 
     async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:
         await self._refresh_claim(source)
-        prior, prior_by_identity = await self._prior_pages(source.source_id)
+        _, prior_by_identity = await self._prior_pages(source.source_uid)
         resolved: dict[str, UUID] = {
             identity: value[2].id for identity, value in prior_by_identity.items()
         }
-        claimed: dict[UUID, str] = {
-            page_id: identity
-            for page_id, value in prior.items()
-            if (identity := value[2].source_identity) is not None
-        }
-        unnamed: dict[str, list[UUID]] = {}
-        for prior_id, (digest, tombstone, browse) in prior.items():
-            if browse.source_identity is None and not tombstone:
-                unnamed.setdefault(digest, []).append(prior_id)
         fetched: list[UUID] = []
         changed: list[ChangedPage] = []
         metadata: list[PageBrowse] = []
@@ -957,28 +934,14 @@ class SyncDriver:
         try:
             for page in result.pages:
                 source_identity = page.source_identity or page.source_ref
-                fallback_id = page_id_for(source.source_id, page.source_ref)
                 existing = prior_by_identity.get(source_identity)
                 page_id = resolved.get(source_identity)
+                if page_id is None and (attaching := prior_by_identity.get(page.source_ref)):
+                    existing = attaching
+                    page_id = attaching[2].id
                 if page_id is None:
-                    fallback = prior.get(fallback_id)
-                    owner = claimed.get(fallback_id)
-                    if fallback is not None and owner is None:
-                        existing = fallback
-                        page_id = fallback_id
-                    elif twins := unnamed.get(page.digest):
-                        page_id = twins.pop()
-                        existing = prior[page_id]
-                    elif fallback is None and owner is None:
-                        page_id = fallback_id
-                    else:
-                        page_id = uuid5(
-                            NAMESPACE_URL,
-                            f"{source.source_id}/page-identity/{source_identity}",
-                        )
-                        existing = prior.get(page_id)
-                    resolved[source_identity] = page_id
-                    claimed[page_id] = source_identity
+                    page_id = uuid7()
+                resolved[source_identity] = page_id
                 fetched.append(page_id)
                 browse = PageBrowse(
                     id=page_id,
@@ -990,7 +953,7 @@ class SyncDriver:
                 )
                 if existing is None or existing[:2] != (page.digest, False):
                     body_ref = (
-                        f"{SOURCE_BLOB_PREFIX}/{source.source_id}/{page_id}/{source.claim}/"
+                        f"{SOURCE_BLOB_PREFIX}/{source.source_uid}/{page_id}/{source.claim}/"
                         f"{page.digest.removeprefix('sha256:')}"
                     )
                     written.append(body_ref)
@@ -1006,9 +969,9 @@ class SyncDriver:
                     metadata.append(browse)
             deleted = [
                 existing[2].id
-                if (existing := prior_by_identity.get(ref)) is not None
-                else page_id_for(source.source_id, ref)
                 for ref in result.deletes
+                if (existing := prior_by_identity.get(ref)) is not None
+                and existing[2].id not in fetched
             ]
             try:
                 tombstoned, retry_at = await self._write(
@@ -1039,7 +1002,7 @@ class SyncDriver:
             with suppress(Exception):
                 warn(
                     "source_sync.rate_limited",
-                    source_id=str(source.source_id),
+                    source_id=str(source.source_uid),
                     **_stream_tags(source),
                     account_id=source.account_id,
                     pages_fetched=len(result.pages),
@@ -1057,7 +1020,7 @@ class SyncDriver:
             )
 
     async def _prior_pages(
-        self, source_id: UUID
+        self, source_uid: UUID
     ) -> tuple[
         dict[UUID, tuple[str, bool, PageBrowse]],
         dict[str, tuple[str, bool, PageBrowse]],
@@ -1067,7 +1030,7 @@ class SyncDriver:
                 (
                     await connection.execute(
                         sa.select(
-                            tables.page.c.id,
+                            tables.page.c.uid.label("id"),
                             tables.page.c.source_identity,
                             tables.page.c.digest,
                             tables.page.c.tombstone,
@@ -1075,7 +1038,7 @@ class SyncDriver:
                             tables.page.c.title,
                             tables.page.c.record_created_at,
                             tables.page.c.record_updated_at,
-                        ).where(tables.page.c.source_id == source_id)
+                        ).where(tables.page.c.source_uid == source_uid)
                     )
                 )
                 .mappings()
@@ -1132,7 +1095,7 @@ class SyncDriver:
                 sa.select(tables.connection.c.shared, tables.connection.c.owner_member_id)
                 .select_from(_source_authority())
                 .where(
-                    tables.source.c.id == source.source_id,
+                    tables.source.c.uid == source.source_uid,
                     tables.source.c.workspace_id == workspace_id,
                     tables.source.c.claimed_by == source.claim,
                 )
@@ -1141,7 +1104,7 @@ class SyncDriver:
                 authority = authority.with_for_update(of=(tables.source, tables.connection))
             held = (await connection.execute(authority)).one_or_none()
             if held is None:
-                raise _SourceClaimLost(str(source.source_id))
+                raise _SourceClaimLost(str(source.source_uid))
             subject = connection_subject(held.shared, held.owner_member_id)
             for changed_page in changed:
                 updated = await connection.execute(
@@ -1158,16 +1121,14 @@ class SyncDriver:
                         tombstone=False,
                         updated_at=now,
                     )
-                    .where(tables.page.c.id == changed_page.browse.id)
+                    .where(tables.page.c.uid == changed_page.browse.id)
                 )
                 if updated.rowcount == 0:
                     await connection.execute(
                         sa.insert(tables.page).values(
-                            uid=uuid7(),
-                            id=changed_page.browse.id,
+                            uid=changed_page.browse.id,
                             source_identity=changed_page.browse.source_identity,
                             workspace_id=workspace_id,
-                            source_id=source.source_id,
                             source_uid=source.source_uid,
                             digest=changed_page.digest,
                             body_ref=changed_page.body_ref,
@@ -1191,7 +1152,7 @@ class SyncDriver:
                         record_created_at=browse_page.record_created_at,
                         record_updated_at=browse_page.record_updated_at,
                     )
-                    .where(tables.page.c.id == browse_page.id)
+                    .where(tables.page.c.uid == browse_page.id)
                 )
             tombstoned = 0
             if deleted:
@@ -1199,9 +1160,9 @@ class SyncDriver:
                     sa.update(tables.page)
                     .values(tombstone=True, updated_at=now)
                     .where(
-                        tables.page.c.source_id == source.source_id,
+                        tables.page.c.source_uid == source.source_uid,
                         tables.page.c.tombstone.is_(False),
-                        tables.page.c.id.in_(deleted),
+                        tables.page.c.uid.in_(deleted),
                     )
                 )
                 tombstoned += swept.rowcount
@@ -1210,9 +1171,9 @@ class SyncDriver:
                     sa.update(tables.page)
                     .values(tombstone=True, updated_at=now)
                     .where(
-                        tables.page.c.source_id == source.source_id,
+                        tables.page.c.source_uid == source.source_uid,
                         tables.page.c.tombstone.is_(False),
-                        tables.page.c.id.not_in(fetched),
+                        tables.page.c.uid.not_in(fetched),
                     )
                 )
                 tombstoned += swept.rowcount
@@ -1220,7 +1181,7 @@ class SyncDriver:
                 sa.update(tables.page)
                 .values(subject=subject, updated_at=now)
                 .where(
-                    tables.page.c.source_id == source.source_id,
+                    tables.page.c.source_uid == source.source_uid,
                     tables.page.c.tombstone.is_(False),
                     tables.page.c.subject != subject,
                 )
@@ -1234,7 +1195,7 @@ class SyncDriver:
             never_landed = ~sa.exists(
                 sa.select(sa.literal(1))
                 .select_from(tables.page)
-                .where(tables.page.c.source_id == source.source_id)
+                .where(tables.page.c.source_uid == source.source_uid)
                 .correlate()
             )
             idles = sa.and_(empty_runs >= SOURCE_EMPTY_IDLE_THRESHOLD, never_landed)
@@ -1270,7 +1231,7 @@ class SyncDriver:
                     updated_at=sa.func.now(),
                 )
                 .where(
-                    tables.source.c.id == source.source_id,
+                    tables.source.c.uid == source.source_uid,
                     tables.source.c.claimed_by == source.claim,
                 )
             )
@@ -1314,7 +1275,7 @@ class SyncDriver:
         with suppress(Exception):
             log(
                 "source_sync.ok",
-                source_id=str(source.source_id),
+                source_id=str(source.source_uid),
                 **tags,
                 account_id=source.account_id,
                 pages_fetched=fetched,
@@ -1380,7 +1341,7 @@ class SyncDriver:
                     fault = ""
             log_error(
                 "source_sync.failed",
-                source_id=str(source.source_id),
+                source_id=str(source.source_uid),
                 **tags,
                 account_id=source.account_id,
                 error_class=error_class,
@@ -1415,7 +1376,7 @@ class SyncDriver:
         with suppress(Exception):
             warn(
                 "source_sync.deferred",
-                source_id=str(source.source_id),
+                source_id=str(source.source_uid),
                 **_stream_tags(source),
                 account_id=source.account_id,
                 error_class=type(error).__name__,
@@ -1449,7 +1410,7 @@ class SyncDriver:
                     updated_at=sa.func.now(),
                 )
                 .where(
-                    tables.source.c.id == source.source_id,
+                    tables.source.c.uid == source.source_uid,
                     tables.source.c.claimed_by == source.claim,
                 )
             )
@@ -1511,7 +1472,7 @@ class SyncDriver:
                         updated_at=sa.func.now(),
                     )
                     .where(
-                        tables.source.c.id == source.source_id,
+                        tables.source.c.uid == source.source_uid,
                         tables.source.c.claimed_by == source.claim,
                     )
                     .returning(tables.source.c.parked_at, tables.source.c.consecutive_refusals)
@@ -1539,7 +1500,7 @@ class SyncDriver:
         with suppress(Exception):
             warn(
                 "source_sync.parked",
-                source_id=str(source.source_id),
+                source_id=str(source.source_uid),
                 **tags,
                 consecutive_refusals=refusals,
                 reason=reason,
@@ -1613,7 +1574,7 @@ class CorePageFeed:
         query = (
             sa.select(
                 tables.page.c.uid,
-                sa.func.coalesce(tables.page.c.source_uid, tables.source.c.uid).label("source_uid"),
+                tables.page.c.source_uid,
                 tables.page.c.subject,
                 tables.page.c.stream,
                 tables.page.c.title,
@@ -1625,9 +1586,6 @@ class CorePageFeed:
                 tables.page.c.record_updated_at,
                 tables.page.c.created_at,
                 tables.page.c.updated_at,
-            )
-            .select_from(
-                tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
             )
             .order_by(tables.page.c.revision, tables.page.c.uid)
             .limit(min(limit, PAGE_FEED_BATCH_MAX))

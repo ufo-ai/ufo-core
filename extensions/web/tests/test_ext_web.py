@@ -2035,7 +2035,6 @@ async def _seed_stream(workspace_id: UUID, connection_id: UUID, stream: str) -> 
         await connection.execute(
             sa.insert(tables.source).values(
                 uid=uuid7(),
-                id=uuid4(),
                 workspace_id=workspace_id,
                 backend="github",
                 config={"stream": stream},

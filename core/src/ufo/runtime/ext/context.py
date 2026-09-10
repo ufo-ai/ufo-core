@@ -84,7 +84,6 @@ from ufo.runtime.sources.sync import (
     SourceRowConfig,
     feed_handle,
     feed_handle_for,
-    source_row_id,
 )
 from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
@@ -2215,7 +2214,13 @@ class ExtensionContext:
                 tables.page.c.stream,
             )
             .select_from(
-                tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
+                tables.page.join(
+                    tables.source,
+                    sa.and_(
+                        tables.page.c.workspace_id == tables.source.c.workspace_id,
+                        tables.page.c.source_uid == tables.source.c.uid,
+                    ),
+                )
             )
             .where(
                 tables.page.c.workspace_id == self.store.workspace_id,
@@ -2335,17 +2340,7 @@ class ExtensionContext:
         them. The core sync driver polls the row and lands its pages in memory; embedding stays a
         job."""
         payload = config.model_dump(mode="json")
-        source_id = source_row_id(
-            self.store.workspace_id,
-            backend,
-            payload,
-            connection_id=connection_id,
-            non_identity_keys=(
-                type(config).non_identity_fields
-                if isinstance(config, SourceRowConfig)
-                else frozenset[str]()
-            ),
-        )
+        handle = feed_handle(config)
         registered_at = datetime.now(UTC)
         async with workspace_tx() as connection:
             authority = (
@@ -2369,11 +2364,10 @@ class ExtensionContext:
                 insert(tables.source)
                 .values(
                     uid=uuid7(),
-                    id=source_id,
                     workspace_id=self.store.workspace_id,
                     backend=backend,
                     config=payload,
-                    feed_handle=feed_handle(config),
+                    feed_handle=handle,
                     connection_id=connection_id,
                     cursor=None,
                     next_sync_at=registered_at,
@@ -2383,13 +2377,23 @@ class ExtensionContext:
                     updated_at=registered_at,
                 )
                 .on_conflict_do_nothing(
-                    index_elements=[tables.source.c.workspace_id, tables.source.c.id]
+                    index_elements=[
+                        tables.source.c.workspace_id,
+                        tables.source.c.connection_id,
+                        tables.source.c.backend,
+                        tables.source.c.feed_handle,
+                    ]
                 )
             )
             present = (
                 await connection.execute(
                     sa.select(tables.source.c.uid, tables.source.c.config)
-                    .where(tables.source.c.id == source_id)
+                    .where(
+                        tables.source.c.workspace_id == self.store.workspace_id,
+                        tables.source.c.connection_id == connection_id,
+                        tables.source.c.backend == backend,
+                        tables.source.c.feed_handle == handle,
+                    )
                     .with_for_update()
                 )
             ).one()
@@ -2472,7 +2476,13 @@ class ExtensionContext:
             .order_by(tables.page.c.uid)
         )
         query = query.select_from(
-            tables.page.join(tables.source, tables.page.c.source_id == tables.source.c.id)
+            tables.page.join(
+                tables.source,
+                sa.and_(
+                    tables.page.c.workspace_id == tables.source.c.workspace_id,
+                    tables.page.c.source_uid == tables.source.c.uid,
+                ),
+            )
         ).where(
             tables.page.c.subject.in_(reader.subjects),
             _source_readable(self.store.workspace_id, reader),
@@ -2541,7 +2551,6 @@ class ExtensionContext:
             rows = (
                 await connection.execute(
                     sa.select(
-                        tables.source.c.id,
                         tables.source.c.uid,
                         tables.source.c.backend,
                         tables.source.c.connection_id,
@@ -2579,7 +2588,7 @@ class ExtensionContext:
                         "claim_expires_at": None,
                     }
                 await connection.execute(
-                    sa.update(tables.source).values(**values).where(tables.source.c.id == row.id)
+                    sa.update(tables.source).values(**values).where(tables.source.c.uid == row.uid)
                 )
 
     async def schedule_source_sync(self, source_ids: tuple[UUID, ...]) -> None:

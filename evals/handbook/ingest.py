@@ -190,7 +190,7 @@ class DocumentIngest:
         async with workspace_tx() as connection:
             await connection.execute(tables.page.delete().where(tables.page.c.uid.in_(page_ids)))
             await connection.execute(
-                tables.source.delete().where(tables.source.c.id.in_(source_ids))
+                tables.source.delete().where(tables.source.c.uid.in_(source_ids))
             )
 
     def _stage(self) -> tuple[str, ...]:
@@ -297,7 +297,7 @@ class DocumentIngest:
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
-                    sa.select(tables.source.c.id, tables.source.c.config).where(
+                    sa.select(tables.source.c.uid, tables.source.c.config).where(
                         tables.source.c.workspace_id == workspace_id,
                         tables.source.c.backend == FOLDER_BACKEND,
                     )
@@ -313,7 +313,7 @@ class DocumentIngest:
             return list(
                 (
                     await connection.execute(
-                        sa.select(tables.page.c.uid).where(tables.page.c.source_id.in_(source_ids))
+                        sa.select(tables.page.c.uid).where(tables.page.c.source_uid.in_(source_ids))
                     )
                 ).scalars()
             )

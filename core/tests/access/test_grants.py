@@ -2171,7 +2171,6 @@ async def _seed_streams(
             await connection.execute(
                 sa.insert(tables.source).values(
                     uid=source_uid,
-                    id=source_id,
                     workspace_id=workspace_id,
                     backend="stub",
                     config={"stream": stream},
@@ -2186,10 +2185,8 @@ async def _seed_streams(
                 sa.insert(tables.page),
                 [
                     {
-                        "id": page_id,
-                        "uid": uuid7(),
+                        "uid": page_id,
                         "workspace_id": workspace_id,
-                        "source_id": source_id,
                         "source_uid": source_uid,
                         "digest": f"sha256:{stream}-{page_id.hex[:8]}",
                         "body_ref": f"sources/{source_id}/{page_id}",
@@ -2213,7 +2210,7 @@ async def _page_subjects(workspace_id: UUID) -> dict[UUID, tuple[str, bool, date
             (
                 await connection.execute(
                     sa.select(
-                        tables.page.c.id,
+                        tables.page.c.uid,
                         tables.page.c.subject,
                         tables.page.c.tombstone,
                         tables.page.c.updated_at,
@@ -2224,7 +2221,7 @@ async def _page_subjects(workspace_id: UUID) -> dict[UUID, tuple[str, bool, date
             .all()
         )
     return {
-        row["id"]: (
+        row["uid"]: (
             row["subject"],
             bool(row["tombstone"]),
             row["updated_at"]

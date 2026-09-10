@@ -104,6 +104,7 @@ async def _workspace() -> UUID:
 
 
 async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -> UUID:
+    source_uid = uuid7()
     source_id, page_id, page_uid = uuid4(), uuid4(), uuid7()
     when = datetime.now(UTC)
     await blob.put(f"pages/{page_id}", body.encode())
@@ -134,8 +135,7 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
             )
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_uid,
                 workspace_id=workspace_id,
                 backend="folder",
                 config={"root": f"/{source_id.hex}"},
@@ -150,12 +150,8 @@ async def _seed_page(blob: FilesystemBlobStore, workspace_id: UUID, body: str) -
         await connection.execute(
             sa.insert(tables.page).values(
                 uid=page_uid,
-                id=page_id,
                 workspace_id=workspace_id,
-                source_id=source_id,
-                source_uid=sa.select(tables.source.c.uid)
-                .where(tables.source.c.id == source_id)
-                .scalar_subquery(),
+                source_uid=source_uid,
                 digest="sha256:" + hashlib.sha256(body.encode()).hexdigest(),
                 body_ref=f"pages/{page_id}",
                 subject=SHARED_SUBJECT,

@@ -103,7 +103,6 @@ from ufo_ext_memory.store import (
     Recalled,
     SourceMatch,
     _aware,
-    mem_page,
     memory_item,
     recall_subjects,
     store_for,
@@ -162,9 +161,6 @@ prose, so it runs first: a paragraph written from rows the same night's curation
 describe the page for a day as it stood before the curation, and the member reading it would find
 sentences answering to nothing under them. Minute 45 stands clear of the consolidator on the hour
 and the deduper on the half hour, so no workspace pays two model jobs in one minute."""
-ADOPT_JOB = "memory_adopt_page_chunks"
-ADOPT_SCHEDULE = "20 * * * * *"
-ADOPT_BATCH = 5000
 REBUILD_QUEUED = (
     "The facts derived from synced pages are written again as the derivation pass reaches each "
     "page. The page's paragraphs and items an app recorded in a conversation are untouched."
@@ -719,24 +715,6 @@ def _items_awaiting_index() -> sa.Select[tuple[UUID]]:
     )
 
 
-async def adopt_page_chunks(ctx: ExtensionContext) -> None:
-    """Drain one batch of pages whose chunks the index still files under their content id."""
-    if ctx.index is None or ctx.embed is None:
-        raise RuntimeError(f"{ADOPT_JOB} requires the index and embed backends; none are wired")
-    await PageIndexer(
-        index=ctx.index,
-        embed=ctx.embed,
-        transaction=ctx.transaction,
-        chunker=TextChunker(),
-        workspace_id=ctx.store.workspace_id,
-        page_states=ctx.page_states,
-    ).adopt_chunks(ADOPT_BATCH)
-
-
-def _pages_chunked_by_content_id() -> sa.Select[tuple[UUID]]:
-    return sa.select(mem_page.c.workspace_id).where(mem_page.c.page_id.is_not(None)).distinct()
-
-
 def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]:
     """Workspaces where a consolidation pass could actually form a cluster: at least
     MIN_CLUSTER_FACTS live facts aged past MIN_OLDEST_AGE — the consolidator's own floor, folded
@@ -1015,12 +993,6 @@ def manifest() -> Manifest:
                 schedule=PROFILE_SCHEDULE,
                 handler=write_member_profiles,
                 candidates=owner_candidates(_peopled_workspaces),
-            ),
-            JobSpec(
-                name=ADOPT_JOB,
-                schedule=ADOPT_SCHEDULE,
-                handler=adopt_page_chunks,
-                candidates=owner_candidates(_pages_chunked_by_content_id),
             ),
             JobSpec(
                 name=PAGE_PASS_JOB,

@@ -24,9 +24,7 @@ from ufo.blob import BlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
-    page_id_for,
     source_body_ref_matches,
-    source_row_id,
 )
 from ufo.schema import tables
 
@@ -80,8 +78,8 @@ class CorpusAttestor:
         owners: dict[UUID, list[UUID]] = {row.uid: [] for row in page_rows}
         for row in fact_rows:
             owners[row.created_from_page_uid].append(row.id)
-        content_id = {row.uid: row.id for row in page_rows}
-        by_id = {page_id_for(self.source_id, page.source_ref): page for page in self.pages}
+        by_identity = {page.source_ref: page for page in self.pages}
+        by_uid = {row.uid: by_identity[row.source_identity] for row in page_rows}
         return CorpusReadiness(
             corpus_digest=corpus_digest(),
             workspace_id=self.workspace_id,
@@ -92,12 +90,12 @@ class CorpusAttestor:
             chunk_count=len(chunk_rows),
             pages=tuple(
                 PageOwners(
-                    source_ref=by_id[content_id[page_uid]].source_ref,
-                    page_id=content_id[page_uid],
+                    source_ref=by_uid[page_uid].source_ref,
+                    page_id=page_uid,
                     memory_ids=tuple(sorted(memory_ids)),
                 )
                 for page_uid, memory_ids in sorted(
-                    owners.items(), key=lambda item: by_id[content_id[item[0]]].source_ref
+                    owners.items(), key=lambda item: by_uid[item[0]].source_ref
                 )
             ),
             ambient=tuple(
@@ -144,7 +142,7 @@ class CorpusAttestor:
             )
             source_row = (
                 await connection.execute(
-                    sa.select(tables.source).where(tables.source.c.id == self.source_id)
+                    sa.select(tables.source).where(tables.source.c.uid == self.source_id)
                 )
             ).one_or_none()
             cursor_rows = (
@@ -171,11 +169,8 @@ class CorpusAttestor:
         config = {"root": str(self.pages_root)}
         if source_row is None:
             raise RuntimeError("issue_recall folder source is missing")
-        landed = source_row_id(
-            self.workspace_id, FOLDER_BACKEND, config, connection_id=source_row.connection_id
-        )
-        if self.source_id != landed:
-            raise RuntimeError("issue_recall folder source id is not canonical")
+        if source_row.uid != self.source_id:
+            raise RuntimeError("issue_recall folder source is not the registered row")
         if (
             source_row.workspace_id != self.workspace_id
             or source_row.backend != FOLDER_BACKEND
@@ -186,11 +181,11 @@ class CorpusAttestor:
             raise RuntimeError("issue_recall folder source is not settled")
 
     async def _landed_pages(self, page_rows: list[sa.Row]) -> None:
-        expected = {page_id_for(self.source_id, page.source_ref): page for page in self.pages}
-        if {row.id for row in page_rows} != set(expected):
+        expected = {page.source_ref: page for page in self.pages}
+        if {row.source_identity for row in page_rows} != set(expected):
             raise RuntimeError("issue_recall page rows do not match the fixture")
         for row in page_rows:
-            page = expected[row.id]
+            page = expected[row.source_identity]
             if (
                 row.workspace_id != self.workspace_id
                 or row.source_id != self.source_id

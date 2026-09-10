@@ -124,7 +124,7 @@ async def seed(workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
                 await connection.execute(
                     sa.update(tables.source)
                     .values(next_sync_at=NEVER)
-                    .where(tables.source.c.id == source_id)
+                    .where(tables.source.c.uid == source_id)
                 )
 
 

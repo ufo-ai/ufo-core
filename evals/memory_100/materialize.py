@@ -43,7 +43,6 @@ from ufo.runtime.sources.sync import (
     SyncDriver,
     feed_handle,
     register_sources,
-    source_row_id,
 )
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import init_workspace_credentials, ws
@@ -105,16 +104,10 @@ class Memory100Materializer:
             config=SourceConfig(root=str(self.pages_root)),
         )
         with ws(workspace_id):
-            connection_id = await context_for("memory", frozenset()).register_connection(
+            await context_for("memory", frozenset()).register_connection(
                 FOLDER_BACKEND, account_id=feed_handle(entry.config)
             )
-            source_id = source_row_id(
-                workspace_id,
-                FOLDER_BACKEND,
-                entry.config.model_dump(mode="json"),
-                connection_id=connection_id,
-            )
-            await register_sources((entry,))
+            (source_id,) = await register_sources((entry,))
             await SyncDriver(
                 backends={FOLDER_BACKEND: FolderSource()},
                 blob=self.blob,

@@ -130,7 +130,6 @@ from ufo.runtime.turns.transcript import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.ids import uuid7
 from ufo.schema.records import (
     MAIN_AGENT_ICON,
     SUBAGENT_SURFACE,
@@ -779,8 +778,7 @@ async def _seed_source(
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.source).values(
-                uid=uuid7(),
-                id=source_id,
+                uid=source_id,
                 workspace_id=workspace_id,
                 backend=backend,
                 config=config,

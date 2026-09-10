@@ -732,7 +732,6 @@ surface_listener_claim = sa.Table(
 source = sa.Table(
     "source",
     metadata,
-    sa.Column("id", sa.Uuid, nullable=False),
     sa.Column("uid", sa.Uuid, nullable=False),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
     sa.Column("backend", sa.Text, nullable=False),
@@ -753,8 +752,6 @@ source = sa.Table(
     sa.PrimaryKeyConstraint("workspace_id", "uid", name="source_pkey"),
     sa.Index("source_due", "next_sync_at"),
     sa.Index("source_authority", "workspace_id", "connection_id"),
-    sa.Index("source_id", "id"),
-    sa.UniqueConstraint("workspace_id", "id", name="source_workspace_identity"),
     sa.UniqueConstraint(
         "workspace_id", "connection_id", "backend", "feed_handle", name="source_feed_handle"
     ),
@@ -792,10 +789,8 @@ transcript_access = sa.Table(
 page = sa.Table(
     "page",
     metadata,
-    sa.Column("id", sa.Uuid, nullable=False),
     sa.Column("uid", sa.Uuid, nullable=False),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
-    sa.Column("source_id", sa.Uuid, nullable=False),
     sa.Column("source_uid", sa.Uuid, nullable=False),
     sa.Column("source_identity", sa.Text, nullable=True),
     sa.Column("digest", sa.Text, nullable=False),
@@ -811,7 +806,6 @@ page = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="page_subject"),
     sa.PrimaryKeyConstraint("workspace_id", "uid", name="page_pkey"),
-    sa.UniqueConstraint("workspace_id", "id", name="page_workspace_identity"),
     sa.ForeignKeyConstraint(
         ["workspace_id", "source_uid"],
         ["source.workspace_id", "source.uid"],
@@ -820,8 +814,6 @@ page = sa.Table(
     ),
     sa.Index("page_feed", "workspace_id", "revision", "uid"),
     sa.Index("page_source", "workspace_id", "source_uid"),
-    sa.Index("page_source_id", "source_id"),
-    sa.Index("page_id", "id"),
     sa.Index(
         "page_source_identity",
         "workspace_id",
