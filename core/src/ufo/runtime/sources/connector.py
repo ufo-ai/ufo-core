@@ -258,7 +258,11 @@ class PartitionWalk:
     the first page reaching it and dissolves to `high` as an exhausted walk does, so the partition
     moves to steady state rather than re-descending every run; it also rides down as
     `PartitionBound.since`, so a factory that can bound server-side never fetches what the walk
-    would discard. `ascending` and `none` ignore it — neither descends."""
+    would discard. An `ascending` walk takes it the other way round: it climbs, so the floor is
+    where a fresh partition starts, riding down as `PartitionBound.after` — the same road the stored
+    watermark takes, and a stored watermark replaces it, since a partition already synced has
+    climbed past its own floor. `none` ignores it: a stream with no cursor to filter on re-walks
+    whole, and a bound it cannot resume from would drop records it never lands again."""
 
     ordering: Ordering
     partitions: Partitions
@@ -376,14 +380,13 @@ class PartitionWalk:
             case str() as synced:
                 return PartitionBound(after=synced), synced, None, synced, False
             case _:
-                backfill = self.ordering is Ordering.newest_first
-                return (
-                    PartitionBound(since=self.floor if backfill else None),
-                    None,
-                    None,
-                    None,
-                    backfill,
-                )
+                match self.ordering:
+                    case Ordering.newest_first:
+                        return PartitionBound(since=self.floor), None, None, None, True
+                    case Ordering.ascending:
+                        return PartitionBound(after=self.floor), None, None, None, False
+                    case _:
+                        return PartitionBound(), None, None, None, False
 
     @staticmethod
     def _decode(cursor: str | None) -> dict[str, str | _Window]:

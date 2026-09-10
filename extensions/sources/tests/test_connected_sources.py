@@ -46,6 +46,7 @@ pytestmark = [
 ]
 
 ASANA = "asana"
+GITHUB = "github"
 FRESHDESK = "freshdesk"
 WINDOWED = "windowed"
 KEYED = "klaviyo"
@@ -600,6 +601,36 @@ async def test_the_connections_window_governs_every_stream_that_takes_one(
     assert declared["instant"][1] is not None
     assert asked["instant"][0] == RAISED_WINDOW_DAYS
     assert declared["undated"] == asked["undated"] == (None, None)
+
+
+async def test_github_reaches_back_as_far_as_each_of_its_streams_is_read(db: None) -> None:
+    """The shipped catalog's windows, asserted through the registrar rather than as declarations.
+    Each is how far back that collection is worth reading against what it costs to read: a repo's
+    Actions runs only from the day the account connects, its comments a week, its pull requests a
+    month, its issues a year. The streams left unpinned read their whole history — `repositories`
+    and `workflows` are small catalogs, and `commit_comments` and `releases` answer no time filter,
+    so a cutoff on either would be honoured by nothing."""
+    state = await _workspace()
+    await _connect_without_the_hook(state, GITHUB)
+
+    await _register(state)
+
+    pins = _pins(await _rows(state))
+    windows = {stream: pin[0] for stream, pin in pins.items()}
+    assert windows == {
+        "workflow_runs": 0,
+        "comments": 7,
+        "review_comments": 7,
+        "pull_requests": 30,
+        "issues": 365,
+        "commit_comments": None,
+        "releases": None,
+        "repositories": None,
+        "workflows": None,
+    }
+    assert set(windows) == _canonical(GITHUB)
+    assert all(pins[stream][1] is not None for stream, days in windows.items() if days is not None)
+    assert all(pins[stream][1] is None for stream, days in windows.items() if days is None)
 
 
 async def test_raising_the_connections_window_repins_its_rows_and_refetches(

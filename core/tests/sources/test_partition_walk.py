@@ -167,13 +167,32 @@ async def _check_a_floor_leaves_steady_state_alone() -> None:
     assert _landed(pages) == ["n3", "n2"]
 
 
-async def _check_a_floor_does_not_reach_an_ascending_walk() -> None:
-    """`ascending` climbs from a watermark and `none` re-walks whole; neither descends, so neither
-    can overshoot a floor and neither takes one."""
+async def _check_a_floor_starts_a_fresh_ascending_walk() -> None:
+    """An `ascending` walk climbs, so its floor is where a fresh partition starts rather than where
+    a descent stops: it rides down as `after`, the same bound the watermark takes, so an endpoint
+    that answers `?since` never sends the older history at all."""
     fake = _FakePartitions(Ordering.ascending, {"p": ["a1", "a2", "a3"]})
-    await _collect(fake, None, floor="a2")
-    assert fake.seen == [("p", PartitionBound(after=None))]
+    pages = await _collect(fake, None, floor="a2")
 
+    assert fake.seen == [("p", PartitionBound(after="a2"))]
+    assert _landed(pages) == ["a3"]
+
+
+async def _check_a_stored_watermark_replaces_an_ascending_floor() -> None:
+    """A partition that has synced has already climbed past its own floor, so its watermark is the
+    resume point. Sending the floor as well would re-assert a first-pass bound on an incremental
+    walk, and on a row whose floor is newer than its watermark it would skip the records between
+    them — landed once, then never again."""
+    fake = _FakePartitions(Ordering.ascending, {"p": ["a1", "a2", "a3"]})
+    pages = await _collect(fake, json.dumps({"p": "a1"}), floor="a2")
+
+    assert fake.seen == [("p", PartitionBound(after="a1"))]
+    assert _landed(pages) == ["a2", "a3"]
+
+
+async def _check_a_floor_does_not_reach_a_none_walk() -> None:
+    """`none` re-walks whole on every completed pass because it has no cursor to filter on. A bound
+    it cannot resume from would drop the records below it on every pass, never to land."""
     plain = _FakePartitions(Ordering.none, {"p": ["x", "y"]})
     await _collect(plain, None, floor="x")
     assert plain.seen == [("p", PartitionBound())]
@@ -539,6 +558,6 @@ async def test_capped_run_closes_the_nested_walk_factory(monkeypatch: pytest.Mon
 
 async def test_partition_walk_in_memory_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 17
+    assert len(checks) == 19
     for check in checks:
         await check()

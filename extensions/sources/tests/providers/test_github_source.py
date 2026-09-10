@@ -70,6 +70,10 @@ def _commit(sha: str, date: str) -> dict[str, object]:
     return {"sha": sha, "commit": {"committer": {"date": date}}}
 
 
+def _pull(number: int, updated_at: str) -> dict[str, object]:
+    return {"id": number, "title": f"pr {number}", "updated_at": updated_at}
+
+
 async def test_a_pinned_floor_bounds_commits_server_side() -> None:
     """`commits` is the one newest-first repo feed GitHub will bound for us: the row's pinned floor
     goes out as `?since`, so a repo with years of history never sends the older commits at all. It
@@ -155,6 +159,106 @@ async def test_a_pinned_floor_drops_events_below_it_client_side() -> None:
     result = await _fetch("events", handle, backfill_after=pinned)
 
     assert _refs(result) == {"events/acme/repo1/e-inside"}
+
+
+async def test_pull_requests_walk_the_order_they_checkpoint_on_and_stop_at_the_floor() -> None:
+    """The pull requests a member reads are the recent ones and the ones still moving, so the walk
+    descends `sort=updated&direction=desc` — the order its `updated_at` cursor is in, which GitHub's
+    default `created` order is not — and stops on the first page reaching the row's floor instead of
+    following the link header through every pull request the repo ever had.
+
+    Descending by `created` instead would checkpoint the newest pull request number against an
+    `updated_at` cursor — two different orders — which the steady-state pass below is the other half
+    of."""
+    pinned = datetime(2026, 8, 9, tzinfo=UTC)
+    queries: list[dict[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/pulls":
+            queries.append(dict(request.url.params))
+            return httpx.Response(
+                200,
+                json=[_pull(2, "2026-09-01T00:00:00Z"), _pull(1, "2026-01-01T00:00:00Z")],
+                headers={
+                    "Link": '<https://api.github.com/repos/acme/repo1/pulls?page=2>; rel="next"'
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    first = await _fetch("pull_requests", handle, backfill_after=pinned)
+
+    assert len(queries) == 1
+    assert queries[0]["sort"] == "updated"
+    assert queries[0]["direction"] == "desc"
+    assert queries[0]["state"] == "all"
+    assert _refs(first) == {"pull_requests/acme/repo1/2"}
+    assert json.loads(first.next_cursor) == {"acme/repo1": "2026-09-01T00:00:00Z"}
+
+
+async def test_a_pull_request_updated_since_the_watermark_lands_again() -> None:
+    """What a reviewer's trigger rests on: a pull request pushed to after the last pass reappears at
+    the head of an `updated`-descending walk and lands, waking the conversation that watches the
+    feed. The pass still stops at the first page below the watermark, so re-landing the moved rows
+    costs one page and not the repo."""
+    queries: list[dict[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/pulls":
+            queries.append(dict(request.url.params))
+            if request.url.params.get("page"):
+                return httpx.Response(200, json=[_pull(2, "2026-08-01T00:00:00Z")])
+            return httpx.Response(
+                200,
+                json=[_pull(1, "2026-09-02T00:00:00Z")],
+                headers={
+                    "Link": '<https://api.github.com/repos/acme/repo1/pulls?page=2>; rel="next"'
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch(
+        "pull_requests", handle, cursor=json.dumps({"acme/repo1": "2026-09-01T00:00:00Z"})
+    )
+
+    assert _refs(result) == {"pull_requests/acme/repo1/1"}
+    assert json.loads(result.next_cursor) == {"acme/repo1": "2026-09-02T00:00:00Z"}
+    assert len(queries) == 2
+
+
+async def test_review_comments_climb_from_the_floor_on_a_first_pass() -> None:
+    """`/pulls/comments` answers `?since`, so a floor on this stream is a bound the API keeps: a
+    first pass climbs from it and the older comments are never fetched. The window is the row's
+    only cutoff — the walk itself climbs and cannot overshoot one."""
+    pinned = datetime(2026, 9, 1, tzinfo=UTC)
+    queries: list[dict[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/pulls/comments":
+            queries.append(dict(request.url.params))
+            return httpx.Response(
+                200, json=[{"id": 9, "body": "nit", "updated_at": "2026-09-06T00:00:00Z"}]
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("review_comments", handle, backfill_after=pinned)
+
+    assert queries[0]["since"] == "2026-09-01T00:00:00Z"
+    assert queries[0]["sort"] == "updated"
+    assert queries[0]["direction"] == "asc"
+    assert _refs(result) == {"review_comments/acme/repo1/9"}
+    assert json.loads(result.next_cursor) == {"acme/repo1": "2026-09-06T00:00:00Z"}
 
 
 async def test_repositories_fan_out_over_granted_orgs_and_advance_a_watermark() -> None:

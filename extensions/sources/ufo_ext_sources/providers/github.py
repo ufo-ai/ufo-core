@@ -19,22 +19,27 @@ is addressed by, so the record's own `sha`/`name`/`id` reads composite in the bo
 own `number`, `login`, `commit.sha` and `url` carry the unscoped values. Each repo is a partition of
 the SDK's `PartitionWalk`, which owns the
 cursor map and resume state; this connector only enumerates repos and produces one repo's bounded
-pages per stream `Ordering`. `issues`/`comments` are `ascending` — a
-`sort=updated&direction=asc&since` walk whose running watermark is a sound resume point.
-`commits`/`events`/`issue_events` are `newest_first` append-only feeds: a first backfill walks the
+pages per stream `Ordering`. `issues`/`comments`/`review_comments` are `ascending` — a
+`sort=updated&direction=asc&since` walk whose running watermark is a sound resume point, and whose
+first pass starts at the row's floor, the one bound these three endpoints take server-side.
+`commits`/`events`/`issue_events`/`pull_requests` are `newest_first`: a first backfill walks the
 repo newest-first as a descending `{high, until}` window (`commits` bounds it server-side with
-`?until`, `events`/`issue_events` client-side since their API takes no time filter), so a capped
+`?until`, the other three client-side since their API takes no time filter), so a capped
 run resumes downward without the position drift that
 would lose records prepended between slices; steady-state stops early once a page sits strictly
 below the repo watermark (a tying page re-yields, so a tied-but-new record lands and the repeats
-dedup downstream). Every other repo-scoped stream is `none` — checkpointed at the repo boundary
-only. `workflow_runs` is the one of those that carries a floor: Actions runs outnumber every other
-collection a busy repo publishes, so the stream declares a zero-day backfill window and each repo
-slice sends the pinned floor as the Actions API's `created=>=` range. A `none` stream re-walks
-whole every pass, so that bound governs every pass, not just the first. GitHub surfaces no delete
-signal, so the sync runner's row-level cursor skips already-seen rows. A grant that can't
-enumerate orgs at all (`/user/orgs` refused with a 403) can read no stream, so the walk raises
-`StreamSkipped` and the run records a skip, not a failure. The write path is
+dedup downstream). Three of the four are append-only feeds, where newest-first is the order the rows
+arrive in. `pull_requests` is not: it is asked for `sort=updated&direction=desc`, so a pull request
+edited today reappears at the head of the walk and lands again, which is what a stream whose page
+changes wake a reviewer owes its readers. Every other repo-scoped stream is `none` — checkpointed at
+the repo boundary only, and re-walked whole on every completed pass. `workflow_runs` is the one of
+those that carries a floor: Actions runs outnumber every other collection a busy repo publishes, so
+the stream declares a zero-day backfill window and each repo slice sends the pinned floor as the
+Actions API's `created=>=` range. A `none` stream re-walks whole every pass, so that bound governs
+every pass, not just the first. GitHub surfaces no delete signal, so the sync runner's row-level
+cursor skips already-seen rows. A grant that can't enumerate orgs at all (`/user/orgs` refused with
+a 403) can read no stream, so the walk raises `StreamSkipped` and the run records a skip, not a
+failure. The write path is
 intentionally absent — the source seam only reads."""
 
 import asyncio
@@ -65,6 +70,8 @@ from ufo.sdk.sources import (
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
+COMMENT_BACKFILL_WINDOW_DAYS = 7
+ISSUE_BACKFILL_WINDOW_DAYS = 365
 REPO_PARTITION_FIELD = "repo_full_name"
 ORG_PARTITION_FIELD = "org_login"
 _REPO_LIST_PARAMS = {"per_page": PAGE_SIZE, "type": "all", "sort": "pushed", "direction": "desc"}
@@ -74,6 +81,7 @@ _GITHUB_API_VERSION = "2022-11-28"
 _STATE_ALL_STREAMS = frozenset({"issues", "pull_requests"})
 _UNTIL_STREAMS = frozenset({"commits"})
 _CREATED_FLOOR_STREAMS = frozenset({"workflow_runs"})
+_UPDATED_DESC_STREAMS = frozenset({"pull_requests"})
 WORKFLOW_RUNS_BACKFILL_WINDOW_DAYS = 0
 _REPO_SKIP_STATUS = frozenset({404, 409, 410})
 _ORG_SKIP_STATUS = frozenset({403, 404, 410})
@@ -117,9 +125,21 @@ def _stream(
 
 ALL_STREAMS: list[StreamSpec] = [
     _stream("repositories", cursor_field="updated_at", canonical=True),
-    _stream("issues", cursor_field="updated_at", ordering=Ordering.ascending, canonical=True),
+    _stream(
+        "issues",
+        cursor_field="updated_at",
+        ordering=Ordering.ascending,
+        backfill_window_days=ISSUE_BACKFILL_WINDOW_DAYS,
+        canonical=True,
+    ),
     _stream("issue_milestones", cursor_field="updated_at"),
-    _stream("comments", cursor_field="updated_at", ordering=Ordering.ascending, canonical=True),
+    _stream(
+        "comments",
+        cursor_field="updated_at",
+        ordering=Ordering.ascending,
+        backfill_window_days=COMMENT_BACKFILL_WINDOW_DAYS,
+        canonical=True,
+    ),
     _stream("users", cursor_field=None),
     _stream("assignees", cursor_field=None),
     _stream("branches", primary_key="name", cursor_field=None),
@@ -150,9 +170,21 @@ ALL_STREAMS: list[StreamSpec] = [
     _stream("issue_labels", cursor_field=None),
     _stream("organizations", cursor_field=None),
     _stream("projects", cursor_field="updated_at"),
-    _stream("pull_requests", cursor_field="updated_at", canonical=True),
+    _stream(
+        "pull_requests",
+        cursor_field="updated_at",
+        ordering=Ordering.newest_first,
+        backfill_window_days=REPO_BACKFILL_WINDOW_DAYS,
+        canonical=True,
+    ),
     _stream("releases", cursor_field="created_at", canonical=True),
-    _stream("review_comments", cursor_field="updated_at", canonical=True),
+    _stream(
+        "review_comments",
+        cursor_field="updated_at",
+        ordering=Ordering.ascending,
+        backfill_window_days=COMMENT_BACKFILL_WINDOW_DAYS,
+        canonical=True,
+    ),
     _stream("stargazers", cursor_field="starred_at", created_at_field="starred_at"),
     _stream("tags", primary_key="name", cursor_field=None),
     _stream("teams", cursor_field=None),
@@ -402,16 +434,22 @@ class GitHubConnector(RestConnector):
     ) -> AsyncIterator[WalkPage]:
         """One repo's bounded page slice for `PartitionWalk`, applying the resume `bound` in
         GitHub's own terms: an ascending `?since` walk sends `sort=updated&direction=asc&since`;
-        `commits` bounds a newest-first backfill server-side with `?until`; `events`/`issue_events`
-        expose no time filter, so a backfill is bounded client-side by dropping records at or above
-        `before`. Each page reports its cursor-value span so the walk tracks the watermark/window
-        and leaves stamped with its repo, which qualifies every record's page ref; a repo the grant
-        can't read (404/409/410) drops out without failing the run.
+        `commits` bounds a newest-first backfill server-side with `?until`;
+        `events`/`issue_events`/`pull_requests` expose no time filter, so a backfill is bounded
+        client-side by dropping records at or above `before`. `pull_requests` is asked for
+        `sort=updated&direction=desc` besides, because its cursor is `updated_at` and a newest-first
+        walk is only sound where the listing order is the cursor's — GitHub's default for that path
+        is `created`, which would checkpoint one field against another's order. Each page reports
+        its cursor-value span so the walk tracks the watermark/window and leaves stamped with its
+        repo, which qualifies every record's page ref; a repo the grant can't read (404/409/410)
+        drops out without failing the run.
 
-        The pinned floor arrives as `bound.since` and takes the same two roads: `commits` sends
-        `?since`, so the older history is never fetched; `events`/`issue_events` filter it
-        client-side, which caps what lands but not what is fetched, their API having no time filter.
-        Both compare as the ISO strings GitHub returns.
+        The pinned floor arrives as `bound.since` on a descending walk and as `bound.after` on a
+        climbing one, and takes the same two roads: `commits` and the three ascending streams send
+        it as `?since`, so the older history is never fetched;
+        `events`/`issue_events`/`pull_requests` filter it client-side, which caps what lands but not
+        what is fetched, their API having no time filter. All compare as the ISO strings GitHub
+        returns.
 
         `workflow_runs` is ordered `none`, so `PartitionWalk` hands it no bound at all and its floor
         arrives as `floor` instead — sent as the Actions API's `created=>=` range, which bounds the
@@ -432,6 +470,8 @@ class GitHubConnector(RestConnector):
                 params["since"] = bound.since
         elif stream.name in _CREATED_FLOOR_STREAMS and floor:
             params["created"] = f">={floor}"
+        elif stream.name in _UPDATED_DESC_STREAMS:
+            params |= {"sort": "updated", "direction": "desc"}
         try:
             async for page in self._paginate_link_header(
                 client, scoped, params=dict(params), record_path=_RECORD_PATHS.get(stream.name)
