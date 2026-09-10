@@ -44,6 +44,7 @@ dependencies = [
     "grpcio>=1.74",
     "protobuf>=6.31.1",
     "segno>=1.6",
+    "emoji>=2.15",
 ]
 
 [project.scripts]

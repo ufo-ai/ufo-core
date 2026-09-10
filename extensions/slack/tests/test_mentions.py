@@ -118,6 +118,34 @@ def test_no_emphasis_is_written_where_slack_draws_none() -> None:
     assert as_markdown(said) == "`a *b* c` and ```\n*d*\n``` and https://x.test/*e* but **f**"
 
 
+def test_an_emoji_shortcode_reads_as_the_character_slack_drew() -> None:
+    """Slack draws the face from the shortcode, so a bubble carrying the colons states words the
+    member never saw. A shortcode inside otherwise-formatted words is rewritten with them."""
+    assert as_markdown("ship it :smile:") == "ship it \U0001f604"
+    assert as_markdown("*:tada: ship* by ~friday~") == "**\U0001f389 ship** by ~~friday~~"
+    assert as_markdown(":man-shrugging: hm") == "\U0001f937\u200d\u2642\ufe0f hm"
+
+
+def test_a_skin_tone_tones_the_face_it_follows() -> None:
+    """Slack sends the tone as a shortcode of its own beside the emoji. The modifier belongs after
+    the face, ahead of any sign joined to it."""
+    assert as_markdown(":wave::skin-tone-4:") == "\U0001f44b\U0001f3fd"
+    assert as_markdown(":man-shrugging::skin-tone-2:") == "\U0001f937\U0001f3fb\u200d\u2642\ufe0f"
+
+
+def test_colons_that_name_no_emoji_stay_the_characters_they_are() -> None:
+    """A workspace's own custom emoji is in no table, and a clock is not a shortcode at all."""
+    for said in (":shipit-parrot:", "meet at 10:30:45", "a : b : c"):
+        assert as_markdown(said) == said
+
+
+def test_a_shortcode_in_code_stays_the_code_the_member_wrote() -> None:
+    """Slack draws no emoji inside backticks or inside an address, so the colons are characters of
+    the code and of the URL."""
+    said = "`:smile:` and ```\n:tada:\n``` and https://x.test/:wave:"
+    assert as_markdown(said) == said
+
+
 def test_a_lone_star_is_the_character_the_member_typed() -> None:
     """An unpaired star, a star against a space, and a multiplication sign are not emphasis."""
     for said in ("2 * 3 * 4", "a * b", "*", "star * alone *", "path/*.py"):

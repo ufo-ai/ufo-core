@@ -5486,6 +5486,23 @@ def test_a_slack_members_bubble_states_their_words_as_markdown() -> None:
     }
 
 
+def test_a_slack_members_bubble_draws_the_emoji_their_shortcode_named() -> None:
+    """Slack drew the face and the wire carries `:smile:`, so the bubble states the character. A
+    shortcode inside a code span stays the characters of the code."""
+    turn_id = uuid4()
+    marker = mint_marker()
+    fenced = fence_member_message(marker, "", "ship it :smile: not `:tada:`", "")
+    spoken = (
+        Message(role="user", content=f"<context>\nmessage_ref: {turn_id}\n</context>\n{fenced}"),
+        Message(role="assistant", content="shipped"),
+    )
+    assert _rendered_messages(spoken, turn_ids=frozenset({str(turn_id)}), slack=True)[0] == {
+        "role": "user",
+        "text": "ship it \U0001f604 not `:tada:`",
+        "markdown": True,
+    }
+
+
 def test_a_portal_comment_on_a_slack_conversation_stays_the_characters_typed() -> None:
     """A member comments from the portal into a Slack conversation shared with them, and admission
     stores those words with no surface fence around them. Slack rendered nothing, so the bubble

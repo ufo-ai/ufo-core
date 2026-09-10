@@ -31,11 +31,15 @@ safe for the words of the member whose own turn this is.
 
 `as_markdown` is what a reader outside Slack draws the same message with. Slack renders its own
 emphasis markup, so the member who wrote `*ship it*` saw bold and typed no markdown; a portal
-bubble states their words as markdown, and this is the rewrite that makes the two agree."""
+bubble states their words as markdown, and this is the rewrite that makes the two agree. Slack
+draws an emoji from the shortcode the wire carries too, so `:smile:` is a face there and a run of
+colons everywhere else, and the same rewrite states the character the member saw."""
 
 import itertools
 import re
 from collections.abc import Mapping
+
+import emoji
 
 SLACK_ENTITY = re.compile(
     r"<(?:(?P<kind>[@#!])(?P<id>[^<>|]*)|(?P<url>[a-z][a-z0-9+.\-]*:[^<>|]*))"
@@ -70,6 +74,9 @@ this work is about, in the other direction — and an `@` inside a URL is part o
 
 MRKDWN_BOLD = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]*[^\s*])\*(?![\w*])")
 MRKDWN_STRIKE = re.compile(r"(?<![\w~])~(?=\S)([^~\n]*[^\s~])~(?![\w~])")
+MRKDWN_EMOJI = re.compile(r":([a-z0-9_+'\-]+):(?::skin-tone-(?P<tone>[2-6]):)?")
+SKIN_TONES = ("\U0001f3fb", "\U0001f3fc", "\U0001f3fd", "\U0001f3fe", "\U0001f3ff")
+"""The five modifiers Slack spells `:skin-tone-2:` through `:skin-tone-6:`, in that order."""
 
 
 def as_markdown(text: str) -> str:
@@ -80,18 +87,42 @@ def as_markdown(text: str) -> str:
     drawn from a Slack message states the emphasis the member saw when they sent it. Everything
     else Slack spells the way markdown does — a quote, a bullet, an inline code span, a fence — and
     crosses untouched, and no emphasis is written inside a span `MENTION_SKIP` names, where Slack
-    renders none either."""
+    renders none either.
+
+    A shortcode is the other markup the member never typed: Slack drew `:smile:` as the face, so
+    the bubble carries the character. A name no table knows — a workspace's own custom emoji — and
+    a name inside a span `MENTION_SKIP` names stay the colons a reader sees in Slack."""
     written: list[str] = []
     read = 0
     for skipped in MENTION_SKIP.finditer(text):
-        written.extend((_emphasis(text[read : skipped.start()]), skipped.group(0)))
+        written.extend((_rendered(text[read : skipped.start()]), skipped.group(0)))
         read = skipped.end()
-    written.append(_emphasis(text[read:]))
+    written.append(_rendered(text[read:]))
     return "".join(written)
 
 
-def _emphasis(text: str) -> str:
-    return MRKDWN_STRIKE.sub(r"~~\1~~", MRKDWN_BOLD.sub(r"**\1**", text))
+def _rendered(text: str) -> str:
+    return MRKDWN_EMOJI.sub(
+        _emoji_character, MRKDWN_STRIKE.sub(r"~~\1~~", MRKDWN_BOLD.sub(r"**\1**", text))
+    )
+
+
+def _emoji_character(match: re.Match[str]) -> str:
+    name = match.group(1)
+    for spelled in (name, name.replace("-", "_")):
+        character = emoji.emojize(f":{spelled}:", language="alias")
+        if character != f":{spelled}:":
+            return _toned(character, match.group("tone"))
+    return match.group(0)
+
+
+def _toned(character: str, tone: str | None) -> str:
+    if tone is None:
+        return character
+    # A modifier tones the face it follows, so a joined sequence takes it after the first code
+    # point, in place of the variation selector standing there.
+    rest = character[1:].removeprefix("\ufe0f")
+    return f"{character[0]}{SKIN_TONES[int(tone) - 2]}{rest}"
 
 
 def mentioned_users(text: str) -> frozenset[str]:
