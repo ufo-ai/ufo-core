@@ -92,6 +92,7 @@ function arrive(next: Route, before: Route | null): Route {
 }
 
 let held: Route | null = null;
+let travelled = 0;
 const listeners = new Set<() => void>();
 
 export function heldRoute(): Route {
@@ -99,8 +100,9 @@ export function heldRoute(): Route {
   return held;
 }
 
-function publish(route: Route): void {
+function publish(route: Route, step: PlaceStep = "push"): void {
   held = route;
+  if (step !== "replace") travelled += 1;
   for (const listener of listeners) listener();
 }
 
@@ -111,6 +113,18 @@ export function useRoute(): Route {
   }, heldRoute);
 }
 
+const travelCount = () => travelled;
+
+/** How many times the member has moved: a push, a back, or an address they typed. A `replace`
+ *  writes where the page already stands, so it is not a move — a surface that answers travel reads
+ *  this rather than the route, whose identity every replacement changes. */
+export function useTravel(): number {
+  return useSyncExternalStore((listener) => {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }, travelCount);
+}
+
 export function navigate(hash: string, step: PlaceStep = "push"): void {
   if (step === "back") {
     history.back();
@@ -118,7 +132,7 @@ export function navigate(hash: string, step: PlaceStep = "push"): void {
   }
   if (step === "replace") history.replaceState(null, "", hash);
   else if (location.hash !== hash) location.hash = hash;
-  publish(arrive(parseHash(hash), heldRoute()));
+  publish(arrive(parseHash(hash), heldRoute()), step);
 }
 
 const readAddress = () => publish(arrive(parseHash(location.hash), heldRoute()));
@@ -229,4 +243,5 @@ export function placeFirstRun(step: string | undefined): void {
 
 export function resetRouter(): void {
   held = null;
+  travelled = 0;
 }

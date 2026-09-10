@@ -8,6 +8,7 @@ import { PaneFault } from "@/kernel/pane";
 import { Loading } from "@/kernel/panel";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { agentHash } from "@/lib/route";
+import { openAgent, placeHome } from "@/lib/router";
 import { agentCrumb } from "@/lib/title";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 
@@ -894,6 +895,19 @@ test("a member who is not an admin is offered no administration control", async 
   const foot = within(await openWorkspaceColumn());
   expect(foot.getByRole("button", { name: "Theme" })).toBeTruthy();
   expect(foot.queryByRole("button", { name: "Administration" })).toBeNull();
+});
+
+test("the drawer rides the address the home screen replaces, and shuts when the member moves", async () => {
+  atPhoneWidth();
+  wire({ "/transcript": () => json({ messages: [] }) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await openWorkspaceColumn();
+
+  act(() => placeHome({ opens: [AGENT_ID] }, "replace"));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+
+  act(() => openAgent(AGENT_ID));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
 test("an app opens on the conversation that moved last, and an address names another", async () => {

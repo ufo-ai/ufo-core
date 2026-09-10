@@ -118,6 +118,7 @@ import {
   placeWorkspace,
   startRouter,
   useRoute,
+  useTravel,
 } from "@/lib/router";
 import {
   COMPOSE,
@@ -195,6 +196,7 @@ export function App({
   onAgents,
 }: AppProps) {
   const route = useRoute();
+  const travel = useTravel();
   const rail = useRail();
   const [menu, setMenu] = useState(false);
   const shutMenu = useCallback(() => setMenu(false), []);
@@ -209,7 +211,9 @@ export function App({
 
   useProvisioned(agents, onAgents);
 
-  useEffect(() => setMenu(false), [route]);
+  /** Not `[route]`: the home screen replaces the address on its first commit to record its opened
+   *  lanes, which shut a drawer the member had opened in those same frames. */
+  useEffect(() => setMenu(false), [travel]);
 
   /** A drawer left open while the window grows past the breakpoint would trap focus behind a hamburger
    *  the layout no longer draws. */
