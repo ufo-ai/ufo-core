@@ -782,6 +782,10 @@ function RemoveConnection({
 }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
+  const streams = usePanelRead<SourcesPayload>("/workspace/sources");
+  const synced =
+    streams.phase === "ready" &&
+    streams.payload.sources.some((one) => one.connection_id === entry.id);
 
   async function remove() {
     if (busy) return;
@@ -805,6 +809,11 @@ function RemoveConnection({
           Every other connected account stays as it is, and you can connect this one again later.
         </DialogDescription>
       </DialogHeader>
+      {synced ? (
+        <Notice tone="attention">
+          Removing this account deletes its streams and everything they synced.
+        </Notice>
+      ) : null}
       <OutcomeNotice state={notice} />
       <DialogFooter>
         <Button variant="send" size="bar" busy={busy} onClick={remove}>

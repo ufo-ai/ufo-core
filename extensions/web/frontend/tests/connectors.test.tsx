@@ -114,6 +114,7 @@ function library(routes: Record<string, (url: string, init?: RequestInit) => Res
     "/workspace/first-run": () => json(CATALOG),
     "/connections": () => json({ connections: [] }),
     "/github/coverage": () => json(COVERAGE),
+    "/workspace/sources": () => json({ sources: [] }),
     "/transcript": () => json({ messages: [] }),
     ...routes,
   });
@@ -922,6 +923,7 @@ const SLACK_LINK = "https://slack.com/oauth/v2/authorize?state=sealed";
 const POOLED_NOTION = {
   connections: [
     {
+      id: "c-g1",
       provider: "notion",
       account_id: "acct-1",
       account_label: "Notion team",
@@ -972,6 +974,49 @@ test("a connected row removes that one account behind a confirmation naming it",
 
   await waitFor(() => expect(screen.queryByLabelText("Notion connected")).toBeNull());
   expect(screen.getByLabelText("Gmail connected")).toBeTruthy();
+});
+
+test("the confirmation warns what a synced account's removal deletes", async () => {
+  location.hash = sectionHash("connectors");
+  library({
+    "/connections": () => json(POOLED_PAIR),
+    "/workspace/sources": () =>
+      json({
+        sources: [
+          stream("c-g1", "notion", "pages"),
+          stream("c-g1", "notion", "databases"),
+          stream("c-g2", "gmail", "messages"),
+        ],
+      }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  await userEvent.click(removes("Notion"));
+
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByText(/Notion account Notion team/)).toBeTruthy();
+  expect(
+    await within(dialog).findByText(
+      /Removing this account deletes its streams and everything they synced\./,
+    ),
+  ).toBeTruthy();
+});
+
+test("an account no stream syncs is removed without a deletion warning", async () => {
+  location.hash = sectionHash("connectors");
+  library({
+    "/connections": () => json(POOLED_PAIR),
+    "/workspace/sources": () => json({ sources: [stream("c-g2", "gmail", "messages")] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Notion connected");
+  await userEvent.click(removes("Notion"));
+
+  const dialog = await screen.findByRole("dialog");
+  await within(dialog).findByText(/Notion account Notion team/);
+  expect(within(dialog).queryByText(/deletes its streams/)).toBeNull();
 });
 
 test("the confirmation cancels and nothing is disconnected", async () => {
