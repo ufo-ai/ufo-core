@@ -220,7 +220,12 @@ export const CHAT_APP = {
   app: "chat",
 };
 
-export const MEMBER = { id: "m1", email: "member@example.com", admin: false, workspace_id: WORKSPACE_ID };
+export const MEMBER = {
+  id: "m1",
+  email: "member@example.com",
+  admin: false,
+  workspace_id: WORKSPACE_ID,
+};
 
 export const SETTINGS = {
   agent: {

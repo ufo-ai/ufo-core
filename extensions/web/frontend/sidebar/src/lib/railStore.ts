@@ -9,14 +9,12 @@ import {
   heldPinned,
   heldRailShown,
   heldRailShut,
-  heldRailSort,
   heldSectionsShut,
   heldSidebar,
   holdAppsExpanded,
   holdPinned,
   holdRailShown,
   holdRailShut,
-  holdRailSort,
   holdSectionsShut,
   holdSidebar,
   chatRows,
@@ -25,7 +23,6 @@ import {
   type ChatsPayload,
   type ConversationsPayload,
   type RailShown,
-  type RailSort,
 } from "@/lib/rail";
 import type { OwnedConversation } from "@/lib/types";
 
@@ -42,7 +39,6 @@ export type RailState = {
   sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, OwnedConversation>>;
   fault: ToastState | null;
-  sort: RailSort;
   shown: RailShown;
   shut: string[] | null;
   collapsed: boolean;
@@ -58,7 +54,6 @@ function fresh(): RailState {
     sought: {},
     linked: {},
     fault: null,
-    sort: heldRailSort(),
     shown: heldRailShown(),
     shut: heldRailShut(),
     collapsed: heldSidebar(),
@@ -173,11 +168,6 @@ export function railActivity(conversationId: string): void {
 
 export function quietRail(): void {
   update((held) => ({ ...held, fault: null }));
-}
-
-export function pickRailSort(sort: RailSort): void {
-  holdRailSort(sort);
-  update((held) => ({ ...held, sort }));
 }
 
 export function pickRailShown(shown: RailShown): void {

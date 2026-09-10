@@ -172,10 +172,8 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Chats",
     "Chats options",
     "Connectors",
-    "Workspace",
     "Channels",
-    "Theme",
-    "Sign out",
+    MEMBER.email,
   ]);
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
 });
@@ -219,7 +217,7 @@ test("the apps section yields its height rather than pushing the sidebar's foot 
   expect(scroller.className).toContain("overflow-y-auto");
   expect(scroller.className).toContain("max-h-(--size-apps-open)");
 
-  expect(within(sidebar).getByRole("button", { name: "Workspace" })).toBeTruthy();
+  expect(within(sidebar).getByRole("button", { name: MEMBER.email })).toBeTruthy();
 });
 
 test("the shell opens with the sidebar open, and a sidebar the member folded stays folded", async () => {
@@ -295,14 +293,31 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Chats",
     "Chats options",
     "Connectors",
-    "Workspace",
     "Channels",
-    "Theme",
-    "Sign out",
+    MEMBER.email,
   ]);
 });
 
-test("the sidebar's foot states who is signed in and offers the way back out", async () => {
+test("the account menu inside the menu drawer is drawn in the drawer, acts and flyout alike", async () => {
+  atPhoneWidth();
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+  const drawer = await screen.findByRole("dialog");
+  const sidebar = within(drawer).getByRole("navigation", { name: "Workspace" });
+
+  await userEvent.click(within(sidebar).getByRole("button", { name: MEMBER.email }));
+  const acts = await screen.findByRole("menu");
+  expect(drawer.contains(acts)).toBe(true);
+  expect(within(acts).getByRole("menuitem", { name: "Settings" })).toBeTruthy();
+  expect(within(acts).getByRole("menuitem", { name: "Sign out" })).toBeTruthy();
+
+  await userEvent.click(within(acts).getByRole("menuitem", { name: "Theme" }));
+  expect(drawer.contains(await screen.findByRole("menuitemradio", { name: "System" }))).toBe(true);
+});
+
+test("the sidebar's foot states who is signed in and holds the account's acts in one menu", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -310,17 +325,19 @@ test("the sidebar's foot states who is signed in and offers the way back out", a
   const foot = sidebar.querySelector("footer")!;
   expect(foot.querySelector("[data-slot=avatar-fallback]")!.textContent).toBe("M");
   expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
-  expect(within(foot).getByText("Member")).toBeTruthy();
 
-  const went: string[] = [];
-  vi.stubGlobal("location", { ...window.location, assign: (to: string) => went.push(to) });
-  await userEvent.click(within(foot).getByRole("button", { name: "Sign out" }));
-  expect(went).toEqual([SIGN_OUT_PATH]);
+  await userEvent.click(within(foot).getByRole("button", { name: MEMBER.email }));
+  expect(await screen.findByRole("menuitem", { name: "Settings" })).toBeTruthy();
 
-  await userEvent.click(within(foot).getByRole("button", { name: "Theme" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "Theme" }));
   expect(await screen.findByRole("menuitemradio", { name: "System" })).toBeTruthy();
   expect(screen.getByRole("menuitemradio", { name: "Light" })).toBeTruthy();
   expect(screen.getByRole("menuitemradio", { name: "Dark" })).toBeTruthy();
+
+  const went: string[] = [];
+  vi.stubGlobal("location", { ...window.location, assign: (to: string) => went.push(to) });
+  await userEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
+  expect(went).toEqual([SIGN_OUT_PATH]);
 });
 
 test("a boot whose body is not json states the network fault, not a 200 error", async () => {

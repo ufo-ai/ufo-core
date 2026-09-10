@@ -1,4 +1,3 @@
-import { agentName } from "@/lib/agentName";
 import { IMESSAGE_SURFACE, SLACK_SURFACE, UFO_SURFACE } from "@/lib/audience";
 import type { Agent, OwnedConversation } from "@/lib/types";
 
@@ -45,31 +44,6 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
 }
 
 export type RailGroup = { label: string | null; rows: ChatRow[] };
-
-export type RailSort = "recency" | "agent";
-
-const HELD_SORT = "rail-sort";
-
-export function heldRailSort(): RailSort {
-  return localStorage.getItem(HELD_SORT) === "agent" ? "agent" : "recency";
-}
-
-export function holdRailSort(sort: RailSort): void {
-  localStorage.setItem(HELD_SORT, sort);
-}
-
-/** Rows bucket under the name as stored — that name is the agent's identity, and two agents whose
- *  names differ only in case are two agents. */
-function groupChatsByAgent(rows: ChatRow[]): RailGroup[] {
-  const buckets = new Map<string, ChatRow[]>();
-  for (const row of rows) {
-    buckets.set(row.agent_name, (buckets.get(row.agent_name) ?? []).concat(row));
-  }
-  return [...buckets.entries()].map(([name, grouped]) => ({
-    label: agentName(name),
-    rows: grouped,
-  }));
-}
 
 export type RailShown = { terminal: boolean; slack: boolean; imessage: boolean };
 
@@ -205,13 +179,36 @@ function admits(row: ChatRow, shown: RailShown): boolean {
 
 const OTHER_MEMBERS = "Other members";
 
-export function railGroups(rows: ChatRow[], sort: RailSort, shown: RailShown): RailGroup[] {
+/** The rail stands in one order, newest first: a chat is found by when it last moved. */
+export function railGroups(rows: ChatRow[], shown: RailShown): RailGroup[] {
   const admitted = rows.filter((row) => admits(row, shown));
   const own = admitted.filter((row) => row.mine);
   const theirs = admitted.filter((row) => !row.mine);
-  const grouped =
-    sort === "agent" ? groupChatsByAgent(own) : own.length ? [{ label: null, rows: own }] : [];
+  const grouped: RailGroup[] = own.length ? [{ label: null, rows: own }] : [];
   return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
+}
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+const WEEK_MS = 604_800_000;
+const YEAR_MS = 31_536_000_000;
+
+/** The rail's own stamp, narrower than the `Moment` the rest of the portal draws: the sidebar's
+ *  width belongs to the titles, so a row spends one number and one letter on the age of its chat.
+ *  The whole moment is still the row's to state, and the `time` it sits in carries it. A stamp
+ *  ahead of now — a clock that disagrees with the server's — reads as `now` rather than as a
+ *  negative age. */
+export function railStamp(raw: string, now: Date): string {
+  const at = new Date(raw).getTime();
+  if (Number.isNaN(at)) return "";
+  const span = Math.max(0, now.getTime() - at);
+  if (span < MINUTE_MS) return "now";
+  if (span < HOUR_MS) return Math.floor(span / MINUTE_MS) + "m";
+  if (span < DAY_MS) return Math.floor(span / HOUR_MS) + "h";
+  if (span < WEEK_MS) return Math.floor(span / DAY_MS) + "d";
+  if (span < YEAR_MS) return Math.floor(span / WEEK_MS) + "w";
+  return Math.floor(span / YEAR_MS) + "y";
 }
 
 export function stampIso(at: Date): string {

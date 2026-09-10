@@ -114,13 +114,20 @@ export function DropdownMenuSubTrigger({
   );
 }
 
+/** `container` is where the flyout is drawn, and it takes the same element as the menu it opens
+ *  from: a flyout left at the document's end while its menu stands inside a drawer is out of the
+ *  member's reach, the way the menu itself would be. */
 export function DropdownMenuSubContent({
   className,
   sideOffset = 4,
+  container,
   ...props
-}: ComponentProps<typeof DropdownMenuPrimitive.SubContent> & { dir?: "ltr" | "rtl" }) {
+}: ComponentProps<typeof DropdownMenuPrimitive.SubContent> & {
+  container?: HTMLElement | null;
+  dir?: "ltr" | "rtl";
+}) {
   return (
-    <DropdownMenuPrimitive.Portal>
+    <DropdownMenuPrimitive.Portal container={container}>
       <DropdownMenuPrimitive.SubContent
         data-slot="dropdown-menu-sub-content"
         sideOffset={sideOffset}

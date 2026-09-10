@@ -7,13 +7,14 @@ import {
   IconFilter2,
   IconChevronRight,
   IconDeviceDesktop,
+  IconDotsVertical,
   IconLayoutSidebarRight,
   IconLogout,
   IconMenu2,
   IconMoon,
   IconPlug,
+  IconSettings,
   IconSun,
-  IconUsers,
   IconX,
 } from "@tabler/icons-react";
 
@@ -59,6 +60,7 @@ import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
 import { Loading, usePanelRead } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
+import { fullMoment } from "@/lib/moments";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
 import { SETUP, pageCrumb, pageTitle } from "@/lib/title";
@@ -70,12 +72,20 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { RAIL_SHOWN_OPTIONS, railGroups, railShut, stampIso, type RailGroup } from "@/lib/rail";
+import {
+  RAIL_SHOWN_OPTIONS,
+  railGroups,
+  railShut,
+  railStamp,
+  stampIso,
+  type RailGroup,
+} from "@/lib/rail";
 import {
   foldSidebar,
   pickAppsExpanded,
@@ -83,7 +93,6 @@ import {
   pickSectionShut,
   pickRailShown,
   pickRailShut,
-  pickRailSort,
   quietRail,
   railActivity,
   railFounded,
@@ -434,8 +443,54 @@ function signOut(): void {
   window.location.assign(SIGN_OUT_PATH);
 }
 
-function AccountMenu({ member }: { member: Member }) {
+const SETTINGS_LABEL = "Settings";
+const THEME = "Theme";
+const SIGN_OUT = "Sign out";
+
+const MENU_ITEM = "flex items-center gap-sm";
+
+/** The header's avatar on a narrow viewport and the sidebar's own row read this one menu, so
+ *  `container` follows the menu these acts stand in rather than the document. */
+function AccountActs({ container }: { container?: HTMLElement | null }) {
   const scheme = useScheme();
+  const tabs = useOfferedTabs();
+  return (
+    <>
+      <DropdownMenuItem onSelect={() => placeWorkspace(tabs[0], {}, "push")}>
+        <span className={MENU_ITEM}>
+          <IconSettings className={GLYPH} aria-hidden />
+          {SETTINGS_LABEL}
+        </span>
+      </DropdownMenuItem>
+      <DropdownMenuSub>
+        <DropdownMenuSubTrigger>
+          <span className={MENU_ITEM}>
+            <SchemeGlyph scheme={scheme} />
+            {THEME}
+          </span>
+        </DropdownMenuSubTrigger>
+        <DropdownMenuSubContent container={container}>
+          <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
+            {SCHEME_OPTIONS.map((option) => (
+              <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
+                {option.label}
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuSubContent>
+      </DropdownMenuSub>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onSelect={signOut}>
+        <span className={MENU_ITEM}>
+          <IconLogout className={GLYPH} aria-hidden />
+          {SIGN_OUT}
+        </span>
+      </DropdownMenuItem>
+    </>
+  );
+}
+
+function AccountMenu({ member }: { member: Member }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -452,25 +507,40 @@ function AccountMenu({ member }: { member: Member }) {
       <DropdownMenuContent align="end">
         <div className="flex flex-col p-sm">
           <span className="truncate text-label">{member.email}</span>
-          <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
         </div>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger
-            value={SCHEME_OPTIONS.find((option) => option.scheme === scheme)?.label}
-          >
-            Theme
-          </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
-              {SCHEME_OPTIONS.map((option) => (
-                <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
-                  {option.label}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
-        <DropdownMenuItem onSelect={signOut}>Sign out</DropdownMenuItem>
+        <AccountActs />
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** The account stands as a row of the sidebar rather than as a strip of glyphs under it: it takes
+ *  the width and the hover of every other row, and its acts live in the menu it opens. */
+function AccountRow({ member, collapsed }: { member: Member; collapsed: boolean }) {
+  const host = useDrawerHost();
+  return (
+    <DropdownMenu>
+      <SidebarRow>
+        <SidebarTooltip collapsed={collapsed} label={member.email}>
+          <DropdownMenuTrigger asChild>
+            <SidebarPress
+              collapsed={collapsed}
+              label={member.email}
+              aria-label={member.email}
+              glyph={
+                <Avatar>
+                  <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
+                </Avatar>
+              }
+            >
+              <span className="min-w-0 flex-1 truncate">{member.email}</span>
+              <IconDotsVertical className={cn(GLYPH, "text-ink-soft")} aria-hidden />
+            </SidebarPress>
+          </DropdownMenuTrigger>
+        </SidebarTooltip>
+      </SidebarRow>
+      <DropdownMenuContent side="top" align="start" container={host}>
+        <AccountActs container={host} />
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -499,7 +569,6 @@ function defaultPins(agents: Agent[]): string[] {
 const GLYPH = "size-(--size-glyph) shrink-0";
 
 const AskGlyph = () => <IconCirclePlusFilled className={cn(GLYPH, "text-primary")} aria-hidden />;
-const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
 
 const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
   connectors: <IconPlug className={GLYPH} aria-hidden />,
@@ -559,34 +628,6 @@ function SchemeGlyph({ scheme }: { scheme: Scheme }) {
   return <IconDeviceDesktop className={GLYPH} aria-hidden />;
 }
 
-function SchemePick({ collapsed }: { collapsed: boolean }) {
-  const scheme = useScheme();
-  return (
-    <DropdownMenu>
-      <SidebarTooltip collapsed={collapsed} label="Theme">
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            aria-label="Theme"
-            className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill data-[state=open]:bg-fill"
-          >
-            <SchemeGlyph scheme={scheme} />
-          </button>
-        </DropdownMenuTrigger>
-      </SidebarTooltip>
-      <DropdownMenuContent align="end">
-        <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
-          {SCHEME_OPTIONS.map((option) => (
-            <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
-              {option.label}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
 function ChannelsPick({
   collapsed,
   agent,
@@ -605,22 +646,24 @@ function ChannelsPick({
     state.phase === "ready" &&
     state.payload.surfaces.some((row) => row.offered && !row.connected);
   return (
-    <>
+    <SidebarRow>
       <SidebarTooltip collapsed={collapsed} label={CHANNELS}>
-        <button
-          type="button"
-          aria-label={CHANNELS}
+        <SidebarPress
+          collapsed={collapsed}
+          label={CHANNELS}
+          glyph={
+            <span className="relative flex shrink-0">
+              <IconBroadcast className={GLYPH} aria-hidden />
+              {missing ? (
+                <span
+                  aria-hidden
+                  className="absolute -right-2xs -bottom-2xs size-sm rounded-full bg-attention-ink"
+                />
+              ) : null}
+            </span>
+          }
           onClick={() => setOpen(true)}
-          className="relative rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
-        >
-          <IconBroadcast className={GLYPH} aria-hidden />
-          {missing ? (
-            <span
-              aria-hidden
-              className="absolute -right-2xs -bottom-2xs size-sm rounded-full bg-attention-ink"
-            />
-          ) : null}
-        </button>
+        />
       </SidebarTooltip>
       {open && agent ? (
           <Dialog
@@ -649,7 +692,7 @@ function ChannelsPick({
         </Dialog>
       ) : null}
       <Toast state={toast} onDone={() => setToast(SILENT)} />
-    </>
+    </SidebarRow>
   );
 }
 
@@ -715,7 +758,6 @@ function WorkspaceSidebar({
   onBuild: () => void;
 }) {
   const rail = useRail();
-  const tabs = useOfferedTabs();
   const collapsed = rail.collapsed && !narrow;
   const appsShut = !collapsed && rail.sectionsShut.includes(APPS);
   const chatsShut = !collapsed && rail.sectionsShut.includes(CHATS);
@@ -824,41 +866,12 @@ function WorkspaceSidebar({
           label={CONNECTORS.label}
           onClick={() => placeSection("connectors", {}, "push")}
         />
-        <NavRow
-          icon={<WorkspaceGlyph />}
-          current={standing(route, "workspace")}
-          collapsed={collapsed}
-          label="Workspace"
-          onClick={() => placeWorkspace(tabs[0], {}, "push")}
-        />
-      </ul>
-      <footer
-        className={cn(
-          "flex shrink-0 items-center gap-sm px-lg",
-          collapsed && "flex-col justify-center px-sm",
-        )}
-      >
-        <SidebarTooltip collapsed={collapsed} label={member.email}>
-          <Avatar>
-            <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
-          </Avatar>
-        </SidebarTooltip>
-        <span className={cn("flex min-w-0 flex-1 flex-col", collapsed && "hidden")}>
-          <span className="truncate text-label">{member.email}</span>
-          <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
-        </span>
         <ChannelsPick collapsed={collapsed} agent={mainAgent} member={member} />
-        <SchemePick collapsed={collapsed} />
-        <SidebarTooltip collapsed={collapsed} label="Sign out">
-          <button
-            type="button"
-            aria-label="Sign out"
-            onClick={signOut}
-            className="rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill"
-          >
-            <IconLogout className={GLYPH} aria-hidden />
-          </button>
-        </SidebarTooltip>
+      </ul>
+      <footer className="shrink-0">
+        <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
+          <AccountRow member={member} collapsed={collapsed} />
+        </ul>
       </footer>
     </nav>,
   );
@@ -1097,23 +1110,11 @@ function NotShared() {
 }
 
 function RailSettingsFlyout({ shut, onShut }: { shut: boolean; onShut: (shut: boolean) => void }) {
-  const { sort, shown } = useRail();
+  const { shown } = useRail();
   const host = useDrawerHost();
   return (
     <SectionHead label={CHATS} shut={shut} onShut={onShut}>
       <DropdownMenuContent side="right" align="start" container={host}>
-        <DropdownMenuSub>
-          <DropdownMenuSubTrigger>Sort by</DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
-            <DropdownMenuRadioGroup
-              value={sort}
-              onValueChange={(value) => pickRailSort(value === "agent" ? "agent" : "recency")}
-            >
-              <DropdownMenuRadioItem value="recency">Recency</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="agent">App</DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
-          </DropdownMenuSubContent>
-        </DropdownMenuSub>
         <DropdownMenuLabel>Show</DropdownMenuLabel>
         {RAIL_SHOWN_OPTIONS.map((option) => (
           <DropdownMenuCheckboxItem
@@ -1205,7 +1206,7 @@ function RailList({
   chatApp: Agent | null;
 }) {
   const rail = useRail();
-  const groups = railGroups(rail.rows, rail.sort, rail.shown);
+  const groups = railGroups(rail.rows, rail.shown);
   const folded = railShut(
     rail.shut,
     groups.map((group) => group.label),
@@ -1225,6 +1226,7 @@ function RailList({
             facts={facts.length ? facts.join(" · ") : null}
             title={row.title}
             surface={row.surface}
+            when={row.last_at}
             onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
           />
         );
@@ -1288,12 +1290,14 @@ function RailRow({
   facts,
   title,
   surface,
+  when,
   onClick,
 }: {
   current: boolean;
   facts: string | null;
   title: string;
   surface: string;
+  when: string;
   onClick: () => void;
 }) {
   const [asks, setAsks] = useState(0);
@@ -1311,6 +1315,9 @@ function RailRow({
       <Ticker asks={asks} className="flex-1">
         {title}
       </Ticker>
+      <time className={RAIL_STAMP} dateTime={when} title={fullMoment(when)}>
+        {railStamp(when, new Date())}
+      </time>
       <SurfaceGlyph surface={surface} />
     </SidebarPress>
   );
@@ -1328,3 +1335,4 @@ function RailRow({
   );
 }
 
+const RAIL_STAMP = "shrink-0 text-small tabular-nums text-ink-faint";

@@ -118,7 +118,7 @@ test("the team tab is an admin's, and the workspace opens on the first tab drawn
   expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
 });
 
-test("the workspace row lands a member on the first tab they are drawn", async () => {
+test("the account menu opens the first workspace tab the member is drawn", async () => {
   location.hash = "";
   wire({ "/transcript": () => json({ messages: [] }) });
   render(
@@ -130,7 +130,8 @@ test("the workspace row lands a member on the first tab they are drawn", async (
     />,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "Workspace" }));
+  await userEvent.click(await screen.findByRole("button", { name: MEMBER.email }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
 
   expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "apps", place: {} });
   expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();

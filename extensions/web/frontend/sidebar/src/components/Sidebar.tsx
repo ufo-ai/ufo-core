@@ -43,7 +43,7 @@ export function SidebarPress({
       {...props}
       type="button"
       aria-current={current}
-      aria-label={collapsed === true ? label : undefined}
+      aria-label={collapsed === true ? label : props["aria-label"]}
       className={cn(SIDEBAR_PRESS, collapsed === true && SIDEBAR_FOLDED, className)}
     >
       {glyph}
