@@ -123,6 +123,7 @@ from ufo.sdk.objects import (
     SURFACE_KIND,
     ActionView,
     ObjectListQuery,
+    ObjectPage,
     ObjectRef,
     ObjectRow,
 )
@@ -239,6 +240,7 @@ MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 MEMORY_KIND = "memory"
 SETUP_READ_FANOUT = 8
+OBJECT_READ_FANOUT = 8
 OBJECT_FANOUT_LIMIT = 50
 CONVERSATION_LIST_LIMIT = 100
 COMMENT_SURFACES = frozenset({"slack", "ufo"})
@@ -4759,7 +4761,9 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
     page offers only what the kind admits. A fanned-out read takes `OBJECT_FANOUT_LIMIT` rows from
     each agent, re-ranks the merge, and continues on a compound token — one kind cursor per agent
     still walking, so each agent's page resumes exactly where its own walk stopped and an agent
-    whose rows ran out leaves the token."""
+    whose rows ran out leaves the token. The agents' reads run together, `OBJECT_READ_FANOUT`
+    wide, so the member waits for the slowest of them rather than the sum — and no read holds more
+    transactions than that on the pool the whole deploy shares."""
     gated = await _object_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
@@ -4800,20 +4804,26 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
         order=order,
         cursor=cursor,
     )
-    rows: list[dict[str, object]] = []
-    walk: str | None = None
-    walking: dict[str, str] = {}
-    for agent in agents:
-        try:
-            page = await ctx.list_member_objects(
+    fanout = asyncio.Semaphore(OBJECT_READ_FANOUT)
+
+    async def page_of(agent: AgentSummary) -> ObjectPage | None:
+        async with fanout:
+            return await ctx.list_member_objects(
                 kind.kind,
                 agent.id,
                 member_id,
                 admin=audience.admin and kind.kind != SITE_KIND,
                 query=(query if named else replace(query, cursor=continuations.get(agent.id, ""))),
             )
-        except ValueError as error:
-            return Response(str(error), status_code=400)
+
+    try:
+        pages = await asyncio.gather(*(page_of(agent) for agent in agents))
+    except ValueError as error:
+        return Response(str(error), status_code=400)
+    rows: list[dict[str, object]] = []
+    walk: str | None = None
+    walking: dict[str, str] = {}
+    for agent, page in zip(agents, pages, strict=True):
         if page is None:
             return Response(f"{kind.kind} does not list in the portal", status_code=404)
         rows.extend(

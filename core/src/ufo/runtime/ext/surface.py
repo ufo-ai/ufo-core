@@ -1314,17 +1314,13 @@ class ConversationDirectory:
         The opening words and the speakers are two further reads over the page's ids, never one
         per row: what a conversation is about and who is in it are facts of its turns, and only a
         turn read can answer them. Both reads are narrowed to the rows this viewer may read, so an
-        unreadable row's content is never fetched, let alone carried."""
-        activity = (
-            sa.select(
-                tables.turn.c.conversation_id,
-                sa.func.count().label("turn_count"),
-                sa.func.max(tables.turn.c.updated_at).label("last_turn_at"),
-            )
-            .where(tables.turn.c.workspace_id == self.workspace_id)
-            .group_by(tables.turn.c.conversation_id)
-            .subquery()
-        )
+        unreadable row's content is never fetched, let alone carried.
+
+        Activity is read per candidate row, not by grouping the workspace's turns: a listing that
+        reduces every turn of every conversation to an activity table pays for the whole workspace
+        before the bound throws almost all of it away. `turn_conversation_activity` answers each
+        correlated read with one index seek."""
+        last_turn_at = self._last_turn_at()
         query = (
             sa.select(
                 tables.conversation.c.id,
@@ -1335,13 +1331,13 @@ class ConversationDirectory:
                 tables.conversation.c.title,
                 tables.member.c.email,
                 tables.conversation.c.created_at,
-                activity.c.turn_count,
-                activity.c.last_turn_at,
+                self._turn_count().label("turn_count"),
+                last_turn_at.label("last_turn_at"),
             )
             .select_from(
                 tables.conversation.outerjoin(
                     tables.member, tables.member.c.id == tables.conversation.c.member_id
-                ).outerjoin(activity, activity.c.conversation_id == tables.conversation.c.id)
+                )
             )
             .where(
                 tables.conversation.c.workspace_id == self.workspace_id,
@@ -1349,7 +1345,7 @@ class ConversationDirectory:
                 tables.conversation.c.surface != SUBAGENT_SURFACE,
             )
             .order_by(
-                sa.func.coalesce(activity.c.last_turn_at, tables.conversation.c.created_at).desc(),
+                sa.func.coalesce(last_turn_at, tables.conversation.c.created_at).desc(),
                 tables.conversation.c.created_at.desc(),
             )
             .limit(limit)
@@ -1383,8 +1379,7 @@ class ConversationDirectory:
             return ()
         readable = readable_audiences(member_id)
         content = [row.id for row in rows if row.audience in readable]
-        sources = await self.sources(content)
-        speakers = await self.speakers(content)
+        sources, speakers = await asyncio.gather(self.sources(content), self.speakers(content))
         mine = str(conversation_audience(member_id))
         return tuple(
             ListedConversation(
@@ -1408,6 +1403,29 @@ class ConversationDirectory:
                 speakers=speakers.get(row.id, ()),
             )
             for row in rows
+        )
+
+    def _last_turn_at(self) -> sa.ColumnElement[datetime | None]:
+        return (
+            sa.select(sa.func.max(tables.turn.c.updated_at))
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+            )
+            .correlate(tables.conversation)
+            .scalar_subquery()
+        )
+
+    def _turn_count(self) -> sa.ColumnElement[int]:
+        return (
+            sa.select(sa.func.count())
+            .select_from(tables.turn)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+            )
+            .correlate(tables.conversation)
+            .scalar_subquery()
         )
 
     async def sources(self, listed: Sequence[UUID]) -> dict[UUID, str | None]:

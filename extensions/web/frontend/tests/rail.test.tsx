@@ -64,12 +64,48 @@ test("the rail walks the listing to its far page", async () => {
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await waitFor(() => expect(railState().phase).toBe("ready"));
-  expect(railState().rows.map((entry) => entry.title)).toEqual([
-    CHAT_ROW.title,
-    "Second page thread",
-  ]);
+  await waitFor(() =>
+    expect(railState().rows.map((entry) => entry.title)).toEqual([
+      CHAT_ROW.title,
+      "Second page thread",
+    ]),
+  );
+  expect(railState().phase).toBe("ready");
   expect(calls).toBe(2);
+});
+
+test("the rail's first page stands while the walk is still reading", async () => {
+  const older = {
+    ...CHAT_ROW,
+    conversation_id: SECOND_ID,
+    title: "Second page thread",
+    last_at: "2026-08-01T09:00:00.000Z",
+  };
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  wire({
+    "/objects/conversation$": async () => {
+      calls += 1;
+      if (calls === 1)
+        return json({ objects: [conversationObject(CHAT_ROW)], next_cursor: "walk-on" });
+      await held;
+      return json({ objects: [conversationObject(older)], next_cursor: null });
+    },
+    "/api/chats": () => json({ chats: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await waitFor(() => expect(railState().phase).toBe("ready"));
+  expect(railState().rows.map((entry) => entry.title)).toEqual([CHAT_ROW.title]);
+
+  await act(async () => {
+    release();
+    await held;
+  });
+  await waitFor(() => expect(railState().rows).toHaveLength(2));
 });
 
 test("the drawer holds the sidebar at a phone width, and a pick shuts it", async () => {

@@ -147,6 +147,12 @@ const TERMINAL_CHAT = {
   surface: "ufo",
 };
 
+/** The composer takes focus once the rail's first read lands, and that focus move shuts an open
+ *  menu, so the filter is opened only after it has settled. */
+async function composerFocused() {
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Ask UFO")));
+}
+
 async function filterBy(label: string) {
   await userEvent.click(await screen.findByRole("button", { name: "Chats options" }));
   await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: label }));
@@ -179,6 +185,40 @@ test("the rail walks the listing to its far page", async () => {
   expect(calls).toBe(2);
 });
 
+test("the rail draws its first page while the walk is still reading", async () => {
+  const older = {
+    ...CHAT_ROW,
+    conversation_id: SECOND_ID,
+    title: "Second page thread",
+    last_at: "2026-08-01T09:00:00.000Z",
+  };
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  wire({
+    "/objects/conversation$": async () => {
+      calls += 1;
+      if (calls === 1)
+        return json({ objects: [conversationObject(CHAT_ROW)], next_cursor: "walk-on" });
+      await held;
+      return json({ objects: [conversationObject(older)], next_cursor: null });
+    },
+    "/api/chats": () => json({ chats: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Second page thread/ })).toBeNull();
+
+  await act(async () => {
+    release();
+    await held;
+  });
+  expect(await screen.findByRole("button", { name: /Second page thread/ })).toBeTruthy();
+});
+
 test("the filter admits a surface into the rail and the browser keeps the choice", async () => {
   wire({ ...chatsOnWire([CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT]) });
   const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -186,6 +226,7 @@ test("the filter admits a surface into the rail and the browser keeps the choice
   expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /Deploy question/ })).toBeNull();
   expect(screen.queryByRole("button", { name: /Migration run/ })).toBeNull();
+  await composerFocused();
 
   await filterBy("Slack");
   expect(await screen.findByRole("button", { name: /Deploy question/ })).toBeTruthy();
@@ -221,6 +262,7 @@ test("the drawer holds the rail at a phone width, and a pick shuts it", async ()
 test("a tick leaves the filter open, so both surfaces are named in one visit", async () => {
   wire({ ...chatsOnWire([CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await composerFocused();
 
   await userEvent.click(await screen.findByRole("button", { name: "Chats options" }));
   await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Slack" }));

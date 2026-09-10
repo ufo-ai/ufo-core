@@ -7,6 +7,7 @@ resolves the same links against the same row: `member_detail` answers a signed-i
 turn, on the subjects their own conversation carries. Surfaces create conversations, so every
 mutation is refused."""
 
+import asyncio
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -115,7 +116,8 @@ class ConversationObjects:
         a filter must narrow the page before it is cut: cut first, a run of newer rows from other
         surfaces renders an empty chat list. It narrows in the directory read, ahead of each
         side's own bound, so one rail read costs `CONVERSATION_MINE_LIMIT` plus
-        `CONVERSATION_OTHERS_LIMIT` rows whatever the workspace holds."""
+        `CONVERSATION_OTHERS_LIMIT` rows whatever the workspace holds. Both sides are one member's
+        wait, so they read together rather than one behind the other."""
         directory = ConversationDirectory(ws_current().workspace_id)
         agent_id = object_agent_id()
         sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
@@ -123,20 +125,27 @@ class ConversationObjects:
             ("others", CONVERSATION_OTHERS_LIMIT),
         )
         portal = query.filters.get("portal")
-        rows: list[ObjectRow] = []
-        for participation, limit in sides:
-            for entry in await directory.list(
-                agent_id,
-                member_id,
-                admin=False,
-                limit=limit,
-                participation=participation,
-                member_admitted=True,
-                portal=portal if isinstance(portal, bool) else None,
-            ):
-                if entry.title:
-                    rows.append(_member_row(entry, mine=participation == "mine"))
-        return object_page(tuple(rows), query)
+        listed = await asyncio.gather(
+            *(
+                directory.list(
+                    agent_id,
+                    member_id,
+                    admin=False,
+                    limit=limit,
+                    participation=participation,
+                    member_admitted=True,
+                    portal=portal if isinstance(portal, bool) else None,
+                )
+                for participation, limit in sides
+            )
+        )
+        rows = tuple(
+            _member_row(entry, mine=participation == "mine")
+            for (participation, _), side in zip(sides, listed, strict=True)
+            for entry in side
+            if entry.title
+        )
+        return object_page(rows, query)
 
     async def member_detail(
         self,

@@ -96,6 +96,8 @@ export function readRail(): void {
   void walkRail(read);
 }
 
+/** Each page stands as it lands and the walk goes on behind it, so the rail is drawn on the first
+ *  read rather than on the whole continuation. */
 async function walkRail(read: number): Promise<void> {
   const gathered: ChatRow[] = [];
   let cursor = "";
@@ -117,14 +119,14 @@ async function walkRail(read: number): Promise<void> {
       return;
     }
     gathered.push(...chatRows(result.payload));
+    update((held) => ({
+      ...held,
+      phase: "ready" as const,
+      rows: mergeChats(gathered, held.rows),
+    }));
     cursor = result.payload.next_cursor ?? "";
-    if (!cursor || gathered.length >= RAIL_ROWS_MAX) break;
+    if (!cursor || gathered.length >= RAIL_ROWS_MAX) return;
   }
-  update((held) => ({
-    ...held,
-    phase: "ready" as const,
-    rows: mergeChats(gathered, held.rows),
-  }));
 }
 
 /** An outstanding read is not an outcome, so it is not state a screen draws from: a permalink whose
