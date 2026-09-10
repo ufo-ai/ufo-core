@@ -4326,6 +4326,8 @@ def _check_on_call_adopts_the_ui_objects_and_the_daily_rotation() -> None:
     assert len(imports) == len(ON_CALL_IMPORTS)
     assert dict(imports) == ON_CALL_IMPORTS
     assert not re.findall(UUID, re.sub(r"import\s*{[^}]*}", "", source))
+    for member in ("alex", "marshall"):
+        assert 'role    = "admin"' in _terraform_block(source, "resource", member)
     schedule = re.search(
         r'resource "datadog_on_call_schedule" "ufo" {\n(.*?)\n  }\n}',
         source,

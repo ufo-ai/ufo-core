@@ -26,9 +26,12 @@ import {
   id = "d4c50744-7563-4f43-8e25-d2ed5df3a5f3:95bdda15-44fc-45f1-83ca-a7c58b2b887a"
 }
 
+# An omitted role is not an unmanaged one: the provider sends an empty role and the API clears the
+# membership to plain member, dropping the right to edit the team's own on-call configuration.
 resource "datadog_team_membership" "alex" {
   team_id = datadog_team.ufo.id
   user_id = data.datadog_user.alex.id
+  role    = "admin"
 }
 
 import {
@@ -39,6 +42,7 @@ import {
 resource "datadog_team_membership" "marshall" {
   team_id = datadog_team.ufo.id
   user_id = data.datadog_user.marshall.id
+  role    = "admin"
 }
 
 import {
