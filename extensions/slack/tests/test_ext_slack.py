@@ -1626,16 +1626,13 @@ async def test_replies_fetch_failure_still_admits(db: None, tmp_path, monkeypatc
             EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
         )
     assert response.status_code == 200
-    assert (
-        len(
-            [
-                request
-                for request in _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
-                if "latest" not in request.url.params
-            ]
-        )
-        == 1
-    )
+    [founding] = [
+        request
+        for request in _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+        if "oldest" not in request.url.params
+    ]
+    assert founding.url.params.get("latest") == "200.5"
+    assert founding.url.params.get("inclusive") == "false"
     assert member_message_text(await _turn_inbound(workspace_id)) == "<@UBOT00000> ping"
 
 
@@ -1784,6 +1781,124 @@ async def test_a_failed_later_fetch_still_admits_with_the_thread_digest(
         + _fenced(mark, AFTER_ASKED)
     )
     assert len(_later_fetches(recorder)) == 1
+
+
+MID_ROOT = "1700000000.000100"
+MID_TRIGGER = "1700000600.001000"
+MID_ASKED = "<@UBOT00000> can you get that moving?"
+
+
+async def _admit_a_mid_thread_mention(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_id: UUID,
+    tmp_path,
+    recorder: list[httpx.Request],
+    reply_pages: list[list[dict[str, object]]],
+) -> str:
+    """Mention the agent part way down a thread Slack serves as `reply_pages`, and hand back the
+    body that mention was admitted with."""
+    _, client, _ = await _mount_transport(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        _ambient_transport(recorder, reply_pages=reply_pages),
+    )
+    body = _event_body(
+        type="app_mention",
+        user="U1",
+        channel="C1",
+        ts=MID_TRIGGER,
+        thread_ts=MID_ROOT,
+        text=MID_ASKED,
+    )
+    async with client:
+        response = await client.post(
+            EVENTS_PATH, content=body, headers=_sign(body, int(time.time()))
+        )
+    assert response.json() == {"ok": True}
+    return await _turn_inbound(workspace_id)
+
+
+async def test_a_mid_thread_mention_keeps_the_thread_nearest_it(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A page of `conversations.replies` fills with the earliest messages in its range, so one page
+    of a thread longer than a page carries its opening — the messages furthest from the mention.
+    The founding read walks the cursor to the mention instead, so the last thing said before it is
+    in the admitted body."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    reply_pages: list[list[dict[str, object]]] = [
+        [
+            {"user": "U2", "ts": MID_ROOT, "text": "opening the deploy thread"},
+            {"user": "U1", "ts": "1700000060.000200", "text": "we cut the release this morning"},
+        ],
+        [
+            {"user": "U2", "ts": "1700000420.000700", "text": "staging is on us-west-2"},
+            {"user": "U1", "ts": "1700000480.000800", "text": "the retention window is 45 days"},
+        ],
+    ]
+    admitted = await _admit_a_mid_thread_mention(
+        monkeypatch, workspace_id, tmp_path, recorder, reply_pages
+    )
+    mark = _marker(admitted)
+    assert admitted == (
+        _background(
+            mark,
+            slack.AMBIENT_THREAD_NOTE,
+            "[2023-11-14 22:13] <@U2>: opening the deploy thread",
+            "[2023-11-14 22:20] <@U2>: staging is on us-west-2",
+        )
+        + _background(
+            mark,
+            slack.AMBIENT_THREAD_MEMBER_NOTE,
+            "[2023-11-14 22:14] <@U1>: we cut the release this morning",
+            "[2023-11-14 22:21] <@U1>: the retention window is 45 days",
+        )
+        + _fenced(mark, MID_ASKED)
+    )
+    walked = [
+        request
+        for request in _fetches(recorder, slack.SLACK_CONVERSATIONS_REPLIES_URL)
+        if "oldest" not in request.url.params
+    ]
+    assert [request.url.params.get("cursor") for request in walked] == [None, "page1"]
+    assert {request.url.params.get("latest") for request in walked} == {MID_TRIGGER}
+
+
+async def test_the_mentioning_members_own_words_are_not_labelled_background(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """What the member wrote above their own mention is part of what they are asking for, so it
+    rides its own element under a note that says so, next to their message. Another speaker's
+    traffic keeps the background note that tells the turn not to act on it. A message of the
+    member's own that names the agent stays too: this thread founds its conversation on the
+    mention, so no turn holds those words."""
+    workspace_id, _ = await _seed()
+    recorder: list[httpx.Request] = []
+    reply_pages: list[list[dict[str, object]]] = [
+        [
+            {"user": "U1", "ts": MID_ROOT, "text": "the audit export is stuck at 40 percent"},
+            {"user": "U2", "ts": "1700000120.000300", "text": "same for me an hour ago"},
+            {"user": "U1", "ts": "1700000240.000500", "text": "<@UBOT00000> are you seeing it?"},
+        ]
+    ]
+    admitted = await _admit_a_mid_thread_mention(
+        monkeypatch, workspace_id, tmp_path, recorder, reply_pages
+    )
+    mark = _marker(admitted)
+    assert admitted == (
+        _background(
+            mark, slack.AMBIENT_THREAD_NOTE, "[2023-11-14 22:15] <@U2>: same for me an hour ago"
+        )
+        + _background(
+            mark,
+            slack.AMBIENT_THREAD_MEMBER_NOTE,
+            "[2023-11-14 22:13] <@U1>: the audit export is stuck at 40 percent",
+            "[2023-11-14 22:17] <@U1>: <@UBOT00000> are you seeing it?",
+        )
+        + _fenced(mark, MID_ASKED)
+    )
 
 
 async def _admit_founding_mention(
