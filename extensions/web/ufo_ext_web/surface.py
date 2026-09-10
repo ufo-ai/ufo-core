@@ -150,6 +150,7 @@ from ufo.sdk.surfaces import (
     ToolIntent,
     Turn,
     TurnContext,
+    TurnRuntimeConfig,
     inbox_name,
     member_message_said,
     member_message_text,
@@ -233,6 +234,7 @@ ANSWER_TURN_HEADER = "x-ufo-answer-turn"
 ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
 TIMEZONE_HEADER = "x-ufo-timezone"
 STOP_TURN_HEADER = "x-ufo-stop-turn"
+MODEL_HEADER = "x-ufo-model"
 SESSION_FAULT_HEADER = "x-ufo-session-fault"
 REFUSAL_HEADER = "x-ufo-refusal"
 NO_MEMBER_FAULT = "no-member"
@@ -1756,6 +1758,22 @@ def _stop_header(request: Request) -> UUID | None | Response:
         return Response(f"{STOP_TURN_HEADER} must be a turn id", status_code=400)
 
 
+def _picked_model(ctx: SurfaceContext, request: Request) -> TurnRuntimeConfig | None | Response:
+    """The model the composer picked for this thread, as this turn's own pin — the agent's stored
+    model is never written, so the pick lasts as long as the messages that carry it. Absent means
+    the turn runs the agent's own model, which is also what the `auto` sentinel asks for: a turn
+    pins a concrete id, and the sentinel resolves per turn where the row holds it."""
+    picked = request.headers.get(MODEL_HEADER, "").strip()
+    if not picked or picked == AUTO_MODEL:
+        return None
+    try:
+        pinned = TurnRuntimeConfig(model=picked)
+        ctx.validate_runtime_config(pinned)
+    except ValueError as error:
+        return Response(str(error), status_code=400, headers={REFUSAL_HEADER: "1"})
+    return pinned
+
+
 @dataclass(frozen=True)
 class _ChatInbound:
     text: str
@@ -1765,6 +1783,7 @@ class _ChatInbound:
     body: str
     stop: UUID | None
     answer: tuple[UUID, int] | None
+    runtime_config: TurnRuntimeConfig | None
 
 
 @dataclass(frozen=True)
@@ -1800,7 +1819,10 @@ async def _chat_inbound(ctx: SurfaceContext, request: Request) -> _ChatInbound |
     answer = _answer_headers(request)
     if isinstance(answer, Response):
         return answer
-    return _ChatInbound(text, uploads, tuple(keys), paths, body, stop, answer)
+    pinned = _picked_model(ctx, request)
+    if isinstance(pinned, Response):
+        return pinned
+    return _ChatInbound(text, uploads, tuple(keys), paths, body, stop, answer, pinned)
 
 
 async def _new_chat_target(
@@ -1934,6 +1956,7 @@ async def _admit_chat(
         idempotency_key=key,
         speaker_member_id=member_id,
         comment=target.comment,
+        runtime_config=inbound.runtime_config,
     )
     await ctx.attach_member_files(admitted.turn_id, blob_keys)
     payload: dict[str, str | bool | None] = {
@@ -1965,6 +1988,9 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     stream on one turn. Every other outcome is the page's to tail, the refusals included: a
     seat-refused or cap-refused message founds a turn of its own carrying its own terminal, and the
     stream replays it.
+
+    An `x-ufo-model` header is the model the composer picked for this thread, pinned on the turn
+    this message founds and on nothing else — the agent's stored model stands.
 
     An `x-ufo-stop-turn` header over an empty body is the member ending a turn of this conversation
     rather than saying anything into it: nothing is admitted, so the transcript never mentions the

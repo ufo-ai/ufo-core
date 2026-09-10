@@ -36,10 +36,6 @@ function open() {
   return render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 }
 
-/** The model chip is drawn for a member who may write the agent row: its owner, or an admin for
- *  the main agent, which has no owner. */
-const ADMIN = { ...MEMBER, admin: true };
-
 function waiting(text: string): boolean {
   return screen.getByText(text).classList.contains("italic");
 }
@@ -3817,17 +3813,34 @@ test("the starters close on a link to the connectors screen, which the press rea
   expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
 });
 
-test("the composer's model chip picks a model out of its provider's flyout, and the pick rides one intent", async () => {
-  const posted: unknown[] = [];
-  wire({
+/** The model the chat POST pinned on the turn it founded, or null where the send carried
+ *  no pick. */
+function pinned(init: RequestInit | undefined): string | null {
+  return new Headers(init?.headers).get("x-ufo-model");
+}
+
+/** The chat POST is the only route a pick reaches: `/intents` has no route here, so an agent apply
+ *  intent fails the test where it is posted. */
+function picking(sent: (string | null)[]): Record<string, Route> {
+  return {
     ...transcript(),
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
-      return json({ applied: true, message: "Applied." });
+    "/chat": (_url, init) => {
+      sent.push(pinned(init));
+      return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" });
     },
-  });
+  };
+}
+
+async function say(text: string): Promise<void> {
+  await userEvent.type(screen.getByLabelText("Ask UFO"), text);
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+}
+
+test("the model chip picks out of a provider flyout, and the pick rides the message", async () => {
+  const sent: (string | null)[] = [];
+  wire(picking(sent));
   render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
@@ -3841,33 +3854,61 @@ test("the composer's model chip picks a model out of its provider's flyout, and 
   expect(pick.getAttribute("aria-checked")).toBe("false");
   await userEvent.click(pick);
 
-  expect(posted).toEqual([
-    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-sol" } },
-  ]);
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
+  await say("hello");
+
+  expect(sent).toEqual(["gpt-5.6-sol"]);
+});
+
+test("a member who may not write the agent row picks a model for the thread", async () => {
+  const sent: (string | null)[] = [];
+  wire(picking(sent));
+  render(
+    <App
+      agents={[{ ...AGENT, model: "claude-opus-4-8", mine: false }]}
+      member={MEMBER}
+      onAgents={() => {}}
+    />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+  await say("hello");
+
+  expect(sent).toEqual(["gpt-5.6-sol"]);
+});
+
+test("every message after a pick carries it, one before it the agent's own model", async () => {
+  const sent: (string | null)[] = [];
+  wire(picking(sent));
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  await screen.findByLabelText("Ask UFO");
+  await say("first");
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+  await say("second");
+  await say("third");
+
+  expect(sent).toEqual([null, "gpt-5.6-sol", "gpt-5.6-sol"]);
 });
 
 test("the pick lands on the new chat screen, where the composer grabs the focus back", async () => {
-  const posted: unknown[] = [];
-  wire({
-    ...transcript(),
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
-      return json({ applied: true, message: "Applied." });
-    },
-  });
+  const sent: (string | null)[] = [];
+  wire(picking(sent));
   location.hash = newChatHash(AGENT_ID);
   render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
   await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
 
-  expect(posted).toEqual([
-    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-sol" } },
-  ]);
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
   expect(screen.queryAllByRole("menu")).toEqual([]);
 });
@@ -3885,7 +3926,7 @@ async function flyoutRows(model: string) {
 test("the model picker offers the latest of each family, a speed variant on its own row", async () => {
   wire(transcript());
   render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
@@ -3907,7 +3948,7 @@ test("the model picker offers the latest of each family, a speed variant on its 
 test("the picker offers Claude largest first and stands no provider beyond Claude and GPT", async () => {
   wire(transcript());
   render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
@@ -3924,7 +3965,7 @@ test("the picker offers Claude largest first and stands no provider beyond Claud
 
 test("an agent on auto reads Auto on the chip and the picker ticks the Auto row", async () => {
   wire(transcript());
-  render(<App agents={[{ ...AGENT, model: "auto" }]} member={ADMIN} onAgents={() => {}} />);
+  render(<App agents={[{ ...AGENT, model: "auto" }]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Auto" }));
   const auto = await screen.findByRole("menuitemradio", { name: "Auto" });
@@ -3936,69 +3977,47 @@ test("an agent on auto reads Auto on the chip and the picker ticks the Auto row"
   ).toBe("false");
 });
 
-test("the Auto row hands the choice back to the deploy after a concrete pick", async () => {
-  const posted: unknown[] = [];
-  wire({
-    ...transcript(),
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
-      return json({ applied: true, message: "Applied." });
-    },
-  });
+test("the Auto row drops the pick, and the agent's own model runs the next message", async () => {
+  const sent: (string | null)[] = [];
+  wire(picking(sent));
   render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+  await say("first");
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" }));
   await userEvent.click(await screen.findByRole("menuitemradio", { name: "Auto" }));
 
-  expect(posted).toEqual([
-    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "auto" } },
-  ]);
+  expect(await screen.findByRole("button", { name: "Model: Opus 4.8" })).toBeTruthy();
+  await say("second");
+
+  expect(sent).toEqual(["gpt-5.6-sol", null]);
+});
+
+test("an agent on auto pins the pick, and the Auto row hands the choice back", async () => {
+  const sent: (string | null)[] = [];
+  wire(picking(sent));
+  render(<App agents={[{ ...AGENT, model: "auto" }]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Auto" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+  await say("first");
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Auto" }));
+  await say("second");
+
+  expect(sent).toEqual(["gpt-5.6-sol", null]);
   expect(await screen.findByRole("button", { name: "Model: Auto" })).toBeTruthy();
 });
 
-test("a model this deploy refuses says so and leaves the chip on the model the agent runs", async () => {
-  wire({
-    ...transcript(),
-    "/intents": () => json({ applied: false, message: "no model named 'gpt-5.6-sol'" }),
-  });
-  render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
-  );
-
-  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
-
-  expect(await screen.findByText("no model named 'gpt-5.6-sol'")).toBeTruthy();
-  expect(await screen.findByRole("button", { name: "Model: Opus 4.8" })).toBeTruthy();
-});
-
-test("a pick that applies reads the roster again, and the chip follows the fresh row", async () => {
-  const reread = vi.fn();
-  wire({
-    ...transcript(),
-    "/intents": () => json({ applied: true, message: "Applied." }),
-  });
-  const { rerender } = render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={reread} />,
-  );
-
-  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
-
-  await waitFor(() => expect(reread).toHaveBeenCalled());
-  rerender(<App agents={[{ ...AGENT, model: "gpt-5.6-sol" }]} member={ADMIN} onAgents={reread} />);
-  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
-});
-
 test("the box handed to the next agent drops the model picked for the last one", async () => {
-  wire({
-    ...transcript(),
-    "/intents": () => json({ applied: true, message: "Applied." }),
-  });
+  wire(transcript());
   location.hash = newChatHash(AGENT_ID);
   render(
     <App
@@ -4006,37 +4025,25 @@ test("the box handed to the next agent drops the model picked for the last one",
         { ...AGENT, model: "claude-opus-4-8" },
         { ...SECOND, model: "claude-opus-4-8" },
       ]}
-      member={ADMIN}
+      member={MEMBER}
       onAgents={() => {}}
     />,
   );
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Auto" }));
-  expect(await screen.findByRole("button", { name: "Model: Auto" })).toBeTruthy();
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
 
   follow(newChatHash(SECOND_ID));
 
   expect(await screen.findByRole("button", { name: "Model: Opus 4.8" })).toBeTruthy();
 });
 
-test("a member who may not write the agent row reads the composer without a model chip", async () => {
+test("the thread's pick stands while the agent's own model moves under it", async () => {
   wire(transcript());
-  render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
-  );
-
-  await screen.findByLabelText("Ask UFO");
-  expect(screen.queryByRole("button", { name: "Model: Opus 4.8" })).toBeNull();
-});
-
-test("a model written elsewhere stands the picked chip down", async () => {
-  wire({
-    ...transcript(),
-    "/intents": () => json({ applied: true, message: "Applied." }),
-  });
   const { rerender } = render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
@@ -4044,51 +4051,15 @@ test("a model written elsewhere stands the picked chip down", async () => {
   await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
 
-  rerender(<App agents={[{ ...AGENT, model: "auto" }]} member={ADMIN} onAgents={() => {}} />);
+  rerender(<App agents={[{ ...AGENT, model: "auto" }]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("button", { name: "Model: Auto" })).toBeTruthy();
-});
-
-test("a model that needs reasoning is applied with the default effort beside it", async () => {
-  const posted: unknown[] = [];
-  wire({
-    ...transcript(),
-    "/intents": (_url, init) => {
-      const body = JSON.parse(String(init?.body));
-      posted.push(body);
-      if (body.spec.reasoning === undefined)
-        return json({
-          applied: false,
-          message: "model 'gpt-5.6-sol' requires reasoning when reasoning is 'off'",
-        });
-      return json({ applied: true, message: "Applied." });
-    },
-  });
-  render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
-  );
-
-  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
-  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
-
-  expect(await screen.findByText("GPT-5.6 Sol needs reasoning.")).toBeTruthy();
-  expect(posted).toEqual([
-    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-sol" } },
-    {
-      verb: "apply",
-      kind: "agent",
-      name: AGENT.name,
-      spec: { model: "gpt-5.6-sol", reasoning: "auto" },
-    },
-  ]);
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
 });
 
 test("the model picker's rows read left to right while the flyout stands to the left", async () => {
   wire(transcript());
   render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
@@ -4104,17 +4075,11 @@ test("the model picker's rows read left to right while the flyout stands to the 
 });
 
 test("at a phone width the picker keeps its flyout, and a tap on a model shuts both menus", async () => {
-  const posted: unknown[] = [];
+  const sent: (string | null)[] = [];
   atPhoneWidth();
-  wire({
-    ...transcript(),
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
-      return json({ applied: true, message: "Applied." });
-    },
-  });
+  wire(picking(sent));
   render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
   );
   const touch = userEvent.setup();
 
@@ -4131,9 +4096,9 @@ test("at a phone width the picker keeps its flyout, and a tap on a model shuts b
 
   await touch.pointer([{ keys: "[TouchA]", target: luna }]);
 
-  expect(posted).toEqual([
-    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-luna" } },
-  ]);
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Luna" })).toBeTruthy();
   await waitFor(() => expect(screen.queryAllByRole("menu")).toEqual([]));
+  await say("hello");
+
+  expect(sent).toEqual(["gpt-5.6-luna"]);
 });

@@ -19,6 +19,7 @@ const RESUMED_NOTE = "Resumed after a restart";
 const CANCELLED = "cancelled";
 const STOPPED = "Stopped.";
 const AUTO_MODEL = "auto";
+const MODEL_HEADER = "x-ufo-model";
 
 export const NEW_CONVERSATION = "new";
 
@@ -604,12 +605,15 @@ export async function openConversation(agentId: string, text: string): Promise<s
 }
 
 /** Whether this delivery opened the run it names is admission's answer, taken under the conversation-row
- *  lock. The drain can beat this response — the row is committed before the POST returns. */
+ *  lock. The drain can beat this response — the row is committed before the POST returns.
+ *  `pinned` is the model the composer picked for this thread: it rides each message as the
+ *  turn's own model and writes nothing. */
 export async function sendMessage(
   target: ChatTarget,
   body: string | FormData,
   shown: string,
   attached: File[] = [],
+  pinned: string | null = null,
 ): Promise<SendOutcome> {
   const chatKey = target.key;
   // The `new` sentinel opens a conversation per request, so a second send before the first answers
@@ -661,7 +665,7 @@ export async function sendMessage(
       method: "POST",
       body,
       credentials: "same-origin",
-      headers: timezoneHeader(),
+      headers: { ...timezoneHeader(), ...(pinned ? { [MODEL_HEADER]: pinned } : {}) },
     });
   } catch {
     settled(chatKey, null);
@@ -710,7 +714,7 @@ export async function sendMessage(
   settled(streamKey, arrivalId);
   const joined = arrivalId !== null && accepted.opened_run === false;
   if (joined && tailed(streamKey, accepted.turn_id)) return "accepted";
-  streamTurn(streamKey, accepted.turn_id, false, target.agentModel);
+  streamTurn(streamKey, accepted.turn_id, false, pinned ?? target.agentModel);
   return "accepted";
 }
 

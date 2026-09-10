@@ -37,10 +37,6 @@ function open() {
   return render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 }
 
-/** The model chip is drawn for a member who may write the agent row: its owner, or an admin for
- *  the main agent, which has no owner. */
-const ADMIN = { ...MEMBER, admin: true };
-
 function waiting(text: string): boolean {
   return screen.getByText(text).classList.contains("italic");
 }
@@ -3718,27 +3714,29 @@ test("the starters close on a link to the connectors screen, which the press rea
   expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
 });
 
-test("the pick lands on the new chat screen, where the composer grabs the focus back", async () => {
-  const posted: unknown[] = [];
+test("a pick lands on the new chat screen and rides the message it founds", async () => {
+  const sent: (string | null)[] = [];
   wire({
     ...transcript(),
-    "/intents": (_url, init) => {
-      posted.push(JSON.parse(String(init?.body)));
-      return json({ applied: true, message: "Applied." });
+    "/chat": (_url, init) => {
+      sent.push(new Headers(init?.headers).get("x-ufo-model"));
+      return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" });
     },
   });
   location.hash = newChatHash(AGENT_ID);
   render(
-    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
   );
 
   await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
   await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
 
-  expect(posted).toEqual([
-    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-sol" } },
-  ]);
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
   expect(screen.queryAllByRole("menu")).toEqual([]);
+
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "hello");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  expect(sent).toEqual(["gpt-5.6-sol"]);
 });

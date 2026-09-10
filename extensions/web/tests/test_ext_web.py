@@ -1185,6 +1185,76 @@ async def test_a_reported_timezone_lands_on_the_turn_and_an_unknown_one_drops(
     assert contexts[turns["Mars/Olympus_Mons"]]["timezone"] is None
 
 
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_picked_model_runs_the_turn_alone_and_leaves_the_agent_s_own_model(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The composer's pick is a turn pin, so a member who may not write the agent row still runs
+    their thread on it: the turn runs the picked model, the row keeps the model it stored, and the
+    `auto` sentinel pins nothing because a turn takes a concrete id."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    await _grant_web_access(workspace_id, agent_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    pins: dict[str, str] = {}
+    for picked in ("claude-sonnet-5", "auto"):
+        STREAM_GATE.arm()
+        admitted = await client.post(
+            f"/surface/web/agents/{agent_id}/chat?conversation=new",
+            content=b"hello",
+            headers=cookie | {"x-ufo-model": picked},
+        )
+        assert admitted.status_code == 200
+        pins[picked] = admitted.json()["turn_id"]
+        _text, terminal = await _consume(client, token, pins[picked])
+        assert terminal["model"] == ("claude-opus-4-8" if picked == "auto" else picked)
+    async with workspace_tx() as connection:
+        configs = {
+            str(row.id): row.runtime_config
+            for row in await connection.execute(
+                sa.select(tables.turn.c.id, tables.turn.c.runtime_config).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        }
+        stored = (
+            await connection.execute(
+                sa.select(tables.agent.c.model).where(tables.agent.c.id == agent_id)
+            )
+        ).scalar_one()
+    assert configs[pins["claude-sonnet-5"]]["model"] == "claude-sonnet-5"
+    assert configs[pins["auto"]] is None
+    assert stored == "claude-opus-4-8"
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_picked_model_this_deploy_does_not_serve_admits_nothing(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "member@example.com")
+    await _grant_web_access(workspace_id, agent_id, "member@example.com")
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        content=b"hello",
+        headers={"cookie": f"{SESSION_COOKIE}={token}", "x-ufo-model": "gpt-5.6-sol"},
+    )
+    assert refused.status_code == 400
+    assert refused.text == "unknown model: gpt-5.6-sol"
+    assert refused.headers["x-ufo-refusal"] == "1"
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+    assert turns == 0
+
+
 def test_title_excerpt_needs_an_assistant_reply_and_bounds_both_sides() -> None:
     opening = Message(role="user", content="Draft the onboarding plan")
     assert web_surface._title_excerpt((opening,)) == ""
