@@ -14,6 +14,9 @@ const MINE = { ...CHAT_ROW, last_at: TODAY };
 const OTHER_ROW = { ...MINE, conversation_id: OTHER_ID, title: "The other thread" };
 const RAIL = { chats: [MINE, OTHER_ROW] };
 const LATER_TURN = "77777777-7777-4777-8777-777777777777";
+const START_MS = 1_700_000_000_000;
+// The clock re-reads itself once a second, so a fresh reading lands a tick after the reattach.
+const PAST_ONE_TICK = { timeout: 3_000 };
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -139,6 +142,119 @@ test("a send during the backoff rebuilds the reply from the replay it reattached
   second.emit("message", { text: "two" });
   expect(await screen.findByText(saying("one two"))).toBeTruthy();
   expect(screen.queryByText("one one two")).toBeNull();
+});
+
+test("a reattached turn counts from the turn's start, not from the reattach", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
+  const pending: (() => void)[] = [];
+  setReattachTimer((fn) => {
+    pending.push(fn);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  });
+  const first = await streaming();
+  first.emit("message", { text: "one " });
+  await screen.findByText(saying("one"));
+
+  clock.mockReturnValue(START_MS + 30_000);
+  fatal(first);
+  await screen.findByText("Reconnecting…");
+  pending[0]();
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+  const second = StreamFake.last();
+  second.emit("open", {});
+  second.emit("activity", { text: "Reading the changelog." });
+  second.emit("message", { text: "one two" });
+  await screen.findByText(saying("one two"));
+  expect(await screen.findByText("30s", undefined, PAST_ONE_TICK)).toBeTruthy();
+
+  clock.mockReturnValue(START_MS + 102_000);
+  second.emit("terminal", { status: "done", model: "opus", tokens: 3, cost_micro_usd: 0 });
+  expect(await screen.findByText("Completed 1 step in 1m 42s")).toBeTruthy();
+  clock.mockRestore();
+});
+
+test("a reattach on returning to the tab keeps the clock the turn started", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
+  setReattachTimer(() => 0 as unknown as ReturnType<typeof setTimeout>);
+  const first = await streaming();
+  fatal(first);
+  await screen.findByText("Reconnecting…");
+
+  clock.mockReturnValue(START_MS + 45_000);
+  window.dispatchEvent(new Event("focus"));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+  StreamFake.last().emit("open", {});
+  StreamFake.last().emit("message", { text: "rejoined" });
+  await screen.findByText(saying("rejoined"));
+  expect(await screen.findByText("45s", undefined, PAST_ONE_TICK)).toBeTruthy();
+  clock.mockRestore();
+});
+
+test("a send that rejoins the running turn keeps the clock that turn started", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
+  setReattachTimer(() => 0 as unknown as ReturnType<typeof setTimeout>);
+  const first = await streaming({
+    "/chat": () =>
+      json({
+        turn_id: TURN_ID,
+        conversation_id: CONVO_ID,
+        title: "go",
+        opened_run: false,
+        arrival_id: ARRIVAL_ID,
+      }),
+  });
+  first.emit("message", { text: "one " });
+  await screen.findByText(saying("one"));
+
+  clock.mockReturnValue(START_MS + 20_000);
+  fatal(first);
+  await screen.findByText("Reconnecting…");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "and again");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(StreamFake.opened.length).toBe(2));
+
+  const second = StreamFake.last();
+  second.emit("open", {});
+  second.emit("message", { text: "one two" });
+  await screen.findByText(saying("one two"));
+  expect(await screen.findByText("20s", undefined, PAST_ONE_TICK)).toBeTruthy();
+  clock.mockRestore();
+});
+
+async function reloadedInto(payload: Record<string, unknown>) {
+  wire({
+    ...chatsOnWire(RAIL.chats),
+    "/transcript": () => json({ messages: [{ role: "user", text: "Review PR 1268." }], ...payload }),
+  });
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  return StreamFake.last();
+}
+
+test("a page loaded into a running turn counts from the turn's start, not from the load", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
+  const stream = await reloadedInto({
+    turn: TURN_ID,
+    turn_started_at: new Date(START_MS - 480_000).toISOString(),
+  });
+  stream.emit("activity", { text: "Reading the diff." });
+  stream.emit("message", { text: "still going" });
+  await screen.findByText(saying("still going"));
+  expect(await screen.findByText("8m 0s", undefined, PAST_ONE_TICK)).toBeTruthy();
+
+  clock.mockReturnValue(START_MS + 60_000);
+  stream.emit("terminal", { status: "done", model: "opus", tokens: 3, cost_micro_usd: 0 });
+  expect(await screen.findByText("Completed 1 step in 9m 0s")).toBeTruthy();
+  clock.mockRestore();
+});
+
+test("a transcript that states no start counts the turn from the load", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
+  const stream = await reloadedInto({ turn: TURN_ID });
+  stream.emit("message", { text: "still going" });
+  await screen.findByText(saying("still going"));
+  expect(await screen.findByText("0s", undefined, PAST_ONE_TICK)).toBeTruthy();
+  clock.mockRestore();
 });
 
 test("a native retry shows a quiet reconnecting state and the stream carries on", async () => {

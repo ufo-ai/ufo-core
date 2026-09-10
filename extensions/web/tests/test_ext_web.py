@@ -1385,6 +1385,7 @@ async def test_an_agent_origin_arrival_states_its_prompt_and_claims_no_wait_of_t
         TerminalFrame(status="done", text="Looked."),
     )
     running = uuid4()
+    admitted = datetime.now(UTC) - timedelta(minutes=8)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.turn).values(
@@ -1396,8 +1397,8 @@ async def test_an_agent_origin_arrival_states_its_prompt_and_claims_no_wait_of_t
                 status="running",
                 inbound="Review PR 1268.",
                 speaker_member_id=member_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+                created_at=admitted,
+                updated_at=admitted,
             )
         )
     mine = await _seed_arrival(
@@ -1424,7 +1425,9 @@ async def test_an_agent_origin_arrival_states_its_prompt_and_claims_no_wait_of_t
     )
 
     assert reloaded.status_code == 200
-    assert reloaded.json() == {
+    body = reloaded.json()
+    assert datetime.fromisoformat(body.pop("turn_started_at")) == admitted
+    assert body == {
         "messages": [
             {"role": "user", "text": "Review PR 1268."},
             {"role": "user", "text": "Also check the tests.", "arrival_id": str(mine)},
@@ -1457,6 +1460,7 @@ async def test_a_pending_subagent_result_is_no_member_bubble(
     )
     running = uuid4()
     delivered = uuid4()
+    admitted = datetime.now(UTC) - timedelta(minutes=8)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.turn).values(
@@ -1468,8 +1472,8 @@ async def test_a_pending_subagent_result_is_no_member_bubble(
                 status="running",
                 inbound="Review PR 1268.",
                 speaker_member_id=member_id,
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
+                created_at=admitted,
+                updated_at=admitted,
             )
         )
         await connection.execute(
@@ -1500,7 +1504,9 @@ async def test_a_pending_subagent_result_is_no_member_bubble(
     )
 
     assert reloaded.status_code == 200
-    assert reloaded.json() == {
+    body = reloaded.json()
+    assert datetime.fromisoformat(body.pop("turn_started_at")) == admitted
+    assert body == {
         "messages": [
             {"role": "user", "text": "Review PR 1268."},
             {

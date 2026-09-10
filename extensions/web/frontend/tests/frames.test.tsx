@@ -7,6 +7,8 @@ import { tokens } from "@/lib/turnStream";
 
 import { AGENT, ARRIVAL_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND_ID, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 
+const START_MS = 1_700_000_000_000;
+
 async function streaming() {
   wire({
     "/transcript": () => json({ messages: [] }),
@@ -64,7 +66,7 @@ test("a settled turn states its latest call and opens onto the ones before it", 
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Completed 3 steps");
+  const summary = await screen.findByText(/^Completed 3 steps/);
   expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByText("Listing the workspace.")).toBeNull();
   expect(screen.queryByText("Loading calendar guidance.")).toBeNull();
@@ -87,7 +89,7 @@ test("one tool call states itself, with nothing more behind it", async () => {
     tokens: 5,
     cost_micro_usd: 1_000_000,
   });
-  const summary = await screen.findByText("Completed 1 step");
+  const summary = await screen.findByText(/^Completed 1 step/);
   expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByText("Listing the workspace.")).toBeNull();
 
@@ -111,7 +113,7 @@ test("a late activity frame leaves the reply already streaming where it stands",
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Completed 1 step");
+  const summary = await screen.findByText(/^Completed 1 step/);
   expect(screen.getByText(answer)).toBeTruthy();
 
   await userEvent.click(summary);
@@ -158,7 +160,7 @@ test("the fold stays closed through the turn settling", async () => {
     cost_micro_usd: 1_000_000,
   });
 
-  expect(await screen.findByText("Completed 1 step")).toBeTruthy();
+  expect(await screen.findByText(/^Completed 1 step/)).toBeTruthy();
   await waitFor(() => expect(document.querySelector("details")!.open).toBe(false));
   expect(screen.queryByText("Listing the workspace.")).toBeNull();
 });
@@ -187,7 +189,7 @@ test("an activity stays a step when the turn is stopped", async () => {
   stream.emit("activity", { text: "Loading calendar guidance." });
   stream.emit("terminal", { status: "cancelled" });
 
-  const summary = await screen.findByText("Completed 1 step");
+  const summary = await screen.findByText(/^Completed 1 step/);
   expect(document.body.textContent).toContain("Stopped.");
 
   await userEvent.click(summary);
@@ -218,7 +220,7 @@ test("a subagent's dispatch stands ahead of the run's row", async () => {
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Completed 2 steps");
+  const summary = await screen.findByText(/^Completed 2 steps/);
   await userEvent.click(summary);
   const log = document.body.textContent ?? "";
   expect(log.indexOf("Delegating the research.")).toBeLessThan(
@@ -255,7 +257,7 @@ test("a run's frame leaves the answer the turn has already streamed where it sta
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Completed 2 steps");
+  const summary = await screen.findByText(/^Completed 2 steps/);
   await userEvent.click(summary);
   const rows = summary.closest("details")!.querySelectorAll(":scope > ul > li");
   expect([...rows].map((row) => row.textContent)).toEqual([
@@ -279,7 +281,7 @@ test("an activity survives the drain that ends its round", async () => {
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Completed 1 step");
+  const summary = await screen.findByText(/^Completed 1 step/);
   await userEvent.click(summary);
   const rows = summary.closest("details")!.querySelectorAll("li");
   expect([...rows].map((row) => row.textContent)).toEqual(["Reading the changelog."]);
@@ -305,7 +307,7 @@ test("a reloaded turn draws the thought it settled into as a step", async () => 
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const summary = await screen.findByText("Completed 1 step");
+  const summary = await screen.findByText(/^Completed 1 step/);
   expect(screen.queryByText("Reading the changelog first.")).toBeNull();
 
   await userEvent.click(summary);
@@ -331,7 +333,7 @@ test("a terminal subagent event nests its work under the reply", async () => {
     cost_micro_usd: 1,
   });
 
-  const summary = await screen.findByText("Completed 1 step");
+  const summary = await screen.findByText(/^Completed 1 step/);
   expect(summary.closest("summary")).toBeTruthy();
   expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
 
@@ -358,10 +360,38 @@ test("a turn with no tool calls renders no fold", async () => {
   expect(screen.queryByText(/tool calls?$/)).toBeNull();
 });
 
-test("a cost frame meters tokens and priced spend", async () => {
+test("a cost frame meters tokens and priced spend behind the turn's own clock", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
   const stream = await streaming();
-  stream.emit("cost", { tokens: 1200, cost_micro_usd: 34500 });
-  expect(await screen.findByText("1,200 tok · $0.03")).toBeTruthy();
+  clock.mockReturnValue(START_MS + 102_000);
+  stream.emit("cost", { tokens: 29_000, cost_micro_usd: 5_000 });
+  expect(await screen.findByText("1m 42s · 29K tok · <$0.01")).toBeTruthy();
+  clock.mockRestore();
+});
+
+test("a running turn counts its elapsed time before any spend is priced", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
+  const stream = await streaming();
+  clock.mockReturnValue(START_MS + 7_000);
+  stream.emit("activity", { text: "Reading the changelog." });
+  expect(await screen.findByText("7s")).toBeTruthy();
+  clock.mockRestore();
+});
+
+test("a settled tool-call block states how long its steps took", async () => {
+  const clock = vi.spyOn(Date, "now").mockReturnValue(START_MS);
+  const stream = await streaming();
+  for (let step = 1; step <= 6; step += 1) stream.emit("activity", { text: "Step " + step + "." });
+  clock.mockReturnValue(START_MS + 102_000);
+  stream.emit("terminal", {
+    status: "done",
+    text: "Looked it over.",
+    model: "opus",
+    tokens: 29_000,
+    cost_micro_usd: 5_000,
+  });
+  expect(await screen.findByText("Completed 6 steps in 1m 42s")).toBeTruthy();
+  clock.mockRestore();
 });
 
 test("a connect frame offers the act, pressable to the address that mints its consent", async () => {
@@ -417,7 +447,7 @@ test("a connect turn that ends wordless keeps the control it posted", async () =
 
   const link = screen.getByRole("link", { name: "Connect Gmail" });
   expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
-  expect(screen.getByText("Completed 1 step")).toBeTruthy();
+  expect(screen.getByText(/^Completed 1 step/)).toBeTruthy();
 });
 
 test("consent opens in a window this page owns, so its return page can close itself", async () => {
@@ -697,7 +727,9 @@ test("an answer the server refuses states its status rather than hanging", async
   expect(await screen.findByText("Error 503 — try again.")).toBeTruthy();
 });
 
-test("token counts group their thousands", () => {
+test("token counts read short enough to re-read every second", () => {
   expect(tokens(12)).toBe("12");
-  expect(tokens(66_473)).toBe("66,473");
+  expect(tokens(29_000)).toBe("29K");
+  expect(tokens(66_473)).toBe("66.5K");
+  expect(tokens(1_450_000)).toBe("1.5M");
 });

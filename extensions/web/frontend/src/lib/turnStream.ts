@@ -42,8 +42,9 @@ function transcriptPath(target: ChatTarget): string | null {
   return "/agents/" + target.agentId + "/transcript?conversation=" + target.conversationId;
 }
 
+/** The count beside a running turn's clock, short enough to re-read every second: `800`, `29K`, `1.4M`. */
 export function tokens(count: number): string {
-  return count.toLocaleString("en-US");
+  return count.toLocaleString("en-US", { notation: "compact", maximumFractionDigits: 1 });
 }
 
 const RESYNC_EPOCH = new Map<string, number>();
@@ -153,7 +154,8 @@ export function applyRunFrame(
 }
 
 /** A source opens with no cursor, so the turn's retained frames arrive from the first of them: whatever
- *  the chat had drawn belongs to the tail this one replaces, and holding it would glue two turns into one. */
+ *  the chat had drawn belongs to the tail this one replaces, and holding it would glue two turns into one.
+ *  The clock belongs to the turn rather than to the source, so a tail reopened on the same turn keeps it. */
 export function streamTurn(
   chatKey: string,
   turnId: string,
@@ -163,10 +165,17 @@ export function streamTurn(
   REATTACHES.delete(chatKey);
   updateChat(chatKey, (state) => ({
     ...state,
-    live: liveTurn(),
+    live: liveTurn(state.turn?.id === turnId ? state.live?.started : undefined),
     turn: { id: turnId, answering },
   }));
   attach(chatKey, turnId, answering, false, agentModel);
+}
+
+/** The moment a server stamp names, or nothing where the read carried no stamp or an unreadable one. */
+function stamped(iso: string | undefined): number | undefined {
+  if (iso === undefined) return undefined;
+  const at = new Date(iso).getTime();
+  return Number.isNaN(at) ? undefined : at;
 }
 
 function tailed(chatKey: string, turnId: string): boolean {
@@ -221,6 +230,7 @@ function attach(
         messages: (state.messages ?? []).concat({
           role: "assistant",
           text: live.text,
+          elapsed: Date.now() - live.started,
           ...(live.meta ? { meta: live.meta } : {}),
           ...(live.connect ? { connect: live.connect } : {}),
           ...(live.events.length ? { events: live.events } : {}),
@@ -253,7 +263,10 @@ function attach(
     REATTACHES.delete(chatKey);
     if (redrawOnOpen) {
       redrawOnOpen = false;
-      updateChat(chatKey, (state) => ({ ...state, live: liveTurn() }));
+      updateChat(chatKey, (state) => ({
+        ...state,
+        live: liveTurn(state.live?.started),
+      }));
     } else {
       onLive((live) => ({ ...live, reconnecting: false }));
     }
@@ -350,7 +363,7 @@ function attach(
           live === null
             ? null
             : {
-                ...liveTurn(),
+                ...liveTurn(live.started),
                 meter: live.meter,
                 reconnecting: live.reconnecting,
                 subagents: live.subagents.map((run) => ({ ...run, at: 0 })),
@@ -547,6 +560,7 @@ export async function refreshTranscript(
     if (!onlyIfEmpty && (current.busy || current.turn)) return current;
     const question = current.handoffs.question ?? null;
     const running = ("turn" in payload && payload.turn) || null;
+    const started = stamped(payload.turn_started_at);
     return {
       ...current,
       messages: payload.messages,
@@ -554,7 +568,7 @@ export async function refreshTranscript(
       fault: null,
       busy: running ? true : current.busy,
       turn: running ? { id: running, answering: false } : current.turn,
-      live: running ? (current.live ?? liveTurn()) : current.live,
+      live: running ? (current.live ?? liveTurn(started)) : current.live,
       handoffs: {
         question,
         credentials: ("credentials" in payload && payload.credentials) || null,

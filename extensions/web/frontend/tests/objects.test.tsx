@@ -8,7 +8,7 @@ import { ObjectDetail, ObjectPane } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { Pane } from "@/kernel/pane";
 import { Viewer } from "@/lib/audience";
-import { friendlyMoment, fullMoment } from "@/lib/moments";
+import { friendlyMoment, fullMoment, spanMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { chatHash } from "@/lib/route";
 
@@ -301,6 +301,15 @@ test("a moment reads as its distance from now, and as its date once it is old", 
   expect(friendlyMoment("2026-08-02T13:00:00Z", NOW)).toBe("Tomorrow");
   expect(friendlyMoment("2026-09-01T12:00:00Z", NOW)).toBe("Sep 1 2026");
   expect(friendlyMoment("not a moment", NOW)).toBe("not a moment");
+});
+
+test("a running span reads as minutes and seconds, and drops its seconds past the hour", () => {
+  expect(spanMoment(0)).toBe("0s");
+  expect(spanMoment(42_400)).toBe("42s");
+  expect(spanMoment(102_000)).toBe("1m 42s");
+  expect(spanMoment(600_000)).toBe("10m 0s");
+  expect(spanMoment(7_505_000)).toBe("2h 5m");
+  expect(spanMoment(-5_000)).toBe("0s");
 });
 
 test("the whole stamp behind a friendly one names the day and the time it fell on", () => {

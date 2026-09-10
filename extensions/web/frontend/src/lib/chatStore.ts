@@ -16,6 +16,9 @@ export type { ActivityEvent } from "@/lib/types";
 
 export type Bubble = Message & {
   meta?: string;
+  /** How long the turn that spoke this ran, in milliseconds. A bubble read back from a transcript
+   *  carries none, so its fold states the steps alone. */
+  elapsed?: number;
   connect?: ChatConnect;
   sending?: string;
   attached?: File[];
@@ -23,6 +26,7 @@ export type Bubble = Message & {
 };
 
 export type LiveTurn = {
+  started: number;
   text: string;
   activity: string | null;
   meter: string | null;
@@ -86,8 +90,11 @@ export function updateChat(chatKey: string, change: (state: ChatState) => ChatSt
   for (const listener of listeners) listener();
 }
 
-export function liveTurn(): LiveTurn {
+/** A redraw of a turn already running hands back the start it opened with: the clock counts the turn,
+ *  not the source drawing it. */
+export function liveTurn(started: number = Date.now()): LiveTurn {
   return {
+    started,
     text: "",
     activity: null,
     meter: null,

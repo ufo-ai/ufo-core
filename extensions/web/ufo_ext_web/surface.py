@@ -2815,9 +2815,10 @@ async def _history_messages(
 async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     """One conversation of the member's with this agent, as the portal renders it on load. The
     `conversation` parameter names which one, gated to the member's own like the chat POST that
-    writes it. A turn still running names itself, so the page attaches to its live frames instead
-    of drawing an empty conversation, and a settled one carries what it still asks of the
-    member."""
+    writes it. A turn still running names itself and the moment it was admitted, so the page
+    attaches to its live frames instead of drawing an empty conversation and counts that turn's
+    clock from the turn's own start rather than from the load, and a settled one carries what it
+    still asks of the member."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -2854,6 +2855,7 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     if turn is not None:
         if turn.terminal is None:
             payload["turn"] = str(turn.id)
+            payload["turn_started_at"] = _iso(turn.created_at)
         else:
             payload.update(await _open_handoffs(ctx, turn.terminal, member_id))
     return JSONResponse(payload)

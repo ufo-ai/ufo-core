@@ -160,7 +160,7 @@ test("a reloaded conversation states its latest activity and opens onto the rest
   );
   open();
 
-  const summary = await screen.findByText("Completed 2 steps");
+  const summary = await screen.findByText(/^Completed 2 steps/);
   expect(summary.closest("summary")!.querySelector("svg")).toBeTruthy();
   expect(screen.queryByText("Running the focused tests.")).toBeNull();
   expect(screen.queryByText("Loading coding guidance.")).toBeNull();
@@ -270,7 +270,7 @@ test("a running turn keeps its calls behind the line until the member opens them
     cost_micro_usd: 1_000_000,
   });
   expect(await screen.findByText("Reviewed it.")).toBeTruthy();
-  expect(screen.getByText("Completed 2 steps")).toBeTruthy();
+  expect(screen.getByText(/^Completed 2 steps/)).toBeTruthy();
   expect(document.querySelector("[data-slot=marker] [data-throb]")).toBeNull();
 });
 
@@ -295,7 +295,7 @@ test("a live subagent run nests under the reply it produced", async () => {
     cost_micro_usd: 1_000_000,
   });
 
-  const summary = await screen.findByText("Completed 1 step");
+  const summary = await screen.findByText(/^Completed 1 step/);
   await userEvent.click(summary);
   const row = screen.getByText("Subagent · general_purpose");
   expect(row.closest("a")).toBeNull();
@@ -326,7 +326,7 @@ test("a run delegated to an agent heads the row with the agent's drawn name", as
     cost_micro_usd: 1_000_000,
   });
 
-  await userEvent.click(await screen.findByText("Completed 1 step"));
+  await userEvent.click(await screen.findByText(/^Completed 1 step/));
   expect(screen.getByText("App \u00b7 Code Reviewer")).toBeTruthy();
 });
 
@@ -386,7 +386,7 @@ test("what a reply did stands above the reply, in the order the turn did it", as
   );
   open();
 
-  await userEvent.click(await screen.findByText("Completed 1 step"));
+  await userEvent.click(await screen.findByText(/^Completed 1 step/));
   expect(screen.getByText("Running the focused tests.")).toBeTruthy();
   expect(order("Running the focused tests.", "The tests pass.")).toBe(true);
 });
@@ -796,7 +796,7 @@ test("a reloaded conversation nests its subagent work under the reply", async ()
   );
   open();
 
-  const summary = await screen.findByText("Completed 2 steps");
+  const summary = await screen.findByText(/^Completed 2 steps/);
   expect(screen.queryByText("Reading the tree.")).toBeNull();
 
   await userEvent.click(summary);
@@ -849,7 +849,7 @@ test("a line longer than the fold opens in place and closes again", async () => 
   );
   open();
 
-  await userEvent.click(await screen.findByText("Completed 2 steps"));
+  await userEvent.click(await screen.findByText(/^Completed 2 steps/));
   const more = await screen.findByRole("button", { name: "Show more" });
   const region = document.getElementById(String(more.getAttribute("aria-controls")));
   expect(more.getAttribute("aria-expanded")).toBe("false");
@@ -884,7 +884,7 @@ test("a line that fits is offered no control that would do nothing", async () =>
   );
   open();
 
-  await userEvent.click(await screen.findByText("Completed 2 steps"));
+  await userEvent.click(await screen.findByText(/^Completed 2 steps/));
   expect(screen.getByText("Checked the changelog.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
 });

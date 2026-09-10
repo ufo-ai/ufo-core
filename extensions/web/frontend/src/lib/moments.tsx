@@ -41,6 +41,15 @@ function relativeMoment(raw: string, now: Date): string {
   return ahead > 0 ? "in " + size : size + " ago";
 }
 
+/** A span a member watches run: `42s`, `1m 42s`, `2h 5m`. Seconds are dropped past the hour, where a
+ *  counter that moves every second reads as noise rather than progress. */
+export function spanMoment(ms: number): string {
+  const span = Math.max(0, Math.floor(ms / 1000));
+  if (span < 60) return span + "s";
+  if (span < 3600) return Math.floor(span / 60) + "m " + (span % 60) + "s";
+  return Math.floor(span / 3600) + "h " + Math.floor((span % 3600) / 60) + "m";
+}
+
 function dayNumber(year: number, month: number, date: number): number {
   return Date.UTC(year, month - 1, date) / DAY_MS;
 }

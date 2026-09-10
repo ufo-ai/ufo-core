@@ -54,6 +54,7 @@ import { cn } from "@/lib/cn";
 import { ConsentLink } from "@/lib/consent";
 import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
+import { spanMoment } from "@/lib/moments";
 import { agentHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
@@ -63,6 +64,9 @@ import type { ChatApp, ChatConnect, ChatFile, ChatQuestion, SubagentRun } from "
 /** How far from the foot still counts as being at it: judged to the pixel, a reply would stop following
  *  the moment a line landed or the composer grew a row. */
 const AT_THE_FOOT_PX = 40;
+
+/** The counter names whole seconds, so it is re-read at the rate its smallest part moves. */
+const TICK_MS = 1_000;
 
 export function TranscriptScroll({ children }: { children: ReactNode }) {
   return (
@@ -229,7 +233,12 @@ export function MessageLog({
             />
           ) : null}
           {message.role === "user" ? null : (
-            <Activity events={message.events ?? []} runs={message.subagents ?? []} live={false} />
+            <Activity
+              events={message.events ?? []}
+              runs={message.subagents ?? []}
+              live={false}
+              elapsed={message.elapsed}
+            />
           )}
           {message.role === "user" && !message.text && !message.asked ? null : (
             <Said mine={message.role === "user"}>
@@ -289,7 +298,7 @@ export function MessageLog({
                 ) : null}
                 {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
                 {row.live.connect ? <ConnectLink connect={row.live.connect} /> : null}
-                {row.live.meter ? <Meta>{row.live.meter}</Meta> : null}
+                <LiveMeter started={row.live.started} spend={row.live.meter} />
                 {row.live.meta ? <Meta>{row.live.meta}</Meta> : null}
               </Speech>
             </MessageScrollerItem>
@@ -632,16 +641,29 @@ function Throbber() {
   );
 }
 
+/** The turn's own clock, beside what it has spent so far, re-read every second while it runs. */
+function LiveMeter({ started, spend }: { started: number; spend: string | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const tick = window.setInterval(() => setNow(Date.now()), TICK_MS);
+    return () => window.clearInterval(tick);
+  }, []);
+  const run = spanMoment(now - started);
+  return <Meta>{spend ? run + " · " + spend : run}</Meta>;
+}
+
 function Activity({
   events,
   runs,
   live,
   working,
+  elapsed,
 }: {
   events: ActivityEvent[];
   runs: SubagentRun[];
   live: boolean;
   working?: string;
+  elapsed?: number;
 }) {
   const [open, setOpen] = useState(false);
   const steps = events.length + runs.length;
@@ -651,7 +673,11 @@ function Activity({
     ? openRuns > 0
       ? "Awaiting " + openRuns + " subagent" + (openRuns === 1 ? "" : "s")
       : (working ?? latestActivity(events, runs))
-    : "Completed " + steps + " step" + (steps === 1 ? "" : "s");
+    : "Completed " +
+      steps +
+      " step" +
+      (steps === 1 ? "" : "s") +
+      (elapsed === undefined ? "" : " in " + spanMoment(elapsed));
   const shown = steps > 0 && open;
   return (
     <details

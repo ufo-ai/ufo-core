@@ -201,6 +201,6 @@ test("a settled turn takes the throbber down", async () => {
     tokens: 5,
     cost_micro_usd: 1_000_000,
   });
-  expect(await screen.findByText("Completed 1 step")).toBeTruthy();
+  expect(await screen.findByText(/^Completed 1 step/)).toBeTruthy();
   expect(throbber()).toBeNull();
 });
