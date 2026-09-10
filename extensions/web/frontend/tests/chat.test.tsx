@@ -3680,6 +3680,31 @@ test("the composer's model chip picks a model out of its provider's flyout, and 
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
 });
 
+test("the pick lands on the new chat screen, where the composer grabs the focus back", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...transcript(),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Applied." });
+    },
+  });
+  location.hash = newChatHash(AGENT_ID);
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+
+  expect(posted).toEqual([
+    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-sol" } },
+  ]);
+  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
+  expect(screen.queryAllByRole("menu")).toEqual([]);
+});
+
 /** The rows of the flyout a model stands in: a submenu that has just closed lingers in the tree
  *  until Radix unmounts it, so one flyout is read through a row of its own. */
 async function flyoutRows(model: string) {

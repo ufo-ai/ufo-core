@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import type { EarlierMessages } from "@/lib/earlier";
-import { chatHash, conversationSlotHash } from "@/lib/route";
+import { chatHash, conversationSlotHash, newChatHash } from "@/lib/route";
 import { ConversationTranscript } from "@/views/Conversations";
 
 import { AGENT, AGENT_ID, ARRIVAL_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
@@ -35,6 +35,10 @@ const transcript = (payload: unknown = { messages: [] }) => ({
 function open() {
   return render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 }
+
+/** The model chip is drawn for a member who may write the agent row: its owner, or an admin for
+ *  the main agent, which has no owner. */
+const ADMIN = { ...MEMBER, admin: true };
 
 function waiting(text: string): boolean {
   return screen.getByText(text).classList.contains("italic");
@@ -3661,4 +3665,29 @@ test("the starters close on a link to the connectors screen, which the press rea
   expect(location.hash).toBe("#/connectors");
   await screen.findByText("No connector is offered yet.");
   expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
+});
+
+test("the pick lands on the new chat screen, where the composer grabs the focus back", async () => {
+  const posted: unknown[] = [];
+  wire({
+    ...transcript(),
+    "/intents": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "Applied." });
+    },
+  });
+  location.hash = newChatHash(AGENT_ID);
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={ADMIN} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+
+  expect(posted).toEqual([
+    { verb: "apply", kind: "agent", name: AGENT.name, spec: { model: "gpt-5.6-sol" } },
+  ]);
+  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
+  expect(screen.queryAllByRole("menu")).toEqual([]);
 });

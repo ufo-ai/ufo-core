@@ -775,6 +775,7 @@ function Composer({
       onMouseDown={
         starting
           ? (event) => {
+              if (!event.currentTarget.contains(event.target as Node)) return;
               if ((event.target as Element).closest("[data-field-card]")) return;
               event.preventDefault();
               input.current?.focus();
