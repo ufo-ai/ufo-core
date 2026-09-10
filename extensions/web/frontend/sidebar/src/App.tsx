@@ -41,6 +41,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SignIn } from "@/views/SignIn";
 import { SearchRow, Spotlight } from "@/views/Spotlight";
+import { usePlaceRecorder } from "@/kernel/place";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
@@ -116,6 +117,7 @@ import {
   placeAgent,
   placeFirstRun,
   placeSection,
+  placeTasks,
   placeWorkspace,
   startRouter,
   useRoute,
@@ -154,8 +156,8 @@ const LinkedPane = lazy(() =>
   import("@/views/ChatPane").then((module) => ({ default: module.LinkedPane })),
 );
 const Store = lazy(() => import("./views/Store").then((module) => ({ default: module.Store })));
-const TaskThreads = lazy(() =>
-  import("@/views/TaskThreads").then((module) => ({ default: module.TaskThreads })),
+const TaskRuns = lazy(() =>
+  import("@/views/TaskRuns").then((module) => ({ default: module.TaskRuns })),
 );
 
 function PaneLoading() {
@@ -807,6 +809,16 @@ function WorkspaceSidebar({
   );
 }
 
+function TasksPane({ member, place }: { member: Member; place: WorkspacePlace }) {
+  const { merged, record } = usePlaceRecorder({
+    view: "tasks",
+    place,
+    remountOnPlace: false,
+    onPlace: placeTasks,
+  });
+  return <TaskRuns member={member} place={merged} onPlace={record} />;
+}
+
 function SectionLanding({ agentId, place }: { agentId: string; place: WorkspacePlace }) {
   useEffect(() => openAgentPlace(agentId, place), [agentId, place]);
   return null;
@@ -863,7 +875,7 @@ function RoutedPane({
     case "store":
       return <Store member={member} onBuild={onBuild} />;
     case "tasks":
-      return <TaskThreads />;
+      return <TasksPane member={member} place={route.place} />;
     case "workspace":
       return (
         <TabbedPane

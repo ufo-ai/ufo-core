@@ -7,11 +7,13 @@ assemble an install step, a link, or a request for a token here.
 
 ## Finding existing work
 
-Radar and Artifacts are under Apps in the web portal; Tasks is a tab on the Workspace page:
+Radar, Artifacts, and Tasks are rows in the web portal's sidebar; the Tasks tab on the
+Workspace page holds the tasks and triggers themselves:
 
 - Radar opens each scheduled run as a full report with its files and conversation.
 - Artifacts lists shared files and hosted sites.
-- Tasks lists recurring tasks and source triggers.
+- Tasks lists the runs of recurring tasks and source triggers, newest first; a run opens its
+  transcript, and a running one can be stopped.
 - In Memory in the web portal, a member can read saved facts and record a correction that
   supersedes the earlier statement. The agent can also correct a fact when the member states the
   correction in chat.

@@ -43,7 +43,7 @@ export type Route =
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents"; build?: boolean }
   | { kind: "store" }
-  | { kind: "tasks" }
+  | { kind: "tasks"; place: WorkspacePlace }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "agent-setup"; agentId: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
@@ -260,11 +260,14 @@ const STORE = row(
   () => STORE_HASH,
 );
 
-const TASKS = row(
+const TASKS = row<"tasks", [WorkspacePlace?]>(
   "tasks",
-  bare(TASKS_HASH),
-  () => ({ kind: "tasks" }),
-  () => TASKS_HASH,
+  new RegExp(`^${TASKS_HASH}${PLACE_TAIL}`),
+  (match) => {
+    const place = parsePlace(match[1]);
+    return place ? { kind: "tasks", place } : null;
+  },
+  (place: WorkspacePlace = {}) => TASKS_HASH + serializePlace(place),
 );
 
 const CHAT = row(
@@ -494,4 +497,5 @@ export const agentHash = AGENT.write;
 export const agentSetupHash = AGENT_SETUP.write;
 export const workspaceHash = WORKSPACE.write;
 export const sectionHash = SECTION.write;
+export const tasksHash = TASKS.write;
 export const firstRunHash = FIRST_RUN.write;

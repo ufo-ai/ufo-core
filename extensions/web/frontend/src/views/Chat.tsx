@@ -22,6 +22,7 @@ import {
   type QuestionnaireItemDefinition,
 } from "@/components/ui/questionnaire";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
 import {
   PromptInput,
   PromptInputAttach,
@@ -88,6 +89,12 @@ export type ChatProps = {
   conversationId: string | null;
   foundingKey?: string;
   focusComposer?: boolean;
+  /** Draw the transcript and follow its live turn, with no composer, no question to answer, and no
+   *  credential form: a screen for watching a conversation rather than speaking in it. */
+  readOnly?: boolean;
+  /** The one turn a read-only screen may stop. Stop draws only while that turn is the live one, so
+   *  a drawer on a settled run never ends the run that came after it in the same conversation. */
+  stops?: string;
   unsaid?: ReactNode;
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string) => void;
@@ -100,6 +107,8 @@ export function Chat({
   conversationId,
   foundingKey,
   focusComposer = false,
+  readOnly = false,
+  stops,
   unsaid,
   onCreated,
   onActivity,
@@ -192,16 +201,20 @@ export function Chat({
                 : null
             }
             className={cn(COLUMN, "p-2xl")}
-            question={(question) => (
-              <Question
-                target={target}
-                question={question}
-                held={held}
-                onAct={() => composer.current?.focus()}
-              />
-            )}
+            question={
+              readOnly
+                ? undefined
+                : (question) => (
+                    <Question
+                      target={target}
+                      question={question}
+                      held={held}
+                      onAct={() => composer.current?.focus()}
+                    />
+                  )
+            }
           >
-            {credentials ? (
+            {credentials && !readOnly ? (
               <Handoff>
                 <div>
                   {credentials.prompts.length === 1 &&
@@ -246,20 +259,49 @@ export function Chat({
           </MessageLog>
         </TranscriptPane>
       )}
-      <Composer
-        agent={agent}
-        target={target}
-        draftKey={draftKey}
-        input={composer}
-        starting={bare}
-        onSent={animateTheSend}
-        placeholder={conversationId !== null ? FOLLOW_UP_PLACEHOLDER : NEW_CHAT_PLACEHOLDER}
-      />
+      {readOnly ? (
+        state.turn && state.turn.id === stops ? (
+          <Watching target={target} turnId={state.turn.id} />
+        ) : null
+      ) : (
+        <Composer
+          agent={agent}
+          target={target}
+          draftKey={draftKey}
+          input={composer}
+          starting={bare}
+          onSent={animateTheSend}
+          placeholder={conversationId !== null ? FOLLOW_UP_PLACEHOLDER : NEW_CHAT_PLACEHOLDER}
+        />
+      )}
       <Toast
         state={stalled ? SILENT : state.fault ?? SILENT}
         onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
       />
     </TranscriptScroll>
+  );
+}
+
+const STOP = "Stop";
+
+/** The one act a watched conversation offers while its turn runs: the stop the composer would
+ *  carry, standing where the composer would. The surface decides who may press it. */
+function Watching({ target, turnId }: { target: ChatTarget; turnId: string }) {
+  const [stopping, setStopping] = useState(false);
+  return (
+    <div className={cn(COLUMN, "flex shrink-0 justify-end px-2xl py-lg")}>
+      <Button
+        variant="row"
+        busy={stopping}
+        onClick={async () => {
+          setStopping(true);
+          await stopTurn(target, turnId);
+          setStopping(false);
+        }}
+      >
+        {STOP}
+      </Button>
+    </div>
   );
 }
 

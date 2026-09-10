@@ -105,6 +105,9 @@ from ufo.schema.records import (
     AgentChange as AgentChange,
 )
 from ufo.schema.records import (
+    FiredBy as FiredBy,
+)
+from ufo.schema.records import (
     ProposalRef as ProposalRef,
 )
 from ufo.schema.records import (

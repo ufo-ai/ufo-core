@@ -1,14 +1,16 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { TASKS_HASH, chatHash } from "@/lib/route";
+import { TASKS_HASH } from "@/lib/route";
 
 import {
   AGENT,
   CHAT_ROW,
   CONVO_ID,
+  StreamFake,
+  TURN_ID,
   MEMBER,
   NO_TASKS,
   NO_TRIGGERS,
@@ -21,26 +23,6 @@ import {
   useStreamFake,
   wire,
 } from "./harness";
-
-const THREADS_READ = "/objects/scheduled_task?order_by=last_run_at&order=desc";
-const BOUND = "The threads that ran most recently. Task settings holds the rest.";
-
-const THREAD_TASK = owned({
-  name: "nightly-deploy",
-  summary: "0 9 * * * — build the nightly",
-  conversation: CONVO_ID,
-  last_run_at: "2026-08-26T09:00:00+00:00",
-  paused: false,
-});
-
-function taskThreadsWire(next: string | null = null) {
-  return wire({
-    ...chatsOnWire([CHAT_ROW]),
-    "/objects/scheduled_task": () => objectIndex(TASK_KIND, [THREAD_TASK], next),
-    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
-    "/transcript": () => json({ messages: [] }),
-  });
-}
 
 beforeEach(() => {
   location.hash = "";
@@ -60,44 +42,6 @@ test("the workspace Tasks tab draws both of its listings", async () => {
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
   expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
   expect(screen.getByRole("button", { name: "New scheduled task" })).toBeTruthy();
-});
-
-test("the sidebar Tasks row opens the threads the tasks report into, and a row opens its chat", async () => {
-  taskThreadsWire();
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await userEvent.click(await screen.findByRole("button", { name: "Tasks" }));
-
-  expect(location.hash).toBe(TASKS_HASH);
-  expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
-  const page = screen.getByRole("main");
-  const thread = await within(page).findByRole("button", { name: /Pick one thread/ });
-  expect(within(page).queryByText(BOUND)).toBeNull();
-
-  await userEvent.click(thread);
-  expect(location.hash).toBe(chatHash(CONVO_ID));
-});
-
-test("the threads are read on the moment they are ranked by, and a cut page says so", async () => {
-  const { calls } = taskThreadsWire("walk-on");
-  location.hash = TASKS_HASH;
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
-  const page = screen.getByRole("main");
-  expect(await within(page).findByText(BOUND)).toBeTruthy();
-  expect(calls.some((url) => url.includes(THREADS_READ))).toBe(true);
-});
-
-test("the gear on the tasks threads opens the tasks themselves", async () => {
-  taskThreadsWire();
-  location.hash = TASKS_HASH;
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await userEvent.click(await screen.findByRole("button", { name: "Task settings" }));
-
-  expect(location.hash).toBe("#/workspace/tasks");
-  expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
 });
 
 test("a task the address opens stands in the sheet, where its pause is one press", async () => {
@@ -140,5 +84,153 @@ test("a task the address opens stands in the sheet, where its pause is one press
         spec: { paused: true },
       },
     ]),
+  );
+});
+
+const TURN_KIND = {
+  kind: "turn",
+  fields: [
+    "conversation",
+    "agent_id",
+    "status",
+    "admission",
+    "fired",
+    "source",
+    "source_name",
+    "title",
+    "created_at",
+    "surface",
+    "origin",
+    "text",
+  ],
+  spec_schema: null,
+  applies: false,
+  deletes: false,
+};
+const OLDER_RUN = "66666666-6666-4666-8666-666666666666";
+
+function firedTurn(name: string, status: string, text = "") {
+  return owned({
+    name,
+    summary: "nightly-digest, " + status,
+    conversation: CONVO_ID,
+    status,
+    admission: "scheduled",
+    fired: true,
+    source: "scheduled_task",
+    source_name: "nightly-digest",
+    title: "nightly-digest",
+    created_at: name === TURN_ID ? "2026-08-27T09:00:00+00:00" : "2026-08-26T09:00:00+00:00",
+    surface: "web",
+    origin: "Portal",
+    text,
+  });
+}
+
+const NIGHTLY_DETAIL = {
+  ...TASK_KIND,
+  name: "nightly-digest",
+  summary: "0 9 * * * — the digest",
+  spec: { schedule: "0 9 * * *", prompt: "digest the night", paused: false },
+  status: { next_run_at: "2026-08-28T09:00:00+00:00", paused: false },
+  links: [],
+  created_at: "2026-08-01T09:00:00Z",
+  updated_at: "2026-08-01T09:00:00Z",
+};
+
+function runsWire(transcript: unknown = { messages: [] }) {
+  const runs = [firedTurn(TURN_ID, "running"), firedTurn(OLDER_RUN, "failed", "The feed 502ed.")];
+  return wire({
+    ...chatsOnWire([CHAT_ROW]),
+    ["/objects/turn/" + TURN_ID]: () =>
+      json({ ...TURN_KIND, ...runs[0], spec: null, status: runs[0], links: [] }),
+    "/objects/turn": (url) =>
+      json({
+        ...TURN_KIND,
+        objects: url.includes("source_name=nightly-digest") ? runs : runs,
+        next_cursor: null,
+      }),
+    "/objects/scheduled_task/nightly-digest": () => json(NIGHTLY_DETAIL),
+    "/objects/scheduled_task": () =>
+      objectIndex(TASK_KIND, [
+        owned({ name: "nightly-digest", summary: "0 9 * * * — the digest", paused: false }),
+      ]),
+    "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
+    "/transcript": () => json(transcript),
+    "/chat": () => json({ stopped: true }),
+    "/intents": () => json({ applied: true, message: "Applied." }),
+  });
+}
+
+test("the sidebar Tasks row lists the runs of scheduled work, newest first, marking the live one", async () => {
+  const { calls } = runsWire();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Tasks" }));
+
+  expect(location.hash).toBe(TASKS_HASH);
+  expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
+  const page = screen.getByRole("main");
+  expect(await within(page).findByRole("img", { name: "Running" })).toBeTruthy();
+  expect(within(page).getByRole("img", { name: "Failed" })).toBeTruthy();
+  expect(within(page).getByText(/The feed 502ed\./)).toBeTruthy();
+  const read = calls.find((url) => url.includes("/objects/turn?"));
+  expect(read).toContain("fired=true");
+  expect(read).toContain("order_by=created_at");
+});
+
+test("a run row opens its transcript read-only, and its Stop ends that run alone", async () => {
+  const { handler } = runsWire({
+    messages: [],
+    turn: TURN_ID,
+    turn_started_at: "2026-08-27T09:00:00Z",
+  });
+  location.hash = TASKS_HASH;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const mark = await screen.findByRole("img", { name: "Running" });
+  await userEvent.click(mark.closest('[role="button"]')!);
+
+  expect(decodeURIComponent(location.hash)).toBe(TASKS_HASH + "?open=run/" + TURN_ID);
+  const drawer = await screen.findByRole("dialog", { name: "nightly-digest" });
+  const stop = await within(drawer).findByRole("button", { name: "Stop" });
+  expect(within(drawer).queryByRole("textbox")).toBeNull();
+
+  await userEvent.click(stop);
+  const stops = () =>
+    handler.mock.calls.filter(
+      ([, init]) => (init?.headers as Record<string, string>)?.["x-ufo-stop-turn"] === TURN_ID,
+    );
+  await waitFor(() => expect(stops()).toHaveLength(1));
+  StreamFake.last().emit("terminal", { status: "cancelled" });
+  await waitFor(() => expect(within(drawer).queryByRole("button", { name: "Stop" })).toBeNull());
+});
+
+test("a run's gear opens the settings of the task that fired it", async () => {
+  runsWire();
+  location.hash = TASKS_HASH;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(
+    (await screen.findAllByRole("button", { name: "Settings for nightly-digest" }))[0],
+  );
+
+  expect(decodeURIComponent(location.hash)).toContain("object/" + AGENT.id + "/scheduled_task/nightly-digest");
+  const sheet = await screen.findByRole("dialog", { name: "nightly-digest" });
+  expect(within(sheet).getByRole("button", { name: "Pause" })).toBeTruthy();
+});
+
+test("the filter narrows the runs to one task, and the narrowing rides the address", async () => {
+  const { calls } = runsWire();
+  location.hash = TASKS_HASH;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("img", { name: "Running" });
+  await userEvent.click(screen.getByRole("button", { name: "Filter" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "nightly-digest" }));
+
+  expect(decodeURIComponent(location.hash)).toBe(TASKS_HASH + "?scope=scheduled_task/nightly-digest");
+  await waitFor(() =>
+    expect(calls.some((url) => url.includes("source_name=nightly-digest"))).toBe(true),
   );
 });

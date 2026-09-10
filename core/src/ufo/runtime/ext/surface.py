@@ -181,6 +181,7 @@ from ufo.schema.records import (
     WRITEBACK_PENDING,
     AgentVisibility,
     ArtifactRole,
+    FiredBy,
     ReasoningEffort,
     RuntimeIdentity,
     SandboxSize,
@@ -4941,6 +4942,10 @@ class SurfaceContext:
             tables.turn.c.inbound,
             tables.turn.c.admission_source,
             tables.turn.c.speaker_member_id,
+            tables.turn.c.on_behalf_of_member_id,
+            tables.turn.c.fired_by_kind,
+            tables.turn.c.fired_by_name,
+            tables.turn.c.fired_by_title,
             tables.turn.c.created_at,
             tables.turn.c.updated_at,
             tables.turn.c.context,
@@ -4963,6 +4968,14 @@ class SurfaceContext:
             inbound=row.inbound,
             admission_source=row.admission_source,
             speaker_member_id=row.speaker_member_id,
+            on_behalf_of_member_id=row.on_behalf_of_member_id,
+            fired_by=(
+                None
+                if row.fired_by_kind is None
+                else FiredBy(
+                    kind=row.fired_by_kind, name=row.fired_by_name, title=row.fired_by_title
+                )
+            ),
             created_at=row.created_at,
             updated_at=row.updated_at,
             context=None if row.context is None else TurnContext.model_validate(row.context),

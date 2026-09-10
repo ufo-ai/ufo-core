@@ -14,6 +14,7 @@ import {
   newChatHash,
   parseHash,
   sectionHash,
+  tasksHash,
   workspaceHash,
   type PlaceStep,
   type Route,
@@ -240,6 +241,10 @@ export function placeSection(section: Section, place: WorkspacePlace, step: Plac
   stepPlace(step, seen.kind === "section" && seen.section === section, () =>
     sectionHash(section, place),
   );
+}
+
+export function placeTasks(place: WorkspacePlace, step: PlaceStep): void {
+  stepPlace(step, heldRoute().kind === "tasks", () => tasksHash(place));
 }
 
 export function placeFirstRun(step: string | undefined): void {

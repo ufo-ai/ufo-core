@@ -102,6 +102,7 @@ from ufo.schema.records import (
     SUBAGENT_SURFACE,
     AgentChange,
     AgentVisibility,
+    FiredBy,
     ProposalRef,
     TurnRuntimeConfig,
     TurnStatus,
@@ -818,6 +819,7 @@ class TurnInvoker(Protocol):
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        fired_by: FiredBy | None = None,
     ) -> UUID | None: ...
 
     async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None: ...
@@ -1921,6 +1923,7 @@ class ExtensionContext:
         standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
+        fired_by: FiredBy | None = None,
     ) -> UUID | None:
         """Kick an internal turn in `conversation_id`, asserting the conversation is bound to
         `agent_id` — admission refuses a mismatch, so a stored binding can never fire into another
@@ -1935,7 +1938,9 @@ class ExtensionContext:
         member arrival past the arrival watermark does (each watermark compares only its own
         counter space). An archived agent raises `AgentArchived` rather than answering None, which
         means a member ended the wait: the caller catches it and leaves its row for a restore to
-        run. Fails loud when no invoker is wired rather than silently dropping the invocation."""
+        run. `fired_by` names the object whose fire this is, stamped on the turn so the `run` kind
+        lists it and addresses that object's settings. Fails loud when no invoker is wired rather
+        than silently dropping the invocation."""
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(
@@ -1949,6 +1954,7 @@ class ExtensionContext:
             standalone=standalone,
             unless_member_since=unless_member_since,
             unless_member_arrival_since=unless_member_arrival_since,
+            fired_by=fired_by,
         )
 
     async def member_reach(self, member_id: UUID, limit: int = 4) -> tuple[MemberReach, ...]:

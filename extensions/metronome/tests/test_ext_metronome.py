@@ -59,7 +59,7 @@ from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, TerminalFrame, Turn, Usage
+from ufo.schema.records import Agent, FiredBy, TerminalFrame, Turn, Usage
 from ufo.sdk.audience import Audience, conversation_audience
 from ufo.sdk.http import Request
 
@@ -614,6 +614,7 @@ class _RecordingInvoker:
         as_scheduled: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
+        fired_by: FiredBy | None = None,
     ) -> UUID | None:
         return await self.admission.invoke(
             self.workspace_id,

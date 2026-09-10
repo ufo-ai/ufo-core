@@ -11,6 +11,7 @@ from ufo.runtime.authority import ExecutionAuthority
 from ufo.runtime.ext.context import MemberReach, TurnRuntimeConfig
 from ufo.runtime.jobs import InvokerFactory
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.schema.records import FiredBy
 
 
 def invoker_factory(dbos: DBOSClient) -> InvokerFactory:
@@ -62,6 +63,7 @@ class RecordingInvoker:
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        fired_by: FiredBy | None = None,
     ) -> UUID | None:
         self.turns.append(
             RecordedTurn(

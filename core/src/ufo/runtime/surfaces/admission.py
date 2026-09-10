@@ -95,6 +95,7 @@ from ufo.schema.records import (
     SURFACE_COMMENT_ROUND_INDEX,
     TURN_WORKFLOW_NAME,
     WRITEBACK_PENDING,
+    FiredBy,
     TerminalFrame,
     TerminalStatus,
     ToolIntent,
@@ -355,6 +356,7 @@ class Admission:
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        fired_by: FiredBy | None = None,
     ) -> UUID | None:
         """Admit an internal turn. `authority` carries forward the authority the work already held
         — a subagent hands its result back to the conversation that delegated it, and
@@ -375,6 +377,11 @@ class Admission:
         `standalone` also founds its own turn beside a live one, but keeps an internal admission's
         meaning. Event delivery uses it when folding would discard that event's authority or
         idempotency boundary.
+
+        `fired_by` names the object whose fire this is — a scheduled task, a source trigger — and
+        is stamped on the turn the admission founds, so the runs list can say what fired it and
+        address its settings. A message that folds into a live turn stamps nothing: the turn it
+        joins already says what founded it.
 
         The two `unless_member_*` watermarks refuse the admission and answer None when a member has
         spoken since a caller began waiting on them — the question asked under admission's own lock,
@@ -421,6 +428,7 @@ class Admission:
                 unless_member_since=unless_member_since,
                 unless_member_arrival_since=unless_member_arrival_since,
                 runtime_config=runtime_config,
+                fired_by=fired_by,
             )
         except _SupersededByMember:
             return None
@@ -454,6 +462,7 @@ class Admission:
         unless_member_arrival_since: int | None = None,
         comment: str | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        fired_by: FiredBy | None = None,
     ) -> Admitted:
         self._validate_member_watermarks(unless_member_since, unless_member_arrival_since)
         dispatch_now = False
@@ -589,6 +598,7 @@ class Admission:
                     idempotency_key,
                     runtime_config,
                     inbound,
+                    fired_by,
                 )
                 turn_id = created.id
                 turn_seq = created.seq
@@ -1041,6 +1051,7 @@ class Admission:
         idempotency_key: str | None,
         runtime_config: TurnRuntimeConfig | None,
         inbound: _Inbound,
+        fired_by: FiredBy | None,
     ) -> _CreatedTurn:
         seq = (
             await connection.execute(
@@ -1127,6 +1138,9 @@ class Admission:
                     if inbound.speaker_member_id is not None
                     else authority_member_id(authority)
                 ),
+                fired_by_kind=None if fired_by is None else fired_by.kind,
+                fired_by_name=None if fired_by is None else fired_by.name,
+                fired_by_title=None if fired_by is None else fired_by.title,
                 parent_turn_id=(
                     None if spawned_identity is None else spawned_identity.parent_turn_id
                 ),
@@ -1363,6 +1377,7 @@ class AdmissionInvoker:
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        fired_by: FiredBy | None = None,
     ) -> UUID | None:
         return await self.admission.invoke(
             self.workspace_id,
@@ -1378,6 +1393,7 @@ class AdmissionInvoker:
             unless_member_since=unless_member_since,
             unless_member_arrival_since=unless_member_arrival_since,
             runtime_config=runtime_config,
+            fired_by=fired_by,
         )
 
     async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None:

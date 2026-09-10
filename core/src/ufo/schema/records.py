@@ -560,6 +560,19 @@ class TurnContext(BaseModel):
         return value
 
 
+class FiredBy(BaseModel):
+    """The object whose fire admitted a turn on its own — a scheduled task's cron fire, a source
+    trigger's wake — as the runs list reads it: the object's kind and name, which address its
+    settings, and the words the list shows for it. Stamped at admission and never rewritten, so a
+    run keeps naming what fired it after the object is edited or gone."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: str
+    name: str
+    title: str
+
+
 class Turn(BaseModel):
     id: UUID
     workspace_id: UUID
@@ -573,6 +586,7 @@ class Turn(BaseModel):
     admission_source: TurnAdmissionSource = INTERNAL_ADMISSION
     speaker_member_id: UUID | None = None
     on_behalf_of_member_id: UUID | None = None
+    fired_by: FiredBy | None = None
     context: TurnContext | None = None
     terminal: TerminalFrame | None = None
     created_refs: tuple[ObjectRef, ...] = ()

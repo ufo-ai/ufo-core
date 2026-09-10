@@ -82,6 +82,8 @@ export function ChatPane({
   conversationId,
   audience,
   focusComposer,
+  readOnly,
+  stops,
   onCreated,
   onActivity,
   title,
@@ -106,7 +108,8 @@ export function ChatPane({
   const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
   const terminal =
     !conversationOnly && shell.phase === "ready" && shell.payload.available ? shell.payload : null;
-  const header = conversationId ? (
+  const header =
+    conversationId && !readOnly ? (
     <Header
       crumb={crumb}
       title={title ?? agentName(agent.name)}
@@ -154,6 +157,8 @@ export function ChatPane({
           member={member}
           conversationId={conversationId}
           focusComposer={focusComposer}
+          readOnly={readOnly}
+          stops={stops}
           onCreated={onCreated}
           onActivity={onActivity}
           onSettled={settled}

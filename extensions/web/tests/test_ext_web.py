@@ -1423,6 +1423,107 @@ async def test_a_stop_refused_by_its_own_shape_touches_nothing(
     assert (conversations, turns) == (1, 2)
 
 
+async def _seed_fired_turn(
+    workspace_id: UUID, conversation_id: UUID, agent_id: UUID, creator_id: UUID, seq: int
+) -> UUID:
+    turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=seq,
+                status="running",
+                inbound="fired",
+                admission_source="scheduled",
+                on_behalf_of_member_id=creator_id,
+                fired_by_kind="scheduled_task",
+                fired_by_name="nightly-digest",
+                fired_by_title="nightly-digest",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn_id
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_fired_turn_is_stopped_by_its_creator_or_an_admin_and_nobody_else(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    creator_id, creator_token = await _seed_member(workspace_id, "creator@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    _viewer_id, viewer_token = await _seed_member(workspace_id, "viewer@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C1:1.0",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    url = f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}"
+    first = await _seed_fired_turn(workspace_id, conversation_id, agent_id, creator_id, 1)
+
+    refused = await client.post(
+        url,
+        headers={"cookie": f"{SESSION_COOKIE}={viewer_token}", "x-ufo-stop-turn": str(first)},
+    )
+    assert refused.status_code == 403
+    assert await _turn_status(first) == "running"
+
+    stopped = await client.post(
+        url,
+        headers={"cookie": f"{SESSION_COOKIE}={creator_token}", "x-ufo-stop-turn": str(first)},
+    )
+    assert stopped.status_code == 200
+    assert stopped.json() == {"stopped": True}
+    assert await _turn_status(first) == "cancelled"
+
+    second = await _seed_fired_turn(workspace_id, conversation_id, agent_id, creator_id, 2)
+    managed = await client.post(
+        url,
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}", "x-ufo-stop-turn": str(second)},
+    )
+    assert managed.status_code == 200
+    assert managed.json() == {"stopped": True}
+    assert await _turn_status(second) == "cancelled"
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_admin_reaches_no_fired_turn_in_another_members_private_conversation(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    creator_id, _creator_token = await _seed_member(workspace_id, "creator@example.com")
+    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    private = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="agent/creator@example.com/private",
+        audience=str(conversation_audience(creator_id)),
+        member_id=creator_id,
+    )
+    fired = await _seed_fired_turn(workspace_id, private, agent_id, creator_id, 1)
+    cookie = {"cookie": f"{SESSION_COOKIE}={admin_token}"}
+
+    streamed = await client.get(f"/surface/web/turns/{fired}/stream", headers=cookie)
+    assert streamed.status_code == 403
+    assert streamed.headers[web_surface.REFUSAL_HEADER] == "1"
+
+    stopped = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={private}",
+        headers={**cookie, "x-ufo-stop-turn": str(fired)},
+    )
+    assert stopped.status_code in (403, 404)
+    assert await _turn_status(fired) == "running"
+
+
 async def _seed_arrival(
     workspace_id: UUID,
     conversation_id: UUID,

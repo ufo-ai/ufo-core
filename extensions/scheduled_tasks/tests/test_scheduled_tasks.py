@@ -2685,3 +2685,29 @@ async def test_a_task_on_an_archived_app_keeps_its_occurrence_and_fails_no_tick(
     assert restored.last_run_at is not None
     assert restored.last_run_at > due_at
     assert restored.next_run_at > restored.last_run_at
+
+
+async def test_a_fire_names_the_task_that_fired_it(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+    with ws(workspace_id), agent(agent_id):
+        await _store().create(
+            conversation_id,
+            "nightly-digest",
+            DAILY_9AM,
+            "summarize the night",
+            "nightly digest",
+            datetime.now(UTC) - timedelta(minutes=1),
+            created_by_member_id=creator,
+        )
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        [turn] = await _turns(conversation_id)
+
+    assert turn["admission_source"] == "scheduled"
+    assert turn["fired_by_kind"] == SCHEDULED_TASK_KIND
+    assert turn["fired_by_name"] == "nightly-digest"
+    assert turn["fired_by_title"] == "nightly-digest"

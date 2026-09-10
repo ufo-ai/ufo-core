@@ -3963,3 +3963,31 @@ test("the shell chip is drawn for a conversation that did coding work, and for n
   const chip = await screen.findByRole("button", { name: "Shell, sandbox running" });
   expect(chip.getAttribute("aria-pressed")).toBe("false");
 });
+
+test("a read-only chat draws no composer, and its one control stops the live turn", async () => {
+  const { handler } = wire({
+    ...transcript({ messages: [], turn: TURN_ID, turn_started_at: "2026-08-14T09:00:00Z" }),
+    "/chat": () => json({ stopped: true }),
+  });
+  render(<Chat agent={AGENT} member={MEMBER} conversationId={CONVO_ID} readOnly stops={TURN_ID} />);
+
+  const stop = await screen.findByRole("button", { name: "Stop" });
+  expect(screen.queryByRole("textbox")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+
+  await userEvent.click(stop);
+  const stops = () =>
+    handler.mock.calls.filter(([, init]) => (init?.headers as Record<string, string>)?.["x-ufo-stop-turn"]);
+  await waitFor(() => expect(stops()).toHaveLength(1));
+  StreamFake.last().emit("terminal", { status: "cancelled" });
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Stop" })).toBeNull());
+});
+
+test("a read-only chat stops only the run it names, never the conversation's other live turn", async () => {
+  wire(transcript({ messages: [], turn: TURN_ID, turn_started_at: "2026-08-14T09:00:00Z" }));
+  render(<Chat agent={AGENT} member={MEMBER} conversationId={CONVO_ID} readOnly stops={ARRIVAL_ID} />);
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  expect(screen.queryByRole("textbox")).toBeNull();
+});

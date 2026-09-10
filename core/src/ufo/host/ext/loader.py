@@ -57,6 +57,7 @@ from ufo.host.kinds.surface_kind import (
     SurfaceObjectSpec,
     registered_surfaces,
 )
+from ufo.host.kinds.turns import TURN_OBJECT
 from ufo.host.kinds.workspace_kind import WORKSPACE_OBJECT
 from ufo.host.tools.builtins import BUILTIN_ACTIONS, BUILTIN_TOOLS
 from ufo.runtime.access.connectors import CliCredential
@@ -117,6 +118,7 @@ from ufo.runtime.workspace import ws_current
 CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=AGENT_OBJECT, extension=None, context=None),
     BoundKind(kind=CONVERSATION_OBJECT, extension=None, context=None),
+    BoundKind(kind=TURN_OBJECT, extension=None, context=None),
     BoundKind(kind=MEMBER_OBJECT, extension=None, context=None),
     BoundKind(kind=WORKSPACE_OBJECT, extension=None, context=None),
 )

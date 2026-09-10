@@ -169,13 +169,11 @@ test("an address naming an inherited property of an object names no workspace ta
   expect(parseHash("#/constructor")).toEqual({ kind: "bad-link" });
 });
 
-test("the tasks screen and the tasks settings answer at addresses of their own", () => {
-  expect(parseHash(TASKS_HASH)).toEqual({ kind: "tasks" });
-  expect(parseHash(TASKS_HASH + "?q=nightly")).toEqual({ kind: "tasks" });
-  expect(parseHash(workspaceHash("tasks"))).toEqual({
-    kind: "workspace",
-    view: "tasks",
-    place: {},
+test("the tasks screen carries a place, and the tasks settings keep the workspace tab address", () => {
+  expect(parseHash(TASKS_HASH)).toEqual({ kind: "tasks", place: {} });
+  expect(parseHash(TASKS_HASH + "?scope=scheduled_task%2Fnightly&open=run%2Fa")).toEqual({
+    kind: "tasks",
+    place: { scope: "scheduled_task/nightly", opens: ["run/a"] },
   });
   expect(parseHash(workspaceHash("tasks", { opens: ["object/a/scheduled_task/nightly"] }))).toEqual({
     kind: "workspace",

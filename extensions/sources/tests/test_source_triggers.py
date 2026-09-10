@@ -578,6 +578,9 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
         turn = next(row for row in turns if feed.name in row["inbound"])
         assert turn["speaker_member_id"] is None
         assert turn["on_behalf_of_member_id"] == state.owner_id
+        assert turn["fired_by_kind"] == SOURCE_TRIGGER_KIND
+        assert turn["fired_by_name"] == trigger_name(feed.name, state.conversation_id)
+        assert turn["fired_by_title"].startswith(feed.name)
         assert "tasks: 2 added" in turn["inbound"]
         assert f"{PAGE_KIND}/{shipped.page_id}" in turn["inbound"]
         assert f"{PAGE_KIND}/{legal.page_id}" in turn["inbound"]

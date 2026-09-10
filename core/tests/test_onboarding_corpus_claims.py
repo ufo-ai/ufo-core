@@ -57,6 +57,7 @@ CODING_SKILL_MD = "extensions/coding/ufo_ext_coding/skills/coding/SKILL.md"
 RADAR_HOME = "extensions/app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx"
 ARTIFACTS_HOME = "extensions/app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx"
 TASKS_VIEW = "extensions/web/frontend/src/views/Tasks.tsx"
+TASK_RUNS_VIEW = "extensions/web/frontend/src/views/TaskRuns.tsx"
 TASK_PANE = "extensions/web/frontend/src/kernel/task.tsx"
 WEB_OBJECTS = "extensions/web/frontend/src/kernel/objects.tsx"
 MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
@@ -503,14 +504,21 @@ CLAIMS = (
         pattern=r"A file or site an app makes in a conversation is listed here",
     ),
     Claim(
-        claim="Tasks lists scheduled work and source triggers",
+        claim="Tasks lists the runs of scheduled tasks and source triggers",
         corpus="references/capabilities.md",
-        phrase="Tasks lists recurring tasks and source triggers",
-        source=TASKS_VIEW,
+        phrase="Tasks lists the runs of recurring tasks and source triggers",
+        source=TASK_RUNS_VIEW,
         pattern=(
-            r'\{ kind: "scheduled_task", label: "Scheduled" \},\n'
-            r'\s+\{ kind: "source_trigger", label: "Triggers" \}'
+            r'const TASK_KIND = "scheduled_task";\n'
+            r'const TRIGGER_KIND = "source_trigger";\n(?:.*\n)*?.*fired: "true"'
         ),
+    ),
+    Claim(
+        claim="a run opens its transcript read-only",
+        corpus="references/capabilities.md",
+        phrase="a run opens its\n  transcript",
+        source=TASK_RUNS_VIEW,
+        pattern=r"<ChatPane\n(?:.*\n){0,5}?\s+readOnly\n\s+stops=\{id\}",
     ),
     Claim(
         claim="Tasks can pause or resume a scheduled task",

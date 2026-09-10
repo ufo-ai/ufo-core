@@ -37,6 +37,7 @@ from ufo.sdk.context import (
     SUBAGENT_SURFACE,
     AgentArchived,
     ExtensionContext,
+    FiredBy,
     SourceReader,
 )
 from ufo.sdk.grants import FeedConnection, account_object_name, feed_connections
@@ -563,6 +564,11 @@ async def _fire_trigger(
     """Deliver one trigger's changes. An archived app raises `AgentArchived` out of the first
     invoke, which drops the rest of this trigger's changes with it — none of them can be answered
     until the app is restored."""
+    fired_by = FiredBy(
+        kind=SOURCE_TRIGGER_KIND,
+        name=trigger_name(_feed_name(connection), trigger.conversation_id, trigger.resource),
+        title=_trigger_summary(connection, trigger),
+    )
     match trigger.delivery:
         case "current":
             member_id = (
@@ -590,6 +596,7 @@ async def _fire_trigger(
                 authority=authority_from_member_id(member_id),
                 holds_work_already_done=True,
                 standalone=True,
+                fired_by=fired_by,
             )
         case "per_page":
             member_key = (
@@ -618,6 +625,7 @@ async def _fire_trigger(
                     authority=authority_from_member_id(trigger.created_by_member_id),
                     holds_work_already_done=True,
                     standalone=True,
+                    fired_by=fired_by,
                 )
 
 

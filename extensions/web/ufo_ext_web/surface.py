@@ -1929,7 +1929,7 @@ async def _resolve_chat_target(
 async def _stop_chat(
     ctx: SurfaceContext, request: Request, conversation_id: UUID, turn_id: UUID
 ) -> Response:
-    authorized = await _member_turn(ctx, request, named_turn=turn_id)
+    authorized = await _member_turn(ctx, request, named_turn=turn_id, admin_stops_fired=True)
     if isinstance(authorized, Response):
         return authorized
     try:
@@ -4570,11 +4570,16 @@ async def _member_turn(
     *,
     named_turn: UUID | None = None,
     allow_commentable: bool = False,
+    admin_stops_fired: bool = False,
 ) -> tuple[UUID, UUID, str] | Response:
     """One turn this member may reach, as the member, the turn, and the email their audience is
-    resolved from, or the refusal to answer with. A mutation requires the member's own turn; a
-    stream may also read a Slack or terminal conversation they may comment in. The agent must still
-    be reachable by their web audience or that conversation."""
+    resolved from, or the refusal to answer with. A mutation requires the member's own turn — the
+    one they spoke, or the one a task or trigger fires on their behalf. A stream may also read a
+    Slack or terminal conversation they may comment in. The stop lane alone passes
+    `admin_stops_fired`: an admin may end a fired turn in a conversation the chat lane has already
+    admitted them to, the cadence management the task kind grants them, and nothing else — the
+    stream and the connect handoff read a turn's frames, which never widen for an admin. The agent
+    must still be reachable by their web audience or that conversation."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -4590,7 +4595,12 @@ async def _member_turn(
     detail = await ctx.turn_detail(turn_id)
     if detail is None:
         return absent
-    owner = detail.turn.speaker_member_id or await ctx.turn_owner(turn_id)
+    owner = (
+        detail.turn.speaker_member_id
+        or detail.turn.on_behalf_of_member_id
+        or await ctx.turn_owner(turn_id)
+    )
+    manages = admin_stops_fired and detail.turn.fired_by is not None and audience.admin
     agent_visible = audience.allows(detail.turn.agent_id)
     conversation = (
         await _member_chat(
@@ -4605,8 +4615,14 @@ async def _member_turn(
         if owner != member_id or not agent_visible
         else None
     )
-    if owner != member_id and (
-        not allow_commentable or conversation is None or not _commentable(conversation, member_id)
+    if (
+        owner != member_id
+        and not manages
+        and (
+            not allow_commentable
+            or conversation is None
+            or not _commentable(conversation, member_id)
+        )
     ):
         if owner is None:
             return absent

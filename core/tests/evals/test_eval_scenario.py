@@ -61,7 +61,7 @@ from ufo.runtime.turns.transcript import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import TurnRuntimeConfig
+from ufo.schema.records import FiredBy, TurnRuntimeConfig
 from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
 
 MODEL = "claude-opus-4-8"
@@ -169,6 +169,7 @@ class ScriptedWorker:
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        fired_by: FiredBy | None = None,
     ) -> UUID | None:
         return await self.admit(conversation_id, message, idempotency_key)
 
