@@ -148,6 +148,17 @@ export type SubagentRun = {
   at?: number;
 };
 
+/** What a settled turn spent and how long it took, carried on the reply it produced. The transcript
+ *  draws it from here, so the line stands after a reload and for a member who watched no stream. */
+export type TurnSummary = {
+  /** The model the turn ran on, held as the id the meta line draws its mark from. An agent on the
+   *  auto sentinel carries none. */
+  model?: string;
+  tokens?: number;
+  cost_micro_usd?: number;
+  duration_ms?: number;
+};
+
 /** `arrival_id` names the inbound-queue row a message admitted mid-turn landed on, carried only while
  *  that turn has not taken the message up. `at` is when the message landed: the member's words as
  *  their turn was admitted, the reply as the turn that wrote it settled. */
@@ -166,6 +177,7 @@ export type Message = {
   question?: ChatQuestion;
   files?: ChatFile[];
   apps?: ChatApp[];
+  summary?: TurnSummary;
 };
 
 export type ChatConnect = {

@@ -36,6 +36,9 @@ from ufo.harness.models.grant import (
     openai_client_id as openai_client_id,
 )
 from ufo.harness.models.interface import (
+    AUTO_MODEL as AUTO_MODEL,
+)
+from ufo.harness.models.interface import (
     PROVIDER_PARK_THRESHOLD_SECONDS as PROVIDER_PARK_THRESHOLD_SECONDS,
 )
 from ufo.harness.models.interface import (

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { tokens } from "@/lib/turnStream";
+import { tokens } from "@/lib/turnMeta";
 
 import { AGENT, ARRIVAL_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND_ID, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 

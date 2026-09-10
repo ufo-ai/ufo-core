@@ -185,6 +185,54 @@ test("a reply from an agent on auto states its spend and names no model", async 
   expect(screen.queryByText(/GLM 5.3 Flash/)).toBeNull();
 });
 
+test("a settled reply states what it spent and how long it took, with no stream to read it from", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "Review PR 1268." },
+        {
+          role: "assistant",
+          text: "Reviewed.",
+          events: [{ kind: "activity", text: "Reading the diff." }],
+          summary: {
+            model: "gpt-6-astra",
+            tokens: 12,
+            cost_micro_usd: 2_000_000,
+            duration_ms: 63_000,
+          },
+        },
+      ],
+    }),
+  );
+  open();
+
+  expect(await screen.findByText(saying("Reviewed."))).toBeTruthy();
+  const meta = screen.getByText("12 tok · $2.00");
+  expect(meta.parentElement!.querySelector('[style*="--brand-openai"]')).toBeTruthy();
+  expect(screen.getByText("Completed 1 step in 1m 3s")).toBeTruthy();
+  expect(StreamFake.opened.length).toBe(0);
+});
+
+test("a settled reply names no model where the agent runs on the deploy's own choice", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "Review PR 1268." },
+        {
+          role: "assistant",
+          text: "Reviewed.",
+          summary: { tokens: 12, cost_micro_usd: 2_000_000, duration_ms: 63_000 },
+        },
+      ],
+    }),
+  );
+  open();
+
+  expect(await screen.findByText(saying("Reviewed."))).toBeTruthy();
+  const meta = screen.getByText("12 tok · $2.00");
+  expect(meta.parentElement!.querySelector('[style*="--brand-"]')).toBeNull();
+});
+
 test("the one control carries the act the member has, and stops the turn once", async () => {
   const { handler } = wire({
     ...transcript(),

@@ -10,17 +10,14 @@ import type {
   CredentialRequest,
   Message,
   SubagentRun,
+  TurnSummary,
 } from "@/lib/types";
 
 export type { ActivityEvent } from "@/lib/types";
 
 export type Bubble = Message & {
-  meta?: string;
-  /** The model the turn ran on, held as the id: the meta line draws the name and the mark the
-   *  picker draws for that id. An agent on the auto sentinel carries none. */
-  model?: string;
-  /** How long the turn that spoke this ran, in milliseconds. A bubble read back from a transcript
-   *  carries none, so its fold states the steps alone. */
+  /** How long the turn that spoke this ran, in milliseconds, as the portal watching it measured.
+   *  A bubble read back from a transcript carries none: its summary holds the duration instead. */
   elapsed?: number;
   connect?: ChatConnect;
   sending?: string;
@@ -33,8 +30,7 @@ export type LiveTurn = {
   text: string;
   activity: string | null;
   meter: string | null;
-  meta: string | null;
-  model: string | null;
+  summary: TurnSummary | null;
   connect: ChatConnect | null;
   events: ActivityEvent[];
   subagents: SubagentRun[];
@@ -102,8 +98,7 @@ export function liveTurn(started: number = Date.now()): LiveTurn {
     text: "",
     activity: null,
     meter: null,
-    meta: null,
-    model: null,
+    summary: null,
     connect: null,
     events: [],
     subagents: [],

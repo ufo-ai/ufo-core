@@ -2523,6 +2523,21 @@ class SurfaceContext:
             ).one_or_none()
         return None if found is None else found.surface
 
+    async def agent_model(self, agent_id: UUID) -> str | None:
+        """The model this workspace's agent is set to — the `auto` sentinel where it names none —
+        or None when the id names no agent here. Read by id rather than off the agent listing,
+        which drops an archived agent whose conversations a member still reads back."""
+        async with workspace_tx() as connection:
+            found = (
+                await connection.execute(
+                    sa.select(tables.agent.c.model).where(
+                        tables.agent.c.workspace_id == self.workspace_id,
+                        tables.agent.c.id == agent_id,
+                    )
+                )
+            ).one_or_none()
+        return None if found is None else found.model
+
     async def retitle_conversation(self, conversation_id: UUID, title: str) -> None:
         """Name a conversation this surface holds — what it calls the conversation on its own rows,
         replacing the words the opening turn named it with."""

@@ -1432,7 +1432,7 @@ async def test_an_agent_origin_arrival_states_its_prompt_and_claims_no_wait_of_t
     assert reloaded.status_code == 200
     body = reloaded.json()
     assert datetime.fromisoformat(body.pop("turn_started_at")) == admitted
-    body["messages"] = _unstamped(body["messages"])
+    body["messages"] = _worded(body["messages"])
     assert body == {
         "messages": [
             {"role": "user", "text": "Review PR 1268."},
@@ -1512,7 +1512,7 @@ async def test_a_pending_subagent_result_is_no_member_bubble(
     assert reloaded.status_code == 200
     body = reloaded.json()
     assert datetime.fromisoformat(body.pop("turn_started_at")) == admitted
-    body["messages"] = _unstamped(body["messages"])
+    body["messages"] = _worded(body["messages"])
     assert body == {
         "messages": [
             {"role": "user", "text": "Review PR 1268."},
@@ -5246,6 +5246,152 @@ async def test_a_file_the_reply_carried_rides_the_reply_and_stays_out_of_the_art
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_settled_reply_states_what_the_turn_spent_and_how_long_it_took(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The model, the tokens, the cost and the duration ride the reply the turn produced, read off
+    the turn's own record — so a member who reloads, or who never watched the stream, reads the
+    same summary. A turn that failed states none: there is no answer for a spend to stand under."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, first_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(
+            status="done",
+            text="Reviewed.",
+            model="claude-opus-4-8",
+            tokens=1_234,
+            cost_micro_usd=45_000,
+        ),
+    )
+    started = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+    second_turn = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == first_turn)
+            .values(created_at=started, updated_at=started + timedelta(seconds=63))
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=second_turn,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="failed",
+                inbound="and again",
+                speaker_member_id=member_id,
+                terminal=TerminalFrame(
+                    status="failed",
+                    text="Broke.",
+                    model="claude-opus-4-8",
+                    tokens=7,
+                    cost_micro_usd=90,
+                ).model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=2,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {first_turn}\n</context>\nreview it",
+                ),
+                Message(role="assistant", content="Reviewed."),
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {second_turn}\n</context>\nand again",
+                ),
+                Message(role="assistant", content="Broke."),
+            ),
+        ),
+    )
+
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert loaded.status_code == 200
+    replies = [message for message in loaded.json()["messages"] if message["role"] == "assistant"]
+    assert replies[0]["summary"] == {
+        "tokens": 1_234,
+        "cost_micro_usd": 45_000,
+        "model": "claude-opus-4-8",
+        "duration_ms": 63_000,
+    }
+    assert "summary" not in replies[1]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_settled_reply_names_no_model_for_an_agent_on_auto(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """An agent running on the auto sentinel picked the deploy's own choice, so its reply states
+    the spend and names no model — the rule the live stream draws, held on a transcript read back
+    as well, or one reply would name a model while it streamed and another after a reload."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(
+            status="done",
+            text="Reviewed.",
+            model="claude-opus-4-8",
+            tokens=1_234,
+            cost_micro_usd=45_000,
+        ),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent).where(tables.agent.c.id == agent_id).values(model="auto")
+        )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {turn_id}\n</context>\nreview it",
+                ),
+                Message(role="assistant", content="Reviewed."),
+            ),
+        ),
+    )
+
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+
+    assert loaded.status_code == 200
+    reply = next(message for message in loaded.json()["messages"] if message["role"] == "assistant")
+    assert reply["summary"]["tokens"] == 1_234
+    assert reply["summary"]["cost_micro_usd"] == 45_000
+    assert "model" not in reply["summary"]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_composer_files_land_in_the_workspace_before_the_turn(
     web: tuple[AsyncClient, UUID, UUID],
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
@@ -5401,12 +5547,10 @@ async def test_the_transcript_reads_slack_words_as_markdown_and_portal_words_as_
         f"/surface/web/agents/{agent_id}/transcript?conversation={typed}", headers=cookie
     )
 
-    assert _unstamped(from_slack.json()["messages"]) == [
+    assert _worded(from_slack.json()["messages"]) == [
         {"role": "user", "text": "**ship it** today", "markdown": True}
     ]
-    assert _unstamped(from_portal.json()["messages"]) == [
-        {"role": "user", "text": "*ship it* today"}
-    ]
+    assert _worded(from_portal.json()["messages"]) == [{"role": "user", "text": "*ship it* today"}]
 
 
 def test_a_bubble_and_its_reply_each_carry_the_moment_they_landed() -> None:
@@ -9187,10 +9331,17 @@ async def _seed_listed_turn(
     return turn_id
 
 
-def _unstamped(messages: list[dict[str, object]]) -> list[dict[str, object]]:
-    """The transcript's messages without the moment each landed at, which the seeded turn takes off
-    the clock: an assertion about what the transcript says reads the words, not the time."""
-    return [{key: value for key, value in message.items() if key != "at"} for message in messages]
+_OFF_THE_CLOCK = frozenset({"at", "summary"})
+
+
+def _worded(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The transcript's messages without the moment each landed at or what its turn spent, both of
+    which a seeded turn takes off the clock: an assertion about what the transcript says reads the
+    words, not the time."""
+    return [
+        {key: value for key, value in message.items() if key not in _OFF_THE_CLOCK}
+        for message in messages
+    ]
 
 
 @pytest.mark.usefixtures("database_url")
@@ -9500,7 +9651,7 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert read.status_code == 200
-    assert _unstamped(read.json()["messages"]) == [
+    assert _worded(read.json()["messages"]) == [
         {"role": "user", "text": "research"},
         {
             "role": "assistant",
@@ -9690,7 +9841,7 @@ async def test_earlier_names_only_records_the_transcript_reflects(
     compacted = await client.get(path, headers=headers)
     assert compacted.status_code == 200
     compacted_payload = compacted.json()
-    assert _unstamped(compacted_payload["messages"]) == [
+    assert _worded(compacted_payload["messages"]) == [
         {"role": "user", "text": "third ask"},
         {"role": "assistant", "text": "third reply"},
     ]
@@ -9698,7 +9849,7 @@ async def test_earlier_names_only_records_the_transcript_reflects(
         path, headers=headers, params={"cursor": compacted_payload["earlier_cursor"]}
     )
     assert page.status_code == 200
-    assert _unstamped(page.json()["messages"]) == [
+    assert _worded(page.json()["messages"]) == [
         {"role": "user", "text": "first ask"},
         {"role": "assistant", "text": "first reply"},
         {"role": "user", "text": "second ask"},
@@ -9754,7 +9905,10 @@ async def test_the_transcript_states_when_each_message_landed(
     )
 
     assert read.status_code == 200
-    assert read.json()["messages"] == [
+    assert [
+        {key: value for key, value in message.items() if key != "summary"}
+        for message in read.json()["messages"]
+    ] == [
         {"role": "user", "text": "what time", "at": admitted.isoformat()},
         {"role": "assistant", "text": "just gone nine", "at": settled.isoformat()},
     ]
@@ -9903,7 +10057,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
 
     opened = await client.get(transcript_path, headers=admin_cookie)
     assert opened.status_code == 200
-    assert _unstamped(opened.json()["messages"]) == [
+    assert _worded(opened.json()["messages"]) == [
         {"role": "user", "text": "private question"},
         {
             "role": "assistant",
@@ -10593,7 +10747,7 @@ async def test_an_agents_own_reply_is_never_read_as_a_payload(
     )
 
     assert read.status_code == 200
-    assert _unstamped(read.json()["messages"]) == [
+    assert _worded(read.json()["messages"]) == [
         {"role": "user", "text": "Give me the json."},
         {"role": "assistant", "text": reply},
     ]
@@ -10816,7 +10970,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     )
 
     assert settled.status_code == 200
-    assert _unstamped(settled.json()["messages"]) == [
+    assert _worded(settled.json()["messages"]) == [
         {
             "role": "user",
             "text": "draft the tweets",
@@ -10873,7 +11027,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     )
 
     assert mid.status_code == 200
-    tail = _unstamped(mid.json()["messages"][-2:])
+    tail = _worded(mid.json()["messages"][-2:])
     assert tail[0] == {
         "role": "user",
         "text": "now the launch email",
@@ -10926,7 +11080,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     )
 
     assert written.status_code == 200
-    settled = _unstamped(written.json()["messages"][-3:])
+    settled = _worded(written.json()["messages"][-3:])
     assert settled[0] == {
         "role": "user",
         "text": "now the launch email",

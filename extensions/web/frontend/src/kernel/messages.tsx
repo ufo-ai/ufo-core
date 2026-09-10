@@ -59,6 +59,7 @@ import { modelLabel, modelMark } from "@/lib/models";
 import { Moment, spanMoment } from "@/lib/moments";
 import { agentHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
+import { turnMeta } from "@/lib/turnMeta";
 import { eventLabel, latestActivity } from "@/lib/turnStream";
 import type { ActivityEvent, Bubble as Spoken, LiveTurn } from "@/lib/chatStore";
 import type { ChatApp, ChatConnect, ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
@@ -245,7 +246,7 @@ export function MessageLog({
               events={message.events ?? []}
               runs={message.subagents ?? []}
               live={false}
-              elapsed={message.elapsed}
+              elapsed={message.elapsed ?? message.summary?.duration_ms}
             />
           )}
           {message.role === "user" && !message.text && !message.asked ? null : (
@@ -267,7 +268,9 @@ export function MessageLog({
           )}
           {message.role === "user" || !message.apps?.length ? null : <Apps apps={message.apps} />}
           {message.connect ? <ConnectLink connect={message.connect} /> : null}
-          {message.meta ? <Meta model={message.model}>{message.meta}</Meta> : null}
+          {message.summary ? (
+            <Meta model={message.summary.model}>{turnMeta(message.summary)}</Meta>
+          ) : null}
           {message.question && question ? question(message.question) : null}
           <Stamp at={message.at} />
         </Speech>
@@ -306,7 +309,9 @@ export function MessageLog({
                 {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
                 {row.live.connect ? <ConnectLink connect={row.live.connect} /> : null}
                 <LiveMeter started={row.live.started} spend={row.live.meter} />
-                {row.live.meta ? <Meta model={row.live.model}>{row.live.meta}</Meta> : null}
+                {row.live.summary ? (
+                  <Meta model={row.live.summary.model}>{turnMeta(row.live.summary)}</Meta>
+                ) : null}
               </Speech>
             </MessageScrollerItem>
           ) : (

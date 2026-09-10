@@ -1,6 +1,7 @@
 import { BASE, getJson } from "@/lib/api";
 import { holdTurn, moveTurnHold, releaseTurn } from "@/lib/appStatusStore";
 import { money } from "@/lib/money";
+import { tokens } from "@/lib/turnMeta";
 import {
   chatState,
   liveTurn,
@@ -40,11 +41,6 @@ function chatUrl(target: Pick<ChatTarget, "agentId" | "conversationId">): string
 function transcriptPath(target: ChatTarget): string | null {
   if (!target.conversationId) return null;
   return "/agents/" + target.agentId + "/transcript?conversation=" + target.conversationId;
-}
-
-/** The count beside a running turn's clock, short enough to re-read every second: `800`, `29K`, `1.4M`. */
-export function tokens(count: number): string {
-  return count.toLocaleString("en-US", { notation: "compact", maximumFractionDigits: 1 });
 }
 
 const RESYNC_EPOCH = new Map<string, number>();
@@ -231,8 +227,7 @@ function attach(
           role: "assistant",
           text: live.text,
           elapsed: Date.now() - live.started,
-          ...(live.meta ? { meta: live.meta } : {}),
-          ...(live.model ? { model: live.model } : {}),
+          ...(live.summary ? { summary: live.summary } : {}),
           ...(live.connect ? { connect: live.connect } : {}),
           ...(live.events.length ? { events: live.events } : {}),
           ...(live.subagents.length ? { subagents: live.subagents } : {}),
@@ -448,12 +443,14 @@ function attach(
       const live = state.live ?? liveTurn();
       const handoffs = { ...state.handoffs };
       let text = live.text;
-      let meta = live.meta;
-      let model = live.model;
+      let summary = live.summary;
       if (frame.status === "done") {
         if (frame.text) text = frame.text;
-        meta = tokens(frame.tokens) + " tok · " + money(frame.cost_micro_usd);
-        model = agentModel === AUTO_MODEL ? null : frame.model;
+        summary = {
+          ...(agentModel === AUTO_MODEL ? {} : { model: frame.model }),
+          tokens: frame.tokens,
+          cost_micro_usd: frame.cost_micro_usd,
+        };
         if (frame.question) {
           handoffs.question = { turn_id: turnId, ...frame.question };
         } else if (!answering) {
@@ -468,7 +465,7 @@ function attach(
         text = text ? text + "\n" + fallback : fallback;
         if (!answering) handoffs.question = null;
       }
-      return { ...state, handoffs, live: { ...live, text, meta, model } };
+      return { ...state, handoffs, live: { ...live, text, summary } };
     });
     record();
     close();

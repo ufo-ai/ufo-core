@@ -34,6 +34,7 @@ from ufo.db import workspace_tx
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.containment import ContainmentError
 from ufo.harness.models.interface import (
+    AUTO_MODEL,
     Message,
     ModelRequest,
     TextBlock,
@@ -633,6 +634,42 @@ async def test_find_conversation_reads_without_creating(db: None, tmp_path) -> N
         await _context(
             other_workspace, StubDbos(), FilesystemBlobStore(root=tmp_path)
         ).conversation_agent(conversation_id)
+        is None
+    )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_agent_model_reads_the_setting_of_an_archived_agent_too(db: None, tmp_path) -> None:
+    """A surface drawing a settled turn back states the model its agent is set to, so it reads that
+    setting by id: the agent listing drops an archived agent whose conversations a member still
+    reads. An id this workspace holds no agent for states nothing."""
+    workspace_id, agent_id, _ = await _seed()
+    archived = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=archived,
+                workspace_id=workspace_id,
+                name="scout",
+                prompt="be brief",
+                model=AUTO_MODEL,
+                archived_at=sa.func.now(),
+                archived_name="scout",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+
+    assert await context.agent_model(agent_id) == "claude-opus-4-8"
+    assert await context.agent_model(archived) == AUTO_MODEL
+    assert archived not in {agent.id for agent in await context.list_agents()}
+    assert await context.agent_model(uuid4()) is None
+    other_workspace, _, _ = await _seed()
+    assert (
+        await _context(other_workspace, StubDbos(), FilesystemBlobStore(root=tmp_path)).agent_model(
+            agent_id
+        )
         is None
     )
 

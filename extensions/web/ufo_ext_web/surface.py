@@ -106,6 +106,7 @@ from ufo.sdk.manifest import (
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import (
     ANTHROPIC_KEY_SLOT,
+    AUTO_MODEL,
     OPENAI_KEY_SLOT,
     Message,
     ModelRequest,
@@ -2198,6 +2199,7 @@ class _TranscriptRenderer:
     slack: bool
     spoken_at: Mapping[str, str]
     answered_at: Mapping[str, str]
+    summaries: Mapping[str, dict[str, object]]
 
     def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]:
         activity = {
@@ -2285,6 +2287,7 @@ class _TranscriptRenderer:
         shared = [] if closing is None else self.files.get(closing, [])
         made = [] if closing is None else self.apps.get(closing, [])
         control = None if closing is None else self.connects.get(closing)
+        summary = None if closing is None else self.summaries.get(closing)
         if (
             not state.answer
             and not state.pending
@@ -2313,6 +2316,8 @@ class _TranscriptRenderer:
         )
         if moment is not None:
             reply["at"] = moment
+        if summary is not None:
+            reply["summary"] = summary
         rendered.append(reply)
         return replace(state, pending=(), answer="", answer_at=0, notes=0)
 
@@ -2333,6 +2338,7 @@ def _rendered_messages(
     slack: bool = False,
     spoken_at: Mapping[str, str] | None = None,
     answered_at: Mapping[str, str] | None = None,
+    summaries: Mapping[str, dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
     one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
@@ -2362,6 +2368,10 @@ def _rendered_messages(
     on the reply that asked holds each answer under the question it answers, so a bubble of its own
     would say the same words a second time. The words themselves are untouched — the card states
     them, and the turn read them as the member sent them.
+
+    `summaries` names what each turn spent and how long it took, keyed like `questions`: the reply
+    carries it, so the model, the tokens, the cost and the duration stand under the words they paid
+    for on a transcript read back, and not only for the member who watched the turn stream.
 
     `files` names what each turn shared, keyed like `questions`: the reply carries its own, so a
     file stands on the words that shared it and stays there when later turns run. A turn that
@@ -2404,6 +2414,7 @@ def _rendered_messages(
         slack=slack,
         spoken_at=spoken_at or {},
         answered_at=answered_at or {},
+        summaries=summaries or {},
     )
     return renderer.render(messages)
 
@@ -2464,8 +2475,8 @@ class _TranscriptAids:
     """Everything the transcript renderer needs beside the messages themselves — subagent runs,
     speaker and question attribution, what the member answered, shared files, the applications each
     turn created, where a member's own attachment is drawn from, when each turn landed and settled,
-    whether the conversation ran a profile, and whether it stands on Slack — gathered once so the
-    live window and an earlier page render one message identically."""
+    what each turn spent, whether the conversation ran a profile, and whether it stands on Slack —
+    gathered once so the live window and an earlier page render one message identically."""
 
     subagents: SubagentRuns
     turn_ids: frozenset[str]
@@ -2479,6 +2490,7 @@ class _TranscriptAids:
     attached: dict[str, dict[str, dict[str, object]]]
     spoken_at: dict[str, str]
     answered_at: dict[str, str]
+    summaries: dict[str, dict[str, object]]
     run_conversation: bool
     slack: bool
 
@@ -2499,6 +2511,7 @@ class _TranscriptAids:
             self.slack,
             self.spoken_at,
             self.answered_at,
+            self.summaries,
         )
         if self.run_conversation:
             for reply in rendered:
@@ -2518,11 +2531,12 @@ async def _transcript_aids(
     opens: frozenset[UUID],
     slack: bool,
 ) -> _TranscriptAids:
-    turns, spawned, shared, admitted = await asyncio.gather(
+    turns, spawned, shared, admitted, agent_model = await asyncio.gather(
         ctx.list_turns(conversation_id),
         ctx.conversation_subagent_turns(conversation_id),
         ctx.list_conversation_artifacts(conversation_id, limit=CONVERSATION_ARTIFACTS_MAX),
         ctx.keyed_admissions(conversation_id),
+        ctx.agent_model(agent_id),
     )
     files: dict[str, list[dict[str, object]]] = {}
     attached: dict[str, dict[str, dict[str, object]]] = {}
@@ -2569,9 +2583,39 @@ async def _transcript_aids(
         apps=drawn,
         connects=await _connect_controls(ctx, conversation_id, turns, viewer),
         attached=attached,
+        summaries={
+            str(turn.id): summary
+            for turn in turns
+            if (summary := _turn_summary(turn, agent_model)) is not None
+        },
         run_conversation=any(turn.subagent_profile is not None for turn in turns),
         slack=slack,
     )
+
+
+def _turn_summary(turn: Turn, agent_model: str | None) -> dict[str, object] | None:
+    """What one settled turn cost and how long it took, drawn under the reply it produced. Read off
+    the turn's own record rather than kept from the live stream, so the line survives a reload and
+    reaches a member who never watched the turn run. A turn that did not complete states nothing:
+    the stream draws its stop or its fault instead, and a spend under those words would read as the
+    price of an answer there is none of.
+
+    An agent on the auto sentinel names no model, exactly as the live stream draws it: the member
+    picked the deploy's own choice, and stating the model it resolved to would read as a model they
+    pinned."""
+    terminal = turn.terminal
+    if terminal is None or terminal.status != "done":
+        return None
+    summary: dict[str, object] = {
+        "tokens": terminal.tokens,
+        "cost_micro_usd": terminal.cost_micro_usd,
+    }
+    if terminal.model and agent_model != AUTO_MODEL:
+        summary["model"] = terminal.model
+    if turn.updated_at is not None:
+        elapsed = (turn.updated_at - turn.created_at).total_seconds()
+        summary["duration_ms"] = max(round(elapsed * 1_000), 0)
+    return summary
 
 
 async def _connect_controls(
