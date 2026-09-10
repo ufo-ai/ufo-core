@@ -46,7 +46,7 @@ import { SECTION_VIEWS } from "@/views/registry";
 
 /** A search that fired on every keystroke would run one fan-out per letter, and the member is still
  *  typing the word the last one answered. */
-const REST_MS = 200;
+export const REST_MS = 200;
 
 const BLANK = "Nothing matches this search.";
 

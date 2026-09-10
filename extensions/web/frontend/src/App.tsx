@@ -172,7 +172,9 @@ export function App({
   const narrow = useNarrow();
   useScrollMark();
   const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
-  const listed = agents.filter((agent) => !agent.hidden);
+  /** A fresh array here re-runs every effect that depends on it — the palette's search aborts
+   *  and re-fires on each status poll, which the member sees as a second search. */
+  const listed = useMemo(() => agents.filter((agent) => !agent.hidden), [agents]);
   const pinned = rail.pinned ?? defaultPins(listed);
 
   const homePlace = useMemo<WorkspacePlace>(

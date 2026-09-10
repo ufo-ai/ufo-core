@@ -1,8 +1,10 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { wakeAppStatus } from "@/lib/appStatusStore";
+import { REST_MS } from "@/views/Spotlight";
 
 import { AGENT, AGENT_ID, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, TASK_KIND, TRIGGER_KIND, useStreamFake, wire } from "./harness";
 
@@ -122,6 +124,47 @@ async function type(term: string) {
 function headings() {
   return [...document.querySelectorAll("[cmdk-group-heading]")].map((head) => head.textContent);
 }
+
+test("a status read that moves a working app leaves the standing term alone", async () => {
+  let activity = "reading the repo";
+  const { calls } = everything({
+    "/api/agents/status": () =>
+      json({
+        statuses: [
+          {
+            agent_id: AGENT_ID,
+            turn: "running",
+            activity,
+            last_active_at: null,
+            last_failed: false,
+          },
+        ],
+      }),
+  });
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  const searched = () => calls.filter((url) => url.includes("q=deploy")).length;
+  const before = searched();
+  expect(before).toBeGreaterThan(0);
+
+  vi.useFakeTimers();
+  try {
+    activity = "writing the plan";
+    await act(async () => {
+      wakeAppStatus();
+      await vi.advanceTimersByTimeAsync(REST_MS * 5);
+    });
+
+    expect(searched()).toBe(before);
+    expect(found.getByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+    expect(found.queryByText("Searching…")).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
 
 test("one term reaches every kind the workspace holds, each hit under its own heading", async () => {
   const { calls } = everything();

@@ -59,7 +59,7 @@ import { TRACK_MAX_SLOTS, heldTrack } from "@/lib/tracks";
 import type { Agent } from "@/lib/types";
 import { SECTION_VIEWS } from "@/views/registry";
 
-const REST_MS = 200;
+export const REST_MS = 200;
 
 const BLANK = "Nothing matches this search.";
 
