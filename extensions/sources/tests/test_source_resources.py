@@ -70,6 +70,7 @@ def _page(body: str, stream: str = "pull_requests") -> PageChange:
         digest=f"sha256:{uuid4().hex}",
         revision=1,
         tombstone=False,
+        indexed=True,
         created_at=now,
         as_of=now,
         changed_at=now,

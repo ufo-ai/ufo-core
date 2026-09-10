@@ -181,7 +181,12 @@ class SyncResult(BaseModel):
     run that drops every record it fetched is a success by every other signal it emits, so the count
     rides onto `source_sync.ok`: the event that says what a run wrote says what it lost with it.
     `retry_after_seconds` makes an incomplete, checkpointed read durable without holding a
-    worker."""
+    worker.
+
+    `indexed` is the stream's declaration of whether its pages reach memory, a fact of the run
+    rather than of any page: the driver writes it onto every row of the source each run, so a row
+    an older image landed under the column default agrees with the declaration one interval
+    later."""
 
     pages: tuple[Page, ...]
     next_cursor: str | None = None
@@ -189,6 +194,7 @@ class SyncResult(BaseModel):
     snapshot: bool = False
     dropped: int = 0
     retry_after_seconds: float | None = Field(default=None, gt=0)
+    indexed: bool = True
 
 
 class CursorExpired(Exception):
@@ -983,6 +989,7 @@ class SyncDriver:
                     deleted,
                     result.snapshot,
                     result.retry_after_seconds,
+                    result.indexed,
                 )
             except asyncio.CancelledError:
                 written.clear()
@@ -1075,10 +1082,16 @@ class SyncDriver:
         deleted: list[UUID],
         snapshot: bool,
         retry_after_seconds: float | None,
+        indexed: bool,
     ) -> tuple[int, datetime | None]:
         """Persist one fetched batch and return how many pages it tombstoned — the delete refs that
         named a live row plus the snapshot sweep, which names no refs at all. The database orders
         material changes for `PageFeed`.
+
+        Every row of the source is brought to the stream's `indexed` declaration first, so a row an
+        older image inserted under the column default, on a stream whose cursor never fetches it
+        again, still meets the declaration on the next run of any shape; the update names only the
+        rows that differ, and each one it moves is a revision the feed replays once.
 
         The authority read locks the connection row as well as the source, so a `set_shared` that
         would otherwise commit between this read and the page stamp below waits for it: with only
@@ -1106,6 +1119,15 @@ class SyncDriver:
             if held is None:
                 raise _SourceClaimLost(str(source.source_uid))
             subject = connection_subject(held.shared, held.owner_member_id)
+            await connection.execute(
+                sa.update(tables.page)
+                .values(indexed=indexed, updated_at=now)
+                .where(
+                    tables.page.c.workspace_id == workspace_id,
+                    tables.page.c.source_uid == source.source_uid,
+                    tables.page.c.indexed.is_distinct_from(indexed),
+                )
+            )
             for changed_page in changed:
                 updated = await connection.execute(
                     sa.update(tables.page)
@@ -1136,6 +1158,7 @@ class SyncDriver:
                             title=changed_page.browse.title,
                             record_created_at=changed_page.browse.record_created_at,
                             record_updated_at=changed_page.browse.record_updated_at,
+                            indexed=indexed,
                             subject=subject,
                             tombstone=False,
                             created_at=now,
@@ -1518,7 +1541,7 @@ class PageChange:
     `stream` and `title` the sync driver landed it under, the inlined body (empty when tombstoned),
     the content digest, monotonic revision, and `as_of` — the provider's update or creation time,
     falling back to ingestion time. `created_at == changed_at` marks a page this replay adds rather
-    than updates."""
+    than updates. `indexed` is the stream's declaration of whether the page reaches memory."""
 
     page_id: UUID
     source_id: UUID
@@ -1529,6 +1552,7 @@ class PageChange:
     digest: str
     revision: int
     tombstone: bool
+    indexed: bool
     created_at: datetime
     as_of: datetime
     changed_at: datetime
@@ -1582,6 +1606,7 @@ class CorePageFeed:
                 tables.page.c.digest,
                 tables.page.c.revision,
                 tables.page.c.tombstone,
+                tables.page.c.indexed,
                 tables.page.c.record_created_at,
                 tables.page.c.record_updated_at,
                 tables.page.c.created_at,
@@ -1618,6 +1643,7 @@ class CorePageFeed:
                     digest=row["digest"],
                     revision=row["revision"],
                     tombstone=bool(row["tombstone"]),
+                    indexed=bool(row["indexed"]),
                     created_at=row["created_at"],
                     as_of=(
                         datetime.fromisoformat(record_as_of)

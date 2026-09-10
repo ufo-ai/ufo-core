@@ -82,34 +82,6 @@ PROMPTS = Path(__file__).parent / "prompts"
 
 MAX_PAGE_BODY_CHARS = 8_000
 MIN_PAGE_BODY_CHARS = 40
-MACHINE_STATUS_STREAMS = frozenset(
-    {
-        "commit_comment_reactions",
-        "contributor_activity",
-        "issue_comment_reactions",
-        "issue_reactions",
-        "issue_timeline_events",
-        "pull_request_comment_reactions",
-        "pull_request_commits",
-        "pull_request_stats",
-        "stargazers",
-        "workflow_jobs",
-        "workflow_runs",
-    }
-)
-"""The streams whose pages a run of the machine writes about itself: build outcomes and durations,
-reaction tallies, commit walks, timeline entries. Every one of them states something the system can
-state again on demand, so a row distilled from one tells a member what they could have read from the
-source and displaces a row that tells them something they could not. The gate is structural rather
-than a sentence in the extraction prompt, because a page that never reaches the model cannot be
-recorded against the member's judgement of what matters.
-
-A `PageChange` carries the provider's bare stream name and never says which provider it came from,
-so a name here matches every connector that happens to use it. That is why `workflows` is absent: it
-is GitHub's list of workflow definitions, which is configuration a member may well want, and it is
-also HubSpot's marketing automation flows and Wrike's task workflows — and this gate does not merely
-skip a page, it retires what that page already derived. A name two connectors share would delete a
-member's rows about their own work, so a test holds this set to names only one connector uses."""
 EXTRACT_PAGE_BATCH = 10
 FACT_EXTRACT_MAX_TOKENS = 16_384
 FACT_EXTRACT_TOOL = "record_facts"
@@ -326,11 +298,12 @@ class FactDeriver:
     """Distill each replayed source-page change into durable `fact` memory_items and retire what
     they replace, off the write path. The core page-change runner owns the cursor and batch loop (a
     cursor independent of the memory indexer's) and hands one delivered batch to `apply`: a page no
-    longer there is retired outright, since nothing will ever replace its facts, a machine-status
-    page is retired outright for the same reason — the gate refuses its replacement, so a row an
-    earlier sync derived from it would otherwise stand for ever — and every other page goes through
-    one bounded metered model pass per bounded group of substantial live pages — whose committed
-    facts are the only thing that authorizes retiring the revisions they replace.
+    longer there is retired outright, since nothing will ever replace its facts, a page of a stream
+    that does not reach memory is retired outright for the same reason — nothing derives its
+    replacement, so a row an earlier sync derived from it would otherwise stand for ever — and every
+    other page goes through one bounded metered model pass per bounded group of substantial live
+    pages — whose committed facts are the only thing that authorizes retiring the revisions they
+    replace.
     Removal is conditional on the replacement's committed result, not merely later than it: a page
     the pass leaves without a fact (a body too thin to send, an extraction carrying none) keeps
     every fact it has, fenced out of recall by its revision until a derivation supersedes it. An
@@ -349,15 +322,15 @@ class FactDeriver:
     async def apply(self, changes: tuple[PageChange, ...]) -> None:
         live = await self.store.page_states(tuple(change.page_id for change in changes))
         for change in changes:
-            if change.page_id not in live or change.stream in MACHINE_STATUS_STREAMS:
+            if change.page_id not in live or not change.indexed:
                 await self.store.supersede_page_facts(change.page_id, None)
         eligible = tuple(
             change
             for change in changes
             if change.page_id in live
             and not change.tombstone
+            and change.indexed
             and len(change.body) >= MIN_PAGE_BODY_CHARS
-            and change.stream not in MACHINE_STATUS_STREAMS
         )
         for group in batched(eligible, EXTRACT_PAGE_BATCH):
             for page_id, kept in (await self._derive(group)).items():

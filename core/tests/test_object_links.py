@@ -345,6 +345,7 @@ async def test_search_to_object_get_walks_page_provenance_end_to_end(
                     digest="sha256:abc",
                     revision=1,
                     tombstone=False,
+                    indexed=True,
                     created_at=datetime(2026, 7, 9, tzinfo=UTC),
                     as_of=datetime(2026, 7, 9, tzinfo=UTC),
                     changed_at=datetime(2026, 7, 9, tzinfo=UTC),

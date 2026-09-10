@@ -728,3 +728,11 @@ async def test_workflows_lands_its_records_from_its_own_envelope_key() -> None:
     result = await _fetch("workflows", handle)
 
     assert _refs(result) == {"workflows/acme/repo1/21"}
+
+
+def test_the_streams_a_run_of_the_machine_writes_about_itself_do_not_reach_memory() -> None:
+    """Actions runs, star events and contributor tallies state what GitHub states again on demand;
+    their pages land for triggers and `object_get` and derive no chunks and no facts. `workflows` is
+    the list of workflow definitions, configuration a member may want, and stays indexed."""
+    unindexed = {spec.name for spec in GitHubConnector().streams() if not spec.indexed}
+    assert unindexed == {"contributor_activity", "stargazers", "workflow_runs"}

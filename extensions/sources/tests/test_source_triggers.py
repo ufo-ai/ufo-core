@@ -360,6 +360,7 @@ def _change(
         digest=f"sha256:{uuid4().hex}",
         revision=revision,
         tombstone=disposition == "removed",
+        indexed=True,
         created_at=created,
         as_of=now,
         changed_at=now,

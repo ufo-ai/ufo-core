@@ -324,7 +324,7 @@ async def _pages() -> list[sa.RowMapping]:
             (
                 await connection.execute(
                     sa.select(
-                        tables.page.c.source_uid,
+                        tables.page.c.uid,
                         tables.page.c.source_uid,
                         tables.page.c.stream,
                         tables.page.c.title,
@@ -334,6 +334,8 @@ async def _pages() -> list[sa.RowMapping]:
                         tables.page.c.digest,
                         tables.page.c.body_ref,
                         tables.page.c.tombstone,
+                        tables.page.c.indexed,
+                        tables.page.c.revision,
                         tables.page.c.updated_at,
                     )
                 )
@@ -3056,6 +3058,137 @@ async def test_sync_refreshes_browse_metadata_without_replaying_unchanged_conten
     assert stored["title"] == refreshed.title
     assert stored["record_updated_at"] == refreshed.updated_at
     assert stored["updated_at"] == stamped
+
+
+async def test_a_run_brings_every_row_of_its_source_to_the_streams_declaration(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A row the outgoing image landed during a roll carries the column default under a stream
+    that declares otherwise, and a cursor stream never fetches it again. The declaration rides the
+    run, not the page, so the first run of any shape — here one landing nothing — moves it; the
+    move is a revision the feed replays once with `indexed=False`; a run that finds every row
+    agreeing assigns nothing; and a row a run inserts is written under the declaration."""
+    workspace_id = await _workspace()
+    source_uid = await _seed_scripted_source(workspace_id, None)
+    stale = await _seed_prior_page(workspace_id, source_uid, "workflow_runs/41")
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    await blob.put(f"sources/{source_uid}/{stale}", b"run 41 passed")
+    landed = Page(
+        source_ref="workflow_runs/42", body="run 42 passed", stream="workflow_runs", title="ci #42"
+    )
+    driver, _ = _scripted_driver(
+        [SyncResult(pages=(), indexed=False), SyncResult(pages=(landed,), indexed=False)],
+        database_url,
+        tmp_path / "blobs",
+    )
+    seeded = (await _pages())[0]
+    assert seeded["indexed"] is True
+
+    await _sync(driver)
+    moved = (await _pages())[0]
+    with ws(workspace_id):
+        replayed = (
+            await CorePageFeed(blob=blob).pages_changed_since(f"{seeded['revision']}|{stale}", 10)
+        ).changes
+    assert (moved["indexed"], moved["revision"] > seeded["revision"]) == (False, True)
+    assert [(change.page_id, change.indexed) for change in replayed] == [(stale, False)]
+
+    await _make_due()
+    await _sync(driver)
+    rows = {row["uid"]: (row["indexed"], row["revision"]) for row in await _pages()}
+    inserted = next(uid for uid in rows if uid != stale)
+    assert rows[stale] == (False, moved["revision"])
+    assert rows[inserted][0] is False
+
+
+async def test_moving_indexed_alone_is_a_revision_and_writing_its_value_again_is_not(
+    db: None,
+) -> None:
+    """`indexed` is in the revision trigger's column list and in its distinct-from row: an update
+    that moves only it assigns a revision the feed orders, and an update that names it at its
+    current value beside a browse-metadata change assigns none."""
+    workspace_id = await _workspace()
+    source_uid = await _seed_scripted_source(workspace_id, None)
+    page_id = await _seed_prior_page(workspace_id, source_uid, "workflow_runs/41")
+
+    async def revision() -> int:
+        async with workspace_tx() as connection:
+            return await connection.scalar(
+                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
+            )
+
+    seeded = await revision()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page).values(indexed=False).where(tables.page.c.uid == page_id)
+        )
+    moved = await revision()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page)
+            .values(indexed=False, title="ci #41")
+            .where(tables.page.c.uid == page_id)
+        )
+    assert (moved, await revision()) == (seeded + 1, moved)
+
+
+async def test_a_page_the_outgoing_image_indexed_leaves_memory_on_the_new_images_first_run(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """During the roll the outgoing image lands a page under the column default and its page
+    indexer writes chunks and a mirror row — after any drain walk ended, or in a workspace no
+    migration marked. The new image's first run over the source moves the row, the move is a
+    revision, and the replay reaches the page indexer, which drops the chunks and the mirror row
+    with no marker involved."""
+    workspace_id = await _workspace()
+    source_uid = await _seed_scripted_source(workspace_id, None)
+    page_id = await _seed_prior_page(workspace_id, source_uid, "workflow_runs/41")
+    blob = FilesystemBlobStore(root=tmp_path / "blobs")
+    await blob.put(
+        f"sources/{source_uid}/{page_id}", b"the nightly billing build ran twelve minutes"
+    )
+    index = DefaultIndex(transaction=workspace_tx)
+    indexer = PageIndexer(
+        index=index,
+        embed=StubEmbed(vec((11, 1.0))),
+        transaction=workspace_tx,
+        chunker=TextChunker(),
+        workspace_id=workspace_id,
+        page_states=context_for("memory", frozenset()).page_states,
+    )
+    feed = CorePageFeed(blob=blob)
+    scope = IndexScope(OWNER_KIND_PAGE, str(page_id))
+
+    async def mirrors() -> set[UUID]:
+        async with workspace_tx() as connection:
+            return set(
+                (
+                    await connection.execute(
+                        sa.select(mem_page.c.page_uid).where(
+                            mem_page.c.workspace_id == workspace_id
+                        )
+                    )
+                ).scalars()
+            )
+
+    with ws(workspace_id):
+        outgoing = await feed.pages_changed_since(None, 50)
+        await indexer.apply(outgoing.changes)
+        assert await index.has_chunks(scope)
+    assert await mirrors() == {page_id}
+
+    driver, _ = _scripted_driver(
+        [SyncResult(pages=(), indexed=False)], database_url, tmp_path / "blobs"
+    )
+    await _sync(driver)
+    with ws(workspace_id):
+        replayed = await feed.pages_changed_since(outgoing.next_cursor, 50)
+        await indexer.apply(replayed.changes)
+        assert [(change.page_id, change.indexed) for change in replayed.changes] == [
+            (page_id, False)
+        ]
+        assert not await index.has_chunks(scope)
+    assert await mirrors() == set()
 
 
 async def test_consecutive_errors_back_off_and_a_success_resets_the_counter(

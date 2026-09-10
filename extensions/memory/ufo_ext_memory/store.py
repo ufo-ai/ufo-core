@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
 
 from ufo.sdk.audience import Audience, audience_subjects
-from ufo.sdk.context import ExtensionContext, PageState, SourceReader
+from ufo.sdk.context import ExtensionContext, PageState, ScopedStore, SourceReader
 from ufo.sdk.index import (
     OWNER_KIND_MEMORY_ITEM,
     OWNER_KIND_PAGE,
@@ -1348,12 +1348,12 @@ class PageIndexer:
     source-page change into index chunks + a `mem_page` mirror row, off the write path. The core
     page-change runner owns the cursor and the batch loop and hands this one delivered batch to
     apply; the derivation stays idempotent so a replayed change re-upserts the same rows. A
-    tombstoned change drops the page's chunks and mirror row; every other change accepts the
-    payload only while subject and revision still match the core page before and after
-    embedding. It never retires a `memory_item` — facts derived from a page are the fact deriver's
-    to replace and retire, on its own cursor — but it does make the facts of the revisions a page
-    has left due for the index job again, so their chunks leave recall's candidate window on a
-    cursor no model can hold."""
+    tombstoned change, or one on a stream whose pages do not reach memory, drops the page's chunks
+    and mirror row and embeds nothing; every other change accepts the payload only while subject
+    and revision still match the core page before and after embedding. It never retires a
+    `memory_item` — facts derived from a page are the fact deriver's to replace and retire, on its
+    own cursor — but it does make the facts of the revisions a page has left due for the index job
+    again, so their chunks leave recall's candidate window on a cursor no model can hold."""
 
     index: IndexBackend
     embed: EmbedClient
@@ -1369,6 +1369,9 @@ class PageIndexer:
     async def _apply(self, change: PageChange) -> None:
         current = (await self.page_states((change.page_id,))).get(change.page_id)
         await self._unsettle_left_behind_facts(change.page_id, current)
+        if not change.indexed:
+            await self._drop(change.page_id)
+            return
         if change.tombstone:
             if current is None:
                 await self._drop(change.page_id)
@@ -1447,3 +1450,90 @@ class PageIndexer:
                 .values(embedding_digest=None, embedding_claimed_at=None, updated_at=sa.func.now())
                 .where(*left_behind)
             )
+
+
+DRAIN_CONCURRENCY = 16
+
+
+class DrainCursor(BaseModel):
+    """Where a workspace's drain of unindexed pages stands: the last mirror `page_uid` walked, None
+    before the first batch. Kept in the extension store under the drain's marker key, whose presence
+    is what makes the workspace a candidate."""
+
+    after: UUID | None = None
+
+
+@dataclass(frozen=True)
+class UnindexedPageDrain:
+    """Remove the chunks and mirror rows of pages whose stream stopped reaching memory before the
+    page indexer saw them: the core backfill marked them before `indexed` joined the revision
+    trigger, so the feed never replays those pages, and a memory migration marks each workspace
+    holding some instead. One pass walks `batch` mirror rows past the marker's cursor in `page_uid`
+    order, asks core which of those pages are live and not indexed, and drops them — every scope
+    first, then the mirror rows of the scopes that went, so a pass that dies midway leaves rows the
+    next pass finds again rather than chunks nothing names. The scope deletes are HTTP calls that
+    hold no connection, so they run `DRAIN_CONCURRENCY` at a time; the mirror rows go in one
+    statement, so the pool is touched once per batch. Every failure is re-raised once the batch
+    settles; a short batch ends the walk and deletes the marker."""
+
+    index: IndexBackend
+    transaction: Transaction
+    store: ScopedStore
+    page_states: PageStates
+    workspace_id: UUID
+    marker_key: str
+    batch: int
+
+    async def run(self) -> int:
+        marker = await self.store.get(self.marker_key)
+        if marker is None:
+            return 0
+        walked = await self._mirrors_after(DrainCursor.model_validate(marker).after)
+        states = await self.page_states(walked)
+        unindexed = tuple(
+            page_id
+            for page_id in walked
+            if (state := states.get(page_id)) is not None and not state.indexed
+        )
+        await self._drop_all(unindexed)
+        if len(walked) < self.batch:
+            await self.store.delete(self.marker_key)
+        else:
+            await self.store.put(
+                self.marker_key, DrainCursor(after=walked[-1]).model_dump(mode="json")
+            )
+        return len(unindexed)
+
+    async def _mirrors_after(self, after: UUID | None) -> tuple[UUID, ...]:
+        query = (
+            sa.select(mem_page.c.page_uid)
+            .where(mem_page.c.workspace_id == self.workspace_id)
+            .order_by(mem_page.c.page_uid)
+            .limit(self.batch)
+        )
+        if after is not None:
+            query = query.where(mem_page.c.page_uid > after)
+        async with self.transaction() as connection:
+            return tuple((await connection.execute(query)).scalars())
+
+    async def _drop_all(self, page_ids: tuple[UUID, ...]) -> None:
+        gate = asyncio.Semaphore(DRAIN_CONCURRENCY)
+
+        async def delete_scope(page_id: UUID) -> None:
+            async with gate:
+                await self.index.delete(IndexScope(OWNER_KIND_PAGE, str(page_id)))
+
+        outcomes = await asyncio.gather(
+            *(delete_scope(page_id) for page_id in page_ids), return_exceptions=True
+        )
+        gone = [
+            page_id
+            for page_id, outcome in zip(page_ids, outcomes, strict=True)
+            if not isinstance(outcome, BaseException)
+        ]
+        if gone:
+            async with self.transaction() as connection:
+                await connection.execute(sa.delete(mem_page).where(mem_page.c.page_uid.in_(gone)))
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome

@@ -652,6 +652,7 @@ class _SyntheticPages:
             digest=f"sha256:{revision:064x}",
             revision=revision,
             tombstone=False,
+            indexed=True,
             created_at=when,
             as_of=when,
             changed_at=when,

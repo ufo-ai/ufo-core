@@ -808,6 +808,7 @@ page = sa.Table(
     sa.Column("tombstone", sa.Boolean, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("indexed", sa.Boolean, nullable=False, server_default=sa.true()),
     sa.CheckConstraint("subject = 'shared' or subject like 'member:%'", name="page_subject"),
     sa.PrimaryKeyConstraint("workspace_id", "uid", name="page_pkey"),
     sa.ForeignKeyConstraint(

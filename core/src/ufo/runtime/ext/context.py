@@ -759,6 +759,21 @@ def unseeded_agent_workspaces(extension: str, prefix: str) -> WorkspaceCandidate
     return owner_candidates(with_an_unsettled_agent)
 
 
+def stored_key_workspaces(extension: str, key: str) -> WorkspaceCandidates:
+    """The candidate seam a drain declares: the workspaces where the extension's store holds `key`.
+    A migration writes the key wherever it finds work and the drain deletes it when the walk ends,
+    so the set empties itself. Core owns `ext_store`, so it owns this query — a workspace holding
+    no marker never fires the handler."""
+
+    def holding_the_key() -> sa.Select[tuple[UUID]]:
+        return sa.select(tables.ext_store.c.workspace_id).where(
+            tables.ext_store.c.extension == extension,
+            tables.ext_store.c.key == key,
+        )
+
+    return owner_candidates(holding_the_key)
+
+
 class AgentArchived(ValueError):
     """The turn's agent is archived, raised for work no member is waiting on. It is raised rather
     than answered with None because None already means a member spoke first — a wait that ended,
@@ -1051,6 +1066,7 @@ class PageState:
     body_ref: str
     title: str
     stream: str
+    indexed: bool
 
 
 def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
@@ -2179,6 +2195,7 @@ class ExtensionContext:
             tables.page.c.body_ref,
             tables.page.c.title,
             tables.page.c.stream,
+            tables.page.c.indexed,
         ).where(
             tables.page.c.workspace_id == self.store.workspace_id,
             tables.page.c.uid.in_(page_ids),
@@ -2194,6 +2211,7 @@ class ExtensionContext:
                 body_ref=row.body_ref,
                 title=row.title,
                 stream=row.stream,
+                indexed=bool(row.indexed),
             )
             for row in rows
         }
@@ -2212,6 +2230,7 @@ class ExtensionContext:
                 tables.page.c.body_ref,
                 tables.page.c.title,
                 tables.page.c.stream,
+                tables.page.c.indexed,
             )
             .select_from(
                 tables.page.join(
@@ -2240,6 +2259,7 @@ class ExtensionContext:
                 body_ref=row.body_ref,
                 title=row.title,
                 stream=row.stream,
+                indexed=bool(row.indexed),
             )
             for row in rows
         }

@@ -110,6 +110,7 @@ def _stream(
     ordering: Ordering = Ordering.none,
     canonical: bool = False,
     backfill_window_days: int | None = None,
+    indexed: bool = True,
 ) -> StreamSpec:
     return StreamSpec(
         name=name,
@@ -120,6 +121,7 @@ def _stream(
         ordering=ordering,
         canonical=canonical,
         backfill_window_days=backfill_window_days,
+        indexed=indexed,
     )
 
 
@@ -153,7 +155,7 @@ ALL_STREAMS: list[StreamSpec] = [
         ordering=Ordering.newest_first,
         backfill_window_days=REPO_BACKFILL_WINDOW_DAYS,
     ),
-    _stream("contributor_activity", primary_key="author.id", cursor_field=None),
+    _stream("contributor_activity", primary_key="author.id", cursor_field=None, indexed=False),
     _stream("deployments", cursor_field="updated_at"),
     _stream(
         "events",
@@ -185,7 +187,7 @@ ALL_STREAMS: list[StreamSpec] = [
         backfill_window_days=COMMENT_BACKFILL_WINDOW_DAYS,
         canonical=True,
     ),
-    _stream("stargazers", cursor_field="starred_at", created_at_field="starred_at"),
+    _stream("stargazers", cursor_field="starred_at", created_at_field="starred_at", indexed=False),
     _stream("tags", primary_key="name", cursor_field=None),
     _stream("teams", cursor_field=None),
     _stream(
@@ -193,6 +195,7 @@ ALL_STREAMS: list[StreamSpec] = [
         cursor_field="updated_at",
         canonical=True,
         backfill_window_days=WORKFLOW_RUNS_BACKFILL_WINDOW_DAYS,
+        indexed=False,
     ),
     _stream("workflows", cursor_field="updated_at", canonical=True),
 ]

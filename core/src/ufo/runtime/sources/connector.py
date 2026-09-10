@@ -137,7 +137,10 @@ class StreamSpec:
     row persists.
     Every field here is a connector constant, so the run's own floor is not one: it arrives beside
     the spec as `fetch_page`'s `backfill_after`. Keeping them apart is what stops a connector
-    recomputing `now - N days` per run."""
+    recomputing `now - N days` per run.
+
+    `indexed` is whether this stream's pages reach memory: left False, its pages still land — source
+    triggers and `object_get` read them — but no chunks and no facts are derived from them."""
 
     name: str
     source_object: str
@@ -150,6 +153,7 @@ class StreamSpec:
     ordering: Ordering = Ordering.none
     pagination: Pagination | None = None
     backfill_window_days: int | None = None
+    indexed: bool = True
 
 
 @dataclass(frozen=True)

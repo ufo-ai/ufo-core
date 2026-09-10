@@ -205,6 +205,7 @@ class ConnectorBackend:
                         deletes=tuple(deletes),
                         snapshot=False,
                         dropped=dropped,
+                        indexed=stream.indexed,
                     )
         except ProviderRateLimited as limited:
             return self._rate_limited_result(
@@ -235,6 +236,7 @@ class ConnectorBackend:
             deletes=tuple(deletes),
             snapshot=stream.delete_missing,
             dropped=dropped,
+            indexed=stream.indexed,
         )
 
     def _warn_missing_cursor(
@@ -290,6 +292,7 @@ class ConnectorBackend:
             deletes=tuple(deletes),
             retry_after_seconds=retry_after_seconds,
             dropped=dropped,
+            indexed=stream.indexed,
         )
 
     async def _credential(self, config: ConnectorSourceConfig, auth: SourceAuth) -> Credential:

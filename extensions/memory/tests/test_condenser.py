@@ -26,7 +26,6 @@ from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.condenser import (
     DEDUP_CURSOR_KEY,
     FACT_EXTRACT_TOOL,
-    MACHINE_STATUS_STREAMS,
     MEMBER_SECTION_HEADINGS,
     MIN_CLUSTER_FACTS,
     MIN_OLDEST_AGE,
@@ -136,7 +135,6 @@ REBUILD_TOOL = "rebuild_page_facts"
 DERIVE_MODEL_JOB = "core:page_change:memory:derive_facts"
 PAGE_BODY = "The acquisition codename is polaris and the deal closes in the third quarter."
 EDITED_PAGE_BODY = "The acquisition codename is meridian and the deal closes in the third quarter."
-MACHINE_STATUS_STREAM = "workflow_runs"
 MACHINE_STATUS_ROW = "the nightly billing build ran for twelve minutes"
 MACHINE_STATUS_REDERIVED = "the nightly billing build ran for eleven minutes"
 LAST_PUBLISHABLE_CHECK = 2
@@ -667,6 +665,7 @@ def _change(
     revision: int,
     digest: str,
     stream: str = "notes",
+    indexed: bool = True,
 ) -> PageChange:
     return PageChange(
         page_id=page_id,
@@ -678,6 +677,7 @@ def _change(
         digest=digest,
         revision=revision,
         tombstone=False,
+        indexed=indexed,
         created_at=WHEN,
         as_of=WHEN,
         changed_at=WHEN,
@@ -875,6 +875,7 @@ async def test_derive_facts_is_idempotent(db: None) -> None:
         digest="sha256:page",
         revision=1,
         tombstone=False,
+        indexed=True,
         created_at=WHEN,
         as_of=WHEN - timedelta(days=365),
         changed_at=WHEN,
@@ -921,6 +922,7 @@ async def test_fact_deriver_ignores_a_stale_private_payload_after_sanitization(
         digest="sha256:private",
         revision=0,
         tombstone=False,
+        indexed=True,
         created_at=WHEN,
         as_of=WHEN,
         changed_at=WHEN,
@@ -1042,21 +1044,20 @@ async def test_a_body_too_thin_to_derive_keeps_the_pages_prior_fact(db: None) ->
     assert await _page_facts(page_id) == {"the acquisition codename is polaris": 1}
 
 
-async def test_a_machine_status_pages_facts_retire_when_its_next_change_lands(db: None) -> None:
-    """The gate that keeps a machine-status page out of the extraction is what makes its rows
-    unreplaceable: no derivation will ever settle that page again, so a fact an earlier one recorded
-    from it would stand in the wiki and in recall for good, telling a member a build duration they
-    could read from the source and holding the place of a row that tells them something they could
-    not. The page is therefore retired outright, the treatment a page that has gone gets, on the
-    next change delivered for it — while the page beside it on a stream this tier reads keeps its
-    facts and derives new ones in the same batch. An extraction naming the machine-status page
-    settles nothing for it either: the gate keeps that page out of the group the model is sent, so a
-    row offered for it is a row naming no page the payload carried."""
-    assert MACHINE_STATUS_STREAM in MACHINE_STATUS_STREAMS
+async def test_an_unindexed_pages_facts_retire_when_its_next_change_lands(db: None) -> None:
+    """A page whose stream does not reach memory is kept out of the extraction, which is what makes
+    its rows unreplaceable: no derivation will ever settle that page again, so a fact an earlier one
+    recorded from it would stand in the wiki and in recall for good, telling a member a build
+    duration they could read from the source and holding the place of a row that tells them
+    something they could not. The page is therefore retired outright, the treatment a page that has
+    gone gets, on the next change delivered for it — while the page beside it on a stream that
+    reaches memory keeps its facts and derives new ones in the same batch. An extraction naming the
+    unindexed page settles nothing for it either: it is kept out of the group the model is sent, so
+    a row offered for it is a row naming no page the payload carried."""
     workspace_id = await _workspace()
     source_id = await _seed_wiki_feed(workspace_id)
     machine, machine_revision = await _seed_wiki_source_page(
-        workspace_id, source_id, WHEN, stream=MACHINE_STATUS_STREAM
+        workspace_id, source_id, WHEN, indexed=False
     )
     read, read_revision = await _seed_wiki_source_page(workspace_id, source_id, WHEN)
     for page_id, revision, body in (
@@ -1097,7 +1098,7 @@ async def test_a_machine_status_pages_facts_retire_when_its_next_change_lands(db
                     PAGE_BODY,
                     machine_revision,
                     "sha256:machine",
-                    stream=MACHINE_STATUS_STREAM,
+                    indexed=False,
                 ),
                 _change(read, source_id, SHARED_SUBJECT, PAGE_BODY, read_revision, "sha256:read"),
             )
@@ -1874,15 +1875,15 @@ async def test_a_page_read_again_that_derives_no_fact_keeps_the_reading_it_has(d
     assert await _page_facts(page_id) == {"the codename is polaris": 1}
 
 
-async def test_a_machine_status_pages_facts_are_retired_when_the_pass_reaches_it_again(
+async def test_an_unindexed_pages_facts_are_retired_when_the_pass_reaches_it_again(
     db: None,
 ) -> None:
-    """A workspace that synced before the stream gate holds rows derived from workflow runs and
-    stargazers, and no derivation of those pages will ever settle a replacement to retire them by:
-    a finished run never moves again, so the revision fence never hides them either. The gate is a
-    refusal of the page, not only of its next reading, so the pass retires what the page derived
-    the next time it is delivered — which is the pass the wiki panel's rebuild sends over every
-    page — and recall loses the row with the wiki band."""
+    """A workspace that synced before its stream stopped reaching memory holds rows derived from
+    workflow runs and stargazers, and no derivation of those pages will ever settle a replacement to
+    retire them by: a finished run never moves again, so the revision fence never hides them either.
+    The declaration is a refusal of the page, not only of its next reading, so the pass retires what
+    the page derived the next time it is delivered — which is the pass the wiki panel's rebuild
+    sends over every page — and recall loses the row with the wiki band."""
     workspace_id = await _workspace()
     page_id, source_id = uuid4(), uuid4()
     await _seed_page_authority(workspace_id, page_id, source_id, SHARED_SUBJECT)
@@ -1895,7 +1896,7 @@ async def test_a_machine_status_pages_facts_are_retired_when_the_pass_reaches_it
         assert await _page_facts(page_id) == {"the codename is polaris": 1}
 
         await _scripted(store, _extraction(page_id, "the codename is polaris")).apply(
-            (replace(change, stream="workflow_runs"),)
+            (replace(change, indexed=False),)
         )
         assert await _page_facts(page_id) == {}
         assert (
@@ -2587,6 +2588,7 @@ async def _seed_wiki_source_page(
     created_at: datetime,
     subject: str = SHARED_SUBJECT,
     stream: str = "notes",
+    indexed: bool = True,
 ) -> tuple[UUID, int]:
     """One synced document of `source_id` with the `mem_page` mirror row the page indexer keeps of
     it, and the revision the feed counter gave it. Both ends are what make a fact derived from this
@@ -2610,6 +2612,7 @@ async def _seed_wiki_source_page(
                 title="Page",
                 stream=stream,
                 tombstone=False,
+                indexed=indexed,
                 created_at=created_at,
                 updated_at=created_at,
             )

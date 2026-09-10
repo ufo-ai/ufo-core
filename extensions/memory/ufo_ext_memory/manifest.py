@@ -6,15 +6,17 @@ sends the fact deriver back over every synced page; the `user_prompt_submit`
 hook auto-injects relevant memory into the turn's context before the model runs. Two `page_change`
 hooks ride independent core-runner cursors: `index_pages` turns each replayed source-page change
 into index chunks + a mirror row, and `derive_facts` distills each into durable `fact`
-memory_items with a bounded metered model pass. Seven JobSpecs run the interval derivations:
+memory_items with a bounded metered model pass. Eight JobSpecs run the interval derivations:
 `memory_index` turns committed items into index chunks, `memory_consolidate` clusters aged facts
 into `semantic` summaries that supersede their originals, `memory_dedup` sweeps one group of
 duplicate copies per tick onto its newest copy, `memory_section` rewrites the paragraph that
 opens each band of the wiki from the facts standing in it, `memory_overview` rewrites the one
 paragraph the whole page opens on, `memory_people` writes each member's role and current focus into
-`memory_profile`, and `memory_page_pass` reads each subject's whole page on the deploy's own model —
+`memory_profile`, `memory_page_pass` reads each subject's whole page on the deploy's own model —
 the one job declaring `needs_deploy_model`, since seeing a page whole is what it is for — retiring
-the rows that repeat one another. Recall is a best-effort prompt hook: the
+the rows that repeat one another, and `memory_drain_unindexed_pages` removes the chunks and mirror
+rows of pages whose stream no longer reaches memory, in the workspaces a migration marked. Recall
+is a best-effort prompt hook: the
 handler owns a soft timeout below the hook deadline and records recall failures, while the hook
 chain logs an outer fault at error severity and continues the turn without an injection.
 """
@@ -33,7 +35,7 @@ from ufo_ext_sources.pages import PAGE_KIND
 
 from ufo.sdk.context import ExtensionContext, SourceReader
 from ufo.sdk.index import TextChunker
-from ufo.sdk.jobs import PAGE_CHANGE_CURSOR_KEY, JobSpec, owner_candidates
+from ufo.sdk.jobs import PAGE_CHANGE_CURSOR_KEY, JobSpec, owner_candidates, stored_key_workspaces
 from ufo.sdk.listings import ListingCursor, ListingPage, page_of, page_query
 from ufo.sdk.manifest import (
     HookContext,
@@ -102,6 +104,7 @@ from ufo_ext_memory.store import (
     PageIndexer,
     Recalled,
     SourceMatch,
+    UnindexedPageDrain,
     _aware,
     memory_item,
     recall_subjects,
@@ -161,6 +164,12 @@ prose, so it runs first: a paragraph written from rows the same night's curation
 describe the page for a day as it stood before the curation, and the member reading it would find
 sentences answering to nothing under them. Minute 45 stands clear of the consolidator on the hour
 and the deduper on the half hour, so no workspace pays two model jobs in one minute."""
+DRAIN_JOB = "memory_drain_unindexed_pages"
+DRAIN_SCHEDULE = "20 * * * * *"
+DRAIN_BATCH = 5000
+UNINDEXED_DRAIN_KEY = "unindexed_pages_drain"
+"""The store key `memory_0022` writes wherever a workspace's mirrors name a page that does not reach
+memory; the drain walks from the cursor it carries and deletes it when the walk ends."""
 REBUILD_QUEUED = (
     "The facts derived from synced pages are written again as the derivation pass reaches each "
     "page. The page's paragraphs and items an app recorded in a conversation are untouched."
@@ -639,8 +648,8 @@ async def rebuild_page_facts_handler(ctx: ToolContext, args: RebuildPageFactsInp
     here: clearing the cursor sends `derive_facts` back over every page, and that pass — which owns
     this derived state — writes each page's facts and retires the reading they replace. A page the
     pass leaves without a fact keeps the one it has, so no row goes before its replacement exists;
-    a page of a machine-status stream is the one page whose rows go with nothing in their place,
-    since that gate derives no replacement for them ever again.
+    a page of a stream that does not reach memory is the one page whose rows go with nothing in
+    their place, since nothing derives a replacement for it ever again.
 
     A tick already running holds the cursor value it read, so its own advance loses the
     compare-and-set against the cleared key and it stops where it stands; the next tick starts from
@@ -713,6 +722,20 @@ def _items_awaiting_index() -> sa.Select[tuple[UUID]]:
         .where(memory_item.c.embedding_digest.is_(None))
         .distinct()
     )
+
+
+async def drain_unindexed_pages(ctx: ExtensionContext) -> None:
+    if ctx.index is None:
+        raise RuntimeError(f"{DRAIN_JOB} requires the index backend; none is wired")
+    await UnindexedPageDrain(
+        index=ctx.index,
+        transaction=ctx.transaction,
+        store=ctx.store,
+        page_states=ctx.page_states,
+        workspace_id=ctx.store.workspace_id,
+        marker_key=UNINDEXED_DRAIN_KEY,
+        batch=DRAIN_BATCH,
+    ).run()
 
 
 def _consolidatable_workspaces() -> sa.Select[tuple[UUID]]:
@@ -1000,6 +1023,12 @@ def manifest() -> Manifest:
                 handler=curate_memory_pages,
                 candidates=owner_candidates(_curatable_workspaces),
                 needs_deploy_model=True,
+            ),
+            JobSpec(
+                name=DRAIN_JOB,
+                schedule=DRAIN_SCHEDULE,
+                handler=drain_unindexed_pages,
+                candidates=stored_key_workspaces(NAME, UNINDEXED_DRAIN_KEY),
             ),
         ),
         memory_search=(

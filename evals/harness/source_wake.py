@@ -52,6 +52,7 @@ def woken_inbound(
                 digest="sha256:0",
                 revision=1,
                 tombstone=False,
+                indexed=True,
                 created_at=WAKE_TIME - timedelta(days=1),
                 as_of=WAKE_TIME,
                 changed_at=WAKE_TIME,

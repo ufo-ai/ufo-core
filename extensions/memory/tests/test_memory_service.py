@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+import ufo_ext_memory.manifest as memory_manifest
 import ufo_ext_memory.store as memory_store
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -28,6 +29,7 @@ from ufo_ext_memory.store import (
     MemoryWrite,
     PageIndexer,
     Recalled,
+    UnindexedPageDrain,
     decay_factor,
     drop_near_duplicates,
     enforce_type_diversity,
@@ -48,6 +50,7 @@ from ufo.runtime.indexing import (
     IndexScope,
     TextChunker,
 )
+from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.runtime.sources.sync import PageChange, feed_handle_for
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
@@ -121,6 +124,7 @@ class ReclassifyingPage:
                 body_ref=f"pages/{self.page_id}",
                 title="Q3 pricing rollout",
                 stream="pull_requests",
+                indexed=True,
             )
         }
 
@@ -171,7 +175,9 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject: str) -> None:
+async def _seed_page(
+    workspace_id: UUID, page_id: UUID, source_id: UUID, subject: str, indexed: bool = True
+) -> None:
     """One page under its own source, under its own workspace-shared connection — the authority a
     reader is granted, so one source is one grantable feed in these tests. `page_id` and
     `source_id` are the rows' ids as the SDK names them; the content-addressed keys are minted here
@@ -216,6 +222,7 @@ async def _seed_page(workspace_id: UUID, page_id: UUID, source_id: UUID, subject
                 title="Page",
                 subject=subject,
                 tombstone=False,
+                indexed=indexed,
                 created_at=now,
                 updated_at=now,
             )
@@ -366,10 +373,14 @@ async def _seed_item(
 
 
 async def _seed_page_chunk(
-    workspace_id: UUID, subject: str, body: str, vector: tuple[float, ...]
+    workspace_id: UUID,
+    subject: str,
+    body: str,
+    vector: tuple[float, ...],
+    indexed: bool = True,
 ) -> UUID:
     page_id, source_id = uuid4(), uuid4()
-    await _seed_page(workspace_id, page_id, source_id, subject)
+    await _seed_page(workspace_id, page_id, source_id, subject, indexed=indexed)
     chunk = Chunk(
         "p-" + page_id.hex,
         OWNER_KIND_PAGE,
@@ -1273,6 +1284,7 @@ async def test_page_indexer_writes_the_contexts_workspace_id(db: None) -> None:
         digest=PAGE_DIGEST,
         revision=PAGE_REVISION,
         tombstone=False,
+        indexed=True,
         created_at=datetime(2025, 1, 1, tzinfo=UTC),
         as_of=datetime(2025, 1, 1, tzinfo=UTC),
         changed_at=datetime(2025, 1, 1, tzinfo=UTC),
@@ -1329,6 +1341,7 @@ async def test_page_index_write_is_deleted_when_the_subject_changes_during_embed
                     digest="sha256:stale",
                     revision=PAGE_REVISION,
                     tombstone=False,
+                    indexed=True,
                     created_at=now,
                     as_of=now,
                     changed_at=now,
@@ -1385,6 +1398,7 @@ async def test_stale_private_payload_is_never_indexed_after_a_shared_sanitized_e
         digest="sha256:private",
         revision=PAGE_REVISION,
         tombstone=False,
+        indexed=True,
         created_at=now,
         as_of=now,
         changed_at=now,
@@ -1476,6 +1490,7 @@ async def test_same_subject_redaction_hides_stale_facts_and_no_page_pass_removes
                     digest="sha256:redacted",
                     revision=PAGE_REVISION + 1,
                     tombstone=False,
+                    indexed=True,
                     created_at=now,
                     as_of=now,
                     changed_at=now,
@@ -1730,6 +1745,7 @@ async def test_a_narrowed_pages_wider_fact_is_never_published_and_never_deleted(
                     digest=PAGE_DIGEST,
                     revision=PAGE_REVISION + 1,
                     tombstone=False,
+                    indexed=True,
                     created_at=datetime(2025, 1, 1, tzinfo=UTC),
                     as_of=datetime(2025, 1, 1, tzinfo=UTC),
                     changed_at=datetime(2025, 1, 2, tzinfo=UTC),
@@ -1868,6 +1884,7 @@ async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: Non
         digest=PAGE_DIGEST,
         revision=PAGE_REVISION,
         tombstone=False,
+        indexed=True,
         created_at=datetime(2025, 1, 1, tzinfo=UTC),
         as_of=datetime(2025, 1, 1, tzinfo=UTC),
         changed_at=datetime(2025, 1, 1, tzinfo=UTC),
@@ -1949,6 +1966,234 @@ async def test_page_tombstone_drops_the_pages_own_chunks_and_mirror_only(db: Non
         ).scalar_one()
     assert mirror == 0
     assert count == 1
+
+
+class _UnreachedEmbed:
+    async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]:
+        raise AssertionError("a page that does not reach memory is never embedded")
+
+
+async def _mirrors(workspace_id: UUID) -> set[UUID]:
+    async with workspace_tx() as connection:
+        return set(
+            (
+                await connection.execute(
+                    sa.select(mem_page.c.page_uid).where(mem_page.c.workspace_id == workspace_id)
+                )
+            ).scalars()
+        )
+
+
+async def _chunked(index: DefaultIndex, page_ids: tuple[UUID, ...]) -> dict[UUID, bool]:
+    return {
+        page_id: await index.has_chunks(IndexScope(OWNER_KIND_PAGE, str(page_id)))
+        for page_id in page_ids
+    }
+
+
+async def test_a_change_on_a_stream_that_does_not_reach_memory_drops_the_page_and_embeds_nothing(
+    db: None,
+) -> None:
+    """The stream's declaration flips without a revision, so the page indexer meets it on the next
+    change the page does replay: the chunks and mirror row an earlier pass wrote go, whether or not
+    the page is live, and the body never reaches the embed client."""
+    workspace_id = await _workspace()
+    page_id, source_id = uuid4(), uuid4()
+    await _seed_page(workspace_id, page_id, source_id, SHARED_SUBJECT)
+    index = DefaultIndex(transaction=workspace_tx)
+    live = PageChange(
+        page_id=page_id,
+        source_id=source_id,
+        subject=SHARED_SUBJECT,
+        stream="workflow_runs",
+        title="ci #41",
+        body="the nightly billing build ran for twelve minutes",
+        digest=PAGE_DIGEST,
+        revision=PAGE_REVISION,
+        tombstone=False,
+        indexed=True,
+        created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        as_of=datetime(2025, 1, 1, tzinfo=UTC),
+        changed_at=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+
+    def indexer(embed: object) -> PageIndexer:
+        return PageIndexer(
+            index=index,
+            embed=embed,
+            transaction=workspace_tx,
+            chunker=TextChunker(),
+            workspace_id=workspace_id,
+            page_states=context_for("memory", frozenset()).page_states,
+        )
+
+    with ws(workspace_id):
+        await indexer(StubEmbed(vec((3, 1.0)))).apply((live,))
+        assert await _chunked(index, (page_id,)) == {page_id: True}
+        assert await _mirrors(workspace_id) == {page_id}
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.page).values(indexed=False).where(tables.page.c.uid == page_id)
+            )
+        await indexer(_UnreachedEmbed()).apply((replace(live, indexed=False),))
+        assert await _chunked(index, (page_id,)) == {page_id: False}
+    assert await _mirrors(workspace_id) == set()
+
+
+async def _mark_for_drain(workspace_id: UUID) -> None:
+    with ws(workspace_id):
+        await context_for("memory", frozenset()).store.put(
+            memory_manifest.UNINDEXED_DRAIN_KEY, {"after": None}
+        )
+
+
+async def _marker(workspace_id: UUID) -> object:
+    with ws(workspace_id):
+        return await context_for("memory", frozenset()).store.get(
+            memory_manifest.UNINDEXED_DRAIN_KEY
+        )
+
+
+def _drain(
+    workspace_id: UUID, index: DefaultIndex, batch: int, transaction: object = workspace_tx
+) -> UnindexedPageDrain:
+    ext = context_for("memory", frozenset())
+    return UnindexedPageDrain(
+        index=index,
+        transaction=transaction,
+        store=ext.store,
+        page_states=ext.page_states,
+        workspace_id=workspace_id,
+        marker_key=memory_manifest.UNINDEXED_DRAIN_KEY,
+        batch=batch,
+    )
+
+
+async def test_the_drain_job_fires_on_marked_workspaces_and_removes_only_unindexed_pages(
+    db: None,
+) -> None:
+    """The job runs through the real dispatch: its candidates are exactly the workspaces holding the
+    marker a migration wrote, and one pass over a small workspace deletes the chunks and mirror rows
+    of the pages that do not reach memory, keeps the page that does, and clears the marker so the
+    workspace leaves the candidate set."""
+    index = DefaultIndex(transaction=workspace_tx)
+    marked, unmarked = await _workspace(), await _workspace()
+    kept = await _seed_page_chunk(
+        marked, SHARED_SUBJECT, "the runway is eleven months", vec((1, 1))
+    )
+    gone = tuple(
+        [
+            await _seed_page_chunk(
+                marked, SHARED_SUBJECT, f"ci run {n}", vec((2, 1)), indexed=False
+            )
+            for n in range(3)
+        ]
+    )
+    elsewhere = await _seed_page_chunk(
+        unmarked, SHARED_SUBJECT, "ci run", vec((2, 1)), indexed=False
+    )
+    await _mark_for_drain(marked)
+
+    manifest = memory_manifest.manifest()
+    job = next(j for j in manifest.jobs if j.name == memory_manifest.DRAIN_JOB)
+    assert set(await job.candidates()) == {marked}
+    runner = JobRunner(
+        bindings=bindings_from((manifest,), ()),
+        manifests=(manifest,),
+        index=index,
+        embed=StubEmbed(vec((0, 1.0))),
+    )
+    key = f"{memory_manifest.NAME}:{memory_manifest.DRAIN_JOB}"
+    for workspace_id in await runner.candidates(key):
+        await runner.fire(key, workspace_id)
+
+    with ws(marked):
+        assert await _chunked(index, (kept, *gone)) == {kept: True, **dict.fromkeys(gone, False)}
+    with ws(unmarked):
+        assert await _chunked(index, (elsewhere,)) == {elsewhere: True}
+    assert await _mirrors(marked) == {kept}
+    assert await _mirrors(unmarked) == {elsewhere}
+    assert await _marker(marked) is None
+    assert await job.candidates() == ()
+
+
+async def test_the_drain_walks_in_batches_from_the_cursor_its_marker_carries(db: None) -> None:
+    """A full batch advances the marker's cursor to the last mirror walked and keeps the marker; the
+    next pass resumes past it and, finding a short batch, ends the walk and deletes the marker."""
+    index = DefaultIndex(transaction=workspace_tx)
+    workspace_id = await _workspace()
+    pages = sorted(
+        [
+            await _seed_page_chunk(
+                workspace_id, SHARED_SUBJECT, f"ci run {n}", vec((2, 1)), indexed=False
+            )
+            for n in range(3)
+        ]
+    )
+    await _mark_for_drain(workspace_id)
+
+    with ws(workspace_id):
+        first = await _drain(workspace_id, index, batch=2).run()
+        assert (first, await _marker(workspace_id)) == (2, {"after": str(pages[1])})
+        assert await _chunked(index, tuple(pages)) == {
+            pages[0]: False,
+            pages[1]: False,
+            pages[2]: True,
+        }
+        second = await _drain(workspace_id, index, batch=2).run()
+        assert (second, await _marker(workspace_id)) == (1, None)
+        assert await _chunked(index, tuple(pages)) == dict.fromkeys(pages, False)
+        assert await _drain(workspace_id, index, batch=2).run() == 0
+    assert await _mirrors(workspace_id) == set()
+
+
+class _RefusingIndex(DefaultIndex):
+    refused: str = ""
+
+    async def delete(self, scope: IndexScope) -> None:
+        if scope.owner_id == self.refused:
+            raise RuntimeError("index unavailable")
+        await super().delete(scope)
+
+
+async def test_a_page_whose_scope_the_index_refuses_keeps_its_mirror_while_the_batch_drains(
+    db: None,
+) -> None:
+    """Every scope goes before any mirror row, and the mirror rows of the scopes that went go in
+    one statement: the refused page keeps its chunks and its mirror row for the next pass, the
+    other two lose both in this pass, the marker holds its cursor, and the pass raises so the tick
+    fails. The pass opens two transactions however many pages it drops — the mirror read and the
+    mirror delete — so a batch never holds more of the pool than one caller."""
+    workspace_id = await _workspace()
+    pages = sorted(
+        [
+            await _seed_page_chunk(
+                workspace_id, SHARED_SUBJECT, f"ci run {n}", vec((2, 1)), indexed=False
+            )
+            for n in range(3)
+        ]
+    )
+    index = _RefusingIndex(transaction=workspace_tx)
+    index.refused = str(pages[1])
+    await _mark_for_drain(workspace_id)
+    opened = 0
+
+    def counting_tx() -> object:
+        nonlocal opened
+        opened += 1
+        return workspace_tx()
+
+    with ws(workspace_id):
+        with pytest.raises(RuntimeError, match="index unavailable"):
+            await _drain(workspace_id, index, batch=10, transaction=counting_tx).run()
+        assert await _chunked(index, tuple(pages)) == {
+            pages[0]: False,
+            pages[1]: True,
+            pages[2]: False,
+        }
+        assert await _marker(workspace_id) == {"after": None}
+    assert await _mirrors(workspace_id) == {pages[1]}
+    assert opened == 2
 
 
 def test_decay_factor_weights_recency_kind_and_confidence() -> None:

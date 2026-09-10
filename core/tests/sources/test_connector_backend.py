@@ -545,6 +545,20 @@ async def test_delete_missing_stream_ignores_the_cap_and_snapshots(
     assert [page.source_ref for page in result.pages] == [f"items/{i}" for i in range(1, 6)]
 
 
+async def test_every_run_carries_its_streams_indexed_declaration() -> None:
+    """A stream reaches memory unless it declares otherwise, and the adapter puts that declaration
+    on the run's result — the one place the rows' `indexed` is decided — whether the run landed
+    records or none."""
+    declared = StreamSpec(name="runs", source_object="runs", indexed=False)
+    assert StreamSpec(name="items", source_object="items").indexed is True
+    unindexed = await _fetch(declared, [_records(1, 2)])
+    empty = await _fetch(declared, [])
+    indexed = await _fetch(StreamSpec(name="items", source_object="items"), [_records(1)])
+    assert (unindexed.indexed, len(unindexed.pages)) == (False, 2)
+    assert (empty.indexed, empty.pages) == (False, ())
+    assert indexed.indexed is True
+
+
 async def _check_connector_json_map_cursor_round_trips_untouched() -> None:
     stream = StreamSpec(name="items", source_object="items", cursor_field="updated_at")
     incoming = json.dumps({"acme/repo1": "2026-02-01T00:00:00Z"}, sort_keys=True)
