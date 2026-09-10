@@ -45,7 +45,7 @@ APPLICATION_DESIGN_WIDTH = DESKTOP_WIDTH
 """A page is drawn at the width it is rendered at. The homepage frame fills its pane, so one
 width serves the drawing and the measurement, and a region drawn above the fold is compared with
 the region rendered above it without a scale between them."""
-APPLICATION_PAGE_GUTTER = 88
+APPLICATION_PAGE_GUTTER = 24
 """`--size-page-gutter` in `extensions/web/frontend/src/theme.css`, which `Page` sets each side."""
 APPLICATION_CONTENT_WIDTH = APPLICATION_DESIGN_WIDTH - 2 * APPLICATION_PAGE_GUTTER
 APPLICATION_BAND_GAP = 16

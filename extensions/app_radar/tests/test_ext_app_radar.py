@@ -38,33 +38,33 @@ def test_the_home_skill_edits_builds_and_deploys_the_project() -> None:
 
 
 PAGE = (SKILL_DIR / "app.tsx").read_text()
-FEED_LIST = PAGE[PAGE.index("{runs.map((run) => (") : PAGE.index("function TourEntry(")]
+FEED_LIST = PAGE[PAGE.index("function Feed(") : PAGE.index("function RunRow(")]
 FRONTMATTER, TOUR_BODY = (
     (SKILL_DIR / "tour.md").read_text().removeprefix("---\n").split("\n---\n", 1)
 )
 
 
-def test_the_tour_stands_as_the_oldest_entry_in_every_workspace() -> None:
-    """Every workspace reads the tour, new or old: it is the last entry on a rail the feed orders
-    newest first, so it stands under the oldest report and moves none of them. A workspace that has
-    never run reads it as the only entry, by the same one branch — the feed keeps no separate empty
-    screen to drift from this one."""
-    assert "{payload.next_cursor ? null : <TourEntry />}" in FEED_LIST
-    assert FEED_LIST.index("{runs.map((run) => (") < FEED_LIST.index("<TourEntry />")
+def test_the_tour_stands_as_the_oldest_row_in_every_workspace() -> None:
+    """Every workspace reads the tour, new or old: it closes a rail the feed orders newest day
+    first, so it stands under the oldest report and moves none of them. A workspace that has never
+    run reads it as the only row, by the same one branch — the feed keeps no separate empty screen
+    to drift from this one."""
+    assert "{payload.next_cursor ? null : (" in FEED_LIST
+    assert FEED_LIST.index("{days.map((key) => {") < FEED_LIST.index("<TourRow")
     assert "if (!runs.length" not in PAGE
     assert 'const TOUR_SLOT = "tour"' in PAGE
     assert "id === TOUR_SLOT ? (\n          <TourSheet" in PAGE
 
 
 def test_the_tour_closes_the_rail_once_and_only_where_no_older_report_is_left() -> None:
-    """The oldest entry is the one with nothing behind it, so the tour stands on the page whose read
+    """The oldest row is the one with nothing behind it, so the tour stands on the page whose read
     answers no further cursor and on no page before it — a member stepping through older reports
-    meets it once, at the foot of the last page. It carries the rail's own line and its last-entry
-    rules, so the report above it joins down to it."""
-    entry = PAGE[PAGE.index("function TourEntry(") : PAGE.index("function TourSheet(")]
-    assert 'className="w-px flex-1 bg-edge group-last/entry:hidden"' in entry
-    assert "pb-6xl group-last/entry:pb-0" in entry
-    assert 'sectionHash("radar", { opens: [TOUR_SLOT] })' in entry
+    meets it once, at the foot of the last page. It takes the same `Row` every report takes, so it
+    is read as one of them rather than as a banner under them."""
+    row = PAGE[PAGE.index("function TourRow(") : PAGE.index("function Row(")]
+    assert "<Row" in row
+    assert 'sectionHash("radar", { opens: [TOUR_SLOT] })' in row
+    assert "next_cursor" not in row
 
 
 def test_the_tour_is_one_committed_document_and_no_stored_row() -> None:

@@ -31,18 +31,18 @@ Draw 2 to 6 regions. Fewer than 2 is a list, not a screen; more than 6 cannot fi
 The wireframe is 1440 px wide and the fold is y=900. Every required fact and the primary workflow
 sit above it.
 
-**The content box is 1264 px, not 1440.** `Page` holds an 88 px gutter each side. Everything you
-lay out divides 1264; nothing you write sets its own width. Draw the wireframe's bands inside
-x=88..1352 so the drawing and the page agree.
+**The content box is 1392 px, not 1440.** `Page` holds a 24 px gutter each side. Everything you
+lay out divides 1392; nothing you write sets its own width. Draw the wireframe's bands inside
+x=24..1416 so the drawing and the page agree.
 
 | Across | Each is | With `gap-2xl` between |
 | --- | --- | --- |
-| 2 | 632 px | 624 px |
-| 3 | 421 px | 411 px |
-| 4 | 316 px | 304 px |
-| 5 | 253 px | 240 px |
+| 2 | 696 px | 688 px |
+| 3 | 464 px | 453 px |
+| 4 | 348 px | 336 px |
+| 5 | 278 px | 266 px |
 
-Five across leaves each column 240 px, where a title line truncates to about 28 characters. Four is
+Five across leaves each column 266 px, where a title line truncates to about 31 characters. Four is
 the practical ceiling for cards and board columns; a fifth belongs in a second row or a menu. A
 board with more columns than fit is a `Segmented` that picks one, never a row that runs off the
 right edge — a recorded build shipped a 1530 px document into this box and its last column, its
@@ -51,7 +51,7 @@ primary act and two row controls landed outside the pane.
 | Band | Height | What it holds |
 | --- | --- | --- |
 | Title + one purpose line | 72 px | `--text-title` once, `--text-small` line under it |
-| Stat row | 96 px | 2 to 4 Stats across, each 1264/N wide |
+| Stat row | 96 px | 2 to 4 Stats across, each 1392/N wide |
 | Attention band | 120 px | at most 2 rows, each one line |
 | Primary rows | 468 px | 9 one-line rows, or a DataTable of the same height |
 | Controls row | 44 px | Segmented, or one Button per control |

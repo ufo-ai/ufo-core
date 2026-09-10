@@ -706,12 +706,12 @@ test("a header with a crumb makes the crumb's leaf the heading the caller asked 
 
 test("the inset is the pinned band's, and nothing else's, and neither band draws a line", () => {
   const { container, unmount } = render(<Header heading={2} title="Reviewer" />);
-  expect(container.firstElementChild!.className).not.toContain("px-2xl");
+  expect(container.firstElementChild!.className).not.toContain("px-(--size-page-gutter)");
   expect(container.firstElementChild!.className).not.toContain("border-b");
   unmount();
 
   const pinned = render(<Header heading={2} title="Reviewer" pinned />);
-  expect(pinned.container.firstElementChild!.className).toContain("px-2xl");
+  expect(pinned.container.firstElementChild!.className).toContain("px-(--size-page-gutter)");
   expect(pinned.container.firstElementChild!.className).toContain("py-lg");
   expect(pinned.container.firstElementChild!.className).not.toContain("border-b");
 });

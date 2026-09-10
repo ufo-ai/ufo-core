@@ -102,7 +102,7 @@ Write `/workspace/ufo-app/application-design.svg`:
 - 2 to 6 `<g data-app-region="slug">` groups, none nested inside another, none drawn as a band
   across y=900. One carries `data-kit-component="ComponentName"` naming a visual `ufo/kit` export.
 - The primary task and every required fact above y=900.
-- Every band inside x=88..1352. `Page` gutters 88 px each side, so the page has 1264 px to
+- Every band inside x=24..1416. `Page` gutters 24 px each side, so the page has 1392 px to
   divide and a band drawn wider than that renders off the pane.
 - SVG drawing elements only. No `clip-path`, `mask`, `filter`, script, `foreignObject`, or any
   external reference.

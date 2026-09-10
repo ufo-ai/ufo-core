@@ -4,11 +4,10 @@
 import {
   ARTIFACT_TEXT_BYTES,
   AgentIcon,
-  Avatar,
-  AvatarFallback,
   FileSheet,
   Header,
   Markdown,
+  MediaIcon,
   Moment,
   ObjectDetail,
   Panel,
@@ -16,6 +15,7 @@ import {
   PanelEmpty,
   Section,
   SectionApp,
+  SurfaceGlyph,
   Sheet,
   Loading,
   agentHash,
@@ -33,6 +33,7 @@ import {
   sectionHash,
   slackLink,
   slotOf,
+  surfaceWord,
   useAgents,
   useCallback,
   useLayoutEffect,
@@ -41,7 +42,7 @@ import {
   useState,
   useTextArtifact,
 } from "ufo/kit";
-import type { ObjectAddress, Placement, ReactMouseEvent } from "ufo/kit";
+import type { ObjectAddress, Placement, ReactMouseEvent, ReactNode } from "ufo/kit";
 // The tour's words, committed beside this file and taken into the bundle at build time. `?raw` is
 // vite's own: the same import resolves in the deploy's app build and in the build a member's
 // redeploy runs, so the document ships with the page rather than being fetched at runtime.
@@ -49,7 +50,6 @@ import TOUR_DOCUMENT from "./tour.md?raw";
 
 const TASK_KIND = "scheduled_task";
 const RUN_PREFIX = "run/";
-const DONE = "done";
 
 /** Whether a slot in the place names a run of this page's own, which the drawer reads as a story
  *  rather than as a record held at an object address. */
@@ -192,6 +192,273 @@ function tourWritten(raw: string): TourWritten {
 
 const TOUR = tourWritten(TOUR_DOCUMENT);
 
+/** Which picture stands for a run. Only a file with a rendered preview can stand for one at all —
+ *  the row shows a picture or nothing, never a frame around a name. Among those, a picture the run
+ *  drew says at a glance what the report is about, while the first page of a document says only
+ *  that a document exists, because every page of prose crops to the same grey band. */
+function cover(artifacts: RadarArtifact[]): RadarArtifact | null {
+  const pictures = artifacts.filter((artifact) => artifact.preview_url !== null);
+  return (
+    pictures.find((artifact) => artifact.media_type.startsWith("image/")) ?? pictures[0] ?? null
+  );
+}
+
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+/** The calendar day a stamp names, read off the ISO string as it was sent rather than through
+ *  `Date`, so no reader's zone shifts a report across midnight. */
+function dateKey(iso: string): string {
+  return iso.slice(0, 10);
+}
+
+/** The day heading: the month written out, because the heading is read as words rather than
+ *  scanned as a column of figures. */
+function dayName(key: string): string {
+  const [year, month, date] = key.split("-");
+  return MONTHS[Number(month) - 1] + " " + Number(date) + ", " + year;
+}
+
+/** The clock time a report fired, on the twelve-hour clock the heading's date is written for. */
+function clock(iso: string): string {
+  const hour = Number(iso.slice(11, 13));
+  return ((hour % 12) || 12) + ":" + iso.slice(14, 16) + (hour < 12 ? " AM" : " PM");
+}
+
+/** One fact of the meta line, read as its mark and its words. The mark names the kind of fact —
+ *  whose agent, which service, what file — so the line reads without labels. */
+function Fact({ mark, children }: { mark: ReactNode; children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-2xs">
+      {mark}
+      {children}
+    </span>
+  );
+}
+
+function Dot() {
+  return (
+    <span aria-hidden className="text-ink-faint">
+      ·
+    </span>
+  );
+}
+
+/** The reports the reader may read, gathered under the day they fired. A day heading names the
+ *  date once, so the rows under it state only their time; today is named as such and its rows
+ *  count back from now, because a report filed this morning is read as recency rather than as a
+ *  clock face. Today runs newest first — the reader came for what just happened — and every day
+ *  behind it runs in the order it was lived.
+ *
+ *  The tour closes the rail rather than opening it, and closes it once: it stands on the page that
+ *  has no older reports behind it, which is the first page of a workspace that has never run and
+ *  the last page of one that walks its whole history. */
+function Feed({
+  place,
+  onPlace,
+}: {
+  place: Placement;
+  onPlace: (place: Placement) => void;
+}) {
+  const opens = place.opens ?? [];
+  const after = place.after ?? "";
+  const params = new URLSearchParams({ order_by: "fired_at", order: "desc" });
+  if (after) params.set("cursor", after);
+  const state = usePanelRead<ReportsPayload>("/objects/report?" + params.toString());
+  const now = dateKey(new Date().toISOString());
+  return (
+    <Panel state={state} shape="cards">
+      {(payload) => {
+        const runs = payload.objects.map(toRun);
+        const days = [...new Set(runs.map((run) => dateKey(run.fired_at)))];
+        return (
+          <>
+            <div className="flex flex-col">
+              {days.map((key) => {
+                const since = key === now;
+                const inDay = runs
+                  .filter((run) => dateKey(run.fired_at) === key)
+                  .sort((one, other) =>
+                    since
+                      ? other.fired_at.localeCompare(one.fired_at)
+                      : one.fired_at.localeCompare(other.fired_at),
+                  );
+                return (
+                  <section key={key} className="flex flex-col first:[&>h2]:pt-0">
+                    <h2 className="m-0 py-2xl text-ui font-medium text-ink">
+                      {since ? "Today" : dayName(key)}
+                    </h2>
+                    <ol className="m-0 flex list-none flex-col border-t border-edge p-0">
+                      {inDay.map((run) => (
+                        <RunRow
+                          key={run.turn_id}
+                          run={run}
+                          since={since}
+                          standing={opens.includes(RUN_PREFIX + run.turn_id)}
+                        />
+                      ))}
+                    </ol>
+                  </section>
+                );
+              })}
+              {payload.next_cursor ? null : (
+                <ol className="m-0 flex list-none flex-col border-t border-edge p-0">
+                  <TourRow standing={opens.includes(TOUR_SLOT)} />
+                </ol>
+              )}
+            </div>
+            {payload.next_cursor || after ? (
+              <div className="flex gap-sm">
+                {payload.next_cursor ? (
+                  <button
+                    className={cn(buttonVariants({ variant: "row" }))}
+                    onClick={() => onPlace({ after: payload.next_cursor ?? undefined })}
+                  >
+                    Older reports
+                  </button>
+                ) : null}
+                {after ? (
+                  <button
+                    className={cn(buttonVariants({ variant: "row" }))}
+                    onClick={() => onPlace({ after: undefined })}
+                  >
+                    Newest reports
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </>
+        );
+      }}
+    </Panel>
+  );
+}
+
+/** One row of the rail: when it fired, what it found, and the facts that place it — which agent
+ *  filed it, where it reported, which task fired it, and what it shared. Each fact is read by its
+ *  mark rather than by a label. The whole row opens the report beside the rail. */
+function RunRow({
+  run,
+  since,
+  standing,
+}: {
+  run: RadarRun;
+  since: boolean;
+  standing: boolean;
+}) {
+  const agent = useAgents().find((entry) => entry.id === run.agent_id);
+  const picture = cover(run.artifacts);
+  const files = run.artifacts.length;
+  return (
+    <Row
+      href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })}
+      standing={standing}
+      when={since ? <Moment at={run.fired_at} /> : clock(run.fired_at)}
+      title={run.entry?.title ?? run.task ?? "Scheduled run"}
+      body={run.entry?.summary ?? run.text}
+      picture={picture?.preview_url ?? null}
+    >
+      {agent ? (
+        <Fact mark={<AgentIcon name={agent.icon} className="size-icon" />}>
+          {agentName(agent.name)}
+        </Fact>
+      ) : null}
+      {agent ? <Dot /> : null}
+      <Fact mark={<SurfaceGlyph surface={run.surface} />}>{surfaceWord(run.surface)}</Fact>
+      {run.task ? <Dot /> : null}
+      {run.task ? <span>{run.task}</span> : null}
+      {files ? <Dot /> : null}
+      {files ? (
+        <Fact mark={<MediaIcon mediaType={run.artifacts[0].media_type} />}>
+          {files + (files === 1 ? " file" : " files")}
+        </Fact>
+      ) : null}
+    </Row>
+  );
+}
+
+/** The tour on the rail, shaped as a row so a member reads it the way they read every report above
+ *  it. It opens the tour in the drawer beside the feed. */
+function TourRow({ standing }: { standing: boolean }) {
+  return (
+    <Row
+      href={sectionHash("radar", { opens: [TOUR_SLOT] })}
+      standing={standing}
+      when={null}
+      title={TOUR.title}
+      body={TOUR.summary}
+      picture={null}
+    >
+      <Fact mark={<AgentIcon name="radar" className="size-icon" />}>{TOUR.lead}</Fact>
+    </Row>
+  );
+}
+
+/** The shape every row on the rail takes: the time it fired in its own column, then what it says,
+ *  then its facts, and the picture it drew at the far edge. It is a link rather than a button, so
+ *  the heading it carries is a heading and a member opens one beside the rail the same way they
+ *  open anything else in the portal. */
+function Row({
+  href,
+  standing,
+  when,
+  title,
+  body,
+  picture,
+  children,
+}: {
+  href: string;
+  standing: boolean;
+  when: ReactNode;
+  title: string;
+  body: string | null;
+  picture: string | null;
+  children: ReactNode;
+}) {
+  return (
+    <li className="border-b border-edge">
+      <a
+        href={href}
+        aria-current={standing || undefined}
+        className={cn(
+          "flex items-start gap-2xl px-sm py-2xl text-inherit no-underline",
+          "hover:bg-fill",
+          standing && "bg-fill",
+        )}
+      >
+        <span className="w-8xl shrink-0 pt-hair text-small tabular-nums text-ink-soft">{when}</span>
+        <span className="flex min-w-0 flex-1 flex-col gap-2xs">
+          <h3 className="m-0 text-ui font-medium text-ink">{title}</h3>
+          {body ? <span className="line-clamp-3 max-w-hint text-ui text-ink-soft">{body}</span> : null}
+          <span className="flex flex-wrap items-center gap-x-sm gap-y-2xs pt-xs text-small text-ink-soft">
+            {children}
+          </span>
+        </span>
+        {picture ? (
+          <img
+            loading="lazy"
+            alt=""
+            src={picture}
+            className="h-(--size-digest-picture) w-(--size-thumbnail) shrink-0 rounded-panel border border-edge object-cover object-top-left"
+          />
+        ) : null}
+      </a>
+    </li>
+  );
+}
+
 function Radar({
   title,
   place,
@@ -204,9 +471,7 @@ function Radar({
   const [named, setNamed] = useState<{ run: string; name: string } | null>(null);
   const name = useCallback((run: string, name: string) => setNamed({ run, name }), []);
   const opens = place.opens ?? [];
-  const band = usePageHead(
-    <Header pinned heading={1} title={title} />,
-  );
+  const band = usePageHead(<Header pinned heading={1} title={title} />);
   return (
     <>
       {band}
@@ -265,110 +530,6 @@ function RecordSlot({
       onOpen={(next) => onPlace({ opens: opened(opens, slotOf(next), id) })}
       onBack={shut}
     />
-  );
-}
-
-/** The feed: every run the reader may read, newest first, and the tour under the oldest of them.
- *  It stands whatever the place carries — a story opened from it is read in the drawer beside it, so
- *  the list the member is walking is never taken away by the report they opened out of it.
- *
- *  The tour closes the rail rather than opening it, and closes it once: it stands on the page that
- *  has no older reports behind it, which is the first page of a workspace that has never run and the
- *  last page of one that walks its whole history. */
-function Feed({
-  place,
-  onPlace,
-}: {
-  place: Placement;
-  onPlace: (place: Placement) => void;
-}) {
-  const opens = place.opens ?? [];
-  const after = place.after ?? "";
-  const feedParams = new URLSearchParams({ order_by: "fired_at", order: "desc" });
-  if (after) feedParams.set("cursor", after);
-  const state = usePanelRead<ReportsPayload>("/objects/report?" + feedParams.toString());
-  return (
-    <Panel state={state} shape="cards">
-      {(payload) => {
-        const runs = payload.objects.map(toRun);
-        return (
-          <>
-            <ol className="m-0 flex list-none flex-col p-0">
-              {runs.map((run) => (
-                <Entry key={run.turn_id} run={run} opens={opens} onPlace={onPlace} />
-              ))}
-              {payload.next_cursor ? null : <TourEntry />}
-            </ol>
-            {payload.next_cursor || after ? (
-              <div className="flex gap-sm">
-                {payload.next_cursor ? (
-                  <button
-                    className={cn(buttonVariants({ variant: "row" }))}
-                    onClick={() => onPlace({ after: payload.next_cursor ?? undefined })}
-                  >
-                    Older reports
-                  </button>
-                ) : null}
-                {after ? (
-                  <button
-                    className={cn(buttonVariants({ variant: "row" }))}
-                    onClick={() => onPlace({ after: undefined })}
-                  >
-                    Newest reports
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
-          </>
-        );
-      }}
-    </Panel>
-  );
-}
-
-/** The tour on the rail, shaped as an entry so a member reads it the way they read every report
- *  above it: the app's own mark, a heading, and the points under it. It takes the rail's own line
- *  and its last-entry rules from `Entry`, so the report before it joins down to the tour and the
- *  tour closes the list. It opens the tour in the drawer beside the feed. */
-function TourEntry() {
-  return (
-    <li className="group/entry flex gap-2xl">
-      <div className="flex flex-col items-center gap-sm">
-        <Avatar>
-          <AvatarFallback>
-            <AgentIcon name="radar" />
-          </AvatarFallback>
-        </Avatar>
-        <span aria-hidden className="w-px flex-1 bg-edge group-last/entry:hidden" />
-      </div>
-      <div className="flex min-w-0 flex-1 flex-col gap-sm pb-6xl group-last/entry:pb-0">
-        <p className="m-0 truncate font-mono text-small tabular-nums text-ink-soft">{TOUR.lead}</p>
-        <a
-          href={sectionHash("radar", { opens: [TOUR_SLOT] })}
-          className="flex items-start gap-2xl text-inherit no-underline"
-        >
-          <div className="flex min-w-0 flex-1 flex-col gap-sm">
-            <h3 className="m-0 line-clamp-2 text-subtitle font-medium text-ink group-hover/entry:underline">
-              {TOUR.title}
-            </h3>
-            <p className="m-0 line-clamp-2 text-ui text-ink-soft">{TOUR.summary}</p>
-            <ul className="m-0 flex list-none flex-col gap-2xs p-0">
-              {TOUR.points.map((made) => (
-                <li key={made.actor} className="flex items-baseline gap-sm text-ui">
-                  <span aria-hidden className="text-ink-faint">
-                    —
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-ink">{made.text}</span>
-                  <span className="shrink-0 whitespace-nowrap text-small text-ink-soft">
-                    {made.actor}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </a>
-      </div>
-    </li>
   );
 }
 
@@ -462,19 +623,6 @@ function StorySheet({
   );
 }
 
-/** Which picture stands for a run. Only a file with a rendered preview can stand for one at all —
- *  the feed shows a picture or nothing, never a frame around a name. Among those, a picture the run
- *  drew — a chart, a capture — says at a glance what the report is about, while the first page of a
- *  document says only that a document exists, because every page of prose crops to the same grey
- *  band. So a raster the run shared outranks a rendered page whatever order the two were shared in,
- *  and only a run that drew nothing is represented by its paperwork. */
-function cover(artifacts: RadarArtifact[]): RadarArtifact | null {
-  const pictures = artifacts.filter((artifact) => artifact.preview_url !== null);
-  return (
-    pictures.find((artifact) => artifact.media_type.startsWith("image/")) ?? pictures[0] ?? null
-  );
-}
-
 /** A markdown file the run shared is the run's own document: it reads inline as the story rather
  *  than standing as a chip the member must download to open. One whose link is not minted cannot
  *  be read here and stays a chip. */
@@ -482,99 +630,6 @@ function isDocument(artifact: RadarArtifact): boolean {
   return (
     artifact.url !== null &&
     (artifact.media_type === "text/markdown" || artifact.filename.endsWith(".md"))
-  );
-}
-
-/** One report on the rail: what it found, in the shortest form that earns a press. The app's own
- *  mark is the node, so which app filed it is read before the entry is, and the rail runs between
- *  the marks and stops under the last. The whole entry opens the report it describes. */
-function Entry({
-  run,
-  opens,
-  onPlace,
-}: {
-  run: RadarRun;
-  opens: string[];
-  onPlace: (place: Placement) => void;
-}) {
-  const agent = useAgents().find((entry) => entry.id === run.agent_id);
-  const picture = cover(run.artifacts);
-  const note = STATUS_NOTES[run.status];
-  const heading = run.entry?.title ?? run.task ?? "Scheduled run";
-  /** A run that did not end well says why, whatever else was written about it: the reason it
-   *  stopped is the whole of what the member can act on, and an entry drawn over the partial
-   *  report it left would read as though the run had delivered. */
-  const summary = run.status === DONE ? (run.entry?.summary ?? null) : run.text || null;
-  return (
-    <li className="group/entry flex gap-2xl">
-      <div className="flex flex-col items-center gap-sm">
-        <Avatar>
-          <AvatarFallback>
-            <AgentIcon name={agent?.icon ?? "propylon"} />
-          </AvatarFallback>
-        </Avatar>
-        <span aria-hidden className="w-px flex-1 bg-edge group-last/entry:hidden" />
-      </div>
-      <div className="flex min-w-0 flex-1 flex-col gap-sm pb-6xl group-last/entry:pb-0">
-        <p className="m-0 truncate font-mono text-small tabular-nums text-ink-soft">
-          <Moment at={run.fired_at} />
-          {agent ? <span>{" \u00b7 " + agentName(agent.name)}</span> : null}
-          {run.task ? " \u00b7 " : null}
-          {run.task ? (
-            <TaskName
-              task={run.task}
-              agentId={run.agent_id}
-              opens={opens}
-              onPlace={onPlace}
-              className="m-0 border-0 p-0 text-left font-mono text-inherit hover:underline"
-            />
-          ) : null}
-          {note ? (
-            <span
-              className={run.status === "failed" ? "[color:var(--color-attention-ink)]" : undefined}
-            >
-              {" \u00b7 " + note}
-            </span>
-          ) : null}
-        </p>
-        <a
-          href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })}
-          className="flex items-start gap-2xl text-inherit no-underline"
-        >
-          <div className="flex min-w-0 flex-1 flex-col gap-sm">
-            <h3 className="m-0 line-clamp-2 text-subtitle font-medium text-ink group-hover/entry:underline">
-              {heading}
-            </h3>
-            {summary ? <p className="m-0 line-clamp-2 text-ui text-ink-soft">{summary}</p> : null}
-            {run.entry?.points.length ? (
-              <ul className="m-0 flex list-none flex-col gap-2xs p-0">
-                {run.entry.points.map((made, at) => (
-                  <li key={run.turn_id + "/" + at} className="flex items-baseline gap-sm text-ui">
-                    <span aria-hidden className="text-ink-faint">
-                      —
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-ink">{made.text}</span>
-                    {made.actor ? (
-                      <span className="shrink-0 whitespace-nowrap text-small text-ink-soft">
-                        {made.actor}
-                      </span>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
-          {picture ? (
-            <img
-              loading="lazy"
-              alt=""
-              src={picture.preview_url ?? ""}
-              className="size-(--size-digest-picture) shrink-0 rounded-panel border border-edge object-cover object-top-left"
-            />
-          ) : null}
-        </a>
-      </div>
-    </li>
   );
 }
 

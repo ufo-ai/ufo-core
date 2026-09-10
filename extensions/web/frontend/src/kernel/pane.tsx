@@ -171,10 +171,10 @@ const LANE_BAND = {
   title: "tracking-(--tracking-ui)",
   acts: "gap-md",
 };
-const PAGE_BAND = { pad: "px-2xl py-lg", name: "gap-sm", title: "", acts: "gap-sm" };
+const PAGE_BAND = { pad: "px-(--size-page-gutter) py-lg", name: "gap-sm", title: "", acts: "gap-sm" };
 
 const BAND_ACTS =
-  "flex shrink-0 flex-wrap items-center justify-end gap-sm px-2xl py-lg " +
+  "flex shrink-0 flex-wrap items-center justify-end gap-sm px-(--size-page-gutter) py-lg " +
   "not-has-[:not(.contents)]:hidden";
 
 /** The band every surface is headed by: where the member is on the left, and on the right what
@@ -278,7 +278,7 @@ export function Header({
       )}
       style={
         pinned
-          ? { paddingRight: "calc(var(--spacing-2xl) + var(--pane-acts-inset, 0px))" }
+          ? { paddingRight: "calc(var(--size-page-gutter) + var(--pane-acts-inset, 0px))" }
           : undefined
       }
     >

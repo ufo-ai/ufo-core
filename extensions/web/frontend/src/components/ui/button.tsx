@@ -20,12 +20,12 @@ export const buttonVariants = cva(
       variant: {
         send: "bg-ink text-surface font-medium px-3xl py-md border border-transparent hover:opacity-(--opacity-muted-soft)",
         outline:
-          "border border-edge bg-transparent text-inherit px-lg py-xs hover:bg-fill",
-        row: "border border-edge bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill",
+          "border border-transparent bg-transparent text-inherit px-lg py-xs hover:bg-fill",
+        row: "border border-transparent bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill",
         quiet: "border border-transparent bg-transparent text-inherit px-lg py-xs hover:bg-fill",
         mark: "border-0 bg-transparent p-0 text-ink-soft hover:text-ink",
         option: cn(
-          "border border-edge-strong bg-transparent text-inherit px-lg py-xs",
+          "border border-transparent bg-transparent text-inherit px-lg py-xs",
           "hover:bg-fill",
           "aria-pressed:bg-ink aria-pressed:text-surface aria-pressed:border-ink",
           "aria-pressed:hover:bg-ink aria-pressed:hover:opacity-(--opacity-muted-soft)",
