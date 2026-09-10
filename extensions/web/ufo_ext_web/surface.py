@@ -46,6 +46,7 @@ from ufo_ext_imessage.tools import IMESSAGE_CONNECT_ACTION
 from ufo_ext_sites.objects import SITE_KIND
 from ufo_ext_sites.store import HostedSites
 from ufo_ext_sites.surface import homepage_embed_url, shipped_homepage_url
+from ufo_ext_slack.mentions import as_markdown
 from ufo_ext_slack.surface import SURFACE_SLACK
 from ufo_ext_slack.tools import SLACK_CONNECT_ACTION
 from ufo_ext_ufo.surface import SURFACE_UFO
@@ -149,6 +150,7 @@ from ufo.sdk.surfaces import (
     Turn,
     TurnContext,
     inbox_name,
+    member_message_said,
     member_message_text,
 )
 from ufo.sdk.tools import ActionBinding
@@ -1671,14 +1673,27 @@ def _member_attachments(said: str) -> tuple[str, tuple[str, ...]]:
     return said[: found.start()].rstrip(), paths
 
 
-def _member_bubble(said: str, attached: Mapping[str, dict[str, object]]) -> dict[str, object]:
-    """One bubble of the member's own words, carrying the files its own note names. Admission wrote
-    the note at the foot of the words and it addresses the model, so the words read clean; each file
-    the note names is drawn from the turn artifact the member's send recorded, matched by name, or
-    named as a plain card when no row carries it — a turn admitted before member attachments became
-    artifacts, or one whose row a same-named file in the same turn already took."""
+def _member_bubble(
+    inbound: str, attached: Mapping[str, dict[str, object]], *, slack: bool = False
+) -> dict[str, object]:
+    """One bubble of the member's own words, taken out of the inbound the turn ran on and carrying
+    the files its own note names. Admission wrote the note at the foot of the words and it
+    addresses the model, so the words read clean; each file the note names is drawn from the turn
+    artifact the member's send recorded, matched by name, or named as a plain card when no row
+    carries it — a turn admitted before member attachments became artifacts, or one whose row a
+    same-named file in the same turn already took.
+
+    `slack` says the conversation stands on Slack, where a member's emphasis was markup Slack drew
+    rather than characters they typed: a message the Slack surface fenced crosses as markdown and
+    the bubble is marked so the portal draws it as the member saw it. A comment the same member
+    typed into the portal of that conversation admits unfenced, so their `#` and `*` stay the
+    characters they typed."""
+    said, fenced = member_message_said(inbound)
     words, paths = _member_attachments(said)
-    bubble: dict[str, object] = {"role": "user", "text": words}
+    mrkdwn = slack and fenced
+    bubble: dict[str, object] = {"role": "user", "text": as_markdown(words) if mrkdwn else words}
+    if mrkdwn:
+        bubble["markdown"] = True
     if paths:
         bubble["files"] = [
             attached.get(PurePosixPath(path).name) or _note_card(path) for path in paths
@@ -2180,6 +2195,7 @@ class _TranscriptRenderer:
     connects: Mapping[str, dict[str, object]]
     attached: Mapping[str, Mapping[str, dict[str, object]]]
     answers: frozenset[str]
+    slack: bool
     spoken_at: Mapping[str, str]
     answered_at: Mapping[str, str]
 
@@ -2243,7 +2259,7 @@ class _TranscriptRenderer:
             state = self._flush(state, rendered, include_subagents=False)
         if turn_id in self.agent_origin or turn_id in self.answers:
             return state
-        bubble = _member_bubble(member_message_text(text), self.attached.get(turn_id or "", {}))
+        bubble = _member_bubble(text, self.attached.get(turn_id or "", {}), slack=self.slack)
         label = None if self.speakers is None or turn_id is None else self.speakers.get(turn_id)
         if label is not None:
             bubble["speaker"] = label
@@ -2314,6 +2330,7 @@ def _rendered_messages(
     connects: Mapping[str, dict[str, object]] | None = None,
     attached: Mapping[str, Mapping[str, dict[str, object]]] | None = None,
     answers: frozenset[str] = frozenset(),
+    slack: bool = False,
     spoken_at: Mapping[str, str] | None = None,
     answered_at: Mapping[str, str] | None = None,
 ) -> list[dict[str, object]]:
@@ -2325,9 +2342,12 @@ def _rendered_messages(
 
     A bubble states the member's own words, never the prompt the turn ran on: a channel surface
     fences those words between the ambient digest and their attachments, and
-    `member_message_text` is what takes them back out. `speakers` names who spoke each turn — the
-    bubble carries the label so a conversation more members than the viewer are in reads as who
-    said what.
+    `member_message_text` is what takes them back out. `slack` says the conversation stands on
+    Slack, whose own markup drew the member's emphasis, so each bubble Slack fenced crosses as
+    markdown.
+
+    `speakers` names who spoke each turn — the bubble carries the label so a conversation more
+    members than the viewer are in reads as who said what.
 
     `questions` names what a turn asked of the member, keyed by the turn that asked: the reply
     carries it, so the portal draws the question under the words that asked it rather than at the
@@ -2381,6 +2401,7 @@ def _rendered_messages(
         connects=connects or {},
         attached=attached or {},
         answers=answers,
+        slack=slack,
         spoken_at=spoken_at or {},
         answered_at=answered_at or {},
     )
@@ -2443,8 +2464,8 @@ class _TranscriptAids:
     """Everything the transcript renderer needs beside the messages themselves — subagent runs,
     speaker and question attribution, what the member answered, shared files, the applications each
     turn created, where a member's own attachment is drawn from, when each turn landed and settled,
-    and whether the conversation ran a profile — gathered once so the live window and an earlier
-    page render one message identically."""
+    whether the conversation ran a profile, and whether it stands on Slack — gathered once so the
+    live window and an earlier page render one message identically."""
 
     subagents: SubagentRuns
     turn_ids: frozenset[str]
@@ -2459,6 +2480,7 @@ class _TranscriptAids:
     spoken_at: dict[str, str]
     answered_at: dict[str, str]
     run_conversation: bool
+    slack: bool
 
     def render(self, messages: tuple[Message, ...]) -> list[dict[str, object]]:
         rendered = _rendered_messages(
@@ -2474,6 +2496,7 @@ class _TranscriptAids:
             self.connects,
             self.attached,
             self.asks.stated,
+            self.slack,
             self.spoken_at,
             self.answered_at,
         )
@@ -2493,6 +2516,7 @@ async def _transcript_aids(
     speakers: dict[str, str],
     asked: dict[str, str],
     opens: frozenset[UUID],
+    slack: bool,
 ) -> _TranscriptAids:
     turns, spawned, shared, admitted = await asyncio.gather(
         ctx.list_turns(conversation_id),
@@ -2546,6 +2570,7 @@ async def _transcript_aids(
         connects=await _connect_controls(ctx, conversation_id, turns, viewer),
         attached=attached,
         run_conversation=any(turn.subagent_profile is not None for turn in turns),
+        slack=slack,
     )
 
 
@@ -2631,6 +2656,12 @@ async def _conversation_messages(
     answer it wrote, whole. Only such a conversation: the same words from a main agent are a reply
     it composed, and reading them as a payload would drop every field it meant to show.
 
+    A conversation a member speaks in over Slack states the bubbles Slack admitted as markdown:
+    Slack drew their emphasis as its own markup, so words the portal drew as the characters they
+    were typed with would read as asterisks where the member saw bold. A comment typed into the
+    portal of that same conversation wears no surface fence and stays the characters it was typed
+    with.
+
     A bubble names its speaker as the display line the admitting surface reported — except the
     `viewer`'s own: their bubbles are the unlabelled default, so the label marks exactly the words
     somebody else said. The transcript refers to a message by the turn it founded or, for one
@@ -2648,12 +2679,14 @@ async def _conversation_messages(
     states the conversation's tail and the cursor standing directly above it — the newest
     compaction whose kept window the transcript opens with, served by
     `_history_messages` as the reader scrolls up, each page naming the one above it in turn."""
-    recorded, agent_origin, spoken, compactions = await asyncio.gather(
+    recorded, agent_origin, spoken, compactions, surface = await asyncio.gather(
         ctx.read_transcript(conversation_id),
         ctx.agent_origin_refs(conversation_id),
         ctx.arrival_speakers(conversation_id),
         ctx.list_rollovers(conversation_id),
+        ctx.conversation_surface(conversation_id),
     )
+    slack = surface == SURFACE_SLACK
     speakers = {
         str(arrival.id): arrival.sender
         for arrival in spoken
@@ -2670,7 +2703,7 @@ async def _conversation_messages(
         stated: frozenset[str] = frozenset()
     else:
         aids = await _transcript_aids(
-            ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked, opens
+            ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked, opens, slack
         )
         rendered = aids.render(recorded.messages)
         earlier = await _verified_earlier(ctx, conversation_id, compactions, recorded.messages)
@@ -2687,7 +2720,7 @@ async def _conversation_messages(
         and str(detail.turn.id) not in agent_origin
         and str(detail.turn.id) not in stated
     ):
-        prompt = _member_bubble(member_message_text(detail.turn.inbound), member_rows)
+        prompt = _member_bubble(detail.turn.inbound, member_rows, slack=slack)
         if (
             detail.turn.context is not None
             and detail.turn.context.sender is not None
@@ -2702,7 +2735,7 @@ async def _conversation_messages(
     for arrival in await ctx.queued_arrivals(conversation_id, draining):
         if str(arrival.id) in agent_origin or str(arrival.id) in stated:
             continue
-        bubble = _member_bubble(member_message_text(arrival.inbound), member_rows)
+        bubble = _member_bubble(arrival.inbound, member_rows, slack=slack)
         label = speakers.get(str(arrival.id))
         if label is not None:
             bubble["speaker"] = label
@@ -2815,9 +2848,10 @@ async def _history_messages(
         return None
     kept = max(len(record.after) - 1, 0)
     window = record.before[: len(record.before) - kept] if kept else record.before
-    agent_origin, spoken = await asyncio.gather(
+    agent_origin, spoken, surface = await asyncio.gather(
         ctx.agent_origin_refs(conversation_id),
         ctx.arrival_speakers(conversation_id),
+        ctx.conversation_surface(conversation_id),
     )
     speakers = {
         str(arrival.id): arrival.sender
@@ -2828,7 +2862,15 @@ async def _history_messages(
         str(arrival.id): arrival.question for arrival in spoken if arrival.question is not None
     }
     aids = await _transcript_aids(
-        ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked, opens
+        ctx,
+        agent_id,
+        conversation_id,
+        viewer,
+        agent_origin,
+        speakers,
+        asked,
+        opens,
+        surface == SURFACE_SLACK,
     )
     rendered = aids.render(window)
     end = len(rendered) if requested_end is None else requested_end

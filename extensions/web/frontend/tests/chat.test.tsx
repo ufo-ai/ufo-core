@@ -233,6 +233,23 @@ test("a bubble another member spoke names them, and the viewer's own carries no 
   expect(own && within(own as HTMLElement).queryByText("Sam Frost")).toBeNull();
 });
 
+test("a bubble marked markdown draws the emphasis, and one that is not draws the characters", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "**ship it** today", markdown: true },
+        { role: "user", text: "**hold it** today" },
+      ],
+    }),
+  );
+  open();
+
+  const spoken = (await screen.findByText("ship it")).closest("[data-slot=message]");
+  expect(spoken?.querySelector("strong")?.textContent).toBe("ship it");
+  const typed = screen.getByText("**hold it** today").closest("[data-slot=message]");
+  expect(typed?.querySelector("strong")).toBeNull();
+});
+
 test("a bubble that answered a question draws the question over the words", async () => {
   wire(
     transcript({

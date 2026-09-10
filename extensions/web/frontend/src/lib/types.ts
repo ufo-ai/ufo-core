@@ -154,6 +154,9 @@ export type SubagentRun = {
 export type Message = {
   role: string;
   text: string;
+  /** The member spoke these words over a surface that drew their emphasis as markup, so the text is
+   *  markdown rather than the characters they typed. */
+  markdown?: boolean;
   at?: string;
   speaker?: string;
   asked?: string;

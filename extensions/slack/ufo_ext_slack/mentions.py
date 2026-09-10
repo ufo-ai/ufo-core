@@ -27,7 +27,11 @@ fire.
 them, and that escaping is what keeps another principal's words from closing the prompt element
 they are quoted inside — the ambient digest carries bystanders' messages and relies on it. So
 entity rendering, which is safe for anyone's words, is separate from unescaping, which is only
-safe for the words of the member whose own turn this is."""
+safe for the words of the member whose own turn this is.
+
+`as_markdown` is what a reader outside Slack draws the same message with. Slack renders its own
+emphasis markup, so the member who wrote `*ship it*` saw bold and typed no markdown; a portal
+bubble states their words as markdown, and this is the rewrite that makes the two agree."""
 
 import itertools
 import re
@@ -62,6 +66,32 @@ MENTION_SKIP = re.compile(
 """The spans an outbound mention is never written into. Slack applies no other formatting inside
 backticks, so a mention mapped in a code span prints the raw wire text in the channel — the bug
 this work is about, in the other direction — and an `@` inside a URL is part of the address."""
+
+
+MRKDWN_BOLD = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]*[^\s*])\*(?![\w*])")
+MRKDWN_STRIKE = re.compile(r"(?<![\w~])~(?=\S)([^~\n]*[^\s~])~(?![\w~])")
+
+
+def as_markdown(text: str) -> str:
+    """A member's own Slack message as the markdown a reader outside Slack renders.
+
+    Slack's emphasis is markup the member never typed: one asterisk is bold there and one tilde is
+    strikethrough, which markdown reads as italic and as plain text. Both are doubled, so a bubble
+    drawn from a Slack message states the emphasis the member saw when they sent it. Everything
+    else Slack spells the way markdown does — a quote, a bullet, an inline code span, a fence — and
+    crosses untouched, and no emphasis is written inside a span `MENTION_SKIP` names, where Slack
+    renders none either."""
+    written: list[str] = []
+    read = 0
+    for skipped in MENTION_SKIP.finditer(text):
+        written.extend((_emphasis(text[read : skipped.start()]), skipped.group(0)))
+        read = skipped.end()
+    written.append(_emphasis(text[read:]))
+    return "".join(written)
+
+
+def _emphasis(text: str) -> str:
+    return MRKDWN_STRIKE.sub(r"~~\1~~", MRKDWN_BOLD.sub(r"**\1**", text))
 
 
 def mentioned_users(text: str) -> frozenset[str]:

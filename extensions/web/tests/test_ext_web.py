@@ -1221,7 +1221,12 @@ def test_title_excerpt_reads_the_member_s_own_words_out_of_the_inbound() -> None
 
 
 async def _seed_running_turn(
-    workspace_id: UUID, conversation_id: UUID, agent_id: UUID, member_id: UUID, seq: int
+    workspace_id: UUID,
+    conversation_id: UUID,
+    agent_id: UUID,
+    member_id: UUID,
+    seq: int,
+    inbound: str = "Review PR 1268.",
 ) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
@@ -1233,7 +1238,7 @@ async def _seed_running_turn(
                 agent_id=agent_id,
                 seq=seq,
                 status="running",
-                inbound="Review PR 1268.",
+                inbound=inbound,
                 speaker_member_id=member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -5308,6 +5313,98 @@ def test_a_members_bubble_carries_what_they_attached_rather_than_the_note() -> N
     )
     assert rendered[0] == {"role": "user", "text": "what are these", "files": [attached]}
     assert rendered[1] == {"role": "assistant", "text": "a lamp"}
+
+
+def test_a_slack_members_bubble_states_their_words_as_markdown() -> None:
+    """Slack drew the member's emphasis as its own markup, so words they saw as bold arrive as
+    `*bold*`. The bubble crosses as markdown — doubled, since one asterisk is italic there — and
+    says so, and the same characters typed into the portal's own composer stay characters."""
+    turn_id = uuid4()
+    marker = mint_marker()
+    fenced = fence_member_message(marker, "", "*ship it* by ~friday~", "")
+    spoken = (
+        Message(role="user", content=f"<context>\nmessage_ref: {turn_id}\n</context>\n{fenced}"),
+        Message(role="assistant", content="shipped"),
+    )
+    turns = frozenset({str(turn_id)})
+    assert _rendered_messages(spoken, turn_ids=turns, slack=True)[0] == {
+        "role": "user",
+        "text": "**ship it** by ~~friday~~",
+        "markdown": True,
+    }
+    assert _rendered_messages(spoken, turn_ids=turns)[0] == {
+        "role": "user",
+        "text": "*ship it* by ~friday~",
+    }
+
+
+def test_a_portal_comment_on_a_slack_conversation_stays_the_characters_typed() -> None:
+    """A member comments from the portal into a Slack conversation shared with them, and admission
+    stores those words with no surface fence around them. Slack rendered nothing, so the bubble
+    draws the asterisks the member typed even though the conversation stands on Slack."""
+    turn_id = uuid4()
+    typed = (
+        Message(
+            role="user",
+            content=f"<context>\nmessage_ref: {turn_id}\n</context>\n*ship it* by ~friday~",
+        ),
+        Message(role="assistant", content="shipped"),
+    )
+    assert _rendered_messages(typed, turn_ids=frozenset({str(turn_id)}), slack=True)[0] == {
+        "role": "user",
+        "text": "*ship it* by ~friday~",
+    }
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_transcript_reads_slack_words_as_markdown_and_portal_words_as_typed(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The surface that admitted the words decides it: a message Slack fenced draws the emphasis
+    the member saw there, and a chat they typed into the portal draws what they typed."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    marker = mint_marker()
+    threaded = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="C1:1.0",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        surface="slack",
+    )
+    await _seed_running_turn(
+        workspace_id,
+        threaded,
+        agent_id,
+        member_id,
+        1,
+        fence_member_message(marker, "", "*ship it* today", ""),
+    )
+    typed, _done = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="ok"),
+    )
+    await _seed_running_turn(workspace_id, typed, agent_id, member_id, 2, "*ship it* today")
+
+    from_slack = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={threaded}", headers=cookie
+    )
+    from_portal = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={typed}", headers=cookie
+    )
+
+    assert _unstamped(from_slack.json()["messages"]) == [
+        {"role": "user", "text": "**ship it** today", "markdown": True}
+    ]
+    assert _unstamped(from_portal.json()["messages"]) == [
+        {"role": "user", "text": "*ship it* today"}
+    ]
 
 
 def test_a_bubble_and_its_reply_each_carry_the_moment_they_landed() -> None:
@@ -10718,7 +10815,12 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
 
     assert settled.status_code == 200
     assert _unstamped(settled.json()["messages"]) == [
-        {"role": "user", "text": "draft the tweets", "speaker": "Sam Frost (peer@example.com)"},
+        {
+            "role": "user",
+            "text": "draft the tweets",
+            "markdown": True,
+            "speaker": "Sam Frost (peer@example.com)",
+        },
         {"role": "assistant", "text": "Drafted."},
         {"role": "user", "text": "thanks"},
         {"role": "assistant", "text": "Any time."},
@@ -10773,6 +10875,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     assert tail[0] == {
         "role": "user",
         "text": "now the launch email",
+        "markdown": True,
         "speaker": "Sam Frost (peer@example.com)",
         "asked": "Announce where first?",
     }
@@ -10825,11 +10928,13 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     assert settled[0] == {
         "role": "user",
         "text": "now the launch email",
+        "markdown": True,
         "asked": "Announce where first?",
     }
     assert settled[1] == {
         "role": "user",
         "text": "and a blog post",
+        "markdown": True,
         "speaker": "Mel Okafor (m@example.com)",
         "asked": "A blog post too?",
     }
@@ -10843,6 +10948,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     assert own.json()["messages"][-2] == {
         "role": "user",
         "text": "and a blog post",
+        "markdown": True,
         "asked": "A blog post too?",
     }
 

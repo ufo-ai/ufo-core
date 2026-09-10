@@ -1,4 +1,5 @@
 from ufo_ext_slack.mentions import (
+    as_markdown,
     mention_index,
     mention_markup,
     mentioned_channels,
@@ -94,6 +95,33 @@ def test_one_reply_maps_no_more_mentions_than_its_cap() -> None:
     inbound mention that way — so a reply that recaps a thread must not page the crowd it quotes."""
     recap = " ".join(["@Bee"] * 5)
     assert mention_markup(recap, ROSTER, limit=2) == "<@U2> <@U2> @Bee @Bee @Bee"
+
+
+def test_slack_emphasis_reads_as_the_markdown_a_portal_draws() -> None:
+    """One asterisk is bold in Slack and italic in markdown, and one tilde is strikethrough in
+    Slack and nothing at all in markdown, so both are doubled. A member who saw bold reads bold."""
+    assert as_markdown("*ship it* by ~friday~ please") == "**ship it** by ~~friday~~ please"
+    assert as_markdown("a *b* c *d*") == "a **b** c **d**"
+
+
+def test_markdown_the_member_already_typed_crosses_as_it_stands() -> None:
+    """Slack spells a quote, a bullet, a heading and `_italic_` the way markdown does, and a
+    doubled asterisk is already bold in both."""
+    said = "> quoted\n- one\n- two\n_soft_ and **already bold**"
+    assert as_markdown(said) == said
+
+
+def test_no_emphasis_is_written_where_slack_draws_none() -> None:
+    """Slack renders nothing inside backticks and nothing inside an address, so a star there is a
+    character of the code or of the URL."""
+    said = "`a *b* c` and ```\n*d*\n``` and https://x.test/*e* but *f*"
+    assert as_markdown(said) == "`a *b* c` and ```\n*d*\n``` and https://x.test/*e* but **f**"
+
+
+def test_a_lone_star_is_the_character_the_member_typed() -> None:
+    """An unpaired star, a star against a space, and a multiplication sign are not emphasis."""
+    for said in ("2 * 3 * 4", "a * b", "*", "star * alone *", "path/*.py"):
+        assert as_markdown(said) == said
 
 
 def test_the_ids_a_text_mentions_are_split_by_the_read_that_resolves_them() -> None:

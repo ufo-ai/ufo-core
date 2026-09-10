@@ -166,6 +166,9 @@ from ufo.runtime.ext.surface import (
     member_message_ref as member_message_ref,
 )
 from ufo.runtime.ext.surface import (
+    member_message_said as member_message_said,
+)
+from ufo.runtime.ext.surface import (
     member_message_text as member_message_text,
 )
 from ufo.runtime.ext.surface import (

@@ -352,9 +352,19 @@ def member_message_text(inbound: str) -> str:
     one message, so the only text that can close it is text `fence_member_message` wrote, and a
     member who types `</member_message>` closes nothing. An inbound wearing neither — a prepared
     intent, a subagent payload — is its own text."""
+    return member_message_said(inbound)[0]
+
+
+def member_message_said(inbound: str) -> tuple[str, bool]:
+    """The member's own words back out of an inbound, and whether a surface fenced them.
+
+    The fence is what tells words a member spoke over a channel from words they typed into the
+    portal, which admission stores unfenced on the very same conversation. A projection that reads
+    a channel's own markup out of the words asks this per message rather than per conversation: a
+    Slack thread carries portal comments too, and their `*` is the character the member typed."""
     said = _INJECTED_CONTEXT_RE.sub("", _CONTEXT_TAG_RE.sub("", inbound))
     found = _MEMBER_MESSAGE_RE.search(said)
-    return said if found is None else found.group("said")
+    return (said, False) if found is None else (found.group("said"), True)
 
 
 def member_message_ref(inbound: str) -> str | None:
@@ -2497,6 +2507,21 @@ class SurfaceContext:
                 )
             ).one_or_none()
         return None if found is None else found.agent_id
+
+    async def conversation_surface(self, conversation_id: UUID) -> str | None:
+        """The surface this workspace's conversation was opened on, or None when the id names no
+        conversation here — how a read projection tells words a member sent over a channel from
+        words they typed into the portal."""
+        async with workspace_tx() as connection:
+            found = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.surface).where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.id == conversation_id,
+                    )
+                )
+            ).one_or_none()
+        return None if found is None else found.surface
 
     async def retitle_conversation(self, conversation_id: UUID, title: str) -> None:
         """Name a conversation this surface holds — what it calls the conversation on its own rows,

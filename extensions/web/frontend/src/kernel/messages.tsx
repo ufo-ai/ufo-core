@@ -178,6 +178,12 @@ function EarlierRow({ earlier }: { earlier: EarlierMessages }) {
   return <MessageScrollerItem ref={row} />;
 }
 
+/** A member's words are the characters they typed, except where they spoke over a surface that drew
+ *  their emphasis as markup: those arrive as markdown and are drawn as the member saw them. */
+function spoken(message: Spoken) {
+  return message.markdown ? <Markdown text={message.text} /> : <Linked text={message.text} />;
+}
+
 export function MessageLog({
   messages,
   earlier,
@@ -250,11 +256,9 @@ export function MessageLog({
               {message.role !== "user" ? (
                 <Markdown text={message.text} />
               ) : message.arrival_id ? (
-                <span className="italic text-ink-soft">
-                  <Linked text={message.text} />
-                </span>
+                <span className="italic text-ink-soft">{spoken(message)}</span>
               ) : (
-                <Linked text={message.text} />
+                spoken(message)
               )}
             </Said>
           )}
