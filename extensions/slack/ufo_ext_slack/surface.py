@@ -209,7 +209,6 @@ SLACK_INSTALL_PAYLOAD = "slack-oauth-install"
 SLACK_INSTALL_TIMEOUT_SECONDS = 20
 SLACK_BOT_SCOPES = (
     "app_mentions:read",
-    "assistant:write",
     "channels:history",
     "channels:read",
     "chat:write",

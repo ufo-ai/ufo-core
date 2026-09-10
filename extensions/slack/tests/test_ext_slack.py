@@ -4458,17 +4458,15 @@ async def test_footer_only_links_to_web_on_a_shared_channel_in_the_operator_work
     assert len(info) == 1
 
 
-def test_oauth_bot_scopes_match_the_byo_manifest_scopes() -> None:
-    """The one-click OAuth scope list and the bring-your-own-app manifest must request the same bot
-    scopes, or a token minted by one path lacks a scope the code assumes — e.g. `im:read`, which
-    `_channel_is_externally_shared` needs to run `conversations.info` on a DM. Guards the two lists
-    against drifting apart."""
+def test_oauth_bot_scopes_exclude_the_byo_agent_scope() -> None:
     from ufo_ext_slack.tools import SLACK_APP_MANIFEST_TEMPLATE
 
     manifest_scopes = set(
         re.findall(r"^\s*-\s*([a-z_]+:[a-z._]+)\s*$", SLACK_APP_MANIFEST_TEMPLATE, re.M)
     )
-    assert set(slack.SLACK_BOT_SCOPES) == manifest_scopes
+    assert set(slack.SLACK_BOT_SCOPES) == manifest_scopes - {"assistant:write"}
+    assert "assistant:write" not in slack.SLACK_BOT_SCOPES
+    assert "assistant:write" in manifest_scopes
     assert "im:read" in slack.SLACK_BOT_SCOPES
 
 
