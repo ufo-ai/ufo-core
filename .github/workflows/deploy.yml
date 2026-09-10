@@ -31,6 +31,7 @@ jobs:
       image_tag: ${{ steps.tag.outputs.tag }}
       client_build: ${{ steps.client.outputs.build }}
       client_tree: ${{ steps.client.outputs.tree }}
+      sandbox_template: ${{ steps.select.outputs.sandbox_template }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,6 +43,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
           DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy(-production)?\.yml|scripts/(billing_export_plan_(check\.py|gate\.sh)|deploy_change_gate\.py|founder_email_prerequisites\.sh|terraform_plan_guard\.py|production_prerequisites\.sh))$|infra/(production_secrets|testing_secrets)\.py$|infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Every input build_definition_digest reads: this script's own constants, the baked client,
+          # the harness modules, and every SKILL.md the system bundle globs.
+          SANDBOX_PATHS_PATTERN: ^(sandbox/|client/|core/src/ufo/harness/|core/src/ufo/runtime/skills/|extensions/.*/skills/|packs/.*/skills/)
         run: |
           git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/deploy-paths"
           git diff --no-renames "$BASE_SHA...$HEAD_SHA" -- infra/modules/platform/iam.tf infra/modules/platform/ses.tf > "$RUNNER_TEMP/auth-diff"
@@ -50,6 +54,11 @@ jobs:
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           else
             echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -Eq "$SANDBOX_PATHS_PATTERN" "$RUNNER_TEMP/deploy-paths"; then
+            echo "sandbox_template=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sandbox_template=false" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: aws-actions/configure-aws-credentials@v4
@@ -415,12 +424,15 @@ jobs:
           docker cp clientbin:/clientbin/. servers/control/clientbin
           docker rm clientbin
 
+      # Publishing boots and probes a sandbox per tier. The bare names resolve to the live templates,
+      # which the digest inputs being unchanged is exactly the proof of.
       - name: Select sandbox template
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          SANDBOX_TEMPLATE: ${{ needs.changes.outputs.sandbox_template }}
           UFO_CLIENT_BINARY: ${{ env.SANDBOX_CLIENT_BINARY }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] || [ "$SANDBOX_TEMPLATE" != "true" ]; then
             E2B_TEMPLATES=small=ufo-sbx-small,medium=ufo-sbx-medium,large=ufo-sbx-large
           else
             E2B_TEMPLATES=$(uv run python sandbox/build_template.py)

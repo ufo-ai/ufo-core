@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from infra.testing_secrets import SECRET_INPUTS
+from sandbox import build_template
 from ufo.db import MAX_OVERFLOW, OWNER_MAX_OVERFLOW, OWNER_POOL_SIZE, POOL_SIZE
 from ufo.harness.durability import DBOS_CLIENT_POOL_SIZE
 from ufo.product import PRODUCT_CENSUS_SECONDS
@@ -1178,6 +1179,7 @@ def test_client_builds_are_skipped_for_a_pushed_client_tree(tmp_path: Path) -> N
         "image_tag": "${{ steps.tag.outputs.tag }}",
         "client_build": "${{ steps.client.outputs.build }}",
         "client_tree": "${{ steps.client.outputs.tree }}",
+        "sandbox_template": "${{ steps.select.outputs.sandbox_template }}",
     }
     changes_steps = changes["steps"]
     assert isinstance(changes_steps, list)
@@ -1785,6 +1787,59 @@ def _check_pull_requests_guard_the_production_edge_plan() -> None:
         for step in steps
         if isinstance(step, dict)
     )
+
+
+def _check_the_sandbox_template_publishes_only_when_its_digest_inputs_move() -> None:
+    """Publishing boots and probes a sandbox per tier, so it runs only when a digest input moved.
+    The pattern has to cover every source `build_definition_digest` reads: the module's own
+    constants, the baked client, each harness module, and every SKILL.md the bundle globs — a path
+    it misses ships a template the live image no longer matches, and nothing re-derives the digest
+    on a deploy."""
+    deploy = _workflow(WORKFLOWS / "deploy.yml")
+    jobs = deploy["jobs"]
+    assert isinstance(jobs, dict)
+    changes = jobs["changes"]
+    assert isinstance(changes, dict)
+    assert changes["outputs"]["sandbox_template"] == "${{ steps.select.outputs.sandbox_template }}"
+    selector = next(
+        step for step in changes["steps"] if step.get("name") == "Select deployment work"
+    )
+    pattern = selector["env"]["SANDBOX_PATHS_PATTERN"]
+    assert 'echo "sandbox_template=true" >> "$GITHUB_OUTPUT"' in selector["run"]
+    assert 'grep -Eq "$SANDBOX_PATHS_PATTERN"' in selector["run"]
+
+    matches = re.compile(pattern)
+    root = Path(build_template.__file__).parents[1]
+    inputs = [Path(build_template.__file__)]
+    inputs += [build_template.CLIENT_SOURCE_DIR / name for name in build_template.CLIENT_ROOT_FILES]
+    inputs += [
+        build_template.CLIENT_SOURCE_DIR / name for name in build_template.CLIENT_SOURCE_DIRS
+    ]
+    inputs += [
+        build_template.MODULE_SOURCE_DIR / name for name, _ in build_template.SANDBOX_MODULES
+    ]
+    skills = [
+        path
+        for pattern in (
+            "core/src/ufo/runtime/skills/**/SKILL.md",
+            "extensions/**/skills/**/SKILL.md",
+            "packs/**/skills/**/SKILL.md",
+        )
+        for path in root.glob(pattern)
+        if "node_modules" not in path.parts
+    ]
+    assert skills
+    inputs += skills
+    for path in inputs:
+        relative = path.resolve().relative_to(root)
+        assert matches.match(str(relative)), f"{relative} feeds the digest but never republishes"
+    assert not matches.match("core/src/ufo/serve.py")
+
+    rollout = next(
+        step for step in jobs["rollout"]["steps"] if step.get("name") == "Select sandbox template"
+    )
+    assert rollout["env"]["SANDBOX_TEMPLATE"] == "${{ needs.changes.outputs.sandbox_template }}"
+    assert '[ "$SANDBOX_TEMPLATE" != "true" ]' in rollout["run"]
 
 
 def _check_pull_requests_plan_production_foundation_without_applying() -> None:
@@ -4946,6 +5001,7 @@ def _check_deploy_workflow_static_contract() -> None:
         _check_production_shared_edge_uses_current_main,
         _check_pull_requests_guard_the_production_edge_plan,
         _check_pull_requests_plan_production_foundation_without_applying,
+        _check_the_sandbox_template_publishes_only_when_its_digest_inputs_move,
         _check_production_vcpu_reservation_matches_the_node_group,
         _check_production_nlb_reservation_matches_the_services,
         _check_hosted_runtime_receives_the_selected_sandbox_template,

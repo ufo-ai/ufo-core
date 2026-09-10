@@ -28,9 +28,11 @@ locals {
 
   system_namespace = module.platform.system_namespace
 
+  # 0 cancels in-flight turns: each stays PENDING and a peer resumes it once the seat ages out
+  # (`_stop_executor`). Prod holds the member's round instead; testing waited 370s a deploy for it.
   prestop_seconds           = 10
   request_shutdown_seconds  = 30
-  graceful_shutdown_seconds = 600
+  graceful_shutdown_seconds = 0
 
   datadog_site = "us5.datadoghq.com"
   datadog_env  = "testing"
@@ -325,7 +327,7 @@ resource "kubectl_manifest" "ufo" {
   for_each  = local.ufo_workload_manifests
   yaml_body = each.value
 
-  # Rollout-completion waits also wait out the old pods' drain (terminationGracePeriodSeconds, 700s) and
+  # Rollout-completion waits also wait out the old pods' drain (terminationGracePeriodSeconds, 100s) and
   # die at the provider's 10m update timeout first, failing healthy rolls. `await_rollout.sh` is the gate.
   wait_for_rollout = false
 
