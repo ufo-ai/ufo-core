@@ -275,9 +275,11 @@ def test_manifest_declares_two_cron_jobs_one_tool_one_section() -> None:
     (slot,) = declared.credentials
     assert slot.name == "anthropic_api_key"
     assert slot.injection is None
-    (billing_route,) = declared.routes
-    assert (billing_route.method, billing_route.path) == ("GET", metronome.BILLING_ROUTE_PATH)
-    assert billing_route.handler is metronome._billing_projection
+    page_route, card_route = declared.routes
+    assert (page_route.method, page_route.path) == ("GET", metronome.BILLING_ROUTE_PATH)
+    assert page_route.handler is metronome._billing_projection
+    assert (card_route.method, card_route.path) == ("GET", metronome.CARD_ROUTE_PATH)
+    assert card_route.handler is metronome._billing_card
 
 
 async def test_unacked_delivery_stays_frozen_when_the_row_grows(
@@ -1269,7 +1271,7 @@ async def test_a_settled_charge_earns_the_workspace_its_grace(
     assert await _grace(workspace_id) == TOPUP_GRACE_MICRO_USD
 
 
-def _billing_request(workspace_id: UUID, email: str | None) -> Request:
+def _billing_request(workspace_id: UUID, email: str | None, path: str) -> Request:
     headers = []
     if email is not None:
         token = mint_token(TOKEN_SECRET, str(workspace_id), email, timedelta(hours=1))
@@ -1278,7 +1280,7 @@ def _billing_request(workspace_id: UUID, email: str | None) -> Request:
         {
             "type": "http",
             "method": "GET",
-            "path": "/ext/metronome/billing",
+            "path": path,
             "headers": headers,
             "query_string": b"",
         }
@@ -1287,9 +1289,17 @@ def _billing_request(workspace_id: UUID, email: str | None) -> Request:
 
 async def _read_billing(workspace_id: UUID, email: str | None) -> tuple[int, dict[str, object]]:
     ctx = context_for(metronome.NAME, frozenset())
-    request = _billing_request(workspace_id, email)
+    request = _billing_request(workspace_id, email, "/ext/metronome/billing")
     with ws(workspace_id):
         answer = await metronome._billing_projection(ctx, request)
+    return answer.status_code, json.loads(bytes(answer.body))
+
+
+async def _read_card(workspace_id: UUID, email: str | None) -> tuple[int, dict[str, object]]:
+    ctx = context_for(metronome.NAME, frozenset())
+    request = _billing_request(workspace_id, email, "/ext/metronome/billing/card")
+    with ws(workspace_id):
+        answer = await metronome._billing_card(ctx, request)
     return answer.status_code, json.loads(bytes(answer.body))
 
 
@@ -1366,6 +1376,97 @@ async def test_the_billing_page_answers_an_admin_what_stops_the_workspace(
     _status, paid = await _read_billing(workspace_id, "owner@example.com")
     assert paid["grace_micro_usd"] == TOPUP_GRACE_MICRO_USD
     assert paid["refused_below_micro_usd"] == 5 * DOLLAR - TOPUP_GRACE_MICRO_USD
+
+
+async def test_the_billing_page_never_waits_on_the_payment_provider(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The balance is ours and the card is Stripe's, so the page states what this deploy already
+    holds: it asks the provider for nothing and mints no customer for a workspace that has never
+    opened the portal."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    with ws(workspace_id):
+        async with workspace_tx() as connection:
+            await credit(connection, workspace_id, 40 * DOLLAR, 0, "opening")
+
+    status, body = await _read_billing(workspace_id, "owner@example.com")
+
+    assert status == 200
+    assert body["balance_micro_usd"] == 40 * DOLLAR
+    assert "card" not in body
+    assert providers.requests == []
+    assert await _stored_record(workspace_id) is None
+
+
+async def test_the_card_read_refuses_whoever_the_page_refuses(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The card is on its own route now, and a route core mounts has no auth in front of it: a
+    teammate and a sessionless request are refused here exactly as they are on the page."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    assert (await _read_card(workspace_id, None))[0] == 401
+    assert (await _read_card(workspace_id, "mate@example.com"))[0] == 403
+    assert providers.requests == []
+
+
+async def test_a_workspace_with_no_customer_has_no_card_to_ask_about(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Stripe Customer is minted when an admin opens the portal, which is the act that saves a
+    card. Until then there is nothing for the provider to answer, so nothing is asked."""
+    _billing_env(monkeypatch)
+    workspace_id, _owner, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+
+    status, body = await _read_card(workspace_id, "owner@example.com")
+
+    assert (status, body) == (200, {"card": None, "card_unread": False})
+    assert providers.requests == []
+
+
+async def test_the_card_read_names_what_the_provider_holds(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An admin needs to know which card a refill charges, so the read states the brand and the
+    last four the provider shows them."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+
+    status, body = await _read_card(workspace_id, "owner@example.com")
+
+    assert status == 200
+    assert body == {"card": {"brand": "visa", "last4": "4242"}, "card_unread": False}
+
+
+async def test_a_provider_that_will_not_answer_leaves_the_card_unknown(
+    db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The balance is already on the screen, so a provider that will not answer costs the card and
+    nothing else. It reads as unknown rather than as absent, because "no card" invites saving one
+    and would be a guess."""
+    _billing_env(monkeypatch)
+    workspace_id, owner_id, _mate, _conv = await _billing_seed()
+    providers = _Providers()
+    providers.default_payment_method = SAVED_CARD
+    monkeypatch.setattr(metronome, "BILLING_TRANSPORT", providers.transport)
+    await _manage_billing(workspace_id, tmp_path, owner_id, None, "portal")
+    providers.failing.add("/v1/customers/cus_1")
+
+    status, body = await _read_card(workspace_id, "owner@example.com")
+
+    assert (status, body) == (200, {"card": None, "card_unread": True})
 
 
 async def test_the_card_link_sends_the_member_back_to_their_billing_screen(

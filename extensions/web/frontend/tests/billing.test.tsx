@@ -33,8 +33,16 @@ const WORKSPACE_ACTIONS: Record<string, Route> = {
 const BILLING_LANE =
   "/surface/web/agents/" + AGENT_ID + "/actions/workspace/" + WORKSPACE + "/manage_billing";
 
+const CARD_PATH = "/ext/metronome/billing/card";
+
+const CARD = { brand: "visa", last4: "4242" };
+
 function billingTab(routes: Record<string, Route>) {
-  const wired = wire({ ...WORKSPACE_ACTIONS, ...routes });
+  const wired = wire({
+    [CARD_PATH]: () => json({ card: null }),
+    ...WORKSPACE_ACTIONS,
+    ...routes,
+  });
   render(
     <WorkspaceId.Provider value={WORKSPACE}>
       <MainAgentProvider agents={[AGENT]}>
@@ -53,7 +61,6 @@ const LIMITED = {
   refused_below_micro_usd: -4_000_000,
   granted_micro_usd: 20_000_000,
   charged_micro_usd: 7_660_000,
-  card: { brand: "visa", last4: "4242" },
   purchases: [
     { at: "2026-08-20T05:26:37Z", granted_micro_usd: 5_000_000, charged_micro_usd: 5_000_000 },
     { at: "2026-08-19T22:35:48Z", granted_micro_usd: 100_000_000, charged_micro_usd: 0 },
@@ -63,7 +70,7 @@ const LIMITED = {
 const RULE = "Adding $100.00 when the balance falls below $25.00.";
 
 test("the balance is the figure, and its refusal line shows only once it bites", async () => {
-  billingTab({ "/ext/metronome/billing": () => json({ ...LIMITED, card: null }) });
+  billingTab({ "/ext/metronome/billing": () => json(LIMITED) });
 
   expect(await screen.findByText("$12.34")).toBeTruthy();
   expect(screen.getByText("Current balance")).toBeTruthy();
@@ -73,7 +80,7 @@ test("the balance is the figure, and its refusal line shows only once it bites",
 test("a stopped workspace states what has to be true before turns run again", async () => {
   billingTab({
     "/ext/metronome/billing": () =>
-      json({ ...LIMITED, balance_micro_usd: -6_430_000, refused_below_micro_usd: 0, card: null }),
+      json({ ...LIMITED, balance_micro_usd: -6_430_000, refused_below_micro_usd: 0 }),
   });
 
   expect(await screen.findByText("-$6.43")).toBeTruthy();
@@ -83,7 +90,10 @@ test("a stopped workspace states what has to be true before turns run again", as
 });
 
 test("the card on file is named, not reduced to yes", async () => {
-  billingTab({ "/ext/metronome/billing": () => json(LIMITED) });
+  billingTab({
+    "/ext/metronome/billing": () => json(LIMITED),
+    [CARD_PATH]: () => json({ card: CARD }),
+  });
 
   expect(await screen.findByText("visa •••• 4242")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Update" })).toBeTruthy();
@@ -124,7 +134,8 @@ test("a read that fails for any other reason says only that", async () => {
 
 test("a card the provider would not read shows as unknown, not as absent", async () => {
   billingTab({
-    "/ext/metronome/billing": () => json({ ...LIMITED, card: null, card_unread: true }),
+    "/ext/metronome/billing": () => json(LIMITED),
+    [CARD_PATH]: () => json({ card: null, card_unread: true }),
   });
 
   expect(await screen.findByText("Payment method could not be read")).toBeTruthy();
@@ -138,7 +149,7 @@ test("a card the provider would not read shows as unknown, not as absent", async
 
 test("no card offers the provider and holds the refill shut with its reason", async () => {
   billingTab({
-    "/ext/metronome/billing": () => json({ ...LIMITED, card: null }),
+    "/ext/metronome/billing": () => json(LIMITED),
   });
 
   expect(await screen.findByRole("button", { name: "Save a payment method" })).toBeTruthy();
@@ -150,7 +161,7 @@ test("no card offers the provider and holds the refill shut with its reason", as
 test("saving a payment method posts the portal operation and states the link it answers", async () => {
   const posted: unknown[] = [];
   billingTab({
-    "/ext/metronome/billing": () => json({ ...LIMITED, card: null }),
+    "/ext/metronome/billing": () => json(LIMITED),
     "/manage_billing": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "", url: "https://billing.stripe.test/session/abc" });
@@ -178,6 +189,7 @@ test("a card on file opens the amounts and posts the figures typed into them", a
           : { ...LIMITED, autopay_micro_usd: 250_000_000, autopay_below_micro_usd: 50_000_000 },
       );
     },
+    [CARD_PATH]: () => json({ card: CARD }),
     "/manage_billing": (_url, init) => {
       posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "Automatic refills are on." });
@@ -185,6 +197,7 @@ test("a card on file opens the amounts and posts the figures typed into them", a
   });
 
   const amount = await screen.findByLabelText("Add");
+  await waitFor(() => expect(amount).toHaveProperty("disabled", false));
   await userEvent.clear(amount);
   await userEvent.type(amount, "250");
   const below = screen.getByLabelText("When the balance falls below");
@@ -209,9 +222,12 @@ test("an emptied amount cannot be submitted", async () => {
   billingTab({
     "/ext/metronome/billing": () =>
       json({ ...LIMITED, autopay_micro_usd: null, autopay_below_micro_usd: null }),
+    [CARD_PATH]: () => json({ card: CARD }),
   });
 
-  await userEvent.clear(await screen.findByLabelText("Add"));
+  const amount = await screen.findByLabelText("Add");
+  await waitFor(() => expect(amount).toHaveProperty("disabled", false));
+  await userEvent.clear(amount);
 
   expect(screen.getByRole("button", { name: "Turn on" })).toHaveProperty("disabled", true);
 });
@@ -260,15 +276,28 @@ test("the acts stay shut until the workspace projects the billing action", async
     [WORKSPACE_READ]: () => json({ actions: [] }),
     "/ext/metronome/billing": () =>
       json({ ...LIMITED, autopay_micro_usd: 100_000_000, autopay_below_micro_usd: 25_000_000 }),
+    [CARD_PATH]: () => json({ card: CARD }),
   });
 
   expect(await screen.findByText(RULE)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Stop" })).toHaveProperty("disabled", true);
-  expect(screen.getByRole("button", { name: "Update" })).toHaveProperty("disabled", true);
+  expect(await screen.findByRole("button", { name: "Update" })).toHaveProperty("disabled", true);
 });
 
 test("a workspace with no balance row has no spending limit", async () => {
   billingTab({ "/ext/metronome/billing": () => json({ limited: false }) });
 
   expect(await screen.findByText("This workspace has no spending limit.")).toBeTruthy();
+});
+
+test("the balance is drawn before the card is asked for", async () => {
+  const { calls } = billingTab({
+    "/ext/metronome/billing": () => json(LIMITED),
+    [CARD_PATH]: () => new Promise<Response>(() => {}),
+  });
+
+  expect(await screen.findByText("$12.34")).toBeTruthy();
+  expect(screen.getByText("Reading the payment method")).toBeTruthy();
+  await waitFor(() => expect(calls).toContain(CARD_PATH));
+  expect(calls.indexOf("/ext/metronome/billing")).toBeLessThan(calls.indexOf(CARD_PATH));
 });

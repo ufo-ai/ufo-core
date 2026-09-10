@@ -4,7 +4,15 @@ import { expect, test } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { AGENT, AGENT_ID, PlacedWorkspace, WORKSPACE_ID, json, wire } from "./harness";
+import { AGENT, AGENT_ID, PlacedWorkspace, WORKSPACE_ID, type Route, json, wire } from "./harness";
+
+const CARD_PATH = "/ext/metronome/billing/card";
+
+const CARD = { brand: "visa", last4: "4242" };
+
+function wireBilling(routes: Record<string, Route>) {
+  return wire({ [CARD_PATH]: () => json({ card: null }), ...routes });
+}
 
 function billingTab() {
   render(
@@ -34,7 +42,6 @@ const LIMITED = {
   refused_below_micro_usd: -4_000_000,
   granted_micro_usd: 20_000_000,
   charged_micro_usd: 7_660_000,
-  card: { brand: "visa", last4: "4242" },
   purchases: [
     { at: "2026-08-20T05:26:37Z", granted_micro_usd: 5_000_000, charged_micro_usd: 5_000_000 },
     { at: "2026-08-19T22:35:48Z", granted_micro_usd: 100_000_000, charged_micro_usd: 0 },
@@ -44,7 +51,7 @@ const LIMITED = {
 const RULE = "Adding $100.00 when the balance falls below $25.00.";
 
 test("the balance is the figure, and its refusal line shows only once it bites", async () => {
-  wire({ "/ext/metronome/billing": () => json({ ...LIMITED, card: null }) });
+  wireBilling({ "/ext/metronome/billing": () => json(LIMITED) });
   billingTab();
 
   expect(await screen.findByText("$12.34")).toBeTruthy();
@@ -53,9 +60,9 @@ test("the balance is the figure, and its refusal line shows only once it bites",
 });
 
 test("a stopped workspace states what has to be true before turns run again", async () => {
-  wire({
+  wireBilling({
     "/ext/metronome/billing": () =>
-      json({ ...LIMITED, balance_micro_usd: -6_430_000, refused_below_micro_usd: 0, card: null }),
+      json({ ...LIMITED, balance_micro_usd: -6_430_000, refused_below_micro_usd: 0 }),
   });
   billingTab();
 
@@ -66,7 +73,10 @@ test("a stopped workspace states what has to be true before turns run again", as
 });
 
 test("the card on file is named, not reduced to yes", async () => {
-  wire({ "/ext/metronome/billing": () => json(LIMITED) });
+  wireBilling({
+    "/ext/metronome/billing": () => json(LIMITED),
+    [CARD_PATH]: () => json({ card: CARD }),
+  });
   billingTab();
 
   expect(await screen.findByText("visa •••• 4242")).toBeTruthy();
@@ -74,7 +84,7 @@ test("the card on file is named, not reduced to yes", async () => {
 });
 
 test("the credit history states what was added and what it cost", async () => {
-  wire({ "/ext/metronome/billing": () => json(LIMITED) });
+  wireBilling({ "/ext/metronome/billing": () => json(LIMITED) });
   billingTab();
 
   // The table draws a stacked variant for narrow widths, so every cell renders twice.
@@ -85,7 +95,7 @@ test("the credit history states what was added and what it cost", async () => {
 });
 
 test("a member the billing route refuses is told who may read it", async () => {
-  wire({
+  wireBilling({
     "/ext/metronome/billing": () =>
       Response.json({ error: "only a workspace admin can read billing" }, { status: 403 }),
   });
@@ -96,7 +106,7 @@ test("a member the billing route refuses is told who may read it", async () => {
 });
 
 test("a deploy carrying no billing extension says so, and claims no refusal", async () => {
-  wire({ "/ext/metronome/billing": () => Response.json({}, { status: 404 }) });
+  wireBilling({ "/ext/metronome/billing": () => Response.json({}, { status: 404 }) });
   billingTab();
 
   expect(await screen.findByText("This deploy does not carry billing.")).toBeTruthy();
@@ -104,15 +114,16 @@ test("a deploy carrying no billing extension says so, and claims no refusal", as
 });
 
 test("a read that fails for any other reason says only that", async () => {
-  wire({ "/ext/metronome/billing": () => Response.json({}, { status: 500 }) });
+  wireBilling({ "/ext/metronome/billing": () => Response.json({}, { status: 500 }) });
   billingTab();
 
   expect(await screen.findByText("Billing could not be read.")).toBeTruthy();
 });
 
 test("a card the provider would not read shows as unknown, not as absent", async () => {
-  wire({
-    "/ext/metronome/billing": () => json({ ...LIMITED, card: null, card_unread: true }),
+  wireBilling({
+    "/ext/metronome/billing": () => json(LIMITED),
+    [CARD_PATH]: () => json({ card: null, card_unread: true }),
   });
   billingTab();
 
@@ -126,8 +137,8 @@ test("a card the provider would not read shows as unknown, not as absent", async
 });
 
 test("no card offers the provider and holds the refill shut with its reason", async () => {
-  wire({
-    "/ext/metronome/billing": () => json({ ...LIMITED, card: null }),
+  wireBilling({
+    "/ext/metronome/billing": () => json(LIMITED),
   });
   billingTab();
 
@@ -139,8 +150,8 @@ test("no card offers the provider and holds the refill shut with its reason", as
 
 test("saving a payment method posts the card verb and states the link it answers", async () => {
   const posted: unknown[] = [];
-  wire({
-    "/ext/metronome/billing": () => json({ ...LIMITED, card: null }),
+  wireBilling({
+    "/ext/metronome/billing": () => json(LIMITED),
     "/actions/workspace/": (_url, init) =>
       init?.method === "POST"
         ? (posted.push(JSON.parse(String(init?.body))),
@@ -159,7 +170,7 @@ test("saving a payment method posts the card verb and states the link it answers
 test("a card on file opens the amounts and posts the figures typed into them", async () => {
   const posted: unknown[] = [];
   let reads = 0;
-  const { calls } = wire({
+  const { calls } = wireBilling({
     "/ext/metronome/billing": () => {
       reads += 1;
       return json(
@@ -173,10 +184,12 @@ test("a card on file opens the amounts and posts the figures typed into them", a
         ? (posted.push(JSON.parse(String(init?.body))),
           json({ applied: true, message: "Automatic refills are on." }))
         : json(WORKSPACE_ACTIONS),
+    [CARD_PATH]: () => json({ card: CARD }),
   });
   billingTab();
 
   const amount = await screen.findByLabelText("Add");
+  await waitFor(() => expect(amount).toHaveProperty("disabled", false));
   await userEvent.clear(amount);
   await userEvent.type(amount, "250");
   const below = screen.getByLabelText("When the balance falls below");
@@ -202,19 +215,22 @@ test("a card on file opens the amounts and posts the figures typed into them", a
 });
 
 test("an emptied amount cannot be submitted", async () => {
-  wire({
+  wireBilling({
     "/ext/metronome/billing": () =>
       json({ ...LIMITED, autopay_micro_usd: null, autopay_below_micro_usd: null }),
+    [CARD_PATH]: () => json({ card: CARD }),
   });
   billingTab();
 
-  await userEvent.clear(await screen.findByLabelText("Add"));
+  const amount = await screen.findByLabelText("Add");
+  await waitFor(() => expect(amount).toHaveProperty("disabled", false));
+  await userEvent.clear(amount);
 
   expect(screen.getByRole("button", { name: "Turn on" })).toHaveProperty("disabled", true);
 });
 
 test("a set refill rule states its figures and offers only the stop", async () => {
-  wire({
+  wireBilling({
     "/ext/metronome/billing": () =>
       json({ ...LIMITED, autopay_micro_usd: 100_000_000, autopay_below_micro_usd: 25_000_000 }),
   });
@@ -228,7 +244,7 @@ test("a set refill rule states its figures and offers only the stop", async () =
 test("stopping refills posts both figures as null", async () => {
   const posted: unknown[] = [];
   let reads = 0;
-  wire({
+  wireBilling({
     "/ext/metronome/billing": () => {
       reads += 1;
       return json(
@@ -254,8 +270,21 @@ test("stopping refills posts both figures as null", async () => {
 });
 
 test("a workspace with no balance row has no spending limit", async () => {
-  wire({ "/ext/metronome/billing": () => json({ limited: false }) });
+  wireBilling({ "/ext/metronome/billing": () => json({ limited: false }) });
   billingTab();
 
   expect(await screen.findByText("This workspace has no spending limit.")).toBeTruthy();
+});
+
+test("the balance is drawn before the card is asked for", async () => {
+  const { calls } = wireBilling({
+    "/ext/metronome/billing": () => json(LIMITED),
+    [CARD_PATH]: () => new Promise<Response>(() => {}),
+  });
+  billingTab();
+
+  expect(await screen.findByText("$12.34")).toBeTruthy();
+  expect(screen.getByText("Reading the payment method")).toBeTruthy();
+  await waitFor(() => expect(calls).toContain(CARD_PATH));
+  expect(calls.indexOf("/ext/metronome/billing")).toBeLessThan(calls.indexOf(CARD_PATH));
 });

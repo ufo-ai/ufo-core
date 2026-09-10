@@ -19,6 +19,9 @@ import { useMainAgent } from "@/lib/mainAgent";
 import type { ActionView } from "@/lib/types";
 
 const BILLING_PATH = "/ext/metronome/billing";
+/* The card is the payment provider's answer and costs a round trip to Stripe, so it is read on its
+   own once the balance is drawn rather than held in front of it. */
+const CARD_PATH = "/ext/metronome/billing/card";
 
 const BILLING_ACTION = "manage_billing";
 
@@ -29,6 +32,7 @@ const CREDIT_COLUMNS = ["Date", "Added", "Charged"];
 
 type Card = { brand: string; last4: string };
 type Purchase = { at: string; granted_micro_usd: number; charged_micro_usd: number };
+type CardRead = { card: Card | null; card_unread?: boolean };
 
 type BillingReport =
   | { limited: false }
@@ -36,8 +40,6 @@ type BillingReport =
       limited: true;
       balance_micro_usd: number;
       refused_below_micro_usd: number;
-      card: Card | null;
-      card_unread?: boolean;
       autopay_micro_usd?: number | null;
       autopay_below_micro_usd?: number | null;
       purchases?: Purchase[];
@@ -176,6 +178,7 @@ export function WorkspaceBilling({
 }) {
   const mainAgent = useMainAgent();
   const [state, setState] = useState<BillingState>({ phase: "asking" });
+  const [cardRead, setCardRead] = useState<CardRead | null>(null);
   const [reloads, setReloads] = useState(0);
   const [refusal, setRefusal] = useState<NoticeState>(QUIET);
   const notice: NoticeState = refusal.text ? refusal : { text: place.notice ?? "", refused: false };
@@ -209,6 +212,26 @@ export function WorkspaceBilling({
       live = false;
     };
   }, [reloads]);
+  const drawn = state.phase === "ready" && state.report.limited;
+  useEffect(() => {
+    if (!drawn) return;
+    let live = true;
+    setCardRead(null);
+    fetch(CARD_PATH, { credentials: "same-origin" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error("the card could not be read");
+        return (await res.json()) as CardRead;
+      })
+      .then((read) => {
+        if (live) setCardRead(read);
+      })
+      .catch(() => {
+        if (live) setCardRead({ card: null, card_unread: true });
+      });
+    return () => {
+      live = false;
+    };
+  }, [drawn, reloads]);
 
   async function refill(amountDollars: number | null, belowDollars: number | null) {
     if (busy || !mainAgent || !billing) return;
@@ -247,13 +270,16 @@ export function WorkspaceBilling({
       ? refillRule(report.autopay_micro_usd, report.autopay_below_micro_usd)
       : null;
   const figures = { amount: wholeDollars(amount), below: wholeDollars(below) };
-  const card = report.card;
-  const unread = report.card_unread === true;
+  const card = cardRead === null ? null : cardRead.card;
+  const unread = cardRead?.card_unread === true;
+  const pending = cardRead === null;
   const arrangeable =
     billing !== undefined && card !== null && figures.amount !== null && figures.below !== null;
-  const cardBlocker = unread
-    ? "The card provider did not answer. The balance above is current."
-    : "Save a payment method to arrange refills.";
+  const cardBlocker = pending
+    ? "Reading the payment method."
+    : unread
+      ? "The card provider did not answer. The balance above is current."
+      : "Save a payment method to arrange refills.";
   const stopped = report.balance_micro_usd <= report.refused_below_micro_usd;
 
   return (
@@ -279,16 +305,22 @@ export function WorkspaceBilling({
               statement={
                 card ? (
                   <span className="capitalize">{card.brand + " •••• " + card.last4}</span>
+                ) : pending ? (
+                  "Reading the payment method"
                 ) : unread ? (
                   "Payment method could not be read"
                 ) : (
                   "No payment method"
                 )
               }
-              note={card || unread ? null : "A refill charges the card saved here."}
+              note={card || unread || pending ? null : "A refill charges the card saved here."}
               action={
                 <Button busy={busy} disabled={!billing} onClick={saveCard}>
-                  {card ? "Update" : unread ? "Open the billing portal" : "Save a payment method"}
+                  {card
+                    ? "Update"
+                    : unread || pending
+                      ? "Open the billing portal"
+                      : "Save a payment method"}
                 </Button>
               }
             />

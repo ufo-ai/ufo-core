@@ -863,6 +863,7 @@ def _rfc3339(moment: datetime) -> str:
 
 
 BILLING_ROUTE_PATH = "billing"
+CARD_ROUTE_PATH = "billing/card"
 BILLING_PURCHASES_SHOWN = 10
 
 
@@ -874,13 +875,8 @@ def _billing_request_workspace(request: Request) -> UUID | None:
     return workspace_claim(request.cookies.get(SESSION_COOKIE, ""))
 
 
-async def _billing_projection(ext: ExtensionContext, request: Request) -> Response:
-    """What the workspace has left, what stops it, and whether a card is on file.
-
-    This reads; it never charges and never changes a rule. It exists because the acts that fix
-    billing are chat acts, and a workspace out of credit refuses the very turns that would carry
-    them — so the one screen that explains why the agent stopped has to sit off the turn path
-    entirely. Nothing here is reachable from a stopped workspace by any other route.
+async def _billing_refusal(ext: ExtensionContext, request: Request) -> Response | None:
+    """The refusal a billing read earns, or None where the reader is an admin of this workspace.
 
     The session is verified against the workspace core bound from the same cookie, and the address
     it proves is resolved to a member of that workspace and no other. An address is not a member
@@ -895,6 +891,25 @@ async def _billing_projection(ext: ExtensionContext, request: Request) -> Respon
             connection, ext.store.workspace_id, member_id
         ):
             return JSONResponse({"error": "only a workspace admin can read billing"}, 403)
+    return None
+
+
+async def _billing_projection(ext: ExtensionContext, request: Request) -> Response:
+    """What the workspace has left and what stops it, out of this deploy's own tables.
+
+    This reads; it never charges and never changes a rule. It exists because the acts that fix
+    billing are chat acts, and a workspace out of credit refuses the very turns that would carry
+    them — so the one screen that explains why the agent stopped has to sit off the turn path
+    entirely. Nothing here is reachable from a stopped workspace by any other route.
+
+    The card is not answered here. It is the provider's to state and costs an HTTPS round trip to
+    Stripe, which is unbounded latency in front of figures this deploy already holds. The screen
+    reads it from `_billing_card` once the balance is drawn, so a slow provider delays the card and
+    nothing else."""
+    refusal = await _billing_refusal(ext, request)
+    if refusal is not None:
+        return refusal
+    async with ext.transaction() as connection:
         headroom = await read_headroom(connection, ext.store.workspace_id)
         balance = await read_balance(connection, ext.store.workspace_id)
         arranged = await configured_auto_topup(connection, ext.store.workspace_id)
@@ -903,17 +918,6 @@ async def _billing_projection(ext: ExtensionContext, request: Request) -> Respon
         )
     if headroom is None or balance is None:
         return JSONResponse({"limited": False})
-    config = BillingConfig.from_env()
-    record = await _billing_record(ext)
-    card, unread = None, False
-    if record is not None:
-        try:
-            card = await _card_on_file(config, record.stripe_customer_id, BILLING_TRANSPORT)
-        except (StripeError, httpx.HTTPError) as error:
-            unread = True
-            warn(
-                "metronome.card_unread", workspace_id=str(ext.store.workspace_id), error=repr(error)
-            )
     return JSONResponse(
         {
             "limited": True,
@@ -923,8 +927,6 @@ async def _billing_projection(ext: ExtensionContext, request: Request) -> Respon
             "refused_below_micro_usd": headroom.reserve_micro_usd - headroom.grace_micro_usd,
             "granted_micro_usd": balance.granted_micro_usd,
             "charged_micro_usd": balance.charged_micro_usd,
-            "card": None if card is None else {"brand": card.brand, "last4": card.last4},
-            "card_unread": unread,
             "autopay_micro_usd": None if arranged is None else arranged.amount_micro_usd,
             "autopay_below_micro_usd": None if arranged is None else arranged.threshold_micro_usd,
             "purchases": [
@@ -935,6 +937,37 @@ async def _billing_projection(ext: ExtensionContext, request: Request) -> Respon
                 }
                 for purchase in purchases
             ],
+        }
+    )
+
+
+async def _billing_card(ext: ExtensionContext, request: Request) -> Response:
+    """The card the provider holds for this workspace, read after the balance is on the screen.
+
+    A workspace with no Stripe Customer has no card and is answered without asking the provider:
+    the customer is minted when an admin opens the portal, which is the act that saves a card.
+
+    The balance is ours and the card is the provider's, so a provider that will not answer must not
+    take the screen down with it: the figures the member came for are already drawn, and the card
+    reads as unknown rather than as absent, because "no card" invites saving one and would be a
+    guess."""
+    refusal = await _billing_refusal(ext, request)
+    if refusal is not None:
+        return refusal
+    record = await _billing_record(ext)
+    if record is None:
+        return JSONResponse({"card": None, "card_unread": False})
+    try:
+        card = await _card_on_file(
+            BillingConfig.from_env(), record.stripe_customer_id, BILLING_TRANSPORT
+        )
+    except (StripeError, httpx.HTTPError) as error:
+        warn("metronome.card_unread", workspace_id=str(ext.store.workspace_id), error=repr(error))
+        return JSONResponse({"card": None, "card_unread": True})
+    return JSONResponse(
+        {
+            "card": None if card is None else {"brand": card.brand, "last4": card.last4},
+            "card_unread": False,
         }
     )
 
@@ -963,6 +996,12 @@ def manifest() -> Manifest:
                 method="GET",
                 path=BILLING_ROUTE_PATH,
                 handler=_billing_projection,
+                identify=_billing_request_workspace,
+            ),
+            RouteSpec(
+                method="GET",
+                path=CARD_ROUTE_PATH,
+                handler=_billing_card,
                 identify=_billing_request_workspace,
             ),
         ),
