@@ -298,6 +298,25 @@ def _assert_no_reserved_routes(app: FastAPI) -> None:
         )
 
 
+def _admission(
+    dbos_client: DBOSClient,
+    manifests: tuple[Manifest, ...],
+    hub: Hub,
+    key_slot_for: Callable[[str], str | None] | None,
+    billing_url: str | None,
+) -> Admission:
+    """The one construction of the turn gate. Every admission a process holds is assembled here, so
+    a change to the gate reaches the instance the member surface serves rather than a copy beside
+    it; `gates.py` refuses a second `Admission(...)` in shipped code."""
+    return Admission(
+        dbos=dbos_client,
+        durable_surfaces=durable_surfaces(manifests),
+        hub=hub,
+        key_slot_for=key_slot_for,
+        billing_url=billing_url,
+    )
+
+
 def run(fleet: Fleet) -> None:
     """Start one process of `fleet`: it serves every workspace, resolving the workspace per request
     (from the caller's token) and per turn (from the workflow argument), scoping each transaction by
@@ -357,13 +376,7 @@ def run(fleet: Fleet) -> None:
     )
     browser_home = home_surface(manifests)
     billing_url = billing_screen_url(config.connect.public_base_url, browser_home)
-    admission = Admission(
-        dbos=dbos_client,
-        durable_surfaces=durable_surfaces(manifests),
-        hub=hub,
-        key_slot_for=registry.key_slot_for,
-        billing_url=billing_url,
-    )
+    admission = _admission(dbos_client, manifests, hub, registry.key_slot_for, billing_url)
 
     def invoker_for(workspace_id: UUID) -> AdmissionInvoker:
         return AdmissionInvoker(admission=admission, workspace_id=workspace_id)
@@ -1196,13 +1209,7 @@ def _mount_shared_surfaces(
             resolver=open_connector_namespace(manifests),
         )
     billing_url = billing_screen_url(public_base_url, home_surface(manifests))
-    admission = Admission(
-        dbos=dbos_client,
-        durable_surfaces=durable_surfaces(manifests),
-        hub=hub,
-        key_slot_for=key_slot_for,
-        billing_url=billing_url,
-    )
+    admission = _admission(dbos_client, manifests, hub, key_slot_for, billing_url)
     tailer = HubTailer(hub=hub, billing_url=billing_url, key_slot_for=key_slot_for)
     stopper = MemberStop(client=dbos_client, hub=hub, admission=admission)
     turn_steps = DurableTurnSteps(client=dbos_client)

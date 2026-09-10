@@ -78,6 +78,9 @@ RAW_BLOB_BOOT_MODULES = frozenset(
         Path("evals/memory_ingestion/materialize.py"),
     }
 )
+ADMISSION_FACTORY = CORE_SRC / "serve.py"
+ADMISSION_FACTORY_NAME = "_admission"
+ADMISSION_HARNESS_ROOT = "evals"
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
@@ -491,6 +494,49 @@ def _raw_blob_failures(trees: dict[Path, ast.Module]) -> list[str]:
                     f"{rel}: calls blob_store_for outside a boot boundary "
                     f"({', '.join(sorted(str(m) for m in RAW_BLOB_BOOT_MODULES))})"
                 )
+    return failures
+
+
+def _admission_construction_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """`Admission` is the turn gate every surface admits through, and a process that builds two of
+    them can take a fix on the copy nobody serves. Shipped code constructs it in one place,
+    `serve._admission`, so the gate the member surface holds is the gate that was changed. Tests and
+    the eval harness build their own: they are the fixture under the gate, not a surface a member
+    reaches."""
+    failures = []
+    for rel, tree in trees.items():
+        if "tests" in rel.parts or rel.parts[0] == ADMISSION_HARNESS_ROOT:
+            continue
+        inside = {
+            id(node)
+            for definition in (ast.walk(tree) if rel == ADMISSION_FACTORY else ())
+            if isinstance(definition, ast.FunctionDef) and definition.name == ADMISSION_FACTORY_NAME
+            for node in ast.walk(definition)
+        }
+        built = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Admission"
+        ]
+        for call in built:
+            if id(call) not in inside:
+                failures.append(
+                    f"{rel}: constructs Admission outside "
+                    f"{ADMISSION_FACTORY}:{ADMISSION_FACTORY_NAME} — one turn gate per process, so "
+                    f"a fix cannot land on an instance nothing serves"
+                )
+            elif not any(word.arg == "key_slot_for" for word in call.keywords):
+                failures.append(
+                    f"{rel}: {ADMISSION_FACTORY_NAME} drops key_slot_for — the balance gate's "
+                    f"own-key exemption needs the model an agent runs"
+                )
+        if rel == ADMISSION_FACTORY and not any(id(call) in inside for call in built):
+            failures.append(
+                f"{rel}: {ADMISSION_FACTORY_NAME} no longer builds Admission — shipped code has no "
+                f"single construction path for the turn gate"
+            )
     return failures
 
 
@@ -2615,6 +2661,7 @@ def main() -> int:
     failures.extend(_tenant_rule_failures())
     failures.extend(_init_code_failures(trees))
     failures.extend(_raw_blob_failures(trees))
+    failures.extend(_admission_construction_failures(trees))
     failures.extend(_boundary_failures(trees))
     failures.extend(_sdk_import_failures(trees))
     failures.extend(_core_layout_failures(trees))

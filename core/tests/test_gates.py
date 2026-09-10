@@ -86,6 +86,73 @@ def _check_antijoin_gate_rejects_not_in_over_a_select_in_a_migration() -> None:
     assert gates._migration_antijoin_failures({CORE_FILE: slow}) == []
 
 
+ADMISSION_FACTORY_SOURCE = (
+    "def _admission(dbos_client, manifests, hub, key_slot_for, billing_url):\n"
+    "    return Admission(\n"
+    "        dbos=dbos_client,\n"
+    "        durable_surfaces=durable_surfaces(manifests),\n"
+    "        hub=hub,\n"
+    "        key_slot_for=key_slot_for,\n"
+    "        billing_url=billing_url,\n"
+    "    )\n"
+)
+
+
+def _check_admission_gate_accepts_the_one_factory() -> None:
+    trees = {gates.ADMISSION_FACTORY: ast.parse(ADMISSION_FACTORY_SOURCE)}
+    assert gates._admission_construction_failures(trees) == []
+
+
+def _check_admission_gate_rejects_a_second_gate_beside_the_factory() -> None:
+    trees = {
+        gates.ADMISSION_FACTORY: ast.parse(
+            ADMISSION_FACTORY_SOURCE
+            + "\n\ndef run():\n    return Admission(dbos=None, durable_surfaces=frozenset())\n"
+        )
+    }
+    failures = gates._admission_construction_failures(trees)
+    assert failures and "outside" in failures[0], failures
+
+
+def _check_admission_gate_rejects_a_shipped_module_building_its_own() -> None:
+    trees = {
+        gates.ADMISSION_FACTORY: ast.parse(ADMISSION_FACTORY_SOURCE),
+        EXT_SHIPPED_PACKAGE: ast.parse(
+            "gate = Admission(dbos=None, durable_surfaces=frozenset())\n"
+        ),
+    }
+    failures = gates._admission_construction_failures(trees)
+    assert failures and str(EXT_SHIPPED_PACKAGE) in failures[0], failures
+
+
+def _check_admission_gate_leaves_tests_and_the_eval_harness_to_their_own() -> None:
+    trees = {
+        gates.ADMISSION_FACTORY: ast.parse(ADMISSION_FACTORY_SOURCE),
+        EXT_TEST: ast.parse("gate = Admission(dbos=None, durable_surfaces=frozenset())\n"),
+        Path("evals/driver.py"): ast.parse(
+            "gate = Admission(dbos=None, durable_surfaces=frozenset())\n"
+        ),
+    }
+    assert gates._admission_construction_failures(trees) == []
+
+
+def _check_admission_gate_rejects_a_factory_that_drops_the_model_resolution() -> None:
+    trees = {
+        gates.ADMISSION_FACTORY: ast.parse(
+            "def _admission(dbos_client, manifests, hub, key_slot_for, billing_url):\n"
+            "    return Admission(dbos=dbos_client, durable_surfaces=frozenset())\n"
+        )
+    }
+    failures = gates._admission_construction_failures(trees)
+    assert failures and "key_slot_for" in failures[0], failures
+
+
+def _check_admission_gate_rejects_a_serve_that_builds_no_gate_at_all() -> None:
+    trees = {gates.ADMISSION_FACTORY: ast.parse("def run():\n    return None\n")}
+    failures = gates._admission_construction_failures(trees)
+    assert failures and "single construction path" in failures[0], failures
+
+
 def _check_sdk_only_gate_rejects_core_internal_import_from_extensions() -> None:
     trees = {ROGUE: ast.parse("from ufo.db import workspace_tx\n")}
     failures = gates._sdk_import_failures(trees)
@@ -1160,6 +1227,12 @@ def test_repository_gates() -> None:
         _check_the_gate_walk_skips_vendored_dependency_trees,
         _check_log_field_gate_rejects_the_reserved_status_field,
         _check_antijoin_gate_rejects_not_in_over_a_select_in_a_migration,
+        _check_admission_gate_accepts_the_one_factory,
+        _check_admission_gate_rejects_a_second_gate_beside_the_factory,
+        _check_admission_gate_rejects_a_shipped_module_building_its_own,
+        _check_admission_gate_leaves_tests_and_the_eval_harness_to_their_own,
+        _check_admission_gate_rejects_a_factory_that_drops_the_model_resolution,
+        _check_admission_gate_rejects_a_serve_that_builds_no_gate_at_all,
         _check_sdk_only_gate_rejects_core_internal_import_from_extensions,
         _check_sdk_only_gate_rejects_bare_ufo_import_from_extensions,
         _check_sdk_only_gate_allows_sdk_import_from_extensions,

@@ -1,4 +1,6 @@
+import ast
 import asyncio
+import inspect
 import json
 import shutil
 import subprocess
@@ -795,12 +797,17 @@ def test_reserved_host_prefixes_guard_fails_loud_on_a_gateway_route() -> None:
         serve._assert_no_reserved_routes(app)
 
 
-def test_every_admission_carries_the_model_resolution() -> None:
-    """The balance gate's own-key exemption needs the model an agent runs, and `Admission` is the
-    only thing that can supply it. Built without it on any surface, a workspace serving its own
-    provider key is refused there while exempt everywhere else — and the surface most members
-    speak on is the shared-fleet one, not the local mount."""
-    source = (Path(serve.__file__)).read_text()
-    blocks = [block.split("\n    )")[0] for block in source.split("admission = Admission(")[1:]]
-    assert len(blocks) == 2
-    assert all("key_slot_for=" in block for block in blocks), blocks
+def test_the_boot_and_the_mount_share_one_admission_construction() -> None:
+    """`run()` and `_mount_shared_surfaces` each hold an admission, and a fix applied to one used to
+    leave the other — the one bound into the member surface — unchanged. Both now assemble it from
+    `_admission`, so the balance gate's own-key exemption reaches every surface a member speaks on
+    and no caller can drop `key_slot_for` on one of them."""
+    tree = ast.parse(Path(serve.__file__).read_text())
+    calls = [
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert calls.count("Admission") == 1
+    assert calls.count("_admission") == 2
+    assert "key_slot_for" in inspect.signature(serve._admission).parameters

@@ -17,6 +17,7 @@ from ufo_testsupport.surfaces import (
     no_member_skills,
 )
 
+from ufo import serve
 from ufo.blob import blob_store_for
 from ufo.config import BlobConfig
 from ufo.db import current_workspace, workspace_tx
@@ -29,6 +30,7 @@ from ufo.host.ext.loader import load_manifests
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.ext.surface import SurfaceAuth, SurfaceContext, SurfaceRoute, SurfaceSpec
 from ufo.runtime.hub import InProcessHub
+from ufo.runtime.surfaces.admission import Admission, MemberAdmission
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.serve import _mount_shared_surfaces
@@ -181,6 +183,71 @@ def _challenge_app(tmp_path: Path) -> FastAPI:
         member_skill_listing=no_member_skills,
     )
     return app
+
+
+async def test_the_mounted_surface_admits_through_the_process_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate a member's turn passes is the one `serve._admission` built. `serve.py` once
+    constructed one admission for `run()` and a second for this mount, which is how a fix lands on
+    the copy nobody serves, so the instance the mounted route hands a surface is compared by
+    identity against the factory's — through a request, not by reading the closure."""
+    built: list[Admission] = []
+    factory = serve._admission
+
+    def _record(*ingredients: object) -> Admission:
+        built.append(factory(*ingredients))
+        return built[-1]
+
+    monkeypatch.setattr(serve, "_admission", _record)
+    served: list[Admission] = []
+
+    async def _report_gate(ctx: SurfaceContext, _request: Request) -> Response:
+        admitter = ctx._admitter
+        assert isinstance(admitter, MemberAdmission)
+        served.append(admitter.admission)
+        return Response("")
+
+    surface = SurfaceSpec(
+        name=PROBE_SURFACE,
+        routes=(SurfaceRoute(method="POST", path="gate", handler=_report_gate),),
+        identify=_identify_workspace,
+    )
+    app = FastAPI()
+    _mount_shared_surfaces(
+        app,
+        (Manifest(name="probe_ext", version="0", surfaces=(surface,)),),
+        None,
+        blob_store_for(BlobConfig(backend="filesystem", root=tmp_path)),
+        ConversationSandbox(
+            carrier=LocalCarrier(),
+            backend="local",
+            off_cluster=False,
+            image_ref=SANDBOX_IMAGE_REF,
+            proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
+            workspace_root=tmp_path / "workspaces",
+        ),
+        InProcessHub(),
+        NoAdmission(),
+        "",
+        None,
+        None,
+        ("auto", "claude-opus-4-8", "claude-sonnet-5"),
+        ambient_reply=UNREACHED_AMBIENT_REPLY,
+        skills=EMPTY_SKILL_REGISTRY,
+        member_skill_listing=no_member_skills,
+    )
+    baseline = current_workspace.set(None)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fleet") as client:
+            reply = await client.post(
+                f"/surface/{PROBE_SURFACE}/gate", headers={"x-workspace": str(uuid4())}
+            )
+    finally:
+        current_workspace.reset(baseline)
+    assert reply.status_code == 200, reply.text
+    assert len(built) == 1, built
+    assert served[0] is built[0]
 
 
 async def _workspace() -> UUID:
