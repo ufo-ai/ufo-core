@@ -60,10 +60,13 @@ def test_grading_states_the_criteria() -> None:
         expected="website-building",
         forbidden=("website-building/webapp",),
     )
-    assert plain.grading == "skill 'pdf' mounts within 120s"
-    assert CASE.grading == "skill 'office-xlsx' mounts within 120s, never 'office-pptx' without it"
+    deadline = f"{runner.MOUNT_DEADLINE_SECONDS:g}s"
+    assert plain.grading == f"skill 'pdf' mounts within {deadline}"
+    assert CASE.grading == (
+        f"skill 'office-xlsx' mounts within {deadline}, never 'office-pptx' without it"
+    )
     assert child.grading == (
-        "skill 'website-building' mounts within 120s, never 'website-building/webapp' "
+        f"skill 'website-building' mounts within {deadline}, never 'website-building/webapp' "
         "without it (a forbidden child of it, never at all)"
     )
 
@@ -175,9 +178,9 @@ def test_deadline_without_mount_fails() -> None:
 
 
 def test_queue_and_sandbox_boot_do_not_count_against_the_load_deadline() -> None:
-    """The measured artifact: three cases failed "did not load within 120s (status running)" while
-    the 120s covered queue wait and sandbox boot. The deadline now runs on the turn's own work, and
-    the verdict reports that clock."""
+    """The measured artifact: three cases failed "did not load ... (status running)" on a deadline
+    that covered queue wait and sandbox boot. The deadline runs on the turn's own work, and the
+    verdict reports that clock."""
     passed, reason = skill_load_verdict(
         CASE, _observed(mounted=("office-xlsx",), charged_seconds=4.0, startup_seconds=396.0)
     )

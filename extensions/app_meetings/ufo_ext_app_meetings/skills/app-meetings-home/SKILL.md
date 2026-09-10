@@ -1,6 +1,6 @@
 ---
 name: app-meetings-home
-description: Load when building or updating the Meetings app homepage — what it is for, a band per feature, and the conversations it holds.
+description: Load when the built-in Meetings app is named and its own screen is being built or changed — a band per feature and the conversations it holds. Not a page about meetings or transcripts a connected calendar holds, and not a homepage an agent builds for its own subject.
 metadata:
   depends:
   - ufo-style

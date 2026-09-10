@@ -1,6 +1,6 @@
 ---
 name: application-homepage
-description: Load when an app's own homepage is asked for — "build your homepage", your board, notes, brief or dashboard page, or a change to the page members open for an app on the Apps screen. Not a standalone website, a browser game, or creating the app itself.
+description: Load when an app's own homepage is asked for — "build your homepage", an interactive homepage named by the subject it shows, or a change to the page members open on the Apps screen. Not a standalone website, a browser game, a built-in app's screen, or creating the app itself.
 metadata:
   depends:
   - ufo-style

@@ -1,6 +1,6 @@
 ---
 name: app-code-home
-description: Load when building or updating the Code app homepage — what it is for, a band per feature, and the conversations it holds.
+description: Load when the built-in Code app is named and its own screen is being built or changed — what it is for, a band per feature, and the conversations it holds. Not a homepage an agent builds for a subject of its own.
 metadata:
   depends:
   - ufo-style

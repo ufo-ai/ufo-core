@@ -73,13 +73,20 @@ SUITE = "skill_loading"
 the task name: the member task registers as `skill_loading_member`, and while that name was also its
 suite the shard built no loadable-skill set for it and the suite raised on its first line, taking
 every finished suite of the shard with it (nightly 2026-08-21, shard 4)."""
-GRADER_REVISION = "skill-verdict-6"
-LOAD_DEADLINE_SECONDS = 120.0
-"""How long the turn's own work may run before the load is called missing. It is charged from the
-turn's first durable engine step, so queue wait and sandbox boot no longer eat into it (see
-`evals.harness.mounts`). The number is unchanged and its meaning is not, so the grader revision
-moves with it: this suite's digest changes at this commit, and the sweep's trend line for
-`skill_loading` and `skill_loading_member` starts again here."""
+GRADER_REVISION = "skill-verdict-7"
+MOUNT_DEADLINE_SECONDS = 60.0
+"""How long the turn's own work may run before an expected mount is called missing. It is charged
+from the turn's first durable engine step, so queue wait and sandbox boot do not eat into it (see
+`evals.harness.mounts`). Routing is the first thing a turn does: over 45 cases the slowest
+mount measured 28.6s, including every case that names an artifact and stages none. A query whose
+premise names an artifact stages it, which is what holds that number — the one case left to hunt
+for its own transcript mounted at 59.9s and mounts at 11.0s with the transcript staged."""
+TERMINAL_DEADLINE_SECONDS = 120.0
+"""How long an `expects_no_load` turn may run before it is called still running. That case is graded
+on the turn reaching its own terminal, not on a mount, so it is a whole-turn budget and the mount
+measurement says nothing about it: the slowest of these turns to reach its terminal took 51.2s,
+where the slowest mount took 28.6s, and `goal-thread-revenue-builds-nothing` runs past this budget
+and is called still running."""
 ABLATION_TAGS = frozenset({"", "block-on", "block-off"})
 REGIMES = frozenset({"", "fold", "names", "retrieval", "tail"})
 
@@ -196,13 +203,18 @@ class SkillLoadCase:
         return (*self.member_skills, *self.late_skills)
 
     @property
+    def deadline(self) -> float:
+        return TERMINAL_DEADLINE_SECONDS if self.expects_no_load else MOUNT_DEADLINE_SECONDS
+
+    @property
     def grading(self) -> str:
         if self.expects_no_load:
             return (
-                f"the turn reaches its own terminal within {LOAD_DEADLINE_SECONDS:g}s without "
+                f"the turn reaches its own terminal within {TERMINAL_DEADLINE_SECONDS:g}s "
+                "without "
                 f"mounting {', '.join(map(repr, self.forbidden))}"
             )
-        statement = f"skill {self.expected!r} mounts within {LOAD_DEADLINE_SECONDS:g}s"
+        statement = f"skill {self.expected!r} mounts within {MOUNT_DEADLINE_SECONDS:g}s"
         if self.forbidden:
             statement += f", never {', '.join(map(repr, self.forbidden))} without it"
         if any(name.startswith(f"{self.expected}/") for name in self.forbidden):
@@ -258,7 +270,7 @@ def skill_load_verdict(case: SkillLoadCase, observation: MountObservation) -> tu
     if never_started(observation):
         return False, (
             f"the turn had not begun its own work {observation.elapsed_seconds:.0f}s after "
-            f"admission (status {observation.status}); the {LOAD_DEADLINE_SECONDS:g}s load "
+            f"admission (status {observation.status}); the {case.deadline:g}s load "
             "deadline never started"
         )
     if case.expects_no_load:
@@ -293,8 +305,7 @@ def skill_load_verdict(case: SkillLoadCase, observation: MountObservation) -> tu
     if observation.status in TERMINAL_STATUSES:
         return False, f"turn ended {observation.status} without loading {case.expected!r}"
     return False, (
-        f"did not load {case.expected!r} within {LOAD_DEADLINE_SECONDS:g}s "
-        f"(status {observation.status})"
+        f"did not load {case.expected!r} within {case.deadline:g}s (status {observation.status})"
     )
 
 
@@ -337,7 +348,8 @@ def skill_loading_task(
             "runner": "skill-load-case",
             "task": name,
             "grader": GRADER_REVISION,
-            "deadlineSeconds": LOAD_DEADLINE_SECONDS,
+            "mountDeadlineSeconds": MOUNT_DEADLINE_SECONDS,
+            "terminalDeadlineSeconds": TERMINAL_DEADLINE_SECONDS,
             "startDeadlineSeconds": START_DEADLINE_SECONDS,
             "cases": [case.payload() for case in cases],
         }
@@ -464,7 +476,7 @@ class SkillLoadingSuite:
                 )
             watched = case.forbidden if case.expects_no_load else (case.expected, *case.forbidden)
             observation = await watch_mounts(
-                target, conversation_id, turn_id, watched, LOAD_DEADLINE_SECONDS
+                target, conversation_id, turn_id, watched, case.deadline
             )
             passed, reason = skill_load_verdict(case, observation)
             evidence = self._evidence(case, observation, conversation_id)

@@ -508,6 +508,18 @@ REPORT_PART1_PDF = WorkspaceFile("pdfs/report-part1.pdf", PDF_STUB)
 REPORT_PART2_PDF = WorkspaceFile("pdfs/report-part2.pdf", PDF_STUB)
 SCAN_PDF = WorkspaceFile("pdfs/scan.pdf", PDF_STUB)
 LOCKED_PDF = WorkspaceFile("pdfs/statement-locked.pdf", PDF_STUB)
+CALL_TRANSCRIPT = _file(
+    "transcripts/latest-call.md",
+    """
+    # Platform sync
+
+    Ana: the retry path lands this week; Ravi owns the backfill.
+    Ravi: I need the export schema before Thursday.
+    Ana: I will send it after this call.
+    """,
+)
+
+
 CASES: tuple[SkillLoadCase, ...] = (
     SkillLoadCase(
         "homepage-build-verbatim-seed",
@@ -538,6 +550,91 @@ CASES: tuple[SkillLoadCase, ...] = (
         "Build your interactive daily brief homepage for the team.",
         expected="application-homepage",
         forbidden=("website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "meetings-app-own-screen",
+        "Update the Meetings app's own screen to show a band for each feature it has.",
+        expected="app-meetings-home",
+        forbidden=("application-homepage", "website-building"),
+    ),
+    SkillLoadCase(
+        "issues-app-own-screen",
+        "Change the Issues app's own homepage so its bands match what the app now does.",
+        expected="app-issues-home",
+        forbidden=("application-homepage", "website-building"),
+    ),
+    SkillLoadCase(
+        "code-app-own-screen",
+        "Change the Code app's own homepage to add a band for the review sweep.",
+        expected="app-code-home",
+        forbidden=("application-homepage", "website-building"),
+    ),
+    SkillLoadCase(
+        "metrics-app-own-screen",
+        "Update the Metrics app's own homepage with a band for the new set of measures.",
+        expected="app-metrics-home",
+        forbidden=("application-homepage", "website-building"),
+    ),
+    SkillLoadCase(
+        "homepage-briefs-topic",
+        "Build an interactive pre-meeting briefs homepage for my next three meetings.",
+        expected="application-homepage",
+        forbidden=("app-meetings-home", "website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-meeting-tasks-topic",
+        "Build an interactive meeting-tasks homepage from the latest call transcript.",
+        expected="application-homepage",
+        forbidden=("app-meetings-home", "website-building", "create-application"),
+        workspace_files=(CALL_TRANSCRIPT,),
+    ),
+    SkillLoadCase(
+        "homepage-issue-owner-topic",
+        "Build an interactive issue-owner homepage for newly opened GitHub issues.",
+        expected="application-homepage",
+        forbidden=("app-issues-home", "website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-issue-planning-topic",
+        "Build an interactive issue-planning homepage for approved GitHub work.",
+        expected="application-homepage",
+        forbidden=("app-issues-home", "website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-review-queue-topic",
+        "Build an interactive code-review queue homepage for the engineering team.",
+        expected="application-homepage",
+        forbidden=("app-code-home", "website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-babysitter-topic",
+        "Build an interactive PR-babysitter homepage for the repository.",
+        expected="application-homepage",
+        forbidden=("app-code-home", "app-code-babysit", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-delivery-metrics-topic",
+        "Build an interactive engineering-delivery metrics homepage.",
+        expected="application-homepage",
+        forbidden=("app-metrics-home", "website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-core-metrics-topic",
+        "Build an interactive startup core-metrics homepage from Stripe.",
+        expected="application-homepage",
+        forbidden=("app-metrics-home", "website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-account-health-topic",
+        "Build an interactive customer account-health homepage.",
+        expected="application-homepage",
+        forbidden=("app-radar-home", "website-building", "create-application"),
+    ),
+    SkillLoadCase(
+        "homepage-candidate-review-topic",
+        "Build an interactive candidate-review homepage for the hiring panel.",
+        expected="application-homepage",
+        forbidden=("app-issues-home", "website-building", "create-application"),
     ),
     SkillLoadCase(
         "new-app-not-homepage",

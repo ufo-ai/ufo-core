@@ -1,6 +1,6 @@
 ---
 name: app-issues-home
-description: Load when building or updating the Issues app homepage — what it is for, a band per feature, and the conversations it holds.
+description: Load when the built-in Issues app is named and its own screen is being built or changed — a band per feature and the conversations it holds. Not a page about issues a connected tracker holds, and not a homepage an agent builds for a subject of its own.
 metadata:
   depends:
   - ufo-style
