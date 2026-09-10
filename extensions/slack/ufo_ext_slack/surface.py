@@ -101,12 +101,14 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from typing import Literal, Protocol
 from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import UUID
@@ -398,14 +400,18 @@ class SlackIdentityResolver:
     async def _prove(self) -> SlackIdentity:
         try:
             async with httpx.AsyncClient(timeout=SLACK_INSTALL_TIMEOUT_SECONDS) as client:
-                response = await client.post(
-                    SLACK_AUTH_TEST_URL,
-                    headers={"authorization": f"Bearer {self.bot_token}"},
+                response = await _slack_send(
+                    lambda: client.post(
+                        SLACK_AUTH_TEST_URL,
+                        headers={"authorization": f"Bearer {self.bot_token}"},
+                    )
                 )
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, json.JSONDecodeError) as error:
             raise SlackIdentityError(f"unreachable: {error}") from error
+        except SlackRateLimitedError as error:
+            raise SlackIdentityError(str(error)) from error
         if not isinstance(payload, dict):
             raise SlackIdentityError("malformed response")
         if payload.get("ok") is not True:
@@ -549,7 +555,7 @@ async def slack_oauth_exchange(code: str, redirect_uri: str) -> SlackInstall:
     storing a broken install."""
     async with httpx.AsyncClient(timeout=SLACK_INSTALL_TIMEOUT_SECONDS) as client:
         payload = await _slack_ok(
-            client.post(
+            lambda: client.post(
                 SLACK_OAUTH_ACCESS_URL,
                 data={
                     "client_id": slack_client_id(),
@@ -662,9 +668,11 @@ class SlackConversationSearch:
     display name/email (dropping the bot itself) so "the dm with alice" finds it. Bounded by
     construction on the app's own bot token: at most SLACK_CONVERSATIONS_MAX_PAGES list requests and
     SLACK_PEOPLE_RESOLVE_MAX DMs resolved, so a workspace that keeps handing back a cursor, a
-    malformed page, or a flood of DMs can never spin it unbounded. An empty query keeps everything
-    listed; a non-empty one is a case-insensitive substring over name, purpose, topic, and the
-    people."""
+    malformed page, or a flood of DMs can never spin it unbounded. Every read takes
+    AMBIENT_FETCH_ATTEMPTS, because a member's tool call waits on the whole search: a 429 fails it
+    at once instead of sleeping the shared ladder once per page and once per DM. An empty query
+    keeps everything listed; a non-empty one is a case-insensitive substring over name, purpose,
+    topic, and the people."""
 
     bot_token: str
     bot_user_id: str
@@ -693,11 +701,13 @@ class SlackConversationSearch:
         cursor = ""
         for _page in range(SLACK_CONVERSATIONS_MAX_PAGES):
             payload = await _slack_ok(
-                client.get(
+                partial(
+                    client.get,
                     SLACK_CONVERSATIONS_LIST_URL,
                     params=self._params(cursor),
                     headers={"Authorization": f"Bearer {self.bot_token}"},
-                )
+                ),
+                attempts=AMBIENT_FETCH_ATTEMPTS,
             )
             page = payload.get("channels")
             if isinstance(page, list):
@@ -768,11 +778,12 @@ class SlackConversationSearch:
             user = raw.get("user")
             return (user,) if isinstance(user, str) else ()
         payload = await _slack_ok(
-            client.get(
+            lambda: client.get(
                 SLACK_CONVERSATIONS_MEMBERS_URL,
                 params={"channel": convo_id, "limit": str(SLACK_MPIM_MEMBERS_LIMIT)},
                 headers={"Authorization": f"Bearer {self.bot_token}"},
-            )
+            ),
+            attempts=AMBIENT_FETCH_ATTEMPTS,
         )
         members = payload.get("members")
         return tuple(m for m in members if isinstance(m, str)) if isinstance(members, list) else ()
@@ -864,6 +875,7 @@ AMBIENT_CHANNEL_FETCH_LIMIT = 15
 AMBIENT_CHANNEL_AFTER_LIMIT = 3
 AMBIENT_UNSEEN_LIMIT = 20
 AMBIENT_FETCH_TIMEOUT_SECONDS = 2.5
+AMBIENT_FETCH_ATTEMPTS = 1
 AMBIENT_MESSAGE_SUBTYPES = (None, "file_share", "thread_broadcast")
 AMBIENT_MESSAGE_CHAR_LIMIT = 400
 AMBIENT_DIGEST_MAX_CHARS = 8_000
@@ -911,6 +923,13 @@ WEB_SURFACE_PATH = "/surface/web"
 
 SLACK_API_TIMEOUT_SECONDS = 20
 MAX_RETRY_AFTER_DIGITS = 9
+SLACK_RATE_LIMITED_STATUS = 429
+SLACK_RETRY_MAX_ATTEMPTS = 8
+SLACK_RETRY_INITIAL_DELAY_SECONDS = 1.0
+SLACK_RETRY_MAX_DELAY_SECONDS = 30.0
+SLACK_RETRY_AFTER_MAX_SECONDS = 60.0
+SLACK_RETRY_BUDGET_SECONDS = 120.0
+SLACK_RETRY_JITTER_MAX_FACTOR = 1.5
 SLACK_UPLOAD_READ_TIMEOUT_SECONDS = 60
 SLACK_UPLOAD_WRITE_TIMEOUT_SECONDS = 600
 SLACK_DOWNLOAD_TIMEOUT_SECONDS = 600
@@ -941,6 +960,10 @@ class SlackBodyTooLarge(Exception):
 
 class SlackApiError(RuntimeError):
     """A Slack API call returned `ok: false` or a malformed response."""
+
+
+class SlackRateLimitedError(SlackApiError):
+    """Slack answered 429 on every attempt of the in-process backoff ladder."""
 
 
 class SlackAudienceUnknown(RuntimeError):
@@ -1495,7 +1518,7 @@ async def _declared_files(
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
-                client.get(
+                lambda: client.get(
                     SLACK_CONVERSATIONS_REPLIES_URL,
                     params={
                         "channel": channel,
@@ -1505,7 +1528,8 @@ async def _declared_files(
                         "inclusive": "true",
                     },
                     headers={"Authorization": f"Bearer {bot_token}"},
-                )
+                ),
+                attempts=AMBIENT_FETCH_ATTEMPTS,
             )
     except Exception as error:
         _LOG.warning("slack attachment read failed for %s:%s: %s", channel, ts, error)
@@ -1971,11 +1995,12 @@ async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
-                client.get(
+                lambda: client.get(
                     SLACK_USERS_INFO_URL,
                     params={"user": slack_user_id},
                     headers={"Authorization": f"Bearer {bot_token}"},
-                )
+                ),
+                attempts=AMBIENT_FETCH_ATTEMPTS,
             )
     except Exception as error:
         _LOG.warning("slack users.info failed for %s: %s", slack_user_id, error)
@@ -2019,11 +2044,12 @@ async def _conversation_members(bot_token: str, channel: str) -> tuple[str, ...]
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
-                client.get(
+                lambda: client.get(
                     SLACK_CONVERSATIONS_MEMBERS_URL,
                     params={"channel": channel, "limit": str(MENTION_ROSTER_MAX)},
                     headers={"Authorization": f"Bearer {bot_token}"},
-                )
+                ),
+                attempts=AMBIENT_FETCH_ATTEMPTS,
             )
     except Exception as error:
         _LOG.warning("slack conversations.members failed for %s: %s", channel, error)
@@ -2151,11 +2177,12 @@ async def _slack_permalink(bot_token: str, channel: str, ts: str) -> str | None:
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
-                client.get(
+                lambda: client.get(
                     SLACK_GET_PERMALINK_URL,
                     params={"channel": channel, "message_ts": ts},
                     headers={"Authorization": f"Bearer {bot_token}"},
-                )
+                ),
+                attempts=AMBIENT_FETCH_ATTEMPTS,
             )
     except Exception as error:
         _LOG.warning("slack permalink failed for %s in %s: %s", ts, channel, error)
@@ -2294,12 +2321,14 @@ async def _thread_tail(
                 if cursor:
                     params["cursor"] = cursor
                 payload = await _slack_ok(
-                    client.get(
+                    partial(
+                        client.get,
                         SLACK_CONVERSATIONS_REPLIES_URL,
                         params=params,
                         headers={"Authorization": f"Bearer {bot_token}"},
                         timeout=remaining,
-                    )
+                    ),
+                    attempts=AMBIENT_FETCH_ATTEMPTS,
                 )
                 messages = payload.get("messages")
                 items.extend(messages if isinstance(messages, list) else ())
@@ -2387,11 +2416,12 @@ async def _founding_context(
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
-                client.get(
+                lambda: client.get(
                     SLACK_CONVERSATIONS_HISTORY_URL,
                     params=params,
                     headers={"Authorization": f"Bearer {bot_token}"},
-                )
+                ),
+                attempts=AMBIENT_FETCH_ATTEMPTS,
             )
     except Exception as error:
         _LOG.warning("slack ambient context fetch failed for %s: %s", inbound.queue_key, error)
@@ -2475,11 +2505,12 @@ async def _later_channel_context(
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
-                client.get(
+                lambda: client.get(
                     SLACK_CONVERSATIONS_HISTORY_URL,
                     params=params,
                     headers={"Authorization": f"Bearer {bot_token}"},
-                )
+                ),
+                attempts=AMBIENT_FETCH_ATTEMPTS,
             )
     except Exception as error:
         _LOG.warning("slack later context fetch failed for %s: %s", inbound.queue_key, error)
@@ -2924,7 +2955,7 @@ class ThreadStatus:
             body["loading_messages"] = [status]
         try:
             await _slack_ok(
-                client.post(
+                lambda: client.post(
                     SLACK_ASSISTANT_STATUS_URL,
                     content=json.dumps(body),
                     headers={
@@ -3327,7 +3358,7 @@ class ThreadProgress:
         metadata = await self._footer(bot_token, channel, spend) if first else None
         try:
             await _slack_ok(
-                client.post(
+                lambda: client.post(
                     SLACK_CHAT_POST_MESSAGE_URL,
                     content=slack_reply_body(channel, thread_ts, text, metadata),
                     headers={
@@ -3727,7 +3758,7 @@ async def _post_ephemeral(
         bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
         async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
             await _slack_ok(
-                client.post(
+                lambda: client.post(
                     SLACK_CHAT_POST_EPHEMERAL_URL,
                     headers={
                         "Authorization": f"Bearer {bot_token}",
@@ -3989,7 +4020,7 @@ async def _rewrite_slack_message(
     means."""
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         await _slack_ok(
-            client.post(
+            lambda: client.post(
                 SLACK_CHAT_UPDATE_URL,
                 headers={
                     "Authorization": f"Bearer {bot_token}",
@@ -4020,7 +4051,7 @@ async def _held_connect_message(
         params["ts"] = held.thread_ts
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         payload = await _slack_ok(
-            client.get(
+            lambda: client.get(
                 SLACK_CONVERSATIONS_REPLIES_URL
                 if held.thread_ts is not None
                 else SLACK_CONVERSATIONS_HISTORY_URL,
@@ -4164,11 +4195,12 @@ async def _channel_info(bot_token: str, channel: str) -> Mapping[str, object] | 
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
-                client.get(
+                lambda: client.get(
                     SLACK_CONVERSATIONS_INFO_URL,
                     params={"channel": channel},
                     headers={"Authorization": f"Bearer {bot_token}"},
-                )
+                ),
+                attempts=AMBIENT_FETCH_ATTEMPTS,
             )
     except Exception as error:
         _LOG.warning("slack conversations.info failed for %s: %s", channel, error)
@@ -4335,7 +4367,8 @@ async def _reconcile_slack_reply(
         if cursor:
             params["cursor"] = cursor
         payload = await _slack_ok(
-            client.get(
+            partial(
+                client.get,
                 SLACK_CONVERSATIONS_REPLIES_URL
                 if thread_ts is not None
                 else SLACK_CONVERSATIONS_HISTORY_URL,
@@ -4749,19 +4782,10 @@ async def _chat_post(
                     error_code = value
                 case _:
                     error_code = None
-        retry_after = response.headers.get("retry-after")
-        retry_after_seconds = (
-            int(retry_after)
-            if response.status_code == 429
-            and retry_after is not None
-            and retry_after.isdecimal()
-            and len(retry_after) <= MAX_RETRY_AFTER_DIGITS
-            else None
-        )
         error_suffix = f": {error_code}" if error_code is not None else ""
         raise SurfaceDeliveryError(
             f"chat.postMessage HTTP {response.status_code}{error_suffix}",
-            retry_after_seconds=retry_after_seconds,
+            retry_after_seconds=_retry_after_seconds(response),
         ) from error
     return response.json()
 
@@ -4840,7 +4864,7 @@ async def _upload_artifact(
     Answers the file id the share step names; nothing reaches the conversation until that step
     runs."""
     reservation = await _slack_ok(
-        client.post(
+        lambda: client.post(
             SLACK_FILES_GET_UPLOAD_URL,
             headers={"Authorization": f"Bearer {bot_token}"},
             data={"filename": artifact.filename, "length": str(artifact.size_bytes)},
@@ -4869,7 +4893,7 @@ async def _share_uploaded_files(
     """The last step of the external upload: share the uploaded files into the channel or parent
     thread as one message, each keeping the caption or the plain filename as its title."""
     await _slack_ok(
-        client.post(
+        lambda: client.post(
             SLACK_FILES_COMPLETE_UPLOAD,
             headers={
                 "Authorization": f"Bearer {bot_token}",
@@ -4886,8 +4910,79 @@ async def _share_uploaded_files(
     )
 
 
-async def _slack_ok(request: Awaitable[httpx.Response]) -> dict[str, object]:
-    response = await request
+def _retry_after_seconds(response: httpx.Response) -> int | None:
+    """The wait Slack stated on a 429, in whole seconds, or None when it stated none this code can
+    read. Slack sends integer seconds; a float, an HTTP date, or a digit run long enough to be
+    hostile is no statement, and the caller falls back to its own schedule."""
+    stated = response.headers.get("retry-after")
+    if (
+        response.status_code != SLACK_RATE_LIMITED_STATUS
+        or stated is None
+        or not stated.isdecimal()
+        or len(stated) > MAX_RETRY_AFTER_DIGITS
+    ):
+        return None
+    return int(stated)
+
+
+def _rate_limit_wait(stated_seconds: int | None, delay: float) -> float:
+    """The next wait: the stated `Retry-After` when it asks for longer than the ladder, else the
+    ladder step, jittered either way so a quota several calls share does not return them all in the
+    same instant."""
+    ladder = min(delay, SLACK_RETRY_MAX_DELAY_SECONDS)
+    stated = (
+        None
+        if stated_seconds is None
+        else min(float(stated_seconds), SLACK_RETRY_AFTER_MAX_SECONDS)
+    )
+    if stated is not None and stated > ladder:
+        floor, cap = stated, SLACK_RETRY_AFTER_MAX_SECONDS
+    else:
+        floor, cap = ladder, SLACK_RETRY_MAX_DELAY_SECONDS
+    return random.uniform(floor, min(floor * SLACK_RETRY_JITTER_MAX_FACTOR, cap))
+
+
+async def _slack_send(
+    request: Callable[[], Awaitable[httpx.Response]],
+    attempts: int = SLACK_RETRY_MAX_ATTEMPTS,
+) -> httpx.Response:
+    """Send one Slack API call and answer the response Slack did not rate limit. A 429 is retried in
+    process on a doubling ladder from one second, honouring a stated `Retry-After`, bounded by
+    `attempts` and `SLACK_RETRY_BUDGET_SECONDS` of waiting; the request is a factory because each
+    attempt sends it again. A call that is still limited raises.
+
+    A read something waits on passes `AMBIENT_FETCH_ATTEMPTS`, so it raises on the 429 instead of
+    sleeping. Two paths wait: the events ack, where `ingest` and `interactive` answer Slack inside
+    three seconds or Slack calls the delivery failed and sends the event again, and the caller of
+    such a read logs the failure and goes on without that context; and `SlackConversationSearch`,
+    whose reads run once per list page and once per group DM inside a member's tool call, where one
+    ladder per read would hold that call for hours. The ladder belongs to the calls nothing waits
+    on — the posts, the updates, the install exchange, and the background tasks."""
+    delay = SLACK_RETRY_INITIAL_DELAY_SECONDS
+    waited = 0.0
+    attempt = 1
+    while True:
+        response = await request()
+        if response.status_code != SLACK_RATE_LIMITED_STATUS:
+            return response
+        wait = _rate_limit_wait(_retry_after_seconds(response), delay)
+        if attempt >= attempts or waited + wait > SLACK_RETRY_BUDGET_SECONDS:
+            raise SlackRateLimitedError(
+                f"{response.url.path}: Slack rate limited; attempts={attempt}, waited={waited:.1f}s"
+            )
+        await asyncio.sleep(wait)
+        waited += wait
+        delay *= 2
+        attempt += 1
+
+
+async def _slack_ok(
+    request: Callable[[], Awaitable[httpx.Response]],
+    attempts: int = SLACK_RETRY_MAX_ATTEMPTS,
+) -> dict[str, object]:
+    """Issue one Slack API call through the shared 429 ladder and answer its payload, asserting
+    `ok`."""
+    response = await _slack_send(request, attempts)
     response.raise_for_status()
     payload = response.json()
     if payload.get("ok") is not True:
