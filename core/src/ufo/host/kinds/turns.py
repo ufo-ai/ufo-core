@@ -70,7 +70,7 @@ class TurnObjects:
         )
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[TurnSpec] | None:
-        found = await _one(ctx.read_subjects, name)
+        found = await _one(ctx.read_subjects, ctx.turn.agent_id, name)
         return None if found is None else found.detail
 
     async def member_page(
@@ -93,7 +93,7 @@ class TurnObjects:
         admin: bool,
     ) -> MemberObject[TurnSpec] | None:
         subjects = frozenset(str(audience) for audience in readable_audiences(member_id))
-        return await _one(subjects, name)
+        return await _one(subjects, object_agent_id(), name)
 
     async def status(
         self,
@@ -125,12 +125,14 @@ class TurnObjects:
         raise VerbNotSupported(TURNS_ARE_ADMITTED)
 
 
-async def _one(subjects: frozenset[str], name: str) -> MemberObject[TurnSpec] | None:
+async def _one(
+    subjects: frozenset[str], agent_id: UUID, name: str
+) -> MemberObject[TurnSpec] | None:
     try:
         turn_id = UUID(name)
     except ValueError:
         return None
-    rows = await _turns(subjects, None, turn_id=turn_id)
+    rows = await _turns(subjects, agent_id, turn_id=turn_id)
     if not rows:
         return None
     (row,) = rows

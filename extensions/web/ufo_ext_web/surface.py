@@ -4600,7 +4600,6 @@ async def _member_turn(
         or detail.turn.on_behalf_of_member_id
         or await ctx.turn_owner(turn_id)
     )
-    manages = admin_stops_fired and detail.turn.fired_by is not None and audience.admin
     agent_visible = audience.allows(detail.turn.agent_id)
     conversation = (
         await _member_chat(
@@ -4614,6 +4613,12 @@ async def _member_turn(
         )
         if owner != member_id or not agent_visible
         else None
+    )
+    manages = (
+        admin_stops_fired
+        and detail.turn.fired_by is not None
+        and audience.admin
+        and conversation is not None
     )
     if (
         owner != member_id

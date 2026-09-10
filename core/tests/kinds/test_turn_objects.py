@@ -109,6 +109,24 @@ async def _seed_workspace() -> tuple[UUID, UUID, UUID, UUID]:
     return workspace_id, member_id, agent_id, conversation_id
 
 
+async def _seed_agent(workspace_id: UUID, name: str) -> UUID:
+    agent_id = uuid4()
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=name,
+                prompt="Report.",
+                model="auto",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return agent_id
+
+
 async def _seed_member(workspace_id: UUID, email: str) -> UUID:
     member_id = uuid4()
     now = datetime.now(UTC)
@@ -375,6 +393,34 @@ async def test_a_turn_reads_its_own_conversation_and_the_requesters_but_no_furth
 
     assert [row.name for row in page.rows] == [str(own), str(ours)]
     assert got is None
+
+
+async def test_a_turn_of_another_agent_is_not_read_through_this_one(db: None) -> None:
+    """The wall the listing holds is the wall a detail holds: a run reached by id under one agent
+    is that agent's run, so a member reading the drawer of a task fired on `analyst` cannot pull a
+    turn of `courier` through it."""
+    workspace_id, member_id, agent_id, _shared = await _seed_workspace()
+    courier = await _seed_agent(workspace_id, "courier")
+    theirs = await _seed_conversation(
+        workspace_id, courier, audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    elsewhere = await _seed_turn(workspace_id, courier, theirs, seq=1, at=FIRED, fired_by=NIGHTLY)
+
+    with ws(workspace_id), object_agent(ObjectAgent(id=agent_id, name="analyst")):
+        crossed = await TURN_OBJECT.store.member_detail(
+            None, str(elsewhere), member_id=member_id, admin=True
+        )
+        got = await TURN_OBJECT.store.get(
+            _context(workspace_id, member_id, agent_id), str(elsewhere)
+        )
+    with ws(workspace_id), object_agent(ObjectAgent(id=courier, name="courier")):
+        held = await TURN_OBJECT.store.member_detail(
+            None, str(elsewhere), member_id=member_id, admin=True
+        )
+
+    assert crossed is None
+    assert got is None
+    assert held is not None
 
 
 async def test_the_kind_refuses_every_mutation(db: None) -> None:
