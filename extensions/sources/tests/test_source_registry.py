@@ -54,7 +54,7 @@ def test_every_connector_declaring_a_window_reads_the_floor_it_is_handed() -> No
 
 def test_a_two_key_connector_declares_the_slot_behind_each_header() -> None:
     slots = {slot.name for slot in manifest().credentials}
-    assert {"datadog_api_key", "datadog_application_key"} <= slots
+    assert {"datadog_feed_api_key", "datadog_feed_application_key"} <= slots
     assert "datadog" not in slots
     assert "github" in slots
     bearer_named = {name for name in CONNECTORS if not CONNECTORS[name].key_headers}

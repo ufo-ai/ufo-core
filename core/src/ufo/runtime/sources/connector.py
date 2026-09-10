@@ -445,8 +445,7 @@ class Connector(ABC):
     It declares its direct-key auth shape the same way. `key_headers` empty is one bearer token, and
     the slot named for the connector holds it. `key_headers` populated is a provider authenticating
     with headers instead — header name to the credential slot holding that secret — so a provider
-    demanding several keys names the slot for each, under the provider's own names rather than this
-    seam's."""
+    demanding several keys names the slot for each."""
 
     name: ClassVar[str] = ""
     base_url: ClassVar[str] = ""

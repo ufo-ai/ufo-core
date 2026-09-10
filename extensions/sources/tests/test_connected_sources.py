@@ -9,9 +9,11 @@ canonical stream on the connection, whichever agent asked for the connection; a 
 registers nothing until the connection names a tenant URL and then registers on the next tick; the
 job creates what a connect-time creation did not and adds nothing once the rows are there; a stream
 a later connector release marks canonical joins a connection registered long ago; the connection's
-`backfill_days` governs every stream that takes a window and no stream that declares none; and
-raising that window re-pins the live rows from their own anchor and refetches them while lowering it
-leaves them exactly where they are."""
+`backfill_days` governs every stream that takes a window and no stream that declares none; raising
+that window re-pins the live rows from their own anchor and refetches them while lowering it leaves
+them exactly where they are; and a keyed connection the last release minted is deleted with its
+pages while neither of this release's slots is filled, and kept once the carry migration fills
+both."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -756,3 +758,87 @@ async def test_clearing_one_key_of_a_pair_keeps_the_feed_and_clearing_both_remov
     await _tick(state)
     assert await _connections(state) == []
     assert await _rows(state) == []
+
+
+async def _connection_the_outgoing_release_minted(state: _Workspace) -> tuple[UUID, UUID]:
+    """The rows the release being replaced left behind: the workspace's own datadog connection,
+    minted off the slots that release read, carrying its canonical streams and a synced page.
+    Neither slot this release reads is filled, because nothing has written them yet."""
+    init_workspace_credentials(CredentialStore(fernet=Fernet(Fernet.generate_key())))
+    with ws(state.workspace_id), agent(state.main_id):
+        connection_id = await _ext().register_connection(DATADOG)
+    await _set_tenant_url(state, connection_id, DATADOG_SITE)
+    with ws(state.workspace_id), agent(state.main_id):
+        await ConnectedSources(ext=_ext()).register(connection_id)
+    landed = next(row for row in await _rows(state) if row["connection_id"] == connection_id)
+    page_id = uuid4()
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.page).values(
+                    uid=uuid7(),
+                    id=page_id,
+                    workspace_id=state.workspace_id,
+                    source_id=landed["id"],
+                    source_uid=landed["uid"],
+                    digest="e" * 64,
+                    body_ref="pages/monitor",
+                    stream=landed["config"]["stream"],
+                    title="monitor",
+                    subject="shared",
+                    tombstone=False,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    return connection_id, page_id
+
+
+async def _page_ids(state: _Workspace) -> list[UUID]:
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.page.c.id).where(
+                        tables.page.c.workspace_id == state.workspace_id
+                    )
+                )
+            ).all()
+    return [row[0] for row in rows]
+
+
+async def test_the_connection_the_last_release_minted_goes_while_neither_slot_is_filled(
+    db: None,
+) -> None:
+    """What the roll costs a workspace whose Datadog secret is still in the slot the last release
+    wrote: the registrar reads neither slot this release names, calls the connection keyless, and
+    takes it with its streams and its synced pages — the loss the carry migration prevents."""
+    state = await _workspace()
+    await _connection_the_outgoing_release_minted(state)
+
+    await _tick(state)
+
+    assert await _connections(state) == []
+    assert await _rows(state) == []
+    assert await _page_ids(state) == []
+
+
+async def test_the_carried_slots_keep_the_connection_the_last_release_minted(db: None) -> None:
+    """The state the carry migration leaves: the two secrets the last release held stand in the
+    slots this release reads. The registrar counts both filled, calls datadog keyed, and settles on
+    the connection already there rather than removing it — same connection, same streams, page still
+    recallable. Ticking again changes nothing, so the guarantee holds past the first minute."""
+    state = await _workspace()
+    connection_id, page_id = await _connection_the_outgoing_release_minted(state)
+    rows = await _rows(state)
+    for slot, key in zip(DATADOG_SLOTS, ("dd-api", "dd-app"), strict=True):
+        await _fill_slot(state, slot, key)
+
+    await _tick(state)
+    await _tick(state)
+
+    settled = await _rows(state)
+    assert [row["id"] for row in await _connections(state)] == [connection_id]
+    assert [row["id"] for row in settled] == [row["id"] for row in rows]
+    assert {row["config"]["stream"] for row in settled} == _canonical(DATADOG)
+    assert await _page_ids(state) == [page_id]

@@ -43,9 +43,9 @@ for the registrar's tick — the provider names alone would miss a provider whos
 
 
 def _declared_slots(name: str, connector: type[Connector]) -> tuple[CredentialSlot, ...]:
-    """One connector's BYOK slots as declarations. A `key_headers` connector's slots carry the
-    provider's own names, which the extension injecting them on the sandbox wire declares too — one
-    secret, two readers, and the panel shows a row per reader."""
+    """One connector's BYOK slots as declarations. A `key_headers` connector declares one slot per
+    header, named apart from the slots an extension swaps onto the sandbox wire, so the key a member
+    fills for feed-sync stays host-side."""
     if not connector.key_headers:
         return (
             CredentialSlot(

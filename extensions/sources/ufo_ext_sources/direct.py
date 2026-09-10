@@ -13,10 +13,11 @@ logged.
 
 A provider that authenticates with headers rather than a bearer (Datadog's API key beside its
 application key) declares `key_headers` on its connector, and `credential` reads the slot named
-beside each header. Those slots are the provider's own, not this extension's: the keyed connector
-declares the same names for the wire it injects on, one secret answers both readers, and one fill
-serves both. A slot with nothing in it answers `GrantUnusable`, which the sync seam records as a
-skip naming what to fill — the run issues no request it already knows the provider will refuse."""
+beside each header. Those slots are this backend's own and no manifest injects them, which is what
+keeps the invariant above true of a two-key provider: the slots an extension swaps onto the sandbox
+wire carry different names, so a member filling a feed key grants the agent nothing. A slot with
+nothing in it answers `GrantUnusable`, which the sync seam records as a skip naming what to fill —
+the run issues no request it already knows the provider will refuse."""
 
 from dataclasses import dataclass
 from uuid import UUID

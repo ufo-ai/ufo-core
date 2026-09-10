@@ -383,6 +383,21 @@ def test_dev_mode_connector_providers_are_unique() -> None:
     assert _connector_entries(load_manifests())
 
 
+def test_no_slot_an_extension_injects_is_read_in_process_by_another() -> None:
+    """A slot carrying an `InjectionTarget` is admitted and swapped on the sandbox wire and its
+    sentinel exported into every sandbox of the workspace, so filling it is the member's grant to
+    the agent. A slot without one is read host-side and reaches no sandbox. One name declared both
+    ways collapses the two acts: a host-side fill — a feed-sync key a member set for sync alone, a
+    migration carrying one — becomes that grant with no member act behind it."""
+    injected: set[str] = set()
+    host_side: set[str] = set()
+    for manifest, _entry in INSTALLED.values():
+        for slot in manifest.credentials:
+            (injected if slot.injection is not None else host_side).add(slot.name)
+    assert injected
+    assert not injected & host_side
+
+
 def test_installed_extensions_register_every_declared_point(tmp_path: Path) -> None:
     for name in sorted(INSTALLED):
         manifest, _entry = INSTALLED[name]

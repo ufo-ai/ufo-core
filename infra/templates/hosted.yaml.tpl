@@ -23,6 +23,12 @@ spec:
             - name: UFO_OWNER_DSN
               valueFrom:
                 secretKeyRef: {name: ufo-control-secrets, key: postgres-admin-dsn}
+            # A revision that carries a credential row from one slot to another opens the same fleet
+            # Fernet serve and jobs open, so it reads the value it rewrites. Without it such a
+            # revision raises, and `backoffLimit: 0` stops the roll on it.
+            - name: UFO_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}
         # The gateway ledgers live in the `ufo_control` schema, outside core's revision graph, and
         # are shaped here so no replica ever issues DDL: initContainers run to completion in order,
         # so this lands before rls-bootstrap and the whole Job before any gateway pod starts.

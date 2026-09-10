@@ -41,6 +41,11 @@ SERVE_DEPLOYMENT = (
     .split("kind: Deployment\nmetadata:\n  name: ufo-serve", maxsplit=1)[1]
     .split("---", maxsplit=1)[0]
 )
+MIGRATE_CONTAINER = (
+    HOSTED_TEMPLATE.read_text()
+    .split("\n        - name: migrate\n", maxsplit=1)[1]
+    .split("\n        - name: ", maxsplit=1)[0]
+)
 TESTING_CONFIG = Path(__file__).resolve().parents[2] / "infra/envs/testing/ufo.tf"
 PROD_CONFIG = Path(__file__).resolve().parents[2] / "infra/envs/prod/ufo.tf"
 PRODUCTION_WORKLOADS = ("ufo-gateway", "ufo-sandbox-proxy", "ufo-ingress", "ufo-serve")
@@ -333,7 +338,7 @@ def _check_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> No
     routes to `ufo-serve`. The two path namespaces are disjoint by nginx longest-prefix; pinning
     the split here keeps a future edit — or a serve route grabbing a reserved prefix — from
     silently shadowing the gateway."""
-    blocks = HOSTED_TEMPLATE.read_text().split("kind: Ingress")
+    blocks = HOSTED_TEMPLATE.read_text().split("kind: Ingress")[1:]
     serve_ingress = next(b for b in blocks if "name: ufo-serve" in b.split("---", 1)[0])
     pattern = r"- path: (\S+)\s+pathType: (\S+).*?name: (ufo-\S+)"
     routes = re.findall(pattern, serve_ingress, re.DOTALL)
@@ -344,7 +349,7 @@ def _check_app_host_ingress_routes_login_to_gateway_and_product_to_serve() -> No
 
 
 def _check_app_host_ingress_outlives_the_terminal_surface_hold() -> None:
-    blocks = HOSTED_TEMPLATE.read_text().split("kind: Ingress")
+    blocks = HOSTED_TEMPLATE.read_text().split("kind: Ingress")[1:]
     serve_ingress = next(b for b in blocks if "name: ufo-serve" in b.split("---", 1)[0])
     configured = re.search(
         r'nginx\.ingress\.kubernetes\.io/proxy-read-timeout: "(\d+)"', serve_ingress
@@ -433,6 +438,14 @@ def _check_hosted_serve_holds_the_fleet_credential_key() -> None:
     so serve, not the proxy, opens the fleet Fernet."""
     assert "name: UFO_CREDENTIAL_KEY" in SERVE_DEPLOYMENT
     assert "secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}" in SERVE_DEPLOYMENT
+
+
+def _check_hosted_migrate_opens_the_fleet_credential_key() -> None:
+    """A revision that carries a credential row from one slot to another reads and rewrites the
+    sealed value, so the migrate container opens the same Fernet the fleet does. Without it such a
+    revision raises, `backoffLimit: 0` fails the Job, and the fleet never rolls."""
+    assert "name: UFO_CREDENTIAL_KEY" in MIGRATE_CONTAINER
+    assert "secretKeyRef: {name: ufo-serve, key: UFO_CREDENTIAL_KEY}" in MIGRATE_CONTAINER
 
 
 def _check_hosted_proxy_receives_the_run_token_signing_secret() -> None:
@@ -588,6 +601,6 @@ def _check_every_secret_key_a_workload_reads_is_one_an_external_secret_supplies(
 
 def test_hosted_irsa_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 31
+    assert len(checks) == 32
     for check in checks:
         check()

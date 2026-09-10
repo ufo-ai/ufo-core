@@ -42,6 +42,9 @@ services:
     command: ["init"]
     environment:
       <<: *dev-env
+      # The same Fernet serve opens: this runs the migrations, and a revision that carries a
+      # credential row from one slot to another reads and rewrites the value under this key.
+      UFO_CREDENTIAL_KEY: b2Adxpv2mSpXfvoBrALyxxePNw-h7N_1mgxzUFVMMFI=
       UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
       UFO_INGRESS_PUBLIC_URL: http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}
     volumes:

@@ -502,15 +502,15 @@ async def _keyed_slots(**filled: str) -> tuple[UUID, CredentialAccess]:
     init_workspace_credentials(store)
     for slot, value in filled.items():
         await store.put(workspace_id, slot, value)
-    declared = frozenset({"datadog_api_key", "datadog_application_key"})
+    declared = frozenset({"datadog_feed_api_key", "datadog_feed_application_key"})
     return workspace_id, CredentialAccess(declared=declared)
 
 
 async def test_direct_backend_reads_a_two_key_provider_into_its_headers(db: None) -> None:
-    """A connector declaring `key_headers` names one credential slot per header, under the
-    provider's own slot names, so the backend fills each header from the slot beside it."""
+    """A connector declaring `key_headers` names one credential slot per header, under the feed's
+    own slot names, so the backend fills each header from the slot beside it."""
     workspace_id, access = await _keyed_slots(
-        datadog_api_key="dd-api", datadog_application_key="dd-app"
+        datadog_feed_api_key="dd-api", datadog_feed_application_key="dd-app"
     )
     with ws(workspace_id):
         credential = await DirectAuthProxy(credentials=access).credential(workspace_id, "datadog")
@@ -522,8 +522,8 @@ async def test_direct_backend_reads_a_two_key_provider_into_its_headers(db: None
 async def test_direct_backend_answers_grant_unusable_while_a_secret_is_unfilled(db: None) -> None:
     """A half-filled pair cannot authenticate, and Datadog refuses an API key with no application
     key beside it — so the run is skipped naming the slot to fill, spending no refusal."""
-    workspace_id, access = await _keyed_slots(datadog_api_key="dd-api")
-    with ws(workspace_id), pytest.raises(GrantUnusable, match="datadog_application_key"):
+    workspace_id, access = await _keyed_slots(datadog_feed_api_key="dd-api")
+    with ws(workspace_id), pytest.raises(GrantUnusable, match="datadog_feed_application_key"):
         await DirectAuthProxy(credentials=access).credential(workspace_id, "datadog")
 
 
