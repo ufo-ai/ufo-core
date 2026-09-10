@@ -3,6 +3,7 @@ where they and the last recorded scan point, and the projection row the portal r
 
 import asyncio
 import json
+import logging
 from uuid import UUID, uuid4
 
 import pytest
@@ -297,6 +298,46 @@ async def test_the_watched_directory_list_is_bounded(db: None) -> None:
     assert len(json.loads(listing.params)["argv"][3:]) == 1 + WORKSPACE_CHANGE_TARGET_DIRS_MAX
     await _answer(terminals, conversation_id, b'{"changes": [], "truncated": false}')
     await recording
+
+
+async def test_a_failed_scan_is_reported_at_error_level_and_keeps_the_last_one(
+    db: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A malformed answer leaves the stored scan standing, and the failure is emitted at error
+    level so a query over error events finds it."""
+    workspace_id, conversation_id = await _seeded_conversation()
+    stored = WorkspaceChanges(
+        changes=(WorkspaceChange(path="repoa/mod.py", patch="+old", truncated=False),),
+        truncated=False,
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation_change).values(
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                scan=stored.model_dump(mode="json"),
+            )
+        )
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    terminals.connect(conversation_id, "/p", None)
+    handle = await carrier.create(_spec(conversation_id))
+    recorder = WorkspaceChangeRecorder(
+        sandbox=SandboxSession(carrier=carrier, handle=handle),
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        targets=("src/new.py",),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="ufo"):
+        recording = asyncio.ensure_future(recorder.record())
+        exec_ok = json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode()
+        await _answer(terminals, conversation_id, exec_ok)
+        await _answer(terminals, conversation_id, b'{"nothing": "useful"}')
+        await recording
+
+    assert ("ufo", logging.ERROR, "workspace.changes.scan_failed") in caplog.record_tuples
+    assert await recorded_workspace_changes(conversation_id) == stored
 
 
 def _spec(conversation_id: UUID) -> SandboxSpec:

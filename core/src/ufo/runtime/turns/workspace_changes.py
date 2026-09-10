@@ -24,7 +24,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import ToolUseBlock
-from ufo.harness.o11y import log
+from ufo.harness.o11y import log, log_error
 from ufo.harness.sandbox.session import WORKSPACE_DIR, Sandbox, workspace_path
 from ufo.runtime.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
 from ufo.schema import tables
@@ -106,7 +106,7 @@ class WorkspaceChangeRecorder:
             asked = self._directories(recorded)
             await self._store(await self._scan(asked), frozenset(asked))
         except Exception as error:
-            log(
+            log_error(
                 "workspace.changes.scan_failed",
                 conversation_id=str(self.conversation_id),
                 error_class=type(error).__name__,
