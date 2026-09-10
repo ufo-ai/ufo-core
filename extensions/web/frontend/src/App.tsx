@@ -26,7 +26,7 @@ import { SignIn } from "@/views/SignIn";
 import { Shortcuts } from "@/views/Shortcuts";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
-import { CONNECTORS, MESSAGING, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
+import { CHANNELS, CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import { MEMBER_SUBJECT, WEB_SURFACE, isPortalChat, Viewer, WorkspaceId } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { AppsProvider } from "@/lib/apps";
@@ -95,7 +95,7 @@ import {
   type WorkspacePlace,
 } from "@/lib/route";
 import { heldTrack } from "@/lib/tracks";
-import { ALL_SURFACES, SurfacesProvider, useOfferedTabs } from "@/lib/surfaces";
+import { ALL_SURFACES, SurfacesProvider, useOfferedTabs, useSurfaces } from "@/lib/surfaces";
 import type { Agent, ArchivedApp, Member, Surfaces } from "@/lib/types";
 import { useNarrow } from "@/lib/narrow";
 
@@ -740,7 +740,7 @@ function WorkspaceSidebar({
             current={standing(route, "section:messaging")}
             onClick={() => placeSection("messaging", {}, "push")}
           >
-            {MESSAGING.label}
+            {CHANNELS.label}
           </NavRow>
         </li>
         <li>
@@ -807,7 +807,11 @@ function RoutedPane({
 }) {
   const rail = useRail();
   const tabs = useOfferedTabs();
+  const surfaces = useSurfaces();
   const crumb = pageCrumb(route, agents, rail.rows, rail.linked);
+  const appIndex =
+    route.kind === "builder" || (route.kind === "workspace" && route.view === "apps");
+  if (appIndex && !surfaces.apps) return <PaneNote>This link is not valid.</PaneNote>;
   switch (route.kind) {
     case "agent-setup": {
       const app = agents.find((entry) => entry.id === route.agentId) ?? null;

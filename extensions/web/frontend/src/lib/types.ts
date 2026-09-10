@@ -67,6 +67,7 @@ export type ArchivedApp = {
  *  lands on it. */
 export type Surfaces = {
   team: boolean;
+  apps: boolean;
   memory: boolean;
   "community-skills": boolean;
   "installed-skills": boolean;

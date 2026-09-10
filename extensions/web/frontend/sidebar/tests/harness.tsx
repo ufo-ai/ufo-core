@@ -11,6 +11,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
+  STORE_HASH,
   type Section,
   type WorkspacePlace,
   type WorkspaceTab,
@@ -256,11 +257,12 @@ export const SETTINGS = {
   audience: [],
 };
 
-export const CHAT_ROW = {
+export const CHAT_ROW: ChatRow = {
   conversation_id: CONVO_ID,
   agent_id: AGENT_ID,
   agent_name: "assistant",
   title: "Pick one thread",
+  opening: "Pick one thread to carry the work.",
   last_at: "2026-08-01T09:00:00.000Z",
   surface: "web",
   surface_label: null,
@@ -268,6 +270,8 @@ export const CHAT_ROW = {
   member_email: "member@example.com",
   mine: true,
   speaker: null,
+  source: null,
+  turn: "idle",
 };
 
 export const json = (payload: unknown) => Response.json(payload);
@@ -372,17 +376,9 @@ export async function openRow(name: string): Promise<void> {
   await pressRow(name);
 }
 
-export function agentIndex(): Promise<HTMLElement> {
-  return screen.findByRole("navigation", { name: "Apps" });
-}
-
-export async function expandApps(): Promise<void> {
-  const more = screen.queryByRole("button", { name: "More applications" });
-  if (more) await userEvent.click(more);
-}
-
 export async function openStore(): Promise<HTMLElement> {
-  await userEvent.click(await screen.findByRole("button", { name: "App Store" }));
+  location.hash = STORE_HASH;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
   return screen.findByRole("region", { name: "App Store" });
 }
 
@@ -409,13 +405,6 @@ export async function heldConversation(app = "Assistant"): Promise<string> {
   const band = pane.querySelector("[data-slot=header] h2");
   if (!band) throw new Error("the half draws no band");
   return String(band.textContent);
-}
-
-export async function openAgentRow(name: string): Promise<void> {
-  const index = await agentIndex();
-  const row = new RegExp("^" + name);
-  if (!within(index).queryByRole("button", { name: row })) await expandApps();
-  await userEvent.click(await within(index).findByRole("button", { name: row }));
 }
 
 export async function openAgentSettings(

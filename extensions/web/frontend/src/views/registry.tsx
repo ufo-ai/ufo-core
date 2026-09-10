@@ -26,6 +26,34 @@ const WorkspaceMessaging = lazy(() =>
   import("@/views/Surfaces").then((module) => ({ default: module.WorkspaceMessaging })),
 );
 
+export const CHANNELS: PaneView = {
+  label: "Channels",
+  remountOnPlace: false,
+  render: () => <WorkspaceMessaging />,
+};
+
+export const TASKS: PaneView = {
+  label: "Tasks",
+  remountOnPlace: false,
+  render: placed(() => import("@/views/Tasks").then((module) => ({ default: module.Tasks }))),
+};
+
+export const RADAR: PaneView = {
+  label: "Radar",
+  remountOnPlace: false,
+  ownsHeader: true,
+  render: placed(() => import("@/views/Radar").then((module) => ({ default: module.Radar }))),
+};
+
+export const ARTIFACTS: PaneView = {
+  label: "Artifacts",
+  remountOnPlace: false,
+  search: "Search artifacts",
+  render: placed(() =>
+    import("@/views/Artifacts").then((module) => ({ default: module.Artifacts })),
+  ),
+};
+
 export const CONNECTORS: PaneView = {
   label: "Connectors",
   remountOnPlace: false,
@@ -47,11 +75,8 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     remountOnPlace: false,
     render: placed(() => import("@/views/Apps").then((module) => ({ default: module.Apps }))),
   },
-  tasks: {
-    label: "Tasks",
-    remountOnPlace: false,
-    render: placed(() => import("@/views/Tasks").then((module) => ({ default: module.Tasks }))),
-  },
+  tasks: TASKS,
+  channels: CHANNELS,
   skills: {
     label: "Skills",
     remountOnPlace: false,
@@ -92,13 +117,9 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
   },
 };
 
-export const MESSAGING: PaneView = {
-  label: "Messaging",
-  remountOnPlace: false,
-  render: () => <WorkspaceMessaging />,
-};
-
 export const SECTION_VIEWS: Partial<Record<Section, PaneView>> = {
+  radar: RADAR,
+  artifacts: ARTIFACTS,
   connectors: CONNECTORS,
-  messaging: MESSAGING,
+  messaging: CHANNELS,
 };

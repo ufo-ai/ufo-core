@@ -1308,9 +1308,11 @@ PORTAL_SURFACES = {
     "community-skills": "enable-community-skills",
     "installed-skills": "enable-installed-skills",
     "app-store": "enable-app-store",
+    "apps": "enable-apps-tab",
 }
 APP_STORE_FLAG = PORTAL_SURFACES["app-store"]
-CLOSED_UNTIL_ANSWERED = frozenset([*APP_FLAGS.values(), APP_STORE_FLAG])
+APPS_TAB_FLAG = PORTAL_SURFACES["apps"]
+CLOSED_UNTIL_ANSWERED = frozenset([*APP_FLAGS.values(), APP_STORE_FLAG, APPS_TAB_FLAG])
 
 
 def _visibility_flag(main: bool, provisioned_by: str | None) -> str | None:
@@ -3141,6 +3143,7 @@ async def _resolve_chat(
                         "audience": own.audience,
                         "member_email": own.summary.member_email,
                         "last_at": _iso(detail.turn.created_at),
+                        "turn": own.turn,
                     }
                 ]
             }

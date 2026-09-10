@@ -7,6 +7,7 @@ const Offered = createContext<Surfaces | undefined>(undefined);
 
 export const ALL_SURFACES: Surfaces = {
   team: true,
+  apps: true,
   memory: true,
   "community-skills": true,
   "installed-skills": true,
@@ -34,10 +35,12 @@ export function useOfferedTabs(): readonly WorkspaceTab[] {
   return WORKSPACE_TABS.filter((tab) =>
     tab === "team"
       ? surfaces.team
-      : tab === "memory"
-        ? surfaces.memory
-        : tab === "skills"
-          ? surfaces["community-skills"] || surfaces["installed-skills"]
-          : true,
+      : tab === "apps"
+        ? surfaces.apps
+        : tab === "memory"
+          ? surfaces.memory
+          : tab === "skills"
+            ? surfaces["community-skills"] || surfaces["installed-skills"]
+            : true,
   );
 }

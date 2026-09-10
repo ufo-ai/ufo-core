@@ -49,6 +49,10 @@ FLAGS = (
         key=PORTAL_SURFACES["app-store"],
         what="The sidebar's apps list ends in the App Store rather than in App Creator.",
     ),
+    FlagSpec(
+        key=PORTAL_SURFACES["apps"],
+        what="The portal draws the Apps tab, the app index and the app store.",
+    ),
     FlagSpec(key=PORTAL_SURFACES["memory"], what="The workspace Memory tab is drawn."),
     FlagSpec(
         key=PORTAL_SURFACES["community-skills"],

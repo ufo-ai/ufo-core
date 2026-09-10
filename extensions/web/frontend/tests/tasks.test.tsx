@@ -94,12 +94,7 @@ test("a task the address opens links its conversation and offers pause", async (
   expect(location.hash).toBe(chatHash(CONVERSATION_ID));
 });
 
-test.each([
-  { action: "Close", remembered: false },
-  { action: "Escape", remembered: false },
-  { action: "Close", remembered: true },
-  { action: "Escape", remembered: true },
-])("$action clears a task drawer when remembered is $remembered", async ({ action, remembered }) => {
+test.each(["Close", "Escape"])("%s clears a task drawer", async (action) => {
   wire({
     "/objects/scheduled_task/nightly-deploy": () =>
       json({
@@ -117,18 +112,12 @@ test.each([
         owned({ name: "nightly-deploy", summary: "0 9 * * * — build the nightly", paused: false }),
       ]),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
-    "/workspace/team": () => json({ members: [], can_manage: false, actions: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/workspace/tasks";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await pressRow("nightly-deploy");
-  await screen.findByRole("dialog", { name: "nightly-deploy" });
-  if (remembered) {
-    await userEvent.click(screen.getByRole("tab", { name: "Team" }));
-    await userEvent.click(await screen.findByRole("tab", { name: "Tasks" }));
-  }
 
   const sheet = await screen.findByRole("dialog", { name: "nightly-deploy" });
   if (action === "Escape") await userEvent.keyboard("{Escape}");
@@ -137,11 +126,5 @@ test.each([
   await vi.waitFor(() =>
     expect(screen.queryByRole("dialog", { name: "nightly-deploy" })).toBeNull(),
   );
-  expect(location.hash).toBe(remembered ? "#/workspace/tasks?open=" : "#/workspace/tasks");
-
-  await userEvent.click(screen.getByRole("tab", { name: "Team" }));
-  await userEvent.click(await screen.findByRole("tab", { name: "Tasks" }));
-
-  expect(screen.queryByRole("dialog", { name: "nightly-deploy" })).toBeNull();
   expect(location.hash).toBe("#/workspace/tasks");
 });

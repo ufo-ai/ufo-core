@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -22,6 +22,7 @@ beforeEach(() => {
 const ADMIN = { ...MEMBER, admin: true };
 const WITHHELD: Surfaces = {
   team: false,
+  apps: false,
   memory: false,
   "community-skills": false,
   "installed-skills": false,
@@ -29,29 +30,6 @@ const WITHHELD: Surfaces = {
 };
 
 const HIDDEN_APP = { ...SECOND, name: "wiki", app: "wiki", hidden: true };
-
-test("an app the deploy offers is a row the sidebar pins itself", async () => {
-  render(
-    <App
-      agents={[AGENT, { ...HIDDEN_APP, hidden: false }]}
-      member={MEMBER}
-      surfaces={ALL_SURFACES}
-      onAgents={() => {}}
-    />,
-  );
-
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
-  expect(within(rail).getByRole("button", { name: "Wiki" })).toBeTruthy();
-});
-
-test("an app the deploy withholds is no such row", async () => {
-  render(
-    <App agents={[AGENT, HIDDEN_APP]} member={MEMBER} surfaces={ALL_SURFACES} onAgents={() => {}} />,
-  );
-
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
-  expect(within(rail).queryByRole("button", { name: "Wiki" })).toBeNull();
-});
 
 test("a withheld app still opens from its own address", async () => {
   location.hash = "#/agents/" + HIDDEN_APP.id;
@@ -63,17 +41,18 @@ test("a withheld app still opens from its own address", async () => {
 });
 
 test("a withheld workspace screen loses its tab", async () => {
-  location.hash = "#/workspace/apps";
+  location.hash = "#/workspace/credentials";
   render(<App agents={[AGENT]} member={MEMBER} surfaces={WITHHELD} onAgents={() => {}} />);
 
-  await waitFor(() => expect(screen.queryByRole("tab", { name: "Apps" })).toBeTruthy());
+  await waitFor(() => expect(screen.queryByRole("tab", { name: "Credentials" })).toBeTruthy());
+  expect(screen.queryByRole("tab", { name: "Apps" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Team" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Memory" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Skills" })).toBeNull();
 });
 
 test("the skills tab stands while either of its two panels is offered", async () => {
-  location.hash = "#/workspace/apps";
+  location.hash = "#/workspace/credentials";
   render(
     <App
       agents={[AGENT]}
@@ -87,13 +66,13 @@ test("the skills tab stands while either of its two panels is offered", async ()
   expect(screen.queryByRole("tab", { name: "Memory" })).toBeNull();
 });
 
-test("offered workspace screens keep their tabs and connectors keeps its section row", async () => {
+test("offered workspace screens keep their tabs and connections keeps its section row", async () => {
   location.hash = "#/workspace/team";
   render(<App agents={[AGENT]} member={MEMBER} surfaces={ALL_SURFACES} onAgents={() => {}} />);
 
   expect(await screen.findByRole("tab", { name: "Memory" })).toBeTruthy();
   expect(screen.queryByRole("tab", { name: "Connectors" })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Connectors" }));
+  await userEvent.click(screen.getByRole("button", { name: "Connections" }));
   await waitFor(() => expect(location.hash).toBe("#/connectors"));
   expect(screen.queryByRole("tab", { name: "Sources" })).toBeNull();
 });
@@ -118,7 +97,7 @@ test("the team tab is an admin's, and the workspace opens on the first tab drawn
   expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
 });
 
-test("the account menu opens the first workspace tab the member is drawn", async () => {
+test("the sidebar's settings row opens the first workspace tab the member is drawn", async () => {
   location.hash = "";
   wire({ "/transcript": () => json({ messages: [] }) });
   render(
@@ -130,8 +109,7 @@ test("the account menu opens the first workspace tab the member is drawn", async
     />,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: MEMBER.email }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
 
   expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "apps", place: {} });
   expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
@@ -153,4 +131,50 @@ test("the palette's workspace row opens the first tab the member is drawn", asyn
   await userEvent.click(await screen.findByRole("option", { name: "Workspace" }));
 
   expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "apps", place: {} });
+});
+
+test("the apps tab, the app index and the store are withheld with the flag off", async () => {
+  location.hash = "#/agents";
+  const index = render(
+    <App
+      agents={[AGENT]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
+  index.unmount();
+
+  location.hash = "#/agents/store";
+  const store = render(
+    <App
+      agents={[AGENT]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
+  store.unmount();
+
+  location.hash = "#/workspace/apps";
+  render(
+    <App
+      agents={[AGENT]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Apps" })).toBeNull();
+});
+
+test("the apps tab and the app index stand with the flag on", async () => {
+  location.hash = "#/workspace/apps";
+  render(<App agents={[AGENT]} member={ADMIN} surfaces={ALL_SURFACES} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
+  expect(screen.queryByText("This link is not valid.")).toBeNull();
 });

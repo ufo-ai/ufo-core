@@ -56,13 +56,18 @@ from ufo.host.kinds.artifacts import (
     artifact_object,
     artifact_object_names,
 )
-from ufo.host.kinds.conversations import CONVERSATION_KIND, CONVERSATION_OBJECT
+from ufo.host.kinds.conversations import (
+    CONVERSATION_KIND,
+    CONVERSATION_OBJECT,
+    OPENING_SENTENCE_CHARS,
+)
 from ufo.host.kinds.credential_kind import CredentialObjects
 from ufo.host.kinds.members import MEMBER_OBJECT
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ExtensionContext, JsonValue, context_for
 from ufo.runtime.ext.manifest import Manifest
+from ufo.runtime.ext.surface import LIVE_TURN_PRIORITY, ConversationDirectory
 from ufo.runtime.kinds.agents import (
     AGENT_ALREADY_ARCHIVED,
     AGENT_CREATE_GATE,
@@ -126,7 +131,7 @@ from ufo.runtime.turns.audience import (
 from ufo.runtime.turns.transcript import Conversation, transcript_key
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import MAIN_AGENT_ICON, SCHEDULED_ADMISSION, Agent, Turn
+from ufo.schema.records import MAIN_AGENT_ICON, SCHEDULED_ADMISSION, Agent, Turn, TurnContext
 from ufo.sdk.objects import AgentTargetVerb
 
 SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sandbox"
@@ -3998,6 +4003,9 @@ async def test_an_agent_write_refuses_off_reasoning_for_a_required_reasoning_mod
         )
 
 
+SLACK_PERMALINK = "https://example.slack.com/archives/C1/p1700000000000001"
+
+
 async def _rail_conversation(
     workspace_id: UUID,
     agent_id: UUID,
@@ -4010,6 +4018,9 @@ async def _rail_conversation(
     moved_at: datetime,
     surface: str = "cli",
     surface_label: str | None = None,
+    source: str | None = None,
+    opening: str | None = None,
+    turn_status: str = "running",
 ) -> UUID:
     conversation_id = uuid4()
     async with workspace_tx() as connection:
@@ -4035,10 +4046,12 @@ async def _rail_conversation(
                 conversation_id=conversation_id,
                 agent_id=agent_id,
                 seq=1,
-                status="running",
-                inbound=title or "hello",
+                status=turn_status,
+                terminal=None if turn_status in LIVE_TURN_PRIORITY else {"status": turn_status},
+                inbound=opening or title or "hello",
                 admission_source=admission,
                 speaker_member_id=speaker_member_id,
+                context=TurnContext(source=source).model_dump(mode="json"),
                 created_at=moved_at,
                 updated_at=moved_at,
             )
@@ -4078,6 +4091,7 @@ async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
             moved_at=datetime(2026, 8, 2, tzinfo=UTC),
             surface="slack",
             surface_label="#ops",
+            source=SLACK_PERMALINK,
         )
         await _rail_conversation(
             workspace_id,
@@ -4157,6 +4171,7 @@ async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
     assert mine_row.fields["surface"] == "web"
     assert mine_row.fields["surface_label"] is None
     assert mine_row.fields["portal"] is True
+    assert mine_row.fields["source"] is None
     assert mine_row.fields["audience"] == str(conversation_audience(alice))
     assert mine_row.fields["member_email"] == f"{alice.hex[:8]}@x.test"
     assert isinstance(mine_row.fields["last_at"], str)
@@ -4165,6 +4180,7 @@ async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
     assert shared_row.fields["surface"] == "slack"
     assert shared_row.fields["surface_label"] == "#ops"
     assert shared_row.fields["portal"] is False
+    assert shared_row.fields["source"] == SLACK_PERMALINK
     assert shared_row.fields["audience"] == str(SHARED_AUDIENCE)
     assert shared_row.fields["member_email"] is None
     assert [row.name for row in widened.rows] == [row.name for row in page.rows]
@@ -4173,6 +4189,147 @@ async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
     assert bob_rows[str(shared_id)].fields["mine"] is True
     assert bob_rows[str(shared_id)].fields["speaker"] is None
     assert [row.name for row in portal_only.rows] == [str(mine_id)]
+
+
+async def test_conversation_rows_carry_one_opening_sentence(db: None) -> None:
+    """A rail row states what the conversation is about: the first sentence of the words it opened
+    with, bounded, and nothing at all where the viewer may not read its content."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        said_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Ship the plan",
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            opening="  Ship the plan by Friday.\nThen tell the team about it. ",
+        )
+        long_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Long one",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=bob,
+            admission="member",
+            moved_at=datetime(2026, 8, 2, tzinfo=UTC),
+            opening="word " * 80,
+        )
+        private_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Bob private",
+            audience=conversation_audience(bob),
+            member_id=bob,
+            speaker_member_id=bob,
+            admission="member",
+            moved_at=datetime(2026, 8, 3, tzinfo=UTC),
+            opening="Rotate the keys.",
+        )
+        query = ObjectListQuery(
+            order_by="last_at", order="desc", supported_fields=CONVERSATION_OBJECT.list_fields
+        )
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None, member_id=alice, admin=False, query=query
+            )
+        widened = await ConversationDirectory(workspace_id).list(
+            agent_id, alice, admin=True, limit=10
+        )
+
+    rows = {row.name: row for row in page.rows}
+    assert rows[str(said_id)].fields["opening"] == "Ship the plan by Friday."
+    stretched = rows[str(long_id)].fields["opening"]
+    assert stretched == " ".join(["word"] * 32) + "…"
+    assert isinstance(stretched, str) and len(stretched) <= OPENING_SENTENCE_CHARS + 1
+    assert str(private_id) not in rows
+    listed = {entry.summary.id: entry.summary.opening_message for entry in widened}
+    assert listed[said_id] == "Ship the plan by Friday.\nThen tell the team about it."
+    assert listed[private_id] is None
+
+
+async def test_conversation_rail_rows_state_their_live_turn(db: None) -> None:
+    """The rail's status indicator reads one field: a conversation working states the turn it
+    holds, one whose turns have all landed states `idle`, and a landed turn never outranks a live
+    one in the same conversation."""
+    workspace_id = await _workspace()
+    moved_at = datetime(2026, 8, 1, tzinfo=UTC)
+    with ws(workspace_id):
+        member_id = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        running_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Working now",
+            audience=conversation_audience(member_id),
+            member_id=member_id,
+            speaker_member_id=member_id,
+            admission="member",
+            moved_at=moved_at,
+            surface="web",
+        )
+        idle_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Answered",
+            audience=conversation_audience(member_id),
+            member_id=member_id,
+            speaker_member_id=member_id,
+            admission="member",
+            moved_at=moved_at + timedelta(seconds=1),
+            surface="web",
+            turn_status="done",
+        )
+        queued_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Waiting to run",
+            audience=conversation_audience(member_id),
+            member_id=member_id,
+            speaker_member_id=member_id,
+            admission="member",
+            moved_at=moved_at + timedelta(seconds=2),
+            surface="web",
+            turn_status="done",
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=queued_id,
+                    agent_id=agent_id,
+                    seq=2,
+                    status="queued",
+                    inbound="and again",
+                    admission_source="member",
+                    speaker_member_id=member_id,
+                    created_at=moved_at,
+                    updated_at=moved_at,
+                )
+            )
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=member_id,
+                admin=False,
+                query=ObjectListQuery(
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+
+    rows = {row.name: row for row in page.rows}
+    assert rows[str(running_id)].fields["turn"] == "running"
+    assert rows[str(idle_id)].fields["turn"] == "idle"
+    assert rows[str(queued_id)].fields["turn"] == "queued"
 
 
 async def test_conversation_member_filter_runs_before_paging(db: None) -> None:

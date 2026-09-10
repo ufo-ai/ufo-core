@@ -8,7 +8,6 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
-import { agentName } from "@/lib/agentName";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { agentHash, chatHash } from "@/lib/route";
 import { openAgents, placeAgent } from "@/lib/router";
@@ -17,6 +16,7 @@ import {
   AGENT,
   MEMBER,
   atPhoneWidth,
+  json,
   useStreamFake,
   wire,
 } from "./harness";
@@ -169,17 +169,36 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "New chat\u21e7\u2318O",
     "Search",
     "Tasks",
-    "Apps",
-    agentName(AGENT.name),
-    "Pin " + agentName(AGENT.name),
-    "App Store",
+    "Radar",
+    "Artifacts",
+    "Connections",
+    "Settings",
     "Chats",
     "Chats options",
-    "Connectors",
-    "Channels",
     MEMBER.email,
   ]);
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
+});
+
+test("every nav row lands on its own section, whatever the workspace holds", async () => {
+  wire({ "/transcript": () => json({ messages: [] }), "/homepage": () => json({ state: "none" }) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
+  await userEvent.click(rail.getByRole("button", { name: "Tasks" }));
+  expect(location.hash).toBe("#/tasks");
+
+  await userEvent.click(rail.getByRole("button", { name: "Radar" }));
+  await waitFor(() => expect(location.hash).toBe("#/radar"));
+
+  await userEvent.click(rail.getByRole("button", { name: "Artifacts" }));
+  expect(location.hash).toBe("#/artifacts");
+
+  await userEvent.click(rail.getByRole("button", { name: "Connections" }));
+  expect(location.hash).toBe("#/connectors");
+
+  await userEvent.click(rail.getByRole("button", { name: "Settings" }));
+  expect(location.hash).toBe("#/workspace/team");
 });
 
 test("a section heading folds its section, and holds its menu behind a mark drawn under the pointer", async () => {
@@ -187,41 +206,18 @@ test("a section heading folds its section, and holds its menu behind a mark draw
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  for (const name of ["Apps", "Chats"]) {
-    const band = within(sidebar).getByRole("button", { name });
-    expect(band.getAttribute("aria-haspopup")).toBeNull();
-    expect(band.getAttribute("aria-expanded")).toBe("true");
-    const chevron = band.querySelector("svg");
-    if (!chevron) throw new Error(name + " states no fold mark");
-    expect(chevron.getAttribute("class")).not.toContain("opacity-0");
-  }
+  const band = within(sidebar).getByRole("button", { name: "Chats" });
+  expect(band.getAttribute("aria-haspopup")).toBeNull();
+  expect(band.getAttribute("aria-expanded")).toBe("true");
+  const chevron = band.querySelector("svg");
+  if (!chevron) throw new Error("Chats states no fold mark");
+  expect(chevron.getAttribute("class")).not.toContain("opacity-0");
 
-  expect(within(sidebar).queryByRole("button", { name: "Apps options" })).toBeNull();
   const options = within(sidebar).getByRole("button", { name: "Chats options" });
   expect(options.getAttribute("aria-haspopup")).toBe("menu");
   expect(options.getAttribute("class")).toContain("opacity-0");
   expect(options.getAttribute("class")).toContain("group-hover/head:opacity-100");
   expect(options.getAttribute("class")).not.toContain("hidden");
-});
-
-test("the apps section yields its height rather than pushing the sidebar's foot off the screen", async () => {
-  wire({});
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  const apps = within(sidebar).getByRole("navigation", { name: "Apps" });
-
-  const section = apps.parentElement;
-  if (!section) throw new Error("the apps list stands in no section");
-  expect(section.className).not.toContain("shrink-0");
-  expect(apps.className).not.toContain("shrink-0");
-
-  const scroller = apps.firstElementChild;
-  if (!scroller) throw new Error("the apps list has no scrolling frame");
-  expect(scroller.className).toContain("overflow-y-auto");
-  expect(scroller.className).toContain("max-h-(--size-apps-open)");
-
-  expect(within(sidebar).getByRole("button", { name: MEMBER.email })).toBeTruthy();
 });
 
 test("the shell opens with the sidebar open, and a sidebar the member folded stays folded", async () => {
@@ -234,19 +230,6 @@ test("the shell opens with the sidebar open, and a sidebar the member folded sta
 
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   expect(screen.getByRole("button", { name: "Expand sidebar" })).toBeTruthy();
-});
-
-test("a stored pin nothing answers draws no row", () => {
-  localStorage.setItem("pinned-rows", "wiki\nradar");
-  wire({});
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  const names = within(sidebar)
-    .getAllByRole("button")
-    .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
-  expect(names).not.toContain("Wiki");
-  expect(names).not.toContain("Radar");
 });
 
 test("the bar's mark stands at a phone width too, centred out of the row", () => {
@@ -291,14 +274,12 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "New chat\u21e7\u2318O",
     "Search",
     "Tasks",
-    "Apps",
-    agentName(AGENT.name),
-    "Pin " + agentName(AGENT.name),
-    "App Store",
+    "Radar",
+    "Artifacts",
+    "Connections",
+    "Settings",
     "Chats",
     "Chats options",
-    "Connectors",
-    "Channels",
     MEMBER.email,
   ]);
 });
@@ -331,7 +312,7 @@ test("the account menu inside the menu drawer is drawn in the drawer, acts and f
   await userEvent.click(within(sidebar).getByRole("button", { name: MEMBER.email }));
   const acts = await screen.findByRole("menu");
   expect(drawer.contains(acts)).toBe(true);
-  expect(within(acts).getByRole("menuitem", { name: "Settings" })).toBeTruthy();
+  expect(within(acts).queryByRole("menuitem", { name: "Settings" })).toBeNull();
   expect(within(acts).getByRole("menuitem", { name: "Sign out" })).toBeTruthy();
 
   await userEvent.click(within(acts).getByRole("menuitem", { name: "Theme" }));
@@ -348,7 +329,8 @@ test("the sidebar's foot states who is signed in and holds the account's acts in
   expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
 
   await userEvent.click(within(foot).getByRole("button", { name: MEMBER.email }));
-  expect(await screen.findByRole("menuitem", { name: "Settings" })).toBeTruthy();
+  expect(await screen.findByRole("menuitem", { name: "Theme" })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Settings" })).toBeNull();
 
   await userEvent.click(screen.getByRole("menuitem", { name: "Theme" }));
   expect(await screen.findByRole("menuitemradio", { name: "System" })).toBeTruthy();

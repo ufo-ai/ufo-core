@@ -1657,7 +1657,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
             "workspace_id": str(workspace_id),
         },
         "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True)
-        | {"app-store": False, "team": False},
+        | {"app-store": False, "apps": False, "team": False},
         "models": ["auto", "claude-opus-4-8", "claude-sonnet-5"],
         "archived": [],
         "agents": [
@@ -1862,8 +1862,10 @@ async def test_a_flag_service_that_answers_nothing_leaves_a_member_what_they_had
     keys — which is every deploy the moment this lands, and every deploy again while Flagship is
     unreachable. Neither takes one of the portal's own screens away, and neither lists a shipped
     app: an app is offered where somebody turned its flag on, so silence draws it in no list while
-    the workspace goes on holding it. The Team tab is answered by the reader's admin standing rather
-    than by a flag, so no silence reaches it either way."""
+    the workspace goes on holding it. The Apps tab answers with the apps rather than with the
+    portal's own screens — silence withholds it, since a deploy listing no app has no tab to list
+    them on. The Team tab is answered by the reader's admin standing rather than by a flag, so no
+    silence reaches it either way."""
     client, workspace_id, _agent_id = web
     init_flags(InMemoryProvider({}) if bound else None)
     for slug in web_surface.APP_FLAGS:
@@ -1872,6 +1874,7 @@ async def test_a_flag_service_that_answers_nothing_leaves_a_member_what_they_had
     visibility, surfaces = await _app_visibility(client, token)
     assert surfaces == dict.fromkeys(web_surface.PORTAL_SURFACES, True) | {
         "app-store": False,
+        "apps": False,
         "team": True,
     }
     assert visibility == {None: False, **dict.fromkeys(web_surface.APP_FLAGS, True)}
@@ -12113,6 +12116,7 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
                 "enable-installed-skills": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-memory-tab": InMemoryFlag(default_variant="on", variants=variants),
                 "enable-app-store": InMemoryFlag(default_variant="on", variants=variants),
+                "enable-apps-tab": InMemoryFlag(default_variant="on", variants=variants),
                 "enable-wiki-app": InMemoryFlag(default_variant="off", variants=variants),
             }
         )
@@ -12127,6 +12131,7 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
         "community-skills": False,
         "installed-skills": False,
         "app-store": True,
+        "apps": True,
         "team": True,
     }
     assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [

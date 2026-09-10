@@ -188,18 +188,9 @@ test("an address naming an inherited property of an object names no workspace ta
   expect(parseHash("#/constructor")).toEqual({ kind: "bad-link" });
 });
 
-test("a screen moved onto the workspace tabs still answers at the section address it had", () => {
-  expect(parseHash("#/tasks")).toEqual({ kind: "workspace", view: "tasks", place: {} });
-  expect(parseHash("#/tasks?q=nightly")).toEqual({
-    kind: "workspace",
-    view: "tasks",
-    place: { q: "nightly" },
-  });
-  expect(parseHash(workspaceHash("tasks"))).toEqual({
-    kind: "workspace",
-    view: "tasks",
-    place: {},
-  });
+test("tasks answers at its workspace address", () => {
+  expect(parseHash("#/workspace/tasks")).toEqual({ kind: "workspace", view: "tasks", place: {} });
+  expect(workspaceHash("tasks", { q: "nightly" })).toBe("#/workspace/tasks?q=nightly");
 });
 
 test("a conversation slot has a builder, and it writes the address its own read takes", () => {

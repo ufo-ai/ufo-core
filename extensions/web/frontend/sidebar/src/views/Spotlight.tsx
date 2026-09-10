@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  IconApps,
+  IconClockPlay,
+  IconFile,
   IconMessage,
   IconPlug,
   IconPlus,
+  IconRadar,
   IconSearch,
   IconUsers,
   type TablerIcon,
@@ -29,8 +31,8 @@ import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "@/components/
 import { useViewer } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import {
-  AGENTS_HASH,
   HOME_HASH,
+  TASKS_HASH,
   SECTIONS,
   newChatHash,
   sectionHash,
@@ -60,13 +62,15 @@ const SEARCH = "Search";
 const SEARCH_CHORD: Chord = { key: CHORD, cap: "\u2318K", aria: "Meta+K" };
 
 const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
+  radar: IconRadar,
+  artifacts: IconFile,
   connectors: IconPlug,
 };
 
 function places(landing: WorkspaceTab): { label: string; hash: string; icon: TablerIcon }[] {
   return [
     { label: "Chat", hash: HOME_HASH, icon: IconMessage },
-    { label: "Apps", hash: AGENTS_HASH, icon: IconApps },
+    { label: "Tasks", hash: TASKS_HASH, icon: IconClockPlay },
     ...SECTIONS.flatMap((section) => {
       const view = SECTION_VIEWS[section];
       const icon = SECTION_ICONS[section];

@@ -28,10 +28,11 @@ beforeEach(() => {
 const ADMIN = { ...MEMBER, admin: true };
 const WITHHELD: Surfaces = {
   team: false,
-      memory: false,
-      "community-skills": false,
-      "installed-skills": false,
-      "app-store": false,
+  apps: false,
+  memory: false,
+  "community-skills": false,
+  "installed-skills": false,
+  "app-store": false,
 };
 
 const HIDDEN_APP = { ...SECOND, name: "wiki", app: "wiki", hidden: true };
@@ -71,10 +72,11 @@ test("a withheld app still opens from its own address", async () => {
 });
 
 test("a withheld workspace screen loses its tab", async () => {
-  location.hash = "#/workspace/apps";
+  location.hash = "#/workspace/credentials";
   render(<App agents={[AGENT]} member={MEMBER} surfaces={WITHHELD} onAgents={() => {}} />);
 
-  await waitFor(() => expect(screen.queryByRole("tab", { name: "Apps" })).toBeTruthy());
+  await waitFor(() => expect(screen.queryByRole("tab", { name: "Credentials" })).toBeTruthy());
+  expect(screen.queryByRole("tab", { name: "Apps" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Team" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Memory" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Skills" })).toBeNull();
@@ -82,7 +84,7 @@ test("a withheld workspace screen loses its tab", async () => {
 });
 
 test("the skills tab stands while either of its two panels is offered", async () => {
-  location.hash = "#/workspace/apps";
+  location.hash = "#/workspace/credentials";
   render(
     <App
       agents={[AGENT]}
@@ -178,4 +180,23 @@ test("the palette carries no second name for the workspace", async () => {
 
   await userEvent.click(screen.getByRole("option", { name: "Apps" }));
   expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "apps", place: {} });
+});
+
+test("the apps tab is withheld with the flag off, and stands with it on", async () => {
+  location.hash = "#/workspace/apps";
+  const off = render(
+    <App
+      agents={[AGENT]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Apps" })).toBeNull();
+  off.unmount();
+
+  render(<App agents={[AGENT]} member={ADMIN} surfaces={ALL_SURFACES} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
 });

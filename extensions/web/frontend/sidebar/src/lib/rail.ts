@@ -6,11 +6,15 @@ import {
 } from "@/lib/audience";
 import type { Agent, OwnedConversation } from "@/lib/types";
 
+/** The liveest turn a conversation holds, `idle` where it holds none. */
+export type RailTurn = "running" | "queued" | "parked" | "idle";
+
 export type ChatRow = {
   conversation_id: string;
   agent_id: string;
   agent_name: string;
   title: string;
+  opening: string | null;
   last_at: string;
   surface: string;
   surface_label: string | null;
@@ -18,6 +22,8 @@ export type ChatRow = {
   member_email: string | null;
   mine: boolean;
   speaker: string | null;
+  source: string | null;
+  turn: RailTurn;
 };
 
 export type ChatsPayload = { chats: ChatRow[]; conversation?: OwnedConversation };
@@ -27,6 +33,7 @@ export type ConversationRow = {
   agent_id: string;
   agent_name: string;
   title: string;
+  opening: string | null;
   last_at: string;
   surface: string;
   surface_label: string | null;
@@ -34,6 +41,8 @@ export type ConversationRow = {
   member_email: string | null;
   mine: boolean;
   speaker: string | null;
+  source: string | null;
+  turn: RailTurn;
 };
 
 export type ConversationsPayload = { objects: ConversationRow[]; next_cursor?: string | null };
@@ -44,6 +53,7 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
     agent_id: row.agent_id,
     agent_name: row.agent_name,
     title: row.title,
+    opening: row.opening,
     last_at: row.last_at,
     surface: row.surface,
     surface_label: row.surface_label,
@@ -51,6 +61,8 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
     member_email: row.member_email,
     mine: row.mine,
     speaker: row.speaker,
+    source: row.source,
+    turn: row.turn,
   }));
 }
 

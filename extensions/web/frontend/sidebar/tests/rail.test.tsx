@@ -28,7 +28,7 @@ import {
 import { pickAppsExpanded, railState, resetRailStore } from "@/lib/railStore";
 import type { Agent } from "@/lib/types";
 
-import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -41,6 +41,14 @@ const NOT_SHARED = "This conversation is not shared with this account.";
 const PORTAL_ONLY = { terminal: false, slack: false, imessage: false };
 const EVERY_SURFACE = { terminal: true, slack: true, imessage: true };
 
+async function hoverCard(): Promise<HTMLElement> {
+  return await waitFor(() => {
+    const card = document.querySelector("[data-slot=hover-card-content]");
+    if (card === null) throw new Error("no hover card");
+    return card as HTMLElement;
+  });
+}
+
 function hoursAgo(hours: number): string {
   return new Date(NOW.getTime() - hours * 3_600_000).toISOString();
 }
@@ -51,6 +59,7 @@ function row(id: string, last_at: string): ChatRow {
     agent_id: AGENT_ID,
     agent_name: "assistant",
     title: "chat " + id,
+    opening: null,
     last_at,
     surface: "web",
     surface_label: null,
@@ -58,6 +67,8 @@ function row(id: string, last_at: string): ChatRow {
     member_email: "member@example.com",
     mine: true,
     speaker: null,
+    source: null,
+    turn: "idle",
   };
 }
 
@@ -285,7 +296,7 @@ test("a tick leaves the filter open, so both surfaces are named in one visit", a
 
 /** The row draws a stamp beside the title, so what the row *says* is the title's own frame. */
 function rowWords(row: HTMLElement): string {
-  return (row.querySelector("span") as HTMLElement).textContent ?? "";
+  return (row.querySelector(":scope > span:not([data-turn])") as HTMLElement).textContent ?? "";
 }
 
 async function openGroup(label: string) {
@@ -669,6 +680,27 @@ test("a first message sent before the rail resolves still lands, and the rail me
   expect(within(screen.getByTestId("log")).getByText("early words")).toBeTruthy();
 });
 
+test("a running thread's row draws the live dot and an idle one's rests in the same column", async () => {
+  const running = { ...CHAT_ROW, turn: "running" as const };
+  const idle = {
+    ...CHAT_ROW,
+    conversation_id: "66666666-6666-4666-8666-666666666666",
+    title: "Answered thread",
+    turn: "idle" as const,
+  };
+  wire(chatsOnWire([running, idle]));
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const live = await screen.findByRole("button", { name: /Pick one thread/ });
+  const rest = screen.getByRole("button", { name: /Answered thread/ });
+  const column = (button: HTMLElement) => button.querySelector("[data-turn]")!;
+  expect(column(live).className).toBe(column(rest).className);
+  expect(column(live).className).toContain("size-(--size-glyph)");
+  expect(column(live).firstElementChild!.className).toContain("bg-live");
+  expect(column(rest).firstElementChild!.className).toContain("scale-0");
+  expect(column(rest).firstElementChild!.className).not.toContain("bg-live");
+});
+
 test("a rail row opens its conversation's transcript", async () => {
   const { calls } = wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -729,7 +761,7 @@ test("a row of a non-main agent names its agent in the rail", async () => {
   const railRow = await screen.findByRole("button", { name: /An ops question/ });
   expect(rowWords(railRow)).toBe("An ops question");
   fireEvent.focus(railRow);
-  expect((await screen.findByRole("tooltip")).textContent).toBe("Second");
+  expect((await hoverCard()).textContent).toContain("Second");
 });
 
 test("a row from another surface draws its glyph and states the surface's own name", async () => {
@@ -747,7 +779,7 @@ test("a row from another surface draws its glyph and states the surface's own na
   expect(rowWords(railRow)).toBe("Slack question");
   expect(railRow.querySelector(".tabler-icon-brand-slack")).not.toBeNull();
   fireEvent.focus(railRow);
-  expect((await screen.findByRole("tooltip")).textContent).toBe("DM");
+  expect((await hoverCard()).textContent).toContain("DM");
 });
 
 test("a cli row draws the terminal glyph and reads as Terminal, never as the surface's own name", async () => {
@@ -759,7 +791,7 @@ test("a cli row draws the terminal glyph and reads as Terminal, never as the sur
   const railRow = await screen.findByRole("button", { name: /Deploy the branch/ });
   expect(railRow.querySelector(".tabler-icon-terminal-2")).not.toBeNull();
   fireEvent.focus(railRow);
-  expect((await screen.findByRole("tooltip")).textContent).toBe("Terminal");
+  expect((await hoverCard()).textContent).toContain("Terminal");
 });
 
 test("the surface glyph is drawn at the sidebar's glyph size, not at the row's text size", async () => {
@@ -811,13 +843,32 @@ test("a portal row draws no glyph — the rail is read where those conversations
   expect(railRow.querySelector(".tabler-icon")).toBeNull();
 });
 
-test("a row whose title is the whole of it is no tooltip trigger", async () => {
+test("hovering a row opens the card on its title, opening words and metadata", async () => {
+  const slack = { ...CHAT_ROW, surface: "slack", surface_label: "#ops" };
+  holdRailShown(EVERY_SURFACE);
+  wire({ ...chatsOnWire([slack]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
+  await userEvent.hover(railRow);
+
+  const card = await hoverCard();
+  expect(card.textContent).toContain("Pick one thread");
+  expect(card.textContent).toContain("Pick one thread to carry the work.");
+  expect(card.textContent).toContain("#ops");
+  expect(card.textContent).toContain(fullMoment(slack.last_at));
+  expect(railRow.getAttribute("aria-describedby")).toBe(card.getAttribute("id"));
+});
+
+test("a row reached by the keyboard opens the same card", async () => {
   wire({ ...chatsOnWire([CHAT_ROW]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
-  expect(railRow.getAttribute("data-state")).toBeNull();
-  expect(railRow.getAttribute("aria-describedby")).toBeNull();
+  fireEvent.focus(railRow);
+
+  expect((await hoverCard()).textContent).toContain("Pick one thread to carry the work.");
+  expect(railRow.getAttribute("data-state")).toBe("open");
 });
 
 test("a conversation another member spoke stands at the foot and names them", async () => {
@@ -835,7 +886,7 @@ test("a conversation another member spoke stands at the foot and names them", as
   const railRow = await screen.findByRole("button", { name: /The deploy thread/ });
   expect(rowWords(railRow)).toBe("The deploy thread");
   fireEvent.focus(railRow);
-  expect((await screen.findByRole("tooltip")).textContent).toContain("Pat Reyes");
+  expect((await hoverCard()).textContent).toContain("Pat Reyes");
   const section = railRow.closest("section");
   expect(section?.textContent).toContain("Other members");
   expect(section?.textContent).not.toContain("Pick one thread");
@@ -844,7 +895,7 @@ test("a conversation another member spoke stands at the foot and names them", as
 
 /** jsdom lays nothing out, so the frame and the words it holds are given their widths rather than measured. */
 function overrunning(row: HTMLElement, frameWidth: number, textWidth: number) {
-  const frame = row.querySelector("span") as HTMLElement;
+  const frame = row.querySelector(":scope > span:not([data-turn])") as HTMLElement;
   const text = frame.querySelector("span") as HTMLElement;
   Object.defineProperty(frame, "clientWidth", { value: frameWidth, configurable: true });
   text.getBoundingClientRect = () => ({ width: textWidth }) as DOMRect;
@@ -1248,42 +1299,6 @@ test("the ask control targets the main agent, and offers no other", async () => 
   expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
 });
 
-test("the apps list opens the agent's page, and the sidebar starts the conversation", async () => {
-  location.hash = "#/";
-  wire({ "/settings": () => json(SETTINGS), "/connections": () => json({ connections: [] }) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await screen.findByRole("main");
-
-  await openAgentRow("Assistant");
-  expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  expect(screen.getByRole("navigation", { name: "Apps" })).toBeTruthy();
-
-  const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(rail.getByRole("button", { name: "New chat" }));
-  expect(location.hash).toBe("#/new/" + AGENT_ID);
-  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
-  expect(screen.queryByRole("navigation", { name: "Breadcrumb" })).toBeNull();
-});
-
-test("an app with nothing in flight states nothing under its name", async () => {
-  location.hash = "#/";
-  wire({
-    "/settings": () => json(SETTINGS),
-    "/connections": () => json({ connections: [] }),
-    "/api/agents/status": () =>
-      json({ statuses: [{ agent_id: AGENT_ID, turn: null, last_failed: false }] }),
-  });
-  const purposeful = { ...AGENT, purpose: "Answers from what this workspace has recorded." };
-  render(<App agents={[purposeful]} member={MEMBER} onAgents={() => {}} />);
-  await screen.findByRole("main");
-
-  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
-  const row = await index.findByRole("button", { name: /^Assistant/ });
-  expect(within(row).queryByText("Answers from what this workspace has recorded.")).toBeNull();
-  expect(index.queryByText(/Idle|Active/)).toBeNull();
-  expect(row.textContent).toBe("Assistant");
-});
-
 test("the conversations rail stands in the sidebar whatever the destination", async () => {
   wire({
     ...chatsOnWire([CHAT_ROW]),
@@ -1297,8 +1312,7 @@ test("the conversations rail stands in the sidebar whatever the destination", as
   expect(await rail.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
   expect(rail.getByRole("button", { name: "New chat" })).toBeTruthy();
 
-  await userEvent.click(rail.getByRole("button", { name: MEMBER.email }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
+  await userEvent.click(rail.getByRole("button", { name: "Settings" }));
   expect(await screen.findByRole("heading", { name: "Team" })).toBeTruthy();
   expect(rail.getByRole("button", { name: /Pick one thread/ })).toBeTruthy();
   expect(rail.getByRole("button", { name: "New chat" })).toBeTruthy();
@@ -1398,23 +1412,21 @@ test("the sidebar marks the destination the member is in and leaves the others o
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   const marked = () =>
-    ["New chat", "Connectors"].filter(
+    ["New chat", "Tasks", "Connections", "Settings"].filter(
       (name) => rail.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
   expect(marked()).toEqual(["New chat"]);
 
-  await userEvent.click(rail.getByRole("button", { name: MEMBER.email }));
-  await userEvent.click(await screen.findByRole("menuitem", { name: "Settings" }));
+  await userEvent.click(rail.getByRole("button", { name: "Settings" }));
   await waitFor(() => expect(destination()).toBe("Team"));
-  expect(marked()).toEqual([]);
+  expect(marked()).toEqual(["Settings"]);
 
-  await userEvent.click(rail.getByRole("button", { name: "Connectors" }));
-  await waitFor(() => expect(marked()).toEqual(["Connectors"]));
+  await userEvent.click(rail.getByRole("button", { name: "Tasks" }));
+  await waitFor(() => expect(marked()).toEqual(["Tasks"]));
 
-  const index = within(await screen.findByRole("navigation", { name: "Apps" }));
-  expect(index.getByRole("button", { name: "Assistant" })).toBeTruthy();
-  expect(index.getByRole("button", { name: "Second" })).toBeTruthy();
+  await userEvent.click(rail.getByRole("button", { name: "Connections" }));
+  await waitFor(() => expect(marked()).toEqual(["Connections"]));
 });
 
 test("a failed rail read states it and retries on demand", async () => {

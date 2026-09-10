@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { render, screen, waitFor } from "@testing-library/react";
@@ -27,6 +27,12 @@ const entry = () => {
   if (!asset) throw new Error("the built page references no module");
   return readFileSync(join(STATIC, asset[1]), "utf8");
 };
+
+const modules = () =>
+  readdirSync(join(STATIC, "assets"))
+    .filter((file) => file.endsWith(".js"))
+    .map((file) => readFileSync(join(STATIC, "assets", file), "utf8"))
+    .join("");
 
 function servesSprites(): string[] {
   const asked: string[] = [];
@@ -245,7 +251,7 @@ test("each element mark carries its own square window inside the pack's canvas",
 });
 
 test("the bundle carries the marks the picker offers and none of the rest", () => {
-  const bundle = entry();
+  const bundle = modules();
   const { container } = render(<AgentIcon name="propylon" />);
   const drawn = container.querySelector("path")!.getAttribute("d")!;
 

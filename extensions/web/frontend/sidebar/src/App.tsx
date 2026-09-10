@@ -1,19 +1,20 @@
-import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
-  IconBroadcast,
   IconChevronDown,
-  IconCirclePlusFilled,
-  IconFilter2,
   IconChevronRight,
+  IconCirclePlusFilled,
+  IconClockPlay,
   IconDeviceDesktop,
   IconDotsVertical,
+  IconFile,
+  IconFilter2,
   IconLayoutSidebarRight,
   IconLogout,
   IconMenu2,
   IconMoon,
-  IconClockPlay,
   IconPlug,
+  IconRadar,
   IconSettings,
   IconSun,
   IconX,
@@ -36,14 +37,12 @@ import {
 } from "@/components/ui/collapsible";
 import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AppsIndex } from "./views/AppsIndex";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { SignIn } from "@/views/SignIn";
-import { ConnectSurfaces, SURFACES_READ, type SurfacesPayload } from "@/views/Surfaces";
 import { SearchRow, Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
-import { CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
+import { SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
   MEMBER_SUBJECT,
   WEB_SURFACE,
@@ -51,6 +50,7 @@ import {
   Viewer,
   WorkspaceId,
   origin,
+  slackLink,
   speakerName,
 } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
@@ -59,9 +59,9 @@ import { useAppStatus } from "@/lib/appStatusStore";
 import { SurfaceGlyph } from "@/lib/surfaceMark";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
-import { Loading, usePanelRead } from "@/kernel/panel";
+import { Loading } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
-import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
+import { MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { fullMoment } from "@/lib/moments";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
@@ -88,11 +88,10 @@ import {
   railStamp,
   stampIso,
   type RailGroup,
+  type RailTurn,
 } from "@/lib/rail";
 import {
   foldSidebar,
-  pickAppsExpanded,
-  pickPinned,
   pickSectionShut,
   pickRailShown,
   pickRailShut,
@@ -106,7 +105,6 @@ import {
 import {
   forwardAgents,
   heldRoute,
-  openAgent,
   openAgentPlace,
   openAgents,
   openBuilder,
@@ -114,7 +112,6 @@ import {
   openHome,
   openNewChat,
   openSlot,
-  openStore,
   openTasks,
   placeAgent,
   placeFirstRun,
@@ -125,6 +122,7 @@ import {
   useTravel,
 } from "@/lib/router";
 import {
+  chatHash,
   COMPOSE,
   COMPOSING,
   standing,
@@ -132,7 +130,7 @@ import {
   type Section,
   type WorkspacePlace,
 } from "@/lib/route";
-import { ALL_SURFACES, SurfacesProvider, useOfferedTabs } from "@/lib/surfaces";
+import { ALL_SURFACES, SurfacesProvider, useOfferedTabs, useSurfaces } from "@/lib/surfaces";
 import type { Agent, ArchivedApp, Member, Surfaces } from "@/lib/types";
 
 /** One route's pane is one chunk: a member who opens the wizard, the store or a workspace tab never
@@ -321,7 +319,6 @@ export function App({
                   member={member}
                   mainAgent={mainAgent}
                   narrow={narrow}
-                  onBuild={startBuild}
                 />
               ) : null}
               <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
@@ -358,6 +355,7 @@ function founded(agent: Agent, conversationId: string, title: string): void {
     agent_id: agent.id,
     agent_name: agent.name,
     title,
+    opening: null,
     last_at: stampIso(new Date()),
     surface: WEB_SURFACE,
     surface_label: null,
@@ -365,6 +363,8 @@ function founded(agent: Agent, conversationId: string, title: string): void {
     member_email: null,
     mine: true,
     speaker: null,
+    source: null,
+    turn: "running",
   });
   const seen = heldRoute();
   if (seen.kind === "home" || (seen.kind === "new-chat" && seen.agentId === agent.id)) {
@@ -468,15 +468,8 @@ const MENU_ITEM = "flex items-center gap-sm";
  *  `container` follows the menu these acts stand in rather than the document. */
 function AccountActs({ container }: { container?: HTMLElement | null }) {
   const scheme = useScheme();
-  const tabs = useOfferedTabs();
   return (
     <>
-      <DropdownMenuItem onSelect={() => placeWorkspace(tabs[0], {}, "push")}>
-        <span className={MENU_ITEM}>
-          <IconSettings className={GLYPH} aria-hidden />
-          {SETTINGS_LABEL}
-        </span>
-      </DropdownMenuItem>
       <DropdownMenuSub>
         <DropdownMenuSubTrigger>
           <span className={MENU_ITEM}>
@@ -561,10 +554,10 @@ function AccountRow({ member, collapsed }: { member: Member; collapsed: boolean 
   );
 }
 
-const APPS = "Apps";
 const CHATS = "Chats";
-const CHANNELS = "Channels";
 const NEW_CHAT = "New chat";
+const TASKS = "Tasks";
+const CONNECTIONS = "Connections";
 
 /** Shift makes the character upper case, so the guard reads the letter. */
 const NEW_CHAT_CHORD: Chord = { key: "o", cap: "\u21e7\u2318O", aria: "Meta+Shift+O" };
@@ -575,19 +568,20 @@ const SECTION_HEAD_CHEVRON =
 const SECTION_HEAD_GLYPH =
   "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none group-hover/head:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 data-[state=open]:bg-fill";
 
-function defaultPins(agents: Agent[]): string[] {
-  const apps = agents.filter((agent) => agent.app && agent.app !== CHAT_SURFACE);
-  apps.sort((a, b) => a.name.localeCompare(b.name));
-  return apps.map((agent) => agent.id);
-}
-
 const GLYPH = "size-(--size-glyph) shrink-0";
 
 const AskGlyph = () => <IconCirclePlusFilled className={cn(GLYPH, "text-primary")} aria-hidden />;
 
 const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
+  radar: <IconRadar className={GLYPH} aria-hidden />,
+  artifacts: <IconFile className={GLYPH} aria-hidden />,
   connectors: <IconPlug className={GLYPH} aria-hidden />,
 };
+
+const APP_SECTIONS: { section: Section; label: string }[] = [
+  { section: "radar", label: "Radar" },
+  { section: "artifacts", label: "Artifacts" },
+];
 
 const HEADER_CONTROL = "rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill";
 
@@ -643,74 +637,6 @@ function SchemeGlyph({ scheme }: { scheme: Scheme }) {
   return <IconDeviceDesktop className={GLYPH} aria-hidden />;
 }
 
-function ChannelsPick({
-  collapsed,
-  agent,
-  member,
-}: {
-  collapsed: boolean;
-  agent: Agent | null;
-  member: Member;
-}) {
-  const [open, setOpen] = useState(false);
-  const [toast, setToast] = useState(SILENT);
-  const [reloads, setReloads] = useState(0);
-  const state = usePanelRead<SurfacesPayload>(SURFACES_READ, reloads);
-  const refuse = useCallback((title: string) => setToast({ title }), []);
-  const missing =
-    state.phase === "ready" &&
-    state.payload.surfaces.some((row) => row.offered && !row.connected);
-  return (
-    <SidebarRow>
-      <SidebarTooltip collapsed={collapsed} label={CHANNELS}>
-        <SidebarPress
-          collapsed={collapsed}
-          label={CHANNELS}
-          glyph={
-            <span className="relative flex shrink-0">
-              <IconBroadcast className={GLYPH} aria-hidden />
-              {missing ? (
-                <span
-                  aria-hidden
-                  className="absolute -right-2xs -bottom-2xs size-sm rounded-full bg-attention-ink"
-                />
-              ) : null}
-            </span>
-          }
-          onClick={() => setOpen(true)}
-        />
-      </SidebarTooltip>
-      {open && agent ? (
-          <Dialog
-            open
-            onOpenChange={(next) => {
-              if (next) return;
-              setOpen(false);
-              setReloads((count) => count + 1);
-            }}
-          >
-          <DialogContent>
-            <DialogHeader className="flex-row items-center justify-between">
-              <DialogTitle>{CHANNELS}</DialogTitle>
-              <DialogPrimitive.Close asChild>
-                <Button variant="mark" size="glyph" aria-label="Close" className="text-ink-quiet">
-                  <IconX stroke={1.25} aria-hidden />
-                </Button>
-              </DialogPrimitive.Close>
-            </DialogHeader>
-            <ConnectSurfaces
-              agent={agent}
-              member={member}
-              onRefused={refuse}
-            />
-          </DialogContent>
-        </Dialog>
-      ) : null}
-      <Toast state={toast} onDone={() => setToast(SILENT)} />
-    </SidebarRow>
-  );
-}
-
 function SectionHead({
   label,
   shut,
@@ -763,20 +689,17 @@ function WorkspaceSidebar({
   member,
   mainAgent,
   narrow,
-  onBuild,
 }: {
   route: Route;
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
   narrow: boolean;
-  onBuild: () => void;
 }) {
   const rail = useRail();
+  const tabs = useOfferedTabs();
   const collapsed = rail.collapsed && !narrow;
-  const appsShut = !collapsed && rail.sectionsShut.includes(APPS);
   const chatsShut = !collapsed && rail.sectionsShut.includes(CHATS);
-  const pinned = rail.pinned ?? defaultPins(agents);
   const chatApp = chatSurface(agents);
   const startChat = useCallback(() => {
     if (!mainAgent) return;
@@ -839,39 +762,34 @@ function WorkspaceSidebar({
           icon={<IconClockPlay className={GLYPH} aria-hidden />}
           current={standing(route, "tasks")}
           collapsed={collapsed}
-          label={WORKSPACE_VIEWS.tasks.label}
+          label={TASKS}
           onClick={openTasks}
         />
+        {APP_SECTIONS.map(({ section, label }) => (
+          <NavRow
+            key={section}
+            icon={SECTION_GLYPHS[section]}
+            current={standing(route, `section:${section}`)}
+            collapsed={collapsed}
+            label={label}
+            onClick={() => placeSection(section, {}, "push")}
+          />
+        ))}
+        <NavRow
+          icon={SECTION_GLYPHS.connectors}
+          current={standing(route, "section:connectors")}
+          collapsed={collapsed}
+          label={CONNECTIONS}
+          onClick={() => placeSection("connectors", {}, "push")}
+        />
+        <NavRow
+          icon={<IconSettings className={GLYPH} aria-hidden />}
+          current={standing(route, "workspace")}
+          collapsed={collapsed}
+          label={SETTINGS_LABEL}
+          onClick={() => placeWorkspace(tabs[0], {}, "push")}
+        />
       </ul>
-      <div className="flex min-h-0 flex-col gap-px px-sm">
-        <SectionHead
-          label={APPS}
-          shut={appsShut}
-          collapsed={collapsed}
-          onShut={(shut) => pickSectionShut(APPS, shut)}
-        />
-        {appsShut ? null : (
-        <AppsIndex
-          agents={agents}
-          openId={route.kind === "agent" ? route.agentId : null}
-          store={route.kind === "store"}
-          pinned={pinned}
-          expanded={rail.appsExpanded}
-          collapsed={collapsed}
-          onExpand={pickAppsExpanded}
-          onPin={(agentId) =>
-            pickPinned(
-              pinned.includes(agentId)
-                ? pinned.filter((id) => id !== agentId)
-                : [...pinned, agentId],
-            )
-          }
-          onOpen={openAgent}
-          onStore={openStore}
-          onBuild={onBuild}
-        />
-        )}
-      </div>
       <div className={cn("flex min-h-0 flex-1 flex-col gap-px px-sm", collapsed && "hidden")}>
         <RailSettingsFlyout shut={chatsShut} onShut={(shut) => pickSectionShut(CHATS, shut)} />
         {chatsShut ? null : (
@@ -880,17 +798,7 @@ function WorkspaceSidebar({
           </div>
         )}
       </div>
-      <ul className="m-0 mt-auto flex shrink-0 list-none flex-col gap-px px-sm py-0">
-        <NavRow
-          icon={SECTION_GLYPHS.connectors}
-          current={standing(route, "section:connectors")}
-          collapsed={collapsed}
-          label={CONNECTORS.label}
-          onClick={() => placeSection("connectors", {}, "push")}
-        />
-        <ChannelsPick collapsed={collapsed} agent={mainAgent} member={member} />
-      </ul>
-      <footer className="shrink-0">
+      <footer className="mt-auto shrink-0">
         <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
           <AccountRow member={member} collapsed={collapsed} />
         </ul>
@@ -927,8 +835,14 @@ function RoutedPane({
 }) {
   const rail = useRail();
   const tabs = useOfferedTabs();
+  const surfaces = useSurfaces();
   const narrow = useNarrow();
   const crumb = pageCrumb(route, agents, rail.rows, rail.linked, mainAgent);
+  const appIndex =
+    route.kind === "agents" ||
+    route.kind === "store" ||
+    (route.kind === "workspace" && route.view === "apps");
+  if (appIndex && !surfaces.apps) return <PaneNote>This link is not valid.</PaneNote>;
   switch (route.kind) {
     case "agent-setup": {
       const app = agents.find((entry) => entry.id === route.agentId) ?? null;
@@ -1243,9 +1157,13 @@ function RailList({
           <RailRow
             key={row.conversation_id}
             current={standing(route, `open:${row.conversation_id}`)}
-            facts={facts.length ? facts.join(" · ") : null}
+            conversationId={row.conversation_id}
+            facts={facts}
             title={row.title}
+            opening={row.opening}
             surface={row.surface}
+            source={row.source}
+            turn={row.turn}
             when={row.last_at}
             onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
           />
@@ -1307,30 +1225,55 @@ function RailList({
  *  rather than the text behind it. The resting title is inline, since a transform does not move one. */
 function RailRow({
   current,
+  conversationId,
   facts,
   title,
+  opening,
   surface,
+  source,
+  turn,
   when,
   onClick,
 }: {
   current: boolean;
-  facts: string | null;
+  conversationId: string;
+  facts: string[];
   title: string;
+  opening: string | null;
   surface: string;
+  source: string | null;
+  turn: RailTurn;
   when: string;
   onClick: () => void;
 }) {
   const [asks, setAsks] = useState(0);
+  const card = useId();
+  const dot = RAIL_DOT[turn];
   const button = (
     <SidebarPress
       current={current}
       label={title}
       className="gap-xs"
+      aria-describedby={card}
       onClick={onClick}
       onPointerEnter={() => setAsks((asked) => asked + 1)}
       onPointerLeave={() => setAsks(0)}
       onFocus={() => setAsks((asked) => asked + 1)}
       onBlur={() => setAsks(0)}
+      glyph={
+        <span
+          aria-hidden
+          data-turn={turn}
+          className="me-2xs flex size-(--size-glyph) shrink-0 items-center justify-center"
+        >
+          <span
+            className={cn(
+              "size-sm rounded-full transition duration-200 ease-control",
+              dot ?? "scale-0",
+            )}
+          />
+        </span>
+      }
     >
       <Ticker asks={asks} className="flex-1">
         {title}
@@ -1343,16 +1286,86 @@ function RailRow({
   );
   return (
     <SidebarRow current={current}>
-      {facts ? (
-        <Tooltip>
-          <TooltipTrigger asChild>{button}</TooltipTrigger>
-          <TooltipContent>{facts}</TooltipContent>
-        </Tooltip>
-      ) : (
-        button
-      )}
+      <HoverCard>
+        <HoverCardTrigger asChild>{button}</HoverCardTrigger>
+        <HoverCardContent id={card} sideOffset={RAIL_CARD_OFFSET}>
+          <span className="font-medium">{title}</span>
+          {opening ? <span className="text-ink-soft">{opening}</span> : null}
+          <span className="text-small text-ink-faint">
+            {[...facts, fullMoment(when)].join(" · ")}
+          </span>
+        </HoverCardContent>
+      </HoverCard>
+      <RailRowActs conversationId={conversationId} surface={surface} source={source} />
     </SidebarRow>
   );
 }
 
 const RAIL_STAMP = "shrink-0 text-small tabular-nums text-ink-faint";
+
+/** The mark names the acts alone: a name carrying the title would answer every read that looks the
+ *  row up by its own words. */
+const THREAD_ACTS = "Thread options";
+
+const RAIL_CARD_OFFSET = 44;
+
+const RAIL_ROW_GLYPH = cn(
+  "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
+  "opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none",
+  "group-hover/row:opacity-100 group-has-[:focus-visible]/row:opacity-100",
+  "focus-visible:opacity-100 data-[state=open]:bg-fill data-[state=open]:opacity-100",
+);
+
+/** The menu stands beside the row's one press rather than inside it, so a pick of an act never opens
+ *  the thread. */
+function RailRowActs({
+  conversationId,
+  surface,
+  source,
+}: {
+  conversationId: string;
+  surface: string;
+  source: string | null;
+}) {
+  const host = useDrawerHost();
+  const away = slackLink(surface, source);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button type="button" aria-label={THREAD_ACTS} className={RAIL_ROW_GLYPH}>
+          <IconDotsVertical className="size-icon" aria-hidden />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="right" align="start" container={host}>
+        <DropdownMenuItem
+          onSelect={() => void navigator.clipboard.writeText(threadLink(conversationId))}
+        >
+          Copy link
+        </DropdownMenuItem>
+        {away === null ? null : (
+          <DropdownMenuItem asChild>
+            <a
+              href={away}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-inherit no-underline"
+            >
+              Open in Slack
+            </a>
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function threadLink(conversationId: string): string {
+  return window.location.origin + window.location.pathname + chatHash(conversationId);
+}
+/** The thread's dot answers to the app dot's states, in the column the app rows draw theirs in. */
+const RAIL_DOT: Record<RailTurn, string | null> = {
+  running: "bg-live",
+  queued: "bg-live",
+  parked: "bg-blocked",
+  idle: null,
+};

@@ -1,6 +1,6 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test, vi } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import type { SurfaceRow } from "@/views/Surfaces";
@@ -29,9 +29,12 @@ const TERMINAL: SurfaceRow = {
   install_command: "curl ufo.example.com | sh",
 };
 
+const CHANNELS_HASH = "#/workspace/channels";
+
 function portal(surfaces: SurfaceRow[], surfacesRoute?: () => Response) {
   const wired = wire({
     "/workspace/surfaces$": surfacesRoute ?? (() => json({ surfaces })),
+    "/workspace/team$": () => json({ members: [MEMBER], can_add: false, actions: [] }),
     "/workspace/first-run$": () =>
       json({
         providers: [],
@@ -49,76 +52,27 @@ function portal(surfaces: SurfaceRow[], surfacesRoute?: () => Response) {
 
 beforeEach(() => {
   useStreamFake();
-  location.hash = "";
+  location.hash = CHANNELS_HASH;
 });
 
-test("the sidebar carries the Channels button", async () => {
-  portal([SLACK, IMESSAGE, TERMINAL]);
-
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
-  expect(within(rail).getByRole("button", { name: "Channels" })).toBeTruthy();
-});
-
-test("an unconnected channel marks the button, and three connected ones do not", async () => {
-  portal([{ ...SLACK, connected: false }, IMESSAGE, TERMINAL]);
-
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
-  const marked = within(rail).getByRole("button", { name: "Channels" });
-  await expect
-    .poll(() => marked.querySelector(".bg-attention-ink"))
-    .not.toBeNull();
-});
-
-test("every channel connected leaves the button unmarked", async () => {
-  portal([SLACK, IMESSAGE, TERMINAL]);
-
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
-  const button = within(rail).getByRole("button", { name: "Channels" });
-  await expect.poll(() => button.querySelector(".bg-attention-ink")).toBeNull();
-});
-
-test("the button opens the Channels dialog on the three rows", async () => {
+test("the Channels tab draws a row for every channel this deploy offers", async () => {
   portal([SLACK, { ...IMESSAGE, connected: false }, TERMINAL]);
 
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
-  await userEvent.click(within(rail).getByRole("button", { name: "Channels" }));
-
-  const dialog = await screen.findByRole("dialog", { name: "Channels" });
-  expect(await within(dialog).findByRole("listitem", { name: "Slack" })).toBeTruthy();
-  expect(within(dialog).getByRole("listitem", { name: "iMessage" })).toBeTruthy();
-  expect(within(dialog).getByRole("listitem", { name: "Terminal" })).toBeTruthy();
+  expect(await screen.findByRole("listitem", { name: "Slack" })).toBeTruthy();
+  expect(screen.getByRole("listitem", { name: "iMessage" })).toBeTruthy();
+  expect(screen.getByRole("listitem", { name: "Terminal" })).toBeTruthy();
 });
 
-test("a channel this deploy does not offer leaves the button unmarked", async () => {
-  portal([{ ...SLACK, offered: false, connected: false }, IMESSAGE, TERMINAL]);
+test("the workspace tabs name Channels, and the tab opens the rows", async () => {
+  location.hash = "#/workspace/team";
+  portal([SLACK, IMESSAGE, TERMINAL]);
 
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
-  const button = within(rail).getByRole("button", { name: "Channels" });
-  await expect.poll(() => button.querySelector(".bg-attention-ink")).toBeNull();
-});
-
-test("the dot does not put the surfaces read on a three-second loop", async () => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
-  const { calls } = portal([{ ...SLACK, connected: false }, IMESSAGE, TERMINAL]);
-
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
-  const marked = within(rail).getByRole("button", { name: "Channels" });
-  const reads = () => calls.filter((url) => url.includes("/workspace/surfaces")).length;
-  await expect.poll(() => marked.querySelector(".bg-attention-ink")).not.toBeNull();
-  expect(reads()).toBe(1);
-
-  await act(async () => {
-    vi.advanceTimersByTime(10_000);
-  });
-  expect(reads()).toBe(1);
-  vi.useRealTimers();
+  await userEvent.click(await screen.findByRole("tab", { name: "Channels" }));
+  expect(await screen.findByRole("listitem", { name: "Slack" })).toBeTruthy();
 });
 
 test("a refused surfaces read states the refusal once and settles", async () => {
   portal([], () => new Response("nope", { status: 503 }));
-
-  const rail = await screen.findByRole("navigation", { name: "Workspace" });
-  await userEvent.click(within(rail).getByRole("button", { name: "Channels" }));
 
   expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
   await act(async () => {

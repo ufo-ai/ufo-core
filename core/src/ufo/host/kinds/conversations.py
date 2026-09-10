@@ -8,6 +8,7 @@ turn, on the subjects their own conversation carries. Surfaces create conversati
 mutation is refused."""
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Literal
 from uuid import UUID
@@ -50,6 +51,8 @@ from ufo.schema.records import EXTENSION_SURFACE_PREFIX, PORTAL_SURFACE
 
 CONVERSATION_KIND = "conversation"
 TRANSCRIPT_WORKSPACE_DIR = "transcripts"
+OPENING_SENTENCE_CHARS = 160
+SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s")
 CONVERSATION_MINE_LIMIT = 100
 CONVERSATION_OTHERS_LIMIT = 25
 CONVERSATIONS_ARE_SURFACE_MADE = (
@@ -117,7 +120,9 @@ class ConversationObjects:
         surfaces renders an empty chat list. It narrows in the directory read, ahead of each
         side's own bound, so one rail read costs `CONVERSATION_MINE_LIMIT` plus
         `CONVERSATION_OTHERS_LIMIT` rows whatever the workspace holds. Both sides are one member's
-        wait, so they read together rather than one behind the other."""
+        wait, so they read together rather than one behind the other. `source` is the link the
+        admitting surface reported for the message that opened the row, so a rail row leads back
+        out to the thread it came in on; a portal row's source is no link out and answers None."""
         directory = ConversationDirectory(ws_current().workspace_id)
         agent_id = object_agent_id()
         sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
@@ -314,25 +319,39 @@ def _visible(subjects: frozenset[str]) -> sa.Select:
     return _agent_conversations().where(tables.conversation.c.audience.in_(subjects))
 
 
+def _opening_sentence(opening: str | None) -> str | None:
+    if opening is None:
+        return None
+    words = " ".join(opening.split())
+    broken = SENTENCE_BREAK.search(words)
+    sentence = words[: broken.start()] if broken else words
+    if len(sentence) <= OPENING_SENTENCE_CHARS:
+        return sentence or None
+    return sentence[:OPENING_SENTENCE_CHARS].rstrip() + "…"
+
+
 def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
     speakers = [who.sender or who.email for who in entry.speakers]
     stamp = entry.summary.last_turn_at or entry.summary.created_at
+    portal = entry.summary.surface == PORTAL_SURFACE or entry.summary.surface.startswith(
+        EXTENSION_SURFACE_PREFIX
+    )
     return ObjectRow(
         name=str(entry.summary.id),
         summary=entry.title,
         fields={
             "title": entry.title,
+            "opening": _opening_sentence(entry.summary.opening_message),
             "mine": mine,
             "speaker": None if mine or not speakers else speakers[0],
             "surface": entry.summary.surface,
             "surface_label": entry.surface_label,
             "audience": entry.audience,
             "member_email": entry.summary.member_email,
-            "portal": (
-                entry.summary.surface == PORTAL_SURFACE
-                or entry.summary.surface.startswith(EXTENSION_SURFACE_PREFIX)
-            ),
+            "portal": portal,
+            "source": None if portal else entry.source,
             "last_at": stamp.isoformat(),
+            "turn": entry.turn,
         },
     )
 
@@ -389,7 +408,8 @@ CONVERSATION_OBJECT = ObjectKind(
         "where the conversation runs — a Slack channel as `#general`, a Slack DM as `DM`. A "
         "conversation whose surface names no origin carries no `surface_label`. "
         "A member listing also carries `title`, `mine`, `speaker`, `audience`, `member_email`, "
-        "and `last_at` — order by "
+        "`last_at`, and `turn` — the liveest turn the conversation holds as `running`, `queued` or "
+        "`parked`, and `idle` where it holds none. Order by "
         "`last_at` desc for the newest activity first. "
         "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
         "cannot be created, changed, or deleted through objects."
@@ -401,12 +421,15 @@ CONVERSATION_OBJECT = ObjectKind(
             "surface",
             "surface_label",
             "title",
+            "opening",
             "mine",
             "speaker",
             "portal",
             "audience",
             "member_email",
+            "source",
             "last_at",
+            "turn",
             "private",
         }
     ),

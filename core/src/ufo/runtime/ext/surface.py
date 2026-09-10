@@ -557,6 +557,16 @@ LIVE_TURN_PRIORITY: tuple[Literal["running", "queued", "parked"], ...] = (
     "parked",
 )
 
+IDLE_TURN = "idle"
+
+ListedTurn = Literal["running", "queued", "parked", "idle"]
+
+
+def _liveness() -> sa.Case[int]:
+    return sa.case(
+        *((tables.turn.c.status == status, rank) for rank, status in enumerate(LIVE_TURN_PRIORITY))
+    )
+
 
 @dataclass(frozen=True)
 class AgentTurnStatus:
@@ -790,7 +800,7 @@ async def scheduled_runs(
                 preview_size_bytes=file.preview_size_bytes,
             )
         )
-    sources = await ConversationDirectory(workspace_id).sources(
+    openings = await ConversationDirectory(workspace_id).openings(
         tuple({row.conversation_id for row in rows})
     )
     return tuple(
@@ -805,7 +815,7 @@ async def scheduled_runs(
             text=TerminalFrame.model_validate(row.terminal).text,
             idempotency_key=row.idempotency_key,
             surface=row.surface,
-            source=sources.get(row.conversation_id),
+            source=openings.get(row.conversation_id, NO_OPENING).source,
             artifacts=tuple(shared.get(row.id, ())),
         )
         for row in rows
@@ -1273,6 +1283,11 @@ class ListedConversation(BaseModel):
     `audience` and `surface_label` travel as the conversation row stores them — the portal maps
     them to member words.
 
+    `turn` is the liveest non-terminal turn the conversation holds (`LIVE_TURN_PRIORITY` order),
+    `IDLE_TURN` where it holds none — what a listing row draws its status indicator from. It is
+    the shape of the conversation's work rather than a word of its content, so an unreadable row
+    states it like `turn_count`.
+
     `title` is what the conversation is called: the member's own opening words as the turn that
     opened it stored them — the ambient digest a channel surface renders around them is not what
     the conversation is about — or whatever a surface has since named it. `source` is the first
@@ -1291,11 +1306,21 @@ class ListedConversation(BaseModel):
     summary: ConversationSummary
     audience: str
     surface_label: str | None
+    turn: ListedTurn
     readable: bool
     disclosable: bool
     title: str
     source: str | None
     speakers: tuple[ConversationSpeaker, ...]
+
+
+@dataclass(frozen=True)
+class ConversationOpening:
+    source: str | None
+    message: str | None
+
+
+NO_OPENING = ConversationOpening(source=None, message=None)
 
 
 @dataclass(frozen=True)
@@ -1333,9 +1358,11 @@ class ConversationDirectory:
         what separates a conversation from a machine lane sharing its surface (a homepage seed, the
         portal's prepared-intent queue). Each entry carries `readable` (content this viewer reads
         now) and `disclosable` (an admin may acknowledge and read another member's private one —
-        `record_transcript_access` is the act). Subagent conversations are absent: they are the
-        agent's own work on a request, listed nested under the turn that spawned them, never beside
-        it. `conversation_id` selects one exact row before the bound for a durable permalink.
+        `record_transcript_access` is the act) and `turn`, the liveest non-terminal turn it holds,
+        read correlated beside its activity so the page costs no scan of the workspace's turns.
+        Subagent conversations are absent: they are the agent's own work on a request, listed
+        nested under the turn that spawned them, never beside it. `conversation_id` selects one
+        exact row before the bound for a durable permalink.
 
         Newest activity is the last turn, and creation only where no turn has landed yet, so the
         top of the page is what moved most recently rather than what was opened most recently.
@@ -1364,6 +1391,7 @@ class ConversationDirectory:
                 tables.conversation.c.created_at,
                 self._turn_count().label("turn_count"),
                 last_turn_at.label("last_turn_at"),
+                self._live_turn().label("live_turn"),
             )
             .select_from(
                 tables.conversation.outerjoin(
@@ -1410,7 +1438,7 @@ class ConversationDirectory:
             return ()
         readable = readable_audiences(member_id)
         content = [row.id for row in rows if row.audience in readable]
-        sources, speakers = await asyncio.gather(self.sources(content), self.speakers(content))
+        openings, speakers = await asyncio.gather(self.openings(content), self.speakers(content))
         mine = str(conversation_audience(member_id))
         return tuple(
             ListedConversation(
@@ -1422,15 +1450,17 @@ class ConversationDirectory:
                     created_at=row.created_at,
                     turn_count=row.turn_count or 0,
                     last_turn_at=row.last_turn_at,
+                    opening_message=openings.get(row.id, NO_OPENING).message,
                 ),
                 audience=row.audience,
                 surface_label=row.surface_label,
+                turn=row.live_turn,
                 readable=row.audience in readable,
                 disclosable=admin
                 and row.audience != mine
                 and audience_member(parse_audience(row.audience)) is not None,
                 title=row.title or "" if row.audience in readable else "",
-                source=sources.get(row.id),
+                source=openings.get(row.id, NO_OPENING).source,
                 speakers=speakers.get(row.id, ()),
             )
             for row in rows
@@ -1447,6 +1477,21 @@ class ConversationDirectory:
             .scalar_subquery()
         )
 
+    def _live_turn(self) -> sa.ColumnElement[str]:
+        return sa.func.coalesce(
+            sa.select(tables.turn.c.status)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                tables.turn.c.terminal.is_(None),
+            )
+            .order_by(_liveness().asc(), tables.turn.c.updated_at.desc())
+            .limit(1)
+            .correlate(tables.conversation)
+            .scalar_subquery(),
+            IDLE_TURN,
+        )
+
     def _turn_count(self) -> sa.ColumnElement[int]:
         return (
             sa.select(sa.func.count())
@@ -1459,9 +1504,10 @@ class ConversationDirectory:
             .scalar_subquery()
         )
 
-    async def sources(self, listed: Sequence[UUID]) -> dict[UUID, str | None]:
-        """Each listed conversation's opening `TurnContext.source` — the link the admitting surface
-        reported for the message that opened it."""
+    async def openings(self, listed: Sequence[UUID]) -> dict[UUID, ConversationOpening]:
+        """Each listed conversation's opening turn: the link the admitting surface reported for the
+        message that opened it, and the words it came in with. Both are facts of that one turn, so
+        one read answers them."""
         if not listed:
             return {}
         opening = (
@@ -1477,7 +1523,7 @@ class ConversationDirectory:
             .subquery()
         )
         query = (
-            sa.select(tables.turn.c.conversation_id, tables.turn.c.context)
+            sa.select(tables.turn.c.conversation_id, tables.turn.c.context, tables.turn.c.inbound)
             .select_from(
                 tables.turn.join(
                     opening,
@@ -1492,8 +1538,11 @@ class ConversationDirectory:
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         return {
-            row.conversation_id: (
-                None if row.context is None else TurnContext.model_validate(row.context).source
+            row.conversation_id: ConversationOpening(
+                source=(
+                    None if row.context is None else TurnContext.model_validate(row.context).source
+                ),
+                message=conversation_name(row.inbound) or None,
             )
             for row in rows
         }
@@ -3842,8 +3891,8 @@ class SurfaceContext:
             query = query.where(tables.shared_artifact.c.role == role)
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
-        found = await ConversationDirectory(self.workspace_id).sources((conversation_id,))
-        source = found.get(conversation_id)
+        found = await ConversationDirectory(self.workspace_id).openings((conversation_id,))
+        source = found.get(conversation_id, NO_OPENING).source
         return tuple(
             ListedArtifact(
                 id=row.id,
@@ -3895,12 +3944,7 @@ class SurfaceContext:
         it to the turns actually in flight."""
         if not agent_ids:
             return ()
-        liveness = sa.case(
-            *(
-                (tables.turn.c.status == status, rank)
-                for rank, status in enumerate(LIVE_TURN_PRIORITY)
-            )
-        )
+        liveness = _liveness()
         readable = tables.turn.join(
             tables.conversation, tables.turn.c.conversation_id == tables.conversation.c.id
         )

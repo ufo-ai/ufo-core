@@ -4,6 +4,7 @@ export const WORKSPACE_TABS = [
   "team",
   "apps",
   "tasks",
+  "channels",
   "skills",
   "memory",
   "credentials",
@@ -11,7 +12,7 @@ export const WORKSPACE_TABS = [
   "billing",
 ] as const;
 
-export const SECTIONS = ["wiki", "artifacts", "radar", "connectors", "messaging"] as const;
+export const SECTIONS = ["wiki", "radar", "artifacts", "connectors", "messaging"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
@@ -372,20 +373,13 @@ const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
     WORKSPACE_PREFIX + view + serializePlace(place),
 );
 
-/* Tasks stood as its own section before it shipped as an app, and links to that address exist outside
-   this code, so this row reads to either kind. */
-const TAB_SECTIONS: readonly WorkspaceTab[] = ["tasks"];
-
-const SECTION = row<"section" | "workspace", [Section, WorkspacePlace?]>(
+const SECTION = row<"section", [Section, WorkspacePlace?]>(
   "section",
   new RegExp(`^#/(${SECTION_NAME})${PLACE_TAIL}`),
   (match) => {
-    const name = match[1];
     const place = parsePlace(match[2]);
-    if (!place) return null;
-    if (isSection(name)) return { kind: "section", section: name, place };
-    const moved = TAB_SECTIONS.find((tab) => tab === name);
-    return moved === undefined ? null : { kind: "workspace", view: moved, place };
+    if (!place || !isSection(match[1])) return null;
+    return { kind: "section", section: match[1], place };
   },
   (section: Section, place: WorkspacePlace = {}) => "#/" + section + serializePlace(place),
 );

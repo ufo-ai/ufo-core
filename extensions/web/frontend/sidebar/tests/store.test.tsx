@@ -223,7 +223,7 @@ test("the App Creator row raises the wizard from the store", async () => {
   expect(location.hash).toBe("#/agents/builder");
 });
 
-test("a deploy that withholds the store ends the apps list in App Creator, and the store keeps its address", async () => {
+test("a deploy that withholds the store keeps its address, and its list ends in App Creator", async () => {
   wire({
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Finances dash" }),
     "/slots/tasks": () =>
@@ -243,13 +243,4 @@ test("a deploy that withholds the store ends the apps list in App Creator, and t
 
   const store = await screen.findByRole("region", { name: "App Store" });
   expect(listed(store)).toEqual(["Radar", "Wiki", "App Creator"]);
-
-  const index = await screen.findByRole("navigation", { name: "Apps" });
-  const unfold = screen.queryByRole("button", { name: "Expand sidebar" });
-  if (unfold) await userEvent.click(unfold);
-  expect(within(index).queryByRole("button", { name: "App Store" })).toBeNull();
-  await userEvent.click(within(index).getByRole("button", { name: "App Creator" }));
-
-  expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
-  expect(location.hash).toBe("#/agents/builder");
 });

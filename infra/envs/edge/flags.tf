@@ -9,6 +9,7 @@ locals {
   portal_flags = {
     testing = {
       "enable-app-store"        = true
+      "enable-apps-tab"         = false
       "enable-assistant-app"    = true
       "enable-code-app"         = false
       "enable-community-skills" = true
@@ -25,6 +26,7 @@ locals {
     }
     prod = {
       "enable-app-store"        = false
+      "enable-apps-tab"         = false
       "enable-assistant-app"    = false
       "enable-code-app"         = false
       "enable-community-skills" = false

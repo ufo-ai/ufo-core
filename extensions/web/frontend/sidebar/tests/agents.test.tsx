@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { beforeEach, expect, test, vi } from "vitest";
@@ -27,17 +27,13 @@ import {
   StreamFake,
   TASK_KIND,
   TURN_ID,
-  agentIndex,
   atPhoneWidth,
   chatsOnWire,
-  expandApps,
   json,
   objectIndex,
-  openAgentRow,
   openAgentSettings,
   openNewApplication,
   openRow,
-  openStore,
   owned,
   saying,
   useStreamFake,
@@ -110,12 +106,6 @@ const ASKED = {
   cost_micro_usd: 2_000_000,
 };
 
-async function shownIndex(): Promise<HTMLElement> {
-  const unfold = screen.queryByRole("button", { name: "Expand sidebar" });
-  if (unfold) await userEvent.click(unfold);
-  return agentIndex();
-}
-
 async function openWizard() {
   await openNewApplication();
   return screen.findByRole("region", { name: "App Creator" });
@@ -130,9 +120,9 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("apps the workspace ships on its first turn reach the sidebar with no reload", async () => {
+test("an app the workspace ships on its first turn is read in with no reload", async () => {
   let shipped = [AGENT];
-  wire({
+  const { calls } = wire({
     "/api/agents": () => boot(shipped, ADMIN),
     "/api/agents/status": () =>
       json({ statuses: shipped.map((agent) => status(agent.id, {})) }),
@@ -148,23 +138,20 @@ test("apps the workspace ships on its first turn reach the sidebar with no reloa
         await Promise.resolve();
       });
     };
+    const reads = () => calls.filter((url) => url.endsWith("/api/agents")).length;
     await settle(0);
-    const index = screen.getByRole("navigation", { name: "Apps" });
-    const row = (name: string) =>
-      within(index).queryByRole("button", { name: new RegExp("^" + name) });
-    expect(row("Assistant")).toBeTruthy();
-    expect(row("Research")).toBeNull();
+    expect(reads()).toBe(1);
 
     shipped = [AGENT, RESEARCH];
 
     await settle(RESTING_STATUS_MS);
-    expect(row("Research")).toBeTruthy();
+    expect(reads()).toBe(2);
   } finally {
     vi.useRealTimers();
   }
 });
 
-test("App Creator opens the wizard speaking in the pane, and the apps list keeps its rows", async () => {
+test("App Creator opens the wizard speaking in the pane", async () => {
   const sent: { url: string; body: string }[] = [];
   wire({
     "/api/agents": () => boot([AGENT], ADMIN),
@@ -184,8 +171,6 @@ test("App Creator opens the wizard speaking in the pane, and the apps list keeps
   expect(sent[0].body).toBe(OPENING);
   expect(within(wizard).getByText(OPENING)).toBeTruthy();
   expect(within(wizard).getByLabelText("Ask UFO")).toBeTruthy();
-  expect(within(await shownIndex()).getByText("Assistant")).toBeTruthy();
-
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
   StreamFake.last().emit("message", { text: "A finances dashboard, then." });
@@ -417,86 +402,51 @@ test("the app the last phase creates reaches the rail when the turn settles", as
 
   await waitFor(() => expect(progress().getAttribute("aria-valuenow")).toBe("5"));
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
-  await shownIndex();
-  await openAgentRow("Research");
+  location.hash = "#/agents/" + SECOND_ID;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
 
-  expect(location.hash).toBe("#/agents/" + SECOND_ID);
   expect(screen.queryByText("No such app.")).toBeNull();
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
-test("the store stands as the apps list's last row, and holds the act that builds an app", async () => {
-  location.hash = "#/agents";
-  wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
-  render(<Portal />);
-
-  const index = await agentIndex();
-
-  const band = screen.getByRole("button", { name: "Apps" });
-  expect(band.getAttribute("aria-haspopup")).toBeNull();
-  expect(screen.queryByRole("button", { name: "Apps options" })).toBeNull();
-
-  const rows = within(index)
-    .getAllByRole("button")
-    .map((row) => row.getAttribute("aria-label") ?? row.textContent);
-  expect(rows.at(-1)).toBe("App Store");
-  expect(within(index).queryByRole("button", { name: "App Creator" })).toBeNull();
-
-  const store = await openStore();
-  expect(location.hash).toBe("#/agents/store");
-  expect(within(index).getByRole("button", { name: "App Store" }).getAttribute("aria-current")).toBe(
-    "true",
-  );
-  const listed = within(store)
-    .getAllByRole("row")
-    .slice(1)
-    .map((row) => within(row).getAllByRole("cell")[0].textContent);
-  expect(listed.at(-1)).toBe("App Creator");
-});
-
 test("pressing a section's band folds it away, and the fold holds across a reload", async () => {
-  location.hash = "#/agents";
-  wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
+  wire({ ...chatsOnWire([CHAT_ROW]), "/api/agents": () => boot([AGENT], ADMIN) });
   const first = render(<Portal />);
 
-  const index = await agentIndex();
-  expect(within(index).queryByRole("button", { name: /^Research/ })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
-  await waitFor(() =>
-    expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull(),
-  );
-  expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-expanded")).toBe("false");
+  await userEvent.click(screen.getByRole("button", { name: "Chats" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: /Pick one thread/ })).toBeNull());
+  expect(screen.getByRole("button", { name: "Chats" }).getAttribute("aria-expanded")).toBe("false");
 
   first.unmount();
   render(<Portal />);
   await waitFor(() =>
-    expect(screen.getByRole("button", { name: "Apps" }).getAttribute("aria-expanded")).toBe("false"),
+    expect(screen.getByRole("button", { name: "Chats" }).getAttribute("aria-expanded")).toBe(
+      "false",
+    ),
   );
-  expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull();
 
-  await userEvent.click(screen.getByRole("button", { name: "Apps" }));
-  expect(await screen.findByRole("navigation", { name: "Apps" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Chats" }));
+  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
 });
 
-test("the drawer holds the apps index at a phone width, and a pick shuts it", async () => {
+test("the drawer holds the sidebar at a phone width, and a pick shuts it", async () => {
   atPhoneWidth();
   location.hash = "#/agents";
   wire({ "/api/agents": () => boot([AGENT, RESEARCH], ADMIN) });
   render(<Portal />);
 
   expect(await screen.findByRole("region", { name: "Assistant" })).toBeTruthy();
-  expect(screen.queryByRole("navigation", { name: "Apps" })).toBeNull();
+  expect(screen.queryByRole("navigation", { name: "Workspace" })).toBeNull();
 
   await userEvent.click(screen.getByRole("button", { name: "Menu" }));
   const drawer = await screen.findByRole("dialog");
-  const index = await shownIndex();
-  expect(drawer.contains(index)).toBe(true);
-  await userEvent.click(within(index).getByRole("button", { name: /^Research/ }));
+  const sidebar = within(drawer).getByRole("navigation", { name: "Workspace" });
+  await userEvent.click(within(sidebar).getByRole("button", { name: "Connections" }));
 
-  expect(location.hash).toBe("#/agents/" + SECOND_ID);
+  expect(location.hash).toBe("#/connectors");
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
 test("closing the wizard gives the pane back to the app", async () => {
@@ -599,7 +549,6 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
 
   await userEvent.click(screen.getByRole("button", { name: "New chat" }));
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
-  await shownIndex();
   await openNewApplication();
 
   const wizard = await screen.findByRole("region", { name: "App Creator" });
@@ -607,7 +556,7 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
   expect(sent).toEqual([OPENING]);
 });
 
-test("an app row leaves the run standing, and App Creator returns to it", async () => {
+test("another app's page leaves the run standing, and App Creator returns to it", async () => {
   const sent: string[] = [];
   wire({
     "/api/agents": () => boot([AGENT, RESEARCH], ADMIN),
@@ -624,10 +573,9 @@ test("an app row leaves the run standing, and App Creator returns to it", async 
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
-  await shownIndex();
-  await openAgentRow("Research");
+  location.hash = "#/agents/" + SECOND_ID;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
-  await shownIndex();
   await openNewApplication();
   expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
   expect(sent).toEqual([OPENING]);
@@ -690,19 +638,6 @@ test("a member who is no admin is offered the act, and it opens the wizard", asy
   render(<Portal />);
 
   expect(await openWizard()).toBeTruthy();
-});
-
-test("each row in the index draws its own app's mark, and states nothing by it", async () => {
-  wire({ "/transcript": () => json({ messages: [] }) });
-  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
-
-  const index = within(await shownIndex());
-
-  const assistant = index.getByRole("button", { name: /^Assistant/ });
-  expect(assistant.querySelector(".element-icon-propylon")).toBeTruthy();
-  expect(assistant.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
-  expect(index.getByRole("button", { name: /^Research/ }).querySelector(".element-icon-aten"))
-    .toBeTruthy();
 });
 
 test("a mark named for what every object answers still leads the picker as the agent's own", async () => {
@@ -788,7 +723,7 @@ test("the main app has no Archive action in Settings", async () => {
   expect(within(dialog).queryByRole("button", { name: "Archive" })).toBeNull();
 });
 
-test("the workspace Apps tab restores an archived app the sidebar does not list", async () => {
+test("the workspace Apps tab restores an archived app", async () => {
   const posted: unknown[] = [];
   const onAgents = vi.fn();
   wire({
@@ -832,8 +767,6 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
       onAgents={onAgents}
     />,
   );
-  const index = within(await shownIndex());
-  expect(index.queryByText("Invoice Intake")).toBeNull();
   expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
 
   await userEvent.click(await screen.findByRole("button", { name: "Restore" }));
@@ -999,13 +932,6 @@ test("a member picks another mark, and the pick rides one intent and comes back"
   );
 });
 
-const THIRD_ID = "44444444-4444-4444-8444-444444444444";
-const FOURTH_ID = "66666666-6666-4666-8666-666666666666";
-const SCRIBE = { id: THIRD_ID, name: "scribe", model: "auto", main: false, icon: "kylix" };
-const WATCHER = { id: FOURTH_ID, name: "watcher", model: "auto", main: false, icon: "dingir" };
-
-const HOURS_AGO = new Date(Date.now() - 5 * 3_600_000).toISOString();
-
 function status(agentId: string, held: Partial<AgentStatus>): AgentStatus {
   return {
     agent_id: agentId,
@@ -1016,174 +942,6 @@ function status(agentId: string, held: Partial<AgentStatus>): AgentStatus {
     ...held,
   };
 }
-
-test("a working app leads the index, and a pin orders everything under it", async () => {
-  wire({
-    "/api/agents/status": () =>
-      json({
-        statuses: [
-          status(SECOND_ID, { turn: "running" }),
-          status(AGENT_ID, { last_active_at: HOURS_AGO }),
-        ],
-      }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents";
-  render(<App agents={[AGENT, RESEARCH, SCRIBE]} member={MEMBER} onAgents={() => {}} />);
-
-  const index = await shownIndex();
-  await expandApps();
-  const drawn = () =>
-    within(index)
-      .getAllByRole("button", { name: /^(Assistant|Research|Scribe)/ })
-      .map((row) => row.querySelector(".text-label")!.textContent);
-  await waitFor(() => expect(drawn()).toEqual(["Research", "Assistant", "Scribe"]));
-
-  await userEvent.click(within(index).getByRole("button", { name: "Pin Scribe" }));
-
-  await waitFor(() => expect(drawn()).toEqual(["Research", "Scribe", "Assistant"]));
-});
-
-test("a row states its name and nothing else, working or not, and opens nothing at the pointer", async () => {
-  wire({
-    "/api/agents/status": () =>
-      json({
-        statuses: [
-          status(SECOND_ID, { turn: "running", activity: "Running bash" }),
-          status(AGENT_ID, { last_active_at: HOURS_AGO }),
-        ],
-      }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents";
-  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
-
-  const index = await shownIndex();
-  const working = within(index).getByRole("button", { name: /^Research/ });
-  await waitFor(() => expect(working.querySelector(".bg-live")).toBeTruthy());
-  expect(working.textContent).toBe("Research");
-
-  const quiet = within(index).getByRole("button", { name: /^Assistant/ });
-  expect(quiet.textContent).toBe("Assistant");
-  fireEvent.focus(quiet);
-  await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
-});
-
-test("the avatar dot reads live on work in flight, blocked on parked or failed, and idle wears none", async () => {
-  wire({
-    "/api/agents/status": () =>
-      json({
-        statuses: [
-          status(AGENT_ID, { turn: "running" }),
-          status(SECOND_ID, { turn: "parked" }),
-          status(THIRD_ID, { last_failed: true }),
-          status(FOURTH_ID, { last_active_at: HOURS_AGO }),
-        ],
-      }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents";
-  render(
-    <App agents={[AGENT, RESEARCH, SCRIBE, WATCHER]} member={MEMBER} onAgents={() => {}} />,
-  );
-
-  const index = await shownIndex();
-  await expandApps();
-  const dot = (name: RegExp, tone: string) =>
-    within(index).getByRole("button", { name }).querySelector("." + tone);
-  await waitFor(() => expect(dot(/^Assistant/, "bg-live")).toBeTruthy());
-  expect(dot(/^Research/, "bg-blocked")).toBeTruthy();
-  expect(dot(/^Scribe/, "bg-blocked")).toBeTruthy();
-  expect(dot(/^Watcher/, "bg-live")).toBeNull();
-  expect(dot(/^Watcher/, "bg-blocked")).toBeNull();
-});
-
-test("a folded rail holds each app's name at the pointer", async () => {
-  wire({ "/transcript": () => json({ messages: [] }) });
-  location.hash = "#/agents";
-  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
-
-  await userEvent.click(await screen.findByRole("button", { name: "Collapse sidebar" }));
-  const index = await agentIndex();
-  const row = within(index).getByRole("button", { name: "Research" });
-  expect(row.textContent).toBe("");
-  fireEvent.focus(row);
-  expect((await screen.findByRole("tooltip")).textContent).toBe("Research");
-});
-
-test("an app row and a conversation row are one box, marked one way", async () => {
-  wire({ ...chatsOnWire([CHAT_ROW]), "/transcript": () => json({ messages: [] }) });
-  location.hash = "#/agents";
-  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
-
-  const index = await agentIndex();
-  const app = within(index).getByRole("button", { name: "Research" }).closest("li");
-  const chat = (await screen.findByRole("button", { name: /Pick one thread/ })).closest("li");
-  expect(app?.className).toBe(chat?.className);
-
-  await openAgentRow("Research");
-  const open = within(await agentIndex()).getByRole("button", { name: "Research" }).closest("li");
-  expect(open?.className).toBe(chat?.className + " bg-fill");
-});
-
-test("an app installed and not set up wears the blocked dot, and work outranks it", async () => {
-  wire({
-    "/api/agents/status": () => json({ statuses: [status(AGENT_ID, { turn: "running" })] }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents";
-  render(
-    <App
-      agents={[
-        { ...AGENT, setup_due: true },
-        { ...RESEARCH, setup_due: true },
-        { ...SCRIBE, setup_due: false },
-      ]}
-      member={MEMBER}
-      onAgents={() => {}}
-    />,
-  );
-
-  const index = await shownIndex();
-  await expandApps();
-  const dot = (name: RegExp, tone: string) =>
-    within(index).getByRole("button", { name }).querySelector("." + tone);
-
-  await waitFor(() => expect(dot(/^Research/, "bg-blocked")).toBeTruthy());
-  expect(dot(/^Assistant/, "bg-live")).toBeTruthy();
-  expect(dot(/^Assistant/, "bg-blocked")).toBeNull();
-  expect(dot(/^Scribe/, "bg-blocked")).toBeNull();
-  expect(dot(/^Scribe/, "bg-live")).toBeNull();
-});
-
-test("a row keeps the member's focus as its status gains and loses a tooltip", async () => {
-  let working = true;
-  wire({
-    "/api/agents/status": () =>
-      json({
-        statuses: [
-          working
-            ? status(SECOND_ID, { turn: "running" })
-            : status(SECOND_ID, { last_active_at: HOURS_AGO }),
-        ],
-      }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents";
-  render(<App agents={[AGENT, RESEARCH]} member={MEMBER} onAgents={() => {}} />);
-
-  const index = await shownIndex();
-  const row = () => within(index).getByRole("button", { name: /^Research/ });
-  await waitFor(() => expect(row().querySelector(".bg-live")).toBeTruthy());
-  row().focus();
-  expect(document.activeElement).toBe(row());
-
-  working = false;
-  await waitFor(() => expect(row().querySelector(".bg-live")).toBeNull(), {
-    timeout: 2 * WORKING_STATUS_MS,
-  });
-  expect(document.activeElement).toBe(row());
-}, 15_000);
 
 test("a status read that fails after answering keeps polling and recovers", async () => {
   let answers = 0;
@@ -1207,17 +965,13 @@ test("a status read that fails after answering keeps polling and recovers", asyn
       });
     };
     await settle(0);
-    const index = screen.getByRole("navigation", { name: "Apps" });
-    const row = () => within(index).getByRole("button", { name: /^Research/ });
-    expect(row().querySelector(".bg-live")).toBeTruthy();
+    expect(answers).toBe(1);
 
     await settle(WORKING_STATUS_MS);
     expect(answers).toBe(2);
-    expect(row().querySelector(".bg-live")).toBeTruthy();
 
     await settle(WORKING_STATUS_MS);
     expect(answers).toBe(3);
-    expect(row().querySelector(".bg-live")).toBeTruthy();
   } finally {
     vi.useRealTimers();
   }
@@ -1233,14 +987,10 @@ test("a name is drawn word by word, and only a word written wholly in lowercase 
   expect(agentName("release_bot")).toBe("Release_Bot");
 });
 
-test("the index row and the pane header draw the app's name in Title Case", async () => {
+test("the pane header draws the app's name in Title Case", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
   location.hash = "#/agents/" + SECOND_ID;
   render(<App agents={[AGENT, REVIEWER]} member={MEMBER} onAgents={() => {}} />);
-
-  const index = within(await shownIndex());
-  expect(index.getByRole("button", { name: /^Code Reviewer/ })).toBeTruthy();
-  expect(index.queryByText("code reviewer")).toBeNull();
 
   const pane = within(await screen.findByRole("region", { name: "Code Reviewer" }));
   expect(pane.getByRole("button", { name: "Menu for Code Reviewer" })).toBeTruthy();

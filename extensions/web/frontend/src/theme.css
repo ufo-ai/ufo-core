@@ -286,7 +286,7 @@
 
   --breakpoint-narrow: 720px;
 
-  --container-sidebar: 216px;
+  --container-sidebar: 260px;
   --container-answer: min(720px, calc(100vw - 32px));
   --container-choice: 220px;
   --container-connect: 300px;

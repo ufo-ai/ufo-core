@@ -11,7 +11,7 @@ import { slotOf, titled } from "@/kernel/objects";
 import { agentName } from "@/lib/agentName";
 import { getJson } from "@/lib/api";
 import { subject } from "@/lib/audience";
-import { chatHash, workspaceHash, agentHash, sectionHash } from "@/lib/route";
+import { chatHash, agentHash, sectionHash, workspaceHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
 
 export type Hit = {

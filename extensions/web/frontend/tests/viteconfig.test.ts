@@ -65,7 +65,6 @@ test("the sidebar shell contains only its entry, navigation, and route seams", a
     "lib/title.ts",
     "main.tsx",
     "views/Agents.tsx",
-    "views/AppsIndex.tsx",
     "views/FirstRun.tsx",
     "views/Spotlight.tsx",
     "views/Store.tsx",
