@@ -136,7 +136,9 @@ test("the open chat states who reads it on its title line, as the glyph alone", 
   const name = screen.getByText(CHAT_ROW.title);
   expect(mark.parentElement!.contains(name)).toBe(true);
   expect(document.body.querySelector("[data-slot=header]")!.contains(mark)).toBe(true);
-  expect(mark.querySelector("svg")).toBeTruthy();
+  const glyph = mark.querySelector("svg")!;
+  expect(glyph.getAttribute("class")).toContain("size-(--size-glyph)");
+  expect(glyph.getAttribute("class")).toContain("-top-px");
   expect(mark.textContent).toBe(detail);
   expect(mark.querySelector(".sr-only")!.textContent).toBe(detail);
   expect(mark.getAttribute("title")).toBe(detail);
