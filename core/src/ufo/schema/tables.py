@@ -526,7 +526,7 @@ credential_fulfillment = sa.Table(
     ),
     sa.Column("request_id", sa.Uuid, primary_key=True),
     sa.Column("slot", sa.Text, primary_key=True),
-    sa.Column("member_id", sa.Uuid, nullable=False),
+    sa.Column("member_id", sa.Uuid, nullable=True),
     sa.Column("fulfilled_at", sa.DateTime(timezone=True), nullable=False),
     sa.ForeignKeyConstraint(
         ["workspace_id", "member_id"],

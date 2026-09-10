@@ -263,7 +263,6 @@ class CredentialStore:
                             workspace_id=workspace_id,
                             request_id=request_id,
                             slot=slot,
-                            member_id=member_id,
                             fulfilled_at=sa.func.now(),
                         )
                         .on_conflict_do_nothing(
