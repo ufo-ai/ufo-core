@@ -156,6 +156,14 @@ test("the mount hands a boot screen the body's height to centre down", () => {
   expect(packedStyles()).toContain("#root{flex-direction:column;height:100%;display:flex}");
 });
 
+/** A percentage min-height resolves to zero against a parent sized to its content, so the floor is
+ *  what gives the wait a box to centre in where no ancestor states a height. */
+test("a wait carries its own floor, so it centres under a parent that states no height", () => {
+  const css = packedStyles();
+  expect(css).toContain("min-height:var(--size-waiting)");
+  expect(css).toContain("--size-waiting:max(100%,128px)");
+});
+
 test("reply headings carry an emitted scale, not just declared tokens", () => {
   const css = packedStyles();
   expect(css).toContain(":where(h2){font-size:var(--text-subtitle)");

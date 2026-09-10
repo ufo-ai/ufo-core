@@ -318,6 +318,7 @@
   --size-digest-picture: 96px;
   --size-avatar: 24px;
   --size-band: 128px;
+  --size-waiting: max(100%, 128px);
   --size-step-on: 24px;
   --size-step-off: 8px;
   --size-badge: 48px;

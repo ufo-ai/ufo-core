@@ -107,12 +107,18 @@ const SKELETON_FIELDS = 3;
 /** The one line a screen states while it has nothing else, and the only place the words are
  *  written. It reserves its line from the first frame and appears on the theme's threshold, so a
  *  read that answers before then leaves no trace on the way past — the timing is the theme's, and
- *  the same threshold governs every placeholder on the surface. */
-export function Loading() {
+ *  the same threshold governs every placeholder on the surface.
+ *  It carries a floor of its own, so it centres wherever it stands; `compact` drops that floor for a
+ *  wait inside a line of content — an artifact's text, a rail's list — where reserving a region's
+ *  height would push that content down. */
+export function Loading({ compact = false }: { compact?: boolean }) {
   return (
     <div
       role="status"
-      className="animate-waiting flex min-h-full w-full flex-1 items-center justify-center gap-2xs self-stretch text-ink-soft"
+      className={cn(
+        "animate-waiting flex w-full flex-1 items-center justify-center gap-2xs self-stretch text-ink-soft",
+        compact ? "min-h-0" : "min-h-(--size-waiting)",
+      )}
     >
       <IconLoader2 aria-hidden className="size-4 shrink-0 animate-spin motion-reduce:animate-none" />
       <span>Loading…</span>

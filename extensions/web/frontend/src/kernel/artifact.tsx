@@ -393,11 +393,7 @@ export function ArtifactText({
 
   if (message) return <div className="font-mono text-small text-ink-soft">{message}</div>;
   if (body === null)
-    return (
-      <div>
-        <Loading />
-      </div>
-    );
+    return <Loading compact />;
   if (mediaType === HTML_MEDIA_TYPE && bounded)
     return (
       <div className="font-mono text-small text-ink-soft">

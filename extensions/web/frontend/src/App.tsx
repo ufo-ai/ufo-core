@@ -126,9 +126,9 @@ const LinkedPane = lazy(() =>
 
 function PaneLoading() {
   return (
-    <PaneNote>
+    <Pane className={COLUMN}>
       <Loading />
-    </PaneNote>
+    </Pane>
   );
 }
 
@@ -932,19 +932,11 @@ function RoutedPane({
           : undefined);
       if (!row || !agent) {
         if (rail.phase === "loading")
-          return (
-            <PaneNote>
-              <Loading />
-            </PaneNote>
-          );
+          return <PaneLoading />;
         if (rail.phase === "failed") return <PaneNote>Couldn't load conversations.</PaneNote>;
         const outcome = rail.sought[route.conversationId];
         if (!outcome)
-          return (
-            <PaneNote>
-              <Loading />
-            </PaneNote>
-          );
+          return <PaneLoading />;
         if (outcome.kind === "signed-out") {
           return (
             <Pane className={COLUMN}>

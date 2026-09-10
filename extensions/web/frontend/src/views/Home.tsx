@@ -788,7 +788,7 @@ function PickerLane({
               </div>
             ) : (
               <div className={PICK_EMPTY}>
-                <Empty>{rail.phase === "loading" ? <Loading /> : NO_CHATS}</Empty>
+                {rail.phase === "loading" ? <Loading /> : <Empty>{NO_CHATS}</Empty>}
               </div>
             )}
           </section>
