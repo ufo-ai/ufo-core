@@ -11,6 +11,7 @@ import {
 } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
+  IconBook,
   IconBrandSlack,
   IconChevronRight,
   IconCirclePlusFilled,
@@ -74,6 +75,7 @@ import {
   speakerName,
 } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
+import { deployment, type Deployment } from "@/lib/mark";
 import { AppsProvider } from "@/lib/apps";
 import { useAppStatus } from "@/lib/appStatusStore";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
@@ -467,6 +469,12 @@ function signOut(): void {
 }
 
 const SETTINGS_LABEL = "Settings";
+const DOCUMENTATION = "Documentation";
+const DOCUMENTATION_URLS: Record<Deployment, string> = {
+  production: "https://docs.ufo.ai",
+  testing: "https://docs.testing.ufo.ai",
+  local: "https://docs.ufo.ai",
+};
 const THEME = "Theme";
 const SIGN_OUT = "Sign out";
 
@@ -478,6 +486,20 @@ function AccountActs({ container }: { container?: HTMLElement | null }) {
   const scheme = useScheme();
   return (
     <>
+      <DropdownMenuItem asChild>
+        <a
+          href={DOCUMENTATION_URLS[deployment(location.hostname)]}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-inherit no-underline"
+        >
+          <span className={MENU_ITEM}>
+            <IconBook className={GLYPH} aria-hidden />
+            {DOCUMENTATION}
+          </span>
+        </a>
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
       <DropdownMenuSub>
         <DropdownMenuSubTrigger>
           <span className={MENU_ITEM}>
