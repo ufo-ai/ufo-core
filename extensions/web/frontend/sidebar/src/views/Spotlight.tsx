@@ -13,14 +13,7 @@ import {
   type TablerIcon,
 } from "@tabler/icons-react";
 
-import {
-  SIDEBAR_FOLDED,
-  SIDEBAR_PRESS,
-  SidebarCap,
-  SidebarRow,
-  SidebarTooltip,
-  type Chord,
-} from "@/components/Sidebar";
+import { SidebarTooltip, type Chord } from "@/components/Sidebar";
 import {
   Command,
   CommandGroup,
@@ -257,22 +250,3 @@ export function Spotlight({
   );
 }
 
-export function SearchRow({ agents, collapsed }: { agents: Agent[]; collapsed: boolean }) {
-  return (
-    <SidebarRow>
-      <Spotlight
-        agents={agents}
-        collapsed={collapsed}
-        className={cn(SIDEBAR_PRESS, collapsed && SIDEBAR_FOLDED)}
-        label={
-          collapsed ? null : (
-            <>
-              <span className="min-w-0 flex-1 truncate">{SEARCH}</span>
-              <SidebarCap chord={SEARCH_CHORD} />
-            </>
-          )
-        }
-      />
-    </SidebarRow>
-  );
-}

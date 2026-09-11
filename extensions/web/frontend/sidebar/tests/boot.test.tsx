@@ -165,9 +165,9 @@ test("the sidebar names the shell's destinations and states the member at its fo
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
+    "Search",
     "Collapse sidebar",
     "New chat\u21e7\u2318O",
-    "Search",
     "Tasks",
     "Radar",
     "Artifacts",
@@ -177,6 +177,13 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Chats options",
     MEMBER.email,
   ]);
+  const head = sidebar.firstElementChild as HTMLElement;
+  expect(
+    within(head)
+      .getAllByRole("button")
+      .map((entry) => entry.getAttribute("aria-label")),
+  ).toEqual(["Search", "Collapse sidebar"]);
+  expect(within(head).getByRole("img", { name: "ufo" })).toBeTruthy();
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
 });
 
@@ -266,9 +273,9 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     .getAllByRole("button")
     .map((entry) => entry.getAttribute("aria-label") ?? entry.textContent);
   expect(names).toEqual([
+    "Search",
     "Collapse sidebar",
     "New chat\u21e7\u2318O",
-    "Search",
     "Tasks",
     "Radar",
     "Artifacts",

@@ -34,6 +34,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 
+import mark from "@brand/ufo-mark.svg";
 import logo from "@/assets/ufo-logo.svg";
 import {
   SidebarCap,
@@ -54,7 +55,7 @@ import { SILENT, Toast } from "@/components/ui/toast";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SignIn } from "@/views/SignIn";
-import { SearchRow, Spotlight } from "@/views/Spotlight";
+import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, TASK_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
@@ -719,7 +720,7 @@ function WorkspaceSidebar({
     <nav
       aria-label="Workspace"
       className={cn(
-        "flex min-h-0 flex-col gap-sm border-r border-edge bg-sidebar py-xl",
+        "flex min-h-0 flex-col gap-2xl border-r border-edge bg-sidebar py-xl",
         "max-narrow:flex-1 max-narrow:border-r-0 max-narrow:py-0",
       )}
     >
@@ -727,15 +728,20 @@ function WorkspaceSidebar({
         className={cn(
           "flex shrink-0 items-center max-narrow:hidden",
           collapsed
-            ? "flex-col justify-center px-sm"
-            : "h-(--size-row) justify-between pl-2xl pr-sm",
+            ? "flex-col justify-center gap-sm px-sm"
+            : "h-(--size-row) gap-2xs pl-2xl pr-sm",
         )}
       >
         <span
           role="img"
           aria-label="ufo"
-          className={cn("h-(--size-wordmark) w-(--size-logo) bg-current", collapsed && "hidden")}
-          style={{ mask: `url(${logo}) center / contain no-repeat` }}
+          className={cn("size-(--size-glyph) shrink-0 bg-current", collapsed && "hidden")}
+          style={{ mask: `url(${mark}) center / contain no-repeat` }}
+        />
+        <Spotlight
+          agents={agents}
+          collapsed={collapsed}
+          className={cn(HEADER_CONTROL, !collapsed && "ml-auto")}
         />
         <SidebarTooltip collapsed={collapsed} label="Expand sidebar">
           <SidebarToggle
@@ -755,7 +761,6 @@ function WorkspaceSidebar({
             onClick={startChat}
           />
         ) : null}
-        <SearchRow agents={agents} collapsed={collapsed} />
         <NavRow
           icon={<IconClockPlay className={GLYPH} aria-hidden />}
           current={standing(route, "tasks")}

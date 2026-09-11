@@ -462,13 +462,13 @@ test("both notice tones keep the chrome type size", () => {
   }
 });
 
-test("the wordmark is the drawn ufo mark in the top bar", async () => {
+test("the sidebar heads itself with the drawn ufo mark", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const brand = await screen.findByRole("img", { name: "ufo" });
   expect(brand.getAttribute("class")).not.toContain("tracking");
-  expect(brand.getAttribute("style")).toContain("ufo-logo.svg");
+  expect(brand.getAttribute("style")).toContain("ufo-mark.svg");
   expect(readFileSync(join(STATIC, "sidebar.html"), "utf8")).toContain(
     '<body data-shell="sidebar">',
   );
