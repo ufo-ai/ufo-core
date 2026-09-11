@@ -19,7 +19,9 @@ from ufo.blob import S3BlobStore
 from ufo.harness.sandbox.client_binary import client_binary
 from ufo.harness.sandbox.session import SANDBOX_GID, SANDBOX_UID
 
-MINIO_IMAGE = "minio/minio"
+MINIO_IMAGE = (
+    "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+)
 MINIO_CREDENTIAL = "minioadmin"
 MINIO_OP_TIMEOUT_S = 180
 MINIO_READY_SECONDS = 60.0
