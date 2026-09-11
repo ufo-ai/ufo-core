@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { chatHash } from "@/lib/route";
+import { chatHash, tasksHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -26,18 +26,18 @@ beforeEach(() => {
 
 const CONVERSATION_ID = "d28e2f45-85c5-4ce8-bc12-32b42b32af91";
 
-test("the workspace Tasks tab draws both of its listings", async () => {
+test("the Scheduled tab draws the tasks listing", async () => {
   wire({
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/tasks";
+  location.hash = tasksHash("scheduled");
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Scheduled" })).toBeTruthy();
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
-  expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
+  expect(screen.queryByText(NO_TRIGGERS)).toBeNull();
   expect(screen.getByRole("button", { name: "New scheduled task" })).toBeTruthy();
 });
 
@@ -71,7 +71,9 @@ test("a task the address opens links its conversation and offers pause", async (
     "/transcript": () => json({ messages: [] }),
   });
   location.hash =
-    "#/workspace/tasks?open=object/" + AGENT.id + "/scheduled_task/nightly-deploy";
+    tasksHash("scheduled", {
+      opens: ["object/" + AGENT.id + "/scheduled_task/nightly-deploy"],
+    });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const sheet = await screen.findByRole("dialog", { name: "nightly-deploy" });
@@ -114,7 +116,7 @@ test.each(["Close", "Escape"])("%s clears a task drawer", async (action) => {
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/tasks";
+  location.hash = tasksHash("scheduled");
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await pressRow("nightly-deploy");
@@ -126,5 +128,5 @@ test.each(["Close", "Escape"])("%s clears a task drawer", async (action) => {
   await vi.waitFor(() =>
     expect(screen.queryByRole("dialog", { name: "nightly-deploy" })).toBeNull(),
   );
-  expect(location.hash).toBe("#/workspace/tasks");
+  expect(location.hash).toBe(tasksHash("scheduled"));
 });

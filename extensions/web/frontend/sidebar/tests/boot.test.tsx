@@ -186,7 +186,7 @@ test("every nav row lands on its own section, whatever the workspace holds", asy
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   await userEvent.click(rail.getByRole("button", { name: "Tasks" }));
-  expect(location.hash).toBe("#/tasks");
+  expect(location.hash).toBe("#/tasks/runs");
 
   await userEvent.click(rail.getByRole("button", { name: "Radar" }));
   await waitFor(() => expect(location.hash).toBe("#/radar"));

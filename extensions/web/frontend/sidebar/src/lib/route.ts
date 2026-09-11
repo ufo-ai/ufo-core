@@ -3,7 +3,6 @@ import { holdableTrack, unholdable } from "@/lib/tracks";
 export const WORKSPACE_TABS = [
   "team",
   "apps",
-  "tasks",
   "channels",
   "skills",
   "memory",
@@ -12,9 +11,12 @@ export const WORKSPACE_TABS = [
   "billing",
 ] as const;
 
+export const TASK_TABS = ["runs", "scheduled", "triggers"] as const;
+
 export const SECTIONS = ["wiki", "radar", "artifacts", "connectors", "messaging"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
+export type TaskTab = (typeof TASK_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
 
 export type PlaceStep = "push" | "replace" | "back";
@@ -43,7 +45,7 @@ export type Route =
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents"; build?: boolean }
   | { kind: "store" }
-  | { kind: "tasks"; place: WorkspacePlace }
+  | { kind: "tasks"; view: TaskTab; place: WorkspacePlace }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "agent-setup"; agentId: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
@@ -172,7 +174,7 @@ export const BUILDER_HASH = AGENTS_HASH + "/builder";
 
 export const STORE_HASH = AGENTS_HASH + "/store";
 
-export const TASKS_HASH = "#/tasks";
+const TASKS_PREFIX = "#/tasks/";
 
 export const FIRST_RUN_HASH = "#/first-run";
 
@@ -260,14 +262,15 @@ const STORE = row(
   () => STORE_HASH,
 );
 
-const TASKS = row<"tasks", [WorkspacePlace?]>(
+const TASKS = row<"tasks", [TaskTab, WorkspacePlace?]>(
   "tasks",
-  new RegExp(`^${TASKS_HASH}${PLACE_TAIL}`),
+  new RegExp(`^${TASKS_PREFIX}(${TAB_NAME})${PLACE_TAIL}`),
   (match) => {
-    const place = parsePlace(match[1]);
-    return place ? { kind: "tasks", place } : null;
+    const tab = TASK_TABS.find((candidate) => candidate === match[1]);
+    const place = parsePlace(match[2]);
+    return tab === undefined || !place ? null : { kind: "tasks", view: tab, place };
   },
-  (place: WorkspacePlace = {}) => TASKS_HASH + serializePlace(place),
+  (view: TaskTab, place: WorkspacePlace = {}) => TASKS_PREFIX + view + serializePlace(place),
 );
 
 const CHAT = row(
@@ -497,5 +500,6 @@ export const agentHash = AGENT.write;
 export const agentSetupHash = AGENT_SETUP.write;
 export const workspaceHash = WORKSPACE.write;
 export const sectionHash = SECTION.write;
+/** The address of a tasks tab, optionally at a place. */
 export const tasksHash = TASKS.write;
 export const firstRunHash = FIRST_RUN.write;

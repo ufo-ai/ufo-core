@@ -242,7 +242,7 @@ test("two agents' same-named records both stand, each opening its own", async ()
   expect(rows).toHaveLength(2);
 
   await userEvent.click(rows[1]);
-  expect(location.hash.startsWith("#/workspace/tasks")).toBe(true);
+  expect(location.hash.startsWith("#/tasks/scheduled")).toBe(true);
   expect(decodeURIComponent(location.hash)).toContain(
     "object/" + SECOND_ID + "/" + TASK_KIND.kind + "/nightly-deploy",
   );

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { TASKS_HASH } from "@/lib/route";
+import { tasksHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -29,19 +29,32 @@ beforeEach(() => {
   useStreamFake();
 });
 
-test("the workspace Tasks tab draws both of its listings", async () => {
+test("the tabs stand over the tasks screen, each drawing its own listing", async () => {
   wire({
     "/objects/scheduled_task": () => objectIndex(TASK_KIND, []),
     "/objects/source_trigger": () => objectIndex(TRIGGER_KIND, []),
+    "/objects/turn": () => json({ ...TURN_KIND, objects: [], next_cursor: null }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/workspace/tasks";
+  location.hash = tasksHash("scheduled");
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
+  expect(await screen.findByRole("heading", { name: "Scheduled" })).toBeTruthy();
+  const tabs = screen.getByRole("tablist", { name: "tasks" });
+  expect(within(tabs).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+    "Runs",
+    "Scheduled",
+    "Triggers",
+  ]);
   expect(await screen.findByText(NO_TASKS)).toBeTruthy();
-  expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
+  expect(screen.queryByText(NO_TRIGGERS)).toBeNull();
   expect(screen.getByRole("button", { name: "New scheduled task" })).toBeTruthy();
+
+  await userEvent.click(within(tabs).getByRole("tab", { name: "Triggers" }));
+
+  expect(location.hash).toBe(tasksHash("triggers"));
+  expect(await screen.findByText(NO_TRIGGERS)).toBeTruthy();
+  expect(screen.queryByText(NO_TASKS)).toBeNull();
 });
 
 test("a task the address opens stands in the sheet, where its pause is one press", async () => {
@@ -69,8 +82,9 @@ test("a task the address opens stands in the sheet, where its pause is one press
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash =
-    "#/workspace/tasks?open=object/" + AGENT.id + "/scheduled_task/nightly-deploy";
+  location.hash = tasksHash("scheduled", {
+    opens: ["object/" + AGENT.id + "/scheduled_task/nightly-deploy"],
+  });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const sheet = await screen.findByRole("dialog", { name: "nightly-deploy" });
@@ -168,8 +182,8 @@ test("the sidebar Tasks row lists the runs of scheduled work, newest first, mark
 
   await userEvent.click(await screen.findByRole("button", { name: "Tasks" }));
 
-  expect(location.hash).toBe(TASKS_HASH);
-  expect(await screen.findByRole("heading", { name: "Tasks" })).toBeTruthy();
+  expect(location.hash).toBe(tasksHash("runs"));
+  expect(await screen.findByRole("heading", { name: "Runs" })).toBeTruthy();
   const page = screen.getByRole("main");
   expect(await within(page).findByRole("img", { name: "Running" })).toBeTruthy();
   expect(within(page).getByRole("img", { name: "Failed" })).toBeTruthy();
@@ -185,13 +199,13 @@ test("a run row opens its transcript read-only, and its Stop ends that run alone
     turn: TURN_ID,
     turn_started_at: "2026-08-27T09:00:00Z",
   });
-  location.hash = TASKS_HASH;
+  location.hash = tasksHash("runs");
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const mark = await screen.findByRole("img", { name: "Running" });
   await userEvent.click(mark.closest('[role="button"]')!);
 
-  expect(decodeURIComponent(location.hash)).toBe(TASKS_HASH + "?open=run/" + TURN_ID);
+  expect(decodeURIComponent(location.hash)).toBe(tasksHash("runs") + "?open=run/" + TURN_ID);
   const drawer = await screen.findByRole("dialog", { name: "nightly-digest" });
   const stop = await within(drawer).findByRole("button", { name: "Stop" });
   expect(within(drawer).queryByRole("textbox")).toBeNull();
@@ -208,7 +222,7 @@ test("a run row opens its transcript read-only, and its Stop ends that run alone
 
 test("a run's gear opens the settings of the task that fired it", async () => {
   runsWire();
-  location.hash = TASKS_HASH;
+  location.hash = tasksHash("runs");
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(
@@ -222,14 +236,14 @@ test("a run's gear opens the settings of the task that fired it", async () => {
 
 test("the filter narrows the runs to one task, and the narrowing rides the address", async () => {
   const { calls } = runsWire();
-  location.hash = TASKS_HASH;
+  location.hash = tasksHash("runs");
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByRole("img", { name: "Running" });
   await userEvent.click(screen.getByRole("button", { name: "Filter" }));
   await userEvent.click(await screen.findByRole("menuitemradio", { name: "nightly-digest" }));
 
-  expect(decodeURIComponent(location.hash)).toBe(TASKS_HASH + "?scope=scheduled_task/nightly-digest");
+  expect(decodeURIComponent(location.hash)).toBe(tasksHash("runs") + "?scope=scheduled_task/nightly-digest");
   await waitFor(() =>
     expect(calls.some((url) => url.includes("source_name=nightly-digest"))).toBe(true),
   );

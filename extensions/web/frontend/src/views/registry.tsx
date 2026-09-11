@@ -1,7 +1,7 @@
 import { lazy, type ComponentType, type ReactNode } from "react";
 
 import type { Placement } from "@/kernel/pager";
-import type { Section, WorkspaceTab } from "@/lib/route";
+import type { Section, TaskTab, WorkspaceTab } from "@/lib/route";
 
 export type PaneView = {
   label: string;
@@ -32,10 +32,26 @@ export const CHANNELS: PaneView = {
   render: () => <WorkspaceMessaging />,
 };
 
-export const TASKS: PaneView = {
-  label: "Tasks",
-  remountOnPlace: false,
-  render: placed(() => import("@/views/Tasks").then((module) => ({ default: module.Tasks }))),
+export const TASK_VIEWS: Record<TaskTab, PaneView> = {
+  runs: {
+    label: "Runs",
+    remountOnPlace: false,
+    render: placed(() =>
+      import("@/views/TaskRuns").then((module) => ({ default: module.TaskRuns })),
+    ),
+  },
+  scheduled: {
+    label: "Scheduled",
+    remountOnPlace: false,
+    render: placed(() =>
+      import("@/views/Tasks").then((module) => ({ default: module.Scheduled })),
+    ),
+  },
+  triggers: {
+    label: "Triggers",
+    remountOnPlace: false,
+    render: placed(() => import("@/views/Tasks").then((module) => ({ default: module.Triggers }))),
+  },
 };
 
 export const RADAR: PaneView = {
@@ -75,7 +91,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     remountOnPlace: false,
     render: placed(() => import("@/views/Apps").then((module) => ({ default: module.Apps }))),
   },
-  tasks: TASKS,
   channels: CHANNELS,
   skills: {
     label: "Skills",

@@ -532,7 +532,7 @@ CLAIMS = (
         corpus="references/capabilities.md",
         phrase="edit\nor delete a row",
         source=TASKS_VIEW,
-        pattern=r"<ObjectDetail",
+        pattern=r"<ObjectPane",
     ),
     Claim(
         claim="the object panel can edit or delete a row",

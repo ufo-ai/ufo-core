@@ -11,7 +11,7 @@ import { slotOf, titled } from "@/kernel/objects";
 import { agentName } from "@/lib/agentName";
 import { getJson } from "@/lib/api";
 import { subject } from "@/lib/audience";
-import { chatHash, agentHash, sectionHash, workspaceHash } from "@/lib/route";
+import { chatHash, agentHash, sectionHash, tasksHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
 
 export type Hit = {
@@ -29,8 +29,10 @@ export type Group = {
   failed: string | null;
 };
 
+const SCHEDULED_TASK_KIND = "scheduled_task";
+
 const TASK_KINDS = [
-  { kind: "scheduled_task", label: "scheduled task" },
+  { kind: SCHEDULED_TASK_KIND, label: "scheduled task" },
   { kind: "source_trigger", label: "source trigger" },
 ] as const;
 
@@ -245,7 +247,7 @@ export async function searchEverywhere(
           const kind = path.slice("/objects/".length).split("?")[0];
           return payload.objects.map((row) => ({
             key: row.agent_id + "/" + kind + "/" + row.name,
-            hash: workspaceHash("tasks", {
+            hash: tasksHash(kind === SCHEDULED_TASK_KIND ? "scheduled" : "triggers", {
               opens: [slotOf({ agent: row.agent_id, kind, name: row.name })],
             }),
             primary: titled(kind, row.name, row),

@@ -7,17 +7,16 @@ import { ObjectDetail, objectAt, slotOf } from "@/kernel/objects";
 import type { ObjectAddress, ObjectRow } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { Pager } from "@/kernel/pager";
-import { COLUMN, FacetMenu, Header, Page, Pane } from "@/kernel/pane";
+import { FacetMenu, PageToolbar } from "@/kernel/pane";
 import type { FacetGroup } from "@/kernel/pane";
-import { Loading, Panel, PanelBlank, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Loading, Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
 import { RowLines } from "@/kernel/rows";
 import { closed, opened } from "@/kernel/slots";
+import { useMe } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { useAgents } from "@/lib/mainAgent";
 import { Moment } from "@/lib/moments";
-import type { Member } from "@/lib/types";
 import { ChatPane } from "@/views/ChatPane";
-import { WORKSPACE_VIEWS } from "@/views/registry";
 
 const TURN_KIND = "turn";
 const TASK_KIND = "scheduled_task";
@@ -225,17 +224,16 @@ function Runs({
 function RunSheet({
   id,
   run,
-  member,
   opens,
   onPlace,
 }: {
   id: string;
   run: Run | null;
-  member: Member;
   opens: string[];
   onPlace: (place: Placement) => void;
 }) {
   const agents = useAgents();
+  const member = useMe();
   const shut = () => onPlace({ opens: closed(opens, RUN_PREFIX + id) });
   const [working, setWorking] = useState(true);
   const state = usePanelRead<DetailPayload>(
@@ -250,7 +248,7 @@ function RunSheet({
   const agent = run === null ? undefined : agents.find((entry) => entry.id === run.agent);
   return (
     <Sheet open title={run?.title || RUN} onClose={shut}>
-      {run === null ? (
+      {run === null || member === null ? (
         <PanelEmpty>{NOT_ON_PAGE}</PanelEmpty>
       ) : agent === undefined ? (
         <PanelEmpty>{NO_AGENT}</PanelEmpty>
@@ -303,11 +301,9 @@ function RecordSheet({
  *  read-only in the drawer, where a running turn can be stopped; its gear opens the settings of
  *  what fired it. */
 export function TaskRuns({
-  member,
   place,
   onPlace,
 }: {
-  member: Member;
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
@@ -315,30 +311,22 @@ export function TaskRuns({
   const opens = place.opens ?? [];
   const [shown, setShown] = useState<Run[]>([]);
   return (
-    <Pane>
-      <Header
-        pinned
-        heading={1}
-        title={WORKSPACE_VIEWS.tasks.label}
-        acts={
-          <Filter
-            scope={scope}
-            onPick={(next) => onPlace({ scope: next || undefined, after: undefined, opens: [] })}
-          />
-        }
-      />
-      <Page>
-        <div className={COLUMN}>
-          <Runs place={place} onPlace={onPlace} onShown={setShown} />
-        </div>
-      </Page>
+    <>
+      <PageToolbar>
+        <Filter
+          scope={scope}
+          onPick={(next) => onPlace({ scope: next || undefined, after: undefined, opens: [] })}
+        />
+      </PageToolbar>
+      <Section>
+        <Runs place={place} onPlace={onPlace} onShown={setShown} />
+      </Section>
       {opens.slice(-1).map((id) =>
         id.startsWith(RUN_PREFIX) ? (
           <RunSheet
             key={id}
             id={id.slice(RUN_PREFIX.length)}
             run={shown.find((run) => RUN_PREFIX + run.name === id) ?? null}
-            member={member}
             opens={opens}
             onPlace={onPlace}
           />
@@ -346,6 +334,6 @@ export function TaskRuns({
           <RecordSheet key={id} id={id} opens={opens} onPlace={onPlace} />
         ),
       )}
-    </Pane>
+    </>
   );
 }

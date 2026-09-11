@@ -3,7 +3,6 @@ import { holdableTrack, unholdable } from "@/lib/tracks";
 export const WORKSPACE_TABS = [
   "team",
   "apps",
-  "tasks",
   "channels",
   "skills",
   "memory",
@@ -12,9 +11,12 @@ export const WORKSPACE_TABS = [
   "billing",
 ] as const;
 
+export const TASK_TABS = ["runs", "scheduled", "triggers"] as const;
+
 export const SECTIONS = ["wiki", "radar", "artifacts", "connectors", "messaging"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
+export type TaskTab = (typeof TASK_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
 
 export type PlaceStep = "push" | "replace" | "back";
@@ -44,6 +46,7 @@ export type Route =
   | { kind: "builder" }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "agent-setup"; agentId: string }
+  | { kind: "tasks"; view: TaskTab; place: WorkspacePlace }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
   | { kind: "first-run"; step?: string }
@@ -210,6 +213,7 @@ const CHAT_PREFIX = "#/c/";
 const NEW_CHAT_PREFIX = "#/new/";
 const AGENT_PREFIX = AGENTS_HASH + "/";
 const WORKSPACE_PREFIX = "#/workspace/";
+const TASKS_PREFIX = "#/tasks/";
 const CONVERSATIONS_PART = "/conversations/";
 const SLOTS_PART = "/slots/";
 const SLOT_PARAM = "slot";
@@ -355,6 +359,17 @@ const AGENT = row(
     AGENT_PREFIX + agentId + serializePlace(place),
 );
 
+const TASKS = row<"tasks", [TaskTab, WorkspacePlace?]>(
+  "tasks",
+  new RegExp(`^${TASKS_PREFIX}(${TAB_NAME})${PLACE_TAIL}`),
+  (match) => {
+    const tab = TASK_TABS.find((candidate) => candidate === match[1]);
+    const place = parsePlace(match[2]);
+    return tab === undefined || !place ? null : { kind: "tasks", view: tab, place };
+  },
+  (view: TaskTab, place: WorkspacePlace = {}) => TASKS_PREFIX + view + serializePlace(place),
+);
+
 const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
   "workspace",
   new RegExp(`^${WORKSPACE_PREFIX}(${TAB_NAME})${PLACE_TAIL}`),
@@ -396,6 +411,7 @@ const ROUTES: readonly RouteReader[] = [
   NEW_CHAT,
   AGENT_SETUP,
   AGENT,
+  TASKS,
   WORKSPACE,
   SECTION,
 ];
@@ -432,6 +448,7 @@ const FRAMED: { [Kind in RouteKind]: boolean } = {
   "new-chat": true,
   agent: true,
   "agent-setup": true,
+  tasks: false,
   workspace: false,
   section: true,
   "bad-link": false,
@@ -441,7 +458,7 @@ export function framedNavigation(to: string): boolean {
   return FRAMED[parseHash(to).kind];
 }
 
-export type Stand = `agent:${string}` | `open:${string}` | "workspace" | `section:${Section}`;
+export type Stand = `agent:${string}` | `open:${string}` | "workspace" | "tasks" | `section:${Section}`;
 
 export const COMPOSING: Stand = `open:${COMPOSE}`;
 
@@ -460,6 +477,8 @@ function stands(route: Route): Stand[] {
     }
     case "agent-setup":
       return [`agent:${route.agentId}`];
+    case "tasks":
+      return ["tasks"];
     case "workspace":
       return route.view === "apps" ? [] : ["workspace"];
     case "section":
@@ -510,5 +529,7 @@ export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): s
 }
 /** The address of a section, optionally at a place. */
 export const sectionHash = SECTION.write;
+/** The address of a tasks tab, optionally at a place. */
+export const tasksHash = TASKS.write;
 /** The address of the first run, at a step or at its welcome. */
 export const firstRunHash = FIRST_RUN.write;

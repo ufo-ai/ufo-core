@@ -4,7 +4,7 @@ import {
   AGENTS_HASH,
   BUILDER_HASH,
   STORE_HASH,
-  TASKS_HASH,
+  TASK_TABS,
   HOME_HASH,
   agentHash,
   artifactTarget,
@@ -18,6 +18,7 @@ import {
   workspaceHash,
   type PlaceStep,
   type Route,
+  type TaskTab,
   type Section,
   type WorkspacePlace,
   type WorkspaceTab,
@@ -202,7 +203,7 @@ export function openStore(): void {
 }
 
 export function openTasks(): void {
-  navigate(TASKS_HASH);
+  navigate(tasksHash(TASK_TABS[0]));
 }
 
 export function openAgent(agentId: string): void {
@@ -243,8 +244,9 @@ export function placeSection(section: Section, place: WorkspacePlace, step: Plac
   );
 }
 
-export function placeTasks(place: WorkspacePlace, step: PlaceStep): void {
-  stepPlace(step, heldRoute().kind === "tasks", () => tasksHash(place));
+export function placeTasks(view: TaskTab, place: WorkspacePlace, step: PlaceStep): void {
+  const seen = heldRoute();
+  stepPlace(step, seen.kind === "tasks" && seen.view === view, () => tasksHash(view, place));
 }
 
 export function placeFirstRun(step: string | undefined): void {

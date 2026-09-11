@@ -3,7 +3,7 @@ import { isPortalChat } from "@/lib/audience";
 import type { ChatRow } from "@/lib/rail";
 import { agentHash, type Route } from "@/lib/route";
 import type { Agent, OwnedConversation } from "@/lib/types";
-import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+import { SECTION_VIEWS, TASK_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 
 export const APP_STORE_TITLE = "App Store";
 
@@ -12,6 +12,7 @@ const TRAIL = " · ";
 const NEW_CONVERSATION = "New conversation";
 const FIRST_RUN = "Set up this workspace";
 const WORKSPACE = "Workspace";
+const TASKS = "Tasks";
 const APPS = "Apps";
 export const SETUP = "Set up";
 const INVALID_LINK = "Invalid link";
@@ -98,12 +99,12 @@ function where(
       return [{ label: APPS }];
     case "store":
       return [{ label: APP_STORE_TITLE }];
-    case "tasks":
-      return [{ label: WORKSPACE_VIEWS.tasks.label }];
     case "agent":
       return [named(route.agentId)];
     case "agent-setup":
       return [{ label: SETUP }, named(route.agentId)];
+    case "tasks":
+      return [{ label: TASK_VIEWS[route.view].label }, { label: TASKS }];
     case "workspace":
       return [{ label: WORKSPACE_VIEWS[route.view].label }, { label: WORKSPACE }];
     case "section":

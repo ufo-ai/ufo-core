@@ -41,11 +41,11 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SignIn } from "@/views/SignIn";
 import { SearchRow, Spotlight } from "@/views/Spotlight";
-import { usePlaceRecorder } from "@/kernel/place";
 import { TabbedPane } from "@/views/TabbedPane";
-import { SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
+import { SECTION_VIEWS, TASK_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
   MEMBER_SUBJECT,
+  Me,
   WEB_SURFACE,
   isPortalChat,
   Viewer,
@@ -128,6 +128,7 @@ import {
   chatHash,
   COMPOSE,
   COMPOSING,
+  TASK_TABS,
   standing,
   type Route,
   type Section,
@@ -157,10 +158,6 @@ const LinkedPane = lazy(() =>
   import("@/views/ChatPane").then((module) => ({ default: module.LinkedPane })),
 );
 const Store = lazy(() => import("./views/Store").then((module) => ({ default: module.Store })));
-const TaskRuns = lazy(() =>
-  import("@/views/TaskRuns").then((module) => ({ default: module.TaskRuns })),
-);
-
 function PaneLoading() {
   return (
     <Pane className={COLUMN}>
@@ -265,6 +262,7 @@ export function App({
     return (
       <WorkspaceId.Provider value={member.workspace_id ?? null}>
       <Viewer.Provider value={member.email}>
+      <Me.Provider value={member}>
         <SurfacesProvider surfaces={surfaces}>
           <MainAgentProvider agents={agents} onAgents={onAgents}>
             {mainAgent ? (
@@ -287,6 +285,7 @@ export function App({
             )}
           </MainAgentProvider>
         </SurfacesProvider>
+      </Me.Provider>
       </Viewer.Provider>
       </WorkspaceId.Provider>
     );
@@ -297,6 +296,7 @@ export function App({
   return (
     <WorkspaceId.Provider value={member.workspace_id ?? null}>
     <Viewer.Provider value={member.email}>
+      <Me.Provider value={member}>
       <SurfacesProvider surfaces={surfaces}>
         <MainAgentProvider agents={agents} onAgents={onAgents}>
           <TooltipProvider>
@@ -349,7 +349,8 @@ export function App({
           </TooltipProvider>
         </MainAgentProvider>
       </SurfacesProvider>
-    </Viewer.Provider>
+    </Me.Provider>
+      </Viewer.Provider>
     </WorkspaceId.Provider>
   );
 }
@@ -812,16 +813,6 @@ function WorkspaceSidebar({
   );
 }
 
-function TasksPane({ member, place }: { member: Member; place: WorkspacePlace }) {
-  const { merged, record } = usePlaceRecorder({
-    view: "tasks",
-    place,
-    remountOnPlace: false,
-    onPlace: placeTasks,
-  });
-  return <TaskRuns member={member} place={merged} onPlace={record} />;
-}
-
 function SectionLanding({ agentId, place }: { agentId: string; place: WorkspacePlace }) {
   useEffect(() => openAgentPlace(agentId, place), [agentId, place]);
   return null;
@@ -878,7 +869,17 @@ function RoutedPane({
     case "store":
       return <Store member={member} onBuild={onBuild} />;
     case "tasks":
-      return <TasksPane member={member} place={route.place} />;
+      return (
+        <TabbedPane
+          group="tasks"
+          tabs={TASK_TABS}
+          views={TASK_VIEWS}
+          view={route.view}
+          crumb={crumb}
+          place={route.place}
+          onPlace={placeTasks}
+        />
+      );
     case "workspace":
       return (
         <TabbedPane

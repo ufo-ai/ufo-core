@@ -26,8 +26,15 @@ import { SignIn } from "@/views/SignIn";
 import { Shortcuts } from "@/views/Shortcuts";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
-import { CHANNELS, CONNECTORS, SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
-import { MEMBER_SUBJECT, WEB_SURFACE, isPortalChat, Viewer, WorkspaceId } from "@/lib/audience";
+import {
+  CHANNELS,
+  CONNECTORS,
+  SECTION_VIEWS,
+  TASK_VIEWS,
+  WORKSPACE_VIEWS,
+  type PaneView,
+} from "@/views/registry";
+import { MEMBER_SUBJECT, Me, WEB_SURFACE, isPortalChat, Viewer, WorkspaceId } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { AppsProvider } from "@/lib/apps";
 import { useAppStatus } from "@/lib/appStatusStore";
@@ -76,6 +83,7 @@ import {
   placeFirstRun,
   placeHome,
   placeSection,
+  placeTasks,
   placeWorkspace,
   startRouter,
   useRoute,
@@ -85,6 +93,7 @@ import type { Seek } from "@/kernel/slots";
 import {
   COMPOSE,
   COMPOSING,
+  TASK_TABS,
   homeConversationLane,
   homeLaneAgent,
   homeLaneConversation,
@@ -259,6 +268,7 @@ export function App({
     return (
       <WorkspaceId.Provider value={member.workspace_id ?? null}>
         <Viewer.Provider value={member.email}>
+      <Me.Provider value={member}>
           <SurfacesProvider surfaces={surfaces}>
             <MainAgentProvider agents={agents} onAgents={onAgents}>
               {mainAgent ? (
@@ -287,7 +297,8 @@ export function App({
               )}
             </MainAgentProvider>
           </SurfacesProvider>
-        </Viewer.Provider>
+        </Me.Provider>
+      </Viewer.Provider>
       </WorkspaceId.Provider>
     );
   }
@@ -297,6 +308,7 @@ export function App({
   return (
     <WorkspaceId.Provider value={member.workspace_id ?? null}>
       <Viewer.Provider value={member.email}>
+      <Me.Provider value={member}>
         <SurfacesProvider surfaces={surfaces}>
           <MainAgentProvider agents={agents} onAgents={onAgents}>
             <TooltipProvider>
@@ -372,6 +384,7 @@ export function App({
             </TooltipProvider>
           </MainAgentProvider>
         </SurfacesProvider>
+      </Me.Provider>
       </Viewer.Provider>
     </WorkspaceId.Provider>
   );
@@ -834,6 +847,18 @@ function RoutedPane({
     }
     case "bad-link":
       return <PaneNote>This link is not valid.</PaneNote>;
+    case "tasks":
+      return (
+        <TabbedPane
+          group="tasks"
+          tabs={TASK_TABS}
+          views={TASK_VIEWS}
+          view={route.view}
+          crumb={crumb}
+          place={route.place}
+          onPlace={placeTasks}
+        />
+      );
     case "workspace":
       return (
         <TabbedPane

@@ -1,12 +1,20 @@
 import { createContext, useContext } from "react";
 
-import type { Conversation } from "@/lib/types";
+import type { Conversation, Member } from "@/lib/types";
 
 export const Viewer = createContext<string | null>(null);
 
 /** The signed-in member's email, from the provider mountApp installs. */
 export function useViewer(): string | null {
   return useContext(Viewer);
+}
+
+export const Me = createContext<Member | null>(null);
+
+/** The signed-in member, for a screen that hands them to another screen's component rather than
+ *  naming them itself. */
+export function useMe(): Member | null {
+  return useContext(Me);
 }
 
 export const WorkspaceId = createContext<string | null>(null);

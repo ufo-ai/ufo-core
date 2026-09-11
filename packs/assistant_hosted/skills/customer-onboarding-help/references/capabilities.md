@@ -7,8 +7,8 @@ assemble an install step, a link, or a request for a token here.
 
 ## Finding existing work
 
-Radar, Artifacts, and Tasks are rows in the web portal's sidebar; the Tasks tab on the
-Workspace page holds the tasks and triggers themselves:
+Radar, Artifacts, and Tasks are rows in the web portal's sidebar; the Tasks screen has a tab
+each for Runs, Scheduled and Triggers:
 
 - Radar opens each scheduled run as a full report with its files and conversation.
 - Artifacts lists shared files and hosted sites.

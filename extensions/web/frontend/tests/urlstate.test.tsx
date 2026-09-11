@@ -24,6 +24,7 @@ import {
   routeIs,
   sectionHash,
   standing,
+  tasksHash,
   workspaceHash,
   type PlaceStep,
   type WorkspacePlace,
@@ -188,9 +189,15 @@ test("an address naming an inherited property of an object names no workspace ta
   expect(parseHash("#/constructor")).toEqual({ kind: "bad-link" });
 });
 
-test("tasks answers at its workspace address", () => {
-  expect(parseHash("#/workspace/tasks")).toEqual({ kind: "workspace", view: "tasks", place: {} });
-  expect(workspaceHash("tasks", { q: "nightly" })).toBe("#/workspace/tasks?q=nightly");
+test("each tasks tab answers at its own address, and the workspace holds none of them", () => {
+  expect(parseHash("#/tasks/runs")).toEqual({ kind: "tasks", view: "runs", place: {} });
+  expect(parseHash("#/tasks/scheduled?q=nightly")).toEqual({
+    kind: "tasks",
+    view: "scheduled",
+    place: { q: "nightly" },
+  });
+  expect(tasksHash("triggers", { q: "github" })).toBe("#/tasks/triggers?q=github");
+  expect(parseHash("#/workspace/tasks")).toEqual({ kind: "bad-link" });
 });
 
 test("a conversation slot has a builder, and it writes the address its own read takes", () => {

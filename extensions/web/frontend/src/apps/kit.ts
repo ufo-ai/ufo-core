@@ -174,6 +174,7 @@ import {
   parseHash,
   routeIs,
   sectionHash,
+  tasksHash,
   workspaceHash,
 } from "@/lib/route";
 import type { WorkspacePlace } from "@/lib/route";
@@ -367,6 +368,7 @@ export {
   parseHash,
   routeIs,
   sectionHash,
+  tasksHash,
   workspaceHash,
   formatSize,
   ChatPane,
