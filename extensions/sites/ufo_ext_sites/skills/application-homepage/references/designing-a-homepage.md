@@ -340,7 +340,8 @@ commits on exit 0, so a second call redeclaring `chromium` fails to compile agai
 Look at it light and dark. Click every control and screenshot what it did. Read the required facts
 off the rendered text, not off your source.
 
-**One pass. Then answer with the site unless the page is broken.** Broken is a short list:
+**Answer with the site once the page holds. Repair what the look found, as many times as it
+takes.** This is the list that decides:
 
 ```
 Did the look find any of these?
@@ -349,11 +350,12 @@ Did the look find any of these?
 ├── a required fact from the objective is not on the page
 ├── a control that changes nothing you can see
 └── a region that renders nothing at all
-   → repair those, deploy once more, and answer
+   → repair those, deploy again, and look again
 Nothing on that list?
    → answer with the site now
 ```
 
 Spacing you would nudge, a colour you would pick differently, a heading you would word again: none
-of these is broken. A page that clears the list is done, and a second pass looking for something to
-improve costs the member a build and finds nothing they would have noticed.
+of these belongs on the list, and chasing them costs the member a build for nothing. Everything on
+it does, however many rounds it takes — you hosting a page that holds is the whole job, and
+answering `stopped` leaves the member with nothing at all.

@@ -193,8 +193,9 @@ object_action(kind="site", action="deploy_website",
 ```
 
 The deploy builds the page, holds it inside `ufo/kit`, and refuses one that never mounts. Nothing
-in it judges how the page looks — you settle that in the browser, in one pass, and answer with the
-deploy's `site` and `site_url` unless that pass found the page broken.
+in it judges how the page looks — you settle that in the browser, repairing and deploying again
+until the look finds nothing on the reference's broken list, and answer with the deploy's `site`
+and `site_url`.
 
 Never run `vite build` yourself: the deploy writes the config that resolves `ufo/kit`, and
 without it the build cannot succeed.

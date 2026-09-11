@@ -1,0 +1,69 @@
+name = "app-builder-soft-close"
+base = "HEAD"
+suites = ["ufo-app-bench"]
+cases = ["pre-meeting-briefs", "issue-planner", "engineering-metrics", "code-review-queue"]
+repeats = 3
+concurrency = 2
+max_stacks = 1
+budget_usd = 90.0
+est_usd_per_case = 3.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "docker" }
+
+[[arm]]
+name = "one-pass-close"
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/skills/application-homepage/references/designing-a-homepage.md"
+old = '''**Answer with the site once the page holds. Repair what the look found, as many times as it
+takes.** This is the list that decides:
+
+```
+Did the look find any of these?
+├── the page did not mount, or the console shows an error
+├── text cut off, printed over other text, or running past the right edge
+├── a required fact from the objective is not on the page
+├── a control that changes nothing you can see
+└── a region that renders nothing at all
+   → repair those, deploy again, and look again
+Nothing on that list?
+   → answer with the site now
+```
+
+Spacing you would nudge, a colour you would pick differently, a heading you would word again: none
+of these belongs on the list, and chasing them costs the member a build for nothing. Everything on
+it does, however many rounds it takes — you hosting a page that holds is the whole job, and
+answering `stopped` leaves the member with nothing at all.'''
+new = '''**One pass. Then answer with the site unless the page is broken.** Broken is a short list:
+
+```
+Did the look find any of these?
+├── the page did not mount, or the console shows an error
+├── text cut off, printed over other text, or running past the right edge
+├── a required fact from the objective is not on the page
+├── a control that changes nothing you can see
+└── a region that renders nothing at all
+   → repair those, deploy once more, and answer
+Nothing on that list?
+   → answer with the site now
+```
+
+Spacing you would nudge, a colour you would pick differently, a heading you would word again: none
+of these is broken. A page that clears the list is done, and a second pass looking for something to
+improve costs the member a build and finds nothing they would have noticed.'''
+
+[[arm.replacements]]
+path = "extensions/sites/ufo_ext_sites/skills/application-homepage/SKILL.md"
+old = '''The deploy builds the page, holds it inside `ufo/kit`, and refuses one that never mounts. Nothing
+in it judges how the page looks — you settle that in the browser, repairing and deploying again
+until the look finds nothing on the reference's broken list, and answer with the deploy's `site`
+and `site_url`.'''
+new = '''The deploy builds the page, holds it inside `ufo/kit`, and refuses one that never mounts. Nothing
+in it judges how the page looks — you settle that in the browser, in one pass, and answer with the
+deploy's `site` and `site_url` unless that pass found the page broken.'''
