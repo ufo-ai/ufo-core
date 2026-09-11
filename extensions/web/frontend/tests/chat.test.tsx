@@ -3333,6 +3333,19 @@ test("a new conversation's composer offers no way to switch app", async () => {
   expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
 });
 
+test("the composer's attach act stands on the centre line of the send act", async () => {
+  wire({ ...transcript() });
+  location.hash = newChatHash(AGENT_ID);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByLabelText("Ask UFO");
+  const attach = screen.getByRole("button", { name: "Attach files" });
+  const toolbar = attach.parentElement!;
+
+  expect(toolbar.contains(screen.getByRole("button", { name: "Send" }))).toBe(true);
+  expect(toolbar.className).toContain("items-center");
+});
+
 test("a route that renames the start screen's agent reads that agent's own draft", async () => {
   wire({ ...transcript() });
   localStorage.setItem("ufo.chat-draft." + MEMBER.id + "/new:" + AGENT_ID, "words for the main agent");

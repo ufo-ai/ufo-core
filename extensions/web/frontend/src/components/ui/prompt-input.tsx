@@ -240,7 +240,7 @@ export function PromptInputTextarea({
 }
 
 export function PromptInputToolbar({ children }: { children: ReactNode }) {
-  return <div className="flex items-stretch justify-between gap-lg">{children}</div>;
+  return <div className="flex items-center justify-between gap-lg">{children}</div>;
 }
 
 export function PromptInputAttach() {
