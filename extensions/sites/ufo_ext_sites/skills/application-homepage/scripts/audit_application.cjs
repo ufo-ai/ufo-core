@@ -1269,11 +1269,9 @@ async function renderedDesignRegions(page, viewport) {
         if (collisionEvidence.length === internalOverlapMax) break;
       }
     }
-    if (collisionEvidence.length) {
-      throw new Error(
-        `application design has accidental internal overlap: ${collisionEvidence.join('; ')}`
-      );
-    }
+    const internalOverlap = collisionEvidence.length
+      ? `application design has accidental internal overlap: ${collisionEvidence.join('; ')}`
+      : '';
     const namedRegions = Array.from(root.querySelectorAll('[data-app-region]'))
       .map((element) => ({
         element,
@@ -1585,7 +1583,7 @@ async function renderedDesignRegions(page, viewport) {
     if (encoder.encode(JSON.stringify(regions)).length > outputByteMax) {
       throw new Error('application design measurement is too large');
     }
-    return regions;
+    return { regions, fault: internalOverlap };
   }, {
     alphaFloor: DESIGN_ALPHA_FLOOR,
     animatedAttributeByteMax: DESIGN_ANIMATED_ATTRIBUTE_BYTE_MAX,
@@ -1649,10 +1647,10 @@ async function measuredDesign(browser, laneWidth, svgInput, previewPath) {
     const source = fs.readFileSync(svgPath).toString('base64');
     await page.goto(`data:image/svg+xml;base64,${source}`, { waitUntil: 'load' });
     const geometry = await nativeDesignGeometry(page, laneWidth);
-    const regions = await renderedDesignRegions(page, geometry);
+    const { regions, fault } = await renderedDesignRegions(page, geometry);
     if (blockedRequests) throw new Error('application design must not contain active or external content');
     if (previewPath) await page.screenshot({ path: previewPath });
-    return { height: geometry.height, regions };
+    return { height: geometry.height, regions, fault };
   } finally {
     await context.close();
   }
@@ -1661,8 +1659,9 @@ async function measuredDesign(browser, laneWidth, svgInput, previewPath) {
 async function designOnly(laneWidth, svgPath, previewPath) {
   const browser = await chromium.launch();
   try {
-    const { regions } = await measuredDesign(browser, laneWidth, svgPath, previewPath);
+    const { regions, fault } = await measuredDesign(browser, laneWidth, svgPath, previewPath);
     process.stdout.write(JSON.stringify(regions));
+    if (fault) throw new Error(fault);
   } finally {
     await browser.close();
   }
@@ -1887,7 +1886,7 @@ async function main() {
   let browser = null;
   try {
     browser = await chromium.launch();
-    let design = { height: DESIGN_INITIAL_FOLD, regions: [] };
+    let design = { height: DESIGN_INITIAL_FOLD, regions: [], fault: '' };
     let designFault = '';
     if (designPath) {
       try {
@@ -1897,6 +1896,7 @@ async function main() {
       }
     }
     const { height: designHeight, regions: designRegions } = design;
+    designFault = designFault || (design.fault || '').slice(0, 500);
     const views = await Promise.all(VIEWS.map(async (view) => {
       const context = await browser.newContext({
         viewport: { width: view.width, height: view.height },

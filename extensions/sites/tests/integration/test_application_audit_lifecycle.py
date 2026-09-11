@@ -643,3 +643,54 @@ def test_readiness_uses_captured_frames_and_a_node_deadline(lifecycle_results: d
         "application lifecycle did not become ready"
     )
     assert lifecycle_results["stalledEvaluate"]["elapsed"] < 500
+
+
+def test_an_overlapping_drawing_still_measures_every_region_it_names(
+    tmp_path: Path, sandbox_image: str
+) -> None:
+    """A wireframe is a sketch, and two labels crossing in it says nothing about the page. The
+    overlap used to abort the measurement, so `designRegions` came back empty and fidelity scored
+    `design has 0 unique visible named regions` — 12 of 26 recorded builds failed that way with
+    their pages rendering fine. The overlap is still named; it no longer discards the regions."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker executable is not available")
+    shutil.copy2(AUDIT_SCRIPT, tmp_path / "audit_application.cjs")
+    crossing = (
+        '<g data-app-region="overview">'
+        '<rect x="40" y="40" width="600" height="150" fill="#eeeeee"/>'
+        '<text x="60" y="200" font-size="32">a label crossing its own panel edge</text>'
+        "</g>"
+        '<g data-app-region="queue">'
+        '<rect x="40" y="300" width="600" height="150" fill="#dddddd"/>'
+        '<text x="60" y="460" font-size="32">and another one crossing</text>'
+        "</g>"
+    )
+    (tmp_path / "design.svg").write_text(
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" '
+        f'width="1440" height="900">{crossing}</svg>'
+    )
+    tmp_path.chmod(CONTAINER_FIXTURE_MODE)
+
+    drawn = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "node",
+            "-v",
+            f"{tmp_path}:/fixture:ro",
+            sandbox_image,
+            "/fixture/audit_application.cjs",
+            "--design",
+            str(APPLICATION_DESIGN_WIDTH),
+            "/fixture/design.svg",
+        ],
+        capture_output=True,
+        timeout=DRAW_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+    assert "accidental internal overlap" in drawn.stderr.decode(errors="replace")
+    assert [region["name"] for region in json.loads(drawn.stdout)] == ["overview", "queue"]
