@@ -1,0 +1,45 @@
+---
+title: Make a code change
+description: Ask the agent to reproduce a defect, implement a focused fix, test it, and open a pull request.
+---
+
+## Connect first
+
+Connect the [GitHub account](/connectors/github/) that can read and write the repository. If the task depends on logs,
+issues, or a design file, connect those sources too.
+
+State the repository when several are available.
+
+## Example request
+
+> In acme/web, fix the error that prevents a member from saving a dashboard with no description.
+> Reproduce the error before you change code. Add the test that would have caught it, run the
+> focused checks, and verify the form in a browser. Open a draft pull request. Do not deploy or
+> merge it.
+
+## What the agent does
+
+The agent inspects the repository instructions and existing implementation. It reproduces the
+problem, changes the smallest relevant path, and runs the focused checks. It can use a browser when
+the result is visible in the product.
+
+The final reply should name the change, the tests and checks that passed, the pull request, and any
+proof it could not obtain.
+
+## Useful limits
+
+State these when they matter:
+
+- The repository, branch, or issue in scope.
+- Whether the agent may commit, push, or open a pull request.
+- Whether the pull request must be a draft.
+- Whether it may change a public API, database schema, or dependency.
+- Whether it may deploy or merge.
+
+## Follow up in the same conversation
+
+> Address the review comments that apply to this change. Explain any comment you do not accept.
+
+> Wait for CI. Fix only failures caused by this branch, then report the exact head and check state.
+
+> Update the pull request description with the test and browser proof. Do not merge.

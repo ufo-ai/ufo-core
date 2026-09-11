@@ -1,0 +1,32 @@
+---
+title: Connecting Stripe
+description: Connect Stripe to work with customers, payments, invoices, and subscriptions.
+---
+
+## Connect Stripe
+
+Ask the agent:
+
+> Connect my Stripe account.
+
+Open the private authorization control and choose the correct Stripe account. The connection follows
+the access granted by Stripe.
+
+## What ufo can do
+
+- Read customers, payments, invoices, subscriptions, products, and related records.
+- Analyze revenue and payment state.
+- Prepare reports or customer follow-up work.
+- Make supported changes only when you request them and the grant allows them.
+
+State whether the task uses test or live data, the time range, currency, and allowed actions.
+
+> Report failed live payments from the last seven days. Group them by failure reason and customer.
+> Do not retry a payment or contact a customer.
+
+## Fix Stripe access
+
+Confirm that the connected account can open the target Stripe account. Reconnect when the grant
+expires. Always state **test** or **live** when the same account contains both modes.
+
+See [Analyze data](/recipes/data-analysis/) and [Weekly progress report](/recipes/weekly-progress-report/).

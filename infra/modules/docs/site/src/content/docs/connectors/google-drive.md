@@ -1,0 +1,36 @@
+---
+title: Connecting Google Drive
+description: Connect Google Drive to search, read, and create files.
+---
+
+## Connect Google Drive
+
+Ask the agent:
+
+> Connect my Google Drive account.
+
+Open the private authorization control and approve the correct Google account. The agent can use
+only files and shared drives that account can access.
+
+## What ufo can do
+
+- Search files and folders.
+- Read documents, spreadsheets, presentations, PDFs, and other supported files.
+- Create or update files when the request allows it.
+- Use Drive content in reports, briefs, and research.
+
+Name the folder, file, owner, or date range when you know it.
+
+> Find the latest board deck in the Finance shared drive. Check its revenue totals against the
+> connected spreadsheet and report differences. Do not edit either file.
+
+## Use Drive as knowledge
+
+A connection gives live access during a task. Use a [synced source](/work/sources/) when selected
+folders must remain searchable as workspace knowledge or start work after changes.
+
+## Fix Drive access
+
+Confirm that the connected account can open the file in Google Drive. Reconnect if the grant
+expired. Connect [Google Sheets](/connectors/google-sheets/) when a task must update spreadsheet
+cells or formulas.

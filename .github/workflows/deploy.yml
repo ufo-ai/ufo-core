@@ -728,8 +728,8 @@ jobs:
           curl -fsS -X POST "https://$HOST/v1/onboard/ufo" | grep -F "x-ufo-session header is required."
           # A custom domain's certificate is issued at Cloudflare's own pace, so the first deploy of
           # this door waits for it rather than reading its absence as a broken site.
-          curl -fsS --retry 6 --retry-delay 10 --retry-all-errors "https://docs.$HOST/start/" \
-            | grep -F "Your first sign-in"
+          curl -fsS --retry 6 --retry-delay 10 --retry-all-errors \
+            "https://docs.$HOST/getting-started/introduction/" | grep -F "How ufo works"
           # shellcheck disable=SC2016  # literal ${UFO_URL:-...} text from the curl card, not an expansion
           curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
           curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null

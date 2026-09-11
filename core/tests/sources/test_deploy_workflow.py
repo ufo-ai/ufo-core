@@ -228,9 +228,9 @@ case "$URL" in
     [ "$BAD_LEGAL_PATH" != terms ] || { printf 'wrong\\n'; exit; }
     printf '<h1>Terms of Service</h1>\\n'
     ;;
-  */start/)
+  */getting-started/introduction/)
     [ "$BAD_DOCS_HOST" != "$HOST" ] || { printf 'wrong\\n'; exit; }
-    printf '<h1>Your first sign-in</h1>\\n'
+    printf '<h1>How ufo works</h1>\\n'
     ;;
   */)
     [ "$BAD_ROOT_HOST" != "$HOST" ] || { printf 'wrong\\n'; exit; }
@@ -1579,7 +1579,7 @@ def test_edge_deploys_are_isolated(
         f"https://{host}/",
         f"https://{host}/login",
         f"https://{host}/v1/onboard/ufo",
-        f"https://docs.{host}/start/",
+        f"https://docs.{host}/getting-started/introduction/",
         f"https://{host}/ufo",
         f"https://{host}/fleet",
         f"https://{host}/privacy",
