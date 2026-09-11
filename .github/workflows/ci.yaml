@@ -90,6 +90,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: |
             infra/modules/edge/pnpm-lock.yaml
+            infra/modules/docs/site/pnpm-lock.yaml
             extensions/debugger/frontend/pnpm-lock.yaml
             extensions/web/frontend/pnpm-lock.yaml
       - run: pnpm -C infra/modules/edge install --frozen-lockfile
@@ -101,6 +102,9 @@ jobs:
             playwright install --with-deps chromium \
             || pnpm -C infra/modules/edge exec playwright install chromium
       - run: node --test infra/modules/edge/*.test.mjs
+      - run: pnpm -C infra/modules/docs/site install --frozen-lockfile
+      - run: pnpm -C infra/modules/docs/site run build
+      - run: pnpm -C infra/modules/docs/site test
       - run: pnpm -C extensions/debugger/frontend install --frozen-lockfile
       - run: pnpm -C extensions/debugger/frontend run build
       - run: pnpm -C extensions/web/frontend install --frozen-lockfile

@@ -1,0 +1,16 @@
+{
+  "name": "ufo-docs",
+  "private": true,
+  "packageManager": "pnpm@11.24.0",
+  "type": "module",
+  "description": "The docs site served at docs.ufo.ai: Starlight content and the build the edge worker uploads.",
+  "scripts": {
+    "dev": "node brand.mjs && astro dev",
+    "build": "node brand.mjs && astro build",
+    "test": "node --test *.test.mjs"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.0",
+    "astro": "7.3.2"
+  }
+}

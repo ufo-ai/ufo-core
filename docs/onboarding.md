@@ -55,6 +55,15 @@ host serves. Sign-in lives on the app host, so the apex carries no signed-in sta
 cookie stays same-origin. The retired `flyingobject.ai` zone answers every request with a 301 to
 the same subdomain and path under ufo.ai.
 
+## The docs door
+
+`docs.ufo.ai` and `docs.testing.ufo.ai` are one Cloudflare Worker each (`infra/modules/docs`), and
+the whole worker is a built Starlight site under `site/` — no code runs, the uploaded assets answer,
+and a custom domain claims the exact host ahead of the `*` wildcard that hosted member sites answer
+under. Both doors serve one build, whose canonical is always production, so the testing copy is
+never the indexed one. The site is public: nothing on it is workspace data, and a session cookie
+could not reach it anyway, since every cookie ufo binds is host-only.
+
 ## Terminal onboarding flow
 
 ```text

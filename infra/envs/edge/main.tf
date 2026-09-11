@@ -82,3 +82,21 @@ module "testing" {
   favicon_svg      = local.favicon_svg
   favicon_dark_svg = local.favicon_dark_svg
 }
+
+module "docs_prod" {
+  source = "../../modules/docs"
+
+  name       = "ufo-docs"
+  hostname   = "docs.ufo.ai"
+  zone_id    = data.cloudflare_zone.ufo_ai.id
+  account_id = data.cloudflare_zone.ufo_ai.account.id
+}
+
+module "docs_testing" {
+  source = "../../modules/docs"
+
+  name       = "ufo-docs-testing"
+  hostname   = "docs.testing.ufo.ai"
+  zone_id    = data.cloudflare_zone.ufo_ai.id
+  account_id = data.cloudflare_zone.ufo_ai.account.id
+}

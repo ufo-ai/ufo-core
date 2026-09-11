@@ -228,6 +228,10 @@ case "$URL" in
     [ "$BAD_LEGAL_PATH" != terms ] || { printf 'wrong\\n'; exit; }
     printf '<h1>Terms of Service</h1>\\n'
     ;;
+  */start/)
+    [ "$BAD_DOCS_HOST" != "$HOST" ] || { printf 'wrong\\n'; exit; }
+    printf '<h1>Your first sign-in</h1>\\n'
+    ;;
   */)
     [ "$BAD_ROOT_HOST" != "$HOST" ] || { printf 'wrong\\n'; exit; }
     printf '  Sign up: https://ufo.ai/join/ufo\\n'
@@ -621,7 +625,7 @@ def _check_pull_request_plans_active_deployment_inputs() -> None:
         r"founder_email_prerequisites\.sh|terraform_plan_guard\.py|"
         r"production_prerequisites\.sh))$|"
         r"infra/(production_secrets|testing_secrets)\.py$|"
-        r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)"
+        r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge|docs)|templates)/)"
     )
     script = selector["run"]
     assert isinstance(script, str)
@@ -1437,6 +1441,7 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
                 "cloudflare_dns_record.ufo_ai_bounce_mx",
                 "cloudflare_dns_record.ufo_ai_bounce_spf",
                 "module.testing",
+                "module.docs_testing",
             ),
             "flagship_testing_api_token",
             "edge",
@@ -1458,7 +1463,7 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
         (
             "deploy-production.yml",
             "deploy",
-            ("cloudflare_flagship_flag.prod_portal", "module.prod"),
+            ("cloudflare_flagship_flag.prod_portal", "module.prod", "module.docs_prod"),
             "flagship_prod_api_token",
             "production-edge",
             "Reject destructive production edge changes",
@@ -1559,6 +1564,7 @@ def test_edge_deploys_are_isolated(
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "BAD_HOST": "",
         "BAD_FLEET_HOST": "",
+        "BAD_DOCS_HOST": "",
         "BAD_LEGAL_PATH": "",
         "BAD_LOGIN_HOST": "",
         "BAD_ONBOARD_HOST": "",
@@ -1568,11 +1574,12 @@ def test_edge_deploys_are_isolated(
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 7
+    assert len(invoked) == 8
     assert [call.rsplit(" ", 1)[-1] for call in invoked] == [
         f"https://{host}/",
         f"https://{host}/login",
         f"https://{host}/v1/onboard/ufo",
+        f"https://docs.{host}/start/",
         f"https://{host}/ufo",
         f"https://{host}/fleet",
         f"https://{host}/privacy",
@@ -1587,6 +1594,14 @@ def test_edge_deploys_are_isolated(
         )
         assert failed.returncode != 0
     environment["BAD_LEGAL_PATH"] = ""
+    environment["BAD_DOCS_HOST"] = f"docs.{host}"
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["BAD_DOCS_HOST"] = ""
     environment["BAD_ROOT_HOST"] = host
     failed = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", script],
@@ -1768,6 +1783,7 @@ def _check_pull_requests_guard_the_production_edge_plan() -> None:
             "  -target=cloudflare_ruleset.shipped_app_cache \\\n"
             "  -target=cloudflare_zone_setting.always_use_https \\\n"
             "  -target=module.prod \\\n"
+            "  -target=module.docs_prod \\\n"
             '  -out="$RUNNER_TEMP/production-edge-review.tfplan"\n'
         ),
     }

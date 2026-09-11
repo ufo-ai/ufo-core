@@ -368,10 +368,16 @@ def _is_skill_content(path: Path) -> bool:
     return any((parent / SKILL_MANIFEST).is_file() for parent in path.parents)
 
 
+def _built(path: Path) -> bool:
+    """A tree a build wrote — a provider cache, a static site's output, its generated types. Every
+    one of them is gitignored, so nothing a reader could edit lives under it."""
+    return bool({".terraform", "dist", ".astro"}.intersection(path.parts))
+
+
 def _vendored(path: Path) -> bool:
-    """A dependency tree checked out inside a source root — a python virtualenv or a pnpm install
-    a frontend build needs. Its files are nobody's code to gate."""
-    return bool({".venv", "node_modules"}.intersection(path.parts))
+    """A tree whose files came from somewhere else — a python virtualenv, a pnpm install a frontend
+    build needs, a copy of an upstream file. None of it is anybody's code here to gate."""
+    return bool({".venv", "node_modules", "vendor"}.intersection(path.parts))
 
 
 def _skill_scripts() -> list[Path]:
@@ -2383,7 +2389,7 @@ def _comment_length_failures() -> list[str]:
     for path in sorted({*trees, *ROOT.glob("*")}):
         if path.suffix not in COMMENT_GATED_SUFFIXES or not path.is_file():
             continue
-        if _vendored(path) or _is_skill_content(path) or ".terraform" in path.parts:
+        if _vendored(path) or _is_skill_content(path) or _built(path):
             continue
         rel = path.relative_to(ROOT)
         if rel in COMMENT_ALIGNMENT_FILES or COMMENT_GENERATED.search(str(rel)):

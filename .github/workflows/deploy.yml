@@ -41,7 +41,7 @@ jobs:
         id: select
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
-          DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy(-production)?\.yml|scripts/(billing_export_plan_(check\.py|gate\.sh)|deploy_change_gate\.py|founder_email_prerequisites\.sh|terraform_plan_guard\.py|production_prerequisites\.sh))$|infra/(production_secrets|testing_secrets)\.py$|infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge)|templates)/)
+          DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy(-production)?\.yml|scripts/(billing_export_plan_(check\.py|gate\.sh)|deploy_change_gate\.py|founder_email_prerequisites\.sh|terraform_plan_guard\.py|production_prerequisites\.sh))$|infra/(production_secrets|testing_secrets)\.py$|infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge|docs)|templates)/)
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           # Every input build_definition_digest reads: this script's own constants, the baked client,
           # the harness modules, and every SKILL.md the system bundle globs.
@@ -620,6 +620,20 @@ jobs:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: infra/modules/docs/site/pnpm-lock.yaml
+
+      # The docs worker is its built site and nothing else, and terraform reads `site/dist` when it
+      # plans, so the build runs ahead of it.
+      - run: pnpm -C infra/modules/docs/site install --frozen-lockfile
+      - run: pnpm -C infra/modules/docs/site run build
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.14.9"
@@ -673,6 +687,7 @@ jobs:
             -target=cloudflare_dns_record.ufo_ai_bounce_mx \
             -target=cloudflare_dns_record.ufo_ai_bounce_spf \
             -target=module.testing \
+            -target=module.docs_testing \
             -out="$RUNNER_TEMP/edge.tfplan"
 
       - name: Reject destructive changes
@@ -690,6 +705,7 @@ jobs:
             -target=cloudflare_ruleset.shipped_app_cache \
             -target=cloudflare_zone_setting.always_use_https \
             -target=module.prod \
+            -target=module.docs_prod \
             -out="$RUNNER_TEMP/production-edge-review.tfplan"
 
       - name: Reject destructive production edge changes
@@ -710,6 +726,10 @@ jobs:
           curl -fsS "https://$HOST/" | grep -F "https://ufo.ai/join/ufo"
           test "$(curl -fsS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/login")" = "302 https://app.$HOST/login"
           curl -fsS -X POST "https://$HOST/v1/onboard/ufo" | grep -F "x-ufo-session header is required."
+          # A custom domain's certificate is issued at Cloudflare's own pace, so the first deploy of
+          # this door waits for it rather than reading its absence as a broken site.
+          curl -fsS --retry 6 --retry-delay 10 --retry-all-errors "https://docs.$HOST/start/" \
+            | grep -F "Your first sign-in"
           # shellcheck disable=SC2016  # literal ${UFO_URL:-...} text from the curl card, not an expansion
           curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
           curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null

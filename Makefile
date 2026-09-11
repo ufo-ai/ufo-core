@@ -2,6 +2,7 @@
 
 WEB := extensions/web/frontend
 DEBUGGER := extensions/debugger/frontend
+DOCS := infra/modules/docs/site
 EMAIL ?= $(shell git config user.email)
 T ?=
 FILE ?=
@@ -47,7 +48,7 @@ STACK_ORIGIN := http://$(STACK_HOST):$(UFO_STACK_PORT_HOST)
 # secure origin and holds the portal's `Secure` cookie there; Safari drops it.
 BROWSER ?= open -a "Google Chrome" %s
 
-.PHONY: help install reinstall build init serve portal setup stack stack-down stack-logs signin db \
+.PHONY: help install reinstall build docs init serve portal setup stack stack-down stack-logs signin db \
 	check fmt test test-one test-control test-preview test-client test-client-load \
 	cover-client bench-client test-web test-integration
 
@@ -66,6 +67,13 @@ build: $(WEB)/node_modules $(DEBUGGER)/node_modules ## Build the client, portal,
 	cargo build --manifest-path client/Cargo.toml --locked
 	pnpm -C $(WEB) run build
 	pnpm -C $(DEBUGGER) run build
+
+docs: $(DOCS)/node_modules ## Build the docs site — a plan in infra/envs/edge reads its output
+	pnpm -C $(DOCS) run build
+
+$(DOCS)/node_modules: $(DOCS)/pnpm-lock.yaml
+	pnpm -C $(DOCS) install --frozen-lockfile
+	@touch $@
 
 $(WEB)/node_modules: $(WEB)/pnpm-lock.yaml
 	pnpm -C $(WEB) install --frozen-lockfile

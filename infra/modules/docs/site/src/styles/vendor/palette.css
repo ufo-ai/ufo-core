@@ -1,0 +1,171 @@
+/* The brand palette, copied from ufo-brand-demo/palette/ufo-palette.css, which is rendered from
+   that repo's ufo-palette.json. Two deviations, both wiring: the dark block answers Starlight's
+   `data-theme` rather than a `.dark` class, and the Tailwind `@theme` block is dropped because
+   nothing here reads Tailwind utilities. Every value is the source's.
+
+   Six ramps on one matched-lightness ladder: step N carries the same OKLab lightness in every ramp,
+   so contrast is a function of step distance. A distance of 6 clears AA body text, 5 clears AA
+   large text and UI, whatever the two hues are. */
+:root {
+  --void-25: #F7FBFD;
+  --void-50: #E9EEF0;
+  --void-100: #D4DADD;
+  --void-200: #BAC1C4;
+  --void-300: #9EA7AB;
+  --void-400: #879195;
+  --void-500: #717C81;
+  --void-600: #5B656A;
+  --void-700: #454F53;
+  --void-800: #2E373B;
+  --void-900: #0D1418;
+  --void-950: #050C0F;
+  --signal-25: #F6FBFE;
+  --signal-50: #DBF0FE;
+  --signal-100: #B3E0FE;
+  --signal-200: #91C7EC;
+  --signal-300: #6EADD8;
+  --signal-400: #4F97C7;
+  --signal-500: #2E81B6;
+  --signal-600: #166A98;
+  --signal-700: #025378;
+  --signal-800: #013A54;
+  --signal-900: #001621;
+  --signal-950: #000D15;
+  --sand-25: #FFFAEF;
+  --sand-50: #F3ECDE;
+  --sand-100: #E1D8C9;
+  --sand-200: #C9BEAE;
+  --sand-300: #B1A392;
+  --sand-400: #9B8D7C;
+  --sand-500: #857768;
+  --sand-600: #6E6054;
+  --sand-700: #574A3F;
+  --sand-800: #3F3329;
+  --sand-900: #1A110A;
+  --sand-950: #110804;
+  --ember-25: #FFF9F1;
+  --ember-50: #FFEAC9;
+  --ember-100: #FFD18B;
+  --ember-200: #E6B672;
+  --ember-300: #CB9B5F;
+  --ember-400: #B38550;
+  --ember-500: #9B7041;
+  --ember-600: #825931;
+  --ember-700: #694321;
+  --ember-800: #4E2C0F;
+  --ember-900: #230C00;
+  --ember-950: #170600;
+  --heat-25: #FFF9F7;
+  --heat-50: #FFE7E1;
+  --heat-100: #FECBC2;
+  --heat-200: #FFA39C;
+  --heat-300: #F67A78;
+  --heat-400: #D96667;
+  --heat-500: #BD5357;
+  --heat-600: #9F3F45;
+  --heat-700: #822A34;
+  --heat-800: #621321;
+  --heat-900: #2C0009;
+  --heat-950: #1D0005;
+  --sage-25: #F1FFEF;
+  --sage-50: #DDF5DA;
+  --sage-100: #C6E2C5;
+  --sage-200: #A9CAA9;
+  --sage-300: #8BB18E;
+  --sage-400: #719C76;
+  --sage-500: #5D8564;
+  --sage-600: #486E50;
+  --sage-700: #34563D;
+  --sage-800: #1E3D28;
+  --sage-900: #01190A;
+  --sage-950: #000F05;
+}
+
+/* shadcn slots — light */
+:root {
+  --background: #F3ECDE;
+  --foreground: #0D1418;
+  --card: #FFFFFF;
+  --card-foreground: #0D1418;
+  --popover: #FFFFFF;
+  --popover-foreground: #0D1418;
+  --primary: #166A98;
+  --primary-foreground: #FFFAEF;
+  --secondary: #DBF0FE;
+  --secondary-foreground: #013A54;
+  --muted: #E1D8C9;
+  --muted-foreground: #454F53;
+  --accent: #FFD18B;
+  --accent-foreground: #4E2C0F;
+  --destructive: #9F3F45;
+  --destructive-foreground: #FFF9F7;
+  --success: #486E50;
+  --success-foreground: #F1FFEF;
+  --warning: #694321;
+  --warning-foreground: #FFF9F1;
+  --border: #E1D8C9;
+  --input: #E1D8C9;
+  --ring: #2E81B6;
+  --chart-1: #2E81B6;
+  --chart-2: #B38550;
+  --chart-3: #025378;
+  --chart-4: #719C76;
+  --chart-5: #D96667;
+  --sidebar: #E1D8C9;
+  --sidebar-foreground: #0D1418;
+  --sidebar-primary: #166A98;
+  --sidebar-primary-foreground: #FFFAEF;
+  --sidebar-accent: #C9BEAE;
+  --sidebar-accent-foreground: #0D1418;
+  --sidebar-border: #C9BEAE;
+  --sidebar-ring: #2E81B6;
+  --radius: 0.25rem;
+}
+
+/* shadcn slots — dark */
+:root[data-theme="dark"] {
+  --background: #050C0F;
+  --foreground: #F3ECDE;
+  --card: #0D1418;
+  --card-foreground: #F3ECDE;
+  --popover: #0D1418;
+  --popover-foreground: #F3ECDE;
+  --primary: #4F97C7;
+  --primary-foreground: #050C0F;
+  --secondary: #013A54;
+  --secondary-foreground: #B3E0FE;
+  --muted: #2E373B;
+  --muted-foreground: #9EA7AB;
+  --accent: #FFD18B;
+  --accent-foreground: #230C00;
+  --destructive: #F67A78;
+  --destructive-foreground: #1D0005;
+  --success: #8BB18E;
+  --success-foreground: #000F05;
+  --warning: #E6B672;
+  --warning-foreground: #230C00;
+  --border: #2E373B;
+  --input: #2E373B;
+  --ring: #4F97C7;
+  --chart-1: #4F97C7;
+  --chart-2: #E6B672;
+  --chart-3: #91C7EC;
+  --chart-4: #8BB18E;
+  --chart-5: #F67A78;
+  --sidebar: #0D1418;
+  --sidebar-foreground: #F3ECDE;
+  --sidebar-primary: #4F97C7;
+  --sidebar-primary-foreground: #050C0F;
+  --sidebar-accent: #2E373B;
+  --sidebar-accent-foreground: #F3ECDE;
+  --sidebar-border: #2E373B;
+  --sidebar-ring: #4F97C7;
+}
+
+/* State layers — composite over any surface; never mint new solids. */
+:root {
+  --state-zebra:    rgb(from var(--foreground) r g b / 0.03);
+  --state-hover:    rgb(from var(--foreground) r g b / 0.05);
+  --state-selected: rgb(from var(--foreground) r g b / 0.09);
+  --state-pressed:  rgb(from var(--foreground) r g b / 0.12);
+}

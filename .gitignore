@@ -9,9 +9,13 @@ extensions/web/ufo_ext_web/apps/
 extensions/web/ufo_ext_web/static/
 extensions/debugger/frontend/tsconfig.tsbuildinfo
 extensions/web/frontend/tsconfig.tsbuildinfo
+infra/modules/docs/site/public/favicon.svg
+infra/modules/docs/site/public/favicon-dark.svg
+infra/modules/docs/site/src/styles/assets/
 .env
 .local/
 dist/
+.astro/
 .pytest_cache/
 .pytest-timings/
 .ruff_cache/

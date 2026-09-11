@@ -1,0 +1,50 @@
+/* The docs site takes the brand palette rather than the portal's house tokens: it is a public site
+   with a subject of its own, which is the row `ufo-style` points at art direction of its own. */
+@import "./vendor/palette.css";
+
+@font-face {
+  font-family: "Roboto Mono";
+  font-style: normal;
+  font-weight: 100 700;
+  src: url("./assets/fonts/RobotoMono-VariableFont_wght.ttf") format("truetype-variations");
+}
+
+/* Starlight reads a ramp rather than roles, so each rung takes the brand slot whose job it already
+   does. Both schemes come off the slots, so no rule below is written twice. */
+:root {
+  --sl-font: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sl-font-mono: var(--sl-font);
+
+  --sl-color-white: var(--foreground);
+  --sl-color-gray-1: var(--foreground);
+  /* Starlight sets secondary text and the inactive contents links in gray-2 and gray-3 alike, so
+     both take the one muted word step the brand declares. */
+  --sl-color-gray-2: var(--muted-foreground);
+  --sl-color-gray-3: var(--muted-foreground);
+  --sl-color-gray-4: var(--border);
+  --sl-color-gray-5: var(--border);
+  --sl-color-gray-6: var(--muted);
+  --sl-color-black: var(--background);
+
+  --sl-color-bg: var(--background);
+  --sl-color-bg-nav: var(--card);
+  /* The sidebar paints only as far as its own box, so a ground of its own draws a hard edge partway
+     down a long page. The hairline divides it instead. */
+  --sl-color-bg-sidebar: var(--background);
+  --sl-color-bg-inline-code: var(--muted);
+  --sl-color-hairline: var(--border);
+  --sl-color-hairline-light: var(--border);
+  --sl-color-hairline-shade: var(--border);
+
+  --sl-color-accent: var(--primary);
+  --sl-color-accent-low: var(--secondary);
+  --sl-color-accent-high: var(--primary);
+  --sl-color-text-accent: var(--primary);
+  --sl-color-text-invert: var(--primary-foreground);
+}
+
+/* The wordmark is the product's, not a link's: the accent it would inherit reads as one more
+   navigation item beside the search field. */
+.site-title {
+  color: var(--foreground);
+}
