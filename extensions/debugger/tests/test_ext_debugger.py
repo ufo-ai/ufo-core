@@ -231,6 +231,23 @@ async def _seed_turn(
     return turn_id
 
 
+async def _seed_ledger(workspace_id: UUID, turn_id: UUID, model: str) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                dimension="tokens",
+                amount=120,
+                priced_micro_usd=340,
+                model=model,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
 def _auth(token: str) -> dict[str, str]:
     return {"authorization": f"Bearer {token}"}
 
@@ -489,3 +506,37 @@ async def test_transcript_shows_a_stored_tool_description_after_its_arg_is_remov
     assert response.status_code == 200
     call = response.json()["messages"][0]["content"][0]
     assert call["input"] == {"command": "ls", "user_description": "Listing files"}
+
+
+async def test_turn_and_conversation_reads_name_the_model_that_served_them(debug) -> None:
+    """A settled turn names the model its terminal frame recorded. A turn still running names the
+    model its metered generations were billed against, which is the only durable answer before a
+    terminal exists. A turn with neither names none."""
+    client, _, _ = debug
+    workspace_id, agent_id = await _seed_workspace()
+    settled_conversation = await _seed_conversation(workspace_id, queue_key="C001:1.0")
+    settled = await _seed_turn(workspace_id, settled_conversation, agent_id, 1)
+    running_conversation = await _seed_conversation(workspace_id, queue_key="C002:2.0")
+    running = await _seed_turn(workspace_id, running_conversation, agent_id, 1, status="running")
+    await _seed_ledger(workspace_id, running, "claude-sonnet-5")
+    silent_conversation = await _seed_conversation(workspace_id, queue_key="C003:3.0")
+    silent = await _seed_turn(workspace_id, silent_conversation, agent_id, 1, status="queued")
+    token = _mint(SECRET, workspace_id, f"alex@{OPERATOR_EMAIL_DOMAIN}")
+
+    listing = await client.get("/surface/debug/api/conversations", headers=_auth(token))
+    turns = {
+        turn_id: await client.get(f"/surface/debug/api/turns/{turn_id}", headers=_auth(token))
+        for turn_id in (settled, running, silent)
+    }
+
+    assert listing.status_code == 200
+    assert {entry["queue_key"]: entry["model"] for entry in listing.json()} == {
+        "C001:1.0": "claude-opus-4-8",
+        "C002:2.0": "claude-sonnet-5",
+        "C003:3.0": None,
+    }
+    assert {turn_id: response.json()["model"] for turn_id, response in turns.items()} == {
+        settled: "claude-opus-4-8",
+        running: "claude-sonnet-5",
+        silent: None,
+    }

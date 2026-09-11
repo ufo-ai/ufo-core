@@ -7,6 +7,7 @@ export type ConversationSummary = {
   turn_count: number;
   last_turn_at: string | null;
   opening_message: string | null;
+  model: string | null;
 };
 
 export type TerminalFrame = {
@@ -73,6 +74,7 @@ export type TurnDetail = {
   turn: Turn;
   ledger: LedgerEntry[];
   children: Turn[];
+  model: string | null;
 };
 
 export type ContentBlock =

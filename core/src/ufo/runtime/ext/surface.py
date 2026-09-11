@@ -100,6 +100,7 @@ from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.billing.accounting import (
     ALLOW,
     PARK,
+    TOKENS_DIMENSION,
     BalanceGate,
     MemberSpendReport,
     OffTurnSpendRefused,
@@ -1205,7 +1206,10 @@ class ConversationSummary(BaseModel):
 
     `opening_message` is what the conversation's first turn came in with, bounded and unfenced by
     `conversation_name`, so a listing states what a conversation is about without reading its
-    turns. A read view that does not carry it leaves it None."""
+    turns. A read view that does not carry it leaves it None.
+
+    `model` is what served the conversation most recently, read by `served_model`. A read view that
+    does not carry it leaves it None."""
 
     id: UUID
     surface: str
@@ -1215,6 +1219,7 @@ class ConversationSummary(BaseModel):
     turn_count: int
     last_turn_at: datetime | None
     opening_message: str | None = None
+    model: str | None = None
 
     @field_validator("created_at", "last_turn_at")
     @classmethod
@@ -1841,12 +1846,22 @@ class TurnStep(BaseModel):
 
 class TurnDetail(BaseModel):
     """One turn with everything durable that hangs off it: the row itself (terminal outcome and
-    context included), its accounting, and the subagent turns it spawned (`parent_turn_id`
-    children, each living in its own conversation)."""
+    context included), its accounting, the model that served it, and the subagent turns it spawned
+    (`parent_turn_id` children, each living in its own conversation)."""
 
     turn: Turn
     ledger: tuple[LedgerEntry, ...]
     children: tuple[Turn, ...]
+    model: str | None = None
+
+
+def served_model(terminal: TerminalFrame | None, billed: str | None) -> str | None:
+    """The model a turn ran on: what its terminal frame recorded when the turn ended, else the
+    model the newest metered generation was billed against — the answer for a turn still running,
+    and for one whose setup failed before it could write a model."""
+    if terminal is not None and terminal.model:
+        return terminal.model
+    return billed or None
 
 
 class QueuedArrival(BaseModel):
@@ -4409,7 +4424,8 @@ class SurfaceContext:
         """The workspace's conversations, newest activity first, across every surface — the read
         half a debug view lists. Bounded, and RLS-scoped like every read on this context. Each row
         carries the message its first turn came in with, so a listing reads as what its
-        conversations are about rather than as a column of keys."""
+        conversations are about rather than as a column of keys, and the model its newest turn ran
+        on, so the listing states which model answered without opening the conversation."""
         opening = (
             sa.select(tables.turn.c.inbound)
             .where(
@@ -4430,6 +4446,31 @@ class SurfaceContext:
             .group_by(tables.turn.c.conversation_id)
             .subquery()
         )
+        latest_terminal = (
+            sa.select(tables.turn.c.terminal)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                tables.turn.c.terminal.is_not(None),
+            )
+            .order_by(tables.turn.c.seq.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        billed_model = (
+            sa.select(tables.ledger.c.model)
+            .select_from(
+                tables.ledger.join(tables.turn, tables.turn.c.id == tables.ledger.c.turn_id)
+            )
+            .where(
+                tables.ledger.c.workspace_id == self.workspace_id,
+                tables.ledger.c.dimension == TOKENS_DIMENSION,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+            )
+            .order_by(tables.ledger.c.created_at.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
         query = (
             sa.select(
                 tables.conversation.c.id,
@@ -4440,6 +4481,8 @@ class SurfaceContext:
                 activity.c.turn_count,
                 activity.c.last_turn_at,
                 opening.label("opening"),
+                latest_terminal.label("latest_terminal"),
+                billed_model.label("billed_model"),
             )
             .select_from(
                 tables.conversation.outerjoin(
@@ -4464,6 +4507,12 @@ class SurfaceContext:
                 turn_count=row.turn_count or 0,
                 last_turn_at=row.last_turn_at,
                 opening_message=conversation_name(row.opening) if row.opening else None,
+                model=served_model(
+                    None
+                    if row.latest_terminal is None
+                    else TerminalFrame.model_validate(row.latest_terminal),
+                    row.billed_model,
+                ),
             )
             for row in rows
         )
@@ -4650,8 +4699,8 @@ class SurfaceContext:
         return frozenset(str(ref) for ref in refs)
 
     async def turn_detail(self, turn_id: UUID) -> TurnDetail | None:
-        """One turn with its accounting rows and the subagent turns it spawned, or None when no
-        such turn exists in this workspace."""
+        """One turn with its accounting rows, the model that served it, and the subagent turns it
+        spawned, or None when no such turn exists in this workspace."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -4686,8 +4735,9 @@ class SurfaceContext:
                     .order_by(tables.ledger.c.created_at)
                 )
             ).all()
+        turn = self._turn_record(row)
         return TurnDetail(
-            turn=self._turn_record(row),
+            turn=turn,
             ledger=tuple(
                 LedgerEntry(
                     dimension=entry.dimension,
@@ -4699,6 +4749,17 @@ class SurfaceContext:
                 for entry in ledger
             ),
             children=tuple(self._turn_record(child) for child in children),
+            model=served_model(
+                turn.terminal,
+                next(
+                    (
+                        entry.model
+                        for entry in reversed(ledger)
+                        if entry.dimension == TOKENS_DIMENSION
+                    ),
+                    None,
+                ),
+            ),
         )
 
     async def turn_steps(self, turn_id: UUID) -> tuple[TurnStep, ...] | None:

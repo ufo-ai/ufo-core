@@ -199,8 +199,8 @@ function TurnCard(props: {
         <span className="inbound">{turn.inbound}</span>
         <span className="meta">
           {terminal
-            ? `${terminal.model} · ${terminal.tokens} tok · ${money(terminal.cost_micro_usd)}`
-            : when(turn.created_at)}
+            ? `${detail?.model ?? "—"} · ${terminal.tokens} tok · ${money(terminal.cost_micro_usd)}`
+            : `${detail?.model ?? "—"} · ${when(turn.created_at)}`}
         </span>
       </div>
       {props.selected && (
@@ -238,6 +238,8 @@ function TurnBody(props: {
         </dd>
         <dt>last update</dt>
         <dd>{when(turn.updated_at)}</dd>
+        <dt>model</dt>
+        <dd>{detail?.model ?? "—"}</dd>
         {turn.context?.source && (
           <>
             <dt>source</dt>

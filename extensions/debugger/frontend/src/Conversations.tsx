@@ -61,6 +61,7 @@ export function Conversations(props: {
             <th>key</th>
             <th>first message</th>
             <th>member</th>
+            <th>model</th>
             <th>turns</th>
             <th>last activity</th>
             <th />
@@ -83,6 +84,7 @@ export function Conversations(props: {
                 {conversation.opening_message ?? "—"}
               </td>
               <td>{conversation.member_email ?? "—"}</td>
+              <td>{conversation.model ?? "—"}</td>
               <td>{conversation.turn_count}</td>
               <td>{when(conversation.last_turn_at ?? conversation.created_at)}</td>
               <td>
