@@ -9,8 +9,8 @@ Ask the agent:
 
 > Connect my Zendesk account.
 
-Open the private authorization control and approve the correct Zendesk account. The connected
-account determines which tickets and help center content are available.
+Open the private authorization control and approve the correct Zendesk account. The account
+controls which tickets and help center content ufo can use.
 
 ## What ufo can do
 

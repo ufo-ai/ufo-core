@@ -3,16 +3,14 @@ title: How ufo works
 description: How a request becomes completed work, what the agent can use, and how it reports results.
 ---
 
-ufo is an agent that completes work through conversation. Give it an outcome, the source material,
-and any limits. It plans the work, uses the tools you have connected, and reports what changed.
+ufo is an agent designed to do real work. It is chat-first, so ask for what you need.
 
 ## Conversations
 
 A conversation holds one line of work. Continue in the same conversation when you want to answer a
 question, change the result, or add a related task. Start a new conversation for unrelated work.
 
-The agent can work for a long time while you do something else. You can return to the conversation
-to read its progress and result.
+You can leave a conversation while the agent works. Return to read its progress and result.
 
 ## Tools and access
 
@@ -24,8 +22,8 @@ private credential control. Never put a password, key, or token in a chat messag
 
 ## Results
 
-A useful result states what happened and what was verified. The agent can return a direct answer,
-change a connected system, open a pull request, or share a file or website.
+The agent can return an answer, change a connected system, open a pull request, or share a file or
+website. Its result states what happened and what it verified.
 
 Ask for a specific check when it matters. For example:
 

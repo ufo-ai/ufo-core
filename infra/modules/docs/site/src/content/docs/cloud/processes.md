@@ -8,8 +8,8 @@ can read and write files, install project dependencies, run tests, and start loc
 
 ## Commands
 
-The agent runs commands in the conversation workspace. Command output becomes evidence for the
-task, but a successful command does not by itself prove the user-facing result.
+The agent runs commands in the conversation workspace. Command output is evidence, but a successful
+command does not prove the user-facing result.
 
 Ask for the focused checks that match the work:
 
@@ -24,7 +24,7 @@ you can open. Ask for a [hosted site](/work/files-sites/) when other people need
 ## Files and persistence
 
 The workspace belongs to the conversation. Continue in that conversation when later work needs its
-files and state. Share important output into the conversation before treating it as delivered.
+files and state. Share important output in the conversation.
 
 Do not use the work session as production hosting, durable storage, or a system of record. A
 deployed service, shared file, connected system, or hosted site must hold the final result.

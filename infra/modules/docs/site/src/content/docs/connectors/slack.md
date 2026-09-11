@@ -3,8 +3,6 @@ title: Connecting Slack
 description: Install ufo in Slack and start work from channels, threads, and direct messages.
 ---
 
-Slack lets a team start and follow work without leaving its conversations.
-
 ## Connect Slack
 
 A workspace admin asks:
@@ -24,10 +22,9 @@ remain visible to the channel audience.
 
 ## What ufo can do
 
-- Answer questions and complete tasks from a channel or direct message.
+- Complete tasks from a channel or direct message.
 - Read the thread that started the work.
-- Post progress and final results in the same thread.
-- Deliver files or links with the result.
+- Post progress, final results, files, and links in the same thread.
 - Run scheduled work and post it to a selected Slack destination.
 
 Slack cannot stop a running turn. Open the web portal when you must stop one.

@@ -3,12 +3,11 @@ title: Ask for work
 description: Give the agent enough context to complete a task and verify the result.
 ---
 
-Write to the agent as you would write to a capable teammate. State the outcome. Add the context and
-limits that change how the work must be done.
+State the outcome. Add the context and limits that affect the work.
 
 ## A useful request
 
-A useful request usually has four parts:
+A request can include four parts:
 
 1. **Outcome.** State what must be true when the work is complete.
 2. **Context.** Name the repository, document, customer, date range, or system to inspect.
@@ -21,8 +20,6 @@ For example:
 > environment. Fix the cause, add the test that would have caught it, and open a draft pull request.
 > Do not deploy or merge.
 
-You do not need to know the steps. Ask for the outcome and let the agent inspect the systems first.
-
 ## Give it the source material
 
 Attach a file, paste a link, name a connected record, or point to a synced source. State which source
@@ -33,7 +30,7 @@ that it returns. Do not paste secrets into the conversation.
 
 ## Set decision boundaries
 
-State which actions the agent may take. This is important for work that can affect customers,
+State which actions the agent may take. Set clear limits for work that can affect customers,
 production, money, or another person.
 
 > Diagnose the production alert and give me the evidence. Do not change production.

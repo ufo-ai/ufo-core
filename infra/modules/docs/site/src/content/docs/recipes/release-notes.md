@@ -17,11 +17,10 @@ Run the report once. Confirm that the deployment record, not merge time, decides
 > merged pull request and issue. Include only member-visible behavior. For each item, state what
 > changed, who it affects, and what the member can do now. Link the deployment and pull request.
 > Exclude internal refactors, tests, operational repairs with no member effect, and merged work that
-> is not deployed. Return the draft in this conversation. If no member-visible change shipped, stay
-> quiet. Do not edit or publish the changelog.
+> is not deployed. Return the draft in this conversation. Do not post a result if no member-visible
+> change shipped. Do not edit or publish the changelog.
 
-Each run records its own reporting boundary. The next run starts after the last successful result,
-so a failed run does not silently skip a release.
+The next run starts after the last successful result. A failed run does not skip a release.
 
 ## Publish after review
 

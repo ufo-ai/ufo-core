@@ -3,8 +3,6 @@ title: Connecting MCP servers
 description: Give ufo access to tools from a Streamable HTTP MCP server.
 ---
 
-MCP servers extend ufo with tools that a normal connector does not provide.
-
 ## Prepare the server
 
 You need:
@@ -27,8 +25,8 @@ token in chat.
 
 ## What ufo can do
 
-The agent reads the server's tool catalog and the input schema for each tool before it calls it.
-The server defines the available reads and writes.
+ufo reads the server's tool catalog and each tool's input schema before it calls the tool. The
+server defines the available operations.
 
 > Use the `docs` MCP server to find the current authentication policy. Cite the page it came from.
 > Do not change anything.

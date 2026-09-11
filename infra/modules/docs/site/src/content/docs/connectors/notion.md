@@ -17,7 +17,6 @@ ufo may access. Pages outside that selection remain unavailable.
 - Search and read pages.
 - Read database entries and properties.
 - Create or update pages and database entries when requested.
-- Use product notes, decisions, and plans in other work.
 
 State the workspace area, page or database, and whether the agent may edit it.
 
@@ -26,8 +25,8 @@ State the workspace area, page or database, and whether the agent may edit it.
 
 ## Use Notion as knowledge
 
-Use a live connection for direct work. Use a [synced source](/work/sources/) when selected Notion
-content must remain searchable as workspace knowledge or start tasks after changes.
+Use a [synced source](/work/sources/) to keep selected Notion content searchable as workspace
+knowledge or to start tasks after changes.
 
 ## Fix Notion access
 

@@ -9,14 +9,13 @@ Ask the agent:
 
 > Connect my QuickBooks account.
 
-Open the private authorization control and choose the correct company. The connected account and
-QuickBooks permissions define the available records.
+Open the private authorization control and select the correct company. Your QuickBooks permissions
+control which records ufo can use.
 
 ## What ufo can do
 
 - Read invoices, expenses, customers, vendors, and accounting reports.
 - Reconcile selected records with spreadsheets or billing systems.
-- Prepare cash, revenue, expense, or collections reports.
 - Make supported changes only when requested.
 
 State the company, accounting period, currency, basis, and whether writes are allowed.

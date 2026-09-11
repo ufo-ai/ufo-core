@@ -9,8 +9,8 @@ Ask the agent:
 
 > Connect my Google Calendar account.
 
-Open the private authorization control and approve the correct Google account. Your existing
-calendar permissions determine which calendars and events the agent can use.
+Open the private authorization control and approve the correct Google account. Your calendar
+permissions determine which calendars and events ufo can use.
 
 ## What ufo can do
 

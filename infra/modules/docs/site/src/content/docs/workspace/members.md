@@ -3,8 +3,8 @@ title: Members and admins
 description: Add or remove members, assign admins, and understand which agents each person can use.
 ---
 
-Members are unlimited and are not billed by seat. A new member can use the agent as soon as they
-join or an admin adds them. There is no approval queue.
+Members are not billed by seat. A new member can use the agent after they join or an admin adds
+them. There is no approval queue.
 
 ## Add a member
 

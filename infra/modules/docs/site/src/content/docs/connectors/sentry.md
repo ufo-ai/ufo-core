@@ -15,7 +15,7 @@ through [MCP](/connectors/mcp/).
 
 ## What ufo can do
 
-Available actions depend on the connected Sentry account. Typical incident work includes:
+The connected Sentry account controls the available actions. ufo can:
 
 - Find issues and error events.
 - Read stack traces, tags, affected releases, and project details.

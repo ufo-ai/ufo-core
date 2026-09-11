@@ -35,11 +35,10 @@ Members are not billed by seat. See [Members and admins](/workspace/members/).
 
 ## Connect the tools for one task
 
-Do not connect every service before you start. Choose a useful first task, then connect the accounts
-and knowledge that task needs.
+Choose a first task. Connect only the accounts and knowledge that task needs.
 
-For example, a pull request review needs a [GitHub connection](/connectors/github/). A weekly product report may need your
-analytics service, issue tracker, and shared project notes.
+A pull request review needs a [GitHub connection](/connectors/github/). A weekly product report may
+need your analytics service, issue tracker, and shared project notes.
 
 Ask the agent to start each connection:
 

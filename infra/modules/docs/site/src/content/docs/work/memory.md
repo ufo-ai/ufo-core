@@ -3,8 +3,7 @@ title: Knowledge and memory
 description: Understand what the agent remembers, where a fact is visible, and how to correct it.
 ---
 
-The agent keeps durable facts across conversations. It uses memory for preferences, decisions,
-people, and other facts that remain useful after one task ends.
+Memory keeps facts that remain useful across conversations, such as preferences and decisions.
 
 ## Memory scopes
 
@@ -25,7 +24,8 @@ State the fact and the scope:
 
 > Remember for the workspace that the product release review happens every Thursday.
 
-Use a synced source for documents and changing records. Use memory for a durable fact or preference.
+Use a synced source for documents and records that change. Use memory for a durable fact or
+preference.
 
 ## Read and correct memory
 
@@ -38,5 +38,5 @@ The correction supersedes the earlier fact.
 
 ## When a detail is missing
 
-Ask where the fact was first stated. A private room, an external shared channel, and a workspace
-conversation have different scopes. Restate the fact in the scope where it must be available.
+Check where the fact was first stated. A private room, an external shared channel, and a workspace
+conversation have different scopes. Restate the fact in the required scope.

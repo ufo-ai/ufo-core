@@ -6,8 +6,7 @@ description: Deduplicate feedback from support and team sources, measure themes,
 ## Connect and sync feedback
 
 Connect Zendesk, the CRM, and the Slack channel where customer reports arrive. Register the support
-records and shared customer notes as synced sources. Define one customer by its CRM account so
-repeated tickets do not inflate a theme.
+records and shared customer notes as synced sources. Use the CRM account to identify each customer.
 
 Run one review for the prior week. Check the included accounts, source links, theme grouping, and
 separation of defects, requests, and setup problems.
@@ -21,8 +20,8 @@ separation of defects, requests, and setup problems.
 > segment, change from the prior four weeks, two representative source links, and current product
 > owner. Separate confirmed defects, feature requests, and setup confusion. Post the five most
 > important themes in the product-review Slack channel and attach a CSV of all included evidence.
-> Stay quiet if no theme has new evidence or material movement. Do not reply to customers or create
-> issues.
+> Do not post a result if no theme has new evidence or material movement. Do not reply to customers
+> or create issues.
 
 ## Turn evidence into work
 
@@ -31,4 +30,4 @@ After the team reviews the report, ask in the run conversation:
 > Draft one issue for each approved defect. Include the trigger, current behavior, customer impact,
 > evidence links, and acceptance check. Show the drafts before you create them.
 
-Keep the scheduled analysis read-only. A later member message grants each publishing action.
+Keep the scheduled analysis read-only. Approve each publishing action in a later message.

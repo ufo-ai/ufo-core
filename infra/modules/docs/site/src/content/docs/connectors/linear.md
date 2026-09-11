@@ -9,8 +9,8 @@ Ask the agent:
 
 > Connect my Linear account.
 
-Open the private authorization control and approve the Linear workspace. The connection follows
-your access to teams, projects, and issues.
+Open the private authorization control and approve the Linear workspace. Your Linear access
+controls which teams, projects, and issues ufo can use.
 
 ## What ufo can do
 

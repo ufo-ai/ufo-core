@@ -3,8 +3,8 @@ title: Browser
 description: Use an isolated cloud browser for web research and page actions.
 ---
 
-The agent can use a browser when a task needs a web page, form, download, or visual check that an
-API cannot provide.
+The agent can use a browser for a web page, form, download, or visual check that an API cannot
+provide.
 
 > Compare the current pricing pages for these five products. Record the plan name, monthly price,
 > usage limit, and source URL. Use only the vendors' own pages.
@@ -23,8 +23,8 @@ cookies. Use a supported [connection](/connectors/) for account data.
 
 ## Control page actions
 
-State the URL, objective, allowed actions, and required evidence. Tell the agent before an action
-can submit a form, publish content, buy something, or change external state.
+State the URL, objective, allowed actions, and required evidence. Require approval before the agent
+submits a form, publishes content, buys something, or changes external state.
 
 > Open the staging signup flow, create a test account with the supplied test address, and report
 > each broken step. Do not use production or send an invitation.

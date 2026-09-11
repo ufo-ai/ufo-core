@@ -17,14 +17,13 @@ spreadsheet.
 - Read cells, ranges, sheets, and spreadsheet metadata.
 - Analyze tables and compare them with connected systems.
 - Update cells or add rows when you request a change.
-- Prepare a corrected spreadsheet or a separate report.
 
 Name the spreadsheet, sheet, range, key columns, and allowed changes.
 
 > Check the `Forecast` sheet for formulas that differ from the rows above them. Report each cell
 > first. Do not change the sheet.
 
-For financial work, state the period, currency, and source of truth. Ask for a separate output when
+For financial work, state the period, currency, and source of truth. Ask for a separate output if
 the original must remain unchanged.
 
 ## Fix Sheets access

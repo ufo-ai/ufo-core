@@ -3,8 +3,8 @@ title: Troubleshooting work
 description: Diagnose a failed or incomplete result from the conversation that produced it.
 ---
 
-Continue in the affected conversation. Give the exact failed action, time, system, and visible
-error. Do not send a credential or secret.
+Continue in the affected conversation. Give the failed action, time, system, and visible error. Do
+not send credentials or secrets.
 
 ## The agent cannot reach a service
 
@@ -19,12 +19,12 @@ of truth when two systems disagree.
 ## The work stopped
 
 Read the last reported blocker. Supply missing authority or context in the same conversation. A
-workspace balance can hold a new member message until an admin adds credit.
+message can wait when the workspace balance is below the reserve for a new turn.
 
 ## A scheduled task sent nothing
 
-Open **Tasks**, then **Runs**. A quiet run can complete without a message. Check its conversation,
-task state, connections, destination, and balance.
+Open **Tasks**, then **Runs**. A run can complete without a message when it finds nothing to report.
+Check its conversation, task state, connections, destination, and balance.
 
 ## The agent made the wrong change
 

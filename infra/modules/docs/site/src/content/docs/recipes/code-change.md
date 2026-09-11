@@ -5,8 +5,8 @@ description: Ask the agent to reproduce a defect, implement a focused fix, test 
 
 ## Connect first
 
-Connect the [GitHub account](/connectors/github/) that can read and write the repository. If the task depends on logs,
-issues, or a design file, connect those sources too.
+Connect the [GitHub account](/connectors/github/) that can read and write the repository. Connect
+logs, issues, or design files when the task needs them.
 
 State the repository when several are available.
 
@@ -19,12 +19,10 @@ State the repository when several are available.
 
 ## What the agent does
 
-The agent inspects the repository instructions and existing implementation. It reproduces the
-problem, changes the smallest relevant path, and runs the focused checks. It can use a browser when
-the result is visible in the product.
+The agent reads the repository instructions and code. It reproduces the problem, changes the
+smallest relevant path, and runs focused checks. It can use a browser to check a visible result.
 
-The final reply should name the change, the tests and checks that passed, the pull request, and any
-proof it could not obtain.
+The final reply should name the change, passed checks, pull request, and missing proof.
 
 ## Useful limits
 

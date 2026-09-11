@@ -9,14 +9,13 @@ Ask the agent:
 
 > Connect my Stripe account.
 
-Open the private authorization control and choose the correct Stripe account. The connection follows
-the access granted by Stripe.
+Open the private authorization control and select the correct Stripe account. The Stripe grant
+controls access.
 
 ## What ufo can do
 
 - Read customers, payments, invoices, subscriptions, products, and related records.
 - Analyze revenue and payment state.
-- Prepare reports or customer follow-up work.
 - Make supported changes only when you request them and the grant allows them.
 
 State whether the task uses test or live data, the time range, currency, and allowed actions.

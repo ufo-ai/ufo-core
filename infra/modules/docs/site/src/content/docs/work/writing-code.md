@@ -3,8 +3,8 @@ title: Writing code
 description: Give ufo a code change and receive a tested pull request.
 ---
 
-Connect [GitHub](/connectors/github/) and name the repository. Include the problem, the required
-behavior, and the proof that must pass.
+Connect [GitHub](/connectors/github/) and name the repository. State the problem, required behavior,
+and required proof.
 
 > In `acme/web`, make the invoice table sortable by due date. Preserve the current mobile layout.
 > Add the test that proves the sort order, run the focused checks, and open a pull request. Do not
@@ -25,9 +25,8 @@ The agent reads repository instructions before it changes code. If the repositor
 
 ## Follow the work
 
-The agent reports important decisions and blockers in the conversation. A final result should name
-the changed behavior, tests, and pull request. A local passing test does not prove that CI passed or
-that a pull request merged.
+The final result must name the changed behavior, tests, and pull request. A local passing test proves
+neither CI nor merge state.
 
 Ask the agent to keep watching when the required outcome includes CI or review:
 
@@ -36,8 +35,8 @@ Ask the agent to keep watching when the required outcome includes CI or review:
 
 ## Review the result
 
-Check the product behavior, not only the diff. For a visual change, ask for browser proof at the
-important widths. For a data change, ask for realistic input through durable state to a result a
-member can use.
+Check the product behavior and the diff. For a visual change, ask for browser proof at the important
+widths. For a data change, ask for proof from realistic input through durable state to a result that
+a member can use.
 
 See the complete [code change recipe](/recipes/code-change/).

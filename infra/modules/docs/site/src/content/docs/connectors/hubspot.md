@@ -9,14 +9,13 @@ Ask the agent:
 
 > Connect my HubSpot account.
 
-Open the private authorization control and approve the correct HubSpot account. The connection
-follows your access and the scopes shown during authorization.
+Open the private authorization control and approve the correct HubSpot account. Your access and
+the approved scopes control which records ufo can use.
 
 ## What ufo can do
 
 - Read and search contacts, companies, deals, and activities.
 - Prepare account briefs and pipeline reports.
-- Compare CRM records with email, calendar, support, or billing data.
 - Update supported records when requested.
 
 State the pipeline, owner, stage, date range, and allowed changes.

@@ -3,8 +3,8 @@ title: Scheduled work
 description: Create recurring tasks, choose where results go, and inspect or change each run.
 ---
 
-Ask the agent to repeat work on a schedule. Include what to do, when to run, the time zone, the
-source to inspect, and where useful results should go.
+Ask the agent to repeat work on a schedule. State the action, schedule, time zone, source, and result
+destination.
 
 > Every weekday at 9:00 AM Pacific time, check open pull requests in acme/web. Report failed checks,
 > conflicts, and reviews that need an owner. Post the report in the engineering Slack channel.
@@ -21,13 +21,12 @@ Every task repeats. One-time reminders are not available. Use an expiry for a sh
 
 ## Runs
 
-Each run has its own conversation. A run posts only when it has something useful to report. A quiet
-run does not send a message.
+Each run has its own conversation. It sends no message when it finds nothing to report.
 
 The **Runs** view on the **Tasks** screen lists task and source-trigger runs, newest first. Open a
 run to read its conversation. You can stop a running web task there.
 
-**Radar** opens scheduled reports with their files and conversation.
+**Radar** shows scheduled reports, files, and conversations.
 
 ## Change a task
 

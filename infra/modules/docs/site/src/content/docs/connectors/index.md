@@ -3,7 +3,7 @@ title: Connecting your systems
 description: Connect the accounts, services, and data that ufo needs to complete your work.
 ---
 
-Connections let ufo work in the systems where your team already keeps its work. Start in chat:
+Ask the agent to connect a system:
 
 > Connect my GitHub account so you can review pull requests.
 
@@ -13,17 +13,17 @@ The agent checks the current catalog and returns the correct private control.
 
 ## Personal connections
 
-Most services use an authorization page from the provider. Approve the connection through the
-control in the agent's reply. A personal connection belongs to the member who approved it. Other
-members connect their own accounts.
+Most services use the provider's authorization page. Open it from the control in the agent's
+reply. A personal connection belongs to the member who approved it. Other members must connect
+their own accounts.
 
 ## Workspace connections
 
 Slack and services that use an API key are workspace connections. An admin installs them or enters
 the required values through a private credential control.
 
-Never put a password, API key, token, or authorization URL in chat. A secret entered through a
-credential control cannot be read back by the agent.
+Never put a password, API key, token, or authorization URL in chat. The agent cannot read a secret
+that you enter through a credential control.
 
 ## Use a connection
 
@@ -32,7 +32,7 @@ Name the service and the result you need. State whether the agent may make chang
 > Review open Linear issues for the next release. Report missing owners and blocked work. Do not
 > change any issues.
 
-The agent uses only the access granted by the connected account. Provider permissions still apply.
+The agent uses only the access granted by the connected account.
 
 ## Manage a connection
 

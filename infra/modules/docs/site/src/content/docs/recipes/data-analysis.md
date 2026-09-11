@@ -5,7 +5,7 @@ description: Calculate, reconcile, and report one product measure on a fixed wee
 
 ## Define and test the measure
 
-Connect the analytics service and the source that defines internal or test accounts. Write the
+Connect the analytics service and the source that identifies internal or test accounts. Define the
 measure before you schedule it:
 
 > Define activation as a new workspace that completes one agent task within 24 hours of sign-up.
@@ -23,13 +23,11 @@ events, inspect sample rows, and explain missing or duplicate records.
 > four-week range. Post a table and chart in this conversation. Call out a change only when it is
 > outside that range or the data check fails. Do not write to the source.
 
-The task creates a new run conversation each Monday. Keep the query or formula with the result so a
-reader can reproduce it.
+Keep the query or formula with each result.
 
 ## Change the definition safely
 
-Do not edit a published metric definition in place without showing the effect. Ask for both old and
-new definitions over the same period, approve the new one, then update the task. Record the effective
-date in the task prompt.
+Before you change a published metric definition, compare both definitions over the same period.
+Approve the new definition, then update the task. Record the effective date in the task prompt.
 
 Use **Tasks**, then **Scheduled** to pause or change the loop.

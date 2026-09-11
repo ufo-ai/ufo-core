@@ -6,8 +6,8 @@ description: Understand the prepaid balance, card portal, automatic refills, and
 A workspace runs on a prepaid balance. Work spends the balance. Members are unlimited and are not
 billed by seat.
 
-Only an admin can read billing state, get a billing portal link, or change a refill rule. Handle
-billing in a private conversation.
+Only an admin can read billing state, get a billing portal link, or change a refill rule. Use a
+private conversation for billing.
 
 ## Read the current state
 
@@ -32,8 +32,7 @@ agent:
 
 > Refill $100 when the balance falls below $25.
 
-You can change or disable the rule later. If a card is refused, fix the card and arrange the refill
-again to restart it.
+You can change or disable the rule. If a card is refused, fix the card and set the refill again.
 
 A one-time credit purchase is not available. A refill rule remains active until an admin disables
 it.

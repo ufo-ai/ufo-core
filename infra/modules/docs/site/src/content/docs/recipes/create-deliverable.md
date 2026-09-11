@@ -6,7 +6,7 @@ description: Create and verify a recurring presentation and PDF from current com
 ## Connect the source systems
 
 Connect the systems that hold revenue, product use, delivery, customer, hiring, and cash data. Add
-the operating plan and prior board packs as synced sources. Name one source of truth for each figure.
+the operating plan and prior board packs as synced sources. Name one source for each figure.
 
 Build one pack by hand before you schedule it. Approve the section order, visual rules, definitions,
 and checks. Keep the approved deck as the layout reference for later runs.
@@ -24,8 +24,7 @@ and checks. Keep the approved deck as the layout reference for later runs.
 
 ## Review each run
 
-Each run has its own conversation and files. A local file path is not delivery; both files must be
-shared in the run.
+A local file path is not delivery. Confirm that the run contains both files.
 
-Use the same conversation to request corrections. Change the scheduled task only when the rule must
-apply to later months. A one-month exception belongs in that run, not in the durable prompt.
+Request a one-month correction in that run conversation. Change the scheduled task only when the
+rule must apply to later months.

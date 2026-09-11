@@ -7,15 +7,15 @@ A workspace admin connects Slack. Ask the agent for the install control:
 
 > Connect this workspace to Slack.
 
-Complete the Slack approval. If Slack says the app is not verified, you can continue. The app is
-publicly installable but is not listed in the Slack directory.
+Complete the Slack approval. You can continue if Slack says that the app is not verified. The app
+is publicly installable but is not in the Slack directory.
 
 ## Work in a channel
 
 Invite ufo to the channel, then mention `@ufo` with a request. It replies in a thread.
 
-After the first mention, every reply in that thread reaches the agent. It answers messages that ask
-it to do something. A conversation between people in the thread does not require an agent reply.
+After the first mention, every reply in that thread reaches the agent. It answers requests. It does
+not reply unless a message asks it to do something.
 
 ## Work in a direct message
 
@@ -23,19 +23,19 @@ Send a direct message to start a private conversation. The agent always reads di
 
 ## New members
 
-The first Slack message resolves the member from the email address that Slack confirms. A teammate
-on the workspace's email domain joins from that message. A person on another domain must be added to
-the workspace first.
+The first Slack message identifies the member by the email address that Slack confirms. A teammate
+on the workspace's email domain joins from that message. Add a person on another domain to the
+workspace before they send a message.
 
 ## Shared channels
 
-A channel shared with another organization has its own memory boundary. Workspace memory does not
-enter the channel, and facts from the channel do not enter workspace memory. Your private memory is
-still available to you there.
+A channel shared with another organization has separate memory. Workspace memory does not enter the
+channel. Facts from the channel do not enter workspace memory. Your private memory is available
+there.
 
 ## Running work
 
-Slack cannot stop a running turn. Work that starts in Slack runs to completion. Open the web portal
-when you need a stop control or a larger view of the result.
+Slack cannot stop a running turn. Work that starts in Slack runs to completion. Use the web portal
+to stop a turn or see a larger view of the result.
 
 If an install link fails, ask the agent for a new one. Install links are short-lived.

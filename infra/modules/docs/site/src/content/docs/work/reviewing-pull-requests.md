@@ -10,8 +10,8 @@ Connect [GitHub](/connectors/github/) and give the pull request URL.
 
 ## Set the review scope
 
-Name special risks such as permissions, billing, concurrency, migrations, or user-facing behavior.
-Provide the related issue or specification when the diff does not contain the full contract.
+Name risks such as permissions, billing, concurrency, migrations, or user-facing behavior. Provide
+the related issue or specification when the diff does not contain the full contract.
 
 State where the review must go:
 
@@ -23,10 +23,10 @@ The agent does not publish or change the branch unless the request allows it.
 
 ## Read the result
 
-A useful finding names the affected file and behavior, explains the failure case, and gives enough
-evidence to reproduce it. Questions and style preferences are separate from correctness findings.
+A finding must name the affected file and behavior. It must explain the failure case and give enough
+evidence to reproduce it. Questions and style preferences are not correctness findings.
 
-If no finding survives verification, the agent reports that result and the checks it performed.
-An empty review must not invent a comment only to show activity.
+If the agent verifies no findings, it reports that result and its checks. It does not add a comment
+only to show activity.
 
 See the complete [pull request review recipe](/recipes/pull-request-review/).

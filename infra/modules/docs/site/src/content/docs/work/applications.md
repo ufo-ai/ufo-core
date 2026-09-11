@@ -3,8 +3,8 @@ title: Applications
 description: Create a focused agent application, choose who can use it, and approve its homepage before creation.
 ---
 
-An application is an agent for a repeated job. It has its own purpose, conversations, connections,
-knowledge, schedule, and homepage.
+An application is an agent for a repeated job. It has its own conversations, connections, sources,
+schedule, and homepage.
 
 Ask the main agent to create one:
 
@@ -13,14 +13,14 @@ Ask the main agent to create one:
 
 ## The creation flow
 
-1. The agent asks what job the application must do and who can use it.
-2. It identifies the connections, sources, and schedule the job needs.
+1. The agent asks about the job and who can use the application.
+2. It identifies the required connections, sources, and schedule.
 3. It shows the proposed homepage.
 4. You approve the design.
 5. The agent creates the application and reports the result.
 
-If you do not name a job, the agent proposes an application and then uses the same interview.
-Creation starts only after you approve the homepage.
+If you do not name a job, the agent proposes one. Creation starts only after you approve the
+homepage.
 
 ## Visibility
 
@@ -32,8 +32,8 @@ created, and private applications shared with them.
 
 ## Change an application
 
-Open the application's conversation and ask for the change. Use that conversation to add a source,
-connect an account, change its schedule, revise its homepage, or share it with another member.
+Open the application's conversation and ask for the change. You can add a source, connect an
+account, change the schedule, revise the homepage, or share the application.
 
 ## Workspace applications
 

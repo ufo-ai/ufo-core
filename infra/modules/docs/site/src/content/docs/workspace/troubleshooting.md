@@ -3,8 +3,7 @@ title: Troubleshooting
 description: Resolve common sign-in, Slack, connection, memory, task, and billing problems.
 ---
 
-Start with the symptom. Ask the agent to check the current state before you reconnect an account or
-repeat work.
+Ask the agent to check the current state before you reconnect an account or repeat work.
 
 ## A teammate cannot sign in
 

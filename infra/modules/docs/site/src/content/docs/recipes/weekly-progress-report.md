@@ -6,8 +6,7 @@ description: Combine plans, shipped work, and blockers into a checked report eve
 ## Connect and sync the work
 
 Connect GitHub, Linear, Slack, and the source that holds product plans. Share the delivery records
-and plans that the whole workspace may use. Register them as synced sources so each run can compare
-current work with prior commitments.
+and plans that the whole workspace may use. Register them as synced sources.
 
 Run one report before you schedule it. Check the reporting period, owners, links, and classification
 of shipped, moving, blocked, and unowned work.
@@ -20,13 +19,12 @@ of shipped, moving, blocked, and unowned work.
 > shipped outcomes, work still moving, blocked work with its blocker and owner, unowned work, and
 > decisions needed next week. Link every item. Do not include activity with no customer or delivery
 > effect. Compare with the previous report and call out material changes. Post in the engineering
-> Slack channel. If nothing material changed, stay quiet. Do not change any source system.
+> Slack channel. Do not post a result if nothing material changed. Do not change any source system.
 
 ## Inspect the loop
 
-Each run has a conversation under **Tasks** and **Runs**. If a report is wrong, correct its source
-or classification rule before the next run. Do not patch a recurring wrong result by editing only
-the posted message.
+If a report is wrong, correct its source or classification rule before the next run. Do not correct
+only the posted message.
 
 Use **Scheduled** to change the time, destination, or pause state:
 

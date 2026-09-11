@@ -3,10 +3,7 @@ title: Recipes
 description: Complete operating loops built from connected accounts, synced sources, source triggers, and scheduled tasks.
 ---
 
-Most useful work is a loop, not one prompt. A recipe defines what starts the work, which sources it
-reads, when it stays quiet, where it reports, and which actions remain forbidden.
-
-Run the work once before you automate it. Check its data, audience, links, and action boundary. Then
+Run the work once before you automate it. Check the data, audience, links, and action limits. Then
 ask the agent to create the source trigger or scheduled task.
 
 ## Engineering and operations
@@ -26,5 +23,4 @@ ask the agent to create the source trigger or scheduled task.
 - [Build a monthly board pack](/recipes/create-deliverable/) — create and verify a recurring presentation and PDF.
 - [Build a customer-health application](/recipes/internal-application/) — give a repeated workflow its own agent, sources, triggers, schedule, and homepage.
 
-See [Scheduled work](/work/tasks/) and [Synced sources](/work/sources/) for the controls behind these
-loops.
+See [Scheduled work](/work/tasks/) and [Synced sources](/work/sources/) to control these loops.

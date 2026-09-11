@@ -9,8 +9,8 @@ Ask the agent:
 
 > Connect my Google Drive account.
 
-Open the private authorization control and approve the correct Google account. The agent can use
-only files and shared drives that account can access.
+Open the private authorization control and approve the correct Google account. ufo can use only
+the files and shared drives that this account can access.
 
 ## What ufo can do
 
@@ -26,8 +26,8 @@ Name the folder, file, owner, or date range when you know it.
 
 ## Use Drive as knowledge
 
-A connection gives live access during a task. Use a [synced source](/work/sources/) when selected
-folders must remain searchable as workspace knowledge or start work after changes.
+Use a [synced source](/work/sources/) to keep selected folders searchable as workspace knowledge or
+to start work after changes.
 
 ## Fix Drive access
 

@@ -3,7 +3,7 @@ title: Investigating incidents
 description: Correlate telemetry, deployments, code, and data without changing production.
 ---
 
-Connect the telemetry service, source repository, deployment system, and data source needed for the
+Connect the telemetry service, source repository, deployment system, and data source for the
 incident.
 
 > Investigate checkout errors from 09:00 to 10:00 Pacific. Correlate Datadog logs and traces with
@@ -12,8 +12,8 @@ incident.
 
 ## Bound the incident
 
-State the environment, service, time range, symptom, and affected users. Give request identifiers,
-error text, or monitor links when available.
+State the environment, service, time range, symptom, and affected users. Include available request
+identifiers, error text, and monitor links.
 
 ## Keep evidence separate
 
@@ -30,7 +30,7 @@ each dependency from its own evidence.
 ## Control changes
 
 Read-only investigation is the default. A restart, rollback, configuration change, or data repair
-needs a separate request with an exact target and blast radius. Ask for verification after any
-approved operation.
+needs a separate request. State the exact target and blast radius. Ask for verification
+after an approved operation.
 
 See the complete [incident investigation recipe](/recipes/incident-investigation/).

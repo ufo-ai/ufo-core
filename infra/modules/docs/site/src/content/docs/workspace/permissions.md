@@ -36,9 +36,9 @@ by the agent. The agent cannot read the stored value back or write it to a file.
 
 ## Sensitive actions
 
-State the action boundary in the request. Ask for diagnosis only when you do not want a change.
-Require approval before sending a message, publishing a document, changing production, spending
-money, or changing another person's access.
+State the action limit in the request. Ask only for a diagnosis when you do not want a change.
+Require approval before the agent sends a message, publishes a document, changes production,
+spends money, or changes another person's access.
 
 > Draft the customer reply and show it to me. Do not send it.
 
