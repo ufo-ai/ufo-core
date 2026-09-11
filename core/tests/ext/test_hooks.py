@@ -299,6 +299,14 @@ def test_tool_hook_cannot_be_best_effort() -> None:
         HookSpec(event="pre_tool_use", handler=hook, best_effort=True)
 
 
+def test_only_page_change_hook_can_hold_a_failed_batch() -> None:
+    async def hook(ctx: HookContext) -> HookOutcome:
+        return None
+
+    with pytest.raises(ValueError, match="only page_change hooks may hold a failed batch"):
+        HookSpec(event="post_tool_use", handler=hook, page_change_failure_scope="batch")
+
+
 async def test_raising_observe_hook_is_swallowed_leaving_the_output_unchanged() -> None:
     async def boom(ctx: HookContext) -> HookOutcome:
         raise RuntimeError("observe exploded")

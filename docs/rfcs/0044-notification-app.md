@@ -9,7 +9,7 @@ date: 2026-09-03
 
 > An agent has an inbox: rows keyed by the agent they are for and the member they concern, folded
 > by subject the way a source folds pages by identity, drained by the clock into one turn on that
-> agent's own lane the way a source trigger's `current` delivery wakes a conversation. Any agent
+> agent's own lane the way a source trigger wakes a conversation. Any agent
 > turn can put a message in it. The first and only reader is the Notification app, an
 > extension-shipped agent that decides what a person should be interrupted for and is the only
 > agent holding the verb that reaches a member outside the conversation they are in. The producer
@@ -22,12 +22,12 @@ date: 2026-09-03
 |---|---|
 | A turn already speaks through hidden markup: `<reply-to message=…>` spans are parsed out of a round and redacted from the live stream. It is the only tag grammar and the only stream filter. | `core/src/ufo/harness/replies.py`, `core/src/ufo/runtime/engine.py` (`ReplyRedaction` as the `TextFilter`) |
 | An observe-only `stop` hook already fires with the closing answer, right before the terminal commits. It can fire twice in one turn: when arrivals recycle the answer the loop `continue`s and fires again. | `core/src/ufo/runtime/ext/manifest.py` (`Stop`), `core/src/ufo/runtime/engine.py:1666` |
-| An extension can open a stable member-private conversation of an agent and admit an internal turn into it. This is how `source_trigger per_page` runs. | `ExtensionContext.open_conversation`, `ExtensionContext.invoke` in `core/src/ufo/runtime/ext/context.py` |
+| An extension can open a stable member-private conversation of an agent and admit an internal turn into it. | `ExtensionContext.open_conversation`, `ExtensionContext.invoke` in `core/src/ufo/runtime/ext/context.py` |
 | Admission registers a `writeback` for any turn entering a durable-surface conversation, whoever admitted it. Slack posts a turn that answers no member message at the DM top level. | `core/src/ufo/runtime/surfaces/admission.py`, `extensions/slack/ufo_ext_slack/surface.py:24` |
 | No turn-less delivery exists: `writeback` and `mid_turn_reply` are keyed on a turn; `open_conversation` hardcodes `surface = <extension>`; no `member_id → DM channel` lookup exists on any surface. | `core/src/ufo/schema/tables.py`, `core/src/ufo/runtime/ext/context.py` |
 | A `profile_only` tool reaches only a provision or profile whose allowlist names it; `object_apply agent` writes no allowlist. | spec.md `tools` point, `core/src/ufo/runtime/queue.py:_agent_tools` |
 | `report_problem` is the in-tree model of "a report written in another voice for a reader who is not the member". It ships without `profile_only`, so every agent holds it. | `extensions/debugger/ufo_ext_debugger/report.py` |
-| A source folds by identity: a page has a provider identity and a body digest, and a new body on the same identity advances the revision instead of adding a row. A source trigger's `current` delivery invokes one turn per batch. Only a shared source carries a trigger, and `per_page` is one turn per page. | spec.md `source`, `source_trigger`; `extensions/sources/ufo_ext_sources/tools.py:_fire_trigger` |
+| A source folds by identity: a page has a provider identity and a body digest, and a new body on the same identity advances the revision instead of adding a row. A source trigger invokes one turn per batch. Only a shared source carries a trigger. | spec.md `source`, `source_trigger`; `extensions/sources/ufo_ext_sources/tools.py:_fire_trigger` |
 | Memory recall is injected into every turn on a `user_prompt_submit` hook, scoped to the conversation's audience subjects. A member-private lane recalls that member's own items. | spec.md Memory, `extensions/memory/ufo_ext_memory/manifest.py` |
 | The gap: a background turn (source trigger, scheduled fire, monitor, subagent) that learns something a person should hear has no way to say so except in its own conversation, which nobody may be reading. |
 
@@ -358,7 +358,6 @@ Radar does not move. It is a place you go; the Notification app is a thing that 
 | `report_problem` | never: its reader is an engineer, not a member |
 | subagent result delivery, `message_spawn` | never: a parent's own arrival, keyed on the child turn |
 | `scheduled_task` fires | never; a fire's report may become a `notify` call |
-| `source_trigger per_page` | round two, and the real prize: one turn per changed page is the 400-turn version of the same problem. A third delivery mode that raises instead of firing a turn is one row per page, folded by subject, drained in one turn. Needs the inbox to earn its keep first. |
 | every app's inbox | the table is already keyed by recipient. A second app becomes a reader when it has a prompt paragraph that reads its lane; then `notify` gains a `to` argument and nothing else changes. Not before: a message that lands where nothing reads it is a consumer with no producer, inverted. |
 | recall of past notifications | later, as a `PageFeed` producer over delivered rows, so "what did you tell me last week" reaches memory and the wiki. Delivered rows only: raised chatter never derives. |
 | app exceptions | later; no producer exists, so no type is declared now |
@@ -442,7 +441,7 @@ one row) if `notify_raise` shows the tool underfires; the app's homepage pane.
   feature. No `type` column, no message registry, no dispatcher, no `to` argument: one reader does
   not demand a general surface. The generality the founders hope for is earned when a second app
   reads its lane, not declared now.
-- **Borrowed from sources, not built on them.** Fold by identity, the `current` delivery's
+- **Borrowed from sources, not built on them.** Fold by identity, the trigger's
   one-batch-one-invoke, park on an unseated member, and a lane that opens on first content. The
   inbox is not a source: sources are upstream producers of it.
 - **Enforce, don't document.** Fold, altitude, loop, one-delivery-per-turn, and isolation are a
@@ -461,7 +460,7 @@ one row) if `notify_raise` shows the tool underfires; the app's homepage pane.
 |---|---|
 | **Tag first** (`<notify>` in the round text, the founders' sketch). Zero extra round, invisible by the proven `reply-to` mechanism, and not a grant. | It needs the harness's one tag grammar generalized (`AgentDefinition.span_tags`, `Stop.spans`, a `Manifest` point, a `_close` branch for a round that empties to a span or the engine raises "empty response twice"), for one consumer. Decisively for constraint 2: a tag has no back-channel, so every fence drops silently and the model cannot raise its altitude mid-turn; an unclosed tag loses the whole notification with no recovery. Kept as a later producer on the same store, gated on measurement. |
 | **A general inbox bus now** (`type` column, a `to` argument, collapsing subagent delivery, scheduled results, source triggers). | One writer, one reader. Subagent results and `message_spawn` never fit (they are a parent's arrival). The recipient-keyed shape ships; the `to` argument lands with the second reader's prompt. |
-| **The inbox as a source, every app subscribed to its own by default.** Reuses fold-by-identity, the trigger wake, source grants, and memory recall. | Only a shared source carries a trigger, so a private per-member inbox cannot wake anything, and an ownerless app inbox is shared with every member the app is visible to. A page has no raised-triaged-delivered state, so the state lands in a second table. Every page derives into memory and the wiki, so operational chatter reaches recall. A source is a pull on its own clock, so the write becomes a fake provider synced a tick later. A default subscription needs a provision field and activation code in core for seven apps nobody writes to. What survives is taken: the fold rule, the `current` delivery shape, the lane on first content, and recall as a later `PageFeed` producer over delivered rows. |
+| **The inbox as a source, every app subscribed to its own by default.** Reuses fold-by-identity, the trigger wake, source grants, and memory recall. | Only a shared source carries a trigger, so a private per-member inbox cannot wake anything, and an ownerless app inbox is shared with every member the app is visible to. A page has no raised-triaged-delivered state, so the state lands in a second table. Every page derives into memory and the wiki, so operational chatter reaches recall. A source is a pull on its own clock, so the write becomes a fake provider synced a tick later. A default subscription needs a provision field and activation code in core for seven apps nobody writes to. What survives is taken: the fold rule, the trigger shape, the lane on first content, and recall as a later `PageFeed` producer over delivered rows. |
 | **A turn-less delivery seam** (a member-addressed row the `WritebackPoller` posts through `speak`). | A new table and poller path and two surface changes, duplicating at-least-once delivery, recovery, and idempotency, and it breaks "the turn is the audit record". The relay turn reuses all of it and gives the member a thread to reply in. Named as round two if the relay's cost or voice bites. |
 | **A source-grant style fence for the delivery tool.** | A grant is a member-created, member-extendable edge in chat. The fence must be one no member can widen; the provision allowlist plus `profile_only` is exactly that. |
 | **A `notification_rule` kind, mute in SQL at raise.** | A second table and kind for a rule the triage turn can read from memory today. Deterministic and free per muted row, but not yet needed. Returns when volume shows a memory-based mute leaking or costing. |

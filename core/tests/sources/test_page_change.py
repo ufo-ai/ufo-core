@@ -52,6 +52,7 @@ from ufo.runtime.ext.manifest import (
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
     PAGE_CHANGE_BATCH,
+    PAGE_CHANGE_BATCH_REFUSED_KEY,
     PAGE_CHANGE_JOB,
     PAGE_CHANGE_PARK_MAX,
     PAGE_CHANGE_PARK_RETRY_SECONDS,
@@ -477,6 +478,63 @@ async def test_a_batch_the_handler_refuses_whole_is_retried_a_page_at_a_time(
     assert len(narrowed) == 1
     assert narrowed[0]["pages"] == 3
     assert narrowed[0]["extension"] == "taker_ext"
+
+
+async def test_a_batch_scoped_handler_retries_then_narrows(
+    db: None,
+    tmp_path: object,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workspace_id = await _workspace()
+    blob = FilesystemBlobStore(root=tmp_path)
+    pages = [
+        await _seed_page(blob, workspace_id, "first"),
+        await _seed_page(blob, workspace_id, "second"),
+    ]
+    _TAKER.reset(refuses_batches=True)
+    manifest = Manifest(
+        name="taker_ext",
+        version="0",
+        hooks=(
+            HookSpec(
+                event="page_change",
+                handler=_take_unrefused_pages,
+                page_change_failure_scope="batch",
+            ),
+        ),
+    )
+    runner = _runner(blob, manifests=(manifest,))
+    (consumer,) = runner.consumers()
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    monkeypatch.setattr(o11y, "_histograms", {})
+
+    for n in range(PAGE_CHANGE_PARK_STRIKES - 1):
+        with pytest.raises(RuntimeError), ws(workspace_id):
+            await runner.drive(consumer)
+        pages.append(await _seed_page(blob, workspace_id, f"new {n}"))
+
+    with caplog.at_level(logging.WARNING, logger="ufo"), ws(workspace_id):
+        await runner.drive(consumer)
+        cursor, parked = await _taker_state(consumer.discriminator)
+        held = await ScopedStore(extension="taker_ext").get(
+            f"{PAGE_CHANGE_BATCH_REFUSED_KEY}:{consumer.discriminator}"
+        )
+
+    assert _TAKER.taken == pages
+    assert isinstance(cursor, str) and cursor.endswith(f"|{pages[-1]}")
+    assert parked is None
+    assert held is None
+    assert _counted(reader, "ufo.page_change_stalled_total") == PAGE_CHANGE_PARK_STRIKES - 1
+    narrowed = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "jobs.page_change_narrowed"
+    ]
+    assert len(narrowed) == 1
+    assert narrowed[0]["pages"] == len(pages)
 
 
 async def test_a_page_the_handler_never_takes_is_parked_and_the_rest_move_past_it(

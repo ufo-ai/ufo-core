@@ -657,16 +657,21 @@ class HookSpec:
     runtime policy filter over the turn's granted tools, never a second grant path.
 
     A best-effort user-prompt hook may still return Deny, but a handler fault drops only its
-    injection instead of denying the turn. No tool gate can fail open."""
+    injection instead of denying the turn. No tool gate can fail open. `page_change_failure_scope`
+    selects whether the runner narrows a failed batch at once or retries it whole before bounded
+    page-by-page recovery."""
 
     event: HookEvent
     handler: Callable[[HookContext], Awaitable[HookOutcome]]
     tools: tuple[str, ...] = ()
     best_effort: bool = False
+    page_change_failure_scope: Literal["page", "batch"] = "page"
 
     def __post_init__(self) -> None:
         if self.best_effort and self.event != "user_prompt_submit":
             raise ValueError("only user_prompt_submit hooks may be best effort")
+        if self.page_change_failure_scope == "batch" and self.event != "page_change":
+            raise ValueError("only page_change hooks may hold a failed batch")
 
 
 AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}[a-z0-9]$")

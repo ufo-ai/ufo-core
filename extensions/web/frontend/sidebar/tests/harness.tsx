@@ -325,7 +325,7 @@ export const TRIGGER_KIND = {
   spec_schema: {
     properties: {
       source: { type: "string", title: "Source" },
-      delivery: { type: "string", enum: ["current", "per_page"], title: "Delivery" },
+      delivery: { type: "string", enum: ["current"], title: "Delivery" },
     },
   },
   applies: false,

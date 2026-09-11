@@ -1,7 +1,7 @@
 """What the sources extension declares: one content-source backend per registered connector, the
 credential slots the direct auth backend reads BYOK keys from, the `direct` auth-proxy backend
 itself, the `page` object kind that projects the synced pages back for read, the `source_trigger`
-kind that delivers a shared connection's changes to one conversation or one conversation per page,
+kind that delivers a shared connection's changed-page batches to its owning conversation,
 the `page_change` hook that performs that delivery, the `user_prompt_submit` and `post_tool_use`
 hooks that offer a conversation a trigger on a synced resource the text it reads links to, the
 `connection_recorded` hook that gives a connected account its canonical streams as the connection
@@ -76,7 +76,11 @@ def manifest() -> Manifest:
         version=VERSION,
         objects=(SOURCE_TRIGGER_OBJECT, PAGE_OBJECT),
         hooks=(
-            HookSpec(event="page_change", handler=on_page_change),
+            HookSpec(
+                event="page_change",
+                handler=on_page_change,
+                page_change_failure_scope="batch",
+            ),
             HookSpec(event="connection_recorded", handler=on_connection_recorded),
             HookSpec(event="user_prompt_submit", handler=on_link_seen, best_effort=True),
             HookSpec(event="post_tool_use", handler=on_link_seen),

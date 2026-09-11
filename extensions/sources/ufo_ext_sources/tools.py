@@ -2,11 +2,10 @@
 
 A connection is one account's authority and its canonical streams sync as `source` rows the moment
 it lands, so nobody registers a feed. A trigger is one conversation's standing interest in one of
-those feeds: apply the kind from the conversation and delete the row to stop. It can wake that
-conversation for each batch of changed pages, or open one stable agent conversation per changed
-page. Only a shared connection can carry one — a private connection's pages are disclosed to its
-owner alone, so the alert filter would drop every change it ever made — and the `page_change` hook
-includes only the shared pages the trigger's agent may read.
+those feeds: apply the kind from the conversation and delete the row to stop. Each batch of changed
+pages wakes that conversation. Only a shared connection can carry one — a private connection's
+pages are disclosed to its owner alone, so the alert filter would drop every change it ever made —
+and the `page_change` hook includes only the shared pages the trigger's agent may read.
 
 A trigger narrows to one resource of that feed — a pull request, an issue — named by its URL, and
 then only the changes about that resource wake the conversation. Its name derives from the triple
@@ -200,8 +199,7 @@ class SourceTriggerSpec(BaseModel):
     delivery: SourceTriggerDelivery = Field(
         default="current",
         title="Delivery",
-        description="Use current to wake this conversation for each batch of changes. Use per_page "
-        "to open one stable agent conversation for each changed page.",
+        description="Current delivery wakes this conversation for each batch of changes.",
     )
 
 
@@ -285,16 +283,15 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                 target=ObjectRef(kind=CONNECTION_OBJECT_KIND, name=_feed_name(found.connection)),
             )
         ]
-        if trigger.delivery == "current":
-            links.append(
-                ObjectLink(
-                    relation="reports_to",
-                    target=ObjectRef(
-                        kind=CONVERSATION_KIND,
-                        name=str(trigger.conversation_id),
-                    ),
-                )
+        links.append(
+            ObjectLink(
+                relation="reports_to",
+                target=ObjectRef(
+                    kind=CONVERSATION_KIND,
+                    name=str(trigger.conversation_id),
+                ),
             )
+        )
         return ObjectDetail(
             spec=SourceTriggerSpec(
                 connection=_feed_name(found.connection),
@@ -425,9 +422,8 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
 
 
 async def on_page_change(ctx: HookContext) -> HookOutcome:
-    """Wake each changed connection's triggers. Current delivery sends one batch to the trigger's
-    conversation. Per-page delivery sends each change to the stable agent conversation keyed by
-    that trigger and page. Only shared pages that the trigger's agent may read cause a wake.
+    """Wake each changed connection's triggers. Each trigger sends one batch to its conversation.
+    Only shared pages that the trigger's agent may read cause a wake.
 
     A trigger narrowed to one resource is woken by the changes about that resource alone, and one
     narrowed to streams by the changes on those streams alone."""
@@ -559,7 +555,11 @@ async def on_link_seen(ctx: HookContext) -> HookOutcome:
             {
                 "kind": SOURCE_TRIGGER_KIND,
                 "name": trigger_name(_feed_name(feed), conversation_id, resource),
-                "spec": {"connection": _feed_name(feed), "resource": resource},
+                "spec": {
+                    "connection": _feed_name(feed),
+                    "resource": resource,
+                    "delivery": "current",
+                },
             },
             sort_keys=False,
         ).strip()
@@ -596,72 +596,44 @@ async def _fire_trigger(
     audience: Audience,
     authorized: list[PageChange],
 ) -> None:
-    """Deliver one trigger's changes. An archived app raises `AgentArchived` out of the first
-    invoke, which drops the rest of this trigger's changes with it — none of them can be answered
-    until the app is restored."""
+    """Deliver one trigger's changes to its conversation."""
     fired_by = FiredBy(
         kind=SOURCE_TRIGGER_KIND,
-        name=trigger_name(_feed_name(connection), trigger.conversation_id, trigger.resource),
+        name=trigger_name(
+            _feed_name(connection), trigger.conversation_id, trigger.resource, trigger.streams
+        ),
         title=_trigger_summary(connection, trigger),
     )
-    match trigger.delivery:
-        case "current":
-            member_id = (
-                trigger.created_by_member_id
-                if trigger.created_by_member_id is not None
-                and audience == conversation_audience(trigger.created_by_member_id)
-                else None
-            )
-            latest = max(change.changed_at for change in authorized).isoformat()
-            path = await _write_change_log(
-                ext,
-                trigger.conversation_id,
-                _trigger_scope(connection, trigger),
-                latest,
-                authorized,
-            )
-            await ext.invoke(
-                trigger.conversation_id,
-                trigger.agent_id,
-                alert_message(connection, trigger, authorized, path),
-                idempotency_key=(
-                    f"source-trigger:{_trigger_scope(connection, trigger)}:"
-                    f"{trigger.conversation_id.hex}:{latest}"
-                ),
-                authority=authority_from_member_id(member_id),
-                holds_work_already_done=True,
-                standalone=True,
-                fired_by=fired_by,
-            )
-        case "per_page":
-            member_key = (
-                "shared"
-                if trigger.created_by_member_id is None
-                else trigger.created_by_member_id.hex
-            )
-            for change in authorized:
-                conversation_id = await ext.open_conversation(
-                    trigger.agent_id,
-                    f"source-trigger:{trigger.id.hex}:{member_key}:page:{change.page_id.hex}",
-                    member_id=trigger.created_by_member_id,
-                )
-                revision = f"{change.changed_at.isoformat()}-{change.revision}"
-                path = await _write_change_log(
-                    ext, conversation_id, _trigger_scope(connection, trigger), revision, [change]
-                )
-                await ext.invoke(
-                    conversation_id,
-                    trigger.agent_id,
-                    alert_message(connection, trigger, [change], path),
-                    idempotency_key=(
-                        f"source-trigger:{trigger.id.hex}:{member_key}:"
-                        f"{change.page_id.hex}:{change.revision}"
-                    ),
-                    authority=authority_from_member_id(trigger.created_by_member_id),
-                    holds_work_already_done=True,
-                    standalone=True,
-                    fired_by=fired_by,
-                )
+    member_id = (
+        trigger.created_by_member_id
+        if trigger.created_by_member_id is not None
+        and audience == conversation_audience(trigger.created_by_member_id)
+        else None
+    )
+    batch_id = sha256(
+        "\n".join(f"{change.revision}:{change.page_id.hex}" for change in authorized).encode()
+    ).hexdigest()
+    latest = max(change.changed_at for change in authorized).isoformat()
+    path = await _write_change_log(
+        ext,
+        trigger.conversation_id,
+        _trigger_scope(connection, trigger),
+        f"{latest}-{batch_id}",
+        authorized,
+    )
+    await ext.invoke(
+        trigger.conversation_id,
+        trigger.agent_id,
+        alert_message(connection, trigger, authorized, path),
+        idempotency_key=(
+            f"source-trigger:{_trigger_scope(connection, trigger)}:"
+            f"{trigger.conversation_id.hex}:{batch_id}"
+        ),
+        authority=authority_from_member_id(member_id),
+        holds_work_already_done=True,
+        standalone=True,
+        fired_by=fired_by,
+    )
 
 
 def _trigger_scope(connection: FeedConnection, trigger: SourceTrigger) -> str:
@@ -683,16 +655,16 @@ async def _write_change_log(
     ext: ExtensionContext,
     conversation_id: UUID,
     directory: str,
-    latest: str,
+    batch_name: str,
     changes: list[PageChange],
 ) -> str | None:
     """The whole delta as one JSON line per changed page, written into the woken
     conversation's workspace so the alerted agent reads it with its file tools instead of carrying
-    it in context. Named for the same `latest` stamp the alert's idempotency key carries, so a
-    replayed batch overwrites its own line-for-line identical file rather than appending a
-    duplicate. A failed write propagates: the page feed inlines every body through this same blob
-    store, so storage being unreachable fails the batch before the hook runs, and a handler that
-    raises leaves the cursor unadvanced for the next tick to retry."""
+    it in context. Named for the latest change and the batch digest, so a replayed batch overwrites
+    its own line-for-line identical file rather than appending a duplicate. A failed write
+    propagates: the page feed inlines every body through this same blob store, so storage being
+    unreachable fails the batch before the hook runs, and a handler that raises leaves the cursor
+    unadvanced for the next tick to retry."""
     if ext.files is None:
         return None
     body = "".join(
@@ -710,7 +682,7 @@ async def _write_change_log(
         for change in changes
     )
     path = await ext.files.write_runtime(
-        conversation_id, CHANGE_LOG_DIR, f"{directory}/{latest}.jsonl", body.encode()
+        conversation_id, CHANGE_LOG_DIR, f"{directory}/{batch_name}.jsonl", body.encode()
     )
     await ext.files.prune_runtime(conversation_id, CHANGE_LOG_DIR, directory)
     return path
@@ -778,8 +750,7 @@ def _headline(connection: FeedConnection, changes: list[PageChange]) -> str:
     a list reads these characters and no others. So a changed page's own title leads and the
     per-stream counts follow it: under counts alone every batch of one feed reads alike. The feed
     replays in revision order, so the last change of a long batch is its newest. One page states
-    its stream and what happened to it instead of counting itself — a per_page trigger delivers one
-    page and nothing else, so the count that names its conversation would always read `1`."""
+    its stream and what happened to it instead of counting itself."""
     if len(changes) == 1:
         (change,) = changes
         return f"{connection.provider}: {_label(change)} — {change.stream} {_disposition(change)}."
@@ -803,9 +774,9 @@ SOURCE_TRIGGER_OBJECT = ObjectKind(
         "admin may delete it."
     ),
     guidance=(
-        "Apply a manifest naming a shared connection. Set `delivery: current` to wake this "
-        "conversation for each batch of changes. Set `delivery: per_page` to open one stable "
-        "agent conversation for each changed page. Set `resource` to the URL of one pull request "
+        "Apply a manifest naming a shared connection with `delivery: current` to wake this "
+        "conversation for each batch of "
+        "changes. Set `resource` to the URL of one pull request "
         "or issue of a GitHub connection to be woken only by the changes about it, on the streams "
         "that connection syncs. Set `streams` to stream names of that connection to be woken by "
         "the changes on them alone; applying an unsynced name answers with the ones it syncs. "

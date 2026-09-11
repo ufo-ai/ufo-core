@@ -7,7 +7,7 @@ assertions read back through the durable trigger rows, the turns the alert admit
 logs it writes. Covered here: a trigger wakes its own conversation until it is deleted; a private
 connection cannot be watched and a stranger's is unknown; the alert reaches only woken
 conversations, only with shared pages, only for agents that still hold the grant, and only once per
-batch; per-page delivery keeps one conversation per page; a narrowed trigger wakes on its resource
+batch; separate batches with one timestamp stay distinct; a narrowed trigger wakes on its resource
 alone under every spelling of the link; and a link a conversation does not watch earns exactly one
 offer."""
 
@@ -22,7 +22,7 @@ import pytest
 import sqlalchemy as sa
 import yaml
 from cryptography.fernet import Fernet
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.exc import IntegrityError
 from ufo_ext_sources.manifest import NAME, manifest
 from ufo_ext_sources.pages import CONNECTION_OBJECT_KIND, PAGE_KIND, PAGE_OBJECT
@@ -33,6 +33,7 @@ from ufo_ext_sources.tools import (
     CHANGE_LOG_DIR,
     SOURCE_TRIGGER_KIND,
     WATCH_OFFER_MAX,
+    SourceTriggerSpec,
     on_link_seen,
     on_page_change,
     trigger_name,
@@ -344,6 +345,11 @@ def _trigger_manifest(
     )
 
 
+def test_source_trigger_delivery_is_current_only() -> None:
+    with pytest.raises(ValidationError):
+        SourceTriggerSpec.model_validate({"connection": "github-account", "delivery": "per_page"})
+
+
 def _change(
     source_id: UUID,
     body: str,
@@ -415,6 +421,12 @@ def test_manifest_declares_the_trigger_and_page_kinds() -> None:
         "post_tool_use",
     }
     assert {hook.event for hook in declared.hooks if hook.best_effort} == {"user_prompt_submit"}
+    assert (
+        next(
+            hook.page_change_failure_scope for hook in declared.hooks if hook.event == "page_change"
+        )
+        == "batch"
+    )
     assert {slot.name for slot in declared.credentials} == {
         name for name, connector in CONNECTORS.items() if not connector.key_headers
     } | {slot for connector in CONNECTORS.values() for slot in connector.key_headers.values()}
@@ -483,6 +495,47 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
             ),
         )
         assert await _woken(state, feed) == {}
+
+
+async def test_stored_delivery_cannot_change_current_trigger_behavior(db: None) -> None:
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state)
+    created_at = datetime(2026, 7, 20, tzinfo=UTC)
+    stored_trigger = sa.table(
+        "source_trigger",
+        sa.column("id", sa.Uuid),
+        sa.column("workspace_id", sa.Uuid),
+        sa.column("conversation_id", sa.Uuid),
+        sa.column("agent_id", sa.Uuid),
+        sa.column("connection_id", sa.Uuid),
+        sa.column("resource", sa.Text),
+        sa.column("streams", sa.Text),
+        sa.column("delivery", sa.Text),
+        sa.column("created_by_member_id", sa.Uuid),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(stored_trigger).values(
+                id=uuid4(),
+                workspace_id=state.workspace_id,
+                conversation_id=state.conversation_id,
+                agent_id=state.agent_id,
+                connection_id=feed.id,
+                resource="",
+                streams="",
+                delivery="per_page",
+                created_by_member_id=state.owner_id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+
+    with ws(state.workspace_id):
+        (trigger,) = await SourceTriggerStore(context_for(NAME, DECLARED_PROVIDERS)).waking(feed.id)
+
+    assert trigger.delivery == "current"
 
 
 async def test_a_non_owner_may_watch_a_shared_connection(db: None) -> None:
@@ -780,155 +833,71 @@ async def test_shared_trigger_conversation_carries_no_member_authority(db: None)
     assert turn["on_behalf_of_member_id"] is None
 
 
-async def test_existing_per_page_conversation_keeps_creator_authority_when_unseated(
-    db: None,
-) -> None:
+async def test_trigger_keeps_creator_authority_when_unseated(db: None) -> None:
     state = await _workspace()
     feed, source_id = await _feed_with_stream(state)
-    page_id = uuid4()
     with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(
-            _context(state),
-            _trigger_manifest(feed, state.conversation_id, delivery="per_page"),
-        )
-        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
-        await on_page_change(
-            HookContext(
-                ext=ext,
-                payload=PageChangeBatch(changes=(_change(source_id, "# first", page_id=page_id),)),
-            )
-        )
+        await _apply(_context(state), _trigger_manifest(feed, state.conversation_id))
     async with workspace_tx() as connection:
-        [conversation_id] = (
-            await connection.execute(
-                sa.select(tables.conversation.c.id).where(
-                    tables.conversation.c.workspace_id == state.workspace_id,
-                    tables.conversation.c.surface == NAME,
-                )
-            )
-        ).scalars()
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.conversation_id == conversation_id)
-            .values(status="done", terminal={"status": "done", "text": "Handled."})
-        )
         await connection.execute(
             sa.update(tables.member)
             .where(tables.member.c.id == state.owner_id)
             .values(seated_at=None)
         )
     with ws(state.workspace_id), agent(state.agent_id):
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
         await on_page_change(
             HookContext(
                 ext=ext,
-                payload=PageChangeBatch(
-                    changes=(
-                        _change(
-                            source_id,
-                            "# still delivered",
-                            changed_at=datetime(2026, 7, 21, tzinfo=UTC),
-                            disposition="updated",
-                            page_id=page_id,
-                            revision=2,
-                        ),
-                    )
-                ),
+                payload=PageChangeBatch(changes=(_change(source_id, "# still delivered"),)),
             )
         )
 
-    turns = await _turns(conversation_id)
-    assert len(turns) == 2
-    turn = turns[-1]
+    [turn] = await _turns(state.conversation_id)
     assert turn["status"] == "parked"
     assert turn["on_behalf_of_member_id"] == state.owner_id
     assert "still delivered" in turn["inbound"]
 
 
-async def test_per_page_delivery_keeps_one_conversation_per_page(db: None) -> None:
+async def test_batches_with_one_timestamp_have_distinct_idempotency_keys(db: None) -> None:
     state = await _workspace()
     feed, source_id = await _feed_with_stream(state)
-    first_page, second_page = uuid4(), uuid4()
+    changed_at = datetime(2026, 7, 21, tzinfo=UTC)
     with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(
-            _context(state),
-            _trigger_manifest(feed, state.conversation_id, delivery="per_page"),
-        )
-        [trigger] = await SourceTriggerStore(context_for(NAME, DECLARED_PROVIDERS)).waking(feed.id)
-        assert trigger.delivery == "per_page"
-        fetched = await _get(_context(state), trigger_name(feed.name, state.conversation_id))
-        assert fetched["spec"] == {
-            "connection": feed.name,
-            "delivery": "per_page",
-            "resource": "",
-            "streams": [],
-        }
-        assert fetched["status"]["delivery"] == "per_page"
-        assert [link["relation"] for link in fetched["links"]] == ["watches"]
+        await _apply(_context(state), _trigger_manifest(feed, state.conversation_id))
         ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
-        first = _change(source_id, "# first", page_id=first_page)
-        second = _change(source_id, "# second", page_id=second_page)
-        batch = PageChangeBatch(changes=(first, second))
-
-        await on_page_change(HookContext(ext=ext, payload=batch))
-        await on_page_change(HookContext(ext=ext, payload=batch))
+        first = PageChangeBatch(
+            changes=(
+                _change(source_id, "# first", changed_at=changed_at, revision=1),
+                _change(source_id, "# second", changed_at=changed_at, revision=2),
+            )
+        )
+        second = PageChangeBatch(
+            changes=(
+                _change(source_id, "# third", changed_at=changed_at, revision=3),
+                _change(source_id, "# fourth", changed_at=changed_at, revision=4),
+            )
+        )
+        for batch in (first, first, second, second):
+            await on_page_change(HookContext(ext=ext, payload=batch))
 
     async with workspace_tx() as connection:
-        conversations = (
-            (
-                await connection.execute(
-                    sa.select(tables.conversation).where(
-                        tables.conversation.c.workspace_id == state.workspace_id,
-                        tables.conversation.c.surface == NAME,
-                    )
+        opened = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.conversation)
+                .where(
+                    tables.conversation.c.workspace_id == state.workspace_id,
+                    tables.conversation.c.surface == NAME,
                 )
             )
-            .mappings()
-            .all()
-        )
-    assert len(conversations) == 2
-    turns_by_page = {}
-    for conversation in conversations:
-        assert conversation["member_id"] == state.owner_id
-        assert conversation["audience"] == str(conversation_audience(state.owner_id))
-        [turn] = await _turns(conversation["id"])
-        assert turn["speaker_member_id"] is None
-        assert turn["on_behalf_of_member_id"] == state.owner_id
-        if str(first_page) in turn["inbound"]:
-            turns_by_page[first_page] = turn
-        if str(second_page) in turn["inbound"]:
-            turns_by_page[second_page] = turn
-    assert set(turns_by_page) == {first_page, second_page}
-    assert turns_by_page[first_page]["idempotency_key"] == (
-        f"source-trigger:{trigger.id.hex}:{state.owner_id.hex}:{first_page.hex}:1"
-    )
-    assert turns_by_page[second_page]["idempotency_key"] == (
-        f"source-trigger:{trigger.id.hex}:{state.owner_id.hex}:{second_page.hex}:1"
-    )
-    assert (
-        turns_by_page[first_page]["conversation_id"]
-        != turns_by_page[second_page]["conversation_id"]
-    )
-    assert await _turns(state.conversation_id) == []
-
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(status="done", terminal={"status": "done", "text": "Handled."})
-            .where(tables.turn.c.id == turns_by_page[first_page]["id"])
-        )
-    changed = _change(
-        source_id,
-        "# first changed",
-        changed_at=datetime(2026, 7, 21, tzinfo=UTC),
-        disposition="updated",
-        page_id=first_page,
-        revision=2,
-    )
-    with ws(state.workspace_id), agent(state.agent_id):
-        await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=(changed,))))
-
-    assert len(await _turns(turns_by_page[first_page]["conversation_id"])) == 2
-    assert len(await _turns(turns_by_page[second_page]["conversation_id"])) == 1
+        ).scalar_one()
+    turns = await _turns(state.conversation_id)
+    assert len(turns) == 2
+    assert len({turn["idempotency_key"] for turn in turns}) == 2
+    assert any("first" in turn["inbound"] and "second" in turn["inbound"] for turn in turns)
+    assert any("third" in turn["inbound"] and "fourth" in turn["inbound"] for turn in turns)
+    assert opened == 0
 
 
 async def _second_agent_conversation(state: _Workspace) -> tuple[UUID, UUID]:
@@ -1377,7 +1346,7 @@ async def test_a_link_to_a_synced_resource_is_offered_to_the_conversation(db: No
     assert yaml.safe_load(manifest_text) == {
         "kind": SOURCE_TRIGGER_KIND,
         "name": trigger_name(feed.name, state.conversation_id, PR_URL),
-        "spec": {"connection": feed.name, "resource": PR_URL},
+        "spec": {"connection": feed.name, "delivery": "current", "resource": PR_URL},
     }
     with ws(state.workspace_id), agent(state.agent_id):
         applied = await _apply(_context(state), manifest_text)

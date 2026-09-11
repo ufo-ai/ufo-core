@@ -15,6 +15,8 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 import yaml
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo_ext_sources.manifest import NAME
 from ufo_ext_sources.registry import CONNECTORS
 from ufo_ext_sources.resources import canonical_resource
@@ -68,6 +70,29 @@ async def seed(workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
                 .limit(1)
             )
         ).scalar_one()
+        insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+        candidate_id = uuid4()
+        await connection.execute(
+            insert(tables.connection)
+            .values(
+                id=candidate_id,
+                workspace_id=workspace_id,
+                provider=GITHUB,
+                account_id=ACCOUNT,
+                host="github.com",
+                owner_member_id=owner_id,
+                shared=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+            .on_conflict_do_nothing(
+                index_elements=(
+                    tables.connection.c.workspace_id,
+                    tables.connection.c.provider,
+                    tables.connection.c.account_id,
+                )
+            )
+        )
         connection_id = (
             await connection.execute(
                 sa.select(tables.connection.c.id).where(
@@ -76,42 +101,25 @@ async def seed(workspace_id: UUID, agent_id: UUID, _blob: BlobStore) -> None:
                     tables.connection.c.account_id == ACCOUNT,
                 )
             )
-        ).scalar_one_or_none()
-        if connection_id is None:
-            connection_id = uuid4()
-            await connection.execute(
-                sa.insert(tables.connection).values(
-                    id=connection_id,
-                    workspace_id=workspace_id,
-                    provider=GITHUB,
-                    account_id=ACCOUNT,
-                    host="github.com",
-                    owner_member_id=owner_id,
-                    shared=True,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
+        ).scalar_one()
+        await connection.execute(
+            insert(tables.connector_grant)
+            .values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                connection_id=connection_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+            .on_conflict_do_nothing(
+                index_elements=(
+                    tables.connector_grant.c.workspace_id,
+                    tables.connector_grant.c.agent_id,
+                    tables.connector_grant.c.connection_id,
                 )
             )
-        granted = (
-            await connection.execute(
-                sa.select(tables.connector_grant.c.id).where(
-                    tables.connector_grant.c.workspace_id == workspace_id,
-                    tables.connector_grant.c.agent_id == agent_id,
-                    tables.connector_grant.c.connection_id == connection_id,
-                )
-            )
-        ).scalar_one_or_none()
-        if granted is None:
-            await connection.execute(
-                sa.insert(tables.connector_grant).values(
-                    id=uuid4(),
-                    workspace_id=workspace_id,
-                    agent_id=agent_id,
-                    connection_id=connection_id,
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
+        )
     with ws(workspace_id), agent(agent_id):
         ext = context_for(NAME, frozenset(CONNECTORS))
         for stream in STREAMS:

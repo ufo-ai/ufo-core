@@ -118,7 +118,7 @@ const SECOND_TRIGGER_ROW = owned(
     summary: "github-30847ee4 — pull_requests",
     conversation: SECOND_CONVO_ID,
     source: "github-30847ee4",
-    delivery: "per_page",
+    delivery: "current",
   },
   SECOND,
 );
@@ -644,63 +644,6 @@ test("a detail renders spec, then status, then links, then when the row was made
   expect(fact("Created By")).toBe("mel@example.com");
   expect(screen.queryByText("Owner Email")).toBeNull();
   expect(screen.getByText("Created").textContent).toBe("Created Jul 1 2026");
-});
-
-test("a record header action applies a partial spec and reads back its next state", async () => {
-  const posted: unknown[] = [];
-  let delivery = "current";
-  wire({
-    "/objects/source_trigger/github-issues": () =>
-      json({
-        ...TRIGGER_DETAIL,
-        spec: { ...TRIGGER_DETAIL.spec, delivery },
-        status: { ...TRIGGER_DETAIL.status, delivery },
-      }),
-    "/intents": (_url, init) => {
-      const envelope = JSON.parse(String(init?.body));
-      posted.push(envelope);
-      delivery = envelope.spec.delivery;
-      return json({ applied: true, message: "Applied." });
-    },
-  });
-  render(
-    <MainAgentProvider agents={[AGENT]}>
-      <Pane>
-        <ObjectDetail
-          agentId={AGENT_ID}
-          kind="source_trigger"
-          name="github-issues"
-          actions={(status, apply) =>
-            status === null ? null : (
-              <button
-                type="button"
-                onClick={() =>
-                  void apply({ delivery: status.delivery === "current" ? "per_page" : "current" })
-                }
-              >
-                {status.delivery === "current" ? "Wake per page" : "Wake this chat"}
-              </button>
-            )
-          }
-          onOpen={() => {}}
-          onBack={() => {}}
-        />
-      </Pane>
-    </MainAgentProvider>,
-  );
-
-  await userEvent.click(await screen.findByRole("button", { name: "Wake per page" }));
-
-  expect(await screen.findByRole("button", { name: "Wake this chat" })).toBeTruthy();
-  expect(await screen.findByText("Applied.")).toBeTruthy();
-  expect(posted).toEqual([
-    {
-      verb: "apply",
-      kind: "source_trigger",
-      name: "github-issues",
-      spec: { delivery: "per_page" },
-    },
-  ]);
 });
 
 test("a spec value longer than its row stands under its label, wrapped, and clears its neighbours", async () => {

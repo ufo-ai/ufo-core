@@ -62,7 +62,7 @@ TRIGGER_KIND = "source_trigger"
 CODE_APP_DELIVERY = "current"
 CODE_APP_STREAMS = ("pull_requests",)
 """Without them the trigger also takes the connection's workflow runs, comments and issues, and
-per-page delivery reviews one head from a conversation per page."""
+wakes the reviewer for changes outside the pull requests it reviews."""
 
 CODE_APP_PURPOSE = (
     "Reviews each pull request as it changes, and says what would break and what is missing."

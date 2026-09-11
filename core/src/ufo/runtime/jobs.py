@@ -135,6 +135,7 @@ INDEX_REAP_BATCH = 50
 PAGE_CHANGE_BATCH = 50
 PAGE_CHANGE_PARKED_KEY = "page_change_parked"
 PAGE_CHANGE_REFUSED_KEY = "page_change_refused"
+PAGE_CHANGE_BATCH_REFUSED_KEY = "page_change_batch_refused"
 PAGE_CHANGE_PARK_STRIKES = 3
 PAGE_CHANGE_PARK_MAX = 20
 PAGE_CHANGE_PARK_RETRY_SECONDS = 3600
@@ -408,6 +409,11 @@ class RefusedPage(BaseModel):
     strikes: int
 
 
+class RefusedBatch(BaseModel):
+    cursor: str | None
+    strikes: int
+
+
 class ParkedPage(BaseModel):
     """One page a `page_change` handler refused on its own, set aside so the pages behind it keep
     moving. `cursor` is the feed position it sits at — the page before it — and `page_id` the page a
@@ -433,9 +439,10 @@ class PageChangeRunner:
     cursors and a restart resumes each exactly where it left off; the handlers stay idempotent, so a
     replayed batch settles on the same state. Each handler runs with the extension's scoped
     ExtensionContext built the jobs way — the model wired, on `background_model` — so a consumer
-    like the fact deriver's distillation pass reaches ctx.model. A batch a
-    handler raises on is retried a page at a time, and a page it refuses alone is parked rather than
-    left in front of the cursor, so no one page holds a workspace's consumer.
+    like the fact deriver's distillation pass reaches ctx.model. A batch a handler raises on is
+    retried whole when the hook requires one delivery, then retried a page at a time; a page it
+    refuses alone is parked rather than left in front of the cursor, so no one page holds a
+    workspace's consumer.
     Batch-at-interval and fed only by the source pipeline, so it can never fire on the derived rows
     a handler writes.
 
@@ -564,10 +571,11 @@ class PageChangeRunner:
         rewound to an older place: losing that write means another writer owns the cursor, and this
         tick stops having only redone work a handler is idempotent under.
 
-        A handler that raises on a batch is given that batch again a page at a time from the same
-        cursor: a refusal the batch earns as a whole — a request over a provider's size cap — is
-        gone once the pages arrive singly, and one the handler makes against a single page names
-        the page. That page holds the cursor while it might be a fault that passes — a model
+        A handler that requires one batch delivery gets bounded whole-batch retries before the
+        runner narrows it. Other handlers narrow at once. A refusal the batch earns as a whole — a
+        request over a provider's size cap — is gone once the pages arrive singly, and one the
+        handler makes against a single page names the page. That page holds the cursor while it
+        might be a fault that passes — a model
         answering badly, a provider refusing for a minute — and is parked once it has refused
         PAGE_CHANGE_PARK_STRIKES ticks running: recorded with the position it sits at, stepped over,
         and re-delivered on its own every hour until it lands, so the pages behind it move and the
@@ -597,6 +605,11 @@ class PageChangeRunner:
                 )
             except Exception as error:
                 if len(batch.changes) > 1:
+                    if (
+                        consumer.spec.page_change_failure_scope == "batch"
+                        and await self._hold_batch(consumer, context, cursor, len(parked), error)
+                    ):
+                        raise
                     emit_metric(
                         PAGE_CHANGE_NARROWED_METRIC,
                         extension=consumer.extension,
@@ -624,6 +637,28 @@ class PageChangeRunner:
                 narrowed_through = None
             elif narrowed_through is None and len(batch.changes) < PAGE_CHANGE_BATCH:
                 return
+
+    async def _hold_batch(
+        self,
+        consumer: PageChangeConsumer,
+        context: ExtensionContext,
+        cursor: str | None,
+        parked: int,
+        error: Exception,
+    ) -> bool:
+        key = f"{PAGE_CHANGE_BATCH_REFUSED_KEY}:{consumer.discriminator}"
+        stored = await context.store.get(key)
+        held = None if stored is None else RefusedBatch.model_validate(stored)
+        strikes = held.strikes + 1 if held is not None and held.cursor == cursor else 1
+        if strikes >= PAGE_CHANGE_PARK_STRIKES:
+            await context.store.delete(key)
+            return False
+        await context.store.put(
+            key,
+            RefusedBatch(cursor=cursor, strikes=strikes).model_dump(mode="json"),
+        )
+        self._report_stall(consumer, cursor, parked, strikes, error)
+        return True
 
     def _context_for(self, consumer: PageChangeConsumer) -> ExtensionContext:
         invoker = (

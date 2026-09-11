@@ -305,7 +305,11 @@ async def test_one_conversation_holds_a_whole_feed_and_a_narrowed_trigger(db: No
         store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
         whole = await store.create(seeded.conversation_id, feed, "current")
         narrowed = await store.create(
-            seeded.conversation_id, feed, "per_page", seeded.member_id, PR
+            seeded.conversation_id,
+            feed,
+            "current",
+            created_by_member_id=seeded.member_id,
+            resource=PR,
         )
 
         assert whole.resource == ""
@@ -330,7 +334,11 @@ async def test_one_conversation_holds_a_whole_feed_and_a_narrowed_trigger(db: No
             await store.remove(narrowed)
 
         narrowed = await store.create(
-            seeded.conversation_id, feed, "per_page", seeded.member_id, PR
+            seeded.conversation_id,
+            feed,
+            "current",
+            created_by_member_id=seeded.member_id,
+            resource=PR,
         )
         assert await _rows(seeded.workspace_id) == [(whole.id, ""), (narrowed.id, PR)]
 
@@ -348,7 +356,7 @@ async def test_disconnecting_the_account_takes_every_trigger_on_it(db: None) -> 
     with ws(seeded.workspace_id), agent(seeded.agent_id):
         store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
         await store.create(seeded.conversation_id, seeded.connection_id, "current")
-        await store.create(seeded.conversation_id, seeded.connection_id, "per_page", resource=PR)
+        await store.create(seeded.conversation_id, seeded.connection_id, "current", resource=PR)
         kept = await store.create(seeded.conversation_id, seeded.later_connection_id, "current")
 
         async with workspace_tx() as connection:
@@ -374,7 +382,7 @@ async def test_the_alert_sweep_reads_a_feeds_triggers_oldest_first(db: None) -> 
     with ws(seeded.workspace_id), agent(seeded.agent_id):
         store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
         newest = await _stamp(
-            await store.create(seeded.conversation_id, feed, "per_page", resource=PR),
+            await store.create(seeded.conversation_id, feed, "current", resource=PR),
             datetime(2026, 7, 20, 14, tzinfo=UTC),
         )
         oldest = await _stamp(
@@ -382,7 +390,7 @@ async def test_the_alert_sweep_reads_a_feeds_triggers_oldest_first(db: None) -> 
             datetime(2026, 7, 20, 12, tzinfo=UTC),
         )
         middle = await _stamp(
-            await store.create(seeded.conversation_id, feed, "per_page", resource=ISSUE),
+            await store.create(seeded.conversation_id, feed, "current", resource=ISSUE),
             datetime(2026, 7, 20, 13, tzinfo=UTC),
         )
         assert await store.waking(feed) == (oldest, middle, newest)
@@ -397,8 +405,8 @@ async def test_a_listing_heads_each_feed_with_its_whole_feed(db: None) -> None:
     with ws(seeded.workspace_id), agent(seeded.agent_id):
         store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
         later_feed = await store.create(seeded.conversation_id, second, "current")
-        pull_request = await store.create(seeded.conversation_id, first, "per_page", resource=PR)
+        pull_request = await store.create(seeded.conversation_id, first, "current", resource=PR)
         whole = await store.create(seeded.conversation_id, first, "current")
-        issue = await store.create(seeded.conversation_id, first, "per_page", resource=ISSUE)
+        issue = await store.create(seeded.conversation_id, first, "current", resource=ISSUE)
         listed = await store.list_reported()
         assert [row.trigger for row in listed] == [whole, issue, pull_request, later_feed]

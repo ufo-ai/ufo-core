@@ -542,7 +542,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "memory_0025",
         "sample_ext_note_0001",
         "scheduled_tasks_0001",
-        "sources_0005",
+        "sources_0006",
         "monitors_0001",
         "skill_create_0004",
         "coding_0004",
@@ -972,8 +972,9 @@ def test_the_trigger_tables_merge_onto_one_keyed_by_resource(tmp_path: Path) -> 
     conversation_id, binding) would make the second of those rows unwritable.
 
     Every narrowed row crosses over keeping its own id — the generation an object edit checks
-    itself against, and the key its per-page conversation is queued under. Both rows seeded here
-    land under one conversation and one binding, which the narrow key could not hold."""
+    itself against. Both rows seeded here land under one conversation and one binding, which the
+    narrow key could not hold. The next revision makes every row current and gives the retained
+    column a default for the outgoing image."""
     database_path = tmp_path / "trigger-resource.db"
     config = Config()
     config.set_main_option("script_location", str(MIGRATIONS_DIR))
@@ -1077,6 +1078,33 @@ def test_the_trigger_tables_merge_onto_one_keyed_by_resource(tmp_path: Path) -> 
             member_id.hex,
         ),
     ]
+    command.upgrade(config, "sources_0006")
+    defaulted_id = uuid4()
+    with sqlite3.connect(database_path) as connection:
+        normalized = connection.execute(
+            "select id, delivery from source_trigger order by id"
+        ).fetchall()
+        connection.execute(
+            "insert into source_trigger (id, workspace_id, conversation_id, agent_id, "
+            "connection_id, resource, created_by_member_id, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                defaulted_id.hex,
+                workspace_id.hex,
+                conversation_id.hex,
+                agent_id.hex,
+                connection_id.hex,
+                "https://github.com/metalcraftai/ufo/pull/1685",
+                member_id.hex,
+                now,
+                now,
+            ),
+        )
+        defaulted = connection.execute(
+            "select delivery from source_trigger where id = ?", (defaulted_id.hex,)
+        ).fetchone()
+    assert {delivery for _, delivery in normalized} == {"current"}
+    assert defaulted == ("current",)
 
 
 SOURCE_AUTHORITY_REVISION = "20260907150257"

@@ -1,17 +1,87 @@
+import asyncio
+from uuid import uuid4
+
+import pytest
+import sqlalchemy as sa
 import yaml
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.suites.source_watch_offer import (
     PR,
     SECOND_PR,
+    STREAMS,
+    seed,
     watches,
     watches_each,
     watches_nothing,
 )
+from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
+from ufo.schema import tables
 
 WATCHES = watches(PR)
 WATCHES_EACH = watches_each(PR, SECOND_PR)
 WATCHES_NOTHING = watches_nothing()
+
+
+@pytest.mark.parametrize("database_url", ["sqlite", "postgres"], indirect=True)
+async def test_parallel_case_seeds_settle_one_connection(db: None, tmp_path) -> None:
+    workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="evals@localhost",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    blob = FilesystemBlobStore(root=tmp_path)
+    await asyncio.gather(*(seed(workspace_id, agent_id, blob) for _ in range(5)))
+
+    async with workspace_tx() as connection:
+        connection_count = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.connection)
+                .where(tables.connection.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        grant_count = (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.connector_grant)
+                .where(tables.connector_grant.c.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        streams = (
+            await connection.execute(
+                sa.select(tables.source.c.config).where(
+                    tables.source.c.workspace_id == workspace_id
+                )
+            )
+        ).scalars()
+    assert connection_count == 1
+    assert grant_count == 1
+    assert {config["stream"] for config in streams} == set(STREAMS)
 
 
 def _apply(kind: str, spec: dict[str, str], *, landed: bool = True) -> ToolInvocation:

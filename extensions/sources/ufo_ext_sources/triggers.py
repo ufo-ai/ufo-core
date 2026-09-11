@@ -1,9 +1,8 @@
 """The source-trigger table and the scoped store that owns it.
 
-A trigger is one conversation's standing interest in one connection's feed. It can send each batch
-to that conversation or partition changes into one stable agent conversation per page. The row
-carries the connection it watches, the owning conversation, the agent it invokes, the delivery
-mode, and the member who asked for it.
+A trigger is one conversation's standing interest in one connection's feed. Each batch returns to
+that conversation. The row carries the connection it watches, the owning conversation, the agent
+it invokes, and the member who asked for it.
 
 A trigger narrows to one resource of that feed — a pull request, an issue — named by the row's
 `resource`, and to the streams its `streams` names. Both join the conversation and the connection
@@ -63,14 +62,13 @@ _COLUMNS = (
     source_trigger.c.connection_id,
     source_trigger.c.resource,
     source_trigger.c.streams,
-    source_trigger.c.delivery,
     source_trigger.c.created_by_member_id,
     source_trigger.c.created_at,
     source_trigger.c.updated_at,
 )
 
 
-SourceTriggerDelivery = Literal["current", "per_page"]
+SourceTriggerDelivery = Literal["current"]
 
 
 @dataclass(frozen=True)
@@ -109,11 +107,6 @@ def _utc(value: datetime) -> datetime:
 def _trigger(row: sa.RowMapping) -> SourceTrigger:
     """One row as a handler reads it. An empty `resource` or `streams` narrows nothing. The
     column holds the sorted names joined by commas, which is what the unique key compares."""
-    match row["delivery"]:
-        case "current" | "per_page" as delivery:
-            pass
-        case value:
-            raise ValueError(f"unknown source trigger delivery {value!r}")
     return SourceTrigger(
         id=row["id"],
         conversation_id=row["conversation_id"],
@@ -121,7 +114,7 @@ def _trigger(row: sa.RowMapping) -> SourceTrigger:
         connection_id=row["connection_id"],
         resource=row["resource"],
         streams=tuple(row["streams"].split(",")) if row["streams"] else (),
-        delivery=delivery,
+        delivery="current",
         created_by_member_id=row["created_by_member_id"],
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
@@ -147,7 +140,7 @@ class SourceTriggerStore:
         resource: str = "",
         streams: tuple[str, ...] = (),
     ) -> SourceTrigger:
-        """Create one delivery rule on one connection's feed, over the whole feed or over the
+        """Create one wake-up on one connection's feed, over the whole feed or over the
         resource and streams of it `resource` and `streams` name. The owning conversation is checked
         against the object namespace, so a trigger can never invoke as an agent other than its
         owner. What this conversation already watches refuses in this vocabulary rather than as a
@@ -228,7 +221,7 @@ class SourceTriggerStore:
         return frozenset((row.connection_id, row.resource) for row in rows)
 
     async def waking(self, connection_id: UUID) -> tuple[SourceTrigger, ...]:
-        """Every delivery rule for this connection, workspace-wide — the alert sweep's read, the
+        """Every trigger for this connection, workspace-wide — the alert sweep's read, the
         whole-feed triggers and the narrowed ones in one pass, oldest first with the id breaking a
         tie, so one batch wakes conversations in the order they subscribed. It spans agents on
         purpose: a connection belongs to the workspace, and each row names its agent."""
