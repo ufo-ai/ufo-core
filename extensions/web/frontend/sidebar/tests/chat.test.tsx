@@ -344,18 +344,54 @@ test("a live run puts the wait on the working line, and gives the line back when
   StreamFake.last().emit("subagent_activity", frame);
   expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
   expect(screen.queryByText("Handing the research off.")).toBeNull();
+  expect(screen.getByText("UK sports news")).toBeTruthy();
 
   StreamFake.last().emit("subagent_activity", {
     ...frame,
     activity: "Searching for latest MLS news.",
   });
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(await screen.findByText("Searching for latest MLS news.")).toBeTruthy();
+  expect(screen.getByText("Awaiting 1 subagent")).toBeTruthy();
   expect(screen.queryByText("UK sports news")).toBeNull();
-  expect(screen.queryByText(/Searching for latest MLS news/)).toBeNull();
 
   StreamFake.last().emit("subagent_activity", { ...frame, status: "done" });
   await waitFor(() => expect(screen.queryByText("Awaiting 1 subagent")).toBeNull());
+  expect(screen.queryByText("Searching for latest MLS news.")).toBeNull();
   expect(screen.getByText("Handing the research off.")).toBeTruthy();
+});
+
+test("each subagent the turn waits on states what it is doing, under the count", async () => {
+  const run = {
+    turn_id: "88888888-8888-4888-8888-888888888888",
+    parent_turn_id: TURN_ID,
+    conversation_id: "66666666-6666-4666-8666-666666666666",
+    profile: "general_purpose",
+    name: "Lookup",
+    activity: "",
+    status: "",
+  };
+  const second = {
+    ...run,
+    turn_id: "99999999-9999-4999-8999-999999999999",
+    conversation_id: "77777777-7777-4777-8777-777777777777",
+    name: "Issues",
+  };
+  wire(transcript({ messages: [{ role: "user", text: "File it." }], turn: TURN_ID }));
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("subagent_activity", { ...run, activity: "Looking up info" });
+  StreamFake.last().emit("subagent_activity", { ...second, activity: "Naming the new issue" });
+
+  expect(await screen.findByText("Awaiting 2 subagents")).toBeTruthy();
+  expect(screen.getByText("Looking up info")).toBeTruthy();
+  expect(screen.getByText("Naming the new issue")).toBeTruthy();
+
+  StreamFake.last().emit("subagent_activity", { ...run, status: "done" });
+
+  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(screen.queryByText("Looking up info")).toBeNull();
+  expect(screen.getByText("Naming the new issue")).toBeTruthy();
 });
 
 function order(first: string, second: string): boolean {

@@ -153,7 +153,7 @@ test("a subagent still running is what the line states, in place of the step tha
 
   expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
   expect(screen.queryByText("Delegating the research.")).toBeNull();
-  expect(screen.queryByText("Subagent · general_purpose")).toBeNull();
+  expect(screen.getByText("Subagent · general_purpose")).toBeTruthy();
 });
 
 test("a run's frame leaves the answer the turn has already streamed where it stands", async () => {

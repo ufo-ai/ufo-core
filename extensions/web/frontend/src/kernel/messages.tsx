@@ -963,8 +963,20 @@ function useReducedMotion(): boolean {
   return still;
 }
 
-/** The step a running turn is on. A settled turn draws no line at all: what it did is the reply it
- *  wrote, and a count of steps is not something a member acts on. */
+const AGENT_PROFILE = "agent:";
+
+function runStep(run: SubagentRun): string {
+  if (run.current) return run.current;
+  const deeper = latestActivity(run.events, run.subagents);
+  if (deeper) return deeper;
+  if (run.name) return run.name;
+  return run.profile.startsWith(AGENT_PROFILE)
+    ? "App · " + agentName(run.profile.slice(AGENT_PROFILE.length))
+    : "Subagent · " + run.profile;
+}
+
+/** The step a running turn is on, and under it the step of each subagent it waits on: a count alone
+ *  reads as a stuck turn. A settled turn draws no line — what it did is the reply it wrote. */
 function Activity({
   events,
   runs,
@@ -977,18 +989,30 @@ function Activity({
   working?: string;
 }) {
   if (!live) return null;
-  const waiting = runs.filter((run) => run.running).length;
+  const waiting = runs.filter((run) => run.running);
   const step =
-    waiting > 0
-      ? "Awaiting " + waiting + " subagent" + (waiting === 1 ? "" : "s")
+    waiting.length > 0
+      ? "Awaiting " + waiting.length + " subagent" + (waiting.length === 1 ? "" : "s")
       : (working ?? latestActivity(events, runs));
   if (!step) return null;
   return (
-    <Marker className="mt-2xs text-label text-ink-soft">
-      <MarkerContent className="shimmer">
-        <DecodeLine text={step} />
-      </MarkerContent>
-    </Marker>
+    <>
+      <Marker className="mt-2xs text-label text-ink-soft">
+        <MarkerContent className="shimmer">
+          <DecodeLine text={step} />
+        </MarkerContent>
+      </Marker>
+      {waiting.map((run) => (
+        <Marker
+          key={run.turn_id ?? run.conversation_id}
+          className="mt-hair pl-2xl text-label text-ink-soft"
+        >
+          <MarkerContent className="shimmer truncate">
+            <DecodeLine text={runStep(run)} />
+          </MarkerContent>
+        </Marker>
+      ))}
+    </>
   );
 }
 
