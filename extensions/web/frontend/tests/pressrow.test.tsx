@@ -37,8 +37,8 @@ test("a line too long for the row travels out to its tail while the pointer is o
 
   await userEvent.hover(screen.getByRole("button"));
 
-  await waitFor(() => expect(words.getAttribute("style")).toContain("translateX(-400px)"));
-  expect(words.parentElement?.className).toContain("text-clip");
+  await waitFor(() => expect(words.getAttribute("style")).toContain("translateX(-416px)"));
+  expect(words.parentElement?.className).toContain("line-fade-x");
 });
 
 test("the line comes back to its first word when the pointer leaves", async () => {
@@ -48,11 +48,11 @@ test("the line comes back to its first word when the pointer leaves", async () =
   const words = screen.getByText(TITLE);
 
   await userEvent.hover(row);
-  await waitFor(() => expect(words.getAttribute("style")).toContain("translateX(-400px)"));
+  await waitFor(() => expect(words.getAttribute("style")).toContain("translateX(-416px)"));
   await userEvent.unhover(row);
 
   await waitFor(() => expect(words.getAttribute("style")).toContain("translateX(0px)"));
-  expect(words.parentElement?.className).toContain("text-ellipsis");
+  expect(words.parentElement?.className).toContain("line-fade-e");
 });
 
 test("a line the row holds whole stands still, so a list is not set moving by a pointer crossing it", async () => {
@@ -63,7 +63,7 @@ test("a line the row holds whole stands still, so a list is not set moving by a 
 
   const words = screen.getByText(TITLE);
   expect(words.getAttribute("style")).toContain("translateX(0px)");
-  expect(words.parentElement?.className).toContain("text-ellipsis");
+  expect(words.parentElement?.className).not.toContain("line-fade");
 });
 
 test("the keyboard reaches the tail the pointer does", async () => {
@@ -73,7 +73,7 @@ test("the keyboard reaches the tail the pointer does", async () => {
   await userEvent.tab();
 
   await waitFor(() =>
-    expect(screen.getByText(TITLE).getAttribute("style")).toContain("translateX(-400px)"),
+    expect(screen.getByText(TITLE).getAttribute("style")).toContain("translateX(-416px)"),
   );
 });
 
@@ -84,7 +84,7 @@ test("the trailing note travels with the line, as the one thing the row says", a
   await userEvent.hover(screen.getByRole("button"));
 
   await waitFor(() =>
-    expect(screen.getByText(TITLE + " Slack").getAttribute("style")).toContain("translateX(-400px)"),
+    expect(screen.getByText(TITLE + " Slack").getAttribute("style")).toContain("translateX(-416px)"),
   );
 });
 

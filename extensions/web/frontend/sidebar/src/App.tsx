@@ -1251,8 +1251,8 @@ function RailList({
   );
 }
 
-/** It is the words' own width that is measured, not the frame's overflow, which reports the ellipsis
- *  rather than the text behind it. The resting title is inline, since a transform does not move one. */
+/** The whole row is one thing under the pointer, and a menu left open holds it: the pointer that
+ *  opened the menu has gone to the menu. */
 function RailRow({
   current,
   conversationId,
@@ -1281,16 +1281,16 @@ function RailRow({
   onClick: () => void;
 }) {
   const [asks, setAsks] = useState(0);
+  const [acts, setActs] = useState(false);
   const card = useId();
+  const reached = asks > 0 || acts;
   const button = (
     <SidebarPress
       current={current}
       label={title}
-      className="gap-xs"
+      className="gap-xs select-none"
       aria-describedby={card}
       onClick={onClick}
-      onPointerEnter={() => setAsks((asked) => asked + 1)}
-      onPointerLeave={() => setAsks(0)}
       onFocus={() => setAsks((asked) => asked + 1)}
       onBlur={() => setAsks(0)}
       glyph={
@@ -1309,7 +1309,7 @@ function RailRow({
         </span>
       }
     >
-      <Ticker asks={asks} className="flex-1">
+      <Ticker asks={asks + (acts ? 1 : 0)} className={cn("flex-1", reached && "me-6xl")}>
         {title}
       </Ticker>
     </SidebarPress>
@@ -1317,13 +1317,19 @@ function RailRow({
   return (
     <HoverCard>
       <HoverCardTrigger asChild>
-        <SidebarRow current={current}>
+        <SidebarRow
+          current={current || acts}
+          onPointerEnter={() => setAsks((asked) => asked + 1)}
+          onPointerLeave={() => setAsks(0)}
+        >
           {button}
           <RailRowActs
             conversationId={conversationId}
             surface={surface}
             surfaceLabel={surfaceLabel}
             source={source}
+            open={acts}
+            onOpenChange={setActs}
           />
         </SidebarRow>
       </HoverCardTrigger>
@@ -1343,29 +1349,33 @@ function RailRow({
 const THREAD_ACTS = "Thread options";
 
 const RAIL_ROW_GLYPH = cn(
-  "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
+  "absolute end-xs top-1/2 -translate-y-1/2 rounded-control border-0 bg-fill p-hair text-ink-soft",
   "opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none",
   "group-hover/row:opacity-100 group-has-[:focus-visible]/row:opacity-100",
-  "focus-visible:opacity-100 data-[state=open]:bg-fill data-[state=open]:opacity-100",
+  "focus-visible:opacity-100 data-[state=open]:opacity-100",
 );
 
 /** The menu stands beside the row's one press rather than inside it, so a pick of an act never opens
- *  the thread. */
+ *  the thread, and over the row's end rather than in its flow, so it holds width off no title. */
 function RailRowActs({
   conversationId,
   surface,
   surfaceLabel,
   source,
+  open,
+  onOpenChange,
 }: {
   conversationId: string;
   surface: string;
   surfaceLabel: string | null;
   source: string | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
   const host = useDrawerHost();
   const away = slackLink(surface, source);
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
         <button type="button" aria-label={THREAD_ACTS} className={RAIL_ROW_GLYPH}>
           <IconDotsVertical className="size-icon" aria-hidden />

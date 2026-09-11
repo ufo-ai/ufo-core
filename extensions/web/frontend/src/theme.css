@@ -728,6 +728,27 @@ body[data-shell="sidebar"] {
   }
 }
 
+/** A line cut by its column ends in a fade rather than an ellipsis: the last characters thin out,
+ *  so the line reads as continuing into the width it did not get. A line travelling out to its last
+ *  word fades at both ends, and stops short of the trailing one so its tail arrives whole. */
+@utility line-fade-e {
+  mask-image: linear-gradient(
+    to right,
+    var(--color-ink) calc(100% - var(--spacing-6xl)),
+    transparent
+  );
+}
+
+@utility line-fade-x {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--color-ink) var(--spacing-2xl),
+    var(--color-ink) calc(100% - var(--spacing-2xl)),
+    transparent
+  );
+}
+
 @utility scroll-fade-x {
   mask-image: linear-gradient(
     to right,

@@ -1000,24 +1000,23 @@ test("a title too long for its row travels its overrun under the pointer, and re
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const row = await screen.findByRole("button", { name: /The thread about the migration/ });
+  const rail = row.closest("li") as HTMLElement;
   const { frame, text } = overrunning(row, 180, 300);
   expect(text.style.transform).toBe("translateX(0px)");
-  expect(frame.className).toContain("text-ellipsis");
-
   expect(text.className).toContain("inline");
   expect(text.className).not.toContain("inline-block");
 
-  fireEvent.pointerEnter(row);
-  expect(text.style.transform).toBe("translateX(-120px)");
-  /* Travelled at a pace rather than in a duration: 120px at 45px a second. */
-  expect(text.style.transitionDuration).toBe("2667ms");
+  fireEvent.pointerEnter(rail);
+  await waitFor(() => expect(text.style.transform).toBe("translateX(-136px)"));
+  /* Travelled at a pace rather than in a duration: 136px at 45px a second. */
+  expect(text.style.transitionDuration).toBe("3022ms");
   expect(text.className).toContain("inline-block");
-  expect(frame.className).toContain("text-clip");
+  expect(frame.className).toContain("line-fade-x");
 
-  fireEvent.pointerLeave(row);
+  fireEvent.pointerLeave(rail);
   expect(text.style.transform).toBe("translateX(0px)");
   expect(text.style.transitionDuration).toBe("150ms");
-  expect(frame.className).toContain("text-ellipsis");
+  expect(frame.className).toContain("line-fade-e");
   expect(text.className).not.toContain("inline-block");
 });
 
@@ -1027,13 +1026,13 @@ test("a title the row holds whole moves nothing, and the keyboard starts one tha
 
   const row = await screen.findByRole("button", { name: /Pick one thread/ });
   const { frame, text } = overrunning(row, 180, 180);
-  fireEvent.pointerEnter(row);
+  fireEvent.pointerEnter(row.closest("li") as HTMLElement);
   expect(text.style.transform).toBe("translateX(0px)");
-  expect(frame.className).toContain("text-ellipsis");
+  expect(frame.className).not.toContain("line-fade");
 
   overrunning(row, 180, 240);
   fireEvent.focus(row);
-  expect(text.style.transform).toBe("translateX(-60px)");
+  await waitFor(() => expect(text.style.transform).toBe("translateX(-76px)"));
   fireEvent.blur(row);
   expect(text.style.transform).toBe("translateX(0px)");
 });

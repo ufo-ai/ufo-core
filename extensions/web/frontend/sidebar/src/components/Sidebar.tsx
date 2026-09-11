@@ -9,7 +9,7 @@ import { cn } from "@/lib/cn";
 export const SIDEBAR_ROW = "group/row flex min-h-(--size-row) w-full items-center px-sm";
 
 export const SIDEBAR_PILL =
-  "flex min-h-(--size-row) w-full min-w-0 items-center rounded-row group-hover/row:bg-fill";
+  "relative flex min-h-(--size-row) w-full min-w-0 items-center rounded-row group-hover/row:bg-fill";
 
 export const SIDEBAR_CURRENT = "bg-fill";
 
