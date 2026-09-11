@@ -100,7 +100,7 @@ locals {
     name = "assistant_hosted"
 
     [models]
-    auto_model = "z-ai/glm-5.3-flash"
+    auto_model = "deepseek/deepseek-v4.1-flash"
 
     [memory]
     index_backend = "turbopuffer"

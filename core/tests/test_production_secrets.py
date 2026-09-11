@@ -150,12 +150,13 @@ def _check_production_selects_the_redis_terminal_transport() -> None:
     assert any(spec.backend == "redis" for spec in manifest.terminal_transports)
 
 
-def _check_hosted_environments_select_the_registered_glm_flash_model() -> None:
+def _check_hosted_environments_select_a_registered_flash_auto_model() -> None:
     manifest = importlib.import_module("ufo_ext_openrouter").manifest()
     registered = {spec.id for spec in manifest.models}
-    for environment in ("prod", "testing"):
+    selected = {"prod": "z-ai/glm-5.3-flash", "testing": "deepseek/deepseek-v4.1-flash"}
+    for environment, model in selected.items():
         auto_model = _serve_config(environment)["models"]["auto_model"]
-        assert auto_model == "z-ai/glm-5.3-flash", environment
+        assert auto_model == model, environment
         assert auto_model in registered, environment
 
 

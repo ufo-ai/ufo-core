@@ -3984,7 +3984,7 @@ test("the model picker offers the latest of each family, a speed variant on its 
   ]);
 });
 
-test("the picker offers Claude largest first and stands Claude, GPT and DeepSeek", async () => {
+test("the picker offers Claude largest first and stands Claude and GPT alone", async () => {
   wire(transcript());
   render(
     <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
@@ -3996,7 +3996,7 @@ test("the picker offers Claude largest first and stands Claude, GPT and DeepSeek
     within(providers)
       .getAllByRole("menuitem")
       .map((item) => item.textContent),
-  ).toEqual(["Claude", "GPT", "DeepSeek"]);
+  ).toEqual(["Claude", "GPT"]);
 
   await userEvent.click(screen.getByRole("menuitem", { name: "Claude" }));
   expect(await flyoutRows("Opus 5")).toEqual(["Fable 5.1", "Opus 5", "Sonnet 5"]);

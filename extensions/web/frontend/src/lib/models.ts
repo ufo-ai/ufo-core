@@ -74,6 +74,7 @@ export const MODEL_CHOICES: readonly ModelChoice[] = [
     provider: "deepseek",
     family: "deepseek-flash",
     label: "DeepSeek V4.1 Flash",
+    offered: false,
   },
   {
     id: "deepseek/deepseek-v4-flash",
