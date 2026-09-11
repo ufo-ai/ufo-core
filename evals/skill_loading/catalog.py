@@ -628,7 +628,7 @@ CASES: tuple[SkillLoadCase, ...] = (
         "homepage-account-health-topic",
         "Build an interactive customer account-health homepage.",
         expected="application-homepage",
-        forbidden=("app-radar-home", "website-building", "create-application"),
+        forbidden=("app-metrics-home", "website-building", "create-application"),
     ),
     SkillLoadCase(
         "homepage-candidate-review-topic",

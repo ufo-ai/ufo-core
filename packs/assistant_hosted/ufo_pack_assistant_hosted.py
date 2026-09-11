@@ -37,14 +37,12 @@ CUSTOMERS_SECTION = PromptSection(
     body=(Path(__file__).parent / "prompts" / "customers_section.md").read_text().strip(),
 )
 EXTENSIONS = (
-    "app_artifacts",
     "app_chat",
     "app_code",
     "app_issues",
     "app_meetings",
     "app_metrics",
     "app_notification",
-    "app_radar",
     "app_wiki",
     "turbopuffer",
     "perplexity",

@@ -15,7 +15,7 @@ import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { slackLink, surfaceWord } from "@/lib/audience";
 import { cn } from "@/lib/cn";
-import { useAgents } from "@/lib/mainAgent";
+import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { Markdown } from "@/lib/markdown";
 import { Moment } from "@/lib/moments";
 import { agentHash, chatHash, sectionHash } from "@/lib/route";
@@ -509,8 +509,7 @@ function StorySheet({
   onPlace: (place: Placement) => void;
   onName: (run: string, name: string) => void;
 }) {
-  const agents = useAgents();
-  const owner = agents.find((agent) => agent.app === "radar") ?? agents[0];
+  const owner = useMainAgent();
   const pinned = id.slice(RUN_PREFIX.length);
   const [file, setFile] = useState<RadarArtifact | null>(null);
   const detail = usePanelRead<ReportDetail>(

@@ -15,13 +15,9 @@ import {
   CHAT_ROW,
   CONVO_ID,
   MEMBER,
-  NO_ARTIFACTS,
-  RADAR_TOUR,
   SECOND_ID,
-  SITE_KIND,
   TURN_ID,
   json,
-  objectIndex,
   wire,
   type Route,
 } from "./harness";
@@ -161,18 +157,6 @@ afterEach(async () => {
   (window as { EventSource: typeof EventSource }).EventSource = nativeEventSource;
 });
 
-test("the radar page mounts and stands its tour under its own band where no run reports", async () => {
-  const { calls } = await runPage("radar", {
-    "/objects/report": () => json({ objects: [] }),
-    "/actions/report$": () => json({ actions: [] }),
-  });
-  expect(await screen.findByRole("heading", { name: "Radar" })).toBeTruthy();
-  expect(await screen.findByRole("heading", { name: RADAR_TOUR })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Rebuild entries" })).toBeNull();
-  expect(calls.some((url) => url.includes("/api/agents"))).toBe(false);
-  expect(calls.some((url) => url.includes("/objects/report"))).toBe(true);
-});
-
 const COLLEAGUE = "colleague@example.com";
 
 test("the wiki crumb comes back to the workspace article in the lane rather than the full screen", async () => {
@@ -247,13 +231,15 @@ function lapse(after: number): Promise<string> {
   );
 }
 
+const WIKI_READS = {
+  "/objects/memory": () => json({ objects: [] }),
+  "/objects/member": () => json({ objects: [] }),
+};
+
 test("a reply posted to a page as it unmounts still lands, so its work drains", async () => {
-  await runPage("radar", {
-    "/objects/report": () => json({ objects: [] }),
-    "/actions/report$": () => json({ actions: [] }),
-  });
-  await screen.findByRole("heading", { name: "Radar" });
-  const inFlight = window.fetch(BASE + "/objects/report").then((res) => (res.ok ? "reply" : "refused"));
+  await runPage("wiki", WIKI_READS);
+  await screen.findByRole("heading", { name: "Wiki" });
+  const inFlight = window.fetch(BASE + "/objects/memory").then((res) => (res.ok ? "reply" : "refused"));
 
   await act(async () => {
     for (const unmount of unmounts.splice(0)) unmount();
@@ -265,11 +251,8 @@ test("a reply posted to a page as it unmounts still lands, so its work drains", 
 test("a page's unmount leaves the animation frames running", async () => {
   /** jsdom drives frames on the window's own interval, so a frame requested before the unmount that
    *  clears the page's timers would otherwise never fire, nor any release after it. */
-  await runPage("radar", {
-    "/objects/report": () => json({ objects: [] }),
-    "/actions/report$": () => json({ actions: [] }),
-  });
-  await screen.findByRole("heading", { name: "Radar" });
+  await runPage("wiki", WIKI_READS);
+  await screen.findByRole("heading", { name: "Wiki" });
   const requested = new Promise<string>((resolve) =>
     window.requestAnimationFrame(() => resolve("frame")),
   );
@@ -282,15 +265,13 @@ test("a page's unmount leaves the animation frames running", async () => {
 });
 
 test("page module resets reuse the installed lifecycle", async () => {
-  await runPage("radar", {
-    "/objects/report": () => json({ objects: [] }),
-    "/actions/report$": () => json({ actions: [] }),
-  });
-  expect(await screen.findByRole("heading", { name: "Radar" })).toBeTruthy();
+  await runPage("wiki", WIKI_READS);
+  expect(await screen.findByRole("heading", { name: "Wiki" })).toBeTruthy();
 
   vi.resetModules();
   await expect(import("@/apps/runtime")).resolves.toBeDefined();
 });
+
 test("the wiki page mounts and draws the workspace article", async () => {
   const { calls } = await runPage("wiki", {
     "/objects/memory": () => json({ objects: [] }),
@@ -377,145 +358,6 @@ test("a member's own page draws the summary its consolidated rows were collapsed
   expect(await screen.findByRole("heading", { name: "Facts" })).toBeTruthy();
   expect(await screen.findByRole("button", { name: CONSOLIDATED })).toBeTruthy();
   expect(screen.queryByText(BREADCRUMB)).toBeNull();
-});
-
-const LOGO_SHEET = "ufo-logo-ratio.pdf";
-
-test("the artifacts page mounts and stands the shipped logo sheet beside the empty-shelf note", async () => {
-  await runPage("artifacts", {
-    "/objects/site": () => objectIndex(SITE_KIND, []),
-    "/objects/artifact": () => json({ objects: [] }),
-  });
-  expect(await screen.findByRole("heading", { name: "Artifacts" })).toBeTruthy();
-  expect(await screen.findByRole("searchbox", { name: "Search artifacts" })).toBeTruthy();
-  expect(await screen.findByText(NO_ARTIFACTS)).toBeTruthy();
-  expect(await screen.findByText(LOGO_SHEET)).toBeTruthy();
-});
-
-test("the artifacts list view stays a table rather than stacking into records", async () => {
-  const filename = "q3-revenue-review-of-every-region.md";
-  await runPage(
-    "artifacts",
-    {
-      "/objects/site": () => objectIndex(SITE_KIND, []),
-      "/objects/artifact": () =>
-        json({
-          objects: [
-            {
-              name: "Report",
-              filename,
-              subject: null,
-              media_type: "text/markdown",
-              size_bytes: 12,
-              shared_at: "2026-08-20T09:00:00+00:00",
-              url: "https://example.test/report.md",
-              preview_url: null,
-              owner_email: MEMBER.email,
-              origin: null,
-              conversation: CONVO_ID,
-              surface: "web",
-              source: null,
-            },
-          ],
-        }),
-    },
-    { place: { face: "table" } },
-  );
-
-  const table = await screen.findByRole("table");
-  expect(table.getAttribute("data-stacks")).toBeNull();
-  expect(table.style.getPropertyValue("--table-floor")).toContain("--size-prose-column");
-  expect(table.closest('[data-slot="table-container"]')?.className).toContain("overflow-x-auto");
-
-  expect(table.getAttribute("data-measured")).toBe("");
-  const name = await screen.findByText(filename);
-  expect(name.className).not.toContain("truncate");
-  expect(name.closest("td")?.className).not.toContain("truncate");
-});
-
-test("a cached picture in the artifacts list becomes visible without a load event", async () => {
-  Object.defineProperty(HTMLImageElement.prototype, "complete", {
-    value: true,
-    configurable: true,
-  });
-  Object.defineProperty(HTMLImageElement.prototype, "naturalWidth", {
-    value: 320,
-    configurable: true,
-  });
-  try {
-    await runPage(
-      "artifacts",
-      {
-        "/objects/site": () => objectIndex(SITE_KIND, []),
-        "/objects/artifact": () =>
-          json({
-            objects: [
-              {
-                ...sharedFile("chart.png", "image/png"),
-                preview_url: "/preview/chart.png",
-              },
-            ],
-          }),
-      },
-      { place: { face: "table" } },
-    );
-
-    await screen.findByText("chart.png");
-    await vi.waitFor(() =>
-      expect(document.querySelector('img[src="/preview/chart.png"]')?.className).toContain(
-        "opacity-100",
-      ),
-    );
-  } finally {
-    Reflect.deleteProperty(HTMLImageElement.prototype, "complete");
-    Reflect.deleteProperty(HTMLImageElement.prototype, "naturalWidth");
-  }
-});
-
-function sharedFile(filename: string, mediaType: string) {
-  return {
-    name: "conv1-" + filename,
-    filename,
-    subject: null,
-    media_type: mediaType,
-    size_bytes: 64,
-    shared_at: "2026-08-14T09:00:00Z",
-    url: "/dl/" + filename,
-    preview_url: null,
-    owner_email: MEMBER.email,
-    origin: null,
-    conversation: CONVO_ID,
-    surface: "web",
-    source: null,
-  };
-}
-
-test("the artifacts shelf draws code and plain text as their characters and labels the rest with their extension", async () => {
-  await runPage("artifacts", {
-    "/objects/site": () => objectIndex(SITE_KIND, []),
-    "/objects/artifact": () =>
-      json({
-        objects: [
-          sharedFile("deploy.py", "text/x-python"),
-          sharedFile("compose.yaml", "application/yaml"),
-          sharedFile("app.ts", "application/typescript"),
-          sharedFile("bundle.zip", "application/zip"),
-          sharedFile("archive.tar.gz", "application/octet-stream"),
-        ],
-      }),
-    "/dl/deploy.py": () => new Response("print('deploying')"),
-    "/dl/compose.yaml": () => new Response("services:\n  web: {}"),
-    "/dl/app.ts": () => new Response("export const port = 8080;"),
-    "/dl/bundle.zip": () => new Response("PK"),
-    "/dl/archive.tar.gz": () => new Response("\u001f\u008b"),
-  });
-
-  expect(await screen.findByText("print('deploying')")).toBeTruthy();
-  expect(await screen.findByText(/services:/)).toBeTruthy();
-  expect(await screen.findByText("export const port = 8080;")).toBeTruthy();
-  expect(screen.queryByText("PK")).toBeNull();
-  expect(await screen.findByText("ZIP")).toBeTruthy();
-  expect(await screen.findByText("TAR.GZ")).toBeTruthy();
 });
 
 test("the meetings page mounts and draws its bands over its own placeholder", async () => {

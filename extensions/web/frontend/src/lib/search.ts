@@ -144,8 +144,6 @@ export async function searchEverywhere(
   if (!wanted) return [];
   const matched = agents.filter((agent) => agent.name.toLowerCase().includes(wanted.toLowerCase()));
   const named = agents.find((agent) => agent.main) ?? agents[0];
-  const app = (slug: string) => agents.find((agent) => agent.app === slug);
-  const artifactsApp = app("artifacts");
   const held = new Map<Slot, Group>();
   const standing = (): Group[] => {
     const files = held.get("files");
@@ -162,7 +160,7 @@ export async function searchEverywhere(
     return [
       held.get("apps"),
       held.get("conversations"),
-      ...(artifactsApp ? [artifacts] : []),
+      artifacts,
       held.get("tasks"),
       held.get("connectors"),
     ]
@@ -212,7 +210,7 @@ export async function searchEverywhere(
         (payload) =>
           payload.objects.map((entry) => ({
             key: entry.name,
-            hash: artifactsApp ? agentHash(artifactsApp.id, { opens: [entry.name] }) : "",
+            hash: sectionHash("artifacts", { opens: [entry.name] }),
             primary: entry.filename,
             fact: entry.media_type,
           })),
@@ -228,11 +226,9 @@ export async function searchEverywhere(
         (payload) =>
           payload.objects.map((row) => ({
             key: SITE_KIND + "/" + row.name,
-            hash: artifactsApp
-              ? agentHash(artifactsApp.id, {
-                  opens: [slotOf({ agent: row.agent_id, kind: SITE_KIND, name: row.name })],
-                })
-              : "",
+            hash: sectionHash("artifacts", {
+              opens: [slotOf({ agent: row.agent_id, kind: SITE_KIND, name: row.name })],
+            }),
             primary: row.name,
             fact: SITE_KIND,
           })),

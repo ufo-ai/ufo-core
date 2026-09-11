@@ -26,14 +26,12 @@ from ufo.sdk.manifest import Pack
 NAME = "assistant"
 VERSION = "0.1.0"
 EXTENSIONS = (
-    "app_artifacts",
     "app_chat",
     "app_code",
     "app_issues",
     "app_meetings",
     "app_metrics",
     "app_notification",
-    "app_radar",
     "app_wiki",
     "perplexity",
     "todos",

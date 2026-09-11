@@ -260,9 +260,9 @@ def _check_skills_gate_flags_a_missing_core_skill() -> None:
     assert any("sandbox" in failure for failure in failures)
 
 
-APP_SHIPPED = frozenset({"app_radar", "app_wiki"})
-APP_HOMES = frozenset({"app-radar-home", "app-wiki-home"})
-APP_BUILT = frozenset({"radar", "wiki"})
+APP_SHIPPED = frozenset({"app_code", "app_wiki"})
+APP_HOMES = frozenset({"app-code-home", "app-wiki-home"})
+APP_BUILT = frozenset({"code", "wiki"})
 
 
 def _app_failures(
@@ -285,19 +285,19 @@ def _check_app_bundle_gate_passes_for_the_apps_this_repo_ships() -> None:
 def _check_app_bundle_gate_flags_a_home_skill_named_for_another_slug() -> None:
     """The failure this gate exists for: the extension installs, the deploy builds a bundle with no
     page in it, and a member opens the app to a blank frame."""
-    failures = _app_failures(homes=frozenset({"app-radar-home", "app-wikipage-home"}))
+    failures = _app_failures(homes=frozenset({"app-code-home", "app-wikipage-home"}))
     assert any("app_wiki" in failure and "app-wiki-home" in failure for failure in failures)
 
 
 def _check_app_bundle_gate_flags_an_app_the_bundle_never_names() -> None:
     failures = _app_failures(
-        built=frozenset({"radar"}), entries=frozenset({"radar"}), typechecked=frozenset({"radar"})
+        built=frozenset({"code"}), entries=frozenset({"code"}), typechecked=frozenset({"code"})
     )
     assert any("does not build 'wiki'" in failure for failure in failures)
 
 
 def _check_app_bundle_gate_flags_a_built_page_with_no_entry_document() -> None:
-    failures = _app_failures(entries=frozenset({"radar"}))
+    failures = _app_failures(entries=frozenset({"code"}))
     assert any("apps/wiki/index.html" in failure for failure in failures)
 
 
@@ -326,7 +326,7 @@ def _check_app_bundle_gate_flags_a_page_the_typecheck_never_reads() -> None:
     """A page left off the typecheck's file list is built and shipped having never been checked:
     the bundle transpiles without types, so a prop the kit does not declare is dropped in silence
     and the page draws without it."""
-    failures = _app_failures(typechecked=frozenset({"radar"}))
+    failures = _app_failures(typechecked=frozenset({"code"}))
     assert any("does not read the 'wiki' page" in failure for failure in failures)
 
 

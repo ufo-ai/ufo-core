@@ -21,7 +21,6 @@ locals {
       "enable-memory-tab"       = true
       "enable-metrics-app"      = false
       "enable-notification-app" = false
-      "enable-radar-app"        = false
       "enable-wiki-app"         = false
     }
     prod = {
@@ -38,7 +37,6 @@ locals {
       "enable-memory-tab"       = false
       "enable-metrics-app"      = false
       "enable-notification-app" = false
-      "enable-radar-app"        = false
       "enable-wiki-app"         = false
     }
   }

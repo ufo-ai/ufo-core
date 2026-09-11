@@ -1300,7 +1300,6 @@ APP_FLAGS = {
     "meetings": "enable-meetings-app",
     "metrics": "enable-metrics-app",
     "notification": "enable-notification-app",
-    "radar": "enable-radar-app",
     "wiki": "enable-wiki-app",
 }
 MAIN_AGENT_FLAG = "enable-assistant-app"

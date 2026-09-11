@@ -6,14 +6,12 @@ import { outsideRootPaths } from "./dev-routing";
 import { tablerMarks } from "./vite-marks";
 
 const APPS = [
-  "artifacts",
   "chat",
   "code",
   "issues",
   "meetings",
   "metrics",
   "notification",
-  "radar",
   "wiki",
 ];
 const KIT = new URL("./src/apps/kit.ts", import.meta.url).pathname;

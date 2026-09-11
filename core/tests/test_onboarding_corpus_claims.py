@@ -54,8 +54,8 @@ TASK_SCHEDULING_SKILL_MD = (
 )
 CREATE_APPLICATION_SKILL_MD = "core/src/ufo/runtime/skills/create-application/SKILL.md"
 CODING_SKILL_MD = "extensions/coding/ufo_ext_coding/skills/coding/SKILL.md"
-RADAR_HOME = "extensions/app_radar/ufo_ext_app_radar/skills/app-radar-home/app.tsx"
-ARTIFACTS_HOME = "extensions/app_artifacts/ufo_ext_app_artifacts/skills/app-artifacts-home/app.tsx"
+RADAR_VIEW = "extensions/web/frontend/src/views/Radar.tsx"
+ARTIFACTS_VIEW = "extensions/web/frontend/src/views/Artifacts.tsx"
 TASKS_VIEW = "extensions/web/frontend/src/views/Tasks.tsx"
 TASK_RUNS_VIEW = "extensions/web/frontend/src/views/TaskRuns.tsx"
 TASK_PANE = "extensions/web/frontend/src/kernel/task.tsx"
@@ -490,7 +490,7 @@ CLAIMS = (
         claim="Radar opens a scheduled run with its report, files, and conversation",
         corpus="references/capabilities.md",
         phrase="Radar opens each scheduled run as a full report with its files and\n  conversation",
-        source=RADAR_HOME,
+        source=RADAR_VIEW,
         pattern=(
             r"<a href=\{chatHash\(run\.conversation_id\)\} className=\{out\}>\n"
             r"\s+Conversation\n(?:.*\n){0,20}\s+\{files\.length \? \("
@@ -500,7 +500,7 @@ CLAIMS = (
         claim="Artifacts lists shared files and hosted sites",
         corpus="references/capabilities.md",
         phrase="Artifacts lists shared files and hosted sites",
-        source=ARTIFACTS_HOME,
+        source=ARTIFACTS_VIEW,
         pattern=r"A file or site an app makes in a conversation is listed here",
     ),
     Claim(

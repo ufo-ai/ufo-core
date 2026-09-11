@@ -41,12 +41,12 @@ def test_a_shipped_app_has_one_workspace_origin() -> None:
     """The provision identity supplies the stable slug, and that slug gives each workspace one
     synthetic conversation and port even though no hosted-site row backs the page."""
     workspace_id = uuid4()
-    anchor = shipped_anchor(workspace_id, "artifacts")
-    assert shipped_app_slug("app_artifacts") == "artifacts"
-    assert shipped_app_slug("artifacts") is None
+    anchor = shipped_anchor(workspace_id, "wiki")
+    assert shipped_app_slug("app_wiki") == "wiki"
+    assert shipped_app_slug("wiki") is None
     assert shipped_app_slug(None) is None
-    assert shipped_anchor(workspace_id, "artifacts") == anchor
-    assert shipped_anchor(uuid4(), "artifacts") != anchor
+    assert shipped_anchor(workspace_id, "wiki") == anchor
+    assert shipped_anchor(uuid4(), "wiki") != anchor
     assert 20000 <= serve_port(anchor) < 40000
 
 

@@ -34,7 +34,7 @@ from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvid
 from PIL import Image
 from pydantic import BaseModel, ValidationError
 from ufo_ext_app_chat.manifest import manifest as app_chat_manifest
-from ufo_ext_app_radar.manifest import manifest as app_radar_manifest
+from ufo_ext_app_code.manifest import manifest as app_code_manifest
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
 from ufo_ext_context_rollover.manifest import manifest as rollover_manifest
 from ufo_ext_context_rollover.rollover import ROLLOVER_PREFIX
@@ -4253,9 +4253,9 @@ def test_only_declared_asset_suffixes_are_served(tmp_path: Path) -> None:
 
 def _write_apps_tree(root: Path) -> None:
     for path, body in (
-        ("radar/index.html", "<script src=/assets/radar-A1.js>"),
+        ("code/index.html", "<script src=/assets/code-A1.js>"),
         ("wiki/index.html", "<script src=/assets/wiki-B2.js>"),
-        ("assets/radar-A1.js", "r()"),
+        ("assets/code-A1.js", "c()"),
         ("assets/wiki-B2.js", "w()"),
         ("assets/pages-C3.css", ":root{}"),
         ("assets/Inter-D4.woff2", "font"),
@@ -7586,7 +7586,7 @@ async def test_homepage_seed_marks_an_app_agent_shipped_without_a_turn(db: None)
     conversation is opened for it. The generic seed path still runs for the main agent."""
     workspace_id, main_agent = await _seed_workspace()
     await _seed_member(workspace_id, "seed-app-admin@example.com", admin=True)
-    app_agent = await _seed_app_agent(workspace_id, "radar")
+    app_agent = await _seed_app_agent(workspace_id, "code")
     dbos = _SeedDbos()
     invoker = AdmissionInvoker(
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
@@ -7648,12 +7648,12 @@ async def web_apps(
     monkeypatch.setattr(web_surface, "_ASSET_PUBLISH", None)
     dbos_client = replay_safe_client(config.database.system_url)
     workspace_id, _main = await _seed_workspace()
-    app_agent = await _seed_app_agent(workspace_id, "radar")
+    app_agent = await _seed_app_agent(workspace_id, "code")
     manifests = (
         web_manifest(),
         sites_manifest(),
         report_digest_manifest(),
-        app_radar_manifest(),
+        app_code_manifest(),
         app_chat_manifest(),
         APP_NOTES,
     )
@@ -7720,7 +7720,7 @@ async def test_a_private_apps_shipped_page_reaches_the_member_it_was_granted_to(
     assert opened.json()["state"] == "set"
     boot = (await client.get("/surface/web/api/agents", headers=cookie)).json()
     homepages = {agent["app"]: agent["homepage"]["state"] for agent in boot["agents"]}
-    assert homepages["radar"] == "set"
+    assert homepages["code"] == "set"
 
 
 @pytest.mark.usefixtures("database_url")
@@ -8894,7 +8894,7 @@ async def test_only_required_setup_blocks_readiness(
     client, workspace_id, _agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
-    quiet = await _seed_app_agent(workspace_id, "radar")
+    quiet = await _seed_app_agent(workspace_id, "notification")
     wired = await _seed_app_agent(workspace_id, "meetings")
     optional = await _seed_app_agent(workspace_id, "issues")
     blocked = await _seed_app_agent(workspace_id, "metrics")
@@ -8919,7 +8919,7 @@ async def test_only_required_setup_blocks_readiness(
 
     assert await due() == {
         "assistant": False,
-        "radar": False,
+        "notification": False,
         "meetings": False,
         "issues": False,
         "metrics": True,
@@ -8930,7 +8930,7 @@ async def test_only_required_setup_blocks_readiness(
     await _fill_slot(workspace_id, "metrics_api_key")
     assert await due() == {
         "assistant": False,
-        "radar": False,
+        "notification": False,
         "meetings": False,
         "issues": False,
         "metrics": False,

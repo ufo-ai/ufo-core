@@ -952,9 +952,9 @@ async def test_framing_refuses_a_requested_site_from_another_workspace(db, ingre
 async def test_framing_names_the_requested_workspace_shipped_app(db, ingress) -> None:
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
     foreign_workspace_id, _foreign_conversation_id = await _seed_conversation(None)
-    await _seed_shipped_app(workspace_id, "app_artifacts", "artifacts")
-    await _seed_shipped_app(foreign_workspace_id, "app_artifacts", "artifacts")
-    anchor = shipped_anchor(workspace_id, "artifacts")
+    await _seed_shipped_app(workspace_id, "app_wiki", "wiki")
+    await _seed_shipped_app(foreign_workspace_id, "app_wiki", "wiki")
+    anchor = shipped_anchor(workspace_id, "wiki")
     await _open(
         ingress,
         workspace_id,
@@ -964,7 +964,7 @@ async def test_framing_names_the_requested_workspace_shipped_app(db, ingress) ->
 
     got = await ingress.get(f"{_origin(conversation_id)}/index.html")
 
-    foreign_anchor = shipped_anchor(foreign_workspace_id, "artifacts")
+    foreign_anchor = shipped_anchor(foreign_workspace_id, "wiki")
     assert _framers(got) == [f"{APP_ORIGIN} {_origin(anchor, serve_port(anchor))}"]
     assert _origin(foreign_anchor, serve_port(foreign_anchor)) not in _framers(got)[0]
 
@@ -2341,7 +2341,7 @@ async def test_a_socket_to_a_stored_site_is_refused(
 JAVASCRIPT_MEDIA_TYPES = frozenset({"text/javascript", "application/javascript"})
 """What `mimetypes.guess_type` returns for a `.js` name — `text/javascript` off Python's own table,
 `application/javascript` where a host's `/etc/mime.types` overrides it. Both run a module script."""
-SHIPPED_SLUG = "radar"
+SHIPPED_SLUG = "wiki"
 SHIPPED_DIGEST = "9f3a1c2b4d5e6f70"
 SHIPPED_ETAG = f'"{SHIPPED_DIGEST}"'
 SHIPPED_INDEX = b'<!doctype html><script type="module" src="/assets/app.7c2b.js"></script>'

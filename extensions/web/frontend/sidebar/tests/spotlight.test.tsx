@@ -93,18 +93,18 @@ function nothing() {
   });
 }
 
-const ARTIFACTS_APP = {
+const WIKI_APP = {
   id: "7f1b9f6e-9f30-4f8f-9a6e-1d9d1c2b3a41",
-  name: "artifacts",
+  name: "wiki",
   model: "auto",
   main: false,
   icon: "stele",
-  app: "artifacts",
+  app: "wiki",
 };
 
 function portal() {
   render(
-    <App agents={[AGENT, SECOND, ARTIFACTS_APP]} member={MEMBER} onAgents={() => {}} />,
+    <App agents={[AGENT, SECOND, WIKI_APP]} member={MEMBER} onAgents={() => {}} />,
   );
 }
 

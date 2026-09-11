@@ -4,7 +4,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { wakeAppStatus } from "@/lib/appStatusStore";
-import { homeConversationLane, homeHash, mintHomeLane, parseHash } from "@/lib/route";
+import { homeConversationLane, homeHash, mintHomeLane, parseHash, sectionHash } from "@/lib/route";
 import { REST_MS } from "@/views/Spotlight";
 
 import { AGENT, AGENT_ID, atPhoneWidth, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
@@ -159,21 +159,21 @@ function railed() {
   return wire({ ...chatsOnWire(RAIL), ...QUIET });
 }
 
-const ARTIFACTS_PURPOSE = "Holds the files and sites the workspace makes.";
+const WIKI_PURPOSE = "Holds the workspace's written pages.";
 
-const ARTIFACTS_APP = {
+const WIKI_APP = {
   id: "7f1b9f6e-9f30-4f8f-9a6e-1d9d1c2b3a41",
-  name: "artifacts",
+  name: "wiki",
   model: "auto",
   main: false,
   icon: "stele",
-  app: "artifacts",
-  purpose: ARTIFACTS_PURPOSE,
+  app: "wiki",
+  purpose: WIKI_PURPOSE,
 };
 
 function portal() {
   render(
-    <App agents={[AGENT, SECOND, ARTIFACTS_APP]} member={MEMBER} onAgents={() => {}} />,
+    <App agents={[AGENT, SECOND, WIKI_APP]} member={MEMBER} onAgents={() => {}} />,
   );
 }
 
@@ -316,6 +316,32 @@ test("a hit opens the place that holds it", async () => {
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
+
+test("a found file opens the Artifacts screen, which holds it without an app agent", async () => {
+  everything();
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  await userEvent.click(await found.findByRole("option", { name: /deploy-plan\.md/ }));
+
+  expect(decodeURIComponent(location.hash)).toBe(
+    sectionHash("artifacts", { opens: [FOUND_FILE.name] }),
+  );
+});
+
+test("a found file opens the Artifacts screen, which holds it without an app agent", async () => {
+  everything();
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  await userEvent.click(await found.findByRole("option", { name: /deploy-plan\.md/ }));
+
+  expect(decodeURIComponent(location.hash)).toBe(
+    sectionHash("artifacts", { opens: [FOUND_FILE.name] }),
+  );
+});
 
 /** An object's name is unique under its own agent, not across the workspace, so two agents may each
  *  hold a `nightly-deploy`. */
@@ -514,9 +540,9 @@ test("an unopened box lists the apps and the places, and reads nothing", async (
   expect(
     found.getAllByRole("option").map((row) => row.textContent),
   ).toEqual([
-    "Artifacts" + ARTIFACTS_PURPOSE,
     "Assistant",
     "Second",
+    "Wiki" + WIKI_PURPOSE,
     "Home",
     "Apps",
     "Connectors",
@@ -689,7 +715,7 @@ test("the arrow keys move the cursor and Enter takes the row under it", async ()
   await userEvent.keyboard("{ArrowDown}");
   await userEvent.keyboard("{Enter}");
 
-  expect(location.hash).toBe(homeHash({ opens: [SECOND_ID, AGENT_ID] }));
+  expect(location.hash).toBe(homeHash({ opens: [WIKI_APP.id, AGENT_ID] }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
@@ -698,9 +724,9 @@ test("the meta digit takes the row standing at that place", async () => {
   await open();
   await screen.findByRole("dialog");
 
-  await userEvent.keyboard("{Meta>}1{/Meta}");
+  await userEvent.keyboard("{Meta>}3{/Meta}");
 
-  expect(location.hash).toBe(homeHash({ opens: [ARTIFACTS_APP.id, AGENT_ID] }));
+  expect(location.hash).toBe(homeHash({ opens: [WIKI_APP.id, AGENT_ID] }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 

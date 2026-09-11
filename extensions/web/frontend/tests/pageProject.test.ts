@@ -17,7 +17,7 @@ const APPS = readdirSync(EXTENSIONS, { withFileTypes: true })
   .map((entry) => entry.name.slice("app_".length))
   .sort();
 const BUILD_CEILING_MS = 240_000;
-const PROJECT = ["app.tsx", "index.html", "tour.md"];
+const PROJECT = ["app.tsx", "index.html"];
 
 const homeSkill = (app: string): string =>
   join(EXTENSIONS, `app_${app}`, `ufo_ext_app_${app}`, "skills", `app-${app}-home`);
@@ -82,7 +82,7 @@ test.each(APPS)("%s's home skill holds the project's page and its source", (app)
 test(
   "a materialized project builds the page and carries the source the next read starts from",
   () => {
-    const forked = built(materialized(homeSkill("radar")));
+    const forked = built(materialized(homeSkill("wiki")));
     const assets = readdirSync(join(forked, "..", "assets"));
     expect(assets.filter((file) => file.startsWith("tabler-")).length).toBeGreaterThan(0);
     built(materialized(forked));
