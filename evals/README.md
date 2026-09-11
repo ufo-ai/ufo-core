@@ -47,6 +47,18 @@ that must foreground-spawn that qualified production profile with the case objec
 the grader reads the child's validated result and ignores the proxy's answer. A durable agent with
 the same bare name cannot capture the target.
 
+`memory_staleness` grades what a turn does with a time-sensitive memory item the live state has
+moved past. Each case seeds one durable memory row about a pull request and the connector record
+that contradicts it, then grades three dimensions: the live read through `call_external_tool`, the
+reply that states the live state and withdraws the remembered one, and the memory row that carries
+the corrected statement once the turn settles. The withdrawal is judged rather than scanned: the
+correct reply names the remembered status to retract it. A case clears every memory row naming its
+item before it seeds and after it settles, so no run inherits another's memory:
+
+```bash
+uv run python -m evals --only memory_staleness --workspace <workspace-id> --label staleness
+```
+
 Corpus runs use the same concurrency control:
 
 ```bash

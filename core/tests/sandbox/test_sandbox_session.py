@@ -969,15 +969,20 @@ async def test_background_bash_detaches_and_signals_completion(tmp_path: Path) -
     """The handler returns before the command ends, and the directive's own probe line — clean
     exit, empty output — stays quiet until the exit file appears exactly once with the code."""
     ctx = await _live_ctx(tmp_path)
+    gate = "/workspace/release-the-background-task"
     result = await bash_handler(
         ctx,
-        BashInput(command="sleep 1; echo finished-marker", background=True),
+        BashInput(
+            command=f'while [ ! -f "{gate}" ]; do sleep 0.05; done; echo finished-marker',
+            background=True,
+        ),
     )
     assert not result.is_error
     task = _task_payload(result.content[0].text)
     probe = await ctx.sandbox.bash(task["watch"])
     assert probe.exit_code == 0
     assert probe.stdout == ""
+    await ctx.sandbox.bash(f'touch "{gate}"')
     assert await _wait_for_file(ctx.sandbox, task["exit_file"]) == "0"
     log = await ctx.sandbox.bash(f'cat "{task["log"]}"')
     assert "finished-marker" in log.stdout

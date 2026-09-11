@@ -81,6 +81,8 @@ GREENHOUSE_PROVIDER = "greenhouse"
 GREENHOUSE_LABEL = "Greenhouse (eval)"
 GREENHOUSE_HOST = "greenhouse.evalenv.test"
 APP_FIXTURE_PREFIX = "app_fixture:"
+GITHUB_ITEM_FIXTURE_PREFIX = "github_item:"
+GITHUB_ARGUMENT_TOOLS = frozenset({"create_commit_status", "get_pull_request"})
 APP_ACTION_KIND = "eval_app_action"
 APP_ACTION_KEY_PREFIX = "app_action:"
 APP_ACTION_FIXTURE_PREFIX = "app_action_fixture:"
@@ -149,6 +151,14 @@ class CreateCommitStatusArgs(BaseModel):
     context: str = Field(min_length=1, description="The status context name.")
     description: str = Field(default="", description="One line shown beside the status.")
     target_url: str = Field(default="", description="Where the status links.")
+
+
+class GetPullRequestArgs(BaseModel):
+    """One pull request, asked for by name. A case seeding its own item key owns its live state
+    outright, so two cases never write one fixture key between them."""
+
+    repository: str = Field(min_length=1, description="The repository, as owner/name.")
+    number: int = Field(ge=1, description="The pull request number.")
 
 
 class SendEmailArgs(BaseModel):
@@ -301,6 +311,15 @@ _CATALOG: dict[str, tuple[BrokerTool, ...]] = {
             read_only=True,
         ),
         BrokerTool(
+            slug="get_pull_request",
+            description=(
+                "Get one pull request's current state: review, checks, merge state, and when it "
+                "merged."
+            ),
+            input_schema=GetPullRequestArgs.model_json_schema(),
+            read_only=True,
+        ),
+        BrokerTool(
             slug="get_delivery_metrics",
             description="Get pull-request delivery metrics and their reporting window.",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
@@ -440,10 +459,8 @@ class EvalEnvBroker:
                     return await self._cancel_event(
                         workspace_id, CancelEventArgs.model_validate(arguments)
                     )
-        if provider == GITHUB_PROVIDER and slug == "create_commit_status":
-            return await self._create_commit_status(
-                CreateCommitStatusArgs.model_validate(arguments)
-            )
+        if provider == GITHUB_PROVIDER and slug in GITHUB_ARGUMENT_TOOLS:
+            return await self._github_call(slug, arguments)
         if provider == CODE_PROVIDER and slug == "search_code":
             return await self._search_code(SearchCodeArgs.model_validate(arguments))
         if provider in {
@@ -462,6 +479,13 @@ class EvalEnvBroker:
             return dict(seeded)
         raise UnknownBrokerTool(slug)
 
+    async def _github_call(self, slug: str, arguments: Mapping[str, object]) -> dict[str, object]:
+        if slug == "create_commit_status":
+            return await self._create_commit_status(
+                CreateCommitStatusArgs.model_validate(arguments)
+            )
+        return await self._get_pull_request(GetPullRequestArgs.model_validate(arguments))
+
     async def _create_commit_status(self, args: CreateCommitStatusArgs) -> dict[str, object]:
         return {
             "sha": args.sha,
@@ -470,6 +494,17 @@ class EvalEnvBroker:
             "description": args.description,
             "target_url": args.target_url,
         }
+
+    async def _get_pull_request(self, args: GetPullRequestArgs) -> dict[str, object]:
+        """The pull request the eval seeded under this repository and number, verbatim. An unseeded
+        item fails loud, as an unseeded code-search query does."""
+        key = f"{GITHUB_ITEM_FIXTURE_PREFIX}{args.repository}#{args.number}"
+        seeded = await ScopedStore(extension=NAME).get(key)
+        if not isinstance(seeded, dict):
+            raise ValueError(
+                f"no pull-request fixture is seeded for {args.repository}#{args.number}"
+            )
+        return dict(seeded)
 
     async def _search_code(self, args: SearchCodeArgs) -> dict[str, object]:
         """The response the eval seeded under this query, verbatim. An unseeded query fails loud

@@ -24,6 +24,7 @@ from ufo_ext_connectors.tools import (
 )
 
 from evals.harness.harness import JsonObject
+from evals.suites import memory_staleness
 from evals.suites.connector_refs import (
     FLEET,
     KERNEL,
@@ -445,6 +446,38 @@ async def test_an_unseeded_app_tool_fails_loud(db: None) -> None:
                 tool_name="list_pull_requests",
                 source_id=env.GITHUB_PROVIDER,
                 arguments={},
+            ),
+        )
+
+
+async def test_one_pull_request_comes_back_under_its_own_seeded_key(db: None) -> None:
+    workspace_id = await _workspace()
+    item = memory_staleness.MERGED_412
+    with ws(workspace_id):
+        await ScopedStore(extension=env.NAME).put(
+            f"{env.GITHUB_ITEM_FIXTURE_PREFIX}{item.repository}#{item.number}", item.live
+        )
+        result = await call_external_tool(
+            _ctx(workspace_id, APP_GRANTS),
+            CallExternalToolInput(
+                tool_name="get_pull_request",
+                source_id=env.GITHUB_PROVIDER,
+                arguments={"repository": item.repository, "number": item.number},
+            ),
+        )
+
+    assert _payload(result) == item.live
+
+
+async def test_an_unseeded_pull_request_fails_loud(db: None) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id), pytest.raises(ValueError, match="no pull-request fixture"):
+        await call_external_tool(
+            _ctx(workspace_id, APP_GRANTS),
+            CallExternalToolInput(
+                tool_name="get_pull_request",
+                source_id=env.GITHUB_PROVIDER,
+                arguments={"repository": "evalco/atlas", "number": 9999},
             ),
         )
 
