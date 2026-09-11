@@ -41,7 +41,7 @@ jobs:
         id: select
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
-          DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy(-production)?\.yml|scripts/(billing_export_plan_(check\.py|gate\.sh)|deploy_change_gate\.py|founder_email_prerequisites\.sh|terraform_plan_guard\.py|production_prerequisites\.sh))$|infra/(production_secrets|testing_secrets)\.py$|infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge|docs)|templates)/)
+          DEPLOY_PATHS_PATTERN: ^(\.github/(workflows/deploy(-production)?\.yml|scripts/(billing_export_plan_(check\.py|gate\.sh)|deploy_change_gate\.py|founder_email_prerequisites\.sh|publish_web_assets\.py|terraform_plan_guard\.py|production_prerequisites\.sh))$|infra/(production_secrets|testing_secrets)\.py$|infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge|docs)|templates)/)
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           # Every input build_definition_digest reads: this script's own constants, the baked client,
           # the harness modules, and every SKILL.md the system bundle globs.
@@ -220,6 +220,19 @@ jobs:
               -c 'from ufo.host.ext.loader import load_manifests; load_manifests("assistant_hosted")'
             docker push "$ECR_REGISTRY/ufo:$IMAGE_TAG"
           fi
+
+      # The publish is content addressed and lists the bucket before it writes, so it runs on every
+      # deploy: a tag already pushed skipped the frontend build above, so the tree is built here first.
+      - name: Publish the portal assets
+        env:
+          BLOB_BUCKET: ufo-testing-ufo-blob-899147036157
+        run: |
+          if [ ! -f extensions/web/ufo_ext_web/static/index.html ]; then
+            pnpm -C extensions/web/frontend install --frozen-lockfile
+            pnpm -C extensions/web/frontend run build
+            rm -f extensions/web/ufo_ext_web/static/assets/*.map
+          fi
+          uv run python .github/scripts/publish_web_assets.py --bucket "$BLOB_BUCKET"
 
   # Images push before the apply that points the Deployments at this tag: a push afterwards starts the
   # new ReplicaSet's progress deadline against an image that does not exist yet.

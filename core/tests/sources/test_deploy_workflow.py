@@ -625,7 +625,8 @@ def _check_pull_request_plans_active_deployment_inputs() -> None:
     assert environment["DEPLOY_PATHS_PATTERN"] == (
         r"^(\.github/(workflows/deploy(-production)?\.yml|"
         r"scripts/(billing_export_plan_(check\.py|gate\.sh)|deploy_change_gate\.py|"
-        r"founder_email_prerequisites\.sh|terraform_plan_guard\.py|"
+        r"founder_email_prerequisites\.sh|publish_web_assets\.py|"
+        r"terraform_plan_guard\.py|"
         r"production_prerequisites\.sh))$|"
         r"infra/(production_secrets|testing_secrets)\.py$|"
         r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge|docs)|templates)/)"
@@ -3896,6 +3897,7 @@ def test_billing_plan_scripts_trigger_a_testing_deploy() -> None:
     for path in (
         ".github/scripts/billing_export_plan_check.py",
         ".github/scripts/billing_export_plan_gate.sh",
+        ".github/scripts/publish_web_assets.py",
     ):
         assert re.search(pattern, path)
 

@@ -58,7 +58,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.websockets import WebSocket
 
-from ufo.blob import BlobNotFound, FleetBlobStore, S3BlobStore, WorkspaceBlobStore
+from ufo.blob import BlobNotFound, BlobStore, FleetBlobStore, S3BlobStore, WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.auth.token_signing import sign_detached, verify_detached
 from ufo.harness.containment import contained_leaf
@@ -5403,6 +5403,11 @@ class SurfaceListenerContext:
 
 SurfaceListener = Callable[[SurfaceListenerContext], Awaitable[None]]
 
+SurfaceBoot = Callable[[BlobStore], None]
+"""Work a surface starts once per process, handed the fleet store. Core calls it as the app loop
+opens, before any request is served, and it returns at once: what it starts runs as the surface's
+own task, so a failure lands on the readers that await it rather than on the server's boot."""
+
 SURFACE_LISTENER_OWNER_POLL_SECONDS = 2.0
 SURFACE_LISTENER_LEASE_SECONDS = 10.0
 
@@ -5639,6 +5644,11 @@ class SurfaceSpec:
     """A persistent provider stream owned by this surface. Core starts it with the app and cancels
     it during app shutdown because only core owns the process lifecycle and privileged workspace
     binding. HTTP-only surfaces leave it unset."""
+    boot: SurfaceBoot | None = None
+    """Per-process work this surface starts as the app loop opens — work a member's request would
+    otherwise be the first to ask for, and wait on. Core owns the process lifecycle, so only core
+    can start it before any request arrives; an extension holds no loop until a request gives it
+    one."""
     addressed: bool = False
     """Whether inbound traffic names its member by the sender's own address rather than by an
     installation. A shared provider the deploy owns — one iMessage project, one line — serves every

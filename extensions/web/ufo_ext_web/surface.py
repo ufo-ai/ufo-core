@@ -492,6 +492,7 @@ STORED_ASSETS_MAX = 64
 APPS_DIR = Path(__file__).parent / "apps"
 APPS_STORE_PREFIX = "apps/"
 APPS_SHARED_DIRS = frozenset({"assets"})
+ASSET_PUBLISH_IN_FLIGHT = 24
 
 _ASSET_PUBLISH: asyncio.Task[None] | None = None
 _STORED_ASSETS: OrderedDict[str, tuple[bytes, str, str]] = OrderedDict()
@@ -556,23 +557,38 @@ def apps() -> AppsBundle:
     return APPS
 
 
-async def _publish_assets(blob: BlobStore, apps: AppsBundle) -> None:
-    for name, (body, _media_type) in STATIC_ASSETS.items():
-        key = STATIC_STORE_PREFIX + name
-        if not await blob.exists(key):
+async def publish_assets(blob: BlobStore, apps: AppsBundle) -> None:
+    """Write this build's static assets and app pages into the shared store, skipping what is
+    already there. Each half learns what it holds from one listing of its own prefix rather than a
+    key at a time, and the writes that remain run together under `ASSET_PUBLISH_IN_FLIGHT`: the
+    tree is 160 files and 6.6 MiB, so a round trip per file is the whole cost. The first failed
+    write fails the publish, and the caller that awaited it. A listing that hit its cap leaves a
+    key it did not see to be written again, which writes the bytes that key already holds: every
+    name here is content addressed."""
+    apps_prefix = f"{APPS_STORE_PREFIX}{apps.digest}/"
+    stored, published = await asyncio.gather(blob.list(STATIC_STORE_PREFIX), blob.list(apps_prefix))
+    held = {entry.key for entry in (*stored, *published)}
+    missing = [
+        (key, body)
+        for key, body in (
+            *((STATIC_STORE_PREFIX + name, body) for name, (body, _) in STATIC_ASSETS.items()),
+            *((apps_prefix + path, body) for path, body in apps.files.items()),
+        )
+        if key not in held
+    ]
+    limit = asyncio.Semaphore(ASSET_PUBLISH_IN_FLIGHT)
+
+    async def write(key: str, body: bytes) -> None:
+        async with limit:
             await blob.put(key, body)
-    prefix = f"{APPS_STORE_PREFIX}{apps.digest}/"
-    published = {entry.key for entry in await blob.list(prefix)}
-    for path, body in apps.files.items():
-        key = prefix + path
-        if key not in published:
-            await blob.put(key, body)
+
+    await asyncio.gather(*(write(key, body) for key, body in missing))
 
 
 def _assets_published(blob: BlobStore, apps: AppsBundle) -> "asyncio.Task[None]":
     """This process's one publish of its built assets into the shared store (RFC 0031): every pod
-    writes its own set before it serves its first page, so a hash a page names is in the store
-    before any pod is asked for it — the causal order that makes a mixed-version roll harmless.
+    writes its own set at boot, so a hash a page names is in the store before any pod is asked for
+    it — the causal order that makes a mixed-version roll harmless.
     Keys carry Vite's content hash, so a key present is a key already correct and is skipped. A
     failed publish fails the page that awaited it and is replaced here, so the next page retries
     rather than serving a reference nothing can answer.
@@ -594,9 +610,18 @@ def _assets_published(blob: BlobStore, apps: AppsBundle) -> "asyncio.Task[None]"
     global _ASSET_PUBLISH
     task = _ASSET_PUBLISH
     if task is None or (task.done() and task.exception() is not None):
-        task = asyncio.create_task(_publish_assets(blob, apps))
+        task = asyncio.create_task(publish_assets(blob, apps))
         _ASSET_PUBLISH = task
     return task
+
+
+def start_asset_publish(blob: BlobStore) -> None:
+    """Start this process's publish as the app loop opens (the surface's `boot`), so the pod is
+    already writing before it takes a request. Every reader still awaits the task — the causal
+    order RFC 0031 holds is unchanged — but no member's page is what starts it. A deploy that
+    skipped the frontend build has no tree to publish and its pages fail naming the build."""
+    if APPS is not None:
+        _assets_published(blob, APPS)
 
 
 async def _stored_asset(blob: BlobStore, request: Request) -> Response:

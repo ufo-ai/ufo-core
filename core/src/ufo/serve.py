@@ -144,6 +144,7 @@ from ufo.runtime.ext.surface import (
     SURFACE_MODEL_JOB_PREFIX,
     MidTurnReplyPoller,
     SurfaceAuth,
+    SurfaceBoot,
     SurfaceContext,
     SurfaceIdentityContext,
     SurfaceListenerRunner,
@@ -500,6 +501,7 @@ def run(fleet: Fleet) -> None:
     app.state.writeback_poller = None
     app.state.mid_turn_reply_poller = None
     app.state.surface_listeners = ()
+    app.state.surface_boots = ()
     app.state.blob = blob
     app.state.artifact_token_secret = artifact_secret
     app.include_router(callback_router)
@@ -1292,6 +1294,7 @@ def _mount_shared_surfaces(
     system_skill_bundle = SystemSkillBundle.from_skills(skills.bundled_skills())
     registered: dict[str, SurfaceSpec] = {}
     listeners = []
+    boots: list[SurfaceBoot] = []
 
     deploy_sandbox_internet = any(manifest.sandbox_internet for manifest in manifests)
     slots = declared_slots(manifests)
@@ -1384,6 +1387,8 @@ def _mount_shared_surfaces(
                         _context_for=context_for,
                     )
                 )
+            if spec.boot is not None:
+                boots.append(spec.boot)
             if spec.routes or spec.sockets:
                 if resolver is None:
                     raise RuntimeError(
@@ -1395,6 +1400,7 @@ def _mount_shared_surfaces(
                     _mount_surface_socket(app, spec.name, socket, resolver, auth, context_for)
             log("serve.shared_surface.mounted", surface=spec.name)
     app.state.surface_listeners = tuple(listeners)
+    app.state.surface_boots = tuple(boots)
     _mount_home(app, manifests)
     if registered:
         worker_id = uuid4().hex
@@ -1456,7 +1462,11 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
     the whole deploy holds, so a jobs process reclaims a dead turns process's turns and the reverse.
     Surface delivery is the turns fleet's alone — an inbound listener is one connection admitted
     across all replicas by a fenced lease, and a jobs process winning that lease would land a
-    member's messages on the fleet that runs the indexer."""
+    member's messages on the fleet that runs the indexer.
+
+    A surface's `boot` runs on the fleet that serves it and returns at once, so the work a request
+    would otherwise be the first to ask for — the portal's asset publish — is already under way
+    when the process takes its first request."""
     await register_sources(app.state.configured_sources)
     async with asyncio.TaskGroup() as group:
         tasks = [
@@ -1465,6 +1475,8 @@ async def _serve_lifespan(app: FastAPI) -> AsyncIterator[None]:
             group.create_task(StrandedTurnReconciler(client=app.state.dbos).run()),
         ]
         if app.state.fleet.surfaces:
+            for boot in app.state.surface_boots:
+                boot(FleetBlobStore(backend=app.state.blob.backend))
             for poller in (app.state.writeback_poller, app.state.mid_turn_reply_poller):
                 if poller is not None:
                     tasks.append(group.create_task(poller.run()))

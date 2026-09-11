@@ -16,6 +16,7 @@ AUTHORIZATION_PATHS = frozenset(
 RUNTIME_PATHS = frozenset(
     {
         ".github/scripts/deploy_change_gate.py",
+        ".github/scripts/publish_web_assets.py",
         ".github/scripts/production_prerequisites.sh",
         ".github/workflows/deploy-production.yml",
         ".github/workflows/deploy.yml",

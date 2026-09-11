@@ -10,8 +10,8 @@ date: 2026-08-15
 > Each serve pod writes its static assets to the shared blob store before it serves its first
 > page. The asset route reads the store when a requested asset is not in the pod's own build.
 > A page can only refer to assets that are in the store. Thus asset requests get a correct
-> response from each pod, and deploy rolls that overlap do not cause 404 errors. This design
-> changes only the web extension. It does not change core or the deploy pipeline.
+> response from each pod, and deploy rolls that overlap do not cause 404 errors. The deploy
+> writes the same keys before the pods roll, so a pod that starts finds its tree already there.
 
 ## Current state
 
@@ -51,12 +51,12 @@ Two pods that write the same key write the same bytes. If the publish task fails
 request fails, and the publish task runs again on the next request. A deploy that cannot get
 access to the blob store shows an error. It does not continue with a race condition.
 
-The page request gives the correct order without a boot hook. A browser can request only a hash
-that it read from a page. A pod serves a page only after its publish task is complete. Thus each
-requested hash is in the store before the request, for each pod that gets the request. A
-`JobSpec` with `schedule=None` is not the correct seam, because jobs apply to one workspace
-(`core/src/ufo/runtime/ext/manifest.py:100`) and the publish task applies to the deploy. A new boot
-callback on `SurfaceSpec` is not necessary, because the page request gives the same order.
+The surface's `boot` (`SurfaceSpec.boot`) starts the task as the app loop opens, and every reader
+waits for it. A browser can request only a hash that it read from a page. A pod serves a page only
+after its publish task is complete. Thus each requested hash is in the store before the request,
+for each pod that gets the request. A member's request starts no part of the work. A `JobSpec`
+with `schedule=None` is not the correct seam, because jobs apply to one workspace
+(`core/src/ufo/runtime/ext/manifest.py:100`) and the publish task applies to the deploy.
 
 **Part 2 — read the store when the build does not have the asset.** The route `static_asset`
 serves `STATIC_ASSETS` first, as it does today. If the name is not in the dictionary, the route
@@ -72,7 +72,8 @@ session. The response is the same for a local asset and for a store asset.
 | --- | --- |
 | Key namespace | `static/web/assets/<vite-name>`; only the publish task writes it |
 | Write rule | do not write a key that exists; the bytes for one key are always the same |
-| Publish trigger | one time in each process; `portal_page` waits for it before its first response |
+| Publish trigger | one time in each process, at boot; `portal_page` waits for it before its first response |
+| Deploy pre-publish | the `bundle` job writes the same keys before the rollout, so a pod's own publish finds them |
 | Publish failure | the page request fails; the next request starts the task again; no silent skip |
 | Fallback gate | correct name shape and declared suffix, then a store read; other names get 404 |
 | Fallback cache | a process dictionary with a size limit; entries do not change |
@@ -87,8 +88,9 @@ response. The order of the rollouts has no effect.
 
 ## Doctrine fit / implications
 
-Core does not change. The store, the configuration, and `SurfaceContext.blob` are available
-today. The two new parts are in the web extension, in the module that owns static serving. The
+Core holds one seam for this: `SurfaceSpec.boot`, the per-process start only core's app loop can
+give. The store, the configuration, and `SurfaceContext.blob` are available today. The two parts
+are in the web extension, in the module that owns static serving. The
 reader finds the publish task, the route, and the store read in one file, from top to bottom.
 The two parts and their tests go into one unit. The publish task fails loudly. A 404 from the
 route keeps one meaning: the asset does not exist. It does not mean "incorrect pod". The data
@@ -113,9 +115,9 @@ correctly, because the assets of each page are in the store.
 - **Use a CDN cache for the assets.** The route operates only for a session. Also, a CDN does
   not have a hash that it has not seen. The first request for a new hash during a rollout goes
   to an old pod and gets a 404 error.
-- **Add a boot callback to `SurfaceSpec` for the publish task.** The effect is the same as the
-  publish task in the page request, but this adds a core seam. The page request gives the order
-  without a new seam.
+- **Start the publish on the first page request.** The order is the same, and it needs no core
+  seam. But the member who sends that request waits for the whole tree: 160 objects, one round
+  trip each. The boot callback moves the same work off every member's request.
 
 ## Open decisions
 

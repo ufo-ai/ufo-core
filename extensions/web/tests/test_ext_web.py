@@ -134,7 +134,7 @@ from ufo_testsupport.surfaces import (
 
 import ufo.db
 import ufo.host.kinds.conversations as conversations_kind
-from ufo.blob import FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
+from ufo.blob import BlobEntry, FilesystemBlobStore, FleetBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.flags import SERVED_FALSE, SERVED_TRUE, init_flags
@@ -4932,6 +4932,101 @@ async def test_a_hashed_asset_is_held_and_an_unhashed_one_revalidates(
     assert unhashed.headers["cache-control"] == "no-cache"
 
 
+class _PublishStore:
+    """A store that records how the publish reached it: each prefix it listed, each key it wrote,
+    and how many writes were in flight at once."""
+
+    def __init__(self, held: frozenset[str]) -> None:
+        self.held = held
+        self.listed: list[str] = []
+        self.written: list[str] = []
+        self.peak = 0
+        self._in_flight = 0
+
+    async def list(self, prefix: str) -> tuple[BlobEntry, ...]:
+        self.listed.append(prefix)
+        return tuple(
+            BlobEntry(key=key, size_bytes=1, modified_at=datetime.now(UTC))
+            for key in sorted(self.held)
+            if key.startswith(prefix)
+        )
+
+    async def put(self, key: str, data: bytes) -> None:
+        self._in_flight += 1
+        self.peak = max(self.peak, self._in_flight)
+        await asyncio.sleep(0)
+        self.written.append(key)
+        self._in_flight -= 1
+
+    async def exists(self, key: str) -> bool:
+        raise AssertionError("the publish reads what is stored by listing, not a key at a time")
+
+
+async def test_the_asset_publish_lists_each_prefix_once_and_writes_the_rest_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pod's publish is 160 objects, so a round trip per file is the whole wait: each half learns
+    what the store holds from one listing of its own prefix, and the writes that remain run
+    together, bounded by `ASSET_PUBLISH_IN_FLIGHT`. A key already stored is a key already correct —
+    every name here is content addressed — and is written by nobody."""
+    store = _PublishStore(
+        frozenset({"static/web/assets/held-00000000.js", "apps/digest0/code/index.html"})
+    )
+    monkeypatch.setattr(
+        web_surface,
+        "STATIC_ASSETS",
+        {
+            f"assets/chunk-{index:08d}.js": (b"js", "text/javascript")
+            for index in range(web_surface.ASSET_PUBLISH_IN_FLIGHT + 8)
+        }
+        | {"assets/held-00000000.js": (b"js", "text/javascript")},
+    )
+    bundle = web_surface.AppsBundle(
+        files={"code/index.html": b"<html>", "assets/app-00000000.js": b"js"},
+        digest="digest0",
+        slugs=frozenset({"code"}),
+    )
+
+    await web_surface.publish_assets(store, bundle)
+
+    assert sorted(store.listed) == ["apps/digest0/", "static/web/"]
+    assert "static/web/assets/held-00000000.js" not in store.written
+    assert "apps/digest0/code/index.html" not in store.written
+    assert "apps/digest0/assets/app-00000000.js" in store.written
+    assert len(store.written) == web_surface.ASSET_PUBLISH_IN_FLIGHT + 9
+    assert store.peak == web_surface.ASSET_PUBLISH_IN_FLIGHT
+
+
+async def test_the_portal_publishes_its_assets_at_boot_and_not_on_a_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The publish is the surface's `boot`, so a pod writes its tree as the app loop opens. Every
+    reader still awaits that one task — no page serves a name the store cannot answer — but a
+    member's request never starts it."""
+    monkeypatch.setattr(web_surface, "_ASSET_PUBLISH", None)
+    monkeypatch.setattr(
+        web_surface, "STATIC_ASSETS", {"assets/boot-00000000.js": (b"js", "text/javascript")}
+    )
+    bundle = web_surface.AppsBundle(
+        files={"code/index.html": b"<html>"}, digest="digest0", slugs=frozenset({"code"})
+    )
+    monkeypatch.setattr(web_surface, "APPS", bundle)
+    blob = FleetBlobStore(backend=FilesystemBlobStore(root=tmp_path))
+    boot = next(
+        spec.boot for spec in web_manifest().surfaces if spec.name == web_surface.SURFACE_WEB
+    )
+    assert boot is not None
+
+    boot(blob)
+
+    task = web_surface._ASSET_PUBLISH
+    assert task is not None
+    await task
+    assert web_surface._assets_published(blob, bundle) is task
+    assert await blob.exists("static/web/assets/boot-00000000.js")
+    assert await blob.exists("apps/digest0/code/index.html")
+
+
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_failed_asset_publish_fails_the_page_and_the_next_page_retries(
@@ -4947,21 +5042,21 @@ async def test_a_failed_asset_publish_fails_the_page_and_the_next_page_retries(
     token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
     real_put = FilesystemBlobStore.put
-    real_exists = FilesystemBlobStore.exists
+    real_list = FilesystemBlobStore.list
 
     async def refuse(self: FilesystemBlobStore, key: str, data: bytes) -> None:
         raise RuntimeError("store refused the write")
 
-    async def absent(self: FilesystemBlobStore, key: str) -> bool:
-        return False
+    async def nothing_held(self: FilesystemBlobStore, prefix: str) -> tuple[BlobEntry, ...]:
+        return ()
 
     monkeypatch.setattr(FilesystemBlobStore, "put", refuse)
-    monkeypatch.setattr(FilesystemBlobStore, "exists", absent)
+    monkeypatch.setattr(FilesystemBlobStore, "list", nothing_held)
     with pytest.raises(RuntimeError, match="store refused the write"):
         await client.get("/surface/web", headers=headers)
 
     monkeypatch.setattr(FilesystemBlobStore, "put", real_put)
-    monkeypatch.setattr(FilesystemBlobStore, "exists", real_exists)
+    monkeypatch.setattr(FilesystemBlobStore, "list", real_list)
     page = await client.get("/surface/web", headers=headers)
     assert page.status_code == 200
     for name in web_surface.STATIC_ASSETS:

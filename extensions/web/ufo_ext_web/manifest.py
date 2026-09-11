@@ -32,6 +32,7 @@ from ufo_ext_web.surface import (
     TITLE_JOB_SCHEDULE,
     resolve_workspace,
     seed_homepages,
+    start_asset_publish,
     summarize_chat_titles,
 )
 
@@ -87,6 +88,7 @@ def manifest() -> Manifest:
                 routes=ROUTES,
                 sockets=SOCKETS,
                 identify=resolve_workspace,
+                boot=start_asset_publish,
                 home=True,
             ),
         ),

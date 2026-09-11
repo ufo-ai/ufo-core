@@ -17,7 +17,7 @@ from sqlalchemy.engine import make_url
 
 import ufo.db
 from ufo import serve
-from ufo.blob import FilesystemBlobStore, S3BlobStore
+from ufo.blob import FilesystemBlobStore, FleetBlobStore, S3BlobStore, WorkspaceBlobStore
 from ufo.config import (
     DEFAULT_BACKGROUND_JOBS_MODEL,
     BlobConfig,
@@ -339,6 +339,7 @@ async def test_serve_lifespan_waits_for_background_shutdown(
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
+            surface_boots=(),
             configured_sources=(),
         )
     )
@@ -380,6 +381,7 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
             writeback_poller=poller,
             mid_turn_reply_poller=speaker,
             surface_listeners=(listener,),
+            surface_boots=(),
             configured_sources=(),
         )
     )
@@ -391,6 +393,40 @@ async def test_the_jobs_fleet_runs_the_reconcilers_and_none_of_the_surface_deliv
         assert not poller.started.is_set()
         assert not speaker.started.is_set()
         assert not listener.started.is_set()
+
+
+async def test_a_surface_boot_starts_its_work_before_the_first_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The work a surface would otherwise start on its first page — the portal's asset publish —
+    starts with the app loop instead, handed the fleet store it writes through. The jobs fleet
+    serves no surface, so it starts none of it."""
+    monkeypatch.setattr(serve, "ExecutorRecovery", ShutdownProbe)
+    monkeypatch.setattr(serve, "CancelReconciler", lambda client: ShutdownProbe())
+    monkeypatch.setattr(serve, "StrandedTurnReconciler", lambda client: ShutdownProbe())
+    backend = FilesystemBlobStore(root=tmp_path)
+    booted: list[object] = []
+
+    def state(fleet: serve.Fleet) -> SimpleNamespace:
+        return SimpleNamespace(
+            state=SimpleNamespace(
+                fleet=fleet,
+                dbos=object(),
+                writeback_poller=None,
+                mid_turn_reply_poller=None,
+                surface_listeners=(),
+                surface_boots=(booted.append,),
+                blob=WorkspaceBlobStore(backend=backend),
+                configured_sources=(),
+            )
+        )
+
+    async with serve._serve_lifespan(state(serve.WHOLE_FLEET)):
+        pass
+    async with serve._serve_lifespan(state(serve.JOBS_FLEET)):
+        pass
+
+    assert booted == [FleetBlobStore(backend=backend)]
 
 
 async def test_serve_lifespan_propagates_a_background_failure(
@@ -409,6 +445,7 @@ async def test_serve_lifespan_propagates_a_background_failure(
             writeback_poller=None,
             mid_turn_reply_poller=None,
             surface_listeners=(),
+            surface_boots=(),
             configured_sources=(),
         )
     )
