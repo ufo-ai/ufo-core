@@ -175,6 +175,7 @@ PIP_PACKAGES = (
     "pdf2docx",
     "pytesseract",
     "imageio-ffmpeg",
+    "uv",
 )
 NPM_PACKAGES = (
     f"pnpm@{PNPM_VERSION}",
@@ -197,6 +198,7 @@ command -v pnpm >/dev/null
 command -v ufo >/dev/null
 command -v vite >/dev/null
 command -v rg >/dev/null
+command -v uv >/dev/null
 command -v bc >/dev/null
 command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null

@@ -115,6 +115,7 @@ EXPECTED_PIP = (
     "pdf2docx",
     "pytesseract",
     "imageio-ffmpeg",
+    "uv",
 )
 EXPECTED_NPM = (
     f"pnpm@{PNPM_VERSION}",
@@ -228,6 +229,7 @@ def _check_ready_probe_checks_every_baked_entrypoint() -> None:
         "node",
         "ufo",
         "rg",
+        "uv",
         "pdftotext",
         "pdftoppm",
         "soffice",
