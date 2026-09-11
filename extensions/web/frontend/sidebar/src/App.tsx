@@ -38,6 +38,8 @@ import {
 import mark from "@brand/ufo-mark.svg";
 import logo from "@/assets/ufo-logo.svg";
 import {
+  SIDEBAR_PRESS,
+  SIDEBAR_ROW,
   SidebarCap,
   SidebarPress,
   SidebarRow,
@@ -45,6 +47,7 @@ import {
   type Chord,
 } from "./components/Sidebar";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -585,6 +588,10 @@ function AccountRow({ member, collapsed }: { member: Member; collapsed: boolean 
 }
 
 const CHATS = "Chats";
+
+/** The placeholder rows are drawn for the eye alone, so the list states the wait for a reader who
+ *  hears the page instead. */
+const RAIL_WAIT = "Loading chats";
 const NEW_CHAT = "New chat";
 const TASKS = "Tasks";
 const CONNECTIONS = "Connections";
@@ -1178,6 +1185,25 @@ function openRailRow(
   openAgentPlace(pane.id, { opens: [conversationId] });
 }
 
+const RAIL_SKELETON_TITLES = ["w-4/5", "w-3/5", "w-3/4", "w-1/2", "w-2/3", "w-2/5"];
+
+/** The rows take the shape of the chat rows they wait for, so the list does not step when the
+ *  titles land. The bar widths vary because one width for every row reads as a control. */
+function RailSkeleton() {
+  return (
+    <ul role="status" aria-label={RAIL_WAIT} className="m-0 flex list-none flex-col gap-px p-0">
+      {RAIL_SKELETON_TITLES.map((title) => (
+        <li key={title} className={SIDEBAR_ROW}>
+          <div className={cn(SIDEBAR_PRESS, "gap-xs")}>
+            <Skeleton className="me-2xs size-(--size-glyph) shrink-0 rounded-full" />
+            <Skeleton className={cn("h-(--size-notice)", title)} />
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function RailList({
   route,
   agents,
@@ -1225,11 +1251,7 @@ function RailList({
   );
   return (
     <>
-      {rail.phase === "loading" ? (
-        <div className="p-sm text-ink-soft">
-          <Loading compact />
-        </div>
-      ) : null}
+      {rail.phase === "loading" ? <RailSkeleton /> : null}
       {rail.phase === "failed" ? (
         <div className="flex flex-col gap-2xs p-sm text-ink-soft">
           <span>Couldn't load conversations.</span>

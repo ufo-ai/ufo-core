@@ -545,8 +545,33 @@ test("a deep link waits while the rail loads instead of denying the conversation
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findAllByText("Loading…")).toHaveLength(2);
+  expect(await screen.findByText("Loading…")).toBeTruthy();
   expect(screen.queryByText(NOT_SHARED)).toBeNull();
+});
+
+test("the loading rail draws placeholder rows shaped like chat rows, not the word", async () => {
+  wire({
+    "/objects/conversation$": () =>
+      new Promise<Response>(() => {
+        return;
+      }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const waiting = await screen.findByRole("status", { name: "Loading chats" });
+  const rows = within(waiting).getAllByRole("listitem");
+  expect(rows.length).toBeGreaterThan(1);
+  for (const row of rows) {
+    expect(row.querySelectorAll("[data-part=skeleton]")).toHaveLength(2);
+  }
+});
+
+test("the rail drops its placeholder rows once the chats land", async () => {
+  wire(chatsOnWire([CHAT_ROW]));
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByText(CHAT_ROW.title);
+  expect(screen.queryByRole("status", { name: "Loading chats" })).toBeNull();
 });
 
 test("a rail read that fails states so and keeps the rows it has", async () => {
