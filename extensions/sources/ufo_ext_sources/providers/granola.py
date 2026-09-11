@@ -4,28 +4,34 @@ Granola publishes no REST host: its whole surface is the MCP server Composio fro
 `granola_mcp` toolkit, so this connector is a `ToolConnector` rather than a `RestConnector` and
 each read is a tool execution the broker runs server-side.
 
-One stream, `meetings`. A run lists the meeting notes in a time range (`list_meetings`), keeps the
-ones created strictly after the stored cursor, and hydrates them in batches of
-`DETAIL_BATCH` through `get_meetings`, which carries the attendees and the summarized notes the
-page recalls by. The transcript tool reads one meeting per call and is gated to Granola's paid
-plans, so a sync does not spend a call per meeting on it; the notes `get_meetings` already returns
-are the cheap content.
+Two streams, `meetings` and `transcripts`. Both list the meeting notes in a time range
+(`list_meetings`). `meetings` hydrates them in batches of `DETAIL_BATCH` through `get_meetings`,
+which carries the attendees and the written notes the page recalls by, and lands a page for every
+listed meeting, so the written notes sync through `list_meetings` and `get_meetings` alone and need
+no paid tool. `transcripts` reads the spoken record instead, one call per meeting through
+`get_meeting_transcript`, and lands a page only for a meeting that has one. An error naming
+Granola's paid plans refuses every meeting on the account, so it raises `StreamSkipped` and holds
+the transcript stream alone: `meetings` keeps syncing on a plan that answers no transcript. Any
+other refusal is one meeting's own, so that meeting lands no record and the checkpoint passes it.
 
 `list_meetings` takes a time range, never a page cursor, so the cursor is the created timestamp of
-the newest meeting landed: a first run reads the declared backfill window (`last_30_days`, or the
-row's pinned floor as a custom range), and a later run reads from the cursor forward and drops the
-meetings at or below it, so a re-listed meeting is not emitted twice. Records are landed oldest
-first and each batch carries its own checkpoint, so a run capped mid-window resumes where it
-stopped. A tool answer Composio reports unsuccessful raises `StreamFault` naming the tool."""
+the newest meeting read: a first run reads the declared backfill window (`last_30_days`, or the
+row's pinned floor as a custom range), and a later run lists from `RESYNC_LOOKBACK` behind the
+cursor, because Granola writes the notes and the transcript after the meeting — a meeting read
+before Granola finished it carries neither, and the re-read lands what was written on the same page
+ref. Records are landed oldest first and each batch carries its own checkpoint, so a run capped
+mid-window resumes where it stopped. A tool answer Composio reports unsuccessful raises
+`StreamFault` naming the tool."""
 
 import json
 from collections.abc import AsyncIterator, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ufo.sdk.sources import (
     StreamFault,
     StreamPage,
+    StreamSkipped,
     StreamSpec,
     ToolConnector,
     ToolExecutor,
@@ -33,21 +39,40 @@ from ufo.sdk.sources import (
 
 LIST_MEETINGS_TOOL = "GRANOLA_MCP_LIST_MEETINGS"
 GET_MEETINGS_TOOL = "GRANOLA_MCP_GET_MEETINGS"
+GET_TRANSCRIPT_TOOL = "GRANOLA_MCP_GET_MEETING_TRANSCRIPT"
+MEETINGS_STREAM = "meetings"
+TRANSCRIPTS_STREAM = "transcripts"
 DETAIL_BATCH = 10
 DEFAULT_TIME_RANGE = "last_30_days"
 CUSTOM_TIME_RANGE = "custom"
 BACKFILL_WINDOW_DAYS = 30
+RESYNC_LOOKBACK = timedelta(days=1)
+
+PLAN_GATE_MARKERS = ("plan", "upgrade", "subscription", "entitle")
 
 RECORD_KEYS = ("meetings", "notes", "documents", "results", "items")
 ID_FIELDS = ("id", "meeting_id", "document_id", "note_id")
 TITLE_FIELDS = ("title", "name", "subject")
 CREATED_FIELDS = ("created_at", "created", "date", "start_time", "started_at")
 NOTES_FIELDS = ("notes", "summary", "summary_markdown", "notes_markdown", "content")
+TRANSCRIPT_FIELDS = ("transcript", "transcript_markdown", "segments", "utterances", "text")
+SPOKEN_FIELDS = ("text", "content", "value")
+SPEAKER_FIELDS = ("speaker", "speaker_name", "name", "source")
 
 GRANOLA_STREAMS: list[StreamSpec] = [
     StreamSpec(
-        name="meetings",
+        name=MEETINGS_STREAM,
         source_object="meetings",
+        primary_key="id",
+        cursor_field="created_at",
+        created_at_field="created_at",
+        updated_at_field=None,
+        canonical=True,
+        backfill_window_days=BACKFILL_WINDOW_DAYS,
+    ),
+    StreamSpec(
+        name=TRANSCRIPTS_STREAM,
+        source_object="transcripts",
         primary_key="id",
         cursor_field="created_at",
         created_at_field="created_at",
@@ -70,18 +95,23 @@ class GranolaConnector(ToolConnector):
         cursor: str | None,
         backfill_after: datetime | None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        if stream.name != "meetings":
+        if stream.name not in (MEETINGS_STREAM, TRANSCRIPTS_STREAM):
             raise NotImplementedError(f"granola_mcp: stream {stream.name!r} has no paginate")
-        listed = await _call(execute, LIST_MEETINGS_TOOL, _range(cursor, backfill_after))
+        floor = _lookback(cursor)
+        listed = await _call(execute, LIST_MEETINGS_TOOL, _range(floor, backfill_after))
         meetings = [meeting for record in _records(listed) if (meeting := _meeting(record))]
         fresh = sorted(
-            (meeting for meeting in meetings if cursor is None or meeting["created_at"] > cursor),
+            (meeting for meeting in meetings if floor is None or meeting["created_at"] > floor),
             key=lambda meeting: meeting["created_at"],
         )
+        if stream.name == TRANSCRIPTS_STREAM:
+            async for page in self._transcribe(execute, fresh):
+                yield page
+            return
         for start in range(0, len(fresh), DETAIL_BATCH):
             batch = fresh[start : start + DETAIL_BATCH]
-            detailed = await self._hydrate(execute, batch)
-            yield StreamPage(records=detailed, next_cursor=detailed[-1]["created_at"])
+            records = await self._hydrate(execute, batch)
+            yield StreamPage(records=records, next_cursor=batch[-1]["created_at"])
 
     async def _hydrate(
         self, execute: ToolExecutor, batch: list[dict[str, Any]]
@@ -98,13 +128,45 @@ class GranolaConnector(ToolConnector):
         }
         return [{**meeting, **details.get(meeting["id"], {})} for meeting in batch]
 
+    async def _transcribe(
+        self, execute: ToolExecutor, fresh: list[dict[str, Any]]
+    ) -> AsyncIterator[StreamPage]:
+        """The listed meetings as transcript pages: `get_meeting_transcript` reads one meeting per
+        call, so `DETAIL_BATCH` calls is a checkpoint boundary rather than a single call. A meeting
+        the tool refuses, and a meeting it answers with nothing said, land no record and the
+        checkpoint passes them, as an unreadable meeting does in `_hydrate`; the lookback window is
+        what reads a transcript Granola writes later. Only the plan gate, which refuses the first
+        meeting of every run, skips the stream."""
+        records: list[dict[str, Any]] = []
+        checkpoint: str | None = None
+        reads = 0
+        for meeting in fresh:
+            payload = await execute(GET_TRANSCRIPT_TOOL, {"meeting_id": meeting["id"]})
+            if payload.get("successful") is False:
+                error = str(payload.get("error") or "")
+                if any(marker in error.lower() for marker in PLAN_GATE_MARKERS):
+                    raise StreamSkipped(
+                        f"granola_mcp: {GET_TRANSCRIPT_TOOL} is gated to Granola's paid plans: "
+                        f"{error!r}"
+                    )
+            elif spoken := _transcript(payload):
+                records.append({**meeting, "transcript": spoken})
+            checkpoint = meeting["created_at"]
+            reads += 1
+            if reads == DETAIL_BATCH:
+                yield StreamPage(records=records, next_cursor=checkpoint)
+                records, checkpoint, reads = [], None, 0
+        if checkpoint is not None:
+            yield StreamPage(records=records, next_cursor=checkpoint)
+
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
-        if stream.name != "meetings":
+        if stream.name not in (MEETINGS_STREAM, TRANSCRIPTS_STREAM):
             return super().render(record, stream)
         title = str(record.get("title") or "")
         attendees = ", ".join(record.get("attendees") or [])
+        content = "transcript" if stream.name == TRANSCRIPTS_STREAM else "notes"
         parts = [
-            f"# granola_mcp meetings: {title}".rstrip(),
+            f"# granola_mcp {stream.name}: {title}".rstrip(),
             "\n".join(
                 f"{label}: {value}"
                 for label, value in (
@@ -113,7 +175,7 @@ class GranolaConnector(ToolConnector):
                 )
                 if value
             ),
-            str(record.get("notes") or ""),
+            str(record.get(content) or ""),
         ]
         return title, "\n\n".join(part for part in parts if part).strip()
 
@@ -129,6 +191,14 @@ def _range(cursor: str | None, backfill_after: datetime | None) -> dict[str, Any
         "custom_start": start,
         "custom_end": _instant(datetime.now(UTC)),
     }
+
+
+def _lookback(cursor: str | None) -> str | None:
+    """The floor a content stream lists from: `RESYNC_LOOKBACK` behind the cursor, so a meeting
+    whose notes or transcript Granola wrote after the run that first read it is read again."""
+    if cursor is None:
+        return None
+    return _instant(datetime.fromisoformat(cursor.replace("Z", "+00:00")) - RESYNC_LOOKBACK)
 
 
 def _instant(moment: datetime) -> str:
@@ -166,6 +236,46 @@ def _records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         elif isinstance(current, list):
             queue.extend(current)
     return []
+
+
+def _transcript(payload: Mapping[str, Any]) -> str:
+    """What was said in one meeting, as prose. Granola answers a transcript either as one block of
+    text or as the speaker turns it was recorded in, under the same wrapping `data` envelope the
+    listing arrives in, so the reader takes the first transcript value under a known key at any
+    depth and renders speaker turns as `speaker: said` lines."""
+    queue: list[Any] = [payload]
+    while queue:
+        current = queue.pop(0)
+        if isinstance(current, str):
+            try:
+                queue.append(json.loads(current))
+            except ValueError:
+                continue
+        elif isinstance(current, Mapping):
+            for key in TRANSCRIPT_FIELDS:
+                value = current.get(key)
+                if isinstance(value, str) and value:
+                    return value
+                if isinstance(value, list) and (turns := _turns(value)):
+                    return turns
+            queue.extend(current.values())
+        elif isinstance(current, list):
+            queue.extend(current)
+    return ""
+
+
+def _turns(value: list[Any]) -> str:
+    lines: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item:
+            lines.append(item)
+        elif isinstance(item, Mapping):
+            said = _field(item, SPOKEN_FIELDS)
+            if not said:
+                continue
+            speaker = _field(item, SPEAKER_FIELDS)
+            lines.append(f"{speaker}: {said}" if speaker else said)
+    return "\n".join(lines)
 
 
 def _meeting(record: Mapping[str, Any]) -> dict[str, Any] | None:

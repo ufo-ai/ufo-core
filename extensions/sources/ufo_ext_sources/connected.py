@@ -20,7 +20,9 @@ The job is the retry path for everything else, never the producer: a hook that r
 that died between the connection and its rows, leaves streams uncreated, and the next tick creates
 exactly those. It is also how a per-tenant provider's rows arrive — a connector that declares no
 host of its own dials the connection's `base_url`, and a connection that carries none registers
-nothing until the member names it, which the next tick reads.
+nothing until the member names it, which the next tick reads. A connector that dials no host at all
+reads through broker tool executions instead, so its empty `base_url` is its whole address and its
+rows land with the connection like a fixed-host provider's.
 
 Nothing marks a connection done, because the rows are the record: a stream a later connector release
 marks canonical reaches accounts that already sync. Each stream's first sync reaches back as far as
@@ -81,7 +83,9 @@ class ConnectedSources:
             if connection_id is not None and connection.id != connection_id:
                 continue
             connector_cls = CONNECTORS.get(connection.provider)
-            if connector_cls is None or not (connector_cls.base_url or connection.base_url):
+            if connector_cls is None:
+                continue
+            if connector_cls.dials_host and not (connector_cls.base_url or connection.base_url):
                 continue
             streams = {stream.name: stream for stream in connector_cls().streams()}
             await self._create(connection, streams, live)

@@ -6,7 +6,8 @@ Every assertion drives a real seam and reads back durable rows. The connect path
 instant the callback answers. The retry path runs the declared job through `JobRunner`, so its
 candidates and handler are the ones exercised. Covered here: the callback leaves one row per
 canonical stream on the connection, whichever agent asked for the connection; a per-tenant provider
-registers nothing until the connection names a tenant URL and then registers on the next tick; the
+registers nothing until the connection names a tenant URL and then registers on the next tick; a
+connector that dials no host at all registers its streams with the connection; the
 job creates what a connect-time creation did not and adds nothing once the rows are there; a stream
 a later connector release marks canonical joins a connection registered long ago; the connection's
 `backfill_days` governs every stream that takes a window and no stream that declares none; raising
@@ -48,6 +49,7 @@ pytestmark = [
 ASANA = "asana"
 GITHUB = "github"
 FRESHDESK = "freshdesk"
+GRANOLA = "granola_mcp"
 WINDOWED = "windowed"
 KEYED = "klaviyo"
 ACCOUNT = "acct-one"
@@ -179,7 +181,9 @@ def _flow() -> ConnectFlow:
     through `connection_hooks`, so completing the handoff publishes to the real chain."""
     credentials = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     return ConnectFlow(
-        providers={provider: _StubProvider(provider=provider) for provider in (ASANA, FRESHDESK)},
+        providers={
+            provider: _StubProvider(provider=provider) for provider in (ASANA, FRESHDESK, GRANOLA)
+        },
         fernet=credentials.fernet,
         store=GrantStore(),
         redirect_uri=REDIRECT_URI,
@@ -379,6 +383,17 @@ async def test_a_per_tenant_provider_waits_for_its_tenant_url(db: None) -> None:
     await _tick(state)
 
     assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(FRESHDESK)
+
+
+async def test_a_connector_that_dials_no_host_registers_its_streams(db: None) -> None:
+    """A broker-tool connector reads through tool executions, so its empty `base_url` is its whole
+    address rather than a tenant URL it waits for. Read as a per-tenant provider it would wait for
+    a URL no member can name, leaving the account connected and permanently silent."""
+    state = await _workspace()
+
+    await _connect(state, state.main_id, GRANOLA)
+
+    assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(GRANOLA)
 
 
 async def test_the_job_creates_what_the_callback_did_not_and_then_adds_nothing(db: None) -> None:

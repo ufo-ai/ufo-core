@@ -81,8 +81,11 @@ over a `Credential`, and the broker transport proxies each request to the provid
 Granola publishes no such host, so a REST connector has nothing to dial. `ToolConnector` reads
 through tool executions the broker runs server-side instead: `ComposioBroker.credential` carries
 an executor beside its transport, and `GranolaConnector` pages its `meetings` stream through
-`GRANOLA_MCP_LIST_MEETINGS` and `GRANOLA_MCP_GET_MEETINGS`. Such a connector dials no host, so it
-declares `dials_host` False and takes no row in `TENANT_URL_RULES`.
+`GRANOLA_MCP_LIST_MEETINGS` and `GRANOLA_MCP_GET_MEETINGS` and its `transcripts` stream through
+`GRANOLA_MCP_GET_MEETING_TRANSCRIPT`, which Granola gates behind its paid plans, so a refusal skips
+that stream alone and the written notes keep syncing on a free plan. Such a connector dials no
+host, so it declares `dials_host` False, takes no row in `TENANT_URL_RULES`, and its source rows
+are created with the connection rather than waiting for a tenant URL.
 
 ### Where the scope axis is not evidence
 
