@@ -208,6 +208,7 @@ from ufo_ext_web.panels import (
     ApplyIntent,
     AppUnlock,
     agent_settings,
+    offered_models,
     submit_action,
     submit_intent,
 )
@@ -1393,9 +1394,9 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     away again. The page row it needs is the row the homepage answer already reads, so the fact
     costs no query of its own.
 
-    `models` is the model ids this deploy's registry serves: the closed set the portal offers
-    where a member chooses what an agent runs on, so no screen names a model a turn would
-    refuse."""
+    `models` is the model ids this deploy's registry serves, less a flagged model this workspace's
+    flag withholds: the closed set the portal offers where a member chooses what an agent runs on,
+    so no screen names a model a turn would refuse."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1459,7 +1460,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                 **{name: flags[key] for name, key in PORTAL_SURFACES.items()},
                 "team": audience.admin,
             },
-            "models": list(ctx.models),
+            "models": await offered_models(ctx.models),
             "archived": [
                 {
                     "id": str(app.id),

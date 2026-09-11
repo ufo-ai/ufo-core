@@ -29,7 +29,7 @@ export type ModelGroup = { provider: ModelProvider; models: ModelChoice[] };
 export const MODEL_PROVIDERS: readonly ModelProvider[] = [
   { id: "anthropic", label: "Claude", mark: "anthropic" },
   { id: "openai", label: "GPT", mark: "openai" },
-  { id: "deepseek", label: "DeepSeek", mark: "deepseek", offered: false },
+  { id: "deepseek", label: "DeepSeek", mark: "deepseek" },
   { id: "zai", label: "GLM", mark: "zai", offered: false },
 ];
 
@@ -70,10 +70,17 @@ export const MODEL_CHOICES: readonly ModelChoice[] = [
     offered: false,
   },
   {
+    id: "deepseek/deepseek-v4.1-flash",
+    provider: "deepseek",
+    family: "deepseek-flash",
+    label: "DeepSeek V4.1 Flash",
+  },
+  {
     id: "deepseek/deepseek-v4-flash",
     provider: "deepseek",
     family: "deepseek-flash",
     label: "DeepSeek V4 Flash",
+    offered: false,
   },
   { id: "z-ai/glm-5.3", provider: "zai", family: "glm", label: "GLM 5.3" },
   { id: "z-ai/glm-5.2", provider: "zai", family: "glm", label: "GLM 5.2" },

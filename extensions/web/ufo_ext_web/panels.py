@@ -13,7 +13,7 @@ like every other portal read."""
 import asyncio
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Literal, get_args
 from uuid import UUID
 
@@ -23,6 +23,7 @@ from ufo_ext_imessage.tools import IMESSAGE_CONNECT_ACTION
 from ufo_ext_slack.tools import SLACK_CONNECT_ACTION
 
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.flags import flag_enabled
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, Terminal
 from ufo.sdk.objects import (
@@ -42,6 +43,9 @@ ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 DELETE_ONLY_KINDS = frozenset({"credential", "source_trigger"})
 CONNECT_KINDS = frozenset({"connection"})
 AGENT_SPEC_REQUIRED = frozenset({"model", "internet_access_allowed", "reasoning"})
+DEEPSEEK_FLASH_MODEL = "deepseek/deepseek-v4.1-flash"
+DEEPSEEK_FLASH_FLAG = "enable-deepseek-v4-1-flash"
+FLAGGED_MODELS = {DEEPSEEK_FLASH_MODEL: DEEPSEEK_FLASH_FLAG}
 STATED_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 SLACK_INSTALL_LINK_KEY = "authorize_url"
 SLACK_INSTALL_HINT_KEY = "hint"
@@ -703,6 +707,25 @@ onto a live one is a message no round ever reads, and the member waits for a rep
 coming. A member reads that room and speaks to the app in their own chat with it."""
 
 
+async def offered_models(models: Iterable[str], keep: str | None = None) -> list[str]:
+    """The served model ids this workspace chooses an agent's model from: the registry's set, less
+    a flagged model whose flag is off. The flag reads closed, so a deploy whose flag service holds
+    no key, and one it cannot reach, offer the models they offered before the flagged one landed.
+    `keep` is the model an agent already runs on, and it stays offered whatever its flag says: a
+    flag that closes over a running app must not empty that app's model choice."""
+    served = list(models)
+    gated = {
+        model: FLAGGED_MODELS[model]
+        for model in served
+        if model in FLAGGED_MODELS and model != keep
+    }
+    if not gated:
+        return served
+    answers = await asyncio.gather(*(flag_enabled(flag, default=False) for flag in gated.values()))
+    withheld = {model for model, on in zip(gated, answers, strict=True) if not on}
+    return [model for model in served if model not in withheld]
+
+
 async def _complete_agent_spec(
     ctx: SurfaceContext,
     submitted: ApplyIntent,
@@ -733,12 +756,25 @@ async def _complete_agent_spec(
     )
 
 
+async def _runs_on(ctx: SurfaceContext, agent_id: UUID, member_id: UUID, model: object) -> bool:
+    if model not in ctx.models:
+        return False
+    detail = await ctx.agent_detail(agent_id, member_id)
+    return detail is not None and detail.model == model
+
+
 async def _intent_refusal(
-    ctx: SurfaceContext, submitted: ApplyIntent, submitted_fields: frozenset[str]
+    ctx: SurfaceContext,
+    submitted: ApplyIntent,
+    submitted_fields: frozenset[str],
+    agent_id: UUID,
+    member_id: UUID,
 ) -> Response | None:
     if submitted.kind == "agent" and submitted.spec:
         model = submitted.spec.get("model")
-        if model not in ctx.models:
+        if model not in await offered_models(ctx.models) and not await _runs_on(
+            ctx, agent_id, member_id, model
+        ):
             return JSONResponse({"applied": False, "message": f"No model named {model!r}."})
         if "sandbox_size" in submitted_fields and not ctx.sandbox_sizes:
             return JSONResponse(
@@ -779,7 +815,7 @@ async def _prepare_panel_intent(
     completed = await _complete_agent_spec(ctx, submitted, submitted_fields, agent_id, member_id)
     if isinstance(completed, Response):
         return completed
-    refused = await _intent_refusal(ctx, completed, submitted_fields)
+    refused = await _intent_refusal(ctx, completed, submitted_fields, agent_id, member_id)
     if refused is not None:
         return refused
     return completed
@@ -982,9 +1018,10 @@ async def agent_settings(
     ctx: SurfaceContext, agent_id: UUID, member_id: UUID, *, admin: bool, archivable: bool
 ) -> Response:
     """The settings projection: the agent's configuration and prompt digest, the deploy's public
-    internet capability as the ceiling the agent setting narrows, the deploy's model ids for the
-    model choice, the writable spec's own schema (the form renders its fields from it, never a
-    parallel description), and — for an admin — the web audience this extension grants."""
+    internet capability as the ceiling the agent setting narrows, the model ids this workspace is
+    offered for the model choice, the writable spec's own schema (the form renders its fields from
+    it, never a parallel description), and — for an admin — the web audience this extension
+    grants."""
     detail = await ctx.agent_detail(agent_id, member_id)
     if detail is None:
         return Response("no such agent", status_code=404)
@@ -1004,7 +1041,7 @@ async def agent_settings(
                 "updated_at": detail.updated_at.isoformat(),
             },
             "deploy": {"sandbox_internet": ctx.deploy_sandbox_internet},
-            "models": list(ctx.models),
+            "models": await offered_models(ctx.models, keep=detail.model),
             "spec": AgentSpec(
                 model=detail.model,
                 internet_access_allowed=detail.internet_access_allowed,

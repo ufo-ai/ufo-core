@@ -8,36 +8,38 @@ locals {
 
   portal_flags = {
     testing = {
-      "enable-app-store"        = true
-      "enable-apps-tab"         = false
-      "enable-assistant-app"    = true
-      "enable-code-app"         = false
-      "enable-community-skills" = true
-      "enable-context-rollover" = true
-      "enable-installed-skills" = true
-      "enable-issues-app"       = false
-      "enable-lanes-shell"      = false
-      "enable-meetings-app"     = false
-      "enable-memory-tab"       = true
-      "enable-metrics-app"      = false
-      "enable-notification-app" = false
-      "enable-wiki-app"         = false
+      "enable-app-store"           = true
+      "enable-apps-tab"            = false
+      "enable-assistant-app"       = true
+      "enable-code-app"            = false
+      "enable-community-skills"    = true
+      "enable-context-rollover"    = true
+      "enable-deepseek-v4-1-flash" = true
+      "enable-installed-skills"    = true
+      "enable-issues-app"          = false
+      "enable-lanes-shell"         = false
+      "enable-meetings-app"        = false
+      "enable-memory-tab"          = true
+      "enable-metrics-app"         = false
+      "enable-notification-app"    = false
+      "enable-wiki-app"            = false
     }
     prod = {
-      "enable-app-store"        = false
-      "enable-apps-tab"         = false
-      "enable-assistant-app"    = false
-      "enable-code-app"         = false
-      "enable-community-skills" = false
-      "enable-context-rollover" = false
-      "enable-installed-skills" = false
-      "enable-issues-app"       = false
-      "enable-lanes-shell"      = false
-      "enable-meetings-app"     = false
-      "enable-memory-tab"       = false
-      "enable-metrics-app"      = false
-      "enable-notification-app" = false
-      "enable-wiki-app"         = false
+      "enable-app-store"           = false
+      "enable-apps-tab"            = false
+      "enable-assistant-app"       = false
+      "enable-code-app"            = false
+      "enable-community-skills"    = false
+      "enable-context-rollover"    = false
+      "enable-deepseek-v4-1-flash" = false
+      "enable-installed-skills"    = false
+      "enable-issues-app"          = false
+      "enable-lanes-shell"         = false
+      "enable-meetings-app"        = false
+      "enable-memory-tab"          = false
+      "enable-metrics-app"         = false
+      "enable-notification-app"    = false
+      "enable-wiki-app"            = false
     }
   }
 }

@@ -250,6 +250,25 @@ def test_manifest_registers_fable_5_1() -> None:
     assert fable.reasoning.supported
 
 
+def test_manifest_registers_deepseek_v4_1_flash_pinned_to_fireworks() -> None:
+    """Fireworks is the one permitted upstream that serves the slug, so the id pins there alone and
+    books the Fireworks rate rather than the list rate of a route it never takes."""
+    deepseek = {spec.id: spec for spec in openrouter.manifest().models}[
+        "deepseek/deepseek-v4.1-flash"
+    ]
+    assert deepseek.provider == "openrouter"
+    assert deepseek.api_surface == "chat"
+    assert deepseek.price.input == 220_000
+    assert deepseek.price.output == 660_000
+    assert deepseek.price.cache_read == 7_000
+    assert deepseek.context_window == 1_048_576
+    assert deepseek.knowledge_cutoff == "2026-06"
+    assert deepseek.accepts_image_input
+    assert deepseek.reasoning.supported
+    assert openrouter.openrouter_slug(deepseek.id) == "deepseek/deepseek-v4.1-flash"
+    assert openrouter.PROVIDER_ORDER[deepseek.id] == ("fireworks",)
+
+
 def test_manifest_compacts_glm_flash_before_its_observed_coherence_boundary() -> None:
     glm_flash = {spec.id: spec for spec in openrouter.manifest().models}["z-ai/glm-5.3-flash"]
     assert glm_flash.context_window == 1_048_576
@@ -911,6 +930,30 @@ async def test_a_dead_upstream_is_excluded_inside_the_ordered_providers() -> Non
     }
 
 
+async def test_a_single_route_pin_holds_and_carries_no_exclusion() -> None:
+    """DeepSeek V4.1 Flash pins one upstream, so the re-route has nothing to fall to: `ignore` would
+    cover `order` and leave the slug served nowhere, so the re-issue repeats the pin alone."""
+    spec = {spec.id: spec for spec in openrouter.OPENROUTER_MODEL_SPECS}[
+        "deepseek/deepseek-v4.1-flash"
+    ]
+    create = ScriptedCreate(
+        [_chunk(finish="stop", provider="Fireworks"), _chunk(usage=_usage(1, 0))],
+        [_chunk(content="ok"), _chunk(finish="stop"), _chunk(usage=_usage(1, 1))],
+    )
+
+    events = [
+        event
+        async for event in _client(create, spec).complete(
+            REQUEST.model_copy(update={"model": "deepseek/deepseek-v4.1-flash"})
+        )
+    ]
+
+    assert TextDelta(text="ok") in events
+    pinned = {"order": ["fireworks"], "allow_fallbacks": False}
+    assert create.calls[0]["extra_body"]["provider"] == pinned
+    assert create.calls[1]["extra_body"]["provider"] == pinned
+
+
 async def test_a_dead_upstream_off_the_order_is_excluded_from_the_re_issue() -> None:
     """An unpinned id carries no `only`, so the re-route's `ignore` is its whole provider
     preference — and it has to carry one: the re-issue keeps the session_id that pins the series to
@@ -1005,7 +1048,8 @@ async def test_every_glm_slug_is_pinned_and_none_of_them_name_a_dropped_route() 
         assert "together" not in routes
         assert "modal" not in routes
         assert "morph" not in routes
-        assert len(routes) >= 2
+    for slug in glm:
+        assert len(openrouter.PROVIDER_ORDER[slug]) >= 2
 
 
 async def test_a_stalled_upstream_leaves_the_rounds_re_run() -> None:

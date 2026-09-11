@@ -120,6 +120,7 @@ GLM_PROVIDER_ORDER = ("fireworks", "baseten")
 PROVIDER_ORDER = {
     "z-ai/glm-5.3": GLM_PROVIDER_ORDER,
     "z-ai/glm-5.3-flash": GLM_PROVIDER_ORDER,
+    "deepseek/deepseek-v4.1-flash": ("fireworks",),
 }
 """The upstreams a slug may be served by, in OpenRouter's `provider.order`. A GLM slug names two
 dozen routes that differ in quantization, price and context window, while the spec books one rate
@@ -130,9 +131,12 @@ assistant text, so the act the call named never ran — where Fireworks broke no
 none of 300. As the route a busy Fireworks fell to, it was breaking one tool call in every
 seventeen it took. Morph is not among them either: OpenRouter keeps routing to a route at 0%
 uptime, and a call that lands there dies on its 500 or waits out the client timeout before any
-chunk names it, so the stall exclusion has nothing to subtract. `allow_fallbacks: false` keeps
-routing inside these two while OpenRouter tries each in order, so a request whose permitted set
-serves the model nowhere answers 404 rather than routing outside it. The dead-provider re-route's
+chunk names it, so the stall exclusion has nothing to subtract. DeepSeek V4.1 Flash names Fireworks
+alone: of the eleven upstreams OpenRouter routes the slug to, Fireworks is the only one of the four
+permitted names that serves it, so the id pins there with no second route and the spec books the
+Fireworks rate and window. `allow_fallbacks: false` keeps routing inside the ordered set while
+OpenRouter tries each in order, so a request whose permitted set serves the model nowhere answers
+404 rather than routing outside it. The dead-provider re-route's
 `ignore` subtracts from the ordered set for a slug named here and is the whole `provider` object
 for one that is not, because an exclusion has to reach the wire for every id or the re-issue lands
 back on the upstream that answered empty. Naming a slug here is also what lets a stalled upstream
@@ -990,6 +994,12 @@ OPENROUTER_MODEL_SPECS = (
             consecutive_turns=4,
             trigger_percent=50,
         ),
+    ),
+    _openrouter(
+        "deepseek/deepseek-v4.1-flash",
+        ModelPrice(220_000, 660_000, 7_000, 0, 0),
+        "2026-06",
+        context_window=1_048_576,
     ),
     _openrouter(
         "moonshotai/kimi-k3",

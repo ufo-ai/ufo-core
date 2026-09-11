@@ -93,10 +93,13 @@ from ufo_ext_web.openai_login import (
     DeviceClaim,
 )
 from ufo_ext_web.panels import (
+    DEEPSEEK_FLASH_FLAG,
+    DEEPSEEK_FLASH_MODEL,
     FRAME_HEADER,
     NO_FRAME_ACCESS,
     _action_intent,
     _outcome,
+    offered_models,
 )
 from ufo_ext_web.shell import SHELL_UNSUPPORTED_MESSAGE
 from ufo_ext_web.starters import SLATE_DIGEST, RankedUnlock, Slate, starters_key
@@ -4527,6 +4530,30 @@ async def test_the_portal_serves_the_sidebar_shell_until_the_lanes_flag_answers(
     assert "assets/sidebar-" not in lanes.text
 
 
+async def test_a_flagged_model_is_offered_only_where_its_flag_is_on(
+    unbound_flags: None,
+) -> None:
+    """DeepSeek V4.1 Flash is registered before OpenRouter serves it, so the workspace's flag
+    decides whether the portal offers it: a flag service holding no key withholds it, an off key
+    withholds it, and an on key offers it. Every other served id stands whatever the flag says."""
+    served = ("auto", "claude-opus-4-8", DEEPSEEK_FLASH_MODEL)
+    variants = {"on": SERVED_TRUE, "off": SERVED_FALSE}
+    workspace_id = uuid4()
+
+    init_flags(InMemoryProvider({}))
+    with ws(workspace_id):
+        assert await offered_models(served) == ["auto", "claude-opus-4-8"]
+
+    for variant, offered in (("off", False), ("on", True)):
+        init_flags(
+            InMemoryProvider(
+                {DEEPSEEK_FLASH_FLAG: InMemoryFlag(default_variant=variant, variants=variants)}
+            )
+        )
+        with ws(workspace_id):
+            assert (DEEPSEEK_FLASH_MODEL in await offered_models(served)) is offered
+
+
 def _stub_openai(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -8609,6 +8636,79 @@ async def test_a_member_repicks_the_agent_icon_through_the_intent_lane(
             )
         ).one()
     assert tuple(row) == ("chart-line", "be useful", "claude-opus-4-8", True, "high", "large")
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_flag_closing_over_a_running_model_neither_refuses_nor_hides_it(
+    web: tuple[AsyncClient, UUID, UUID],
+    unbound_flags: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An app runs on a flagged model and the flag then reads off. Every save of that app carries
+    the stored model back, so the panel keeps saving and the picker keeps naming the model the app
+    runs on. A model the app does not run on stays withheld."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    monkeypatch.setattr(
+        web_panels,
+        "FLAGGED_MODELS",
+        {"claude-sonnet-5": DEEPSEEK_FLASH_FLAG, "claude-opus-4-8": DEEPSEEK_FLASH_FLAG},
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(model="claude-sonnet-5")
+            .where(tables.agent.c.id == agent_id)
+        )
+    saved = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "agent",
+            "name": "assistant",
+            "spec": {"icon": "chart-line"},
+        },
+        headers=headers,
+    )
+    assert saved.status_code == 200
+    assert saved.json()["applied"] is True
+    settings = await client.get(f"/surface/web/agents/{agent_id}/settings", headers=headers)
+    assert settings.json()["models"] == ["auto", "claude-sonnet-5"]
+    kept = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "agent",
+            "name": "assistant",
+            "spec": {
+                "model": "claude-sonnet-5",
+                "internet_access_allowed": False,
+                "reasoning": "medium",
+            },
+        },
+        headers=headers,
+    )
+    assert kept.json()["applied"] is True
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "agent",
+            "name": "assistant",
+            "spec": {
+                "model": "claude-opus-4-8",
+                "internet_access_allowed": False,
+                "reasoning": "medium",
+            },
+        },
+        headers=headers,
+    )
+    assert refused.json() == {
+        "applied": False,
+        "message": "No model named 'claude-opus-4-8'.",
+    }
 
 
 @pytest.mark.usefixtures("database_url")

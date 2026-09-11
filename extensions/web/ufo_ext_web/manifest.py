@@ -14,6 +14,7 @@ from ufo.sdk.jobs import JobSpec, unseeded_agent_workspaces, untitled_conversati
 from ufo.sdk.manifest import FlagSpec, Manifest
 from ufo.sdk.surfaces import SurfaceSpec
 from ufo_ext_web.audience import EXTENSION_WEB, WEB_ACCESS_TOOLS
+from ufo_ext_web.panels import DEEPSEEK_FLASH_FLAG
 from ufo_ext_web.surface import (
     APP_FLAGS,
     ARTIFACTS_SLOT,
@@ -60,6 +61,10 @@ FLAGS = (
     FlagSpec(
         key=PORTAL_SURFACES["installed-skills"],
         what="The Skills tab offers the workspace's own skills.",
+    ),
+    FlagSpec(
+        key=DEEPSEEK_FLASH_FLAG,
+        what="DeepSeek V4.1 Flash is offered where a member chooses an agent's model.",
     ),
     FlagSpec(
         key=LANES_SHELL_FLAG,
