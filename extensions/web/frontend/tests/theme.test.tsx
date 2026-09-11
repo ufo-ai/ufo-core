@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
+import { GrowingTextarea } from "@/components/ui/field";
 import { Table, Td } from "@/components/ui/table";
 import { BRAND_MARKS } from "@/lib/brandMark";
 import { Notice } from "@/kernel/panel";
@@ -531,6 +532,28 @@ test("a placeholder is muted rather than mistaken for a value", () => {
   expect(packedStyles()).toContain(
     ".placeholder\\:text-ink-faint::placeholder{color:var(--color-ink-faint)}",
   );
+});
+
+/** iOS Safari zooms the page in on a field it focuses that computes under 16px, and the size reaches
+ *  a field as a utility, so only a rule outside the layers can floor every one of them. */
+test("a field at phone width holds 16px, so tapping an entry never zooms the page", () => {
+  const css = packedStyles();
+
+  expect(css).toContain("--text-subtitle:16px");
+  expect(css).toContain(
+    "@medianotalland(min-width:720px){" +
+      "input:not([type=checkbox],[type=radio],[type=range]),textarea,select," +
+      "[data-slot=growing-mirror]{font-size:var(--text-subtitle)}",
+  );
+});
+
+/** The box grows on the mirror's height, so the mirror takes the floor with the textarea or the
+ *  composer measures a height its own text overflows. */
+test("the growing box's mirror is named, so the phone-width floor sizes it too", () => {
+  const { container } = render(<GrowingTextarea value="a line" onChange={() => {}} bare />);
+
+  const mirror = container.querySelector('[data-slot="growing-mirror"]');
+  expect(mirror?.textContent).toBe("a line ");
 });
 
 test("muted text is the palette's second tone, never ink held back by opacity", () => {

@@ -158,6 +158,7 @@ export function GrowingTextarea({
     <div className={cn("grid", className)}>
       <div
         aria-hidden
+        data-slot="growing-mirror"
         className={cn(
           surface,
           GROWING_CELL,

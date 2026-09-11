@@ -966,6 +966,17 @@ body[data-shell="sidebar"] {
   margin-block-start: 0;
 }
 
+/* iOS Safari zooms the page in when the field taking focus computes under 16px. The mirror takes
+   the floor with its textarea, or the growing box measures a height its text overflows. */
+@media (width < theme(--breakpoint-narrow)) {
+  input:not([type="checkbox"], [type="radio"], [type="range"]),
+  textarea,
+  select,
+  [data-slot="growing-mirror"] {
+    font-size: var(--text-subtitle);
+  }
+}
+
 @media (width < theme(--breakpoint-narrow)) {
   [data-slot="table"][data-stacks] {
     display: block;
