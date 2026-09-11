@@ -58,7 +58,7 @@ the same subdomain and path under ufo.ai.
 ## The docs door
 
 `docs.ufo.ai` and `docs.testing.ufo.ai` are one Cloudflare Worker each (`infra/modules/docs`), and
-the whole worker is a built Starlight site under `site/` — no code runs, the uploaded assets answer,
+the whole worker is the Starlight site built from `content/docs/` — no code runs, the assets answer,
 and a custom domain claims the exact host ahead of the `*` wildcard that hosted member sites answer
 under. Both doors serve one build, whose canonical is always production, so the testing copy is
 never the indexed one. The site is public: nothing on it is workspace data, and a session cookie

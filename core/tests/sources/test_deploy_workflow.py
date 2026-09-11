@@ -627,7 +627,7 @@ def _check_pull_request_plans_active_deployment_inputs() -> None:
     environment = selector["env"]
     assert isinstance(environment, dict)
     assert environment["DEPLOY_PATHS_PATTERN"] == (
-        r"^(\.github/(workflows/deploy(-production)?\.yml|"
+        r"^(content/|\.github/(workflows/deploy(-production)?\.yml|"
         r"scripts/(billing_export_plan_(check\.py|gate\.sh)|deploy_change_gate\.py|"
         r"founder_email_prerequisites\.sh|publish_web_assets\.py|"
         r"terraform_plan_guard\.py|"

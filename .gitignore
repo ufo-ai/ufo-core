@@ -9,10 +9,10 @@ extensions/web/ufo_ext_web/apps/
 extensions/web/ufo_ext_web/static/
 extensions/debugger/frontend/tsconfig.tsbuildinfo
 extensions/web/frontend/tsconfig.tsbuildinfo
-infra/modules/docs/site/public/favicon.svg
-infra/modules/docs/site/public/favicon-dark.svg
-infra/modules/docs/site/src/styles/assets/
-infra/modules/docs/site/src/assets/
+content/docs/public/favicon.svg
+content/docs/public/favicon-dark.svg
+content/docs/src/styles/assets/
+content/docs/src/assets/
 .env
 .local/
 dist/

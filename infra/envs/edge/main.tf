@@ -9,6 +9,7 @@ data "cloudflare_zone" "ufo_ai" {
 locals {
   favicon_svg      = file("${path.root}/../../../assets/brand/ufo-mark.svg")
   favicon_dark_svg = file("${path.root}/../../../assets/brand/ufo-mark-on-dark.svg")
+  docs_dist        = "${path.root}/../../../content/docs/dist"
 }
 
 resource "cloudflare_ruleset" "flyingobject_redirect" {
@@ -94,6 +95,7 @@ module "docs_prod" {
 
   name       = "ufo-docs"
   hostname   = "docs.ufo.ai"
+  dist       = local.docs_dist
   zone_id    = data.cloudflare_zone.ufo_ai.id
   account_id = data.cloudflare_zone.ufo_ai.account.id
 }
@@ -103,6 +105,7 @@ module "docs_testing" {
 
   name       = "ufo-docs-testing"
   hostname   = "docs.testing.ufo.ai"
+  dist       = local.docs_dist
   zone_id    = data.cloudflare_zone.ufo_ai.id
   account_id = data.cloudflare_zone.ufo_ai.account.id
 }

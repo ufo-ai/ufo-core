@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // gitignored, and each file is read from the one place that owns it. The apex worker reads the same
 // two mark files at plan time, and `ufo-style` holds the face.
 const here = dirname(fileURLToPath(import.meta.url));
-const repository = join(here, "..", "..", "..", "..");
+const repository = join(here, "..", "..");
 const brand = join(repository, "assets", "brand");
 const style = join(repository, "core", "src", "ufo", "runtime", "skills", "ufo-style");
 

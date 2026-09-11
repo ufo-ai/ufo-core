@@ -2,7 +2,7 @@
 
 WEB := extensions/web/frontend
 DEBUGGER := extensions/debugger/frontend
-DOCS := infra/modules/docs/site
+DOCS := content/docs
 EMAIL ?= $(shell git config user.email)
 T ?=
 FILE ?=

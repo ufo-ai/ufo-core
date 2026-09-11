@@ -3,7 +3,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import test from "node:test";
 
 const dist = new URL("dist/", import.meta.url);
-const brand = new URL("../../../../assets/brand/", import.meta.url);
+const brand = new URL("../../assets/brand/", import.meta.url);
 const APEX = "https://docs.ufo.ai";
 const NOT_FOUND = "/404";
 
@@ -30,7 +30,7 @@ async function pages(directory = dist, prefix = "/") {
 const built = await pages();
 assert.ok(
   built.size > 1,
-  "dist holds no pages — run `pnpm -C infra/modules/docs/site run build` before this suite",
+  "dist holds no pages — run `pnpm -C content/docs run build` before this suite",
 );
 
 function links(html) {

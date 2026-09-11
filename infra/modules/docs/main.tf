@@ -4,14 +4,14 @@ terraform {
   }
 }
 
-# The built site is the whole worker: no code runs and the assets answer. `make docs` writes
-# `site/dist`, which a plan reads, so the deploy runs that build ahead of terraform.
+# The built site is the whole worker: no code runs and the assets answer. A plan reads `dist`, so
+# the deploy runs `make docs` ahead of terraform.
 resource "cloudflare_workers_script" "docs" {
   account_id  = var.account_id
   script_name = var.name
 
   assets = {
-    directory = "${path.module}/site/dist"
+    directory = var.dist
     config = {
       html_handling      = "auto-trailing-slash"
       not_found_handling = "404-page"
