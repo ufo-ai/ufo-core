@@ -81,6 +81,14 @@ test("every canonical names production, so the testing door is never the indexed
   }
 });
 
+test("the header draws the lockup, one file per scheme", () => {
+  const header = built.get("/").match(/<a[^>]*class="site-title[^"]*"[^>]*>(.*?)<\/a>/s);
+  assert.ok(header, "no site title in the header");
+  const drawn = [...header[1].matchAll(/src="([^"]+)"/g)].map(([, src]) => src);
+  assert.equal(drawn.length, 2, `the header draws ${drawn.length} images, not one per scheme`);
+  for (const src of drawn) assert.match(src, /lockup(-on-dark)?\.[A-Za-z0-9_-]+\.svg$/);
+});
+
 test("the mark is served from its one home", async () => {
   for (const [served_as, source] of [
     ["favicon.svg", "ufo-mark.svg"],

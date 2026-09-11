@@ -12,6 +12,7 @@ extensions/web/frontend/tsconfig.tsbuildinfo
 infra/modules/docs/site/public/favicon.svg
 infra/modules/docs/site/public/favicon-dark.svg
 infra/modules/docs/site/src/styles/assets/
+infra/modules/docs/site/src/assets/
 .env
 .local/
 dist/

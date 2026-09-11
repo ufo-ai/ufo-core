@@ -8,7 +8,12 @@ export default defineConfig({
   site: "https://docs.ufo.ai",
   integrations: [
     starlight({
-      title: "ufo",
+      title: "UFO",
+      logo: {
+        light: "./src/assets/lockup.svg",
+        dark: "./src/assets/lockup-on-dark.svg",
+        replacesTitle: true,
+      },
       description: "How to use ufo: signing in, where you talk to the agent, connecting accounts, memory, scheduled work, and what a workspace pays.",
       customCss: ["./src/styles/brand.css"],
       // The code theme carries hexes of its own, and the house style admits no colour that is not a

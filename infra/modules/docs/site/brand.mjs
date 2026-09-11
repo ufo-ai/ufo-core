@@ -14,9 +14,17 @@ await mkdir(join(here, "public"), { recursive: true });
 await cp(join(brand, "ufo-mark.svg"), join(here, "public", "favicon.svg"));
 await cp(join(brand, "ufo-mark-on-dark.svg"), join(here, "public", "favicon-dark.svg"));
 
-// The one face the site sets, from the tree that already holds it for the sandbox.
+// The header draws the brand's own lockup rather than setting `∵ UFO` as text: Roboto Mono carries
+// no glyph for U+2235, and the lockup holds the spacing the logo sheet specifies.
+await mkdir(join(here, "src", "assets"), { recursive: true });
+await cp(join(brand, "ufo-lockup.svg"), join(here, "src", "assets", "lockup.svg"));
+await cp(join(brand, "ufo-lockup-on-dark.svg"), join(here, "src", "assets", "lockup-on-dark.svg"));
+
+// The two faces the site sets, from the tree that already holds them for the sandbox.
 await mkdir(join(here, "src", "styles", "assets", "fonts"), { recursive: true });
-await cp(
-  join(style, "assets", "fonts", "RobotoMono-VariableFont_wght.ttf"),
-  join(here, "src", "styles", "assets", "fonts", "RobotoMono-VariableFont_wght.ttf"),
-);
+for (const face of ["Inter-VariableFont_wght.woff2", "RobotoMono-VariableFont_wght.ttf"]) {
+  await cp(
+    join(style, "assets", "fonts", face),
+    join(here, "src", "styles", "assets", "fonts", face),
+  );
+}

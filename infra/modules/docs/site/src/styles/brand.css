@@ -3,6 +3,13 @@
 @import "./vendor/palette.css";
 
 @font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  src: url("./assets/fonts/Inter-VariableFont_wght.woff2") format("woff2-variations");
+}
+
+@font-face {
   font-family: "Roboto Mono";
   font-style: normal;
   font-weight: 100 700;
@@ -12,8 +19,8 @@
 /* Starlight reads a ramp rather than roles, so each rung takes the brand slot whose job it already
    does. Both schemes come off the slots, so no rule below is written twice. */
 :root {
-  --sl-font: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sl-font-mono: var(--sl-font);
+  --sl-font: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --sl-font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --sl-color-white: var(--foreground);
   --sl-color-gray-1: var(--foreground);
@@ -26,11 +33,13 @@
   --sl-color-gray-6: var(--muted);
   --sl-color-black: var(--background);
 
-  --sl-color-bg: var(--background);
-  --sl-color-bg-nav: var(--card);
+  /* A page of prose is the pane, so it takes `card` and the chrome around it takes `background` —
+     the reading column stays the brightest surface, as it is in the portal. */
+  --sl-color-bg: var(--card);
+  --sl-color-bg-nav: var(--background);
   /* The sidebar paints only as far as its own box, so a ground of its own draws a hard edge partway
-     down a long page. The hairline divides it instead. */
-  --sl-color-bg-sidebar: var(--background);
+     down a long page. It shares the page's and the hairline divides them. */
+  --sl-color-bg-sidebar: var(--card);
   --sl-color-bg-inline-code: var(--muted);
   --sl-color-hairline: var(--border);
   --sl-color-hairline-light: var(--border);
@@ -43,8 +52,11 @@
   --sl-color-text-invert: var(--primary-foreground);
 }
 
-/* The wordmark is the product's, not a link's: the accent it would inherit reads as one more
-   navigation item beside the search field. */
-.site-title {
+/* A row's selected state is a state layer over the surface, never a solid fill — the brand's own
+   instruction, because a saturated row reads as a control rather than as the place you are. */
+.sidebar-content a[aria-current="page"],
+.sidebar-content a[aria-current="page"]:hover,
+.sidebar-content a[aria-current="page"]:focus {
   color: var(--foreground);
+  background-color: var(--state-selected);
 }
