@@ -3,7 +3,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
-import { agentHash, chatHash, type Route } from "@/lib/route";
+import { chatHash, newChatHash, type Route } from "@/lib/route";
 import { pageCrumb, pageTitle } from "@/lib/title";
 import type { OwnedConversation } from "@/lib/types";
 
@@ -74,11 +74,11 @@ test("a conversation is named by its own subject, and one still unread by the pr
 test("the crumb is the step the tab title names after the page", () => {
   expect(crumbed({ kind: "chat", conversationId: CONVO_ID })).toEqual({
     label: "Assistant",
-    at: agentHash(AGENT_ID),
+    at: newChatHash(AGENT_ID),
   });
   expect(crumbed({ kind: "chat", conversationId: "linked" }, { linked: LINKED })).toEqual({
     label: "Assistant",
-    at: agentHash(AGENT_ID),
+    at: newChatHash(AGENT_ID),
   });
   expect(crumbed({ kind: "workspace", view: "team", ...PLACE })).toEqual({ label: "Workspace" });
   expect(crumbed({ kind: "builder" })).toEqual({ label: "Apps", at: "#/agents" });

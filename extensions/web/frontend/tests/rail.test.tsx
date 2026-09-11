@@ -753,7 +753,7 @@ test("the chat header names the agent holding the conversation and what it is ca
   expect(crumb.queryByText(AGENT.model)).toBeNull();
 
   await userEvent.click(crumb.getByRole("link", { name: "Back to Assistant" }));
-  expect(location.hash).toBe("#/agents/" + AGENT_ID);
+  expect(location.hash).toBe("#/new/" + AGENT_ID);
 });
 
 test("a deep link is not blamed while the rail is the thing that failed", async () => {

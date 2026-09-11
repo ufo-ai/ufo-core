@@ -1,7 +1,7 @@
 import { agentName } from "@/lib/agentName";
 import { isPortalChat } from "@/lib/audience";
 import type { ChatRow } from "@/lib/rail";
-import { agentHash, workspaceHash, type Route } from "@/lib/route";
+import { agentHash, newChatHash, workspaceHash, type Route } from "@/lib/route";
 import type { Agent, OwnedConversation } from "@/lib/types";
 import { APP_CREATOR_TITLE } from "@/lib/wizard";
 import { SECTION_VIEWS, TASK_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
@@ -21,6 +21,10 @@ export type Crumb = { label: string; at?: string };
 
 export function agentCrumb(agent: { id: string; name: string }): Crumb {
   return { label: agentName(agent.name), at: agentHash(agent.id) };
+}
+
+function chatCrumb(agent: { id: string; name: string }): Crumb {
+  return { label: agentName(agent.name), at: newChatHash(agent.id) };
 }
 
 export function titled(...parts: string[]): string {
@@ -78,13 +82,14 @@ function where(
         (entry) => entry.conversation_id === route.conversationId && isPortalChat(entry.surface),
       );
       if (row) {
+        const found = agents.find((agent) => agent.id === row.agent_id);
         return [
           { label: row.title },
-          named(row.agent_id) ?? { label: agentName(row.agent_name) },
+          found ? chatCrumb(found) : { label: agentName(row.agent_name) },
         ];
       }
       const held = linked[route.conversationId];
-      return held ? [{ label: held.description }, agentCrumb(held.agent)] : [];
+      return held ? [{ label: held.description }, chatCrumb(held.agent)] : [];
     }
     case "conversation-slot":
       return [{ label: route.slot }, named(route.agentId)];
