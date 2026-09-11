@@ -3,6 +3,8 @@ title: Connecting MCP servers
 description: Give ufo access to tools from a Streamable HTTP MCP server.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Prepare the server
 
 You need:
@@ -16,9 +18,12 @@ workspace.
 
 ## Connect an MCP server
 
-A workspace admin asks:
-
-> Connect an MCP server named `docs` at `https://mcp.example.com/mcp`.
+<ConnectorAccess
+  name="MCP"
+  prompt="Connect an MCP server named docs at https://mcp.example.com/mcp."
+  query="MCP"
+  tags={["Streamable HTTP", "Workspace", "Admin only"]}
+/>
 
 The agent returns a private credential control. Enter the endpoint and token there. Never put the
 token in chat.

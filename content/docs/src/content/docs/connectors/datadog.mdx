@@ -3,6 +3,8 @@ title: Connecting Datadog
 description: Connect Datadog with workspace keys for monitors, incidents, dashboards, and telemetry.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 A workspace admin connects Datadog.
 
 ## Prepare Datadog
@@ -17,9 +19,12 @@ Read the Datadog site from your Datadog URL. For example, US1 uses `api.datadogh
 
 ## Connect Datadog
 
-Ask the agent:
-
-> Connect Datadog for this workspace.
+<ConnectorAccess
+  name="Datadog"
+  prompt="Connect Datadog for this workspace."
+  query="Datadog"
+  tags={["API keys", "Workspace", "Admin only"]}
+/>
 
 The agent returns a private credential control for the API key, application key, and site. Enter
 the values there. Never paste them into chat.

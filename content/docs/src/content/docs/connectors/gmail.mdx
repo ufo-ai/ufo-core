@@ -3,11 +3,16 @@ title: Connecting Gmail
 description: Connect Gmail to search messages, read threads, and prepare email.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Gmail
 
-Ask the agent:
-
-> Connect my Gmail account.
+<ConnectorAccess
+  name="Gmail"
+  prompt="Connect my Gmail account."
+  query="Gmail"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control. Select the correct Google account and approve the access
 shown by Google. The connection uses your Gmail permissions.

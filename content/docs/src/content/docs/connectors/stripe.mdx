@@ -3,11 +3,16 @@ title: Connecting Stripe
 description: Connect Stripe to work with customers, payments, invoices, and subscriptions.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Stripe
 
-Ask the agent:
-
-> Connect my Stripe account.
+<ConnectorAccess
+  name="Stripe"
+  prompt="Connect my Stripe account."
+  query="Stripe"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control and select the correct Stripe account. The Stripe grant
 controls access.

@@ -3,11 +3,16 @@ title: Connecting Notion
 description: Connect Notion to search pages and work with databases.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Notion
 
-Ask the agent:
-
-> Connect my Notion account.
+<ConnectorAccess
+  name="Notion"
+  prompt="Connect my Notion account."
+  query="Notion"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control. In Notion, choose the workspace and approve the pages that
 ufo may access. Pages outside that selection remain unavailable.

@@ -3,11 +3,16 @@ title: Connecting Google Sheets
 description: Connect Google Sheets to read and update spreadsheets.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Google Sheets
 
-Ask the agent:
-
-> Connect my Google Sheets account.
+<ConnectorAccess
+  name="Google Sheets"
+  prompt="Connect my Google Sheets account."
+  query="Google Sheets"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control and approve the Google account that can open the target
 spreadsheet.

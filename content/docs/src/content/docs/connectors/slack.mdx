@@ -3,11 +3,16 @@ title: Connecting Slack
 description: Install ufo in Slack and start work from channels, threads, and direct messages.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Slack
 
-A workspace admin asks:
-
-> Connect this workspace to Slack.
+<ConnectorAccess
+  name="Slack"
+  prompt="Connect this workspace to Slack."
+  query="Slack"
+  tags={["OAuth", "Workspace", "Admin only"]}
+/>
 
 Open the install control and approve the workspace. Then invite ufo to each channel where it must
 work.

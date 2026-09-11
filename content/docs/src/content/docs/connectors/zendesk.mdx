@@ -3,11 +3,16 @@ title: Connecting Zendesk
 description: Connect Zendesk to review support tickets and prepare replies.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Zendesk
 
-Ask the agent:
-
-> Connect my Zendesk account.
+<ConnectorAccess
+  name="Zendesk"
+  prompt="Connect my Zendesk account."
+  query="Zendesk"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control and approve the correct Zendesk account. The account
 controls which tickets and help center content ufo can use.

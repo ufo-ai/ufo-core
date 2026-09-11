@@ -3,11 +3,16 @@ title: Connecting QuickBooks
 description: Connect QuickBooks to read invoices, expenses, customers, and reports.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect QuickBooks
 
-Ask the agent:
-
-> Connect my QuickBooks account.
+<ConnectorAccess
+  name="QuickBooks"
+  prompt="Connect my QuickBooks account."
+  query="QuickBooks"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control and select the correct company. Your QuickBooks permissions
 control which records ufo can use.

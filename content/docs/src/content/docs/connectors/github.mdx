@@ -3,14 +3,20 @@ title: Connecting GitHub
 description: Connect GitHub for repository work, issues, pull requests, and checks.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect GitHub
 
-Ask the agent:
-
-> Connect my GitHub account.
+<ConnectorAccess
+  name="GitHub"
+  prompt="Connect my GitHub account."
+  query="GitHub"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control. Approve access to the organizations and repositories that
-you need. Each member connects their own account. The connection uses that member's GitHub access.
+you need. Each member connects their own account. ufo can access only the GitHub organizations and
+repositories available to that account.
 
 ## What ufo can do
 

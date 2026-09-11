@@ -6,6 +6,26 @@ const dist = new URL("dist/", import.meta.url);
 const brand = new URL("../../assets/brand/", import.meta.url);
 const APEX = "https://docs.ufo.ai";
 const NOT_FOUND = "/404";
+const CONNECTORS = new Map([
+  ["/connectors/datadog/", ["Connect Datadog for this workspace.", "Datadog"]],
+  ["/connectors/github/", ["Connect my GitHub account.", "GitHub"]],
+  ["/connectors/gmail/", ["Connect my Gmail account.", "Gmail"]],
+  ["/connectors/google-calendar/", ["Connect my Google Calendar account.", "Google Calendar"]],
+  ["/connectors/google-drive/", ["Connect my Google Drive account.", "Google Drive"]],
+  ["/connectors/google-sheets/", ["Connect my Google Sheets account.", "Google Sheets"]],
+  ["/connectors/hubspot/", ["Connect my HubSpot account.", "HubSpot"]],
+  ["/connectors/linear/", ["Connect my Linear account.", "Linear"]],
+  [
+    "/connectors/mcp/",
+    ["Connect an MCP server named docs at https://mcp.example.com/mcp.", "MCP"],
+  ],
+  ["/connectors/notion/", ["Connect my Notion account.", "Notion"]],
+  ["/connectors/quickbooks/", ["Connect my QuickBooks account.", "QuickBooks"]],
+  ["/connectors/sentry/", ["Connect my Sentry account.", "Sentry"]],
+  ["/connectors/slack/", ["Connect this workspace to Slack.", "Slack"]],
+  ["/connectors/stripe/", ["Connect my Stripe account.", "Stripe"]],
+  ["/connectors/zendesk/", ["Connect my Zendesk account.", "Zendesk"]],
+]);
 
 async function pages(directory = dist, prefix = "/") {
   const found = new Map();
@@ -68,6 +88,20 @@ test("every page is reached from another page", () => {
     (route) => route !== "/" && route !== NOT_FOUND && !reached.has(route),
   );
   assert.deepEqual(orphans, []);
+});
+
+test("every connector page offers chat or the filtered Connectors page", () => {
+  const routes = [...built.keys()].filter(
+    (route) => route.startsWith("/connectors/") && route !== "/connectors/",
+  );
+  assert.deepEqual(routes.sort(), [...CONNECTORS.keys()].sort());
+  for (const [route, [prompt, query]] of CONNECTORS) {
+    const html = built.get(route);
+    assert.ok(html.includes(`data-connect-prompt="${prompt}"`), `${route} has no chat prompt`);
+    const path = `/surface/web#/connectors?q=${encodeURIComponent(query)}`;
+    assert.ok(html.includes(`data-connector-path="${path}"`), `${route} has the wrong filter`);
+    assert.ok(html.includes(`href="https://app.ufo.ai${path}"`), `${route} has no production link`);
+  }
 });
 
 test("every canonical names production, so the testing door is never the indexed copy", () => {

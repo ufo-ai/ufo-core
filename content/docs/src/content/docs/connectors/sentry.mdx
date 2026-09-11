@@ -3,11 +3,16 @@ title: Connecting Sentry
 description: Connect Sentry to inspect errors, issues, events, and releases.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Sentry
 
-Ask the agent:
-
-> Connect my Sentry account.
+<ConnectorAccess
+  name="Sentry"
+  prompt="Connect my Sentry account."
+  query="Sentry"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control and approve the organization and projects needed for the
 work. If Sentry is not available in the current connector catalog, connect its supported MCP server

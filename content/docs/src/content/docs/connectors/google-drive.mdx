@@ -3,11 +3,16 @@ title: Connecting Google Drive
 description: Connect Google Drive to search, read, and create files.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Google Drive
 
-Ask the agent:
-
-> Connect my Google Drive account.
+<ConnectorAccess
+  name="Google Drive"
+  prompt="Connect my Google Drive account."
+  query="Google Drive"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control and approve the correct Google account. ufo can use only
 the files and shared drives that this account can access.

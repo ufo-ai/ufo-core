@@ -3,11 +3,16 @@ title: Connecting HubSpot
 description: Connect HubSpot to work with contacts, companies, deals, and activities.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect HubSpot
 
-Ask the agent:
-
-> Connect my HubSpot account.
+<ConnectorAccess
+  name="HubSpot"
+  prompt="Connect my HubSpot account."
+  query="HubSpot"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control and approve the correct HubSpot account. Your access and
 the approved scopes control which records ufo can use.

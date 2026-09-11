@@ -3,11 +3,16 @@ title: Connecting Google Calendar
 description: Connect Google Calendar to find events, prepare briefs, and schedule meetings.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Google Calendar
 
-Ask the agent:
-
-> Connect my Google Calendar account.
+<ConnectorAccess
+  name="Google Calendar"
+  prompt="Connect my Google Calendar account."
+  query="Google Calendar"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control and approve the correct Google account. Your calendar
 permissions determine which calendars and events ufo can use.

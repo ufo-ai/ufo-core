@@ -3,11 +3,16 @@ title: Connecting Linear
 description: Connect Linear to search issues and update projects.
 ---
 
+import ConnectorAccess from "../../../components/ConnectorAccess.astro";
+
 ## Connect Linear
 
-Ask the agent:
-
-> Connect my Linear account.
+<ConnectorAccess
+  name="Linear"
+  prompt="Connect my Linear account."
+  query="Linear"
+  tags={["OAuth", "Personal"]}
+/>
 
 Open the private authorization control and approve the Linear workspace. Your Linear access
 controls which teams, projects, and issues ufo can use.

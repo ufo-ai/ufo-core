@@ -1,0 +1,240 @@
+---
+interface Props {
+  name: string;
+  prompt: string;
+  query: string;
+  tags: string[];
+}
+
+const { name, prompt, query, tags } = Astro.props;
+const connectorPath = `/surface/web#/connectors?q=${encodeURIComponent(query)}`;
+const connectorHref = `https://app.ufo.ai${connectorPath}`;
+---
+
+<ul class="connector-tags not-content" aria-label="Connection type">
+  {tags.map((tag) => <li>{tag}</li>)}
+</ul>
+
+<div class="connector-options not-content">
+  <section class="connector-option">
+    <div>
+      <h3>Ask in chat</h3>
+      <p>Send this message to the agent.</p>
+    </div>
+    <div class="prompt">
+      <button type="button" data-connect-prompt={prompt}>
+        <svg class="copy-icon" aria-hidden="true" viewBox="0 0 24 24">
+          <rect width="14" height="14" x="8" y="8" rx="2"></rect>
+          <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>
+        </svg>
+        <span data-copy-label>Copy</span>
+      </button>
+      <pre><code>{prompt}</code></pre>
+    </div>
+  </section>
+
+  <div class="or"><span>or</span></div>
+
+  <section class="connector-option">
+    <div>
+      <h3>Use Connectors</h3>
+      <p>Find {name} on the Connectors page.</p>
+    </div>
+    <a href={connectorHref} data-connector-path={connectorPath}>
+      Open Connectors <span aria-hidden="true">→</span>
+    </a>
+  </section>
+</div>
+
+<script>
+  const connectorHost = window.location.hostname === "docs.ufo.ai" ? "app.ufo.ai" : "app.testing.ufo.ai";
+  for (const link of document.querySelectorAll<HTMLAnchorElement>("[data-connector-path]")) {
+    const path = link.dataset.connectorPath;
+    if (!path) throw new Error("Connector path is missing");
+    link.href = `https://${connectorHost}${path}`;
+  }
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>("[data-connect-prompt]")) {
+    button.addEventListener("click", async () => {
+      const prompt = button.dataset.connectPrompt;
+      if (!prompt) throw new Error("Connect prompt is missing");
+      const label = button.querySelector("[data-copy-label]");
+      if (!label) throw new Error("Copy label is missing");
+      try {
+        await navigator.clipboard.writeText(prompt);
+        label.textContent = "Copied";
+      } catch {
+        label.textContent = "Copy failed";
+      }
+    });
+  }
+</script>
+
+<style>
+  .connector-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 0.75rem 0 1rem;
+    padding: 0;
+    list-style: none;
+  }
+
+  .connector-tags li {
+    display: inline-flex;
+    box-sizing: border-box;
+    height: 1.75rem;
+    align-items: center;
+    padding: 0.2rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted-foreground);
+    background: transparent;
+    font-size: var(--sl-text-sm);
+    line-height: 1.4;
+  }
+
+  .connector-options {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 3rem minmax(0, 1fr);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-block: 0 1.5rem;
+  }
+
+  .connector-option {
+    display: flex;
+    min-width: 0;
+    min-height: 10rem;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 1.5rem;
+    padding: 1rem;
+  }
+
+  h3,
+  p {
+    margin: 0;
+  }
+
+  h3 {
+    font-size: var(--sl-text-lg);
+  }
+
+  p {
+    margin-top: 0.35rem;
+    color: var(--muted-foreground);
+  }
+
+  .prompt {
+    box-sizing: border-box;
+    min-width: 0;
+    min-height: 4.5rem;
+    padding-block: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+
+  pre {
+    margin: 0.6rem 0 0;
+    overflow: visible;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  code {
+    color: var(--foreground);
+    background: transparent;
+  }
+
+  button,
+  a {
+    border: 0;
+    border-radius: 0;
+    color: var(--primary);
+    background: transparent;
+    font: inherit;
+    font-weight: 600;
+  }
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.25rem 0;
+    cursor: pointer;
+  }
+
+  .copy-icon {
+    width: 1rem;
+    height: 1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2;
+  }
+
+  a {
+    display: flex;
+    box-sizing: border-box;
+    min-height: 4.5rem;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding-block: 0.75rem;
+    border-top: 1px solid var(--border);
+    text-decoration: none;
+  }
+
+  button:hover,
+  button:focus-visible,
+  a:hover,
+  a:focus-visible {
+    text-decoration: underline;
+  }
+
+  .or {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted-foreground);
+    margin: 0;
+  }
+
+  .or::before {
+    position: absolute;
+    width: 1px;
+    height: 100%;
+    background: var(--border);
+    content: "";
+  }
+
+  .or span {
+    z-index: 1;
+    padding-block: 0.5rem;
+    background: var(--card);
+  }
+
+  @media (max-width: 44rem) {
+    .connector-options {
+      grid-template-columns: 1fr;
+    }
+
+    .connector-option {
+      min-height: 0;
+    }
+
+    .or {
+      min-height: 2rem;
+    }
+
+    .or::before {
+      width: 100%;
+      height: 1px;
+    }
+
+    .or span {
+      padding: 0 0.75rem;
+    }
+  }
+</style>
