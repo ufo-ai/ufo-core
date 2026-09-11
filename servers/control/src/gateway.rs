@@ -34,6 +34,7 @@ pub const GATEWAY_PORT_ENV: &str = "UFO_GATEWAY_PORT";
 
 pub const OPERATOR_EMAIL_DOMAIN: &str = "metalcraft.ai";
 pub const LOGIN_PATH: &str = "/login";
+pub const SIGNUP_LOGIN_PATH: &str = "/login?signup=1";
 pub const LOGOUT_PATH: &str = "/logout";
 pub const PORTAL_SURFACE_PATH: &str = "/surface/web";
 pub const DEBUG_SURFACE_PATH: &str = "/surface/debug";
@@ -568,6 +569,9 @@ async fn login(
     );
     if let Some(landing) = landing {
         return Redirect::to(&landing).into_response();
+    }
+    if query.get("signup").is_some_and(|value| value == "1") && state.onboarding.invite_required {
+        return Redirect::to(&format!("https://{}", state.onboarding.apex_host)).into_response();
     }
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],

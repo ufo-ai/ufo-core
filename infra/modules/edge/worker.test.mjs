@@ -9,6 +9,10 @@ import {
   LANDING_PAGE,
   PRIVACY_DESCRIPTION,
   PRIVACY_PAGE,
+  SLACK_DESCRIPTION,
+  SLACK_PAGE,
+  SUPPORT_DESCRIPTION,
+  SUPPORT_PAGE,
   TERMS_DESCRIPTION,
   TERMS_PAGE,
   edgeCache,
@@ -418,7 +422,7 @@ test("/ufo serves byte-identical content to every user agent", async () => {
   assert.equal(cli, browser);
 });
 
-const LEGAL = [
+const PUBLIC_PAGES = [
   {
     path: "/privacy",
     document: PRIVACY_PAGE,
@@ -428,13 +432,37 @@ const LEGAL = [
     headings: [
       "1. Information We Collect",
       "2. How We Use Information",
-      "3. Google API Services User Data Policy",
-      "4. Data Sharing",
-      "5. Data Retention",
-      "6. Children's Privacy",
-      "7. Changes to This Policy",
-      "8. Contact Us",
+      "3. AI Processing",
+      "4. Google API Services User Data Policy",
+      "5. Data Sharing",
+      "6. Data Retention and Your Choices",
+      "7. Children's Privacy",
+      "8. Changes to This Policy",
+      "9. Contact Us",
     ],
+  },
+  {
+    path: "/slack",
+    document: SLACK_PAGE,
+    title: "ufo for Slack",
+    description: SLACK_DESCRIPTION,
+    canonical: "https://ufo.ai/slack",
+    headings: [
+      "What ufo does",
+      "Permissions",
+      "Install ufo",
+      "Use ufo",
+      "AI output",
+      "Privacy and support",
+    ],
+  },
+  {
+    path: "/support",
+    document: SUPPORT_PAGE,
+    title: "Support",
+    description: SUPPORT_DESCRIPTION,
+    canonical: "https://ufo.ai/support",
+    headings: ["Contact", "What to include", "Privacy requests"],
   },
   {
     path: "/terms",
@@ -457,30 +485,36 @@ const LEGAL = [
   },
 ];
 
-test("each legal page is served whole, headed by its own title", async () => {
-  for (const legal of LEGAL) {
-    const reply = await request(`https://flyingobject.ai${legal.path}`, { ua: "Mozilla/5.0" });
+test("each public page is served whole, headed by its own title", async () => {
+  for (const page of PUBLIC_PAGES) {
+    const reply = await request(`https://flyingobject.ai${page.path}`, { ua: "Mozilla/5.0" });
     assert.equal(reply.status, 200);
     assert.equal(reply.headers.get("content-type"), "text/html; charset=utf-8");
     assert.equal(reply.headers.get("cache-control"), "public, max-age=600");
     const served = await reply.text();
-    assert.equal(served, legal.document);
+    assert.equal(served, page.document);
     assert.doesNotMatch(served, /__[A-Z_]+__/);
-    assert.match(served, new RegExp(`<title>${legal.title}</title>`));
-    assert.match(served, new RegExp(`<h1>${legal.title}</h1>`));
+    assert.match(served, new RegExp(`<title>${page.title}</title>`));
+    assert.match(served, new RegExp(`<h1>${page.title}</h1>`));
     assert.deepEqual(
       [...served.matchAll(/<h2>([^<]+)<\/h2>/g)].map(([, heading]) => heading),
-      legal.headings,
+      page.headings,
     );
-    assert.match(served, /founders@metalcraft\.ai/);
+    assert.match(served, /support@ufo\.ai/);
+    assert.doesNotMatch(served, /founders@metalcraft\.ai/);
     assert.match(served, /ufo\.ai/);
     assert.doesNotMatch(served, /Flying Object AI/);
     assert.doesNotMatch(served, /flyingobject\.ai/);
+    assert.match(
+      served,
+      /Slack is a trademark and service mark of Slack Technologies, Inc\., registered in the U\.S\. and in other countries\./,
+    );
+    assert.match(served, /Copyright 2023 Slack Technologies, LLC\./);
   }
 });
 
-test("a legal page reads the same for every user agent", async () => {
-  for (const { path } of LEGAL) {
+test("a public page reads the same for every user agent", async () => {
+  for (const { path } of PUBLIC_PAGES) {
     const cli = await (await request(`https://flyingobject.ai${path}`)).text();
     const browser = await (
       await request(`https://flyingobject.ai${path}`, { ua: "Mozilla/5.0" })
@@ -489,24 +523,24 @@ test("a legal page reads the same for every user agent", async () => {
   }
 });
 
-test("a legal page over plain http is bounced to https with its query intact", async () => {
-  for (const { path } of LEGAL) {
+test("a public page over plain http is bounced to https with its query intact", async () => {
+  for (const { path } of PUBLIC_PAGES) {
     const reply = await request(`http://flyingobject.ai${path}?ref=x`, { ua: "Mozilla/5.0" });
     assert.equal(reply.status, 301);
     assert.equal(reply.headers.get("location"), `https://flyingobject.ai${path}?ref=x`);
   }
 });
 
-test("no public surface links to a legal page", async () => {
+test("the home page does not link to a secondary public page", async () => {
   const card = await (await request("https://flyingobject.ai/")).text();
-  for (const { path } of LEGAL) {
+  for (const { path } of PUBLIC_PAGES) {
     assert.doesNotMatch(LANDING_PAGE, new RegExp(path));
     assert.doesNotMatch(card, new RegExp(path));
   }
 });
 
-test("each legal page carries its own description, canonical URL, and share tags", async () => {
-  for (const legal of LEGAL) {
+test("each public page carries its own description, canonical URL, and share tags", async () => {
+  for (const legal of PUBLIC_PAGES) {
     const served = await (
       await request(`https://flyingobject.ai${legal.path}`, { ua: "Mozilla/5.0" })
     ).text();
@@ -541,9 +575,9 @@ test("each legal page carries its own description, canonical URL, and share tags
 const locations = (xml) => [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)].map(([, loc]) => loc);
 const refusals = (rules) => [...rules.matchAll(/^Disallow: (\S+)$/gm)].map(([, path]) => path);
 
-const INDEXED = ["https://ufo.ai/", ...LEGAL.map(({ canonical }) => canonical)];
+const INDEXED = ["https://ufo.ai/", ...PUBLIC_PAGES.map(({ canonical }) => canonical)];
 
-test("the sitemap lists the home page and each legal page at its canonical URL", async () => {
+test("the sitemap lists the home page and each public page at its canonical URL", async () => {
   const reply = await request("https://flyingobject.ai/sitemap.xml", { ua: "Googlebot/2.1" });
   assert.equal(reply.status, 200);
   assert.equal(reply.headers.get("content-type"), "application/xml; charset=utf-8");
@@ -552,6 +586,34 @@ test("the sitemap lists the home page and each legal page at its canonical URL",
   assert.match(served, /^<\?xml version="1\.0" encoding="UTF-8"\?>\n/);
   assert.match(served, /<urlset xmlns="http:\/\/www\.sitemaps\.org\/schemas\/sitemap\/0\.9">/);
   assert.deepEqual(locations(served), INDEXED);
+});
+
+test("the Slack page gives the install path, first use, AI warning, and policy links", async () => {
+  assert.match(SLACK_PAGE, /href="\/login">Sign in<\/a>/);
+  assert.match(SLACK_PAGE, /href="\/login\?signup=1">create a workspace or join the waitlist<\/a>/);
+  assert.match(SLACK_PAGE, /ask ufo to connect a Slack workspace/);
+  assert.match(SLACK_PAGE, /Add to Slack/);
+  assert.match(SLACK_PAGE, /direct message/);
+  assert.match(SLACK_PAGE, /can be inaccurate/);
+  assert.match(SLACK_PAGE, /href="\/privacy">Privacy Policy<\/a>/);
+  assert.match(SLACK_PAGE, /href="\/support">Support<\/a>/);
+});
+
+test("the Slack page explains its thread behavior and permissions", async () => {
+  assert.match(SLACK_PAGE, /ufo does not join channels on its own/);
+  assert.match(SLACK_PAGE, /can\s+answer later messages in that thread when they are relevant/);
+  assert.match(SLACK_PAGE, /Message history: reads the channel, direct-message, and thread context/);
+  assert.match(SLACK_PAGE, /ufo uses a bot token\. It does not request a Slack user token\./);
+});
+
+test("the policy states Slack data rights, retention, no LLM training, and minimum age", async () => {
+  assert.match(PRIVACY_PAGE, /Slack messages, files, comments, profile information,\s+metadata/);
+  assert.match(PRIVACY_PAGE, /access, transfer, correction, or deletion/);
+  assert.match(PRIVACY_PAGE, /while the related ufo workspace is active and as needed to\s+provide/);
+  assert.match(PRIVACY_PAGE, /do not use Slack data to train/);
+  assert.match(PRIVACY_PAGE, /discard those unused\s+fields after we process the Slack event/);
+  assert.match(PRIVACY_PAGE, /ufo for Slack does not permit use by children under 16/);
+  assert.match(TERMS_PAGE, /at least 16 years old to use ufo for\s+Slack/);
 });
 
 test("every page the sitemap lists is served as a document", async () => {

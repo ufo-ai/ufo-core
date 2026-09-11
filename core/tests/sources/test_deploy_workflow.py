@@ -4943,6 +4943,8 @@ def _check_edge_worker_artifact_substitutes_every_placeholder() -> None:
         "__FAVICON_SVG__": "var.favicon_svg",
         "__LANDING_HTML__": "local.landing_html",
         "__PRIVACY_HTML__": "local.privacy_html",
+        "__SLACK_HTML__": "local.slack_html",
+        "__SUPPORT_HTML__": "local.support_html",
         "__TERMS_HTML__": "local.terms_html",
     }
     assert set(re.findall(r'"(__[A-Z_]+__)"', worker)) == set(substituted)

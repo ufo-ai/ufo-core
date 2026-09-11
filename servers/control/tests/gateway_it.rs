@@ -8,8 +8,8 @@ use ufo_control::claim::ClaimWorkflow;
 use ufo_control::gateway::{
     keyed_mark, parse_invite_required, router, stamped_script, GatewayState, Onboarding,
     BILLING_CHOICE, FIRST_MOVE_PROMPT, INVITATION_LOGIN_PATH, JOIN_LOGIN_PATH, LOGIN_PATH,
-    LOGOUT_PATH, MAX_BODY_BYTES, OPERATOR_COOKIE, OPERATOR_EMAIL_DOMAIN, SIGNUP_MARK_TTL_MINUTES,
-    WORKSPACE_PROMPT,
+    LOGOUT_PATH, MAX_BODY_BYTES, OPERATOR_COOKIE, OPERATOR_EMAIL_DOMAIN, SIGNUP_LOGIN_PATH,
+    SIGNUP_MARK_TTL_MINUTES, WORKSPACE_PROMPT,
 };
 use ufo_control::invite::InviteCodes;
 use ufo_control::shared::SharedWorkspaces;
@@ -187,6 +187,34 @@ async fn the_login_page_is_served_as_html() {
     let rig = rig(vec![], vec![], true).await;
     let response = client()
         .get(format!("{}/login", rig.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response
+        .text()
+        .await
+        .unwrap()
+        .starts_with("<!doctype html>"));
+}
+
+#[tokio::test]
+async fn closed_signup_sends_a_new_member_to_the_waitlist() {
+    let rig = rig(vec![], vec![], true).await;
+    let response = client()
+        .get(format!("{}{}", rig.base, SIGNUP_LOGIN_PATH))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], format!("https://{APEX}"));
+}
+
+#[tokio::test]
+async fn open_signup_serves_the_login_page_to_a_new_member() {
+    let rig = rig(vec![], vec![], false).await;
+    let response = client()
+        .get(format!("{}{}", rig.base, SIGNUP_LOGIN_PATH))
         .send()
         .await
         .unwrap();

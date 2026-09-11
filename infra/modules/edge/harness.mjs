@@ -21,6 +21,10 @@ const legalPage = async ({ title, description, canonical, body }) =>
     .replace("__BODY__", await readFile(new URL(body, moduleDir), "utf8"));
 export const PRIVACY_DESCRIPTION =
   "What ufo.ai collects when you sign in and use the service, how that information is used, and how long it is kept.";
+export const SLACK_DESCRIPTION =
+  "How to install and use ufo in Slack, what the app does, and where to get support.";
+export const SUPPORT_DESCRIPTION =
+  "How to get support for ufo and the ufo Slack app, and how to make a privacy request.";
 export const TERMS_DESCRIPTION =
   "The terms that govern your use of ufo.ai: accounts, acceptable use, intellectual property, and liability.";
 export const PRIVACY_PAGE = await legalPage({
@@ -28,6 +32,18 @@ export const PRIVACY_PAGE = await legalPage({
   description: PRIVACY_DESCRIPTION,
   canonical: "https://ufo.ai/privacy",
   body: "privacy.html",
+});
+export const SLACK_PAGE = await legalPage({
+  title: "ufo for Slack",
+  description: SLACK_DESCRIPTION,
+  canonical: "https://ufo.ai/slack",
+  body: "slack.html",
+});
+export const SUPPORT_PAGE = await legalPage({
+  title: "Support",
+  description: SUPPORT_DESCRIPTION,
+  canonical: "https://ufo.ai/support",
+  body: "support.html",
 });
 export const TERMS_PAGE = await legalPage({
   title: "Terms of Service",
@@ -42,6 +58,8 @@ export async function importWorker(tag) {
     .replace('"__FAVICON_SVG__"', JSON.stringify(FAVICON_SVG))
     .replace('"__FAVICON_DARK_SVG__"', JSON.stringify(FAVICON_DARK_SVG))
     .replace('"__PRIVACY_HTML__"', JSON.stringify(PRIVACY_PAGE))
+    .replace('"__SLACK_HTML__"', JSON.stringify(SLACK_PAGE))
+    .replace('"__SUPPORT_HTML__"', JSON.stringify(SUPPORT_PAGE))
     .replace('"__TERMS_HTML__"', JSON.stringify(TERMS_PAGE));
   const tagged = `${source}\n// ${tag}`;
   return (await import(`data:text/javascript;base64,${Buffer.from(tagged).toString("base64")}`))
@@ -68,4 +86,3 @@ export function edgeCache() {
     },
   };
 }
-

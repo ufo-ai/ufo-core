@@ -9,6 +9,8 @@ locals {
   landing_html        = file("${path.module}/landing.html")
   legal_shell         = file("${path.module}/legal.html")
   privacy_description = "What ufo.ai collects when you sign in and use the service, how that information is used, and how long it is kept."
+  slack_description   = "How to install and use ufo in Slack, what the app does, and where to get support."
+  support_description = "How to get support for ufo and the ufo Slack app, and how to make a privacy request."
   terms_description   = "The terms that govern your use of ufo.ai: accounts, acceptable use, intellectual property, and liability."
   privacy_html = replace(
     replace(
@@ -19,6 +21,26 @@ locals {
       "__CANONICAL__", "https://ufo.ai/privacy",
     ),
     "__BODY__", file("${path.module}/privacy.html"),
+  )
+  slack_html = replace(
+    replace(
+      replace(
+        replace(local.legal_shell, "__TITLE__", "ufo for Slack"),
+        "__DESCRIPTION__", local.slack_description,
+      ),
+      "__CANONICAL__", "https://ufo.ai/slack",
+    ),
+    "__BODY__", file("${path.module}/slack.html"),
+  )
+  support_html = replace(
+    replace(
+      replace(
+        replace(local.legal_shell, "__TITLE__", "Support"),
+        "__DESCRIPTION__", local.support_description,
+      ),
+      "__CANONICAL__", "https://ufo.ai/support",
+    ),
+    "__BODY__", file("${path.module}/support.html"),
   )
   terms_html = replace(
     replace(
@@ -40,9 +62,17 @@ resource "cloudflare_workers_script" "edge" {
       replace(
         replace(
           replace(
-            file("${path.module}/worker.js"),
-            "\"__LANDING_HTML__\"",
-            jsonencode(local.landing_html),
+            replace(
+              replace(
+                file("${path.module}/worker.js"),
+                "\"__LANDING_HTML__\"",
+                jsonencode(local.landing_html),
+              ),
+              "\"__SLACK_HTML__\"",
+              jsonencode(local.slack_html),
+            ),
+            "\"__SUPPORT_HTML__\"",
+            jsonencode(local.support_html),
           ),
           "\"__FAVICON_SVG__\"",
           jsonencode(var.favicon_svg),

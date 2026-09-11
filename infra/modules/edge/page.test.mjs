@@ -137,6 +137,15 @@ for (const [where, device] of [
   });
 }
 
+test("the public text carries no ufo metaphor", async () => {
+  for (const path of ["/privacy", "/slack", "/support", "/terms"]) {
+    const page = await browser.newPage(DESKTOP);
+    await page.goto(`${origin}${path}`);
+    assert.doesNotMatch(await page.innerText("body"), BANNED_METAPHOR, path);
+    await page.close();
+  }
+});
+
 const BANNED_METAPHOR =
   /\bbeam\w*|\btransmit\w*|\bsignals?\b|\bsaucers?\b|\bmothership\b|\bcraft\b|\bfleets?\b|\babduct\w*|\b(un)?identified\b|\bidentification\b|\bobjects?\b/i;
 
@@ -147,3 +156,22 @@ test("every word the page shows carries no ufo metaphor", async () => {
   assert.doesNotMatch(shown, BANNED_METAPHOR);
   await page.close();
 });
+
+for (const [where, device] of [
+  ["a desktop", DESKTOP],
+  ["a phone", PHONE],
+]) {
+  test(`the Slack page fits ${where} and exposes its install steps`, async () => {
+    const page = await browser.newPage(device);
+    await page.goto(`${origin}/slack`);
+    const content = await page.locator("main").evaluate((main) => ({
+      title: main.querySelector("h1")?.textContent,
+      steps: [...main.querySelectorAll("ol li")].map((item) => item.textContent.trim()),
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    }));
+    assert.equal(content.title, "ufo for Slack");
+    assert.equal(content.steps.length, 4);
+    assert.equal(content.overflow, 0, `the page scrolls ${content.overflow}px sideways at ${where}`);
+    await page.close();
+  });
+}
