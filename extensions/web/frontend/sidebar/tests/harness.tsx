@@ -272,6 +272,7 @@ export const CHAT_ROW: ChatRow = {
   speaker: null,
   source: null,
   turn: "idle",
+  unread: false,
 };
 
 export const json = (payload: unknown) => Response.json(payload);

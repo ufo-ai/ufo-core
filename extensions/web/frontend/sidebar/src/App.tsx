@@ -116,6 +116,7 @@ import {
   pickRailShut,
   quietRail,
   railActivity,
+  railRead,
   railFounded,
   readRail,
   seekChat,
@@ -370,6 +371,7 @@ function founded(agent: Agent, conversationId: string, title: string): void {
     speaker: null,
     source: null,
     turn: "running",
+    unread: false,
   });
   const seen = heldRoute();
   if (seen.kind === "home" || (seen.kind === "new-chat" && seen.agentId === agent.id)) {
@@ -1139,6 +1141,7 @@ function openRailRow(
   conversationId: string,
   agentId: string,
 ): void {
+  railRead(conversationId);
   const owner = agents.find((agent) => agent.id === agentId);
   const pane = owner?.app ? owner : chatApp;
   if (!pane) {
@@ -1185,6 +1188,7 @@ function RailList({
             surfaceLabel={row.surface_label}
             source={row.source}
             turn={row.turn}
+            unread={row.unread}
             when={row.last_at}
             onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
           />
@@ -1254,6 +1258,7 @@ function RailRow({
   surfaceLabel,
   source,
   turn,
+  unread,
   when,
   onClick,
 }: {
@@ -1266,6 +1271,7 @@ function RailRow({
   surfaceLabel: string | null;
   source: string | null;
   turn: RailTurn;
+  unread: boolean;
   when: string;
   onClick: () => void;
 }) {
@@ -1293,7 +1299,7 @@ function RailRow({
               className="size-(--size-glyph) shrink-0 animate-spin text-primary motion-reduce:animate-none"
             />
           ) : (
-            <RailOrigin surface={surface} ink={RAIL_TURN_INK[turn]} />
+            <RailOrigin surface={surface} ink={unread ? UNREAD_INK : RAIL_TURN_INK[turn]} />
           )}
         </span>
       }
@@ -1400,3 +1406,7 @@ const RAIL_TURN_INK: Record<Exclude<RailTurn, "running" | "queued">, string> = {
   parked: "text-blocked",
   idle: "text-ink-quiet",
 };
+
+/** A running turn keeps its spinner instead: what the agent is doing right now outranks what
+ *  stands unread above it. */
+const UNREAD_INK = "text-live";

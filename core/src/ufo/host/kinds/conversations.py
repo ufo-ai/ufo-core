@@ -338,6 +338,7 @@ def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
             "source": None if portal else entry.source,
             "last_at": stamp.isoformat(),
             "turn": entry.turn,
+            "unread": entry.unread,
         },
     )
 
@@ -394,8 +395,9 @@ CONVERSATION_OBJECT = ObjectKind(
         "where the conversation runs — a Slack channel as `#general`, a Slack DM as `DM`. A "
         "conversation whose surface names no origin carries no `surface_label`. "
         "A member listing also carries `title`, `mine`, `speaker`, `audience`, `member_email`, "
-        "`last_at`, and `turn` — the liveest turn the conversation holds as `running`, `queued` or "
-        "`parked`, and `idle` where it holds none. Order by "
+        "`last_at`, `turn` — the liveest turn the conversation holds as `running`, `queued` or "
+        "`parked`, and `idle` where it holds none — and `unread`, whether it moved after the "
+        "member last read it and last spoke in it. Order by "
         "`last_at` desc for the newest activity first. "
         "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
         "cannot be created, changed, or deleted through objects."
@@ -416,6 +418,7 @@ CONVERSATION_OBJECT = ObjectKind(
             "source",
             "last_at",
             "turn",
+            "unread",
             "private",
         }
     ),

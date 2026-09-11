@@ -841,6 +841,26 @@ page = sa.Table(
     ),
 )
 
+conversation_read = sa.Table(
+    "conversation_read",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("conversation_id", sa.Uuid, nullable=False),
+    sa.Column("member_id", sa.Uuid, nullable=False),
+    sa.Column("read_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "conversation_id"],
+        ["conversation.workspace_id", "conversation.id"],
+        ondelete="CASCADE",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "member_id"],
+        ["member.workspace_id", "member.id"],
+        ondelete="CASCADE",
+    ),
+    sa.PrimaryKeyConstraint("workspace_id", "conversation_id", "member_id"),
+)
+
 conversation_change = sa.Table(
     "conversation_change",
     metadata,

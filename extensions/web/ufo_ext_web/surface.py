@@ -2974,7 +2974,10 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     writes it. A turn still running names itself and the moment it was admitted, so the page
     attaches to its live frames instead of drawing an empty conversation and counts that turn's
     clock from the turn's own start rather than from the load, and a settled one carries what it
-    still asks of the member."""
+    still asks of the member.
+
+    Serving the messages moves this member's read cursor on the conversation: the act the cursor
+    records is the member reading them, and the rail draws the row unread until it moves."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -3005,6 +3008,7 @@ async def transcript(ctx: SurfaceContext, request: Request) -> Response:
     rendered, turn, earlier = await _conversation_messages(
         ctx, agent_id, conversation_id, member_id, _opens(audience)
     )
+    await ctx.mark_conversation_read(conversation_id, member_id)
     payload: dict[str, object] = {"messages": rendered}
     if earlier:
         payload["earlier_cursor"] = _history_cursor(earlier)
@@ -3148,6 +3152,7 @@ async def _resolve_chat(
                         "source": None,
                         "last_at": _iso(detail.turn.created_at),
                         "turn": own.turn,
+                        "unread": own.unread,
                     }
                 ]
             }
@@ -3576,7 +3581,11 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     """One conversation read rather than continued — another member's the admin acknowledged, one
     another surface holds — as the same messages the chat draws. Each reply names the children it
     spawned, and a child carries this conversation's audience, so the card opens that run through
-    this conversation and the one gate here authorizes both."""
+    this conversation and the one gate here authorizes both.
+
+    Serving the messages moves this member's read cursor on the conversation, as the chat
+    transcript does: the member cannot speak here, so this read is the only act that clears the
+    rail's unread mark."""
     cursor = request.query_params.get("cursor")
     if cursor is not None:
         return await _conversation_history(ctx, request, cursor)
@@ -3587,6 +3596,7 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     rendered, _turn, earlier = await _conversation_messages(
         ctx, agent_id, conversation_id, viewer.member_id, viewer.opens
     )
+    await ctx.mark_conversation_read(conversation_id, viewer.member_id)
     payload: dict[str, object] = {"messages": rendered}
     if earlier:
         payload["earlier_cursor"] = _history_cursor(earlier)

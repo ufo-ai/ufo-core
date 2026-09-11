@@ -81,6 +81,7 @@ function row(id: string, last_at: string): ChatRow {
     speaker: null,
     source: null,
     turn: "idle",
+    unread: false,
   };
 }
 
@@ -781,6 +782,50 @@ test("a running turn the rail does not draw earns the working cadence only once 
   await settle(WORKING_STATUS_MS);
   expect(listings()).toBe(walked + 1);
   vi.useRealTimers();
+});
+
+test("a thread holding unread messages draws its mark live, on every surface", async () => {
+  const slack = {
+    ...CHAT_ROW,
+    conversation_id: "66666666-6666-4666-8666-666666666666",
+    title: "Answered thread",
+    surface: "slack",
+    surface_label: "DM",
+    unread: true,
+  };
+  wire(chatsOnWire([{ ...CHAT_ROW, unread: true }, slack]));
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const mark = (title: string) =>
+    screen
+      .getByRole("button", { name: new RegExp(title) })
+      .querySelector("[data-turn]")!
+      .firstElementChild!.getAttribute("class")!;
+  await screen.findByRole("button", { name: /Pick one thread/ });
+  expect(mark("Pick one thread")).toContain("text-live");
+  expect(mark("Answered thread")).toContain("text-live");
+});
+
+test("opening a thread clears its unread mark", async () => {
+  wire({
+    ...chatsOnWire([{ ...CHAT_ROW, unread: true }]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const row = await screen.findByRole("button", { name: /Pick one thread/ });
+  expect(row.querySelector("[data-turn]")!.firstElementChild!.getAttribute("class")).toContain(
+    "text-live",
+  );
+
+  await userEvent.click(row);
+
+  await waitFor(() => {
+    const mark = screen
+      .getByRole("button", { name: /Pick one thread/ })
+      .querySelector("[data-turn]")!.firstElementChild!;
+    expect(mark.getAttribute("class")).toContain("text-ink-quiet");
+  });
 });
 
 test("a rail row opens its conversation's transcript", async () => {

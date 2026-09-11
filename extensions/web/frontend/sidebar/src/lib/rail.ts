@@ -24,6 +24,7 @@ export type ChatRow = {
   speaker: string | null;
   source: string | null;
   turn: RailTurn;
+  unread: boolean;
 };
 
 export type ChatsPayload = { chats: ChatRow[]; conversation?: OwnedConversation };
@@ -43,6 +44,7 @@ export type ConversationRow = {
   speaker: string | null;
   source: string | null;
   turn: RailTurn;
+  unread: boolean;
 };
 
 export type ConversationsPayload = { objects: ConversationRow[]; next_cursor?: string | null };
@@ -63,6 +65,7 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
     speaker: row.speaker,
     source: row.source,
     turn: row.turn,
+    unread: row.unread,
   }));
 }
 
@@ -296,6 +299,14 @@ export function bumpChat(
   );
   bumped.sort((a, b) => moment(b) - moment(a));
   return bumped;
+}
+
+/** A chat this tab has just opened: its mark stops reading unread as the member reaches it, ahead
+ *  of the transcript read that moves the cursor the next listing answers from. */
+export function readChat(rows: ChatRow[], conversationId: string): ChatRow[] {
+  return rows.map((row) =>
+    row.conversation_id === conversationId ? { ...row, unread: false } : row,
+  );
 }
 
 /** A turn that ends restates its row's mark alone: its moment is the turn it started, so a landing

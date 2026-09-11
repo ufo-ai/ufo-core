@@ -569,6 +569,23 @@ def _liveness() -> sa.Case[int]:
     )
 
 
+def _unread(
+    last_turn_at: datetime | None, read_at: datetime | None, spoke_at: datetime | None
+) -> bool:
+    """Whether a conversation holds messages a member has not seen: it moved after the later of
+    the cursor their reading wrote and their own last turn. A conversation nobody has spoken a
+    turn in holds nothing to read. SQLite hands datetimes back without their zone, so both sides
+    are read as UTC before they are compared."""
+    if last_turn_at is None:
+        return False
+    seen = [_as_utc(moment) for moment in (read_at, spoke_at) if moment is not None]
+    return not seen or _as_utc(last_turn_at) > max(seen)
+
+
+def _as_utc(moment: datetime) -> datetime:
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
 @dataclass(frozen=True)
 class AgentTurnStatus:
     """One agent's turn aggregate as a portal status read draws it: the liveest non-terminal turn
@@ -1313,6 +1330,12 @@ class ListedConversation(BaseModel):
     opened the conversation, which for Slack is the permalink of its first message, so a screen
     reading the conversation leads back to the thread it came in on. It is None where the surface
     reported none and surface-defined where it did — a portal chat's own source is not a link out.
+    `unread` is whether this viewer has messages here they have not seen: the conversation moved
+    after they last read it and after they last spoke in it. Speaking is reading — a member who
+    answered in the Slack thread has seen what stood above their answer, and Slack keeps no read
+    state a bot token may ask for. Like `turn` it is the shape of the conversation's work rather
+    than a word of its content, so an unreadable row states it too.
+
     `speakers` runs in order of first appearance and stops at `MAX_CONVERSATION_SPEAKERS`.
 
     All are content of the conversation and all answer empty unless `readable`: a row listed to
@@ -1325,6 +1348,7 @@ class ListedConversation(BaseModel):
     audience: str
     surface_label: str | None
     turn: ListedTurn
+    unread: bool
     readable: bool
     disclosable: bool
     title: str
@@ -1410,6 +1434,8 @@ class ConversationDirectory:
                 self._turn_count().label("turn_count"),
                 last_turn_at.label("last_turn_at"),
                 self._live_turn().label("live_turn"),
+                self._read_at(member_id).label("read_at"),
+                self._spoke_at(member_id).label("spoke_at"),
             )
             .select_from(
                 tables.conversation.outerjoin(
@@ -1473,6 +1499,7 @@ class ConversationDirectory:
                 audience=row.audience,
                 surface_label=row.surface_label,
                 turn=row.live_turn,
+                unread=_unread(row.last_turn_at, row.read_at, row.spoke_at),
                 readable=row.audience in readable,
                 disclosable=admin
                 and row.audience != mine
@@ -1510,6 +1537,33 @@ class ConversationDirectory:
             IDLE_TURN,
         )
 
+    def _read_at(self, member_id: UUID) -> sa.ColumnElement[datetime | None]:
+        return (
+            sa.select(tables.conversation_read.c.read_at)
+            .where(
+                tables.conversation_read.c.workspace_id == self.workspace_id,
+                tables.conversation_read.c.conversation_id == tables.conversation.c.id,
+                tables.conversation_read.c.member_id == member_id,
+            )
+            .correlate(tables.conversation)
+            .scalar_subquery()
+        )
+
+    def _spoke_at(self, member_id: UUID) -> sa.ColumnElement[datetime | None]:
+        """When this member last spoke in the conversation, read off `created_at`: the engine works
+        the member's own turn row through every state change up to the agent's reply, so
+        `updated_at` on it names the reply's moment rather than theirs."""
+        return (
+            sa.select(sa.func.max(tables.turn.c.created_at))
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                tables.turn.c.speaker_member_id == member_id,
+            )
+            .correlate(tables.conversation)
+            .scalar_subquery()
+        )
+
     def _turn_count(self) -> sa.ColumnElement[int]:
         return (
             sa.select(sa.func.count())
@@ -1521,6 +1575,30 @@ class ConversationDirectory:
             .correlate(tables.conversation)
             .scalar_subquery()
         )
+
+    async def mark_read(self, conversation_id: UUID, member_id: UUID) -> None:
+        """Move this member's read cursor on one conversation to now — what clears its unread
+        indicator. The act is the member reading the messages, so the authenticated read that
+        serves them is what calls this; nothing else writes the row.
+
+        The moment is the process clock rather than the database's: SQLite's `now()` is whole
+        seconds, and a cursor rounded down below the turn it just read leaves the row unread."""
+        read_at = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.conversation_read)
+                .values(
+                    workspace_id=self.workspace_id,
+                    conversation_id=conversation_id,
+                    member_id=member_id,
+                    read_at=read_at,
+                )
+                .on_conflict_do_update(
+                    index_elements=("workspace_id", "conversation_id", "member_id"),
+                    set_={"read_at": read_at},
+                )
+            )
 
     async def openings(self, listed: Sequence[UUID]) -> dict[UUID, ConversationOpening]:
         """Each listed conversation's opening turn: the link the admitting surface reported for the
@@ -4414,6 +4492,11 @@ class SurfaceContext:
             search=search,
             member_admitted=member_admitted,
         )
+
+    async def mark_conversation_read(self, conversation_id: UUID, member_id: UUID) -> None:
+        """Move this member's read cursor on one conversation to now, so its rail row stops
+        drawing unread — `ConversationDirectory.mark_read`, bound to this surface's workspace."""
+        await ConversationDirectory(self.workspace_id).mark_read(conversation_id, member_id)
 
     async def readable_conversation(
         self, conversation_id: UUID, agent_id: UUID, member_id: UUID, *, admin: bool = False

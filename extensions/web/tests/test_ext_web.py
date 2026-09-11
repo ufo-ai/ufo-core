@@ -3577,6 +3577,100 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_rail_row_reads_unread_until_the_member_reads_the_transcript(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A conversation that moved after the member's own last turn is unread, whatever surface it
+    came in on, and serving them the transcript moves the cursor that clears it. A member's own
+    turn is the other half: the row they just spoke in reads read without any portal read. The
+    agent answers on that same turn row, so its reply must leave the row unread rather than count
+    as the member speaking again."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, spoken_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="hi"),
+        title="A thread that moved",
+    )
+    spoken_at = datetime.now(UTC) - timedelta(hours=2)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == spoken_turn)
+            .values(created_at=spoken_at, updated_at=spoken_at)
+        )
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [False]
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="done",
+                inbound="a colleague's message",
+                admission_source="member",
+                speaker_member_id=None,
+                terminal=TerminalFrame(status="done", text="answered").model_dump(mode="json"),
+                created_at=datetime.now(UTC) - timedelta(hours=1),
+                updated_at=datetime.now(UTC) - timedelta(hours=1),
+            )
+        )
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [True]
+
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}", headers=cookie
+    )
+    assert read.status_code == 200
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [False]
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == spoken_turn)
+            .values(updated_at=datetime.now(UTC) + timedelta(minutes=1))
+        )
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [True]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_reading_a_conversation_transcript_clears_its_unread_mark(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A room the member cannot speak in is read through the conversation transcript, so that read
+    is the only act that can clear its unread mark. Without a cursor of its own the row would draw
+    unread on every rail poll."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "builder@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=f"homepage/{agent_id}/{member_id}",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=1, inbound="build the homepage"
+    )
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [True]
+
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript", headers=cookie
+    )
+    assert read.status_code == 200, read.text
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [False]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

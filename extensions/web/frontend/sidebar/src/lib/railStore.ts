@@ -25,6 +25,7 @@ import {
   chatRows,
   mergeChats,
   railGroups,
+  readChat,
   type ChatRow,
   type ChatsPayload,
   type ConversationsPayload,
@@ -228,6 +229,10 @@ export function seekChat(conversationId: string): void {
 export function railFounded(row: ChatRow): void {
   update((held) => ({ ...held, rows: mergeChats(held.rows, [row]) }));
   wakeRail();
+}
+
+export function railRead(conversationId: string): void {
+  update((held) => ({ ...held, rows: readChat(held.rows, conversationId) }));
 }
 
 export function railActivity(conversationId: string, turn: ChatTurn): void {
