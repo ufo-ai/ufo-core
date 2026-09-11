@@ -1,17 +1,9 @@
 ---
 title: Troubleshooting
-description: Resolve common sign-in, Slack, connection, memory, task, and billing problems.
+description: Resolve common Slack, connection, memory, task, and billing problems.
 ---
 
 Ask the agent to check the current state before you reconnect an account or repeat work.
-
-## A teammate cannot sign in
-
-Confirm the exact email address they used and check its spam folder for the sign-in code. A teammate
-on the workspace's work domain can join directly. A person on another domain must first be added by
-an admin.
-
-If the address is correct and no code arrives, ask the agent to pass the problem to the ufo team.
 
 ## The agent does not answer in Slack
 
