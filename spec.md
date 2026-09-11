@@ -711,7 +711,9 @@ reads it only under `member_context_read`.
   with `commented` linking to the portal conversation, before the agent's reply. Every post the
   surface makes — comment, span, progress, terminal reply, shared file — is a reply to the member
   message it answers: the thread root a channel's queue key carries, and in a DM the member message
-  the surface recorded at admission. A portal comment has no new Slack message to answer, so it
+  the surface recorded at admission. A DM turn core founded itself on a member message it left
+  queued reaches no admission of the surface's own, so the turn's execution anchors it from the
+  conversation's mirror. A portal comment has no new Slack message to answer, so it
   uses the conversation's recorded DM thread anchor. A turn that answers no member message (a
   scheduled run) has nothing to thread under and posts at the DM top level.
 - **Live** (web; the terminal surface is its directive-stream twin) — the member's connection is held open, so

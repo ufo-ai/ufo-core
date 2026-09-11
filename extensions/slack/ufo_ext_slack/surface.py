@@ -20,7 +20,9 @@ Everything the agent says lands as a threaded reply to the member message it ans
 a channel: a channel conversation is its thread and its key carries the root, while a DM
 conversation is the channel and each member message founds a thread of its own, so admission records
 which Slack message a message ref names (`_anchor_dm_thread`) and every delivery reads its parent
-back from there (`_reply_thread`). A reply that answers no member message this surface anchored — a
+back from there (`_reply_thread`). Core founds a turn of its own on a member message it left queued,
+an admission no Slack request carries, so that turn's execution anchors itself from the
+conversation's mirror (`_anchor_followed_turn`). A reply that answers no member message — a
 scheduled run, an alert-woken turn — posts at the DM top level.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
@@ -833,7 +835,7 @@ STATUS_DESCRIPTION_LIMIT = STATUS_TEXT_LIMIT - len(STATUS_DESCRIBED_TEXT.format(
 STATUS_UPDATE_MIN_SECONDS = 1.0
 STATUS_REFRESH_SECONDS = 90.0
 
-THREAD_MIRROR_READ_SECONDS = 1.0
+THREAD_MIRROR_BUDGET_SECONDS = 1.0
 PROGRESS_BASE_SECONDS = 600.0
 PROGRESS_CAP_SECONDS = 1_800.0
 PROGRESS_ACTIVITY_LIMIT = 200
@@ -2820,6 +2822,19 @@ async def _anchor_dm_thread(admitted: Admitted, message_ts: str) -> None:
     )
 
 
+async def _anchor_followed_turn(store: ScopedStore, turn_id: UUID, thread: MirroredThread) -> None:
+    """Anchor a turn this surface never admitted to the DM message the conversation's mirror names,
+    so its replies thread under the member instead of founding a run of their own at the DM top
+    level. Core admits a member message it left queued as a turn of its own once the turn that was
+    running ends, and that admission reaches no Slack request.
+
+    Written only while the turn holds no anchor of its own, so the founding message an admission
+    recorded stands over the later message the mirror has moved on to."""
+    if thread.queue_key.partition(":")[2] or not thread.message_ts:
+        return
+    await store.put_if(_dm_anchor_key(turn_id), thread.message_ts, expected=None)
+
+
 async def _reply_thread(
     queue_key: str, turn_id: UUID, message_ref: UUID | None = None
 ) -> str | None:
@@ -3528,23 +3543,29 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
     when it starts executing; the status is thread state, so the two arms converge on one line and
     the per-turn task each follower keeps holds this process to one of each.
 
+    A turn answering a member is anchored here too, which is what a DM turn core founded on a
+    queued message has instead of an admission of this surface's own: its execution is where that
+    turn first reaches Slack, and the mirror names the message it answers.
+
     A subagent turn holds its own conversation on the subagent surface and no Slack thread, so it
     ends before any read. Everything else costs one indexed read of the thread mirror, which is
     absent for every conversation this surface did not open.
 
     This is a gating event: a handler that raises or outruns the per-handler timeout denies the
     turn, and the denial becomes the member's answer. Live feedback must never hold that power, so
-    the read is bounded by a budget of its own and every failure resolves to `None` — a turn that
-    runs unfollowed, never a turn that does not run."""
+    the mirror work is bounded by a budget of its own and every failure resolves to `None` — a turn
+    that runs unfollowed, never a turn that does not run."""
     turn = ctx.turn
     if turn is None or turn.subagent_profile is not None:
         return None
     try:
-        async with asyncio.timeout(THREAD_MIRROR_READ_SECONDS):
+        async with asyncio.timeout(THREAD_MIRROR_BUDGET_SECONDS):
             row = await ctx.ext.store.get(_thread_mirror_key(turn.conversation_id))
-        if row is None:
-            return None
-        thread = MirroredThread.read(row)
+            if row is None:
+                return None
+            thread = MirroredThread.read(row)
+            if ctx.speaker_member_id is not None:
+                await _anchor_followed_turn(ctx.ext.store, turn.id, thread)
     except Exception as error:
         log(
             "slack.thread_followers.unarmed",

@@ -4542,6 +4542,47 @@ async def test_writeback_ignores_an_oversize_slack_retry_after(
     assert writeback.last_error == "chat.postMessage HTTP 429: ratelimited"
 
 
+async def test_a_dm_turn_core_founded_on_a_queued_message_answers_in_its_thread(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A member message that arrives too late to fold is left queued, and core admits it as a turn
+    of its own once the running turn ends — an admission no Slack request carries, so nothing
+    anchored it. The turn's own execution anchors it from the conversation's mirror, so its reply
+    answers the member in their own thread instead of at the DM top level."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    assert member_id is not None
+    recorder: list[httpx.Request] = []
+    hub = InProcessHub()
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
+    turn_id = await _seed_done_turn(
+        workspace_id, "D5", "Renamed it.", blob, artifact=False, speaker_member_id=member_id
+    )
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+    with ws(workspace_id):
+        await slack.ScopedStore(slack.SLACK_EXTENSION).put(
+            slack._thread_mirror_key(conversation_id),
+            slack.MirroredThread(queue_key="D5", message_ts="200.5").model_dump(mode="json"),
+        )
+
+    await _arm_followers(workspace_id, turn_id, hub)
+    followers = [
+        task
+        for tasks in (slack._STATUS_TASKS, slack._PROGRESS_TASKS)
+        if (task := tasks.get(turn_id)) is not None
+    ]
+    await app.state.writeback_poller.drain()
+
+    posts = _progress_posts(recorder)
+    assert [(post["channel"], post["thread_ts"]) for post in posts] == [("D5", "200.5")]
+    for task in followers:
+        await asyncio.wait_for(task, timeout=10)
+
+
 async def test_a_dm_turn_answering_no_member_message_replies_at_the_top_level(
     db: None, tmp_path, monkeypatch
 ) -> None:
@@ -5669,8 +5710,8 @@ async def _arm_followers(
                 return moment if tz is not None else moment.replace(tzinfo=None)
 
         slack.datetime = _ArmingInstant
-        shipped_budget = slack.THREAD_MIRROR_READ_SECONDS
-        slack.THREAD_MIRROR_READ_SECONDS = ARMING_READ_BUDGET_SECONDS
+        shipped_budget = slack.THREAD_MIRROR_BUDGET_SECONDS
+        slack.THREAD_MIRROR_BUDGET_SECONDS = ARMING_READ_BUDGET_SECONDS
         try:
             resolution = await chain.fire(
                 "user_prompt_submit",
@@ -5681,7 +5722,7 @@ async def _arm_followers(
             )
         finally:
             slack.datetime = datetime
-            slack.THREAD_MIRROR_READ_SECONDS = shipped_budget
+            slack.THREAD_MIRROR_BUDGET_SECONDS = shipped_budget
     assert resolution.denied is None
 
 
