@@ -3672,6 +3672,88 @@ async def test_reading_a_conversation_transcript_clears_its_unread_mark(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_turn_that_arrives_after_the_read_cursor_marks_the_row_unread_again(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The cursor answers one question: what arrived since the member read. A thread carrying a
+    cursor and nothing newer reads read, the next turn to arrive marks it unread, and the read that
+    serves that turn clears the mark again."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "builder@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=f"homepage/{agent_id}/{member_id}",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=1, inbound="build the homepage"
+    )
+    transcript = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
+    read = await client.get(transcript, headers=cookie)
+    assert read.status_code == 200, read.text
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [False]
+
+    arrived_at = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="done",
+                inbound="the homepage is up",
+                admission_source="internal",
+                speaker_member_id=None,
+                terminal=TerminalFrame(status="done", text="done").model_dump(mode="json"),
+                created_at=arrived_at,
+                updated_at=arrived_at,
+            )
+        )
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [True]
+
+    reread = await client.get(transcript, headers=cookie)
+    assert reread.status_code == 200, reread.text
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [False]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_conversation_an_agent_opened_reads_unread_before_the_member_opens_it(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An agent opens a room and speaks in it, so the member has neither a cursor nor a turn of
+    their own there. Nothing states they saw it, and that first arrival is what the mark exists to
+    report."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "builder@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=f"homepage/{agent_id}/{member_id}",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=1, inbound="build the homepage"
+    )
+    async with workspace_tx() as connection:
+        cursors = (
+            await connection.execute(
+                sa.select(sa.func.count()).select_from(tables.conversation_read)
+            )
+        ).scalar_one()
+    assert cursors == 0
+    assert [row["unread"] for row in await _rail_rows(client, cookie)] == [True]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

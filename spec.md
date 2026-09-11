@@ -882,9 +882,10 @@ and they are not: the rail's projection, each row titled the way the title job n
 `mine`, and a colleague's naming who spoke it. Each row also states `unread`: the conversation moved
 after the later of this member's read cursor (`conversation_read`, written by the transcript read
 that serves them the messages) and their own last turn — so a thread they answered in Slack reads
-read without a portal visit, and one an agent or a colleague moved draws its rail mark live. Slack
-holds a per-user read state of its own and no token this deploy carries may ask for it. A
-conversation no member spoke in is an extension's errand and is in neither. A
+read without a portal visit, and one an agent or a colleague moved draws its rail mark live. A
+thread holding neither a cursor nor a turn of theirs is unread from its first turn: nothing there
+states they saw it. Slack holds a per-user read state of its own and no token this deploy carries
+may ask for it. A conversation no member spoke in is an extension's errand and is in neither. A
 `#/c/<conversation_id>` permalink opens a web chat normally, opens a
 member-private extension conversation for replies, opens the signed-in member's and workspace's
 Slack and terminal conversations for comments, and opens every other surface's readable
