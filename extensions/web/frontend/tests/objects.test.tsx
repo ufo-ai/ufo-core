@@ -8,7 +8,7 @@ import { ObjectDetail, ObjectPane } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { Pane } from "@/kernel/pane";
 import { Viewer } from "@/lib/audience";
-import { friendlyMoment, fullMoment, spanMoment } from "@/lib/moments";
+import { friendlyMoment, fullMoment, rowMoment, spanMoment } from "@/lib/moments";
 import { MainAgentProvider } from "@/lib/mainAgent";
 import { chatHash } from "@/lib/route";
 
@@ -301,6 +301,16 @@ test("a moment reads as its distance from now, and as its date once it is old", 
   expect(friendlyMoment("2026-08-02T13:00:00Z", NOW)).toBe("Tomorrow");
   expect(friendlyMoment("2026-09-01T12:00:00Z", NOW)).toBe("Sep 1 2026");
   expect(friendlyMoment("not a moment", NOW)).toBe("not a moment");
+});
+
+test("a row's moment reads as an age today and as a named day with a clock time before that", () => {
+  const noon = new Date(2026, 7, 1, 12, 0, 0);
+  const dawn = new Date(2026, 7, 1, 9, 0, 0);
+  const before = new Date(2026, 6, 30, 11, 2, 0);
+  expect(rowMoment(dawn.toISOString(), noon)).toBe("3h ago");
+  expect(rowMoment(new Date(2026, 7, 1, 11, 59, 40).toISOString(), noon)).toBe("now");
+  expect(rowMoment(before.toISOString(), noon)).toBe("Jul 30, 11:02 AM");
+  expect(rowMoment("not a moment", noon)).toBe("not a moment");
 });
 
 test("a running span reads as minutes and seconds, and drops its seconds past the hour", () => {

@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { expect, test } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
+import { clockOf, localMoment } from "@/lib/moments";
 import { Radar } from "@/views/Radar";
 
 import { AGENT, RADAR_TOUR, json, wire } from "./harness";
@@ -45,3 +46,56 @@ test("the tour stands under the feed's own band where no run has reported", asyn
   expect(await screen.findByRole("heading", { name: RADAR_TOUR })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Rebuild entries" })).toBeNull();
 });
+
+test("a run fired on an earlier day states its clock in the reader's own zone", async () => {
+  const fired = new Date(2026, 6, 30, 9, 0, 0);
+  wire({
+    "/objects/report": () =>
+      new Response(
+        JSON.stringify({
+          objects: [
+            {
+              name: "11111111-1111-4111-8111-111111111111",
+              agent_id: AGENT.id,
+              conversation: "22222222-2222-4222-8222-222222222222",
+              fired_at: fired.toISOString(),
+              status: "done",
+              task: null,
+              surface: "web",
+              source: null,
+              text: "The nightly ran.",
+              entry: null,
+              artifacts: [],
+            },
+          ],
+          next_cursor: null,
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Radar place={{}} onPlace={() => {}} />
+    </MainAgentProvider>,
+  );
+
+  expect(await screen.findByText(clockOf(localMoment(fired)))).toBeTruthy();
+  const [year, month, date] = localMoment(fired).slice(0, 10).split("-");
+  const heading = MONTHS[Number(month) - 1] + " " + Number(date) + ", " + year;
+  expect(screen.getAllByRole("heading").map((h) => h.textContent)).toContain(heading);
+});
+
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];

@@ -397,7 +397,7 @@ test("the picker lane offers the workspace's apps and the member's history", asy
     within(apps.parentElement!)
       .getAllByRole("button")
       .map((row) => row.textContent),
-  ).toEqual(["Assistant", "Second", "ConnectorsConnect the accounts your apps work in."]);
+  ).toEqual(["Assistant", "Second", "ConnectionsConnect the accounts your apps work in."]);
 
   const history = within(picker).getByRole("heading", { name: "History", level: 3 });
   const chats = history.closest("section")!;

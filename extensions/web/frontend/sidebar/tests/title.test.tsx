@@ -49,7 +49,7 @@ test("every page names where the member is, innermost first, then the product", 
   expect(titled({ kind: "workspace", view: "credentials", ...PLACE })).toBe(
     "Credentials · Workspace · ufo",
   );
-  expect(titled({ kind: "section", section: "connectors", ...PLACE })).toBe("Connectors · ufo");
+  expect(titled({ kind: "section", section: "connectors", ...PLACE })).toBe("Connections · ufo");
   expect(titled({ kind: "first-run" })).toBe("Set up this workspace · ufo");
   expect(titled({ kind: "bad-link" })).toBe("Invalid link · ufo");
   expect(

@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 import type { ToastState } from "@/components/ui/toast";
 import { getJson } from "@/lib/api";
 import { isPortalChat } from "@/lib/audience";
+import type { ChatTurn } from "@/lib/chatStore";
 import {
   bumpChat,
   heldPinned,
@@ -146,7 +147,10 @@ export function railFounded(row: ChatRow): void {
   update((held) => ({ ...held, rows: mergeChats(held.rows, [row]) }));
 }
 
-export function railActivity(conversationId: string): void {
+/** A row's moment is the turn it started, never the turn it finished: a send that failed leaves the
+ *  rail where it stood. */
+export function railActivity(conversationId: string, turn: ChatTurn): void {
+  if (turn !== "running") return;
   update((held) => ({ ...held, rows: bumpChat(held.rows, conversationId, new Date()) }));
 }
 

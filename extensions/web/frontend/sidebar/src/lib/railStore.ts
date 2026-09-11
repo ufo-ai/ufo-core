@@ -4,17 +4,21 @@ import type { ToastState } from "@/components/ui/toast";
 import { getJson } from "@/lib/api";
 import { RESTING_STATUS_MS, WORKING_STATUS_MS } from "@/lib/appStatusStore";
 import { isPortalChat } from "@/lib/audience";
+import type { ChatTurn } from "@/lib/chatStore";
 import {
   bumpChat,
+  turnedChat,
   heldAppsExpanded,
   heldPinned,
   heldRailShown,
+  heldRailSort,
   heldRailShut,
   heldSectionsShut,
   heldSidebar,
   holdAppsExpanded,
   holdPinned,
   holdRailShown,
+  holdRailSort,
   holdRailShut,
   holdSectionsShut,
   holdSidebar,
@@ -25,6 +29,7 @@ import {
   type ChatsPayload,
   type ConversationsPayload,
   type RailShown,
+  type RailSort,
 } from "@/lib/rail";
 import type { OwnedConversation } from "@/lib/types";
 
@@ -42,6 +47,7 @@ export type RailState = {
   linked: Readonly<Record<string, OwnedConversation>>;
   fault: ToastState | null;
   shown: RailShown;
+  sort: RailSort;
   shut: string[] | null;
   collapsed: boolean;
   pinned: string[] | null;
@@ -57,6 +63,7 @@ function fresh(): RailState {
     linked: {},
     fault: null,
     shown: heldRailShown(),
+    sort: heldRailSort(),
     shut: heldRailShut(),
     collapsed: heldSidebar(),
     pinned: heldPinned(),
@@ -147,7 +154,7 @@ let ticking: number | null = null;
 function poll(): void {
   if (ticking !== null || document.visibilityState === "hidden") return;
   const held = railState();
-  const live = railGroups(held.rows, held.shown).some((group) =>
+  const live = railGroups(held.rows, held.shown, held.sort).some((group) =>
     group.rows.some((row) => row.turn === "running" || row.turn === "queued"),
   );
   ticking = window.setTimeout(
@@ -223,9 +230,20 @@ export function railFounded(row: ChatRow): void {
   wakeRail();
 }
 
-export function railActivity(conversationId: string): void {
-  update((held) => ({ ...held, rows: bumpChat(held.rows, conversationId, new Date()) }));
+export function railActivity(conversationId: string, turn: ChatTurn): void {
+  update((held) => ({
+    ...held,
+    rows:
+      turn === "running"
+        ? bumpChat(held.rows, conversationId, new Date(), turn)
+        : turnedChat(held.rows, conversationId, turn),
+  }));
   wakeRail();
+}
+
+export function pickRailSort(sort: RailSort): void {
+  holdRailSort(sort);
+  update((held) => ({ ...held, sort }));
 }
 
 export function quietRail(): void {

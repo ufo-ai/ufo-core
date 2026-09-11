@@ -436,6 +436,7 @@ export type Stand =
   | `open:${string}`
   | "workspace"
   | "tasks"
+  | "store"
   | `section:${Section}`;
 
 export const COMPOSING: Stand = `open:${COMPOSE}`;
@@ -461,10 +462,11 @@ function stands(route: Route): Stand[] {
       return ["workspace"];
     case "tasks":
       return ["tasks"];
+    case "store":
+      return ["store"];
     case "section":
       return [`section:${route.section}`];
     case "agents":
-    case "store":
     case "first-run":
     case "bad-link":
       return [];

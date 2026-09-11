@@ -366,7 +366,7 @@ test("an unopened term lists what to do and where to go, and reads nothing", asy
     "App Store",
     "Radar",
     "Artifacts",
-    "Connectors",
+    "Connections",
     "Workspace",
   ]);
   expect(calls.some((url) => url.includes("q="))).toBe(false);

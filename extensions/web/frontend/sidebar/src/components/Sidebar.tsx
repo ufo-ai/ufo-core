@@ -3,8 +3,13 @@ import type { ComponentProps, ReactElement, ReactNode } from "react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 
-export const SIDEBAR_ROW =
-  "group/row flex min-h-(--size-row) w-full items-center rounded-row hover:bg-fill";
+/** The row reaches the sidebar's own edges so the gutter beside a title answers the pointer, and
+ *  the pill it paints is inset from them. A pill that was itself the hit area left two dead
+ *  strips a member crossing the list from the left never got a hover out of. */
+export const SIDEBAR_ROW = "group/row flex min-h-(--size-row) w-full items-center px-sm";
+
+export const SIDEBAR_PILL =
+  "flex min-h-(--size-row) w-full min-w-0 items-center rounded-row group-hover/row:bg-fill";
 
 export const SIDEBAR_CURRENT = "bg-fill";
 
@@ -17,10 +22,13 @@ export const SIDEBAR_FOLDED = "justify-center gap-0 px-0";
 export function SidebarRow({
   current,
   className,
+  children,
   ...props
 }: ComponentProps<"li"> & { current?: boolean }) {
   return (
-    <li {...props} className={cn(SIDEBAR_ROW, current === true && SIDEBAR_CURRENT, className)} />
+    <li {...props} className={cn(SIDEBAR_ROW, className)}>
+      <div className={cn(SIDEBAR_PILL, current === true && SIDEBAR_CURRENT)}>{children}</div>
+    </li>
   );
 }
 

@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 
@@ -8,6 +8,14 @@ import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, MEMBER, useStreamFake, wire } f
 
 beforeEach(() => {
   useStreamFake();
+});
+
+/** Radix arms a 300ms timer either side of a hover, and vitest tears this file's environment down
+ *  under a pending one. */
+const CARD_DELAY_MS = 300;
+
+afterEach(async () => {
+  await new Promise((settled) => setTimeout(settled, CARD_DELAY_MS + 50));
 });
 
 const SLACK_LINK = "https://example.slack.com/archives/C1/p1700000000000001";
@@ -39,7 +47,7 @@ async function acts(title: string): Promise<HTMLElement> {
 
 test("a thread row holds its acts behind a mark drawn under the pointer and on the row's focus", async () => {
   wire({ ...chatsOnWire([CHAT_ROW]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  const view = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const mark = await acts("Pick one thread");
   expect(mark.getAttribute("aria-haspopup")).toBe("menu");
@@ -50,30 +58,33 @@ test("a thread row holds its acts behind a mark drawn under the pointer and on t
   await userEvent.click(mark);
   expect(await screen.findByRole("menuitem", { name: "Copy link" })).toBeTruthy();
   expect(location.hash).toBe("");
+  view.unmount();
 });
 
 test("copy link writes the thread's portal address", async () => {
   const written = writeText();
   wire({ ...chatsOnWire([CHAT_ROW]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  const view = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await acts("Pick one thread"));
   await userEvent.click(await screen.findByRole("menuitem", { name: "Copy link" }));
 
   expect(written).toHaveBeenCalledWith(location.origin + location.pathname + "#/c/" + CONVO_ID);
+  view.unmount();
 });
 
 test("a Slack thread leads back out to Slack and a portal thread does not", async () => {
   localStorage.setItem("rail-shown", "slack");
   wire({ ...chatsOnWire([CHAT_ROW, SLACK_ROW]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  const view = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await acts("Pick one thread"));
-  expect(screen.queryByRole("menuitem", { name: "Open in Slack" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: /^Open in / })).toBeNull();
   await userEvent.keyboard("{Escape}");
 
   await userEvent.click(await acts("Deploy question"));
-  const away = await screen.findByRole("menuitem", { name: "Open in Slack" });
+  const away = await screen.findByRole("menuitem", { name: "Open in #deploys" });
   expect(away.getAttribute("href")).toBe(SLACK_LINK);
   expect(away.getAttribute("rel")).toBe("noopener noreferrer");
+  view.unmount();
 });

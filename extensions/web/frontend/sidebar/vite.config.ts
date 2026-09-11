@@ -33,6 +33,10 @@ export default defineConfig({
         replacement: new URL("./src/views/Agents.tsx", import.meta.url).pathname,
       },
       {
+        find: "@/views/Apps",
+        replacement: new URL("./src/views/Apps.tsx", import.meta.url).pathname,
+      },
+      {
         find: "@/views/FirstRun",
         replacement: new URL("./src/views/FirstRun.tsx", import.meta.url).pathname,
       },

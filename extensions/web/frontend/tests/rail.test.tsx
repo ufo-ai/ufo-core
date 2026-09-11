@@ -833,7 +833,7 @@ test("the sidebar marks the destination the member is in and leaves the others o
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   const marked = (rail: ReturnType<typeof within>) =>
-    ["New chat", "Connectors", "Workspace"].filter(
+    ["New chat", "Connections", "Workspace"].filter(
       (name) => rail.getByRole("button", { name }).getAttribute("aria-current") === "true",
     );
 
@@ -845,9 +845,9 @@ test("the sidebar marks the destination the member is in and leaves the others o
   const team = await openRail();
   expect(marked(team)).toEqual(["Workspace"]);
 
-  await userEvent.click(team.getByRole("button", { name: "Connectors" }));
+  await userEvent.click(team.getByRole("button", { name: "Connections" }));
   const connectors = await openRail();
-  await waitFor(() => expect(marked(connectors)).toEqual(["Connectors"]));
+  await waitFor(() => expect(marked(connectors)).toEqual(["Connections"]));
 
   const index = within(connectors.getByRole("navigation", { name: "Apps" }));
   expect(index.getByRole("button", { name: "Assistant" })).toBeTruthy();

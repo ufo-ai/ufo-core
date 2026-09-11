@@ -81,6 +81,23 @@ export type RailGroup = { label: string | null; rows: ChatRow[] };
 
 export type RailShown = { terminal: boolean; slack: boolean; imessage: boolean };
 
+export type RailSort = "recency" | "priority";
+
+export const RAIL_SORT_OPTIONS: { sort: RailSort; label: string }[] = [
+  { sort: "recency", label: "Recency" },
+  { sort: "priority", label: "Priority" },
+];
+
+const HELD_SORT = "rail-sort";
+
+export function heldRailSort(): RailSort {
+  return localStorage.getItem(HELD_SORT) === "priority" ? "priority" : "recency";
+}
+
+export function holdRailSort(sort: RailSort): void {
+  localStorage.setItem(HELD_SORT, sort);
+}
+
 export const RAIL_SHOWN_OPTIONS: { surface: keyof RailShown; label: string }[] = [
   { surface: "terminal", label: "Terminal" },
   { surface: "slack", label: "Slack" },
@@ -89,12 +106,16 @@ export const RAIL_SHOWN_OPTIONS: { surface: keyof RailShown; label: string }[] =
 
 const HELD_SHOWN = "rail-shown";
 
+/** A browser holding nothing has never opened the filter, and the rail it draws is every
+ *  conversation the member has; an empty set is a member who switched them all off. */
 export function heldRailShown(): RailShown {
-  const held = (localStorage.getItem(HELD_SHOWN) ?? "").split(",");
+  const held = localStorage.getItem(HELD_SHOWN);
+  if (held === null) return { terminal: true, slack: true, imessage: true };
+  const named = held.split(",");
   return {
-    terminal: held.includes("terminal"),
-    slack: held.includes("slack"),
-    imessage: held.includes("imessage"),
+    terminal: named.includes("terminal"),
+    slack: named.includes("slack"),
+    imessage: named.includes("imessage"),
   };
 }
 
@@ -214,8 +235,16 @@ function admits(row: ChatRow, shown: RailShown): boolean {
 const OTHER_MEMBERS = "Other members";
 
 /** The rail stands in one order, newest first: a chat is found by when it last moved. */
-export function railGroups(rows: ChatRow[], shown: RailShown): RailGroup[] {
-  const admitted = rows.filter((row) => admits(row, shown));
+const TURN_RANK: Record<RailTurn, number> = { parked: 0, running: 1, queued: 1, idle: 2 };
+
+export function railGroups(rows: ChatRow[], shown: RailShown, sort: RailSort): RailGroup[] {
+  const kept = rows.filter((row) => admits(row, shown));
+  const admitted =
+    sort === "recency"
+      ? kept
+      : [...kept].sort(
+          (one, two) => TURN_RANK[one.turn] - TURN_RANK[two.turn] || moment(two) - moment(one),
+        );
   const own = admitted.filter((row) => row.mine);
   const theirs = admitted.filter((row) => !row.mine);
   const grouped: RailGroup[] = own.length ? [{ label: null, rows: own }] : [];
@@ -256,14 +285,23 @@ function moment(row: ChatRow): number {
 
 /** A conversation this tab has just admitted a turn into: its row moves to the top and its dot
  *  reads live, until the next listing read states the turn the engine holds. */
-export function bumpChat(rows: ChatRow[], conversationId: string, at: Date): ChatRow[] {
+export function bumpChat(
+  rows: ChatRow[],
+  conversationId: string,
+  at: Date,
+  turn: RailTurn,
+): ChatRow[] {
   const bumped = rows.map((row) =>
-    row.conversation_id === conversationId
-      ? { ...row, last_at: stampIso(at), turn: "running" as const }
-      : row,
+    row.conversation_id === conversationId ? { ...row, last_at: stampIso(at), turn } : row,
   );
   bumped.sort((a, b) => moment(b) - moment(a));
   return bumped;
+}
+
+/** A turn that ends restates its row's mark alone: its moment is the turn it started, so a landing
+ *  turn must not reorder the rail under the member. */
+export function turnedChat(rows: ChatRow[], conversationId: string, turn: RailTurn): ChatRow[] {
+  return rows.map((row) => (row.conversation_id === conversationId ? { ...row, turn } : row));
 }
 
 export function mergeChats(fetched: ChatRow[], held: ChatRow[]): ChatRow[] {

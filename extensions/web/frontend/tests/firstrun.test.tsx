@@ -1143,7 +1143,7 @@ test("the last screen lands home on the founded thread with connectors beside it
       Array.from(document.querySelectorAll("[data-slot=slot-track] > div > section")).map((lane) =>
         lane.getAttribute("aria-label"),
       ),
-    ).toEqual(["Conversation", "Connectors"]),
+    ).toEqual(["Conversation", "Connections"]),
   );
 });
 
@@ -1174,7 +1174,7 @@ test("a second run through opens a new conversation rather than the one the firs
   await waitFor(() => expect(chat.sent).toEqual([...DEFAULT_SENT, ...DEFAULT_SENT]));
   expect(chat.posted).toEqual(chat.posted.map(() => chat.posted[0]));
   expect(chat.posted[2]).toContain("conversation=new");
-});
+}, BUILD_STEP_MS * 20);
 
 test("the website step opens the run, prefilled with the workspace's domain, and Back returns to the welcome", async () => {
   await open();

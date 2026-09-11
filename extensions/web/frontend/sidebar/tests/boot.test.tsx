@@ -173,14 +173,14 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Artifacts",
     "Connections",
     "Settings",
-    "Chats",
+    "New chat",
     "Chats options",
     MEMBER.email,
   ]);
   expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
 });
 
-test("every nav row lands on its own section, whatever the workspace holds", async () => {
+test("every nav row lands on its own portal view", async () => {
   wire({ "/transcript": () => json({ messages: [] }), "/homepage": () => json({ state: "none" }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -196,22 +196,18 @@ test("every nav row lands on its own section, whatever the workspace holds", asy
 
   await userEvent.click(rail.getByRole("button", { name: "Connections" }));
   expect(location.hash).toBe("#/connectors");
-
-  await userEvent.click(rail.getByRole("button", { name: "Settings" }));
-  expect(location.hash).toBe("#/workspace/team");
 });
 
-test("a section heading folds its section, and holds its menu behind a mark drawn under the pointer", async () => {
+test("a section heading names its list and holds its menu behind a mark drawn under the pointer", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  const band = within(sidebar).getByRole("button", { name: "Chats" });
-  expect(band.getAttribute("aria-haspopup")).toBeNull();
-  expect(band.getAttribute("aria-expanded")).toBe("true");
-  const chevron = band.querySelector("svg");
-  if (!chevron) throw new Error("Chats states no fold mark");
-  expect(chevron.getAttribute("class")).not.toContain("opacity-0");
+  expect(within(sidebar).getByRole("heading", { name: "Chats" })).toBeTruthy();
+  expect(within(sidebar).queryByRole("button", { name: "Chats" })).toBeNull();
+
+  const compose = within(sidebar).getAllByRole("button", { name: "New chat" }).at(-1)!;
+  expect(compose.getAttribute("class")).toContain("group-hover/head:opacity-100");
 
   const options = within(sidebar).getByRole("button", { name: "Chats options" });
   expect(options.getAttribute("aria-haspopup")).toBe("menu");
@@ -278,7 +274,7 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Artifacts",
     "Connections",
     "Settings",
-    "Chats",
+    "New chat",
     "Chats options",
     MEMBER.email,
   ]);

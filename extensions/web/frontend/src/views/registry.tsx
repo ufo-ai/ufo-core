@@ -71,9 +71,9 @@ export const ARTIFACTS: PaneView = {
 };
 
 export const CONNECTORS: PaneView = {
-  label: "Connectors",
+  label: "Connections",
   remountOnPlace: false,
-  search: "Search connectors",
+  search: "Search connections",
   render: placed(() =>
     import("@/views/Connectors").then((module) => ({ default: module.Connectors })),
   ),

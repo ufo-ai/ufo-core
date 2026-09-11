@@ -1,7 +1,17 @@
-import { Fragment, Suspense, lazy, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
-  IconChevronDown,
+  IconBrandSlack,
   IconChevronRight,
   IconCirclePlusFilled,
   IconClockPlay,
@@ -10,13 +20,17 @@ import {
   IconFile,
   IconFilter2,
   IconLayoutSidebarRight,
+  IconLoader2,
   IconLogout,
   IconMenu2,
+  IconMessageCircle,
   IconMoon,
+  IconPencilPlus,
   IconPlug,
   IconRadar,
   IconSettings,
   IconSun,
+  IconTerminal2,
   IconX,
 } from "@tabler/icons-react";
 
@@ -44,26 +58,29 @@ import { SearchRow, Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, TASK_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
+  IMESSAGE_SURFACE,
   MEMBER_SUBJECT,
   Me,
+  SLACK_SURFACE,
+  UFO_SURFACE,
   WEB_SURFACE,
   isPortalChat,
   Viewer,
   WorkspaceId,
   origin,
   slackLink,
+  surfaceWord,
   speakerName,
 } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { AppsProvider } from "@/lib/apps";
 import { useAppStatus } from "@/lib/appStatusStore";
-import { SurfaceGlyph } from "@/lib/surfaceMark";
 import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
 import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
 import { Loading } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { MainAgentProvider, chatSurface } from "@/lib/mainAgent";
-import { fullMoment } from "@/lib/moments";
+import { rowMoment } from "@/lib/moments";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
 import { SETUP, pageCrumb, pageTitle } from "@/lib/title";
@@ -83,17 +100,18 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   RAIL_SHOWN_OPTIONS,
+  RAIL_SORT_OPTIONS,
   railAudience,
   railGroups,
   railShut,
-  railStamp,
   stampIso,
   type RailGroup,
+  type RailSort,
   type RailTurn,
 } from "@/lib/rail";
 import {
   foldSidebar,
-  pickSectionShut,
+  pickRailSort,
   pickRailShown,
   pickRailShut,
   quietRail,
@@ -105,6 +123,7 @@ import {
   watchRail,
 } from "@/lib/railStore";
 import {
+  buildWanted,
   forwardAgents,
   heldRoute,
   openAgentPlace,
@@ -242,22 +261,6 @@ export function App({
     if (route.kind === "chat" && rail.phase === "ready") seekChat(route.conversationId);
   }, [route, rail]);
 
-  /** The wizard mounts only behind a member's press or a run already in flight: its address alone must
-   *  not found a conversation, or Back and reload would send model turns nobody asked for. */
-  const [wantedBuild, setWantedBuild] = useState(false);
-  const startBuild = useCallback(() => {
-    setWantedBuild(true);
-    openBuilder();
-  }, []);
-  const exitBuild = useCallback(() => {
-    setWantedBuild(false);
-    openAgents();
-  }, []);
-  const forwardBuild = useCallback(() => {
-    setWantedBuild(false);
-    forwardAgents();
-  }, []);
-
   if (route.kind === "first-run") {
     return (
       <WorkspaceId.Provider value={member.workspace_id ?? null}>
@@ -335,10 +338,6 @@ export function App({
                       member={member}
                       mainAgent={mainAgent}
                       onAgents={onAgents}
-                      onBuild={startBuild}
-                      onExitBuilder={exitBuild}
-                      onForwardAgents={forwardBuild}
-                      buildWanted={wantedBuild}
                     />
                   </Suspense>
                 </PaneFault>
@@ -568,9 +567,6 @@ const CONNECTIONS = "Connections";
 /** Shift makes the character upper case, so the guard reads the letter. */
 const NEW_CHAT_CHORD: Chord = { key: "o", cap: "\u21e7\u2318O", aria: "Meta+Shift+O" };
 
-const SECTION_HEAD_CHEVRON =
-  "size-icon shrink-0 transition-transform duration-100 ease-control motion-reduce:transition-none";
-
 const SECTION_HEAD_GLYPH =
   "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none group-hover/head:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 data-[state=open]:bg-fill";
 
@@ -645,36 +641,31 @@ function SchemeGlyph({ scheme }: { scheme: Scheme }) {
 
 function SectionHead({
   label,
-  shut,
   collapsed,
-  onShut,
+  acts,
   children,
 }: {
   label: string;
-  shut: boolean;
   collapsed?: boolean;
-  onShut: (shut: boolean) => void;
+  acts?: React.ReactNode;
   children?: React.ReactNode;
 }) {
   return (
     <div
       className={cn(
-        "group/head flex h-(--size-row) w-full shrink-0 items-center rounded-control hover:bg-fill",
+        "group/head flex h-(--size-row) w-full shrink-0 items-center rounded-control px-sm",
         collapsed && "hidden",
       )}
     >
-      <button
-        type="button"
-        aria-expanded={!shut}
-        onClick={() => onShut(!shut)}
+      <h2
         className={cn(
-          "flex min-w-0 flex-1 items-center gap-sm border-0 bg-transparent px-sm",
-          "text-left font-sans text-label font-medium text-ink-soft",
+          "m-0 min-w-0 flex-1 truncate px-sm",
+          "font-sans text-label font-medium text-ink-soft",
         )}
       >
-        <span className="min-w-0 truncate">{label}</span>
-        <IconChevronDown className={cn(SECTION_HEAD_CHEVRON, shut && "-rotate-90")} aria-hidden />
-      </button>
+        {label}
+      </h2>
+      {acts}
       {children ? (
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
@@ -705,7 +696,6 @@ function WorkspaceSidebar({
   const rail = useRail();
   const tabs = useOfferedTabs();
   const collapsed = rail.collapsed && !narrow;
-  const chatsShut = !collapsed && rail.sectionsShut.includes(CHATS);
   const chatApp = chatSurface(agents);
   const startChat = useCallback(() => {
     if (!mainAgent) return;
@@ -752,7 +742,7 @@ function WorkspaceSidebar({
           />
         </SidebarTooltip>
       </div>
-      <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
+      <ul className="m-0 flex list-none flex-col gap-px p-0">
         {mainAgent ? (
           <NavRow
             icon={<AskGlyph />}
@@ -796,16 +786,14 @@ function WorkspaceSidebar({
           onClick={() => placeWorkspace(tabs[0], {}, "push")}
         />
       </ul>
-      <div className={cn("flex min-h-0 flex-1 flex-col gap-px px-sm", collapsed && "hidden")}>
-        <RailSettingsFlyout shut={chatsShut} onShut={(shut) => pickSectionShut(CHATS, shut)} />
-        {chatsShut ? null : (
-          <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto">
-            <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
-          </div>
-        )}
+      <div className={cn("flex min-h-0 flex-1 flex-col gap-px", collapsed && "hidden")}>
+        <RailSettingsFlyout onCompose={startChat} />
+        <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto">
+          <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
+        </div>
       </div>
       <footer className="mt-auto shrink-0">
-        <ul className="m-0 flex list-none flex-col gap-px px-sm py-0">
+        <ul className="m-0 flex list-none flex-col gap-px p-0">
           <AccountRow member={member} collapsed={collapsed} />
         </ul>
       </footer>
@@ -824,20 +812,12 @@ function RoutedPane({
   member,
   mainAgent,
   onAgents,
-  onBuild,
-  onExitBuilder,
-  onForwardAgents,
-  buildWanted,
 }: {
   route: Route;
   agents: Agent[];
   member: Member;
   mainAgent: Agent | null;
   onAgents: () => void;
-  onBuild: () => void;
-  onExitBuilder: () => void;
-  onForwardAgents: () => void;
-  buildWanted: boolean;
 }) {
   const rail = useRail();
   const tabs = useOfferedTabs();
@@ -867,7 +847,7 @@ function RoutedPane({
     case "bad-link":
       return <PaneNote>This link is not valid.</PaneNote>;
     case "store":
-      return <Store member={member} onBuild={onBuild} />;
+      return <Store member={member} onBuild={openBuilder} />;
     case "tasks":
       return (
         <TabbedPane
@@ -945,9 +925,9 @@ function RoutedPane({
                   : undefined
             }
             onAgents={onAgents}
-            onExitBuilder={onExitBuilder}
-            onForwardAgents={onForwardAgents}
-            buildWanted={buildWanted}
+            onExitBuilder={openAgents}
+            onForwardAgents={forwardAgents}
+            buildWanted={buildWanted()}
           />
         </Pane>
       );
@@ -1059,11 +1039,23 @@ function NotShared() {
   return <PaneNote>This conversation is not shared with this account.</PaneNote>;
 }
 
-function RailSettingsFlyout({ shut, onShut }: { shut: boolean; onShut: (shut: boolean) => void }) {
-  const { shown } = useRail();
+function RailSettingsFlyout({ onCompose }: { onCompose: () => void }) {
+  const { shown, sort } = useRail();
   const host = useDrawerHost();
   return (
-    <SectionHead label={CHATS} shut={shut} onShut={onShut}>
+    <SectionHead
+      label={CHATS}
+      acts={
+        <button
+          type="button"
+          aria-label={NEW_CHAT}
+          onClick={onCompose}
+          className={SECTION_HEAD_GLYPH}
+        >
+          <IconPencilPlus className="size-icon" aria-hidden />
+        </button>
+      }
+    >
       <DropdownMenuContent side="right" align="start" container={host}>
         <DropdownMenuLabel>Show</DropdownMenuLabel>
         {RAIL_SHOWN_OPTIONS.map((option) => (
@@ -1075,6 +1067,18 @@ function RailSettingsFlyout({ shut, onShut }: { shut: boolean; onShut: (shut: bo
             {option.label}
           </DropdownMenuCheckboxItem>
         ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Sort</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={sort}
+          onValueChange={(next) => pickRailSort(next as RailSort)}
+        >
+          {RAIL_SORT_OPTIONS.map((option) => (
+            <DropdownMenuRadioItem key={option.sort} value={option.sort}>
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </SectionHead>
   );
@@ -1156,7 +1160,7 @@ function RailList({
   chatApp: Agent | null;
 }) {
   const rail = useRail();
-  const groups = railGroups(rail.rows, rail.shown);
+  const groups = railGroups(rail.rows, rail.shown, rail.sort);
   const folded = railShut(
     rail.shut,
     groups.map((group) => group.label),
@@ -1178,6 +1182,7 @@ function RailList({
             title={row.title}
             opening={row.opening}
             surface={row.surface}
+            surfaceLabel={row.surface_label}
             source={row.source}
             turn={row.turn}
             when={row.last_at}
@@ -1220,7 +1225,7 @@ function RailList({
           >
             <section>
               <h2 className="m-0">
-                <CollapsibleTrigger className="group/rail flex h-(--size-row) w-full items-center gap-2xs rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill">
+                <CollapsibleTrigger className="group/rail mx-sm flex h-(--size-row) w-[calc(100%-var(--spacing-sm)*2)] items-center gap-2xs rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill">
                   <span className="min-w-0 truncate">{label}</span>
                   <IconChevronRight
                     aria-hidden
@@ -1246,6 +1251,7 @@ function RailRow({
   title,
   opening,
   surface,
+  surfaceLabel,
   source,
   turn,
   when,
@@ -1257,6 +1263,7 @@ function RailRow({
   title: string;
   opening: string | null;
   surface: string;
+  surfaceLabel: string | null;
   source: string | null;
   turn: RailTurn;
   when: string;
@@ -1264,7 +1271,6 @@ function RailRow({
 }) {
   const [asks, setAsks] = useState(0);
   const card = useId();
-  const dot = RAIL_DOT[turn];
   const button = (
     <SidebarPress
       current={current}
@@ -1282,48 +1288,48 @@ function RailRow({
           data-turn={turn}
           className="me-2xs flex size-(--size-glyph) shrink-0 items-center justify-center"
         >
-          <span
-            className={cn(
-              "size-sm rounded-full transition duration-200 ease-control",
-              dot ?? "scale-0",
-            )}
-          />
+          {turn === "running" || turn === "queued" ? (
+            <IconLoader2
+              className="size-(--size-glyph) shrink-0 animate-spin text-primary motion-reduce:animate-none"
+            />
+          ) : (
+            <RailOrigin surface={surface} ink={RAIL_TURN_INK[turn]} />
+          )}
         </span>
       }
     >
       <Ticker asks={asks} className="flex-1">
         {title}
       </Ticker>
-      <time className={RAIL_STAMP} dateTime={when} title={fullMoment(when)}>
-        {railStamp(when, new Date())}
-      </time>
-      <SurfaceGlyph surface={surface} />
     </SidebarPress>
   );
   return (
-    <SidebarRow current={current}>
-      <HoverCard>
-        <HoverCardTrigger asChild>{button}</HoverCardTrigger>
-        <HoverCardContent id={card} sideOffset={RAIL_CARD_OFFSET}>
-          <span className="font-medium">{title}</span>
-          {opening ? <span className="text-ink-soft">{opening}</span> : null}
-          <span className="text-small text-ink-faint">
-            {[...facts, fullMoment(when)].join(" · ")}
-          </span>
-        </HoverCardContent>
-      </HoverCard>
-      <RailRowActs conversationId={conversationId} surface={surface} source={source} />
-    </SidebarRow>
+    <HoverCard>
+      <HoverCardTrigger asChild>
+        <SidebarRow current={current}>
+          {button}
+          <RailRowActs
+            conversationId={conversationId}
+            surface={surface}
+            surfaceLabel={surfaceLabel}
+            source={source}
+          />
+        </SidebarRow>
+      </HoverCardTrigger>
+      <HoverCardContent id={card}>
+        <span className="text-balance font-medium leading-snug">{title}</span>
+        {opening ? <span className="text-pretty leading-snug text-ink-soft">{opening}</span> : null}
+        <span className="text-small text-ink-faint">
+          {[...facts, rowMoment(when, new Date())].join(" · ")}
+        </span>
+      </HoverCardContent>
+    </HoverCard>
   );
 }
-
-const RAIL_STAMP = "shrink-0 text-small tabular-nums text-ink-faint";
 
 /** The mark names the acts alone: a name carrying the title would answer every read that looks the
  *  row up by its own words. */
 const THREAD_ACTS = "Thread options";
-
-const RAIL_CARD_OFFSET = 44;
 
 const RAIL_ROW_GLYPH = cn(
   "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill",
@@ -1337,10 +1343,12 @@ const RAIL_ROW_GLYPH = cn(
 function RailRowActs({
   conversationId,
   surface,
+  surfaceLabel,
   source,
 }: {
   conversationId: string;
   surface: string;
+  surfaceLabel: string | null;
   source: string | null;
 }) {
   const host = useDrawerHost();
@@ -1352,7 +1360,7 @@ function RailRowActs({
           <IconDotsVertical className="size-icon" aria-hidden />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="right" align="start" container={host}>
+      <DropdownMenuContent side="bottom" align="end" container={host}>
         <DropdownMenuItem
           onSelect={() => void navigator.clipboard.writeText(threadLink(conversationId))}
         >
@@ -1366,7 +1374,7 @@ function RailRowActs({
               rel="noopener noreferrer"
               className="text-inherit no-underline"
             >
-              Open in Slack
+              Open in {surfaceLabel ?? surfaceWord(surface)}
             </a>
           </DropdownMenuItem>
         )}
@@ -1378,10 +1386,17 @@ function RailRowActs({
 function threadLink(conversationId: string): string {
   return window.location.origin + window.location.pathname + chatHash(conversationId);
 }
-/** The thread's dot answers to the app dot's states, in the column the app rows draw theirs in. */
-const RAIL_DOT: Record<RailTurn, string | null> = {
-  running: "bg-live",
-  queued: "bg-live",
-  parked: "bg-blocked",
-  idle: null,
+/** The portal takes a bullet where a trailing glyph drew nothing, so every row keeps the column
+ *  and the list reads down one left edge. */
+function RailOrigin({ surface, ink }: { surface: string; ink: string }) {
+  const drawn = cn("size-3.5 shrink-0", ink);
+  if (surface === SLACK_SURFACE) return <IconBrandSlack className={drawn} aria-hidden />;
+  if (surface === UFO_SURFACE) return <IconTerminal2 className={drawn} aria-hidden />;
+  if (surface === IMESSAGE_SURFACE) return <IconMessageCircle className={drawn} aria-hidden />;
+  return <span aria-hidden className={cn("size-sm rounded-full bg-current", ink)} />;
+}
+
+const RAIL_TURN_INK: Record<Exclude<RailTurn, "running" | "queued">, string> = {
+  parked: "text-blocked",
+  idle: "text-ink-quiet",
 };

@@ -393,7 +393,7 @@ test("the pool narrows on the toolbar's search, which names what it searches", a
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("notion")).toBeTruthy();
-  const box = screen.getByLabelText("Search connectors");
+  const box = screen.getByLabelText("Search connections");
   expect(document.querySelector('[data-slot="header"]')!.contains(box)).toBe(false);
 
   await userEvent.type(box, "github{enter}");
@@ -1268,12 +1268,12 @@ test("the search narrows the catalog and states when nothing matches", async () 
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("heading", { name: "Available" });
 
-  await userEvent.type(screen.getByLabelText("Search connectors"), "notion{Enter}");
+  await userEvent.type(screen.getByLabelText("Search connections"), "notion{Enter}");
   expect(connects("Notion")).toBeTruthy();
   expect(screen.queryByText("Slack")).toBeNull();
 
-  await userEvent.clear(screen.getByLabelText("Search connectors"));
-  await userEvent.type(screen.getByLabelText("Search connectors"), "salesforce{Enter}");
+  await userEvent.clear(screen.getByLabelText("Search connections"));
+  await userEvent.type(screen.getByLabelText("Search connections"), "salesforce{Enter}");
   expect(await screen.findByText("No connector matches this search.")).toBeTruthy();
 });
 
@@ -1294,7 +1294,7 @@ test("the search reads providers outside the fixed catalog", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("heading", { name: "Available" });
 
-  await userEvent.type(screen.getByLabelText("Search connectors"), "salesforce{Enter}");
+  await userEvent.type(screen.getByLabelText("Search connections"), "salesforce{Enter}");
 
   expect(await screen.findByText("Salesforce")).toBeTruthy();
   expect(calls.some((url) => url.includes("q=salesforce"))).toBe(true);

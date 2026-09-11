@@ -186,15 +186,26 @@ export function openNewChat(agentId: string): void {
   navigate(newChatHash(agentId));
 }
 
+/** The wizard mounts only behind a member's press or a run already in flight: its address alone must
+ *  not found a conversation, or Back and reload would send model turns nobody asked for. */
+let building = false;
+
+export function buildWanted(): boolean {
+  return building;
+}
+
 export function openAgents(): void {
+  building = false;
   navigate(AGENTS_HASH);
 }
 
 export function forwardAgents(): void {
+  building = false;
   navigate(AGENTS_HASH, "replace");
 }
 
 export function openBuilder(): void {
+  building = true;
   navigate(BUILDER_HASH);
 }
 
@@ -256,4 +267,5 @@ export function placeFirstRun(step: string | undefined): void {
 export function resetRouter(): void {
   held = null;
   travelled = 0;
+  building = false;
 }

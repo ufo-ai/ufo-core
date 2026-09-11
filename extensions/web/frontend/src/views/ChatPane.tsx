@@ -199,7 +199,7 @@ export function LinkedPane({
   member: Member;
   crumb?: Crumb;
   slot?: string;
-  onActivity: (conversationId: string) => void;
+  onActivity: NonNullable<ChatProps["onActivity"]>;
   onSelectSlot: (slot: string | null) => void;
 }) {
   const [disclosed, setDisclosed] = useState(false);

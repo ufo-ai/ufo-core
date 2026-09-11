@@ -49,7 +49,7 @@ import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
-import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
+import { chatState, clearChat, updateChat, useChat, type ChatTurn } from "@/lib/chatStore";
 import {
   clearDraft,
   flushDrafts,
@@ -97,7 +97,7 @@ export type ChatProps = {
   stops?: string;
   unsaid?: ReactNode;
   onCreated?: (conversationId: string, title: string) => void;
-  onActivity?: (conversationId: string) => void;
+  onActivity?: (conversationId: string, turn: ChatTurn) => void;
   onSettled?: () => void;
 };
 
@@ -129,7 +129,7 @@ export function Chat({
       moveDraft(draftKey, member.id + "/" + created);
       onCreated?.(created, title);
     },
-    onAccepted: onActivity,
+    onAccepted: (accepted) => onActivity?.(accepted, "running"),
   };
   const live = useRef(target);
   live.current = target;
@@ -159,9 +159,14 @@ export function Chat({
   }, [chatKey]);
 
   useEffect(() => {
-    if (wasBusy.current && !state.busy) onSettled?.();
+    if (wasBusy.current && !state.busy) {
+      onSettled?.();
+      if (conversationId !== null && state.ended !== null) {
+        onActivity?.(conversationId, state.ended);
+      }
+    }
     wasBusy.current = state.busy;
-  }, [onSettled, state.busy]);
+  }, [conversationId, onActivity, onSettled, state.busy, state.ended]);
 
   const earlier = useEarlierMessages(
     conversationId === null

@@ -9,6 +9,7 @@ import {
   updateChat,
   type ActivityEvent,
   type Bubble,
+  type ChatTurn,
   type LiveTurn,
 } from "@/lib/chatStore";
 import type { ChatApp, ChatFile, SubagentRun, Transcript } from "@/lib/types";
@@ -237,7 +238,7 @@ function attach(
     if (SOURCES.get(chatKey) === source) SOURCES.delete(chatKey);
   };
 
-  const close = () => {
+  const close = (ended: ChatTurn | null) => {
     release();
     releaseTurn(chatKey);
     updateChat(chatKey, (state) => ({
@@ -245,6 +246,7 @@ function attach(
       busy: false,
       live: null,
       turn: null,
+      ended,
       messages: withoutWait(state.messages),
     }));
   };
@@ -463,14 +465,14 @@ function attach(
       return { ...state, handoffs, live: { ...live, text, summary, at } };
     });
     record();
-    close();
+    close("idle");
   });
 
   source.addEventListener("parked", (event) => {
     const message = JSON.parse((event as MessageEvent).data).message as string;
     onLive((live) => ({ ...live, text: live.text ? live.text + "\n" + message : message }));
     record();
-    close();
+    close("parked");
   });
 
   source.onerror = () => {
@@ -489,7 +491,7 @@ function attach(
           text: "Connection lost — reload to see the reply.",
         }),
       }));
-      close();
+      close(null);
       return;
     }
     REATTACHES.set(chatKey, attempts);
@@ -627,6 +629,7 @@ export async function sendMessage(
   updateChat(chatKey, (state) => ({
     ...state,
     busy: true,
+    ended: null,
     live: state.live ?? liveTurn(),
     messages: (state.messages ?? []).concat({
       role: "user",
@@ -722,7 +725,7 @@ export async function answerQuestions(
   if (!answers.length || state.busy || state.messages === null) return;
   bumpEpoch(chatKey);
   holdTurn(chatKey, target.agentId);
-  updateChat(chatKey, (current) => ({ ...current, busy: true, live: liveTurn() }));
+  updateChat(chatKey, (current) => ({ ...current, busy: true, ended: null, live: liveTurn() }));
   for (const { index, body } of answers) {
     let res: Response;
     try {

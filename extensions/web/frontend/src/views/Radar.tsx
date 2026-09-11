@@ -17,7 +17,7 @@ import { slackLink, surfaceWord } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { Markdown } from "@/lib/markdown";
-import { Moment } from "@/lib/moments";
+import { Moment, clockOf, localMoment } from "@/lib/moments";
 import { agentHash, chatHash, sectionHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { SurfaceGlyph } from "@/lib/surfaceMark";
@@ -138,7 +138,8 @@ const MONTHS = [
 /** The calendar day a stamp names, read off the ISO string as it was sent rather than through
  *  `Date`, so no reader's zone shifts a report across midnight. */
 function dateKey(iso: string): string {
-  return iso.slice(0, 10);
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? iso.slice(0, 10) : localMoment(at).slice(0, 10);
 }
 
 /** The day heading: the month written out, because the heading is read as words rather than
@@ -150,8 +151,8 @@ function dayName(key: string): string {
 
 /** The clock time a report fired, on the twelve-hour clock the heading's date is written for. */
 function clock(iso: string): string {
-  const hour = Number(iso.slice(11, 13));
-  return ((hour % 12) || 12) + ":" + iso.slice(14, 16) + (hour < 12 ? " AM" : " PM");
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? iso : clockOf(localMoment(at));
 }
 
 /** One fact of the meta line, read as its mark and its words. The mark names the kind of fact —

@@ -54,7 +54,7 @@ import {
   type WorkspacePlace,
 } from "@/lib/route";
 import { AgentSetup } from "@/views/AgentSetup";
-import { Chat } from "@/views/Chat";
+import { Chat, type ChatProps } from "@/views/Chat";
 import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS } from "@/views/registry";
@@ -122,7 +122,7 @@ export function Home({
   seeking?: Seek;
   onActive: (lane: string | undefined) => void;
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
-  onActivity: (conversationId: string) => void;
+  onActivity: NonNullable<ChatProps["onActivity"]>;
   onAgents: () => void;
 }) {
   const chatAgent = chatSurface(agents) ?? mainAgent;
@@ -179,7 +179,7 @@ function HomeLane({
   member: Member;
   onOpens: (opens: string[]) => void;
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
-  onActivity: (conversationId: string) => void;
+  onActivity: NonNullable<ChatProps["onActivity"]>;
   onAgents: () => void;
 }) {
   const conversationId = homeLaneConversation(lane);
@@ -563,7 +563,7 @@ function ChatLane({
   member: Member;
   onOpens: (opens: string[]) => void;
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
-  onActivity: (conversationId: string) => void;
+  onActivity: NonNullable<ChatProps["onActivity"]>;
 }) {
   const founded = useChat(lane).founded;
   const [history, setHistory] = useState(false);
@@ -626,7 +626,7 @@ function ConversationLane({
   member: Member;
   onOpens: (opens: string[]) => void;
   onFounded: (agent: Agent, conversationId: string, title: string) => void;
-  onActivity: (conversationId: string) => void;
+  onActivity: NonNullable<ChatProps["onActivity"]>;
 }) {
   const rail = useRail();
   const [history, setHistory] = useState(false);

@@ -109,7 +109,7 @@ export async function searchConnectors(term: string, signal: AbortSignal): Promi
   );
   const connected = new Set(connections.map((entry) => entry.provider));
   return {
-    label: "Connectors",
+    label: "Connections",
     icon: IconPlug,
     hits: [
       ...connections.map((entry) => ({

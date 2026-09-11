@@ -51,14 +51,14 @@ function dateOf(local: string, today: string): string {
 
 const MERIDIEM_PIVOT = 12;
 
-function clockOf(local: string): string {
+export function clockOf(local: string): string {
   const hour = Number(local.slice(11, 13));
   const minute = local.slice(14, 16);
   const meridiem = hour < MERIDIEM_PIVOT ? "AM" : "PM";
   return (hour % MERIDIEM_PIVOT || MERIDIEM_PIVOT) + ":" + minute + " " + meridiem;
 }
 
-function localMoment(at: Date): string {
+export function localMoment(at: Date): string {
   return new Date(at.getTime() - at.getTimezoneOffset() * MINUTE_MS).toISOString();
 }
 
@@ -80,6 +80,21 @@ function relativeMoment(raw: string, now: Date): string {
         ? Math.round(span / HOUR_MS) + "h"
         : Math.round(span / DAY_MS) + "d";
   return ahead > 0 ? "in " + size : size + " ago";
+}
+
+/** A rail row's moment: today reads as the age of the thread and any earlier day names itself with
+ *  the clock time, so one glance separates this morning from last Tuesday. Local to the reader,
+ *  since the question the card answers is when this was for them. */
+export function rowMoment(raw: string, now: Date): string {
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) return raw;
+  if (at.toDateString() === now.toDateString()) return relativeMoment(raw, now);
+  return at.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 /** A span a member watches run: `42s`, `1m 42s`, `2h 5m`. Seconds are dropped past the hour, where a

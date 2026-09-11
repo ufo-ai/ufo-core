@@ -97,7 +97,7 @@ test("the team tab is an admin's, and the workspace opens on the first tab drawn
   expect(await screen.findByRole("tab", { name: "Team" })).toBeTruthy();
 });
 
-test("the sidebar's settings row opens the first workspace tab the member is drawn", async () => {
+test("the settings row opens the first workspace tab the member is drawn", async () => {
   location.hash = "";
   wire({ "/transcript": () => json({ messages: [] }) });
   render(

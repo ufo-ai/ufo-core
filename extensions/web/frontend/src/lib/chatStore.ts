@@ -45,6 +45,9 @@ export type Handoffs = {
 
 export type StreamingTurn = { id: string; answering: boolean };
 
+/** What a conversation's turn is doing, as a screen outside the chat reads it. */
+export type ChatTurn = "running" | "idle" | "parked";
+
 export type Founding = { conversationId: string; title: string };
 
 export type ChatState = {
@@ -61,6 +64,9 @@ export type ChatState = {
   fault: ToastState | null;
   founded: Founding | null;
   closed: boolean;
+  /** Where the turn landed when its stream ended, or null while one runs and after a stream that
+   *  dropped without a verdict — the server's turn outlives that drop, so no screen restates it. */
+  ended: ChatTurn | null;
 };
 
 const EMPTY: ChatState = {
@@ -75,6 +81,7 @@ const EMPTY: ChatState = {
   fault: null,
   founded: null,
   closed: false,
+  ended: null,
 };
 
 const states = new Map<string, ChatState>();

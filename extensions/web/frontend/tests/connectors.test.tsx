@@ -239,9 +239,9 @@ test("the picker stands the connectors screen in a lane", async () => {
   location.hash = homeHash({ opens: [HOME_NEW_LANE, AGENT_ID] });
   window.dispatchEvent(new HashChangeEvent("hashchange"));
   const picker = await screen.findByRole("region", { name: "New tab" });
-  await userEvent.click(within(picker).getByRole("button", { name: /^Connectors/ }));
+  await userEvent.click(within(picker).getByRole("button", { name: /^Connections/ }));
 
-  expect(await screen.findByRole("region", { name: "Connectors" })).toBeTruthy();
+  expect(await screen.findByRole("region", { name: "Connections" })).toBeTruthy();
   expect(track()).toEqual([HOME_CONNECTORS_LANE, AGENT_ID]);
   expect(await screen.findByText("github")).toBeTruthy();
 });
@@ -254,7 +254,7 @@ test("a second pick of the connectors screen keeps the one lane", async () => {
   location.hash = homeHash({ opens: [HOME_NEW_LANE, HOME_CONNECTORS_LANE, AGENT_ID] });
   window.dispatchEvent(new HashChangeEvent("hashchange"));
   const picker = await screen.findByRole("region", { name: "New tab" });
-  await userEvent.click(within(picker).getByRole("button", { name: /^Connectors/ }));
+  await userEvent.click(within(picker).getByRole("button", { name: /^Connections/ }));
 
   await waitFor(() => expect(track()).toEqual([HOME_CONNECTORS_LANE, AGENT_ID]));
 });
@@ -412,7 +412,7 @@ test("the pool narrows on the toolbar's search, which names what it searches", a
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("notion")).toBeTruthy();
-  const box = screen.getByLabelText("Search connectors");
+  const box = screen.getByLabelText("Search connections");
   expect(document.querySelector('[data-slot="header"]')!.contains(box)).toBe(false);
 
   await userEvent.type(box, "github{enter}");
@@ -1333,12 +1333,12 @@ test("the search narrows the catalog and states when nothing matches", async () 
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("heading", { name: "Available" });
 
-  await userEvent.type(screen.getByLabelText("Search connectors"), "notion{Enter}");
+  await userEvent.type(screen.getByLabelText("Search connections"), "notion{Enter}");
   expect(connects("Notion")).toBeTruthy();
   expect(screen.queryByText("Slack")).toBeNull();
 
-  await userEvent.clear(screen.getByLabelText("Search connectors"));
-  await userEvent.type(screen.getByLabelText("Search connectors"), "salesforce{Enter}");
+  await userEvent.clear(screen.getByLabelText("Search connections"));
+  await userEvent.type(screen.getByLabelText("Search connections"), "salesforce{Enter}");
   expect(await screen.findByText("No connector matches this search.")).toBeTruthy();
 });
 
@@ -1359,7 +1359,7 @@ test("the search reads providers outside the fixed catalog", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await screen.findByRole("heading", { name: "Available" });
 
-  await userEvent.type(screen.getByLabelText("Search connectors"), "salesforce{Enter}");
+  await userEvent.type(screen.getByLabelText("Search connections"), "salesforce{Enter}");
 
   expect(await screen.findByText("Salesforce")).toBeTruthy();
   expect(calls.some((url) => url.includes("q=salesforce"))).toBe(true);

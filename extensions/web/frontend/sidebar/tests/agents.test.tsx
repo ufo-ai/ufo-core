@@ -13,6 +13,7 @@ import {
   type AgentStatus,
 } from "@/lib/appStatusStore";
 import { chatState } from "@/lib/chatStore";
+import { ALL_SURFACES } from "@/lib/surfaces";
 import { sendMessage } from "@/lib/turnStream";
 
 import {
@@ -409,28 +410,6 @@ test("the app the last phase creates reaches the rail when the turn settles", as
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
 
-test("pressing a section's band folds it away, and the fold holds across a reload", async () => {
-  wire({ ...chatsOnWire([CHAT_ROW]), "/api/agents": () => boot([AGENT], ADMIN) });
-  const first = render(<Portal />);
-
-  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-
-  await userEvent.click(screen.getByRole("button", { name: "Chats" }));
-  await waitFor(() => expect(screen.queryByRole("button", { name: /Pick one thread/ })).toBeNull());
-  expect(screen.getByRole("button", { name: "Chats" }).getAttribute("aria-expanded")).toBe("false");
-
-  first.unmount();
-  render(<Portal />);
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: "Chats" }).getAttribute("aria-expanded")).toBe(
-      "false",
-    ),
-  );
-
-  await userEvent.click(screen.getByRole("button", { name: "Chats" }));
-  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-});
-
 test("the drawer holds the sidebar at a phone width, and a pick shuts it", async () => {
   atPhoneWidth();
   location.hash = "#/agents";
@@ -547,7 +526,7 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  await userEvent.click(screen.getAllByRole("button", { name: "New chat" })[0]);
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
   await openNewApplication();
 
@@ -805,6 +784,49 @@ test("the workspace Apps tab lists every app and narrows to the member's own", a
 
   await userEvent.click(screen.getByRole("tab", { name: "Archived" }));
   expect(await screen.findByText("No apps are archived.")).toBeTruthy();
+});
+
+test("the workspace Apps tab opens the App Store", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/workspace/apps";
+  render(<App agents={[AGENT, RESEARCH]} archived={[]} member={ADMIN} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "App Store" }));
+
+  expect(await screen.findByRole("region", { name: "App Store" })).toBeTruthy();
+  expect(location.hash).toBe("#/agents/store");
+});
+
+test("a deploy that withholds the store raises the wizard from the workspace Apps tab", async () => {
+  wire({
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: TITLE }),
+    "/slots/tasks": () =>
+      json({
+        type: "tasks",
+        title: "",
+        tasks: [],
+        total_count: 0,
+        completed_count: 0,
+        truncated: false,
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/workspace/apps";
+  render(
+    <App
+      agents={[AGENT, RESEARCH]}
+      archived={[]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, "app-store": false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: "App Store" })).toBeNull();
+  await userEvent.click(await screen.findByRole("button", { name: "App Creator" }));
+
+  expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
+  expect(location.hash).toBe("#/agents/builder");
 });
 
 test("scheduled task sheets close back to their settings list", async () => {

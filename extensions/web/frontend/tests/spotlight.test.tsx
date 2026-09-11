@@ -545,7 +545,7 @@ test("an unopened box lists the apps and the places, and reads nothing", async (
     "Wiki" + WIKI_PURPOSE,
     "Home",
     "Apps",
-    "Connectors",
+    "Connections",
     "Channels",
     "Workspace",
   ]);
@@ -893,7 +893,7 @@ test("a term reaches the accounts the workspace holds and the providers it could
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByRole("option", { name: /GitHub/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /Linear/ })).toBeTruthy();
-  expect(headings()).toContain("Connectors");
+  expect(headings()).toContain("Connections");
 
   await userEvent.click(found.getByRole("option", { name: /GitHub/ }));
   expect(parseHash(location.hash)).toEqual({
@@ -915,8 +915,8 @@ test("a pool that refuses states nothing, and the catalog still answers", async 
 
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByRole("option", { name: /Linear/ })).toBeTruthy();
-  expect(headings()).toContain("Connectors");
-  expect(rowsUnder("Connectors")).toEqual(["LinearNot connected"]);
+  expect(headings()).toContain("Connections");
+  expect(rowsUnder("Connections")).toEqual(["LinearNot connected"]);
   expect(found.queryByText(/Error 500/)).toBeNull();
 });
 

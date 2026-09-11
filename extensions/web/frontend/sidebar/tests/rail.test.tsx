@@ -8,7 +8,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App, NARROW } from "@/App";
 import { agentName } from "@/lib/agentName";
 import { RESTING_STATUS_MS, WORKING_STATUS_MS } from "@/lib/appStatusStore";
-import { fullMoment } from "@/lib/moments";
+import { rowMoment } from "@/lib/moments";
 import {
   appOrder,
   appRun,
@@ -21,8 +21,8 @@ import {
   holdRailShut,
   mergeChats,
   railGroups,
+  type RailSort,
   railShut,
-  railStamp,
   stampIso,
   type ChatRow,
   type RailTurn,
@@ -39,6 +39,8 @@ beforeEach(() => {
 const NOW = new Date(2026, 7, 1, 12, 0, 0);
 
 const NOT_SHARED = "This conversation is not shared with this account.";
+
+const RECENCY: RailSort = "recency";
 
 const PORTAL_ONLY = { terminal: false, slack: false, imessage: false };
 const EVERY_SURFACE = { terminal: true, slack: true, imessage: true };
@@ -93,8 +95,8 @@ test("the rail is one unheaded run of rows, and no run at all where none stand",
     row("c", hoursAgo(4 * 24)),
     row("d", hoursAgo(90 * 24)),
   ];
-  expect(railGroups(rows, PORTAL_ONLY)).toEqual([{ label: null, rows }]);
-  expect(railGroups([], PORTAL_ONLY)).toEqual([]);
+  expect(railGroups(rows, PORTAL_ONLY, RECENCY)).toEqual([{ label: null, rows }]);
+  expect(railGroups([], PORTAL_ONLY, RECENCY)).toEqual([]);
 });
 
 test("everyone else's conversations are one group at the foot", () => {
@@ -105,12 +107,12 @@ test("everyone else's conversations are one group at the foot", () => {
     theirs("t2", hoursAgo(30 * 24), "sam@example.com"),
   ];
 
-  const grouped = railGroups(rows, PORTAL_ONLY);
+  const grouped = railGroups(rows, PORTAL_ONLY, RECENCY);
   expect(grouped.map((group) => group.label)).toEqual([null, "Other members"]);
   expect(grouped[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "b"]);
   expect(grouped[1].rows.map((entry) => entry.conversation_id)).toEqual(["t1", "t2"]);
 
-  expect(railGroups([row("a", hoursAgo(1))], PORTAL_ONLY).map((group) => group.label)).toEqual([
+  expect(railGroups([row("a", hoursAgo(1))], PORTAL_ONLY, RECENCY).map((group) => group.label)).toEqual([
     null,
   ]);
 });
@@ -127,24 +129,24 @@ test("the rail holds portal conversations until the filter names another surface
     { ...elsewhere("s2", "slack"), mine: false, speaker: "sam@example.com" },
   ];
 
-  expect(railGroups(rows, PORTAL_ONLY)).toEqual([{ label: null, rows: [rows[0]] }]);
+  expect(railGroups(rows, PORTAL_ONLY, RECENCY)).toEqual([{ label: null, rows: [rows[0]] }]);
 
-  const withSlack = railGroups(rows, { terminal: false, slack: true, imessage: false });
+  const withSlack = railGroups(rows, { terminal: false, slack: true, imessage: false }, RECENCY);
   expect(withSlack.map((group) => group.label)).toEqual([null, "Other members"]);
   expect(withSlack[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "s1"]);
   expect(withSlack[1].rows.map((entry) => entry.conversation_id)).toEqual(["s2"]);
 
-  const withTerminal = railGroups(rows, { terminal: true, slack: false, imessage: false });
+  const withTerminal = railGroups(rows, { terminal: true, slack: false, imessage: false }, RECENCY);
   expect(withTerminal.map((group) => group.rows.map((entry) => entry.conversation_id))).toEqual([
     ["a", "u1"],
   ]);
 
-  const withBoth = railGroups(rows, EVERY_SURFACE);
+  const withBoth = railGroups(rows, EVERY_SURFACE, RECENCY);
   expect(withBoth[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "s1", "u1"]);
 });
 
-test("a browser holding no filter admits neither surface, and holds what a member names", () => {
-  expect(heldRailShown()).toEqual(PORTAL_ONLY);
+test("a browser holding no filter admits every surface, and holds what a member names", () => {
+  expect(heldRailShown()).toEqual(EVERY_SURFACE);
 
   holdRailShown({ terminal: true, slack: false, imessage: false });
   expect(heldRailShown()).toEqual({ terminal: true, slack: false, imessage: false });
@@ -243,6 +245,7 @@ test("the rail draws its first page while the walk is still reading", async () =
 });
 
 test("the filter admits a surface into the rail and the browser keeps the choice", async () => {
+  holdRailShown(PORTAL_ONLY);
   wire({ ...chatsOnWire([CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT]) });
   const first = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -283,6 +286,7 @@ test("the drawer holds the rail at a phone width, and a pick shuts it", async ()
 });
 
 test("a tick leaves the filter open, so both surfaces are named in one visit", async () => {
+  holdRailShown(PORTAL_ONLY);
   wire({ ...chatsOnWire([CHAT_ROW, SLACK_CHAT, TERMINAL_CHAT]) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await composerFocused();
@@ -470,7 +474,7 @@ test("the recency rail heads its own conversations with nothing at all", async (
   expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
   expect(screen.getByRole("button", { name: /Last month's thread/ })).toBeTruthy();
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  expect(within(sidebar).queryAllByRole("heading")).toEqual([]);
+  expect(within(sidebar).getAllByRole("heading").map((head) => head.textContent)).toEqual(["Chats"]);
 });
 
 test("a group heading shuts its rows, and the browser holds that past a remount", async () => {
@@ -520,14 +524,6 @@ test("the query holding the narrow rail's groups open is the theme's own breakpo
   const declared = /--breakpoint-narrow:\s*(\d+)px/.exec(theme);
   expect(declared).not.toBeNull();
   expect(NARROW).toBe("(width < " + declared![1] + "px)");
-});
-
-test("bumping a conversation moves it to the top and states the turn it just took", () => {
-  const rows = [row("a", hoursAgo(3)), row("b", hoursAgo(4))];
-  const bumped = bumpChat(rows, "b", NOW);
-  expect(bumped.map((entry) => entry.conversation_id)).toEqual(["b", "a"]);
-  expect(bumped[0].turn).toBe("running");
-  expect(bumped[1].turn).toBe("idle");
 });
 
 test("merging keeps held rows the fetch does not know and prefers fetched rows it does", () => {
@@ -708,9 +704,9 @@ test("a running thread's row draws the live dot and an idle one's rests in the s
   const column = (button: HTMLElement) => button.querySelector("[data-turn]")!;
   expect(column(live).className).toBe(column(rest).className);
   expect(column(live).className).toContain("size-(--size-glyph)");
-  expect(column(live).firstElementChild!.className).toContain("bg-live");
-  expect(column(rest).firstElementChild!.className).toContain("scale-0");
-  expect(column(rest).firstElementChild!.className).not.toContain("bg-live");
+  expect(column(live).firstElementChild!.getAttribute("class")).toContain("animate-spin");
+  expect(column(rest).firstElementChild!.className).toContain("text-ink-quiet");
+  expect(column(rest).firstElementChild!.className).not.toContain("animate-spin");
 });
 
 test("a row's dot follows the listing, not the row it was founded with", async () => {
@@ -729,17 +725,19 @@ test("a row's dot follows the listing, not the row it was founded with", async (
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await settle(0);
 
-  const dot = (title: string) =>
-    screen.getByRole("button", { name: new RegExp(title) }).querySelector("[data-turn]")!
-      .firstElementChild!.className;
-  expect(dot("Pick one thread")).toContain("bg-live");
-  expect(dot("Answered thread")).toContain("scale-0");
+  const mark = (title: string) =>
+    screen
+      .getByRole("button", { name: new RegExp(title) })
+      .querySelector("[data-turn]")!
+      .firstElementChild!.getAttribute("class")!;
+  expect(mark("Pick one thread")).toContain("animate-spin");
+  expect(mark("Answered thread")).toContain("text-ink-quiet");
 
   held = ["idle", "running"];
   await settle(WORKING_STATUS_MS);
 
-  expect(dot("Pick one thread")).toContain("scale-0");
-  expect(dot("Answered thread")).toContain("bg-live");
+  expect(mark("Pick one thread")).toContain("text-ink-quiet");
+  expect(mark("Answered thread")).toContain("animate-spin");
   vi.useRealTimers();
 });
 
@@ -764,6 +762,7 @@ test("a parked turn is not work in flight, so the rail waits out the resting cad
 
 test("a running turn the rail does not draw earns the working cadence only once shown", async () => {
   vi.useFakeTimers();
+  holdRailShown(PORTAL_ONLY);
   const slack = { ...CHAT_ROW, surface: "slack", surface_label: "DM", turn: "running" as const };
   const { calls } = wire({
     "/objects/conversation$": () => json({ objects: [conversationObject(slack)] }),
@@ -884,46 +883,11 @@ test("the surface glyph is drawn at the sidebar's glyph size, not at the row's t
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Slack question/ });
-  const drawn = railRow.querySelector(".tabler-icon-brand-slack")!.getAttribute("class")!.split(" ");
-  expect(drawn).toContain("size-(--size-glyph)");
-  expect(drawn).not.toContain("size-icon");
-});
-
-test("a rail row states its chat's age in one number and one letter, and carries the whole moment", async () => {
-  const row = { ...CHAT_ROW, last_at: stampIso(new Date(Date.now() - 3 * 3_600_000)) };
-  wire({ ...chatsOnWire([row]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
-  const stamp = railRow.querySelector("time")!;
-  expect(stamp.textContent).toBe("3h");
-  expect(stamp.getAttribute("datetime")).toBe(row.last_at);
-  expect(stamp.getAttribute("title")).toBe(fullMoment(row.last_at));
-});
-
-test.each([
-  [30 * 1_000, "now"],
-  [3 * 60_000, "3m"],
-  [59 * 60_000, "59m"],
-  [3_600_000, "1h"],
-  [23 * 3_600_000, "23h"],
-  [86_400_000, "1d"],
-  [6 * 86_400_000, "6d"],
-  [7 * 86_400_000, "1w"],
-  [51 * 604_800_000, "51w"],
-  [400 * 86_400_000, "1y"],
-  [-60_000, "now"],
-])("a chat %i ms old reads as %s in the rail", (span, reads) => {
-  const now = new Date("2026-09-09T12:00:00.000Z");
-  expect(railStamp(stampIso(new Date(now.getTime() - span)), now)).toBe(reads);
-});
-
-test("a portal row draws no glyph — the rail is read where those conversations happen", async () => {
-  wire({ ...chatsOnWire([CHAT_ROW]) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
-  expect(railRow.querySelector(".tabler-icon")).toBeNull();
+  const drawn = railRow
+    .querySelector("[data-turn] .tabler-icon-brand-slack")!
+    .getAttribute("class")!
+    .split(" ");
+  expect(drawn).toContain("size-3.5");
 });
 
 test("hovering a row opens the card on its title, opening words and metadata", async () => {
@@ -939,7 +903,7 @@ test("hovering a row opens the card on its title, opening words and metadata", a
   expect(card.textContent).toContain("Pick one thread");
   expect(card.textContent).toContain("Pick one thread to carry the work.");
   expect(card.textContent).toContain("#ops");
-  expect(card.textContent).toContain(fullMoment(slack.last_at));
+  expect(card.textContent).toContain(rowMoment(slack.last_at, new Date()));
   expect(railRow.getAttribute("aria-describedby")).toBe(card.getAttribute("id"));
 });
 
@@ -948,10 +912,10 @@ test("a row reached by the keyboard opens the same card", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
-  fireEvent.focus(railRow);
+  railRow.focus();
 
   expect((await hoverCard()).textContent).toContain("Pick one thread to carry the work.");
-  expect(railRow.getAttribute("data-state")).toBe("open");
+  expect(railRow.closest("li")!.getAttribute("data-state")).toBe("open");
 });
 
 test("a conversation another member spoke stands at the foot and names them", async () => {
@@ -1346,7 +1310,7 @@ test("the ask row opens the chat app at its start screen when one is shipped", a
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(rail.getByRole("button", { name: "New chat" }));
+  await userEvent.click(rail.getAllByRole("button", { name: "New chat" })[0]);
 
   expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
 });
@@ -1357,7 +1321,7 @@ test("the chord the row prints starts the conversation the row would", async () 
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  const row = rail.getByRole("button", { name: "New chat" });
+  const row = rail.getAllByRole("button", { name: "New chat" })[0];
   expect(row.getAttribute("aria-keyshortcuts")).toBe("Meta+Shift+O");
 
   await userEvent.keyboard("{Meta>}{Shift>}O{/Shift}{/Meta}");
@@ -1368,14 +1332,14 @@ test("the chord the row prints starts the conversation the row would", async () 
 test("the ask control targets the main agent, and offers no other", async () => {
   wire({});
   const single = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  await userEvent.click(screen.getAllByRole("button", { name: "New chat" })[0]);
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   single.unmount();
 
   location.hash = "";
   wire({});
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  await userEvent.click(screen.getAllByRole("button", { name: "New chat" })[0]);
 
   expect(location.hash).toBe("#/new/" + AGENT_ID);
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
@@ -1393,12 +1357,12 @@ test("the conversations rail stands in the sidebar whatever the destination", as
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   expect(await rail.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-  expect(rail.getByRole("button", { name: "New chat" })).toBeTruthy();
+  expect(rail.getAllByRole("button", { name: "New chat" })[0]).toBeTruthy();
 
   await userEvent.click(rail.getByRole("button", { name: "Settings" }));
   expect(await screen.findByRole("heading", { name: "Team" })).toBeTruthy();
   expect(rail.getByRole("button", { name: /Pick one thread/ })).toBeTruthy();
-  expect(rail.getByRole("button", { name: "New chat" })).toBeTruthy();
+  expect(rail.getAllByRole("button", { name: "New chat" })[0]).toBeTruthy();
 });
 
 test("the chat header names the agent holding the conversation and what it is called, never the model", async () => {
@@ -1496,7 +1460,7 @@ test("the sidebar marks the destination the member is in and leaves the others o
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   const marked = () =>
     ["New chat", "Tasks", "Connections", "Settings"].filter(
-      (name) => rail.getByRole("button", { name }).getAttribute("aria-current") === "true",
+      (name) => rail.getAllByRole("button", { name })[0].getAttribute("aria-current") === "true",
     );
 
   expect(marked()).toEqual(["New chat"]);
@@ -1527,4 +1491,161 @@ test("a failed rail read states it and retries on demand", async () => {
   expect(await screen.findByText("Couldn't load conversations.")).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+});
+
+test("a browser holding no filter admits every surface, and holds what a member names", () => {
+  expect(heldRailShown()).toEqual(EVERY_SURFACE);
+
+  holdRailShown({ terminal: true, slack: false, imessage: false });
+  expect(heldRailShown()).toEqual({ terminal: true, slack: false, imessage: false });
+
+  holdRailShown(EVERY_SURFACE);
+  expect(heldRailShown()).toEqual(EVERY_SURFACE);
+
+  holdRailShown(PORTAL_ONLY);
+  expect(heldRailShown()).toEqual(PORTAL_ONLY);
+});
+
+
+
+
+
+
+
+
+
+test("a founded row spins while its turn runs and rests when the turn ends", async () => {
+  wire({
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello there" }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "hello there");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  const turnOf = () =>
+    screen.getByRole("button", { name: /hello there/ }).querySelector("[data-turn]")!;
+  await waitFor(() => expect(turnOf().getAttribute("data-turn")).toBe("running"));
+  expect(turnOf().firstElementChild!.getAttribute("class")).toContain("animate-spin");
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("terminal", { status: "done", model: "opus", tokens: 12 });
+
+  await waitFor(() => expect(turnOf().getAttribute("data-turn")).toBe("idle"));
+  expect(turnOf().firstElementChild!.getAttribute("class")).not.toContain("animate-spin");
+});
+
+test("a parked turn marks its row blocked rather than resting it", async () => {
+  wire({
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello there" }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.type(await screen.findByLabelText("Ask UFO"), "hello there");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  const turnOf = () =>
+    screen.getByRole("button", { name: /hello there/ }).querySelector("[data-turn]")!;
+  await waitFor(() => expect(turnOf().getAttribute("data-turn")).toBe("running"));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("parked", { message: "Waiting on your approval." });
+
+  await waitFor(() => expect(turnOf().getAttribute("data-turn")).toBe("parked"));
+  expect(turnOf().firstElementChild!.getAttribute("class")).toContain("text-blocked");
+});
+
+test("a portal row leads with an outline circle, so every row keeps the same left edge", async () => {
+  wire({ ...chatsOnWire([CHAT_ROW]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const railRow = await screen.findByRole("button", { name: /Pick one thread/ });
+  const column = railRow.querySelector("[data-turn]")!;
+  expect(column.firstElementChild!.className).toContain("rounded-full");
+  expect(railRow.querySelector(".tabler-icon-brand-slack")).toBeNull();
+});
+
+test("a running thread spins, a held one is marked blocked, and a settled one rests in the same column", async () => {
+  holdRailShown(EVERY_SURFACE);
+  const running = { ...CHAT_ROW, turn: "running" as const };
+  const parked = {
+    ...CHAT_ROW,
+    conversation_id: "77777777-7777-4777-8777-777777777777",
+    title: "Held thread",
+    turn: "parked" as const,
+  };
+  const idle = {
+    ...CHAT_ROW,
+    conversation_id: "66666666-6666-4666-8666-666666666666",
+    title: "Answered thread",
+    turn: "idle" as const,
+  };
+  wire(chatsOnWire([running, parked, idle]));
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const live = await screen.findByRole("button", { name: /Pick one thread/ });
+  const held = screen.getByRole("button", { name: /Held thread/ });
+  const rest = screen.getByRole("button", { name: /Answered thread/ });
+  const column = (button: HTMLElement) => button.querySelector("[data-turn]")!;
+  expect(column(live).className).toBe(column(rest).className);
+  expect(column(live).className).toContain("size-(--size-glyph)");
+  const mark = (button: HTMLElement) => column(button).firstElementChild!.getAttribute("class")!;
+  expect(mark(live)).toContain("animate-spin");
+  expect(mark(held)).toContain("text-blocked");
+  expect(mark(rest)).toContain("text-ink-quiet");
+  expect(mark(rest)).not.toContain("animate-spin");
+});
+
+test("a stream that drops never rests the row, since the server's turn outlives it", async () => {
+  wire({
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello there" }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.type(await screen.findByLabelText("Ask UFO"), "hello there");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  const turnOf = () =>
+    screen.getByRole("button", { name: /hello there/ }).querySelector("[data-turn]")!;
+  await waitFor(() => expect(turnOf().getAttribute("data-turn")).toBe("running"));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  const stream = StreamFake.last();
+  stream.close();
+  stream.fail();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBeGreaterThan(1));
+  expect(turnOf().getAttribute("data-turn")).toBe("running");
+});
+
+test("bumping a conversation moves it to the top and states the turn it is now in", () => {
+  const rows = [row("a", hoursAgo(3)), row("b", hoursAgo(4))];
+  const bumped = bumpChat(rows, "b", NOW, "running");
+  expect(bumped.map((entry) => entry.conversation_id)).toEqual(["b", "a"]);
+  expect(bumped[0].turn).toBe("running");
+  expect(bumpChat(bumped, "b", NOW, "idle")[0].turn).toBe("idle");
+});
+
+test("priority leads with what is held, then what is working, then the rest by recency", () => {
+  const held = { ...row("held", hoursAgo(50)), turn: "parked" as const };
+  const working = { ...row("working", hoursAgo(30)), turn: "running" as const };
+  const queued = { ...row("queued", hoursAgo(80)), turn: "queued" as const };
+  const fresh = row("fresh", hoursAgo(1));
+  const stale = row("stale", hoursAgo(9));
+  const rows = [fresh, stale, working, held, queued];
+
+  const ranked = railGroups(rows, PORTAL_ONLY, "priority");
+  expect(ranked[0].rows.map((entry) => entry.conversation_id)).toEqual([
+    "held",
+    "working",
+    "queued",
+    "fresh",
+    "stale",
+  ]);
+
+  const recent = railGroups(rows, PORTAL_ONLY, RECENCY);
+  expect(recent[0].rows.map((entry) => entry.conversation_id)).toEqual(rows.map((r) => r.conversation_id));
 });
