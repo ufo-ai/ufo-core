@@ -14,6 +14,8 @@ import {
   ROBOTO_MONO_FONT,
   SLACK_DESCRIPTION,
   SLACK_PAGE,
+  SUBPROCESSORS_DESCRIPTION,
+  SUBPROCESSORS_PAGE,
   SUPPORT_DESCRIPTION,
   SUPPORT_PAGE,
   TERMS_DESCRIPTION,
@@ -508,6 +510,21 @@ const PUBLIC_PAGES = [
     ],
   },
   {
+    path: "/subprocessors",
+    document: SUBPROCESSORS_PAGE,
+    title: "Subprocessors",
+    description: SUBPROCESSORS_DESCRIPTION,
+    canonical: "https://ufo.ai/subprocessors",
+    headings: [
+      "Infrastructure",
+      "AI and search",
+      "Tools and connections",
+      "Accounts and operations",
+      "Changes",
+      "Contact",
+    ],
+  },
+  {
     path: "/support",
     document: SUPPORT_PAGE,
     title: "Support",
@@ -668,6 +685,31 @@ test("the policy states Slack data rights, retention, no LLM training, and minim
   assert.match(PRIVACY_PAGE, /discard those unused\s+fields after we process the Slack event/);
   assert.match(PRIVACY_PAGE, /ufo for Slack does not permit use by children under 16/);
   assert.match(TERMS_PAGE, /at least 16 years old to use ufo for\s+Slack/);
+});
+
+test("the privacy policy links to the named providers and their work", () => {
+  assert.match(PRIVACY_PAGE, /href="\/subprocessors">Subprocessor List<\/a>/);
+  for (const provider of [
+    "Amazon Web Services",
+    "Cloudflare",
+    "OpenRouter",
+    "Fireworks AI",
+    "Baseten",
+    "OpenAI",
+    "Perplexity",
+    "Turbopuffer",
+    "E2B",
+    "Browserbase",
+    "Composio",
+    "Pipedream",
+    "WorkOS",
+    "People Data Labs",
+    "Stripe",
+    "Metronome",
+    "Datadog",
+  ]) {
+    assert.match(SUBPROCESSORS_PAGE, new RegExp(provider));
+  }
 });
 
 test("every page the sitemap lists is served as a document", async () => {

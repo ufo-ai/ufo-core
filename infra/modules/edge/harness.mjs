@@ -30,6 +30,8 @@ export const PRIVACY_DESCRIPTION =
   "What ufo.ai collects when you sign in and use the service, how that information is used, and how long it is kept.";
 export const SLACK_DESCRIPTION =
   "How to install and use ufo in Slack, what the app does, and where to get support.";
+export const SUBPROCESSORS_DESCRIPTION =
+  "The service providers that process information for ufo.ai and the work each provider performs.";
 export const SUPPORT_DESCRIPTION =
   "How to get support for ufo and the ufo Slack app, and how to make a privacy request.";
 export const TERMS_DESCRIPTION =
@@ -45,6 +47,12 @@ export const SLACK_PAGE = await legalPage({
   description: SLACK_DESCRIPTION,
   canonical: "https://ufo.ai/slack",
   body: "slack.html",
+});
+export const SUBPROCESSORS_PAGE = await legalPage({
+  title: "Subprocessors",
+  description: SUBPROCESSORS_DESCRIPTION,
+  canonical: "https://ufo.ai/subprocessors",
+  body: "subprocessors.html",
 });
 export const SUPPORT_PAGE = await legalPage({
   title: "Support",
@@ -72,6 +80,7 @@ export async function importWorker(tag) {
     .replace('"__FAVICON_DARK_SVG__"', JSON.stringify(FAVICON_DARK_SVG))
     .replace('"__PRIVACY_HTML__"', JSON.stringify(PRIVACY_PAGE))
     .replace('"__SLACK_HTML__"', JSON.stringify(SLACK_PAGE))
+    .replace('"__SUBPROCESSORS_HTML__"', JSON.stringify(SUBPROCESSORS_PAGE))
     .replace('"__SUPPORT_HTML__"', JSON.stringify(SUPPORT_PAGE))
     .replace('"__TERMS_HTML__"', JSON.stringify(TERMS_PAGE));
   const tagged = `${source}\n// ${tag}`;

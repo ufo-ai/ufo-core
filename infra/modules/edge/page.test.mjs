@@ -138,7 +138,7 @@ for (const [where, device] of [
 }
 
 test("the public text carries no ufo metaphor", async () => {
-  for (const path of ["/privacy", "/slack", "/support", "/terms"]) {
+  for (const path of ["/privacy", "/slack", "/subprocessors", "/support", "/terms"]) {
     const page = await browser.newPage(DESKTOP);
     await page.goto(`${origin}${path}`);
     assert.doesNotMatch(await page.innerText("body"), BANNED_METAPHOR, path);

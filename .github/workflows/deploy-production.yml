@@ -537,6 +537,7 @@ jobs:
           curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
           curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null
           curl -fsS "https://$HOST/privacy" | grep -F "<h1>Privacy Policy</h1>"
+          curl -fsS "https://$HOST/subprocessors" | grep -F "<h1>Subprocessors</h1>"
           curl -fsS "https://$HOST/terms" | grep -F "<h1>Terms of Service</h1>"
 
   report:

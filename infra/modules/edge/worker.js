@@ -1,7 +1,7 @@
 const CLI_UA = /^(curl|wget|httpie)\b/i;
 const PAGE_CACHE = "public, max-age=600";
 const APEX = "https://ufo.ai";
-const INDEXED = ["/", "/privacy", "/slack", "/support", "/terms"];
+const INDEXED = ["/", "/privacy", "/slack", "/subprocessors", "/support", "/terms"];
 const UNCRAWLED = ["/ufo", "/fleet", "/v1/onboard/", "/login"];
 const SITE_CARD_PREFIX = "/surface/sites/share/site/";
 const ARTIFACT_PREFIX = "/artifacts/";
@@ -17,6 +17,7 @@ const FAVICON_SVG = "__FAVICON_SVG__";
 const FAVICON_DARK_SVG = "__FAVICON_DARK_SVG__";
 const PRIVACY_HTML = "__PRIVACY_HTML__";
 const SLACK_HTML = "__SLACK_HTML__";
+const SUBPROCESSORS_HTML = "__SUBPROCESSORS_HTML__";
 const SUPPORT_HTML = "__SUPPORT_HTML__";
 const TERMS_HTML = "__TERMS_HTML__";
 
@@ -157,6 +158,8 @@ export default {
         return secure(url) ?? page(PRIVACY_HTML);
       case "/slack":
         return secure(url) ?? page(SLACK_HTML);
+      case "/subprocessors":
+        return secure(url) ?? page(SUBPROCESSORS_HTML);
       case "/support":
         return secure(url) ?? page(SUPPORT_HTML);
       case "/terms":

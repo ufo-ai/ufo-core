@@ -227,6 +227,10 @@ case "$URL" in
     [ "$BAD_LEGAL_PATH" != privacy ] || { printf 'wrong\\n'; exit; }
     printf '<h1>Privacy Policy</h1>\\n'
     ;;
+  */subprocessors)
+    [ "$BAD_LEGAL_PATH" != subprocessors ] || { printf 'wrong\\n'; exit; }
+    printf '<h1>Subprocessors</h1>\\n'
+    ;;
   */terms)
     [ "$BAD_LEGAL_PATH" != terms ] || { printf 'wrong\\n'; exit; }
     printf '<h1>Terms of Service</h1>\\n'
@@ -1580,7 +1584,7 @@ def test_edge_deploys_are_isolated(
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 12
+    assert len(invoked) == 13
     assert [call.rsplit(" ", 1)[-1] for call in invoked] == [
         f"https://{host}/",
         f"https://{host}/",
@@ -1593,6 +1597,7 @@ def test_edge_deploys_are_isolated(
         f"https://{host}/ufo",
         f"https://{host}/fleet",
         f"https://{host}/privacy",
+        f"https://{host}/subprocessors",
         f"https://{host}/terms",
     ]
     environment["OLD_TLS_HOST"] = host
@@ -1603,7 +1608,7 @@ def test_edge_deploys_are_isolated(
     )
     assert failed.returncode != 0
     environment["OLD_TLS_HOST"] = ""
-    for page in ("privacy", "terms"):
+    for page in ("privacy", "subprocessors", "terms"):
         environment["BAD_LEGAL_PATH"] = page
         failed = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", script],
@@ -5008,6 +5013,7 @@ def _check_edge_worker_artifact_substitutes_every_placeholder() -> None:
         "__PRIVACY_HTML__": "local.privacy_html",
         "__ROBOTO_MONO_FONT__": "local.roboto_mono_font",
         "__SLACK_HTML__": "local.slack_html",
+        "__SUBPROCESSORS_HTML__": "local.subprocessors_html",
         "__SUPPORT_HTML__": "local.support_html",
         "__TERMS_HTML__": "local.terms_html",
     }
