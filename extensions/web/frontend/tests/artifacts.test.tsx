@@ -36,6 +36,50 @@ function shelf(routes: Record<string, unknown>, place: Placement = {}) {
   );
 }
 
+function waiting(place: Placement = {}) {
+  return shelf(
+    {
+      "/objects/site": () => new Promise<Response>(() => {}),
+      "/objects/artifact": () => new Promise<Response>(() => {}),
+    },
+    place,
+  );
+}
+
+test("the shelf waits as the tiles it will draw, under its own toolbar", async () => {
+  const { container } = waiting();
+
+  expect(await screen.findByRole("tablist", { name: "Scope" })).toBeTruthy();
+  const track = container.querySelector("ul")!;
+  expect(track.className).toContain("minmax(var(--size-tile),1fr)");
+  const tiles = track.querySelectorAll("li");
+  expect(tiles.length).toBeGreaterThan(0);
+  for (const tile of tiles) {
+    expect(tile.className).toContain("flex flex-col gap-sm");
+    const marks = tile.querySelectorAll('[data-part="skeleton"]');
+    expect(marks.length).toBe(3);
+    expect(marks[0].className).toContain("aspect-square w-full rounded-panel border border-edge");
+  }
+});
+
+test("the list view waits on its own tracks, under the columns it will fill", async () => {
+  const { container } = waiting({ face: "table" });
+
+  const table = await screen.findByRole("table");
+  expect(table.getAttribute("data-measured")).toBe("");
+  expect(table.style.getPropertyValue("--table-floor")).toContain("--size-prose-column");
+  for (const column of ["Name", "Details", "Type"]) {
+    expect(screen.getByRole("columnheader", { name: column })).toBeTruthy();
+  }
+  const rows = table.querySelectorAll("tbody tr");
+  expect(rows.length).toBeGreaterThan(0);
+  for (const row of rows) {
+    expect(row.querySelectorAll('[data-part="skeleton"]').length).toBe(5);
+    expect(row.querySelector('[data-part="skeleton"]')?.className).toContain("size-(--size-lede)");
+  }
+  expect(container.querySelector("ul")).toBeNull();
+});
+
 test("the empty shelf stands the shipped logo sheet beside its note", async () => {
   shelf({
     "/objects/site": () => objectIndex(SITE_KIND, []),

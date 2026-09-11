@@ -5,7 +5,8 @@ import { IconWorldWww } from "@tabler/icons-react";
 import { buttonVariants } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/filter";
 import { Sheet } from "@/components/ui/sheet";
-import { Clip, Lede, Td, TdFact, TdWhole } from "@/components/ui/table";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Clip, Lede, Table, Td, TdFact, TdWhole, Th, tableFloor } from "@/components/ui/table";
 import { ArtifactText, FileSheet, MediaIcon, isTextMedia } from "@/kernel/artifact";
 import { CardGrid } from "@/kernel/cards";
 import { OWNER_FIELD, ObjectDetail, creator, objectAt, slotOf } from "@/kernel/objects";
@@ -369,32 +370,30 @@ export function Artifacts({
 
   return (
     <>
-      {state.phase === "loading" ? null : (
-        <PageToolbar>
-          <Segmented
-            label="Scope"
-            segments={SCOPE_SEGMENTS}
-            value={scope}
-            onPick={(value) =>
-              onPlace({ scope: value === "all" ? undefined : value, after: undefined })
-            }
+      <PageToolbar>
+        <Segmented
+          label="Scope"
+          segments={SCOPE_SEGMENTS}
+          value={scope}
+          onPick={(value) =>
+            onPlace({ scope: value === "all" ? undefined : value, after: undefined })
+          }
+        />
+        <span className="ml-auto flex shrink-0 items-center gap-sm max-narrow:ml-0">
+          <FacetMenu
+            groups={facets}
+            value={picked}
+            onPick={(value) => onPlace({ chip: value || undefined, after: undefined })}
           />
-          <span className="ml-auto flex shrink-0 items-center gap-sm max-narrow:ml-0">
-            <FacetMenu
-              groups={facets}
-              value={picked}
-              onPick={(value) => onPlace({ chip: value || undefined, after: undefined })}
-            />
-            <ToolbarRule />
-            <ViewSwitch
-              face={face}
-              onPick={(next) => onPlace({ face: next === "tiles" ? undefined : next })}
-            />
-          </span>
-        </PageToolbar>
-      )}
+          <ToolbarRule />
+          <ViewSwitch
+            face={face}
+            onPick={(next) => onPlace({ face: next === "tiles" ? undefined : next })}
+          />
+        </span>
+      </PageToolbar>
       <Section>
-        <Panel state={state} shape={face === "table" ? "table" : "cards"}>
+        <Panel state={state} loading={() => <ShelfSkeleton face={face} />}>
           {(payload) => {
             if (unknown) return <PanelBlank body="That filter is not available." />;
             if (!payload.cards.length)
@@ -529,6 +528,69 @@ function OpenSite({ href }: { href: string }) {
 }
 
 const COLUMNS = [{ label: "Name", whole: true }, "Details", { label: "Type", fact: true }];
+
+const COLUMN_TRACK: Record<string, string> = {
+  Details: "w-(--size-prose-column)",
+  Type: "w-(--size-fact-column)",
+};
+
+const SKELETON_TILES = 8;
+const SKELETON_ROWS = 6;
+
+/** The columns and the view are the member's rather than the read's, so the head names them while
+ *  the records are still coming and nothing shifts when they land. */
+function ShelfSkeleton({ face }: { face: Face }) {
+  if (face === "table")
+    return (
+      <Table measured floor={tableFloor({ prose: 2, fact: 1, act: true })}>
+        <thead>
+          <tr>
+            {COLUMNS.map((column) => {
+              const name = typeof column === "string" ? column : column.label;
+              return (
+                <Th key={name} className={COLUMN_TRACK[name]}>
+                  {name}
+                </Th>
+              );
+            })}
+            <Th className="w-(--size-act)">{""}</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: SKELETON_ROWS }, (_, index) => (
+            <tr key={index}>
+              <TdWhole>
+                <span className="flex min-w-0 items-center gap-md">
+                  <Skeleton className="size-(--size-lede) shrink-0" />
+                  <Skeleton className="h-(--size-notice) w-(--size-prose-column) text-label" />
+                </span>
+              </TdWhole>
+              <Td>
+                <Skeleton className="h-(--size-notice) w-(--size-prose-column) text-label" />
+              </Td>
+              <TdFact>
+                <Skeleton className="h-(--size-notice) w-2/3 text-label" />
+              </TdFact>
+              <Td className="w-(--size-act)">
+                <Skeleton className="ml-auto h-(--size-notice) w-2/3 text-label" />
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+    );
+  return (
+    <ul className="m-0 grid list-none grid-cols-[repeat(auto-fill,minmax(var(--size-tile),1fr))] gap-lg p-0">
+      {Array.from({ length: SKELETON_TILES }, (_, index) => (
+        <li key={index} className="flex flex-col gap-sm">
+          <Skeleton className="aspect-square w-full rounded-panel border border-edge" />
+          <Skeleton className="h-(--size-notice) w-4/5 text-body" />
+          <Skeleton className="h-(--size-notice) w-2/5 text-small" />
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 /** The list view of the shelf. The cards are the other view the bar offers, so a narrow pane does
  *  not stack these rows into cards of its own: the table holds its tracks and scrolls sideways. */
