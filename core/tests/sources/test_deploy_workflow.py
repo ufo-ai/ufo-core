@@ -4445,7 +4445,7 @@ def _check_notification_rules_route_each_environment() -> None:
 
     production = NOTIFICATION_RULES["prod"].read_text()
     assert re.search(r'scope\s*=\s*"priority:p1"', production)
-    assert re.search(r'fallback_recipients\s*=\s*\["slack-on-call"\]', production)
+    assert re.search(r'fallback_recipients\s*=\s*\["slack-alerts"\]', production)
 
 
 def _check_on_call_adopts_the_ui_objects_and_the_daily_rotation() -> None:

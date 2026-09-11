@@ -123,6 +123,6 @@ resource "datadog_monitor_notification_rule" "prod" {
       recipients = ["oncall-ufo", "slack-on-call"]
     }
 
-    fallback_recipients = ["slack-on-call"]
+    fallback_recipients = ["slack-alerts"]
   }
 }
