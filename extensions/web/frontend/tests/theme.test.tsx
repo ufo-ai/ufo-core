@@ -459,7 +459,10 @@ test("replies read as a document and member bubbles stay bubbles", async () => {
   expect(mineSaid.closest("[data-role=me]")!.className).toContain(
     "*:data-[slot=bubble-content]:bg-said",
   );
-  for (const said of [agentSaid, mineSaid]) expect(said.className).toContain("wrap-anywhere");
+  for (const said of [agentSaid, mineSaid]) {
+    expect(said.className).toContain("wrap-anywhere");
+    expect(said.className).toContain("max-narrow:text-subtitle");
+  }
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "go");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -554,6 +557,12 @@ test("the growing box's mirror is named, so the phone-width floor sizes it too",
 
   const mirror = container.querySelector('[data-slot="growing-mirror"]');
   expect(mirror?.textContent).toBe("a line ");
+});
+
+/** A field computes at 16px on a phone, so a reply left at the desktop 13px reads a size under the
+ *  composer beneath it. Both sides of the conversation take the field's phone size instead. */
+test("a said bubble takes the field's phone size, so the transcript matches the composer", () => {
+  expect(packedStyles()).toContain(".max-narrow\\:text-subtitle{font-size:var(--text-subtitle)}");
 });
 
 test("muted text is the palette's second tone, never ink held back by opacity", () => {

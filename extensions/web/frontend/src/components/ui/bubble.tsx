@@ -47,7 +47,7 @@ export function BubbleContent({ className, ...props }: ComponentProps<"div">) {
       data-slot="bubble-content"
       className={cn(
         "w-fit max-w-full min-w-0 overflow-hidden rounded-bubble",
-        "p-2xl text-label leading-reading wrap-anywhere",
+        "p-2xl text-label max-narrow:text-subtitle leading-reading wrap-anywhere",
         "group-data-[align=end]/bubble:self-end",
         className,
       )}
