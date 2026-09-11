@@ -205,8 +205,15 @@ jobs:
           retention-days: 1
 
   web-test:
+    name: web shard ${{ matrix.shard }}
     needs: [triage, web-build]
     if: needs.triage.outputs.checks == 'true'
+    # One vitest worker: the runner has two cores and the forks pool reserves one, so the suite runs
+    # file by file. Four shards split a 490s serial run into a 129s worst slice.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -232,7 +239,7 @@ jobs:
         with:
           name: sites-page-kit
           path: extensions/sites/ufo_ext_sites/page/kit
-      - run: pnpm -C extensions/web/frontend test
+      - run: pnpm -C extensions/web/frontend test --shard=${{ matrix.shard }}
 
   sandbox-client:
     needs: triage

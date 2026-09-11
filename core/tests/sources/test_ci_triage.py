@@ -181,7 +181,8 @@ def _check_test_shards_do_not_build_the_workflow_linter() -> None:
 def _check_the_portal_suite_stays_off_the_shard_critical_path() -> None:
     """The shards wait on the portal's build, never on its suite. `web-build` publishes the three
     trees and stops; `web-test` reads those same bytes back and runs vitest beside the shards, so a
-    suite that grows never delays them, and the gate names it because nothing else consumes it."""
+    suite that grows never delays them, and the gate names it because nothing else consumes it.
+    Each slice reads all three trees: which one holds the boot suite moves with the file set."""
     jobs = _jobs()
     trees = {"portal-static", "portal-apps", "sites-page-kit"}
     build = jobs["web-build"]["steps"]
@@ -193,7 +194,12 @@ def _check_the_portal_suite_stays_off_the_shard_critical_path() -> None:
     assert {
         step["with"]["name"] for step in suite if step.get("uses") == "actions/download-artifact@v4"
     } == trees
-    assert any(step.get("run") == "pnpm -C extensions/web/frontend test" for step in suite)
+    assert any(
+        step.get("run") == "pnpm -C extensions/web/frontend test --shard=${{ matrix.shard }}"
+        for step in suite
+    )
+    assert jobs["web-test"]["strategy"]["matrix"]["shard"] == ["1/4", "2/4", "3/4", "4/4"]
+    assert jobs["web-test"]["strategy"]["fail-fast"] == "false"
     assert jobs["test-shard"]["needs"] == ["triage", "web-build", "sandbox-client"]
     assert "web-test" in jobs["test"]["needs"]
 
