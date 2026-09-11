@@ -4485,6 +4485,7 @@ def _check_on_call_adopts_the_ui_objects_and_the_daily_rotation() -> None:
 def test_prod_member_paths_page_only_after_sustained_multi_region_failure() -> None:
     source = MONITORS["prod"].read_text()
     synthetic = _terraform_block(source, "resource", "member_paths")
+    assert _monitor_attribute("db_tx_unavailable", "priority", "prod") == "2"
     attributes = {
         name: re.search(rf"^  {name} += +(.+)$", synthetic, re.MULTILINE)
         for name in ("type", "subtype", "status", "locations", "message", "tags")
@@ -4540,6 +4541,14 @@ def test_prod_member_paths_page_only_after_sustained_multi_region_failure() -> N
             step,
         )
         assert re.search(contract, step)
+
+    gateway = (ROOT / "servers" / "control" / "src" / "gateway.rs").read_text()
+    assert re.search(
+        r"async fn healthz\(.*?state\.onboarding\.store\.pool\.get\(\)\.await.*?"
+        r"StatusCode::SERVICE_UNAVAILABLE",
+        gateway,
+        re.DOTALL,
+    )
 
 
 def _check_the_source_sync_monitor_watches_the_check_the_reporters_submit() -> None:
@@ -4646,7 +4655,7 @@ def _check_the_job_failure_monitor_consumes_the_reported_counter() -> None:
 
 
 def _check_failure_only_alerts_resolve_without_data() -> None:
-    p1_monitors = {"db_tx_unavailable", "surface_listener_parked"}
+    fast_resolve_monitors = {"db_tx_unavailable", "surface_listener_parked"}
     for environment in DEPLOY_ENVIRONMENTS:
         for monitor in [
             "db_tx_unavailable",
@@ -4660,8 +4669,7 @@ def _check_failure_only_alerts_resolve_without_data() -> None:
             block = _terraform_block(MONITORS[environment].read_text(), "resource", monitor)
             assert _monitor_attribute(monitor, "type", environment) == "query alert"
             assert _monitor_attribute(monitor, "require_full_window", environment) == "false"
-            if environment == "prod" and monitor in p1_monitors:
-                assert _monitor_attribute(monitor, "priority", environment) == "1"
+            if environment == "prod" and monitor in fast_resolve_monitors:
                 assert _monitor_attribute(monitor, "on_missing_data", environment) == "resolve"
                 assert not re.search(r"^ +timeout_h", block, re.MULTILINE)
             else:

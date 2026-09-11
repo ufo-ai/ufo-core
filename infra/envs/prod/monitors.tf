@@ -118,7 +118,7 @@ resource "datadog_monitor" "db_tx_unavailable" {
   query   = "sum(last_15m):sum:ufo.db_tx_unavailable_total{env:prod}.as_count() >= 1"
   message = "A transaction never opened: {{value}} in 15 minutes. This is a turn or job that ended with no answer. Read `db_pool_exhausted_total` first — it is what says whether the fleet hit its own ceiling — then RDS reachability and connection count."
 
-  priority = 1
+  priority = 2
 
   monitor_thresholds {
     critical = 1
