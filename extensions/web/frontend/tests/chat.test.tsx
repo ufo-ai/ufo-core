@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { resetChatStore } from "@/lib/chatStore";
+import { liveTurn, resetChatStore } from "@/lib/chatStore";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import { resetStreams } from "@/lib/turnStream";
@@ -536,6 +536,113 @@ test("a conversation reloaded mid-run draws the waiting runs the replayed frames
 
   expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
   expect(screen.getAllByText("Looking up info")).toHaveLength(1);
+});
+
+const LOOKUP_NODE = {
+  profile: "general_purpose",
+  name: "Lookup",
+  conversation_id: FIRST_RUN.conversation_id,
+  events: [],
+  output: "",
+  subagents: [],
+};
+
+test("the wait stands through a message sent mid-run and the answer that message gets", async () => {
+  wire({
+    ...transcript({ messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }),
+    "/chat": () => json({ ...FOLDED, arrival_id: ARRIVAL_ID }),
+  });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("subagent_activity", { ...FIRST_RUN, activity: "Looking up info" });
+  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "and the tags?");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(await screen.findByText("and the tags?")).toBeTruthy();
+  StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
+  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+
+  StreamFake.last().emit("subagent", { ...LOOKUP_NODE, running: true });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "Tagged v2; the lookup runs on.",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+
+  expect(await screen.findByText("Tagged v2; the lookup runs on.")).toBeTruthy();
+  expect(screen.getByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(screen.getByText("Lookup")).toBeTruthy();
+  expect(StreamFake.opened.length).toBe(1);
+});
+
+test("the wait goes when the read says the run the turn left going has ended", async () => {
+  let serves = 0;
+  const answer = "Tagged v2; the lookup runs on.";
+  wire({
+    ...transcript(),
+    "/transcript": () => {
+      serves += 1;
+      return json(
+        serves === 1
+          ? { messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }
+          : {
+              messages: [
+                {
+                  role: "assistant",
+                  text: answer,
+                  subagents: [{ ...LOOKUP_NODE, running: false }],
+                },
+              ],
+            },
+      );
+    },
+  });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("subagent_activity", { ...FIRST_RUN, activity: "Looking up info" });
+  StreamFake.last().emit("subagent", { ...LOOKUP_NODE, running: true });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: answer,
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+
+  window.dispatchEvent(new Event("focus"));
+
+  await waitFor(() => expect(screen.queryByText("Awaiting 1 subagent")).toBeNull());
+  expect(screen.getByText(answer)).toBeTruthy();
+});
+
+test("the wait states itself on the turn whose run is going, not on the newest one", () => {
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "user", text: "Research it." },
+          {
+            role: "assistant",
+            text: "Handed it off.",
+            subagents: [{ ...LOOKUP_NODE, running: true }],
+          },
+          { role: "user", text: "And the tags?" },
+          { role: "assistant", text: "Tagged v2." },
+        ]}
+        live={liveTurn()}
+      />
+    </TranscriptScroll>,
+  );
+
+  expect(screen.getAllByText("Awaiting 1 subagent")).toHaveLength(1);
+  expect(order("Awaiting 1 subagent", "And the tags?")).toBe(true);
+  expect(order("Tagged v2.", "Thinking…")).toBe(true);
 });
 
 function order(first: string, second: string): boolean {

@@ -394,6 +394,51 @@ test("each subagent the turn waits on states what it is doing, under the count",
   expect(screen.getByText("Naming the new issue")).toBeTruthy();
 });
 
+test("the wait stands through a message sent mid-run and the answer that message gets", async () => {
+  const node = {
+    profile: "general_purpose",
+    name: "Lookup",
+    conversation_id: "66666666-6666-4666-8666-666666666666",
+    events: [],
+    output: "",
+    subagents: [],
+  };
+  wire({
+    ...transcript({ messages: [{ role: "user", text: "Research it." }], turn: TURN_ID }),
+    "/chat": () => json({ ...FOLDED, arrival_id: ARRIVAL_ID }),
+  });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("subagent_activity", {
+    turn_id: "88888888-8888-4888-8888-888888888888",
+    parent_turn_id: TURN_ID,
+    conversation_id: node.conversation_id,
+    profile: node.profile,
+    name: node.name,
+    activity: "",
+    status: "",
+  });
+  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "and the tags?");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(await screen.findByText("and the tags?")).toBeTruthy();
+  StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
+  StreamFake.last().emit("subagent", { ...node, running: true });
+  StreamFake.last().emit("terminal", {
+    status: "done",
+    text: "Tagged v2; the lookup runs on.",
+    model: "opus",
+    tokens: 9,
+    cost_micro_usd: 1_000_000,
+  });
+
+  expect(await screen.findByText("Tagged v2; the lookup runs on.")).toBeTruthy();
+  expect(screen.getByText("Awaiting 1 subagent")).toBeTruthy();
+  expect(screen.getByText("Lookup")).toBeTruthy();
+});
+
 function order(first: string, second: string): boolean {
   const log = document.body.textContent ?? "";
   return log.indexOf(first) < log.indexOf(second);

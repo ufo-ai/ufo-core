@@ -2065,9 +2065,11 @@ class SubagentNode(TypedDict):
     """One spawned run as the conversation shows it: the display name its spawn gave it (empty
     when it gave none — the row states the target then), the qualified target (`agent:<name>` for
     an agent child, the bare profile otherwise), the conversation that holds the whole record,
-    the work it did, what it answered, and the runs it spawned in turn. A profile run links to
-    its own conversation page; an agent run has no such page — the portal derives that from the
-    target's prefix, shows its work inline, and mints no link."""
+    the work it did, what it answered, the runs it spawned in turn, and whether it is still going —
+    a spawn whose wait a member's message ended keeps running after the turn that opened it has
+    answered, so the chat states that wait against that turn until the run itself ends. A profile
+    run links to its own conversation page; an agent run has no such page — the portal derives that
+    from the target's prefix, shows its work inline, and mints no link."""
 
     profile: str
     name: str
@@ -2075,6 +2077,7 @@ class SubagentNode(TypedDict):
     events: list[dict[str, str]]
     output: str
     subagents: list["SubagentNode"]
+    running: bool
 
 
 SubagentRuns = dict[str, list[SubagentNode]]
@@ -2191,6 +2194,7 @@ async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> Subag
             events=[],
             output=_run_answer("" if turn.terminal is None else turn.terminal.text),
             subagents=[],
+            running=turn.terminal is None,
         )
     read = sorted(spawned, key=lambda turn: turn.created_at, reverse=True)[:SUBAGENT_ACTIVITY_LIMIT]
     recorded = await asyncio.gather(*(ctx.read_transcript(turn.conversation_id) for turn in read))

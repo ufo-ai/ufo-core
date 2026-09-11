@@ -790,6 +790,7 @@ def _node(profile: str, conversation_id: UUID) -> SubagentNode:
         events=[],
         output="",
         subagents=[],
+        running=False,
     )
 
 
@@ -9631,6 +9632,7 @@ async def _seed_listed_turn(
     speaker_member_id: UUID | None = None,
     context: TurnContext | None = None,
     idempotency_key: str | None = None,
+    running: bool = False,
 ) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
@@ -9641,10 +9643,14 @@ async def _seed_listed_turn(
                 conversation_id=conversation_id,
                 agent_id=agent_id,
                 seq=seq,
-                status="done",
+                status="running" if running else "done",
                 inbound=inbound,
                 admission_source="internal" if subagent_profile else "member",
-                terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
+                terminal=(
+                    None
+                    if running
+                    else TerminalFrame(status="done", text="ok").model_dump(mode="json")
+                ),
                 parent_turn_id=parent_turn_id,
                 subagent_profile=subagent_profile,
                 speaker_member_id=speaker_member_id,
@@ -9998,6 +10004,7 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
                     "events": [],
                     "output": "ok",
                     "subagents": [],
+                    "running": False,
                 }
             ],
         },
@@ -10024,6 +10031,82 @@ async def test_conversation_transcript_reads_as_chat_and_fails_closed(
     assert malformed.status_code == 404
     anonymous = await client.get(f"/surface/web/agents/{agent_id}/conversations/{mine}/transcript")
     assert anonymous.status_code == 401
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_transcript_states_the_run_its_turn_left_going(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A member's message ends the wait on a spawn, and the run keeps going after the turn that
+    opened it has answered, so the reply it stands under states the run as still running."""
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="mine",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    parent = await _seed_listed_turn(
+        workspace_id, conversation_id, agent_id, seq=1, inbound="research"
+    )
+    child_conversation = await _seed_agent_conversation(
+        workspace_id,
+        agent_id,
+        queue_key=str(parent),
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="subagent",
+    )
+    await _seed_listed_turn(
+        workspace_id,
+        child_conversation,
+        agent_id,
+        seq=1,
+        inbound="search",
+        parent_turn_id=parent,
+        subagent_profile="deep_research",
+        running=True,
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {parent}\n</context>\nresearch",
+                ),
+                Message(role="assistant", content="the research runs on"),
+            ),
+        ),
+    )
+
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert read.status_code == 200
+    assert _worded(read.json()["messages"])[-1] == {
+        "role": "assistant",
+        "text": "the research runs on",
+        "subagents": [
+            {
+                "profile": "deep_research",
+                "name": "",
+                "conversation_id": str(child_conversation),
+                "events": [],
+                "output": "",
+                "subagents": [],
+                "running": True,
+            }
+        ],
+    }
 
 
 @pytest.mark.usefixtures("database_url")
@@ -10407,6 +10490,7 @@ async def test_an_acknowledgement_opens_a_private_transcript_and_records_the_rea
                     ],
                     "output": "ok",
                     "subagents": [],
+                    "running": False,
                 }
             ],
         },

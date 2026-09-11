@@ -156,6 +156,8 @@ test("a subagent still running is what the line states, in place of the step tha
   expect(screen.getByText("Subagent · general_purpose")).toBeTruthy();
 });
 
+const RUN_CONVERSATION = "66666666-6666-4666-8666-666666666666";
+
 test("a run's frame leaves the answer the turn has already streamed where it stands", async () => {
   const stream = await streaming();
   const answer = "The research runs on; I will say what it finds.";
@@ -166,7 +168,7 @@ test("a run's frame leaves the answer the turn has already streamed where it sta
   stream.emit("subagent_activity", {
     turn_id: "88888888-8888-4888-8888-888888888888",
     parent_turn_id: TURN_ID,
-    conversation_id: "66666666-6666-4666-8666-666666666666",
+    conversation_id: RUN_CONVERSATION,
     profile: "general_purpose",
     name: "",
     tool: "",
@@ -178,6 +180,15 @@ test("a run's frame leaves the answer the turn has already streamed where it sta
   expect(screen.getByText(saying(answer))).toBeTruthy();
   expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
 
+  stream.emit("subagent", {
+    profile: "general_purpose",
+    name: "",
+    conversation_id: RUN_CONVERSATION,
+    events: [],
+    output: "",
+    subagents: [],
+    running: true,
+  });
   stream.emit("terminal", {
     status: "done",
     text: answer,
@@ -187,6 +198,39 @@ test("a run's frame leaves the answer the turn has already streamed where it sta
   });
 
   expect(await screen.findByText(answer)).toBeTruthy();
+  expect(screen.getByText("Awaiting 1 subagent")).toBeTruthy();
+});
+
+test("the turn that opened a run gives the line back when the run itself ends", async () => {
+  const stream = await streaming();
+  stream.emit("subagent_activity", {
+    turn_id: "88888888-8888-4888-8888-888888888888",
+    parent_turn_id: TURN_ID,
+    conversation_id: RUN_CONVERSATION,
+    profile: "general_purpose",
+    name: "",
+    status: "",
+  });
+  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
+
+  stream.emit("subagent", {
+    profile: "general_purpose",
+    name: "",
+    conversation_id: RUN_CONVERSATION,
+    events: [],
+    output: "",
+    subagents: [],
+    running: false,
+  });
+  stream.emit("terminal", {
+    status: "done",
+    text: "Its answer will follow.",
+    model: "opus",
+    tokens: 5,
+    cost_micro_usd: 1_000_000,
+  });
+
+  expect(await screen.findByText("Its answer will follow.")).toBeTruthy();
   await waitFor(() => expect(stepLine()).toBeNull());
 });
 

@@ -153,7 +153,8 @@ export function applyRunFrame(
 
 /** A source opens with no cursor, so the turn's retained frames arrive from the first of them: whatever
  *  the chat had drawn belongs to the tail this one replaces, and holding it would glue two turns into one.
- *  The clock belongs to the turn rather than to the source, so a tail reopened on the same turn keeps it. */
+ *  The clock belongs to the turn rather than to the source, so a tail reopened on the same turn keeps it.
+ *  The runs it left going are not that draft: they outlive their turn, so they stay as its own row. */
 export function streamTurn(
   chatKey: string,
   turnId: string,
@@ -161,8 +162,22 @@ export function streamTurn(
   agentModel: string,
 ): void {
   REATTACHES.delete(chatKey);
+  const leaving = chatState(chatKey).turn;
+  const held =
+    leaving && leaving.id !== turnId
+      ? (chatState(chatKey).live?.subagents ?? []).filter((run) => run.running)
+      : [];
   updateChat(chatKey, (state) => ({
     ...state,
+    ...(held.length
+      ? {
+          messages: (state.messages ?? []).concat({
+            role: "assistant",
+            text: "",
+            subagents: held,
+          }),
+        }
+      : {}),
     live: liveTurn(),
     turn: { id: turnId, answering },
   }));

@@ -247,6 +247,9 @@ export function MessageLog({
     return (
       <MessageScrollerItem key={key} messageId={key} scrollAnchor={mine}>
         <Speech mine={mine} at={message.at}>
+          {message.subagents?.some((run) => run.running) ? (
+            <Activity events={message.events ?? []} runs={message.subagents} />
+          ) : null}
           {message.role === "user" && message.speaker ? (
             <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
           ) : null}
@@ -310,7 +313,6 @@ export function MessageLog({
                 <Activity
                   events={row.live.events}
                   runs={row.live.subagents}
-                  live
                   working={
                     row.live.reconnecting
                       ? "Reconnecting…"
@@ -975,20 +977,17 @@ function runStep(run: SubagentRun): string {
     : "Subagent · " + run.profile;
 }
 
-/** The step a running turn is on, and under it the step of each subagent it waits on: a count alone
- *  reads as a stuck turn. A settled turn draws no line — what it did is the reply it wrote. */
+/** The step a turn is on, and under it the step of each subagent it waits on: a count alone reads as
+ *  a stuck turn. A turn holding no running run draws no line — what it did is the reply it wrote. */
 function Activity({
   events,
   runs,
-  live,
   working,
 }: {
   events: ActivityEvent[];
   runs: SubagentRun[];
-  live: boolean;
   working?: string;
 }) {
-  if (!live) return null;
   const waiting = runs.filter((run) => run.running);
   const step =
     waiting.length > 0
