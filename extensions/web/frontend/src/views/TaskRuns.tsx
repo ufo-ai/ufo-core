@@ -313,10 +313,12 @@ export function TaskRuns({
   return (
     <>
       <PageToolbar>
-        <Filter
-          scope={scope}
-          onPick={(next) => onPlace({ scope: next || undefined, after: undefined, opens: [] })}
-        />
+        <span className="ml-auto flex shrink-0 items-center gap-sm max-narrow:ml-0">
+          <Filter
+            scope={scope}
+            onPick={(next) => onPlace({ scope: next || undefined, after: undefined, opens: [] })}
+          />
+        </span>
       </PageToolbar>
       <Section>
         <Runs place={place} onPlace={onPlace} onShown={setShown} />
