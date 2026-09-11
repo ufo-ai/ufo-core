@@ -574,8 +574,10 @@ def _unread(
 ) -> bool:
     """Whether a conversation holds messages a member has not seen: it moved after the later of
     the cursor their reading wrote and their own last turn. A conversation nobody has spoken a
-    turn in holds nothing to read. SQLite hands datetimes back without their zone, so both sides
-    are read as UTC before they are compared."""
+    turn in holds nothing to read, and one holding neither a cursor nor a turn of theirs is a
+    conversation opened since the cursor was seeded onto every thread a workspace already held, so
+    its first turn is an arrival. SQLite hands datetimes back without their zone, so both sides are
+    read as UTC before they are compared."""
     if last_turn_at is None:
         return False
     seen = [_as_utc(moment) for moment in (read_at, spoke_at) if moment is not None]
