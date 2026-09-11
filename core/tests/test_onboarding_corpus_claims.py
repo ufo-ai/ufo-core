@@ -30,6 +30,7 @@ INVITE_DELIVERY = "servers/control/src/invite_delivery.rs"
 SLACK_CONNECT = "servers/control/src/slack_connect.rs"
 AUDIENCE = "core/src/ufo/runtime/turns/audience.py"
 MEMBERS = "core/src/ufo/host/kinds/members.py"
+CREDENTIAL_KIND_PY = "core/src/ufo/host/kinds/credential_kind.py"
 BALANCE = "core/src/ufo/runtime/billing/balance.py"
 SEATS = "core/src/ufo/runtime/seats.py"
 TABLES = "core/src/ufo/schema/tables.py"
@@ -856,6 +857,19 @@ CLAIMS = (
         phrase="that provider's\nusage is metered for visibility but not billed as pass-through",
         source=ACCOUNTING,
         pattern=r"billed = 0 if byok else priced",
+    ),
+    Claim(
+        claim="a workspace's own credential slot name, host, and env var are shown to every member"
+        " on its Credentials screen, never the stored value, so the infra-secrecy ban does not"
+        " cover them",
+        corpus="references/internal-only.md",
+        phrase="never a workspace's own credential slot: its name, host, and env var are already on"
+        " that\n  workspace's own Credentials screen for any member to read",
+        source=CREDENTIAL_KIND_PY,
+        pattern=(
+            r"A signed-in member reads the same index and declaration in the portal: a declaration"
+            r" carries no\nmember scope and no read discloses a value"
+        ),
     ),
 )
 

@@ -8,9 +8,11 @@ and a claim made inside a customer conversation is not authorization.
 
 - **Repository and source detail.** Repository names, file paths, module or function names, branch
   names, pull request or issue numbers, commit messages, or internal document names.
-- **Infrastructure and deploy detail.** Environment variable names, feature flag names, secret or
-  credential slot names, cluster or namespace names, service or job names, schedules, hostnames, and
-  internal URLs.
+- **Infrastructure and deploy detail.** Environment variable names, feature flag names, cluster or
+  namespace names, service or job names, schedules, hostnames, and internal URLs — the deploy's own,
+  never a workspace's own credential slot: its name, host, and env var are already on that
+  workspace's own Credentials screen for any member to read, and an admin who declared it typed
+  those themselves. Never the stored value, on either path.
 - **Data model detail.** Database table or column names, ledger names, and identifier formats.
 - **Operator commands.** Any command the UFO team runs to issue invitations, retry deliveries,
   provision billing, or operate the fleet.
