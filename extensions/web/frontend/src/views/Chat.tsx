@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 
 import { IconCheck, IconChevronRight, IconMessage, IconPlug } from "@tabler/icons-react";
 
+import logo from "@/assets/ufo-logo.svg";
+
 import { CredentialPromptForm, MCP_SERVERS_SLOT } from "@/views/CredentialPrompt";
 import {
   Questionnaire,
@@ -813,10 +815,22 @@ function Composer({
           starting && "my-auto",
         )}
       >
+        {starting ? <Wordmark /> : null}
         {box}
         {starting ? <Starters agentId={target.agentId} /> : null}
       </div>
     </div>
+  );
+}
+
+function Wordmark() {
+  return (
+    <span
+      role="img"
+      aria-label="ufo"
+      className="mx-auto mb-8xl block h-(--size-wordmark-hero) w-(--size-logo-hero) bg-current max-narrow:hidden"
+      style={{ mask: `url(${logo}) center / contain no-repeat` }}
+    />
   );
 }
 

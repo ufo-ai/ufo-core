@@ -367,6 +367,8 @@
   --size-usage-chart: 10em;
   --size-wordmark: 12px;
   --size-logo: 48px;
+  --size-wordmark-hero: 48px;
+  --size-logo-hero: 192px;
   --size-notice: 1em;
   --marker-width: 2px;
 }

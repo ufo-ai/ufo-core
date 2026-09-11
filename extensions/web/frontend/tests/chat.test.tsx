@@ -3533,6 +3533,23 @@ test("a route that renames the start screen's agent reads that agent's own draft
   );
 });
 
+test("the start screen heads the box with the ufo wordmark, drawn above the phone width", async () => {
+  wire({ ...transcript() });
+  location.hash = newChatHash(AGENT_ID);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const start = await screen.findByTestId("start");
+  const wordmark = within(start).getByRole("img", { name: "ufo" });
+  expect(wordmark.getAttribute("style")).toContain("ufo-logo.svg");
+  expect(wordmark.className).toContain("h-(--size-wordmark-hero)");
+  expect(wordmark.className).toContain("mb-8xl");
+  expect(wordmark.className).toContain("max-narrow:hidden");
+  expect(
+    wordmark.compareDocumentPosition(screen.getByLabelText("Ask UFO")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+});
+
 test("the start screen's empty space is the box's: a press in it lands the cursor in the words", async () => {
   wire({ ...transcript() });
   location.hash = newChatHash(AGENT_ID);

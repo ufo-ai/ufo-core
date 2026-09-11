@@ -466,7 +466,8 @@ test("the sidebar heads itself with the drawn ufo mark", async () => {
   wire({});
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const brand = await screen.findByRole("img", { name: "ufo" });
+  const marks = await screen.findAllByRole("img", { name: "ufo" });
+  const brand = marks.find((mark) => mark.getAttribute("style")?.includes("ufo-mark.svg"))!;
   expect(brand.getAttribute("class")).not.toContain("tracking");
   expect(brand.getAttribute("style")).toContain("ufo-mark.svg");
   expect(readFileSync(join(STATIC, "sidebar.html"), "utf8")).toContain(
