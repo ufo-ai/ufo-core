@@ -59,6 +59,7 @@ declared name with the rest of the identity — and the row's own name with it, 
 never renamed it and holds nothing else by this one."""
 
 TRIGGER_KIND = "source_trigger"
+CODE_APP_DELIVERY = "current"
 CODE_APP_STREAMS = ("pull_requests",)
 """Without them the trigger also takes the connection's workflow runs, comments and issues, and
 per-page delivery reviews one head from a conversation per page."""
@@ -74,8 +75,9 @@ CODE_APP_SETUP_INSTRUCTIONS = (
     "whose conversation it is made in, so make it here, with you; the same account fetches the "
     "commits the reviewers read. Then ask the member to register the pull-request source for that "
     "account and share it — only a shared source carries a trigger — and apply a source trigger "
-    f"naming it with `streams: {list(CODE_APP_STREAMS)}`, so a changed pull request wakes this "
-    "conversation and a workflow run or a comment on the same connection does not."
+    f"naming it with `delivery: {CODE_APP_DELIVERY}` and `streams: {list(CODE_APP_STREAMS)}`, so "
+    "changed pull requests wake this conversation and workflow runs or comments on the same "
+    "connection do not."
 )
 
 CODE_APP_AGENT = AgentProvision(

@@ -16,10 +16,15 @@ WAKE_ID = UUID("30000000-0000-0000-0000-000000000001")
 
 
 def woken_inbound(
-    provider: str, account: str, stream: str, title: str, page_id: UUID, resource: str = ""
+    provider: str,
+    account: str,
+    stream: str,
+    pages: tuple[tuple[str, UUID], ...],
+    resource: str = "",
+    log_path: str | None = None,
 ) -> str:
-    """One updated page, worded by the deploy's own writer, so a case that stages a woken turn
-    reads what the product sends rather than a copy of it that drifts."""
+    """Updated pages, worded by the deploy's own writer, so a case that stages a woken turn reads
+    what the product sends rather than a copy of it that drifts."""
     return alert_message(
         FeedConnection(
             id=WAKE_ID,
@@ -58,6 +63,7 @@ def woken_inbound(
                 as_of=WAKE_TIME,
                 changed_at=WAKE_TIME,
             )
+            for title, page_id in pages
         ],
-        None,
+        log_path,
     )

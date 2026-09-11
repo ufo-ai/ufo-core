@@ -74,15 +74,15 @@ def test_the_review_agent_runs_the_member_facing_tool_set() -> None:
 
 
 CANONICAL_PROCEDURE = (
-    "For each head SHA, spawn exactly two `coding` reviewers in the background.",
-    "Issue both spawn calls in the same response.",
-    "Do not process a result until both reviewers have started.",
+    "For each review key, spawn exactly two `coding` reviewers in the background.",
+    "Issue up to eight ready spawn calls in one response",
+    "Start all reviewers for the delivered batch before you process a result.",
     "Do not spawn preparation, synthesis, or adjudication subagents.",
     "Resolve disagreements yourself.",
     "Do not create or update a plan, objective, journal, or todo for a review.",
     'Each spawn payload is `{"objective": "<complete objective>"}`; never use `task`.',
     "do not load `spawn-catalog` or another skill",
-    "After `object_get`, issue the two spawn calls immediately.",
+    "After all named page reads, issue the ready spawn calls immediately.",
     "Earlier conversation messages can contain reviewer objectives from old prompt revisions.",
     "Build both spawn objectives only from the current `Review objective for each subagent` block",
     "issue all independent calls whose inputs are known, with a maximum of eight",
@@ -94,13 +94,14 @@ CANONICAL_PROCEDURE = (
     "If one response creates multiple subset diff files, read all of them together next.",
     "Return exactly one JSON object through `finish`, with no other text",
     "Treat a source update for a new head SHA as higher priority than every result for an older "
-    "head SHA.",
-    "Call `cancel_spawn` for every still-running reviewer associated with each superseded head.",
+    "review key with the same repository URL and pull-request number.",
+    "Call `cancel_spawn` for every still-running reviewer associated with each superseded review "
+    "key for that pull request.",
     "Issue independent cancellation calls in the same response.",
-    "Discard every result for each superseded head, including a result that arrives after "
-    "cancellation.",
-    "Do not publish a review or status for a superseded head.",
-    "Do not publish until two valid results exist for the current head SHA.",
+    "Discard every result for each superseded review key for that pull request, including a "
+    "result that arrives after cancellation.",
+    "Do not publish a review or status for a superseded review key.",
+    "Do not publish until two valid results exist for the current review key.",
 )
 """Every clause of the review procedure this app carries, as the release that bounded review
 concurrency wrote them."""
@@ -119,13 +120,18 @@ publication against a superseded head publishing nothing."""
 
 
 def test_the_app_frames_the_procedure_and_changes_nothing_in_it() -> None:
-    """Two framing lines, and the procedure between them: which app is speaking, and where its own
-    page is edited. Everything in between is the procedure as the repository holds it, so an edit
-    meant for the app's own voice cannot reach the procedure by accident."""
+    """Three opening lines, then the procedure and the line that locates the app's own page."""
     lines = (PROMPT_DIR / "agent_code.md").read_text().splitlines()
     assert lines[0] == "You are the Code app for this workspace, and reviewing is what you do."
     assert lines[1] == ""
-    assert lines[2] == "You review GitHub pull requests. One conversation tracks one pull request."
+    assert lines[2] == (
+        "You review GitHub pull requests. One conversation tracks the pull-request stream."
+    )
+    assert lines[3] == (
+        "Its source trigger uses `delivery: current` and `streams: [pull_requests]`."
+    )
+    assert "do no more work for that page and do not publish a status" in lines[5]
+    assert "read its complete contents and use each line's `page` value in file order" in lines[5]
     assert lines[-2] == ""
     assert lines[-1].startswith("Your homepage is the code screen:")
     assert lines[-1].endswith(f"load the skill `{app_code.HOME_SKILL}` and follow it.")
@@ -146,7 +152,10 @@ def test_each_reviewer_owns_one_workspace_checkout() -> None:
     prompt = agent.spec.prompt
     assert "Checkout label `correctness`." in prompt
     assert "Checkout label `security`." in prompt
-    assert "/workspace/code-review-<full head SHA>-<checkout label>" in prompt
+    assert (
+        "/workspace/code-review-<repository owner>-<repository name>-<pull-request number>-<full "
+        "head SHA>-<checkout label>" in prompt
+    )
     assert "Never use `/tmp` or a peer's path." in prompt
 
 
@@ -158,11 +167,36 @@ def test_a_finding_never_crosses_a_head_sha() -> None:
     )
 
 
-def test_the_review_agent_stops_unchanged_head_revisions_without_more_tools() -> None:
+def test_the_review_agent_stops_unchanged_review_keys_without_more_tools() -> None:
     (agent,) = app_code.manifest().agents
-    assert "A new head SHA is the only source change that starts review work." in agent.spec.prompt
-    assert "stop in the next response without another tool call" in agent.spec.prompt
+    assert "make no more tool calls for that page" in agent.spec.prompt
+    assert "Only a new head SHA for the same repository URL and pull-request number" in (
+        agent.spec.prompt
+    )
     assert "report that no action was needed" in agent.spec.prompt
+
+
+def test_the_review_agent_keeps_current_batch_pull_requests_separate() -> None:
+    (agent,) = app_code.manifest().agents
+    prompt = agent.spec.prompt
+
+    assert "obtain every changed page ref in the received order" in prompt
+    assert "Pass every obtained ref unchanged to `object_get`" in prompt
+    assert "`delivery: current` and `streams: [pull_requests]`" in prompt
+    assert "Continue until you have handled every changed page." in prompt
+    assert "repository URL, pull-request number, and head SHA" in prompt
+    assert "A different repository URL or pull-request number is different work" in prompt
+    assert "Never combine results from different review keys." in prompt
+    assert "Do not cancel or discard work for another repository URL" in prompt
+
+
+def test_the_setup_applies_the_current_pull_request_trigger() -> None:
+    instructions = app_code.CODE_APP_SETUP_INSTRUCTIONS
+
+    assert app_code.CODE_APP_DELIVERY == "current"
+    assert app_code.CODE_APP_STREAMS == ("pull_requests",)
+    assert "`delivery: current`" in instructions
+    assert "`streams: ['pull_requests']`" in instructions
 
 
 def test_the_review_agent_bounds_each_child_evidence_pass() -> None:

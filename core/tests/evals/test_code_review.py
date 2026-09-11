@@ -95,8 +95,8 @@ async def test_parallel_review_grader_requires_two_same_round_spawns_and_child_b
         "spawn-2",
         {"target": "coding", "background": True, "payload": {"objective": "review two"}},
     )
-    correctness = f"/workspace/code-review-{code_review.HEAD_SHA}-correctness"
-    security = f"/workspace/code-review-{code_review.HEAD_SHA}-security"
+    correctness = f"/workspace/code-review-eval-review-target-7-{code_review.HEAD_SHA}-correctness"
+    security = f"/workspace/code-review-eval-review-target-7-{code_review.HEAD_SHA}-security"
     alpha = _call("read", "read-1", {"file_path": f"{correctness}/src/alpha.py"})
     beta = _call("read", "read-2", {"file_path": f"{correctness}/src/beta.py"})
     bulk = _call("bash", "bash-1", {"command": f"cd {security} && sed -n 1p alpha.py beta.py"})
@@ -611,6 +611,58 @@ async def test_preemption_grader_requires_both_old_reviewers_and_no_old_status()
     assert passed.passed, passed.reason
     assert not failed.passed
     assert "old head still received" in failed.reason
+
+
+async def test_current_batch_grader_keeps_pull_requests_with_one_head_separate() -> None:
+    reads = tuple(
+        _call("object_get", f"read-{index}", {"ref": f"page/{page_id}"})
+        for index, page_id in enumerate(code_review.CURRENT_BATCH_PAGE_IDS)
+    )
+    spawns = tuple(
+        _call(
+            "spawn",
+            f"spawn-{number}-{focus}",
+            {
+                "target": "coding",
+                "background": True,
+                "payload": {"objective": f"Pull request number: {number}. Focus: {focus}."},
+            },
+        )
+        for number in (7, 8)
+        for focus in ("correctness", "security")
+    )
+    passed = await code_review._grade_current_batch(
+        CapabilityOutput("", (*reads, *spawns), own_calls=(*reads, *spawns))
+    )
+    retried = await code_review._grade_current_batch(
+        CapabilityOutput(
+            "", (*reads, *spawns, *spawns[:2]), own_calls=(*reads, *spawns, *spawns[:2])
+        )
+    )
+    merged = await code_review._grade_current_batch(
+        CapabilityOutput("", (*reads, *spawns[:2]), own_calls=(*reads, *spawns[:2]))
+    )
+
+    assert passed.passed, passed.reason
+    assert retried.passed, retried.reason
+    assert not merged.passed
+    assert "expected at least 4" in merged.reason
+
+
+def test_current_batch_case_names_both_pages_in_order() -> None:
+    case = next(case for case in code_review.CASES if case.name == "code-review-current-batch")
+    first, second = (str(page_id) for page_id in code_review.CURRENT_BATCH_PAGE_IDS)
+
+    assert case.message.index(first) < case.message.index(second)
+    assert "pass each ref unchanged to object_get" in case.message
+
+
+def test_change_log_batch_case_names_the_complete_log() -> None:
+    case = next(case for case in code_review.CASES if case.name == "code-review-change-log-batch")
+
+    assert code_review.CHANGE_LOG_PATH in case.message
+    assert "Every changed page is one JSON line" in case.message
+    assert len(code_review.CHANGE_LOG_BATCH_PAGE_IDS) == 6
 
 
 async def test_a_foreground_launch_reads_as_a_foreground_launch() -> None:

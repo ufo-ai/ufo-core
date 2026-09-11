@@ -1411,7 +1411,7 @@ def source_alert(filing: Filing) -> str:
         bytes=hashlib.sha256(f"issue-recall/alert/{filing.alert_page}".encode()).digest()[:16],
         version=4,
     )
-    return woken_inbound("github", ALERT_ACCOUNT, page.stream, page.title, page_uuid)
+    return woken_inbound("github", ALERT_ACCOUNT, page.stream, ((page.title, page_uuid),))
 
 
 CASES: tuple[FilingCase, ...] = (

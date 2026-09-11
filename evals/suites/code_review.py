@@ -28,6 +28,7 @@ from ufo.blob import WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 
@@ -49,6 +50,13 @@ STALE_OBJECTIVE_PAGE_ID = UUID("20000000-0000-0000-0000-000000000008")
 LAUNCH_PAGE_ID = UUID("20000000-0000-0000-0000-000000000009")
 RECOVERY_PAGE_ID = UUID("20000000-0000-0000-0000-00000000000a")
 PUBLISH_PAGE_ID = UUID("20000000-0000-0000-0000-00000000000b")
+CURRENT_BATCH_PAGE_IDS = (
+    UUID("20000000-0000-0000-0000-00000000000c"),
+    UUID("20000000-0000-0000-0000-00000000000d"),
+)
+CHANGE_LOG_BATCH_PAGE_IDS = tuple(
+    UUID(f"20000000-0000-0000-0000-{number:012x}") for number in range(14, 20)
+)
 SOURCE_ID = UUID("30000000-0000-0000-0000-000000000001")
 PREEMPT_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000002")
 INSTRUCTION_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000003")
@@ -60,6 +68,13 @@ STALE_OBJECTIVE_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000008")
 LAUNCH_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000009")
 RECOVERY_SOURCE_ID = UUID("30000000-0000-0000-0000-00000000000a")
 PUBLISH_SOURCE_ID = UUID("30000000-0000-0000-0000-00000000000b")
+CURRENT_BATCH_SOURCE_IDS = (
+    UUID("30000000-0000-0000-0000-00000000000c"),
+    UUID("30000000-0000-0000-0000-00000000000d"),
+)
+CHANGE_LOG_BATCH_SOURCE_IDS = tuple(
+    UUID(f"30000000-0000-0000-0000-{number:012x}") for number in range(14, 20)
+)
 FIXTURE_CONNECTION_ID = UUID("31000000-0000-0000-0000-000000000001")
 FIXTURE_PROVIDER = "fixture"
 EVAL_GITHUB_PROVIDER = "eval_github"
@@ -78,7 +93,9 @@ MAX_LARGE_REVIEW_ROUNDS = 18
 MAX_LARGE_SINGLE_CALL_ROUNDS = 4
 ROOT_INSTRUCTION = "Review all changed Python files."
 NESTED_INSTRUCTION = "Review src changes against supported behavior."
-CHECKOUT_PATTERN = re.compile(r"/workspace/code-review-[0-9a-f]{40}-(?:correctness|security)")
+CHECKOUT_PATTERN = re.compile(
+    r"/workspace/code-review-eval-review-target-7-[0-9a-f]{40}-(?:correctness|security)"
+)
 REVIEW_FAILURES = (
     "escapes /workspace",
     "is not a regular file",
@@ -220,6 +237,24 @@ WORKSPACE_FILES = (
         for name in FIXTURE_FILES
     ),
     WorkspaceFile(".review.patch", PATCH.encode()),
+)
+CHANGE_LOG_PATH = "/workspace/changed-pull-requests.jsonl"
+CHANGE_LOG_FILE = WorkspaceFile(
+    "changed-pull-requests.jsonl",
+    "".join(
+        json.dumps(
+            {
+                "as_of": "2026-07-20T00:00:00+00:00",
+                "change": "updated",
+                "page": f"page/{page_id}",
+                "stream": "pull_requests",
+                "title": f"Review fixture {number}",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+        for number, page_id in enumerate(CHANGE_LOG_BATCH_PAGE_IDS, start=14)
+    ).encode(),
 )
 REAL_PATCH = (
     "diff --git a/core/tests/evals/test_eval_harness.py "
@@ -441,14 +476,16 @@ async def _seed_page(
     source_id: UUID,
     head_sha: str,
     base_sha: str = BASE_SHA,
+    pull_number: int = 7,
+    grant_publication: bool = True,
 ) -> None:
     body = json.dumps(
         {
-            "number": 7,
+            "number": pull_number,
             "state": "open",
             "draft": False,
             "merged": False,
-            "html_url": "file:///workspace/review-target/pull/7",
+            "html_url": f"file:///workspace/review-target/pull/{pull_number}",
             "base": {
                 "sha": base_sha,
                 "repo": {
@@ -505,9 +542,11 @@ async def _seed_page(
         )
         await connection.execute(
             sa.insert(tables.source).values(
+                uid=source_id,
                 workspace_id=workspace_id,
                 backend=FIXTURE_PROVIDER,
-                config={},
+                config={"root": f"/{source_id.hex}"},
+                feed_handle=feed_handle_for({"root": f"/{source_id.hex}"}, frozenset()),
                 connection_id=FIXTURE_CONNECTION_ID,
                 next_sync_at=FIXTURE_TIME,
                 created_at=FIXTURE_TIME,
@@ -516,6 +555,7 @@ async def _seed_page(
         )
         await connection.execute(
             sa.insert(tables.page).values(
+                uid=page_id,
                 workspace_id=workspace_id,
                 source_uid=source_id,
                 digest=f"sha256:{hashlib.sha256(body).hexdigest()}",
@@ -530,7 +570,8 @@ async def _seed_page(
                 updated_at=FIXTURE_TIME,
             )
         )
-    await _grant_publication(agent_id)
+    if grant_publication:
+        await _grant_publication(agent_id)
 
 
 async def _seed_review(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
@@ -630,6 +671,39 @@ async def _seed_stale_objective(
         STALE_OBJECTIVE_SOURCE_ID,
         HEAD_SHA,
     )
+
+
+async def _seed_current_batch(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+    for number, (page_id, source_id) in enumerate(
+        zip(CURRENT_BATCH_PAGE_IDS, CURRENT_BATCH_SOURCE_IDS, strict=True), start=7
+    ):
+        await _seed_page(
+            workspace_id,
+            agent_id,
+            blob,
+            page_id,
+            source_id,
+            HEAD_SHA,
+            pull_number=number,
+            grant_publication=number != 7,
+        )
+
+
+async def _seed_change_log_batch(
+    workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore
+) -> None:
+    for number, (page_id, source_id) in enumerate(
+        zip(CHANGE_LOG_BATCH_PAGE_IDS, CHANGE_LOG_BATCH_SOURCE_IDS, strict=True), start=14
+    ):
+        await _seed_page(
+            workspace_id,
+            agent_id,
+            blob,
+            page_id,
+            source_id,
+            HEAD_SHA,
+            pull_number=number,
+        )
 
 
 async def _git(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
@@ -950,8 +1024,8 @@ async def _grade_parallel_review(output: CapabilityOutput) -> CapabilityVerdict:
             False, f"recorded {len(child_batches)} reviewer turns, expected 2", evidence
         )
     expected_roots = {
-        f"/workspace/code-review-{HEAD_SHA}-correctness",
-        f"/workspace/code-review-{HEAD_SHA}-security",
+        f"/workspace/code-review-eval-review-target-7-{HEAD_SHA}-correctness",
+        f"/workspace/code-review-eval-review-target-7-{HEAD_SHA}-security",
     }
     if checkout_roots != expected_roots:
         return CapabilityVerdict(
@@ -1401,11 +1475,121 @@ async def _grade_preemption(output: CapabilityOutput) -> CapabilityVerdict:
     )
 
 
+async def _grade_current_batch(output: CapabilityOutput) -> CapabilityVerdict:
+    expected_refs = tuple(f"page/{page_id}" for page_id in CURRENT_BATCH_PAGE_IDS)
+    read_refs = tuple(
+        str(call.input.get("ref", ""))
+        for call in output.own_calls
+        if call.name == "object_get" and call.succeeded
+    )
+    spawns = _coding_spawns(output)
+    initial_spawns = spawns[:4]
+    objectives = tuple(str(_spawn_payload(call).get("objective", "")) for call in initial_spawns)
+    pull_counts: JsonObject = {
+        str(number): sum(
+            re.search(rf"\bpull[ -]request(?: number)?:?\s*{number}\b", objective, re.IGNORECASE)
+            is not None
+            for objective in objectives
+        )
+        for number in (7, 8)
+    }
+    evidence: JsonObject = {
+        "read_refs": [*read_refs],
+        "spawn_count": len(spawns),
+        "reviewers_by_pull_request": pull_counts,
+    }
+    if read_refs[:2] != expected_refs:
+        return CapabilityVerdict(
+            False, "the agent did not read both changed pages in received order", evidence
+        )
+    if len(spawns) < 4:
+        return CapabilityVerdict(
+            False, f"started {len(spawns)} reviewers, expected at least 4", evidence
+        )
+    if (foreground := _background_verdict(initial_spawns, evidence)) is not None:
+        return foreground
+    if pull_counts != {"7": 2, "8": 2}:
+        return CapabilityVerdict(
+            False, "the reviewer objectives did not keep the two pull requests separate", evidence
+        )
+    return CapabilityVerdict(
+        True, "both pull requests kept two reviewers despite their shared head SHA", evidence
+    )
+
+
+async def _grade_change_log_batch(output: CapabilityOutput) -> CapabilityVerdict:
+    expected_refs = tuple(f"page/{page_id}" for page_id in CHANGE_LOG_BATCH_PAGE_IDS)
+    log_reads = tuple(
+        call
+        for call in output.own_calls
+        if call.succeeded and CHANGE_LOG_PATH in json.dumps(call.input)
+    )
+    read_refs = tuple(
+        str(call.input.get("ref", ""))
+        for call in output.own_calls
+        if call.name == "object_get" and call.succeeded
+    )
+    evidence: JsonObject = {
+        "change_log_reads": len(log_reads),
+        "read_refs": [*read_refs],
+    }
+    if not log_reads:
+        return CapabilityVerdict(False, "the agent did not read the named change log", evidence)
+    if read_refs[: len(expected_refs)] != expected_refs:
+        return CapabilityVerdict(
+            False, "the agent did not read every logged page in order", evidence
+        )
+    return CapabilityVerdict(True, "the agent read every page from the change log", evidence)
+
+
 def _source_change(page_id: UUID) -> str:
-    return woken_inbound("github", "metalcraftai", "pull_requests", "Review fixture", page_id)
+    return woken_inbound("github", "metalcraftai", "pull_requests", (("Review fixture", page_id),))
 
 
 CASES = (
+    CapabilityCase(
+        name="code-review-current-batch",
+        message=woken_inbound(
+            "github",
+            "metalcraftai",
+            "pull_requests",
+            (
+                ("Review fixture 7", CURRENT_BATCH_PAGE_IDS[0]),
+                ("Review fixture 8", CURRENT_BATCH_PAGE_IDS[1]),
+            ),
+        ),
+        grader=DescribedGrader(
+            "the agent reads both changed pull requests in received order and starts two "
+            "reviewers for each, even when both pull requests have the same head SHA",
+            _grade_current_batch,
+        ),
+        workspace_files=WORKSPACE_FILES,
+        seed=_seed_current_batch,
+        prepare=_prepare_review,
+        digest_tag="code-review:current-batch:v1",
+    ),
+    CapabilityCase(
+        name="code-review-change-log-batch",
+        message=woken_inbound(
+            "github",
+            "metalcraftai",
+            "pull_requests",
+            tuple(
+                (f"Review fixture {number}", page_id)
+                for number, page_id in enumerate(CHANGE_LOG_BATCH_PAGE_IDS, start=14)
+            ),
+            log_path=CHANGE_LOG_PATH,
+        ),
+        grader=DescribedGrader(
+            "the agent reads the named JSONL change log and then reads every changed pull request "
+            "in file order",
+            _grade_change_log_batch,
+        ),
+        workspace_files=(*WORKSPACE_FILES, CHANGE_LOG_FILE),
+        seed=_seed_change_log_batch,
+        prepare=_prepare_review,
+        digest_tag="code-review:change-log-batch:v1",
+    ),
     CapabilityCase(
         name="code-review-publishes-the-verdict",
         message=_source_change(PUBLISH_PAGE_ID),
@@ -1556,7 +1740,8 @@ CASES = (
         prior_messages=(
             _source_change(PAGE_ID),
             (
-                f"Review of head {OLD_HEAD_SHA} is running in background spawns "
+                "Review key (file:///workspace/review-target, pull request 7, head "
+                f"{OLD_HEAD_SHA}) is running in background spawns "
                 f"{OLD_SPAWNS[0]} and {OLD_SPAWNS[1]}."
             ),
         ),
