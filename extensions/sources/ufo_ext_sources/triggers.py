@@ -6,9 +6,9 @@ carries the connection it watches, the owning conversation, the agent it invokes
 mode, and the member who asked for it.
 
 A trigger narrows to one resource of that feed — a pull request, an issue — named by the row's
-`resource`, which joins the conversation and the connection in the table's unique key, so a thread
-watches the two pull requests it is talking about and the whole feed beside them. The trigger on
-the whole feed is the row whose resource is empty.
+`resource`, and to the streams its `streams` names. Both join the conversation and the connection
+in the table's unique key, so a thread watches the two pull requests it is talking about and the
+whole feed beside them. The trigger on everything is the row whose two are empty.
 
 The connection is a foreign key that cascades, so disconnecting an account takes its triggers with
 its source rows and its pages: nothing here sweeps them, and no trigger outlives the feed it
@@ -41,6 +41,7 @@ source_trigger = sa.Table(
     sa.Column("agent_id", sa.Uuid, nullable=False),
     sa.Column("connection_id", sa.Uuid, nullable=False),
     sa.Column("resource", sa.Text, nullable=False, server_default=""),
+    sa.Column("streams", sa.Text, nullable=False, server_default=""),
     sa.Column("delivery", sa.Text, nullable=False),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -50,6 +51,7 @@ source_trigger = sa.Table(
         "conversation_id",
         "connection_id",
         "resource",
+        "streams",
         name="source_trigger_conversation",
     ),
 )
@@ -60,6 +62,7 @@ _COLUMNS = (
     source_trigger.c.agent_id,
     source_trigger.c.connection_id,
     source_trigger.c.resource,
+    source_trigger.c.streams,
     source_trigger.c.delivery,
     source_trigger.c.created_by_member_id,
     source_trigger.c.created_at,
@@ -80,6 +83,7 @@ class SourceTrigger:
     agent_id: UUID
     connection_id: UUID
     resource: str
+    streams: tuple[str, ...]
     delivery: SourceTriggerDelivery
     created_by_member_id: UUID | None
     created_at: datetime
@@ -103,7 +107,8 @@ def _utc(value: datetime) -> datetime:
 
 
 def _trigger(row: sa.RowMapping) -> SourceTrigger:
-    """One row as a handler reads it. An empty `resource` is the trigger on the whole feed."""
+    """One row as a handler reads it. An empty `resource` or `streams` narrows nothing. The
+    column holds the sorted names joined by commas, which is what the unique key compares."""
     match row["delivery"]:
         case "current" | "per_page" as delivery:
             pass
@@ -115,6 +120,7 @@ def _trigger(row: sa.RowMapping) -> SourceTrigger:
         agent_id=row["agent_id"],
         connection_id=row["connection_id"],
         resource=row["resource"],
+        streams=tuple(row["streams"].split(",")) if row["streams"] else (),
         delivery=delivery,
         created_by_member_id=row["created_by_member_id"],
         created_at=_utc(row["created_at"]),
@@ -139,14 +145,14 @@ class SourceTriggerStore:
         delivery: SourceTriggerDelivery,
         created_by_member_id: UUID | None = None,
         resource: str = "",
+        streams: tuple[str, ...] = (),
     ) -> SourceTrigger:
-        """Create one delivery rule on one connection's feed, over the whole feed or over the one
-        resource of it `resource` names. The owning conversation is checked against the object
-        namespace, so a trigger can never invoke as an agent other than its owner. What this
-        conversation already watches — the whole feed, or that one resource of it — refuses in this
-        vocabulary rather than as a constraint violation: two turns can read no trigger and both
-        write one, and the loser of that race is a caller to answer, not a driver error to
-        surface."""
+        """Create one delivery rule on one connection's feed, over the whole feed or over the
+        resource and streams of it `resource` and `streams` name. The owning conversation is checked
+        against the object namespace, so a trigger can never invoke as an agent other than its
+        owner. What this conversation already watches refuses in this vocabulary rather than as a
+        constraint violation: two turns can read no trigger and both write one, and the loser of
+        that race is a caller to answer, not a driver error to surface."""
         agent_id = object_agent_id()
         if await self.ctx.conversation_agent(conversation_id) != agent_id:
             raise ValueError(
@@ -159,6 +165,7 @@ class SourceTriggerStore:
             "agent_id": agent_id,
             "connection_id": connection_id,
             "resource": resource,
+            "streams": ",".join(sorted(streams)),
             "delivery": delivery,
             "created_by_member_id": created_by_member_id,
             "created_at": sa.func.now(),
@@ -175,6 +182,7 @@ class SourceTriggerStore:
                         source_trigger.c.conversation_id,
                         source_trigger.c.connection_id,
                         source_trigger.c.resource,
+                        source_trigger.c.streams,
                     )
                 )
                 .returning(*_COLUMNS)
@@ -182,7 +190,8 @@ class SourceTriggerStore:
             row = (await connection.execute(statement)).mappings().one_or_none()
         if row is None:
             watched = repr(resource) if resource else "this feed"
-            raise ValueError(f"this conversation already watches {watched}")
+            narrowed = f"{watched} on {', '.join(sorted(streams))}" if streams else watched
+            raise ValueError(f"this conversation already watches {narrowed}")
         return _trigger(row)
 
     async def remove(self, expected: SourceTrigger) -> None:
@@ -254,7 +263,12 @@ class SourceTriggerStore:
         triggers = tuple(
             sorted(
                 listed,
-                key=lambda trigger: (trigger.connection_id, trigger.resource, trigger.id),
+                key=lambda trigger: (
+                    trigger.connection_id,
+                    trigger.resource,
+                    trigger.streams,
+                    trigger.id,
+                ),
             )
         )
         if not triggers:

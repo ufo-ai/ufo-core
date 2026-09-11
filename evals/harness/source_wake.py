@@ -36,6 +36,7 @@ def woken_inbound(
             conversation_id=WAKE_ID,
             agent_id=WAKE_ID,
             resource=resource,
+            streams=(),
             delivery="current",
             created_by_member_id=None,
             created_at=WAKE_TIME,

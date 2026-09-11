@@ -51,6 +51,7 @@ def _trigger(resource: str) -> SourceTrigger:
         agent_id=uuid4(),
         connection_id=CONNECTION,
         resource=resource,
+        streams=(),
         delivery="current",
         created_by_member_id=None,
         created_at=now,

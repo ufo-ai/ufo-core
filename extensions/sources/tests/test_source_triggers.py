@@ -323,13 +323,23 @@ async def _turns(conversation_id: UUID) -> list[sa.RowMapping]:
 
 
 def _trigger_manifest(
-    feed: _Feed, conversation_id: UUID, *, delivery: str = "current", resource: str = ""
+    feed: _Feed,
+    conversation_id: UUID,
+    *,
+    delivery: str = "current",
+    resource: str = "",
+    streams: tuple[str, ...] = (),
 ) -> str:
     return yaml.safe_dump(
         {
             "kind": SOURCE_TRIGGER_KIND,
-            "name": trigger_name(feed.name, conversation_id, resource),
-            "spec": {"connection": feed.name, "delivery": delivery, "resource": resource},
+            "name": trigger_name(feed.name, conversation_id, resource, streams),
+            "spec": {
+                "connection": feed.name,
+                "delivery": delivery,
+                "resource": resource,
+                "streams": list(streams),
+            },
         }
     )
 
@@ -456,6 +466,7 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
             "connection": feed.name,
             "delivery": "current",
             "resource": "",
+            "streams": [],
         }
         assert fetched["status"]["connection"] == feed.name
         assert fetched["status"]["conversation"] == str(state.conversation_id)
@@ -529,6 +540,7 @@ async def test_a_trigger_cannot_land_on_a_connection_disconnected_mid_verb(
         delivery: str,
         created_by_member_id: UUID | None = None,
         resource: str = "",
+        streams: tuple[str, ...] = (),
     ) -> SourceTrigger:
         assert await GrantStore().disconnect(connection_id, actor_member_id=state.owner_id) is True
         return await real_create(
@@ -538,6 +550,7 @@ async def test_a_trigger_cannot_land_on_a_connection_disconnected_mid_verb(
             delivery,
             created_by_member_id=created_by_member_id,
             resource=resource,
+            streams=streams,
         )
 
     monkeypatch.setattr(SourceTriggerStore, "create", disconnect_before_create)
@@ -615,6 +628,131 @@ async def test_alert_opens_on_what_changed_and_asks_for_no_member_report(db: Non
         assert refs.endswith(f"{PAGE_KIND}/{shipped.page_id}; {PAGE_KIND}/{legal.page_id}.")
         assert closing == ALERT_CLOSING
         assert "tell the member" not in turn["inbound"]
+
+
+async def test_a_trigger_narrowed_to_a_stream_wakes_on_that_stream_alone(db: None) -> None:
+    state = await _workspace()
+    feed, tasks = await _feed_with_stream(state, stream="tasks")
+    projects = await _stream(state, feed, stream="projects")
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state),
+            _trigger_manifest(feed, state.conversation_id, streams=("tasks",)),
+        )
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        watched = _change(tasks, "# asana tasks: Ship the launch list", stream="tasks")
+        ignored = _change(projects, "# asana projects: Q3 roadmap", stream="projects")
+        await on_page_change(
+            HookContext(ext=ext, payload=PageChangeBatch(changes=(watched, ignored)))
+        )
+
+        (turn,) = await _turns(state.conversation_id)
+        assert f"{PAGE_KIND}/{watched.page_id}" in turn["inbound"]
+        assert str(ignored.page_id) not in turn["inbound"]
+
+
+async def test_a_stream_narrowed_trigger_does_not_wake_on_another_stream_at_all(db: None) -> None:
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state, stream="tasks")
+    projects = await _stream(state, feed, stream="projects")
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state),
+            _trigger_manifest(feed, state.conversation_id, streams=("tasks",)),
+        )
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        await on_page_change(
+            HookContext(
+                ext=ext,
+                payload=PageChangeBatch(
+                    changes=(_change(projects, "# asana projects: Q3 roadmap", stream="projects"),)
+                ),
+            )
+        )
+
+        assert await _turns(state.conversation_id) == []
+
+
+async def test_one_trigger_watches_two_streams_and_not_a_third(db: None) -> None:
+    state = await _workspace()
+    feed, tasks = await _feed_with_stream(state, stream="tasks")
+    projects = await _stream(state, feed, stream="projects")
+    goals = await _stream(state, feed, stream="goals")
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state),
+            _trigger_manifest(feed, state.conversation_id, streams=("projects", "tasks")),
+        )
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        listed = _change(tasks, "# asana tasks: Ship the launch list", stream="tasks")
+        roadmap = _change(projects, "# asana projects: Q3 roadmap", stream="projects")
+        unwatched = _change(goals, "# asana goals: Grow revenue", stream="goals")
+        await on_page_change(
+            HookContext(ext=ext, payload=PageChangeBatch(changes=(listed, roadmap, unwatched)))
+        )
+
+        (turn,) = await _turns(state.conversation_id)
+        assert f"{PAGE_KIND}/{listed.page_id}" in turn["inbound"]
+        assert f"{PAGE_KIND}/{roadmap.page_id}" in turn["inbound"]
+        assert str(unwatched.page_id) not in turn["inbound"]
+
+
+async def test_one_conversation_watches_two_streams_of_one_connection(db: None) -> None:
+    state = await _workspace()
+    feed, tasks = await _feed_with_stream(state, stream="tasks")
+    projects = await _stream(state, feed, stream="projects")
+    with ws(state.workspace_id), agent(state.agent_id):
+        ctx = _context(state)
+        await _apply(ctx, _trigger_manifest(feed, state.conversation_id, streams=("tasks",)))
+        await _apply(ctx, _trigger_manifest(feed, state.conversation_id, streams=("projects",)))
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        await on_page_change(
+            HookContext(
+                ext=ext,
+                payload=PageChangeBatch(
+                    changes=(
+                        _change(tasks, "# asana tasks: Ship the launch list", stream="tasks"),
+                        _change(projects, "# asana projects: Q3 roadmap", stream="projects"),
+                    )
+                ),
+            )
+        )
+
+        assert len(await _turns(state.conversation_id)) == 2
+
+
+async def test_a_stream_narrowed_trigger_reads_back_its_streams_and_re_applies(db: None) -> None:
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state, stream="tasks")
+    await _stream(state, feed, stream="projects")
+    manifest = _trigger_manifest(feed, state.conversation_id, streams=("projects", "tasks"))
+    with ws(state.workspace_id), agent(state.agent_id):
+        ctx = _context(state)
+        assert (await _apply(ctx, manifest))["result"] == "created"
+
+        narrowed = trigger_name(feed.name, state.conversation_id, "", ("projects", "tasks"))
+        fetched = await _get(ctx, narrowed)
+        assert fetched["spec"] == {
+            "connection": feed.name,
+            "delivery": "current",
+            "resource": "",
+            "streams": ["projects", "tasks"],
+        }
+        assert fetched["status"]["streams"] == "projects,tasks"
+
+        assert (await _apply(ctx, manifest))["result"] == "updated"
+        assert await _woken(state, feed) == {state.conversation_id: state.agent_id}
+
+
+async def test_a_stream_the_connection_does_not_sync_is_refused(db: None) -> None:
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state, stream="tasks")
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(ValueError, match="syncs no pull_requests"):
+            await _apply(
+                _context(state),
+                _trigger_manifest(feed, state.conversation_id, streams=("pull_requests",)),
+            )
 
 
 async def test_shared_trigger_conversation_carries_no_member_authority(db: None) -> None:
@@ -722,6 +860,7 @@ async def test_per_page_delivery_keeps_one_conversation_per_page(db: None) -> No
             "connection": feed.name,
             "delivery": "per_page",
             "resource": "",
+            "streams": [],
         }
         assert fetched["status"]["delivery"] == "per_page"
         assert [link["relation"] for link in fetched["links"]] == ["watches"]
@@ -1051,6 +1190,7 @@ async def test_a_trigger_narrowed_to_a_link_wakes_on_that_resource_alone(db: Non
             "connection": feed.name,
             "delivery": "current",
             "resource": PR_URL,
+            "streams": [],
         }
         assert fetched["status"]["resource"] == PR_URL
 

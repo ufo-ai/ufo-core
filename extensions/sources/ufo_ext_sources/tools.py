@@ -22,6 +22,7 @@ channel. A resource's changes reach it only on the streams the connection syncs.
 import json
 import re
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
@@ -156,17 +157,20 @@ async def _reachable_feeds(
     )
 
 
-def trigger_name(connection: str, conversation_id: UUID, resource: str = "") -> str:
-    """A trigger IS the triple it names — the connection whose feed it watches, the conversation it
-    wakes, and the one resource of that feed a narrowed trigger is about — so its object name
-    derives from that triple, and an apply under any other name is refused with the one to use
-    rather than filed as a second row over the same triple.
+def trigger_name(
+    connection: str, conversation_id: UUID, resource: str = "", streams: Sequence[str] = ()
+) -> str:
+    """A trigger IS what it names — the connection whose feed it watches, the conversation it
+    wakes, and the resource and streams of that feed a narrowed trigger is about — so its object
+    name derives from all of them, and an apply under any other name is refused with the one to
+    use rather than filed as a second row over the same identity.
 
     It is spelled the way `account_object_name` spells an account, and for the same reason: the
     connection's own name leads it so a member reading a list of triggers sees which feed each one
-    watches, and a digest of the whole triple qualifies it, because a resource is a URL and the head
+    watches, and a digest of the whole of it qualifies it, because a resource is a URL and the head
     is truncated to leave the digest whole."""
-    identity = f"{connection}\0{conversation_id}\0{resource}".encode()
+    joined = ",".join(sorted(streams))
+    identity = f"{connection}\0{conversation_id}\0{resource}\0{joined}".encode()
     qualifier = sha256(identity).hexdigest()[:TRIGGER_NAME_DIGEST_HEX]
     head = f"{connection}-{conversation_id.hex}"[:TRIGGER_NAME_HEAD_MAX].strip("-")
     return f"{head}-{qualifier}"
@@ -185,6 +189,13 @@ class SourceTriggerSpec(BaseModel):
         description="The URL of one resource of that feed to narrow the trigger to — a GitHub "
         "pull request or issue. Only the changes about it, on the streams the connection syncs, "
         "wake the conversation. Leave it empty to watch the whole feed.",
+    )
+    streams: tuple[str, ...] = Field(
+        default=(),
+        title="Streams",
+        description="The streams of that connection to narrow the trigger to. Only the changes "
+        "on them wake the conversation. Leave it empty to watch every stream the connection "
+        "syncs.",
     )
     delivery: SourceTriggerDelivery = Field(
         default="current",
@@ -208,6 +219,7 @@ class _Watched:
             _feed_name(self.connection),
             self.listed.trigger.conversation_id,
             self.listed.trigger.resource,
+            self.listed.trigger.streams,
         )
 
 
@@ -245,6 +257,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                     "conversation": str(row.listed.trigger.conversation_id),
                     "connection": _feed_name(row.connection),
                     "resource": row.listed.trigger.resource,
+                    "streams": ",".join(row.listed.trigger.streams),
                     "delivery": row.listed.trigger.delivery,
                     "origin": row.listed.surface_label or "Portal",
                     "owner_email": emails.get(row.listed.trigger.created_by_member_id),
@@ -286,6 +299,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             spec=SourceTriggerSpec(
                 connection=_feed_name(found.connection),
                 resource=trigger.resource,
+                streams=trigger.streams,
                 delivery=trigger.delivery,
             ),
             created_at=trigger.created_at,
@@ -305,6 +319,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             "conversation": str(trigger.conversation_id),
             "connection": _feed_name(found.connection),
             "resource": trigger.resource,
+            "streams": ",".join(trigger.streams),
             "delivery": trigger.delivery,
             "origin": found.listed.surface_label or "Portal",
             "owner_email": emails.get(trigger.created_by_member_id),
@@ -334,7 +349,22 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                     f"a {SOURCE_TRIGGER_KIND} narrows to"
                 )
             spec = spec.model_copy(update={"resource": resource})
-        expected = trigger_name(_feed_name(connection), ctx.turn.conversation_id, spec.resource)
+        if spec.streams:
+            synced = frozenset(
+                stream
+                for record in await _require_ext(ctx.ext).sources()
+                if record.connection_id == connection.id
+                and isinstance(stream := record.config.get("stream"), str)
+            )
+            if unknown := sorted(set(spec.streams) - synced):
+                raise ValueError(
+                    f"{spec.connection!r} syncs no {', '.join(unknown)} — it syncs "
+                    f"{', '.join(sorted(synced))}"
+                )
+            spec = spec.model_copy(update={"streams": tuple(sorted(set(spec.streams)))})
+        expected = trigger_name(
+            _feed_name(connection), ctx.turn.conversation_id, spec.resource, spec.streams
+        )
         if name != expected:
             raise ValueError(
                 f"a {SOURCE_TRIGGER_KIND} is named for the triple it is — apply it as {expected!r}"
@@ -343,8 +373,8 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             if old == spec:
                 return
             raise ValueError(
-                f"a {SOURCE_TRIGGER_KIND} is the connection, resource and conversation it names — "
-                "delete this one and apply another"
+                f"a {SOURCE_TRIGGER_KIND} is the connection, resource, streams and conversation "
+                "it names — delete this one and apply another"
             )
         await _require_triggers(ctx.ext).create(
             conversation_id=ctx.turn.conversation_id,
@@ -352,6 +382,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             delivery=spec.delivery,
             created_by_member_id=authority_member_id(ctx.authority),
             resource=spec.resource,
+            streams=spec.streams,
         )
 
     async def _watchable(self, ctx: ToolContext, connection: str) -> FeedConnection:
@@ -398,7 +429,8 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
     conversation. Per-page delivery sends each change to the stable agent conversation keyed by
     that trigger and page. Only shared pages that the trigger's agent may read cause a wake.
 
-    A trigger narrowed to one resource is woken by the changes about that resource alone."""
+    A trigger narrowed to one resource is woken by the changes about that resource alone, and one
+    narrowed to streams by the changes on those streams alone."""
     match ctx.payload:
         case PageChangeBatch(changes=changes):
             pass
@@ -431,6 +463,8 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
             readable = await ctx.ext.readable_source_ids(_shared_reader(trigger.agent_id))
             authorized = [change for change in shared if change.source_id in readable]
             authorized = _about_resource(feed.provider, trigger, authorized)
+            if trigger.streams:
+                authorized = [change for change in authorized if change.stream in trigger.streams]
             if not authorized:
                 continue
             with suppress(AgentArchived):
@@ -460,9 +494,10 @@ def _trigger_summary(connection: FeedConnection, trigger: SourceTrigger) -> str:
     """What a member reads the trigger as: the resource it watches where it watches one, since a
     thread's watch is about that pull request and not about the feed carrying it."""
     feed = f"{_feed_name(connection)} ({_feed_summary(connection)})"
-    if not trigger.resource:
-        return feed[:SUMMARY_MAX]
-    return f"{trigger.resource} on {feed}"[:SUMMARY_MAX]
+    watched = feed if not trigger.resource else f"{trigger.resource} on {feed}"
+    if trigger.streams:
+        watched = f"{watched}, {', '.join(trigger.streams)} only"
+    return watched[:SUMMARY_MAX]
 
 
 async def on_link_seen(ctx: HookContext) -> HookOutcome:
@@ -636,9 +671,12 @@ def _trigger_scope(connection: FeedConnection, trigger: SourceTrigger) -> str:
     landing stamps every page it carries with the same `changed_at`, and under the connection alone
     the second log would overwrite the first and the second alert would be dropped as the first's
     repeat."""
-    if not trigger.resource:
-        return _feed_name(connection)
-    return f"{_feed_name(connection)}/{resource_digest(trigger.resource)}"
+    scope = _feed_name(connection)
+    if trigger.resource:
+        scope = f"{scope}/{resource_digest(trigger.resource)}"
+    if trigger.streams:
+        scope = f"{scope}/{','.join(trigger.streams)}"
+    return scope
 
 
 async def _write_change_log(
@@ -760,24 +798,38 @@ def _label(change: PageChange) -> str:
 SOURCE_TRIGGER_OBJECT = ObjectKind(
     name=SOURCE_TRIGGER_KIND,
     description=(
-        "A standing wake-up for one shared connection's feed, or for one resource of it: each "
-        "batch of changed pages wakes a conversation. Only its creator or an admin may delete it."
+        "A standing wake-up for one shared connection's feed, or for one resource or some "
+        "streams of it: each batch of changed pages wakes a conversation. Only its creator or an "
+        "admin may delete it."
     ),
     guidance=(
         "Apply a manifest naming a shared connection. Set `delivery: current` to wake this "
         "conversation for each batch of changes. Set `delivery: per_page` to open one stable "
         "agent conversation for each changed page. Set `resource` to the URL of one pull request "
         "or issue of a GitHub connection to be woken only by the changes about it, on the streams "
-        f"that connection syncs. A {SOURCE_TRIGGER_KIND} IS the connection, resource, and owning "
-        "conversation it names, so its name derives from all three. Delete it to stop. A private "
-        "or unknown connection cannot be watched. Disconnecting the account removes every trigger "
-        "on it. Listing returns `connection`, `resource`, `delivery`, the owning `conversation`, "
-        "its creator (`owner_email`), and `origin`."
+        "that connection syncs. Set `streams` to stream names of that connection to be woken by "
+        "the changes on them alone; applying an unsynced name answers with the ones it syncs. "
+        "Leave it empty to wake on every stream, including the ones that carry the comments and "
+        "runs beside what you are watching. "
+        f"A {SOURCE_TRIGGER_KIND} IS the connection, resource, streams, and owning conversation "
+        "it names, so its name derives from all of them. Delete it to stop. A private or unknown "
+        "connection cannot be watched. Disconnecting the account removes every trigger on it. "
+        "Listing returns `connection`, `resource`, `streams`, `delivery`, the owning "
+        "`conversation`, its creator (`owner_email`), and `origin`."
     ),
     spec_model=SourceTriggerSpec,
     store=SourceTriggerObjects(),
     list_fields=frozenset(
-        {"conversation", "connection", "resource", "delivery", "origin", "owner_email", "mine"}
+        {
+            "conversation",
+            "connection",
+            "resource",
+            "streams",
+            "delivery",
+            "origin",
+            "owner_email",
+            "mine",
+        }
     ),
     agent_target_verbs=frozenset({"list", "get", "delete"}),
 )
