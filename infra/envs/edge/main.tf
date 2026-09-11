@@ -42,6 +42,12 @@ resource "cloudflare_zone_setting" "always_use_https" {
   depends_on = [cloudflare_ruleset.flyingobject_redirect]
 }
 
+resource "cloudflare_zone_setting" "minimum_tls_version" {
+  zone_id    = data.cloudflare_zone.ufo_ai.id
+  setting_id = "min_tls_version"
+  value      = "1.2"
+}
+
 resource "cloudflare_ruleset" "shipped_app_cache" {
   zone_id = data.cloudflare_zone.ufo_ai.id
   name    = "Cache shipped app documents"

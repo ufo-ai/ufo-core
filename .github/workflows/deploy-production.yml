@@ -499,6 +499,7 @@ jobs:
             -target=cloudflare_ruleset.flyingobject_redirect \
             -target=cloudflare_ruleset.shipped_app_cache \
             -target=cloudflare_zone_setting.always_use_https \
+            -target=cloudflare_zone_setting.minimum_tls_version \
             -target=aws_sesv2_email_identity.ufo_ai \
             -target=aws_sesv2_email_identity_mail_from_attributes.ufo_ai \
             -target=aws_sesv2_contact_list.ufo_users \
@@ -519,6 +520,12 @@ jobs:
         shell: bash
         run: |
           HOST=ufo.ai
+          for TLS_HOST in "$HOST" "app.$HOST"; do
+            if curl -sS --tls-max 1.1 "https://$TLS_HOST/" >/dev/null; then
+              exit 1
+            fi
+            curl -sS --tlsv1.2 --tls-max 1.2 "https://$TLS_HOST/" >/dev/null
+          done
           curl -fsS "https://$HOST/" | grep -F "https://ufo.ai/join/ufo"
           test "$(curl -fsS -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/login")" = "302 https://app.$HOST/login"
           curl -fsS -X POST "https://$HOST/v1/onboard/ufo" | grep -F "x-ufo-session header is required."

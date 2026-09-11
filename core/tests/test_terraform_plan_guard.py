@@ -69,6 +69,7 @@ REGENERABLE_TYPE_DELETIONS = (
     ("module.prod.cloudflare_workers_route.edge", "cloudflare_workers_route"),
     ("module.prod.cloudflare_workers_script.edge", "cloudflare_workers_script"),
     ("cloudflare_zone_setting.always_use_https", "cloudflare_zone_setting"),
+    ("cloudflare_zone_setting.minimum_tls_version", "cloudflare_zone_setting"),
     ("datadog_dashboard.database", "datadog_dashboard"),
     ("datadog_metric_metadata.turn_ms", "datadog_metric_metadata"),
     ("datadog_metric_tag_configuration.turn_ms", "datadog_metric_tag_configuration"),

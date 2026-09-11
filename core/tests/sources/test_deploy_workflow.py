@@ -188,15 +188,18 @@ DOOR_CURL_STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$DOOR_CALLS"
 URL=""
 FORMAT=""
+TLS_MAX=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -w) FORMAT="$2"; shift ;;
+    --tls-max) TLS_MAX="$2"; shift ;;
     https://*) URL="$1" ;;
   esac
   shift
 done
 HOST="${URL#https://}"
 HOST="${HOST%%/*}"
+[ "$TLS_MAX" != "1.1" ] || [ "$OLD_TLS_HOST" = "$HOST" ] || exit 35
 case "$URL" in
   */login)
     case "$HOST" in
@@ -1433,6 +1436,7 @@ def test_service_images_skip_and_retag_by_tree(tmp_path: Path) -> None:
             "edge",
             (
                 "cloudflare_ruleset.shipped_app_cache",
+                "cloudflare_zone_setting.minimum_tls_version",
                 "cloudflare_flagship_flag.testing_portal",
                 "aws_sesv2_email_identity.ufo_ai",
                 "aws_sesv2_email_identity_mail_from_attributes.ufo_ai",
@@ -1570,12 +1574,17 @@ def test_edge_deploys_are_isolated(
         "BAD_ONBOARD_HOST": "",
         "BAD_ROOT_HOST": "",
         "NEGATIVE_FLEET_HOST": "",
+        "OLD_TLS_HOST": "",
         "DOOR_CALLS": str(calls),
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 8
+    assert len(invoked) == 12
     assert [call.rsplit(" ", 1)[-1] for call in invoked] == [
+        f"https://{host}/",
+        f"https://{host}/",
+        f"https://app.{host}/",
+        f"https://app.{host}/",
         f"https://{host}/",
         f"https://{host}/login",
         f"https://{host}/v1/onboard/ufo",
@@ -1585,6 +1594,14 @@ def test_edge_deploys_are_isolated(
         f"https://{host}/privacy",
         f"https://{host}/terms",
     ]
+    environment["OLD_TLS_HOST"] = host
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["OLD_TLS_HOST"] = ""
     for page in ("privacy", "terms"):
         environment["BAD_LEGAL_PATH"] = page
         failed = subprocess.run(
@@ -1659,6 +1676,16 @@ def _check_flag_resources_keep_their_refresh_address() -> None:
         assert re.search(r"^\s*flag_key\s*=\s*each\.key$", resource, re.MULTILINE)
 
 
+def test_ufo_zone_rejects_tls_before_1_2() -> None:
+    source = _code((ROOT / "infra" / "envs" / "edge" / "main.tf").read_text())
+    resource = _terraform_block(source, "resource", "minimum_tls_version")
+    assert re.search(
+        r"^\s*zone_id\s*=\s*data\.cloudflare_zone\.ufo_ai\.id$", resource, re.MULTILINE
+    )
+    assert re.search(r'^\s*setting_id\s*=\s*"min_tls_version"$', resource, re.MULTILINE)
+    assert re.search(r'^\s*value\s*=\s*"1\.2"$', resource, re.MULTILINE)
+
+
 def _check_production_edge_preserves_the_promoted_workspace() -> None:
     jobs = _workflow(WORKFLOWS / "deploy-production.yml")["jobs"]
     assert isinstance(jobs, dict)
@@ -1729,6 +1756,7 @@ def _check_production_shared_edge_uses_current_main() -> None:
         "cloudflare_ruleset.flyingobject_redirect",
         "cloudflare_ruleset.shipped_app_cache",
         "cloudflare_zone_setting.always_use_https",
+        "cloudflare_zone_setting.minimum_tls_version",
         "aws_sesv2_email_identity.ufo_ai",
         "aws_sesv2_email_identity_mail_from_attributes.ufo_ai",
         "aws_sesv2_contact_list.ufo_users",
@@ -1782,6 +1810,7 @@ def _check_pull_requests_guard_the_production_edge_plan() -> None:
             "  -target=cloudflare_ruleset.flyingobject_redirect \\\n"
             "  -target=cloudflare_ruleset.shipped_app_cache \\\n"
             "  -target=cloudflare_zone_setting.always_use_https \\\n"
+            "  -target=cloudflare_zone_setting.minimum_tls_version \\\n"
             "  -target=module.prod \\\n"
             "  -target=module.docs_prod \\\n"
             '  -out="$RUNNER_TEMP/production-edge-review.tfplan"\n'
