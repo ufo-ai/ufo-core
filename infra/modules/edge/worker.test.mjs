@@ -6,9 +6,12 @@ import { gzipSync } from "node:zlib";
 import {
   FAVICON_DARK_SVG,
   FAVICON_SVG,
+  INTER_FONT,
   LANDING_PAGE,
+  LEGAL_CSS,
   PRIVACY_DESCRIPTION,
   PRIVACY_PAGE,
+  ROBOTO_MONO_FONT,
   SLACK_DESCRIPTION,
   SLACK_PAGE,
   SUPPORT_DESCRIPTION,
@@ -263,6 +266,54 @@ test("favicons serve the exact light and dark product marks", async () => {
   }
 });
 
+test("the public pages serve their house stylesheet and fonts without an origin read", async () => {
+  const assets = [
+    ["/legal.css", "text/css; charset=utf-8", Buffer.from(LEGAL_CSS)],
+    ["/assets/fonts/Inter-VariableFont_wght.woff2", "font/woff2", INTER_FONT],
+    ["/assets/fonts/RobotoMono-VariableFont_wght.ttf", "font/ttf", ROBOTO_MONO_FONT],
+  ];
+  const before = outbound.length;
+
+  for (const [path, type, expected] of assets) {
+    const reply = await request(`https://flyingobject.ai${path}`, { ua: "Mozilla/5.0" });
+    assert.equal(reply.headers.get("content-type"), type);
+    assert.equal(reply.headers.get("cache-control"), "public, max-age=600");
+    assert.deepEqual(Buffer.from(await reply.arrayBuffer()), expected);
+  }
+
+  assert.deepEqual(outbound.slice(before), []);
+});
+
+test("the worker decodes each embedded font before it accepts a request", async () => {
+  const source = await readFile(new URL("worker.js", import.meta.url), "utf8");
+  const handler = source.slice(source.indexOf("export default"));
+
+  assert.match(source, /const INTER_FONT = base64Bytes\("__INTER_FONT__"\)/);
+  assert.match(source, /const ROBOTO_MONO_FONT = base64Bytes\("__ROBOTO_MONO_FONT__"\)/);
+  assert.doesNotMatch(handler, /atob|base64Bytes/);
+});
+
+test("the public stylesheet uses only the house palette", () => {
+  assert.match(LEGAL_CSS, /color-scheme: light dark/);
+  assert.deepEqual(
+    [...new Set(LEGAL_CSS.match(/#[0-9A-F]{6}/g))].sort(),
+    [
+      "#0095FF",
+      "#191A1A",
+      "#262929",
+      "#323535",
+      "#676767",
+      "#919090",
+      "#A7A9A9",
+      "#EBEAE9",
+      "#F4F3F2",
+      "#F5F5F5",
+      "#FAF9F7",
+      "#FF6700",
+    ],
+  );
+});
+
 test("every front door serves the embedded page to browsers", async () => {
   for (const host of ["flyingobject.ai", "testing.flyingobject.ai"]) {
     const fresh = await importWorker(`page-${host}`);
@@ -496,6 +547,9 @@ test("each public page is served whole, headed by its own title", async () => {
     assert.doesNotMatch(served, /__[A-Z_]+__/);
     assert.match(served, new RegExp(`<title>${page.title}</title>`));
     assert.match(served, new RegExp(`<h1>${page.title}</h1>`));
+    assert.match(served, /<link rel="stylesheet" href="\/legal\.css" \/>/);
+    assert.match(served, /<header class="site-header">/);
+    assert.match(served, /<nav class="site-nav" aria-label="Public pages">/);
     assert.deepEqual(
       [...served.matchAll(/<h2>([^<]+)<\/h2>/g)].map(([, heading]) => heading),
       page.headings,

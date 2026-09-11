@@ -7,7 +7,10 @@ terraform {
 
 locals {
   landing_html        = file("${path.module}/landing.html")
+  inter_font          = filebase64("${path.module}/assets/fonts/Inter-VariableFont_wght.woff2")
+  legal_css           = file("${path.module}/legal.css")
   legal_shell         = file("${path.module}/legal.html")
+  roboto_mono_font    = filebase64("${path.module}/assets/fonts/RobotoMono-VariableFont_wght.ttf")
   privacy_description = "What ufo.ai collects when you sign in and use the service, how that information is used, and how long it is kept."
   slack_description   = "How to install and use ufo in Slack, what the app does, and where to get support."
   support_description = "How to get support for ufo and the ufo Slack app, and how to make a privacy request."
@@ -64,9 +67,21 @@ resource "cloudflare_workers_script" "edge" {
           replace(
             replace(
               replace(
-                file("${path.module}/worker.js"),
-                "\"__LANDING_HTML__\"",
-                jsonencode(local.landing_html),
+                replace(
+                  replace(
+                    replace(
+                      file("${path.module}/worker.js"),
+                      "\"__LANDING_HTML__\"",
+                      jsonencode(local.landing_html),
+                    ),
+                    "\"__LEGAL_CSS__\"",
+                    jsonencode(local.legal_css),
+                  ),
+                  "\"__INTER_FONT__\"",
+                  jsonencode(local.inter_font),
+                ),
+                "\"__ROBOTO_MONO_FONT__\"",
+                jsonencode(local.roboto_mono_font),
               ),
               "\"__SLACK_HTML__\"",
               jsonencode(local.slack_html),

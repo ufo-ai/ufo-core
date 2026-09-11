@@ -146,6 +146,104 @@ test("the public text carries no ufo metaphor", async () => {
   }
 });
 
+const PUBLIC_NAV = [
+  ["Slack", "/slack"],
+  ["Privacy", "/privacy"],
+  ["Terms", "/terms"],
+  ["Support", "/support"],
+  ["Sign In", "/login"],
+];
+
+test("the public shell links the product and its public pages", async () => {
+  const page = await browser.newPage(DESKTOP);
+  await page.goto(`${origin}/privacy`);
+  const brand = page.locator("a.brand");
+  assert.equal(await brand.getAttribute("href"), "/");
+  assert.equal((await brand.textContent()).trim(), "");
+  assert.equal(await brand.locator("img").count(), 1);
+  assert.deepEqual(
+    await page.locator("nav.site-nav a").evaluateAll((links) =>
+      links.map((link) => [link.textContent.trim(), link.getAttribute("href")]),
+    ),
+    PUBLIC_NAV,
+  );
+  await page.close();
+});
+
+test("the Slack install step text stays beside its number", async () => {
+  const page = await browser.newPage(DESKTOP);
+  await page.goto(`${origin}/slack`);
+  const steps = await page.locator("ol li").evaluateAll((items) =>
+    items.map((item) => {
+      const range = document.createRange();
+      range.selectNodeContents(item);
+      const box = item.getBoundingClientRect();
+      return {
+        expectedLeft: box.left + Number.parseFloat(getComputedStyle(item).paddingLeft) - 1,
+        textLeft: Math.min(...[...range.getClientRects()].map((rect) => rect.left)),
+      };
+    }),
+  );
+  for (const step of steps) assert.ok(step.textLeft >= step.expectedLeft);
+  await page.close();
+});
+
+for (const [scheme, expected] of [
+  ["light", { surface: "rgb(250, 249, 247)", ink: "rgb(25, 26, 26)" }],
+  ["dark", { surface: "rgb(25, 26, 26)", ink: "rgb(245, 245, 245)" }],
+]) {
+  test(`the public pages use the ${scheme} house palette and local type`, async () => {
+    const page = await browser.newPage({ ...DESKTOP, colorScheme: scheme });
+    await page.goto(`${origin}/privacy`);
+    await page.evaluate(() => document.fonts.ready);
+    const styles = await page.evaluate(() => ({
+      surface: getComputedStyle(document.body).backgroundColor,
+      ink: getComputedStyle(document.body).color,
+      bodyFont: getComputedStyle(document.body).fontFamily,
+      titleFont: getComputedStyle(document.querySelector("h1")).fontFamily,
+      monoLoaded: document.fonts.check('12px "Roboto Mono"'),
+      sansLoaded: document.fonts.check('15px "Inter"'),
+    }));
+    assert.deepEqual(styles, {
+      ...expected,
+      bodyFont: "Inter, system-ui, sans-serif",
+      titleFont: 'Georgia, "Times New Roman", serif',
+      monoLoaded: true,
+      sansLoaded: true,
+    });
+    await page.close();
+  });
+}
+
+for (const path of ["/privacy", "/terms", "/slack"]) {
+  test(`${path} fits a 360px-wide screen`, async () => {
+    const page = await browser.newPage({
+      viewport: { width: 360, height: 800 },
+      deviceScaleFactor: 3,
+      isMobile: true,
+      hasTouch: true,
+    });
+    await page.goto(`${origin}${path}`);
+    const layout = await page.evaluate(() => ({
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      mainLeft: document.querySelector("main").getBoundingClientRect().left,
+      mainRight: document.querySelector("main").getBoundingClientRect().right,
+      viewport: innerWidth,
+      clipped: [...document.body.querySelectorAll("*")]
+        .filter((element) => {
+          const box = element.getBoundingClientRect();
+          return box.width > 0 && (box.left < 0 || box.right > innerWidth);
+        })
+        .map((element) => element.tagName),
+    }));
+    assert.equal(layout.overflow, 0);
+    assert.ok(layout.mainLeft >= 0);
+    assert.ok(layout.mainRight <= layout.viewport);
+    assert.deepEqual(layout.clipped, []);
+    await page.close();
+  });
+}
+
 const BANNED_METAPHOR =
   /\bbeam\w*|\btransmit\w*|\bsignals?\b|\bsaucers?\b|\bmothership\b|\bcraft\b|\bfleets?\b|\babduct\w*|\b(un)?identified\b|\bidentification\b|\bobjects?\b/i;
 

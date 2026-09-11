@@ -10,6 +10,9 @@ const JOIN_URL = `${APEX}${JOIN_PREFIX}ufo`;
 const ARTIFACT_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 
 const LANDING_HTML = "__LANDING_HTML__";
+const LEGAL_CSS = "__LEGAL_CSS__";
+const INTER_FONT = base64Bytes("__INTER_FONT__");
+const ROBOTO_MONO_FONT = base64Bytes("__ROBOTO_MONO_FONT__");
 const FAVICON_SVG = "__FAVICON_SVG__";
 const FAVICON_DARK_SVG = "__FAVICON_DARK_SVG__";
 const PRIVACY_HTML = "__PRIVACY_HTML__";
@@ -47,6 +50,15 @@ function page(body, type = "text/html; charset=utf-8") {
   return new Response(body, {
     headers: { "cache-control": PAGE_CACHE, "content-type": type },
   });
+}
+
+function base64Bytes(encoded) {
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function sitemap() {
@@ -131,6 +143,12 @@ export default {
         return new Response(FAVICON_DARK_SVG, {
           headers: { "cache-control": "no-cache", "content-type": "image/svg+xml" },
         });
+      case "/legal.css":
+        return page(LEGAL_CSS, "text/css; charset=utf-8");
+      case "/assets/fonts/Inter-VariableFont_wght.woff2":
+        return page(INTER_FONT, "font/woff2");
+      case "/assets/fonts/RobotoMono-VariableFont_wght.ttf":
+        return page(ROBOTO_MONO_FONT, "font/ttf");
       case "/robots.txt":
         return secure(url) ?? page(robots(), "text/plain; charset=utf-8");
       case "/sitemap.xml":

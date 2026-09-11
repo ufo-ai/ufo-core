@@ -11,6 +11,13 @@ export const FAVICON_DARK_SVG = await readFile(
 );
 const sourceTemplate = await readFile(new URL("worker.js", moduleDir), "utf8");
 export const LANDING_PAGE = await readFile(new URL("landing.html", moduleDir), "utf8");
+export const LEGAL_CSS = await readFile(new URL("legal.css", moduleDir), "utf8");
+export const INTER_FONT = await readFile(
+  new URL("assets/fonts/Inter-VariableFont_wght.woff2", moduleDir),
+);
+export const ROBOTO_MONO_FONT = await readFile(
+  new URL("assets/fonts/RobotoMono-VariableFont_wght.ttf", moduleDir),
+);
 
 const legalShell = await readFile(new URL("legal.html", moduleDir), "utf8");
 const legalPage = async ({ title, description, canonical, body }) =>
@@ -55,6 +62,12 @@ export const TERMS_PAGE = await legalPage({
 export async function importWorker(tag) {
   const source = sourceTemplate
     .replace('"__LANDING_HTML__"', JSON.stringify(LANDING_PAGE))
+    .replace('"__LEGAL_CSS__"', JSON.stringify(LEGAL_CSS))
+    .replace('"__INTER_FONT__"', JSON.stringify(INTER_FONT.toString("base64")))
+    .replace(
+      '"__ROBOTO_MONO_FONT__"',
+      JSON.stringify(ROBOTO_MONO_FONT.toString("base64")),
+    )
     .replace('"__FAVICON_SVG__"', JSON.stringify(FAVICON_SVG))
     .replace('"__FAVICON_DARK_SVG__"', JSON.stringify(FAVICON_DARK_SVG))
     .replace('"__PRIVACY_HTML__"', JSON.stringify(PRIVACY_PAGE))

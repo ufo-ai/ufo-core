@@ -21,49 +21,36 @@
 <meta name="twitter:title" content="__TITLE__" />
 <meta name="twitter:description" content="__DESCRIPTION__" />
 <meta name="twitter:image" content="https://ufo.ai/share/og-home.jpg" />
-<style>
-  :root{
-    --hull:#8b8fb8; --gold:#ffd35e; --cyan:#8be9ff; --ice:#b8ecff;
-    --mono:"DejaVu Sans Mono","SFMono-Regular",ui-monospace,"Cascadia Code",
-           "Source Code Pro",Menlo,Consolas,"Liberation Mono",monospace;
-  }
-  *{box-sizing:border-box}
-  html{background:#000}
-  body{
-    margin:0;
-    padding:clamp(28px,6vw,72px) clamp(20px,5vw,32px);
-    background:#000;
-    font-family:var(--mono); font-size:14px; line-height:1.7;
-    color:var(--hull);
-    -webkit-text-size-adjust:100%;
-  }
-  main{max-width:44rem; margin:0 auto}
-  h1{
-    margin:0 0 1.5rem;
-    font-size:18px; letter-spacing:.08em; font-weight:normal;
-    color:var(--gold);
-  }
-  h2{
-    margin:2.5rem 0 .75rem;
-    font-size:14px; letter-spacing:.04em; font-weight:normal;
-    color:var(--ice);
-  }
-  p,ul,ol{margin:0 0 1rem}
-  ul,ol{padding-left:2ch}
-  li{margin:0 0 .25rem}
-  strong{font-weight:normal; color:var(--ice)}
-  code{color:var(--ice)}
-  a{color:var(--cyan); text-decoration:underline}
-  a:hover,a:focus-visible{color:var(--gold)}
-  address{margin:0; font-style:normal}
-  .brand-terms{margin-top:3rem; text-align:right; font-size:10px}
-</style>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" media="(prefers-color-scheme: light)" />
+<link rel="icon" href="/favicon-dark.svg" type="image/svg+xml" media="(prefers-color-scheme: dark)" />
+<link rel="stylesheet" href="/legal.css" />
 </head>
 <body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="/" aria-label="ufo home">
+        <picture>
+          <source srcset="/favicon-dark.svg" media="(prefers-color-scheme: dark)" />
+          <img src="/favicon.svg" alt="" width="24" height="24" />
+        </picture>
+      </a>
+      <nav class="site-nav" aria-label="Public pages">
+        <a href="/slack">Slack</a>
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+        <a href="/support">Support</a>
+        <a class="sign-in" href="/login">Sign In</a>
+      </nav>
+    </div>
+  </header>
   <main>
     <h1>__TITLE__</h1>
+    <div class="document">
 __BODY__
-    <p class="brand-terms">Slack is a trademark and service mark of Slack Technologies, Inc., registered in the U.S. and in other countries.<br />Copyright 2023 Slack Technologies, LLC.</p>
+    </div>
   </main>
+  <footer class="site-footer">
+    <p class="brand-terms">Slack is a trademark and service mark of Slack Technologies, Inc., registered in the U.S. and in other countries.<br />Copyright 2023 Slack Technologies, LLC.</p>
+  </footer>
 </body>
 </html>

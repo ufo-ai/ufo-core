@@ -5000,8 +5000,11 @@ def _check_edge_worker_artifact_substitutes_every_placeholder() -> None:
     substituted = {
         "__FAVICON_DARK_SVG__": "var.favicon_dark_svg",
         "__FAVICON_SVG__": "var.favicon_svg",
+        "__INTER_FONT__": "local.inter_font",
         "__LANDING_HTML__": "local.landing_html",
+        "__LEGAL_CSS__": "local.legal_css",
         "__PRIVACY_HTML__": "local.privacy_html",
+        "__ROBOTO_MONO_FONT__": "local.roboto_mono_font",
         "__SLACK_HTML__": "local.slack_html",
         "__SUPPORT_HTML__": "local.support_html",
         "__TERMS_HTML__": "local.terms_html",
