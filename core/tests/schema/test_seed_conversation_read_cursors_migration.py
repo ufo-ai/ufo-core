@@ -2,14 +2,18 @@
 
 The cursor is the conversation's own activity moment, which is what keeps the rail quiet about
 threads from before the column landed, and a cursor a member's own read already wrote stands. A
-member of another workspace takes none.
+member of another workspace takes none. A cursor the running fleet writes between the filter and the
+insert takes the key, so the seed passes it by instead of failing the migration.
 """
 
 from pathlib import Path
+from types import ModuleType
 
 import sqlalchemy as sa
-from alembic import command
+from alembic import command, op
 from alembic.config import Config
+from alembic.script import ScriptDirectory
+from pytest import MonkeyPatch
 
 from ufo.db import MIGRATIONS_DIR
 
@@ -100,3 +104,28 @@ def test_the_seed_covers_every_member_and_leaves_a_written_cursor_alone(tmp_path
     assert str(cursors[0][3]).startswith("2020-01-01")
     assert not str(cursors[1][3]).startswith("2020-01-01")
     assert [str(row[3]) for row in cursors[2:4]] == ["2026-01-02 03:04:05"] * 2
+
+
+def _seed_module(tmp_path: Path) -> ModuleType:
+    script = ScriptDirectory.from_config(_config(tmp_path / "unused.db"))
+    revision = script.get_revision("20260911124440")
+    assert revision.module is not None
+    return revision.module
+
+
+def test_the_seed_yields_the_key_to_a_cursor_written_while_it_runs(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    statements: list[str] = []
+
+    class _Bind:
+        dialect = sa.dialects.postgresql.dialect()
+
+        def execute(self, statement: sa.Insert) -> None:
+            statements.append(str(statement.compile(dialect=self.dialect)))
+
+    monkeypatch.setattr(op, "get_bind", _Bind)
+    _seed_module(tmp_path).upgrade()
+    assert len(statements) == 1
+    rendered = " ".join(statements[0].split())
+    assert "ON CONFLICT (workspace_id, conversation_id, member_id) DO NOTHING" in rendered, rendered

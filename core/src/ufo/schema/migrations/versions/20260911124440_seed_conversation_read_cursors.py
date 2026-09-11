@@ -9,6 +9,8 @@ is the arrival the mark exists to report.
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 revision: str = "20260911124440"
 down_revision: str | None = "20260911102948"
@@ -50,8 +52,11 @@ def upgrade() -> None:
         .correlate(conversation)
         .scalar_subquery()
     )
-    op.get_bind().execute(
-        conversation_read.insert().from_select(
+    bind = op.get_bind()
+    insert = postgres_insert if bind.dialect.name == "postgresql" else sqlite_insert
+    bind.execute(
+        insert(conversation_read)
+        .from_select(
             ["workspace_id", "conversation_id", "member_id", "read_at"],
             sa.select(
                 conversation.c.workspace_id,
@@ -70,6 +75,13 @@ def upgrade() -> None:
                     )
                 )
             ),
+        )
+        .on_conflict_do_nothing(
+            index_elements=[
+                conversation_read.c.workspace_id,
+                conversation_read.c.conversation_id,
+                conversation_read.c.member_id,
+            ]
         )
     )
 
