@@ -66,6 +66,23 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
+      # `make check` reaches cargo through pre-commit, so the clippy hooks compile both crates and
+      # every dependency from scratch — 110s of the job's 212s.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            servers/control
+            servers/preview
+      - uses: actions/cache@v4
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-${{ hashFiles('uv.lock') }}-${{ github.sha }}
+          restore-keys: |
+            mypy-${{ runner.os }}-${{ hashFiles('uv.lock') }}-
+            mypy-${{ runner.os }}-
       - run: uv sync
       - run: make check
       - run: uv run pytest --collect-only -m integration -q
