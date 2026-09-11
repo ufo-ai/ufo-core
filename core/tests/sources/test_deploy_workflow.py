@@ -4617,6 +4617,7 @@ def _check_the_job_failure_monitor_consumes_the_reported_counter() -> None:
 
 
 def _check_failure_only_alerts_resolve_without_data() -> None:
+    p1_monitors = {"db_tx_unavailable", "surface_listener_parked"}
     for environment in DEPLOY_ENVIRONMENTS:
         for monitor in [
             "db_tx_unavailable",
@@ -4629,9 +4630,14 @@ def _check_failure_only_alerts_resolve_without_data() -> None:
         ]:
             block = _terraform_block(MONITORS[environment].read_text(), "resource", monitor)
             assert _monitor_attribute(monitor, "type", environment) == "query alert"
-            assert _monitor_attribute(monitor, "timeout_h", environment) == "1"
             assert _monitor_attribute(monitor, "require_full_window", environment) == "false"
-            assert not re.search(r"^ +on_missing_data", block, re.MULTILINE)
+            if environment == "prod" and monitor in p1_monitors:
+                assert _monitor_attribute(monitor, "priority", environment) == "1"
+                assert _monitor_attribute(monitor, "on_missing_data", environment) == "resolve"
+                assert not re.search(r"^ +timeout_h", block, re.MULTILINE)
+            else:
+                assert _monitor_attribute(monitor, "timeout_h", environment) == "1"
+                assert not re.search(r"^ +on_missing_data", block, re.MULTILINE)
 
         assert _monitor_attribute("problem_reported", "type", environment) == "log alert"
         assert _monitor_attribute("problem_reported", "on_missing_data", environment) == "resolve"

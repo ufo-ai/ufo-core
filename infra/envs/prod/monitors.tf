@@ -125,7 +125,7 @@ resource "datadog_monitor" "db_tx_unavailable" {
   }
 
   require_full_window = false
-  timeout_h           = 1
+  on_missing_data     = "resolve"
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }
@@ -265,7 +265,7 @@ resource "datadog_monitor" "surface_listener_parked" {
   }
 
   require_full_window = false
-  timeout_h           = 1
+  on_missing_data     = "resolve"
 
   tags = ["env:prod", "managed-by:terraform", "team:ufo"]
 }
