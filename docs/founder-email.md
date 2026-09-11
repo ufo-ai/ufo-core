@@ -2,8 +2,7 @@
 
 A founder campaign is written, prepared, approved, and sent from `/surface/email` on the workspace
 host, under the operator-domain gate. RFC [0038](rfcs/0038-email-delivery.md) records why it lives
-in `servers/control/`. This is the operator's copy: where each part is, and what to prove before the
-first send.
+in `servers/control/`. This is the operator's copy: where each part is, and what holds it together.
 
 ## Where it lives
 
@@ -24,7 +23,7 @@ stack — the workers do not spawn and `/surface/email` is not routed.
 
 The Compose view's From list is `local.founder_senders` in `infra/modules/platform/ses.tf`, and the
 IAM condition names the same addresses, so a send from anything else is refused twice — once by the
-ledger, once by SES. Today the list is:
+ledger, once by SES. The list is:
 
 | From | Replies reach |
 |---|---|
@@ -50,62 +49,6 @@ These four records are outside it and carry the mailbox replies arrive in:
 
 Every address in the From list is a Google mailbox or alias. Terraform cannot create one. Each must
 exist and be read before a campaign goes out from it, or its replies are lost.
-
-## Before the first campaign
-
-The production roll runs `.github/scripts/founder_email_prerequisites.sh`, which fails unless
-`ufo.ai` is verified, DKIM is `SUCCESS`, the custom MAIL FROM is `bounce.ufo.ai` and `SUCCESS`, the
-configuration set is sending, and the `founder-updates` topic exists. `production_prerequisites.sh`
-already fails unless the account holds SES production access with sending enabled.
-
-What the gate cannot check, an operator does once:
-
-1. `terraform fmt`, `terraform validate`, and a scoped plan of `infra/envs/edge` and both
-   environments.
-2. `dig ufo.ai MX` and `dig ufo.ai TXT` still name Google.
-3. Send to the SES simulator addresses — `success@simulator.amazonses.com`,
-   `bounce@simulator.amazonses.com`, `complaint@simulator.amazonses.com` — as a campaign whose
-   audience is `operators`, and read the Results view for delivered, bounced, and complained.
-4. `aws sesv2 create-contact` then `aws sesv2 delete-contact` against `ufo-users`, to prove the
-   topic accepts a subscription and the Preview's exclusion count moves.
-5. Send a test to both founders from the Compose view, reply to it, and confirm the reply lands in
-   the shared mailbox.
-6. Prepare a small campaign, approve the exact revision and count the Preview names, and send it.
-7. Read Results: every SES event must land on the recipient row it names.
-8. Send the whole campaign only after reviewing the Preview's count and exclusions.
-
-## Landing the grant
-
-`deploy_change_gate.py` reads any added line inside an existing block of
-`infra/modules/platform/ses.tf` as an authorization contraction, and refuses a deploy whose span also
-holds a runtime path. The campaign grants are additive, but they are statements inside the policy
-document that already exists, and no arrangement avoids it: handing a live IRSA role another policy
-edits either that document or the module's `role_policy_arns`, and the gate reads both as narrowing.
-Since `main` carries runtime commits continuously, any span from the last production deployment
-holds one.
-
-So the grant lands against a production roll rather than beside one:
-
-1. Roll production.
-2. Merge the grant, and roll production again before anything else lands.
-3. Merge the runtime, and roll production again.
-
-Steps 2 and 3 each race every other merge — a commit under `core/src/`, `extensions/`,
-`servers/control/`, `packs/` or `sandbox/` in either window refuses the roll, and the remedy is to
-roll again once the span is clear.
-
-## Retiring the flyingobject.ai identity
-
-The transactional sender still sends from `no-reply@flyingobject.ai`, and that identity is still
-declared in `infra/modules/platform/ses.tf`. It cannot be retired here. SES verifies a domain once
-per account, so destroying it un-verifies it for every environment at once — and a merge to main
-applies testing while production keeps the release it was last rolled to, which would stop
-production sign-in and invitation email until someone dispatched a deploy.
-
-The order is therefore: move `ses_sender` to `no-reply@ufo.ai`, roll **production**, confirm its
-pods carry the new value, and only then drop `aws_sesv2_email_identity.onboard`,
-`infra/envs/testing/ses_dns.tf`, and their `retired_resources.json` entries in a change of their
-own. Until that lands, `ufo.ai` and `flyingobject.ai` are both verified and both send.
 
 ## Sending
 
