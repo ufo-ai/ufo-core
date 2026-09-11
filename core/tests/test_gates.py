@@ -487,11 +487,16 @@ def _check_job_selector_gate_allows_a_declared_selector() -> None:
     assert gates._job_selector_failures(trees) == []
 
 
+SCHEDULE_STORE = "class ScheduleStore:\n" + "".join(
+    f"    async def {name}(self, expected):\n        pass\n"
+    for name in sorted(gates.AMBIENT_SCHEDULE_METHODS)
+)
+
+
 def _check_schedule_authority_gate_rejects_explicit_agent_selection() -> None:
     trees = {
         gates.SCHEDULING_MODULE: ast.parse(
-            "class ScheduleStore:\n"
-            "    async def create(self, conversation_id, on_behalf_of_agent_id):\n"
+            SCHEDULE_STORE + "    async def create(self, conversation_id, on_behalf_of_agent_id):\n"
             "        pass\n"
             "    async def cancel(self, expected, selected_agent):\n"
             "        pass\n"
@@ -500,6 +505,20 @@ def _check_schedule_authority_gate_rejects_explicit_agent_selection() -> None:
     failures = gates._schedule_authority_failures(trees)
     assert len(failures) == 2
     assert all("ambient" in failure for failure in failures)
+
+
+def _check_schedule_authority_gate_refuses_a_name_no_method_answers() -> None:
+    """A frozenset of method names decays in silence: a rename left the gate reporting green over a
+    name nothing answered. Resolving the set against the class is what fails instead."""
+    trees = {
+        gates.SCHEDULING_MODULE: ast.parse(
+            "class ScheduleStore:\n    async def create(self, conversation_id):\n        pass\n"
+        )
+    }
+    failures = gates._schedule_authority_failures(trees)
+    assert len(failures) == 1
+    assert "are gone" in failures[0]
+    assert "update" in failures[0]
 
 
 def _check_schedule_authority_gate_refuses_a_store_it_cannot_find() -> None:
@@ -513,11 +532,7 @@ def _check_schedule_authority_gate_refuses_a_store_it_cannot_find() -> None:
 def _check_schedule_authority_gate_allows_ambient_agent_selection() -> None:
     trees = {
         gates.SCHEDULING_MODULE: ast.parse(
-            "class ScheduleStore:\n"
-            "    async def create(self, conversation_id):\n"
-            "        pass\n"
-            "    async def claim_due(self, now):\n"
-            "        pass\n"
+            SCHEDULE_STORE + "    async def claim_due(self, now, agent_id):\n        pass\n"
         )
     }
     assert gates._schedule_authority_failures(trees) == []
@@ -1272,6 +1287,7 @@ def test_repository_gates() -> None:
         _check_job_selector_gate_allows_a_declared_selector,
         _check_schedule_authority_gate_rejects_explicit_agent_selection,
         _check_schedule_authority_gate_refuses_a_store_it_cannot_find,
+        _check_schedule_authority_gate_refuses_a_name_no_method_answers,
         _check_schedule_authority_gate_allows_ambient_agent_selection,
         _check_execution_authority_gate_rejects_nullable_identity_in_shipped_code,
         _check_execution_authority_gate_leaves_durable_identity_fields_alone,

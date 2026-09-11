@@ -84,7 +84,7 @@ ADMISSION_HARNESS_ROOT = "evals"
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
-AMBIENT_SCHEDULE_METHODS = frozenset({"create", "cancel", "list", "inspect"})
+AMBIENT_SCHEDULE_METHODS = frozenset({"create", "update", "cancel", "list", "inspect"})
 RAW_EXECUTION_AUTHORITY_NAME = "acting_member_id"
 CORE_AUTHORITY_METHOD = "admits"
 PORTAL_SOURCE = Path("extensions/web/frontend/src")
@@ -752,17 +752,20 @@ def _job_selector_failures(trees: dict[Path, ast.Module]) -> list[str]:
 def _schedule_authority_failures(trees: dict[Path, ast.Module]) -> list[str]:
     """Schedule member paths and their write primitive accept no agent selector. A missing module is
     a failure, not a pass: the store this reads is free to move, and a stale path would leave the
-    gate reading nothing while reporting green."""
+    gate reading nothing while reporting green. A named method that no longer exists is that same
+    silence one rename later, so the set is resolved against the class as well as read off it."""
     tree = trees.get(SCHEDULING_MODULE)
     if tree is None:
         return [f"{SCHEDULING_MODULE}: the schedule store is not here — repoint the authority gate"]
     failures = []
+    declared = set()
     for node in tree.body:
         if not isinstance(node, ast.ClassDef) or node.name != "ScheduleStore":
             continue
         for method in node.body:
             if not isinstance(method, ast.AsyncFunctionDef):
                 continue
+            declared.add(method.name)
             if method.name not in AMBIENT_SCHEDULE_METHODS:
                 continue
             parameters = (*method.args.posonlyargs, *method.args.args, *method.args.kwonlyargs)
@@ -771,6 +774,12 @@ def _schedule_authority_failures(trees: dict[Path, ast.Module]) -> list[str]:
                     f"{SCHEDULING_MODULE}: ScheduleStore.{method.name} accepts an agent selector — "
                     "member-facing schedule authority is ambient"
                 )
+    gone = sorted(AMBIENT_SCHEDULE_METHODS - declared)
+    if gone:
+        failures.append(
+            f"{SCHEDULING_MODULE}: the authority gate names ScheduleStore methods that are gone "
+            f"({', '.join(gone)}) — a rename empties the gate in silence"
+        )
     return failures
 
 
