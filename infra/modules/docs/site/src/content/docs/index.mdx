@@ -4,7 +4,7 @@ description: Learn how to use ufo, connect your tools, automate work, and manage
 template: splash
 hero:
   title: Work with ufo.
-  tagline: Give the agent a task in chat. It uses the tools you connect, completes the work, and reports the result.
+  tagline: Describe the result you need in chat. ufo does the work across your connected systems.
   actions:
     - text: Get started
       link: /getting-started/introduction/
@@ -17,13 +17,9 @@ hero:
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 <CardGrid>
-  <LinkCard title="Getting started" href="/getting-started/introduction/" description="Learn how work moves from a request to a result, set up your workspace, and write a useful first request." />
-  <LinkCard title="Connect your systems" href="/connectors/" description="Connect code, communication, documents, project, telemetry, customer, and finance systems." />
-  <LinkCard title="Working with ufo" href="/work/web/" description="Use ufo on the web, in Slack, in a terminal, or in iMessage. Write code, analyze data, investigate incidents, and create reports." />
-  <LinkCard title="Recipes" href="/recipes/" description="Start with complete examples for code, incidents, data, reports, meetings, customer feedback, files, and internal applications." />
-  <LinkCard title="Workspace" href="/workspace/members/" description="Manage members, permissions, billing, privacy, and common problems." />
+  <LinkCard title="Getting started" href="/getting-started/introduction/" description="Set up your workspace and write your first request." />
+  <LinkCard title="Connect your systems" href="/connectors/" description="Connect code, communication, documents, and project systems." />
+  <LinkCard title="Working with ufo" href="/work/web/" description="Use ufo on the web, in Slack, in a terminal, or in iMessage." />
+  <LinkCard title="Recipes" href="/recipes/" description="Use complete examples for code, incidents, data, and reports." />
+  <LinkCard title="Workspace" href="/workspace/members/" description="Manage members, permissions, billing, and privacy." />
 </CardGrid>
-
-Every member action starts in conversation. Ask the agent to connect an account, schedule work,
-add a member, or change an application. The agent gives you the required control when an approval,
-credential, or payment step needs your input.
