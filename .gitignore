@@ -46,3 +46,5 @@ sandbox/artifacts/
 target/
 
 .pnpm-store/
+
+.secrets/
