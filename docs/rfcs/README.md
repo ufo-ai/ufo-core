@@ -44,6 +44,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0046](0046-tenant-scale-schema.md) | Tenant-scale schema — surrogate keys over workspace-leading partitions | proposed |
 | [0045](0045-open-agent-module.md) | Open agent module — two repos, one internal RPC | proposed |
 | [0048](0048-cubesandbox-carrier.md) | CubeSandbox carrier — self-hosted microVM sandboxes on AWS | proposed |
+| [0049](0049-selfhosted-inference.md) | Self-hosted inference for the agent fleet — GLM-5.3-Flash and DeepSeek-V4.1-Flash on AWS | proposed |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working
