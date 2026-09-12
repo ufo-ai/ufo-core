@@ -2551,7 +2551,12 @@ class _TranscriptAids:
     speaker and question attribution, what the member answered, shared files, the applications each
     turn created, where a member's own attachment is drawn from, when each turn landed and settled,
     what each turn spent, whether the conversation ran a profile, and whether it stands on Slack —
-    gathered once so the live window and an earlier page render one message identically."""
+    gathered once so the live window and an earlier page render one message identically.
+
+    `attached` answers under both ids a member message is named by: a turn's own id for the message
+    that founded it, and the queue-row id the engine writes for one folded into a running turn.
+    Both reach the rows of the turn the files were recorded against, and each message takes the
+    files its own note names."""
 
     subagents: SubagentRuns
     turn_ids: frozenset[str]
@@ -2603,6 +2608,7 @@ async def _transcript_aids(
     agent_origin: frozenset[str],
     speakers: dict[str, str],
     asked: dict[str, str],
+    folded: dict[str, str],
     opens: frozenset[UUID],
     slack: bool,
 ) -> _TranscriptAids:
@@ -2622,6 +2628,9 @@ async def _transcript_aids(
             )
         else:
             files.setdefault(str(entry.turn_id), []).append(_file_payload(ctx, entry.artifact))
+    for arrival_id, turn_id in folded.items():
+        if turn_id in attached:
+            attached[arrival_id] = attached[turn_id]
     drawn = await _created_apps(
         ctx,
         {
@@ -2814,6 +2823,9 @@ async def _conversation_messages(
     asked = {
         str(arrival.id): arrival.question for arrival in spoken if arrival.question is not None
     }
+    folded = {
+        str(arrival.id): str(arrival.turn_id) for arrival in spoken if arrival.turn_id is not None
+    }
     latest = await ctx.latest_turn(conversation_id)
     detail = None if latest is None else await ctx.turn_detail(latest)
     if recorded is None:
@@ -2822,7 +2834,16 @@ async def _conversation_messages(
         stated: frozenset[str] = frozenset()
     else:
         aids = await _transcript_aids(
-            ctx, agent_id, conversation_id, viewer, agent_origin, speakers, asked, opens, slack
+            ctx,
+            agent_id,
+            conversation_id,
+            viewer,
+            agent_origin,
+            speakers,
+            asked,
+            folded,
+            opens,
+            slack,
         )
         rendered = aids.render(recorded.messages)
         earlier = await _verified_earlier(ctx, conversation_id, compactions, recorded.messages)
@@ -2980,6 +3001,9 @@ async def _history_messages(
     asked = {
         str(arrival.id): arrival.question for arrival in spoken if arrival.question is not None
     }
+    folded = {
+        str(arrival.id): str(arrival.turn_id) for arrival in spoken if arrival.turn_id is not None
+    }
     aids = await _transcript_aids(
         ctx,
         agent_id,
@@ -2988,6 +3012,7 @@ async def _history_messages(
         agent_origin,
         speakers,
         asked,
+        folded,
         opens,
         surface == SURFACE_SLACK,
     )

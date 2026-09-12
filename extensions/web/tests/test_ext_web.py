@@ -1169,7 +1169,7 @@ async def _consume(client: AsyncClient, token: str, turn_id: str) -> tuple[str, 
                     data = json.loads(line.split(":", 1)[1].strip())
                     if event == "terminal":
                         return "".join(deltas), data
-                    if event in ("cost", "files"):
+                    if event in ("cost", "files", "absorbed"):
                         continue
                     deltas.append(data["text"])
                 elif not line:
@@ -6352,6 +6352,53 @@ async def test_an_attached_file_is_an_artifact_of_the_turn_that_carried_it(
     assert fetched.status_code == 200
     assert fetched.content == _png()
     await _consume(client, token, admitted.json()["turn_id"])
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_attachment_folded_into_a_running_turn_survives_the_reload(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A member who attaches a file while the turn still runs folds it into that turn, and the
+    transcript names their message by its queue row rather than by the turn. The file is an
+    artifact of the turn that carried it, so the reloaded bubble draws the picture the live page
+    drew — a name card with no link would lose the image on the reload."""
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    STREAM_GATE.arm()
+    opened = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        content=b"hello",
+        headers=cookie,
+    )
+    assert opened.status_code == 200
+    conversation_id = opened.json()["conversation_id"]
+
+    folded = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        data={"message": "what is this"},
+        files=[("file", ("lights.png", _png(), "image/png"))],
+        headers=cookie,
+    )
+    assert folded.status_code == 200
+    assert folded.json()["arrival_id"] != opened.json()["turn_id"]
+    await _consume(client, token, opened.json()["turn_id"])
+
+    loaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+    said = [row for row in loaded.json()["messages"] if row["role"] == "user"][-1]
+    assert said["text"] == "what is this"
+    (drawn,) = said["files"]
+    assert drawn["filename"] == "lights.png"
+    served = await client.get(str(drawn["preview_url"]), headers=cookie)
+    assert served.status_code == 200
+    assert served.content == _png()
+    fetched = await client.get(str(drawn["url"]), headers=cookie)
+    assert fetched.status_code == 200
+    assert fetched.content == _png()
 
 
 @pytest.mark.usefixtures("database_url")

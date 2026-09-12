@@ -1884,16 +1884,21 @@ class QueuedArrival(BaseModel):
 
 class SpokenArrival(BaseModel):
     """One member-admitted queue row's attribution: the display line the admitting surface
-    reported, the member the words are attributed to, and the question the words answered when the
-    surface knew one — exactly what the turn it joined carries for its own founding message.
-    Drained rows included: the engine names a folded message by its queue-row id in the
-    transcript's `<context>` tag, so a projection labelling who spoke reads these beside the turn
-    rows, which only name the messages that founded turns."""
+    reported, the member the words are attributed to, the question the words answered when the
+    surface knew one, and the turn the row was admitted into — exactly what the turn it joined
+    carries for its own founding message. Drained rows included: the engine names a folded message
+    by its queue-row id in the transcript's `<context>` tag, so a projection labelling who spoke
+    reads these beside the turn rows, which only name the messages that founded turns.
+
+    `turn_id` is what the row's own files are recorded against — a member's attachment is an
+    artifact of the admitting turn, never of the queue row — so a projection drawing those files
+    under a folded message reads the turn through this."""
 
     id: UUID
     sender: str | None
     question: str | None
     speaker_member_id: UUID | None
+    turn_id: UUID | None = None
 
 
 class KeyedAdmission(BaseModel):
@@ -4834,6 +4839,7 @@ class SurfaceContext:
                         tables.inbound_message.c.id,
                         tables.inbound_message.c.context,
                         tables.inbound_message.c.speaker_member_id,
+                        tables.inbound_message.c.admitted_turn_id,
                     ).where(
                         tables.inbound_message.c.workspace_id == self.workspace_id,
                         tables.inbound_message.c.conversation_id == conversation_id,
@@ -4850,6 +4856,7 @@ class SurfaceContext:
                     sender=None if context is None else context.sender,
                     question=None if context is None else context.question,
                     speaker_member_id=row.speaker_member_id,
+                    turn_id=row.admitted_turn_id,
                 )
             )
         return tuple(spoken)
