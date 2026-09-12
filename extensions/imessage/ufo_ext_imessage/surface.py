@@ -12,6 +12,7 @@ from ufo.sdk.audience import conversation_audience, room_audience
 from ufo.sdk.context import ScopedStore
 from ufo.sdk.o11y import log
 from ufo.sdk.surfaces import (
+    ATTACHED_FILES_CLAUSE,
     NOTHING_DELIVERED,
     AddressClaim,
     AmbientMessage,
@@ -429,7 +430,7 @@ class ImessageSurface:
         notes: list[str] = []
         if delivered:
             files = ", ".join(f"{IMESSAGE_INBOX_DIR}/{name}" for name in delivered)
-            notes.append(f"Attached files, saved in the workspace: {files}")
+            notes.append(f"{ATTACHED_FILES_CLAUSE}{files}")
         if too_large:
             files = ", ".join(too_large)
             notes.append(f"Skipped files, too large to download: {files}")

@@ -144,6 +144,7 @@ from ufo.sdk.o11y import log, warn
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
     AMBIENT_HISTORY_MESSAGES,
+    ATTACHED_FILES_CLAUSE,
     NOTHING_DELIVERED,
     WORKSPACE_WRITE_MAX_BYTES,
     Admitted,
@@ -2757,7 +2758,7 @@ def files_note(downloaded: DownloadedFiles) -> str:
     clauses: list[str] = []
     if downloaded.delivered:
         listed = ", ".join(f"{SLACK_INBOX_DIR}/{name}" for name in downloaded.delivered)
-        clauses.append(f"Attached files, saved in the workspace: {listed}")
+        clauses.append(f"{ATTACHED_FILES_CLAUSE}{listed}")
     if downloaded.skipped:
         listed = ", ".join(downloaded.skipped)
         limit_mb = SLACK_INBOUND_FILE_MAX_BYTES // (1024 * 1024)

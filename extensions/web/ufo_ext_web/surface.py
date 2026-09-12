@@ -155,6 +155,7 @@ from ufo.sdk.surfaces import (
     TurnRuntimeConfig,
     handshake_request,
     inbox_name,
+    member_message_attachments,
     member_message_said,
     member_message_text,
     opening_sentence,
@@ -1731,13 +1732,21 @@ def _member_bubble(
     carries it — a turn admitted before member attachments became artifacts, or one whose row a
     same-named file in the same turn already took.
 
+    A channel surface names what it delivered in the attachments element it fenced beside the
+    member's words rather than in a note under them, so a share from Slack draws its files off that
+    element alone — the rows the share recorded, drawn the way the composer's own send is. A note
+    inside fenced words is characters the member typed, and names no file.
+
     `slack` says the conversation stands on Slack, where a member's emphasis was markup Slack drew
     rather than characters they typed: a message the Slack surface fenced crosses as markdown and
     the bubble is marked so the portal draws it as the member saw it. A comment the same member
     typed into the portal of that conversation admits unfenced, so their `#` and `*` stay the
     characters they typed."""
     said, fenced = member_message_said(inbound)
-    words, paths = _member_attachments(said)
+    if fenced:
+        words, paths = said, member_message_attachments(inbound)
+    else:
+        words, paths = _member_attachments(said)
     mrkdwn = slack and fenced
     bubble: dict[str, object] = {"role": "user", "text": as_markdown(words) if mrkdwn else words}
     if mrkdwn:

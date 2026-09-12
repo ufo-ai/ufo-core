@@ -81,6 +81,7 @@ from ufo.runtime.ext.surface import (
     SILENCE_SENTINEL,
     WRITEBACK_DELIVERED,
     fence_member_message,
+    member_message_attachments,
     member_message_text,
     mint_marker,
 )
@@ -5009,6 +5010,24 @@ async def test_inbound_oversize_file_is_skipped_and_reported(
     assert inbound.endswith(f"<attachments_{mark}>\n{note}\n</attachments_{mark}>")
     assert f"</member_message_{mark}>\n<attachments_{mark}>" in inbound
     assert note not in inbound.partition(f"</member_message_{mark}>")[0]
+
+
+def test_the_note_reads_back_as_the_paths_each_file_landed_under() -> None:
+    """The note is what the portal draws a member's Slack share from, so it writes the clause the
+    fence's own reader takes paths off. A file too large to download landed nowhere and names none,
+    and a message that delivered nothing names none."""
+    delivered = slack.DownloadedFiles(
+        delivered=("lights.png", "paper.pdf"), keys=(), skipped=("big.bin",)
+    )
+    marker = "deadbeef"
+    fenced = _fenced(marker, "what are these", attachments=slack.files_note(delivered))
+    assert member_message_attachments(fenced) == (
+        f"{slack.SLACK_INBOX_DIR}/lights.png",
+        f"{slack.SLACK_INBOX_DIR}/paper.pdf",
+    )
+    skipped = slack.files_note(slack.DownloadedFiles(delivered=(), keys=(), skipped=("big.bin",)))
+    assert member_message_attachments(_fenced(marker, "look", attachments=skipped)) == ()
+    assert member_message_attachments(_fenced(marker, "hello")) == ()
 
 
 def test_the_inbound_cap_is_the_workspace_write_bound() -> None:

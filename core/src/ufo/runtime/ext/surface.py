@@ -244,6 +244,9 @@ PREVIEW_PAGES_MAX = 20
 AMBIENT_CONTEXT_ELEMENT = "channel_context"
 MEMBER_MESSAGE_ELEMENT = "member_message"
 ATTACHMENTS_ELEMENT = "attachments"
+ATTACHED_FILES_CLAUSE = "Attached files, saved in the workspace: "
+"""How the attachments element names what a surface landed: the clause every inbound surface writes
+its delivered paths under, and the one a projection reads them back from."""
 MARKER_BYTES = 4
 INBOX_NAME_MAX_CHARS = 80
 INBOX_FALLBACK_NAME = "file"
@@ -252,6 +255,10 @@ _MEMBER_MESSAGE_RE = re.compile(
     rf"<{MEMBER_MESSAGE_ELEMENT}_(?P<marker>[0-9a-f]{{{MARKER_BYTES * 2}}})>\n"
     rf"(?P<said>.*)\n</{MEMBER_MESSAGE_ELEMENT}_(?P=marker)>",
     re.DOTALL,
+)
+_ATTACHMENTS_TEMPLATE = (
+    rf"\n<{ATTACHMENTS_ELEMENT}_{{marker}}>\n"
+    rf"(?P<delivered>.*)\n</{ATTACHMENTS_ELEMENT}_{{marker}}>"
 )
 _CONTEXT_TAG_RE = re.compile(r"\A<context>\n.*?\n</context>\n", re.DOTALL)
 _MESSAGE_REF_RE = re.compile(r"\A\s*<context>\s*message_ref:\s*(?P<ref>[^\n]+)")
@@ -369,6 +376,34 @@ def member_message_said(inbound: str) -> tuple[str, bool]:
     said = _INJECTED_CONTEXT_RE.sub("", _CONTEXT_TAG_RE.sub("", inbound))
     found = _MEMBER_MESSAGE_RE.search(said)
     return (said, False) if found is None else (found.group("said"), True)
+
+
+def member_message_attachments(inbound: str) -> tuple[str, ...]:
+    """The workspace paths a fenced message's own files landed under, in the order its attachments
+    element names them, or none where the message delivered no file.
+
+    `member_message_said` answers the member's own words, and those stop at their own element: what
+    a surface delivered for them stands in the element beside it, so a projection drawing a
+    member's files reads them from here rather than out of their sentence. A file the surface could
+    not deliver names no path and so answers nothing — the clause is what landed.
+
+    Only the element the surface fenced for this message answers: it is named with that message's
+    own marker and stands exactly where `fence_member_message` wrote it, straight after the member's
+    element. So a member who spells an attachments element inside their own words names nothing —
+    their text stands before the fence, and no marker they can write is this message's."""
+    said = _INJECTED_CONTEXT_RE.sub("", _CONTEXT_TAG_RE.sub("", inbound))
+    fenced = _MEMBER_MESSAGE_RE.search(said)
+    if fenced is None:
+        return ()
+    delivered = re.compile(_ATTACHMENTS_TEMPLATE.format(marker=fenced.group("marker")), re.DOTALL)
+    found = delivered.match(said, fenced.end())
+    if found is None:
+        return ()
+    for clause in found.group("delivered").splitlines():
+        if clause.startswith(ATTACHED_FILES_CLAUSE):
+            listed = clause.removeprefix(ATTACHED_FILES_CLAUSE)
+            return tuple(path for path in (part.strip() for part in listed.split(",")) if path)
+    return ()
 
 
 def member_message_ref(inbound: str) -> str | None:

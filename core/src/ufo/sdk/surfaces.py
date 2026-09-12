@@ -34,6 +34,9 @@ from ufo.runtime.ext.surface import (
     ATTACHED_COVER_BUDGET_SECONDS as ATTACHED_COVER_BUDGET_SECONDS,
 )
 from ufo.runtime.ext.surface import (
+    ATTACHED_FILES_CLAUSE as ATTACHED_FILES_CLAUSE,
+)
+from ufo.runtime.ext.surface import (
     ATTACHMENTS_ELEMENT as ATTACHMENTS_ELEMENT,
 )
 from ufo.runtime.ext.surface import (
@@ -167,6 +170,9 @@ from ufo.runtime.ext.surface import (
 )
 from ufo.runtime.ext.surface import (
     is_silence_sentinel as is_silence_sentinel,
+)
+from ufo.runtime.ext.surface import (
+    member_message_attachments as member_message_attachments,
 )
 from ufo.runtime.ext.surface import (
     member_message_ref as member_message_ref,
