@@ -133,6 +133,12 @@ test("documentation and blog pages stay under their paths", () => {
   );
 });
 
+test("the docs landing page states the brand line", () => {
+  const html = built.get("/docs/");
+  assert.ok(html.includes("∵ UFO.ai"));
+  assert.ok(html.includes("Build the unknown"));
+});
+
 test("the blog has no RSS links", async () => {
   assert.doesNotMatch(built.get("/blog/"), /application\/rss|rss\.xml|>RSS</i);
   await assert.rejects(readFile(new URL("blog/rss.xml", dist), "utf8"), { code: "ENOENT" });
