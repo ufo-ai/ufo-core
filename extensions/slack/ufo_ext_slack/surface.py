@@ -20,10 +20,12 @@ Everything the agent says lands as a threaded reply to the member message it ans
 a channel: a channel conversation is its thread and its key carries the root, while a DM
 conversation is the channel and each member message founds a thread of its own, so admission records
 which Slack message a message ref names (`_anchor_dm_thread`) and every delivery reads its parent
-back from there (`_reply_thread`). Core founds a turn of its own on a member message it left queued,
-an admission no Slack request carries, so that turn's execution anchors itself from the
-conversation's mirror (`_anchor_followed_turn`). A reply that answers no member message — a
-scheduled run, an alert-woken turn — posts at the DM top level.
+back from there (`_reply_thread`). A turn answering a member message this surface never saw — a
+portal message on a Slack thread, a queued message core founded a turn of its own on — is anchored
+by nothing, so it pins the thread the conversation's mirror names once at turn start
+(`_pin_turn_thread`) and answers there, its shared files with it, however far the mirror moves while
+the turn runs. A reply that answers no member message — a scheduled run, an alert-woken turn —
+posts at the DM top level.
 
 While the turn runs, a per-turn status task tails its live frames off the hub and keeps the
 thread's native status (`assistant.threads.setStatus`) current — "Thinking…", each tool call's
@@ -2823,27 +2825,42 @@ async def _anchor_dm_thread(admitted: Admitted, message_ts: str) -> None:
     )
 
 
-async def _anchor_followed_turn(store: ScopedStore, turn_id: UUID, thread: MirroredThread) -> None:
-    """Anchor a turn this surface never admitted to the DM message the conversation's mirror names,
-    so its replies thread under the member instead of founding a run of their own at the DM top
-    level. Core admits a member message it left queued as a turn of its own once the turn that was
-    running ends, and that admission reaches no Slack request.
-
-    Written only while the turn holds no anchor of its own, so the founding message an admission
-    recorded stands over the later message the mirror has moved on to."""
-    if thread.queue_key.partition(":")[2] or not thread.message_ts:
-        return
-    await store.put_if(_dm_anchor_key(turn_id), thread.message_ts, expected=None)
+async def _pin_turn_thread(store: ScopedStore, turn_id: UUID, thread: MirroredThread) -> str | None:
+    """Pin the DM message a turn this surface never admitted answers, and return the pinned value.
+    The mirror names the conversation's latest member message and the next inbound moves it, so a
+    turn reading it at each delivery posts its spans, its reply and its files under whatever message
+    arrived last, and a retried reply looks for the attempt whose response was lost in a thread it
+    never posted in and posts the reply a second time. The value is written once per turn, under the
+    turn's own anchor key, so the founding message an admission recorded stands over it and every
+    later delivery of the turn reads back the value pinned first."""
+    anchor = thread.anchor()
+    if thread.queue_key.partition(":")[2] or anchor is None:
+        return None
+    if await store.put_if(_dm_anchor_key(turn_id), anchor, expected=None):
+        return anchor
+    pinned = await store.get(_dm_anchor_key(turn_id))
+    return pinned if isinstance(pinned, str) and pinned else None
 
 
 async def _reply_thread(
-    queue_key: str, turn_id: UUID, message_ref: UUID | None = None
+    queue_key: str,
+    turn_id: UUID,
+    conversation_id: UUID,
+    answers_member: bool,
+    message_ref: UUID | None = None,
 ) -> str | None:
     """The message a reply posts under, in a channel and in a DM alike: the root the queue key
     carries, else the anchored DM message the reply answers. A span whose ref names no anchored
-    message falls back to the turn's founding message, so one turn's words stay in one thread; a
-    turn with no anchor at all — a scheduled run, an alert-woken turn — posts at the DM top level
-    and founds a thread of its own."""
+    message falls back to the turn's founding message, so one turn's words stay in one thread.
+
+    A turn answering a member whose message this surface never saw — a portal message on a Slack
+    thread, a queued message core founded a turn on — is anchored by nothing, so it answers in the
+    thread the conversation's mirror named when the turn started, pinned under the turn the first
+    time the turn reaches Slack. Every post the turn makes reads its parent here, so the reply, the
+    spans it spoke and the files it shared all land in that one thread however far the mirror has
+    moved on when one of them posts or retries. A turn answering
+    no member message — a scheduled run, an alert-woken turn — posts at the DM top level and founds
+    a thread of its own."""
     root_ts = queue_key.partition(":")[2]
     if root_ts:
         return root_ts
@@ -2851,7 +2868,14 @@ async def _reply_thread(
     anchor = await store.get(_dm_anchor_key(turn_id, message_ref))
     if anchor is None and message_ref is not None:
         anchor = await store.get(_dm_anchor_key(turn_id))
-    return anchor if isinstance(anchor, str) and anchor else None
+    if isinstance(anchor, str) and anchor:
+        return anchor
+    if not answers_member:
+        return None
+    mirrored = await store.get(_thread_mirror_key(conversation_id))
+    if mirrored is None:
+        return None
+    return await _pin_turn_thread(store, turn_id, MirroredThread.read(mirrored))
 
 
 class FollowerContext(Protocol):
@@ -3544,9 +3568,10 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
     when it starts executing; the status is thread state, so the two arms converge on one line and
     the per-turn task each follower keeps holds this process to one of each.
 
-    A turn answering a member is anchored here too, which is what a DM turn core founded on a
-    queued message has instead of an admission of this surface's own: its execution is where that
-    turn first reaches Slack, and the mirror names the message it answers.
+    A turn answering a member is pinned to the mirror's thread here, which is what a turn no Slack
+    request admitted — a portal message, a queued message core founded a turn on — has instead of an
+    admission of this surface's own: its execution is where that turn first reaches Slack, so the
+    thread is fixed before the next inbound can move the mirror.
 
     A subagent turn holds its own conversation on the subagent surface and no Slack thread, so it
     ends before any read. Everything else costs one indexed read of the thread mirror, which is
@@ -3566,7 +3591,7 @@ async def follow_turn(ctx: HookContext) -> HookOutcome:
                 return None
             thread = MirroredThread.read(row)
             if ctx.speaker_member_id is not None:
-                await _anchor_followed_turn(ctx.ext.store, turn.id, thread)
+                await _pin_turn_thread(ctx.ext.store, turn.id, thread)
     except Exception as error:
         log(
             "slack.thread_followers.unarmed",
@@ -4511,7 +4536,12 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         log("slack.reply_suppressed", turn=str(writeback.turn_id), channel=channel)
         await _drop_turn_reply_records(ScopedStore(SLACK_EXTENSION), writeback.turn_id)
         return NOTHING_DELIVERED
-    thread = await _reply_thread(writeback.queue_key, writeback.turn_id)
+    thread = await _reply_thread(
+        writeback.queue_key,
+        writeback.turn_id,
+        writeback.conversation_id,
+        writeback.speaker_member_id is not None,
+    )
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     store = ScopedStore(SLACK_EXTENSION)
     progress_key = _slack_reply_progress_key(writeback.turn_id)
@@ -4681,9 +4711,10 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
     """Post one reply delivered before the turn ends and return its message ref
     (`channel:ts`) — a plain thread message, split at markdown boundaries when it is long. It
     threads under the message the span answers (`message_ref`), so a turn that speaks to two members
-    answers each in their own thread rather than stacking both under whichever message came first.
-    A portal comment in a DM uses the conversation's mirrored thread anchor because no Slack message
-    arrived to anchor it; a channel comment uses the root carried by the queue key.
+    answers each in their own thread rather than stacking both under whichever message came first. A
+    portal comment answers a member message no Slack request carried, on a turn that may answer no
+    member of its own — a scheduled run the member wrote to mid-flight — so it threads in the
+    conversation's own thread like every other post of a turn a member spoke to.
 
     It carries no footer, no ask or connect buttons and no files: this is not the turn's outcome, so
     it has no settled accounting to state and nothing to attach, and the terminal reply that follows
@@ -4697,18 +4728,16 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
     after core has recorded the ref of the terminal reply, or in `post` when that reply says
     nothing and so posts no message at all. It does carry mentions: these are the model's own words
     to the member, like the terminal reply's, so a name it writes notifies the same person here."""
-    channel, _, root = reply.queue_key.partition(":")
+    channel = reply.queue_key.partition(":")[0]
     bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
     store = ScopedStore(SLACK_EXTENSION)
-    if reply.is_comment and not root:
-        mirrored = await store.get(_thread_mirror_key(reply.conversation_id))
-        if mirrored is None:
-            raise SlackApiError("Slack thread mirror missing")
-        thread = MirroredThread.read(mirrored).anchor()
-        if thread is None:
-            raise SlackApiError("Slack thread anchor missing")
-    else:
-        thread = root or await _reply_thread(reply.queue_key, reply.turn_id, reply.message_ref)
+    thread = await _reply_thread(
+        reply.queue_key,
+        reply.turn_id,
+        reply.conversation_id,
+        reply.speaker_member_id is not None or reply.is_comment,
+        reply.message_ref,
+    )
     progress_key = _slack_reply_progress_key(reply.turn_id, reply.id)
     progress, stored = await _slack_reply_progress(store, progress_key)
     if progress.complete:
@@ -4830,41 +4859,48 @@ async def attach(ctx: SurfaceContext, writeback: Writeback, reply_ref: str) -> N
     effort: a file Slack refuses is logged and left out of the share, so the rest still arrive
     together, and an upload never re-posts the reply or blocks its siblings.
 
-    Every record the turn made is dropped first (`_drop_turn_reply_records`), because core has now
-    durably recorded the terminal ref and every span row carries the ref of the message it posted,
-    so no attempt can arrive that needs them."""
+    Every record the turn made is dropped once the share is done (`_drop_turn_reply_records`),
+    because core has now durably recorded the terminal ref and every span row carries the ref of the
+    message it posted, so no attempt can arrive that needs them. An attempt that fails before the
+    share is retried, and it finds the turn's thread where this one did."""
     store = ScopedStore(SLACK_EXTENSION)
-    thread = await _reply_thread(writeback.queue_key, writeback.turn_id)
-    await _drop_turn_reply_records(store, writeback.turn_id)
     inline = tuple(
         a
         for a in writeback.artifacts
         if a.role == "file" and a.size_bytes <= SLACK_UPLOAD_MAX_BYTES
     )
-    if not inline:
-        return
-    channel = writeback.queue_key.partition(":")[0]
-    bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
-    timeout = httpx.Timeout(
-        SLACK_UPLOAD_READ_TIMEOUT_SECONDS, write=SLACK_UPLOAD_WRITE_TIMEOUT_SECONDS
-    )
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        results = await asyncio.gather(
-            *(_upload_artifact(ctx, client, bot_token, artifact) for artifact in inline),
-            return_exceptions=True,
+    if inline:
+        thread = await _reply_thread(
+            writeback.queue_key,
+            writeback.turn_id,
+            writeback.conversation_id,
+            writeback.speaker_member_id is not None,
         )
-        files: list[dict[str, str]] = []
-        for artifact, result in zip(inline, results, strict=True):
-            if isinstance(result, BaseException):
-                _LOG.warning("slack attachment upload failed for %s: %s", artifact.filename, result)
-            else:
-                files.append({"id": result, "title": artifact.subject or artifact.filename})
-        for batch in _attachment_batches(files):
-            try:
-                await _share_uploaded_files(client, bot_token, channel, thread, batch)
-            except Exception as error:
-                titles = ", ".join(file["title"] for file in batch)
-                _LOG.warning("slack attachment share failed for %s: %s", titles, error)
+        channel = writeback.queue_key.partition(":")[0]
+        bot_token = await ctx.credential(SLACK_BOT_TOKEN_SLOT)
+        timeout = httpx.Timeout(
+            SLACK_UPLOAD_READ_TIMEOUT_SECONDS, write=SLACK_UPLOAD_WRITE_TIMEOUT_SECONDS
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            results = await asyncio.gather(
+                *(_upload_artifact(ctx, client, bot_token, artifact) for artifact in inline),
+                return_exceptions=True,
+            )
+            files: list[dict[str, str]] = []
+            for artifact, result in zip(inline, results, strict=True):
+                if isinstance(result, BaseException):
+                    _LOG.warning(
+                        "slack attachment upload failed for %s: %s", artifact.filename, result
+                    )
+                else:
+                    files.append({"id": result, "title": artifact.subject or artifact.filename})
+            for batch in _attachment_batches(files):
+                try:
+                    await _share_uploaded_files(client, bot_token, channel, thread, batch)
+                except Exception as error:
+                    titles = ", ".join(file["title"] for file in batch)
+                    _LOG.warning("slack attachment share failed for %s: %s", titles, error)
+    await _drop_turn_reply_records(store, writeback.turn_id)
 
 
 def _attachment_batches(files: Sequence[dict[str, str]]) -> Iterator[Sequence[dict[str, str]]]:

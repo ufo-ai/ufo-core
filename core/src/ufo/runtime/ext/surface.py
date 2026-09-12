@@ -885,7 +885,9 @@ class Writeback:
     frame, and the files the turn shared. A surface renders the reply and metadata off `terminal`,
     uploads `artifacts`, renders `terminal.question` as its own answer affordance, collects
     credentials privately, or exposes `terminal.connect_request` only through its authenticated
-    member channel."""
+    member channel. `speaker_member_id` is the member whose message the turn answers, None for a
+    turn no member spoke, so a surface that threads its reply under that message tells the two apart
+    whichever surface admitted the message."""
 
     turn_id: UUID
     conversation_id: UUID
@@ -893,6 +895,7 @@ class Writeback:
     queue_key: str
     terminal: TerminalFrame
     artifacts: tuple[SharedArtifact, ...]
+    speaker_member_id: UUID | None = None
 
 
 def writeback_says_nothing(writeback: Writeback) -> bool:
@@ -923,7 +926,8 @@ class MidTurnReply:
 
     It carries no terminal frame: a mid-turn reply is not the turn's outcome, so it has no settled
     accounting to footer, no question to attach buttons for, and no shared files. Those ride the
-    terminal writeback that follows it."""
+    terminal writeback that follows it. `speaker_member_id` names the member the turn answers, as
+    the terminal writeback carries it, so every post one turn makes threads the same way."""
 
     id: UUID
     turn_id: UUID
@@ -933,6 +937,7 @@ class MidTurnReply:
     message_ref: UUID | None
     text: str
     is_comment: bool = False
+    speaker_member_id: UUID | None = None
 
 
 AMBIENT_REPLY_TIMEOUT_SECONDS = 5.0
@@ -6089,6 +6094,7 @@ class WritebackPoller:
                         tables.turn.c.terminal,
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
+                        tables.turn.c.speaker_member_id,
                         tables.conversation.c.queue_key,
                         tables.conversation.c.surface,
                     )
@@ -6139,6 +6145,7 @@ class WritebackPoller:
                 )
                 for artifact in artifacts
             ),
+            speaker_member_id=row.speaker_member_id,
         )
         return writeback, row.surface
 
@@ -6435,6 +6442,7 @@ class MidTurnReplyPoller:
                     sa.select(
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
+                        tables.turn.c.speaker_member_id,
                         tables.conversation.c.queue_key,
                         tables.conversation.c.surface,
                     )
@@ -6464,6 +6472,7 @@ class MidTurnReplyPoller:
                 message_ref=row.message_ref,
                 text=row.text,
                 is_comment=row.round_index == SURFACE_COMMENT_ROUND_INDEX,
+                speaker_member_id=turn.speaker_member_id,
             ),
         )
 

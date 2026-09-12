@@ -102,6 +102,7 @@ from ufo.runtime.turns.ambient_reply import AmbientReplyClassifier
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import (
+    SURFACE_COMMENT_ROUND_INDEX,
     WRITEBACK_PENDING,
     AskQuestion,
     AskUserInput,
@@ -2398,21 +2399,21 @@ async def test_a_dm_reply_in_a_thread_keeps_the_dm_conversation_and_anchors_to_t
     async with workspace_tx() as connection:
         conversation = (
             await connection.execute(
-                sa.select(tables.conversation.c.queue_key).where(
+                sa.select(tables.conversation.c.id, tables.conversation.c.queue_key).where(
                     tables.conversation.c.workspace_id == workspace_id
                 )
             )
-        ).scalar_one()
+        ).one()
         turn_id = (
             await connection.execute(
                 sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
             )
         ).scalar_one()
     status = json.loads(_requests_to(recorder, slack.SLACK_ASSISTANT_STATUS_URL)[0].content)
-    assert conversation == "D9"
+    assert conversation.queue_key == "D9"
     assert (status["channel_id"], status["thread_ts"]) == ("D9", "7.0")
     with ws(workspace_id):
-        assert await slack._reply_thread("D9", turn_id) == "7.0"
+        assert await slack._reply_thread("D9", turn_id, conversation.id, True) == "7.0"
     dying = slack._STATUS_TASKS[turn_id]
     dying.cancel()
     await asyncio.gather(dying, return_exceptions=True)
@@ -4584,18 +4585,240 @@ async def test_a_dm_turn_core_founded_on_a_queued_message_answers_in_its_thread(
         await asyncio.wait_for(task, timeout=10)
 
 
+async def _mirror_dm(workspace_id: UUID, turn_id: UUID, message_ts: str) -> None:
+    """The thread mirror a Slack DM message leaves behind, for a turn seeded without one."""
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+        queue_key = (
+            await connection.execute(
+                sa.select(tables.conversation.c.queue_key).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).scalar_one()
+    with ws(workspace_id):
+        await slack._mirror_thread(
+            conversation_id, slack.MirroredThread(queue_key=queue_key, message_ts=message_ts)
+        )
+
+
+async def test_a_portal_founded_turn_answers_in_the_mirrored_dm_thread(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A member who starts a turn from the portal on a Slack DM thread sends no Slack message, so
+    nothing anchors that turn. Its comment notice, its reply and the files it shared all answer in
+    the thread the conversation's mirror names, as they do for a turn started from Slack."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(
+        workspace_id, "D9", "here you go", blob, artifact=False, speaker_member_id=member_id
+    )
+    await _seed_shared_files(workspace_id, turn_id, blob, (("plan.md", None),))
+    await _seed_spoken_reply(
+        workspace_id,
+        turn_id,
+        "You commented: write the plan",
+        round_index=SURFACE_COMMENT_ROUND_INDEX,
+        message_ref=turn_id,
+    )
+    await _mirror_dm(workspace_id, turn_id, "7.0")
+
+    await app.state.mid_turn_reply_poller.drain()
+    await app.state.writeback_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in recorder
+        if str(request.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+    ]
+    assert [(post["channel"], post.get("thread_ts")) for post in posts] == [
+        ("D9", "7.0"),
+        ("D9", "7.0"),
+    ]
+    completes = [
+        json.loads(request.content)
+        for request in recorder
+        if str(request.url) == slack.SLACK_FILES_COMPLETE_UPLOAD
+    ]
+    assert [(share["channel_id"], share.get("thread_ts")) for share in completes] == [("D9", "7.0")]
+    assert completes[0]["files"] == [{"id": _file_id("plan.md"), "title": "plan.md"}]
+
+
+async def test_a_portal_comment_on_a_speakerless_turn_answers_in_the_mirrored_dm_thread(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A member writes in the portal on a DM conversation whose live turn answers no member of its
+    own — a scheduled run. The comment notice answers a member message all the same, so it posts in
+    the thread the conversation's mirror names rather than founding one at the DM top level."""
+    workspace_id, _ = await _seed(member_email="bee@example.com")
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(workspace_id, "D9", "the nightly digest", blob, artifact=False)
+    await _seed_spoken_reply(
+        workspace_id,
+        turn_id,
+        "You commented: write the plan",
+        round_index=SURFACE_COMMENT_ROUND_INDEX,
+        message_ref=turn_id,
+    )
+    await _mirror_dm(workspace_id, turn_id, "7.0")
+
+    await app.state.mid_turn_reply_poller.drain()
+
+    posts = [
+        json.loads(request.content)
+        for request in recorder
+        if str(request.url).split("?")[0] == slack.SLACK_CHAT_POST_MESSAGE_URL
+    ]
+    assert [(post["channel"], post.get("thread_ts")) for post in posts] == [("D9", "7.0")]
+
+
+async def test_a_retried_file_share_keeps_the_thread_the_reply_posted_in(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """An attempt that posts the reply and then dies before the share is retried, and a member
+    message has moved the conversation's mirror meanwhile. The retried share still lands in the
+    thread the reply posted in, so the turn's files do not hang under an unrelated later message."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    recorder: list[httpx.Request] = []
+    app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
+    turn_id = await _seed_done_turn(
+        workspace_id, "D9", "here you go", blob, artifact=False, speaker_member_id=member_id
+    )
+    await _seed_shared_files(workspace_id, turn_id, blob, (("plan.md", None),))
+    await _mirror_dm(workspace_id, turn_id, "7.0")
+    batches = slack._attachment_batches
+    died = False
+
+    def dying(files):
+        nonlocal died
+        if not died:
+            died = True
+            raise RuntimeError("worker died before the share")
+        return batches(files)
+
+    monkeypatch.setattr(slack, "_attachment_batches", dying)
+
+    await app.state.writeback_poller.drain()
+    await _mirror_dm(workspace_id, turn_id, "9.0")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.writeback)
+            .where(tables.writeback.c.turn_id == turn_id)
+            .values(claim_expires_at=None)
+        )
+    await app.state.writeback_poller.drain()
+
+    completes = [
+        json.loads(request.content)
+        for request in recorder
+        if str(request.url) == slack.SLACK_FILES_COMPLETE_UPLOAD
+    ]
+    assert [(share["channel_id"], share.get("thread_ts")) for share in completes] == [("D9", "7.0")]
+
+
+async def test_a_turn_keeps_its_thread_when_a_later_message_moves_the_mirror(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    """A turn no Slack request admitted pins the thread the mirror named when it started, so a
+    member message arriving mid-flight moves the mirror without moving the turn. The first attempt
+    is accepted by Slack and its response lost, the mirror then moves, and the retry reconciles in
+    the pinned thread: it finds the message the lost attempt posted and never posts a second one."""
+    workspace_id, member_id = await _seed(member_email="bee@example.com")
+    recorder: list[httpx.Request] = []
+    posted: list[dict[str, object]] = []
+    lost = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal lost
+        recorder.append(request)
+        url = str(request.url).split("?")[0]
+        if url == slack.SLACK_CONVERSATIONS_REPLIES_URL:
+            thread_ts = request.url.params["ts"]
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [
+                        message for message in posted if message["thread_ts"] == thread_ts
+                    ],
+                    "response_metadata": {"next_cursor": ""},
+                },
+            )
+        if url != slack.SLACK_CHAT_POST_MESSAGE_URL:
+            return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
+        body = json.loads(request.content)
+        ts = f"999.{len(posted) + 1}00"
+        posted.append(
+            {
+                "ts": ts,
+                "thread_ts": body.get("thread_ts"),
+                "text": body["text"],
+                "metadata": body["metadata"],
+            }
+        )
+        if not lost:
+            lost = True
+            raise httpx.ReadTimeout(
+                "response lost after Slack accepted the message", request=request
+            )
+        return httpx.Response(200, json={"ok": True, "channel": "D9", "ts": ts})
+
+    app, _, blob = await _mount_transport(
+        monkeypatch, workspace_id, tmp_path, httpx.MockTransport(handler)
+    )
+    turn_id = await _seed_done_turn(
+        workspace_id, "D9", "here you go", blob, artifact=False, speaker_member_id=member_id
+    )
+    await _mirror_dm(workspace_id, turn_id, "7.0")
+
+    await app.state.writeback_poller.drain()
+    await _mirror_dm(workspace_id, turn_id, "9.0")
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.writeback)
+            .where(tables.writeback.c.turn_id == turn_id)
+            .values(claim_expires_at=None)
+        )
+    await app.state.writeback_poller.drain()
+
+    assert [message["thread_ts"] for message in posted] == ["7.0"]
+    reconciliations = [
+        request
+        for request in recorder
+        if str(request.url).split("?")[0] == slack.SLACK_CONVERSATIONS_REPLIES_URL
+    ]
+    assert [request.url.params["ts"] for request in reconciliations] == ["7.0"]
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.writeback.c.status, tables.writeback.c.reply_ref).where(
+                    tables.writeback.c.turn_id == turn_id
+                )
+            )
+        ).one()
+    assert (row.status, row.reply_ref) == (WRITEBACK_DELIVERED, "D9:999.100")
+
+
 async def test_a_dm_turn_answering_no_member_message_replies_at_the_top_level(
     db: None, tmp_path, monkeypatch
 ) -> None:
     """A scheduled run and an alert-woken turn answer no message of the member's, so they have
     nothing to thread under: the reply founds its own thread at the DM top level and its file lands
-    there too, rather than hanging under whatever the member last asked."""
+    there too, rather than hanging under whatever the member last asked — which the conversation's
+    mirror still names."""
     workspace_id, _ = await _seed()
     recorder: list[httpx.Request] = []
     app, _, blob = await _mount(monkeypatch, workspace_id, tmp_path, recorder)
     with ws(workspace_id):
         await blob.put("artifacts/a/report.pdf", b"PDF-CONTENT")
-    await _seed_done_turn(workspace_id, "D5", "the nightly digest", blob, artifact=True)
+    turn_id = await _seed_done_turn(workspace_id, "D5", "the nightly digest", blob, artifact=True)
+    await _mirror_dm(workspace_id, turn_id, "200.5")
 
     await app.state.writeback_poller.drain()
 
