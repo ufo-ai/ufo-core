@@ -53,6 +53,7 @@ def _trigger(resource: str) -> SourceTrigger:
         resource=resource,
         streams=(),
         delivery="current",
+        paused=False,
         created_by_member_id=None,
         created_at=now,
         updated_at=now,

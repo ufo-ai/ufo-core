@@ -42,6 +42,7 @@ source_trigger = sa.Table(
     sa.Column("resource", sa.Text, nullable=False, server_default=""),
     sa.Column("streams", sa.Text, nullable=False, server_default=""),
     sa.Column("delivery", sa.Text, nullable=False),
+    sa.Column("paused", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -62,6 +63,7 @@ _COLUMNS = (
     source_trigger.c.connection_id,
     source_trigger.c.resource,
     source_trigger.c.streams,
+    source_trigger.c.paused,
     source_trigger.c.created_by_member_id,
     source_trigger.c.created_at,
     source_trigger.c.updated_at,
@@ -83,6 +85,7 @@ class SourceTrigger:
     resource: str
     streams: tuple[str, ...]
     delivery: SourceTriggerDelivery
+    paused: bool
     created_by_member_id: UUID | None
     created_at: datetime
     updated_at: datetime
@@ -115,6 +118,7 @@ def _trigger(row: sa.RowMapping) -> SourceTrigger:
         resource=row["resource"],
         streams=tuple(row["streams"].split(",")) if row["streams"] else (),
         delivery="current",
+        paused=bool(row["paused"]),
         created_by_member_id=row["created_by_member_id"],
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
@@ -160,6 +164,7 @@ class SourceTriggerStore:
             "resource": resource,
             "streams": ",".join(sorted(streams)),
             "delivery": delivery,
+            "paused": False,
             "created_by_member_id": created_by_member_id,
             "created_at": sa.func.now(),
             "updated_at": sa.func.now(),
@@ -185,6 +190,35 @@ class SourceTriggerStore:
             watched = repr(resource) if resource else "this feed"
             narrowed = f"{watched} on {', '.join(sorted(streams))}" if streams else watched
             raise ValueError(f"this conversation already watches {narrowed}")
+        return _trigger(row)
+
+    async def set_paused(self, expected: SourceTrigger, paused: bool) -> SourceTrigger:
+        """Stop this trigger waking its conversation, or start it again. Pausing is the whole of
+        what a standing trigger can be changed to: the connection, resource, streams and
+        conversation it names are its identity, and those are applied under a new name or not at
+        all."""
+        agent_id = object_agent_id()
+        if expected.agent_id != agent_id:
+            raise ValueError("source trigger executor changed while pausing")
+        async with self.ctx.transaction() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.update(source_trigger)
+                        .where(
+                            source_trigger.c.workspace_id == self.workspace_id,
+                            source_trigger.c.id == expected.id,
+                            source_trigger.c.agent_id == expected.agent_id,
+                        )
+                        .values(paused=paused, updated_at=sa.func.now())
+                        .returning(*_COLUMNS)
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise ValueError(f"source trigger {expected.id} changed while pausing")
         return _trigger(row)
 
     async def remove(self, expected: SourceTrigger) -> None:
@@ -221,13 +255,16 @@ class SourceTriggerStore:
         return frozenset((row.connection_id, row.resource) for row in rows)
 
     async def waking(self, connection_id: UUID) -> tuple[SourceTrigger, ...]:
-        """Every trigger for this connection, workspace-wide — the alert sweep's read, the
+        """Every running trigger for this connection, workspace-wide — the alert sweep's read, the
         whole-feed triggers and the narrowed ones in one pass, oldest first with the id breaking a
         tie, so one batch wakes conversations in the order they subscribed. It spans agents on
-        purpose: a connection belongs to the workspace, and each row names its agent."""
+        purpose: a connection belongs to the workspace, and each row names its agent. A paused
+        trigger is absent: pausing is what stops the wake, and the row stays for the member who
+        resumes it."""
         query = sa.select(*_COLUMNS).where(
             source_trigger.c.workspace_id == self.workspace_id,
             source_trigger.c.connection_id == connection_id,
+            source_trigger.c.paused == sa.false(),
         )
         async with self.ctx.transaction() as connection:
             rows = (await connection.execute(query)).mappings().all()

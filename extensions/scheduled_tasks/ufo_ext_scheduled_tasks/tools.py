@@ -12,6 +12,7 @@ object surface. It converges member ingress and timer expiry on one resume turn 
 the arbitration simply moved to where the race is, into the fire's `unless_member_since` guard."""
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
@@ -27,6 +28,7 @@ from ufo.sdk.objects import (
     AdminRequired,
     ConversationObjectGrant,
     GeneratedObjectOwner,
+    MemberObject,
     MemberReadableObjects,
     ObjectDetail,
     ObjectKind,
@@ -196,21 +198,48 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         admin: bool,
         query: ObjectListQuery,
     ) -> ObjectPage:
+        conversation_id: UUID | None = None
         conversation = query.filters.get("conversation")
-        if not isinstance(conversation, str):
-            return await super().member_page(ext, member_id=member_id, admin=admin, query=query)
-        try:
-            conversation_id = UUID(conversation)
-        except ValueError:
-            return object_page((), query)
+        if isinstance(conversation, str):
+            try:
+                conversation_id = UUID(conversation)
+            except ValueError:
+                return object_page((), query)
         rows = tuple(
             ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
             for row in await self._rows(
-                ext, member_id=member_id, conversation_id=conversation_id, prompt_max=None
+                ext,
+                member_id=member_id,
+                conversation_id=conversation_id,
+                prompt_max=None,
+                admin=admin,
             )
-            if self._visible(row.owner, member_id, admin)
+            if self._visible(row.owner, member_id, admin) and self._listed(row, query)
         )
         return object_page(rows, query)
+
+    async def member_detail(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[ScheduledTaskSpec] | None:
+        """One task as a signed-in member reads it. The base reads rows without knowing whether the
+        reader administers the workspace; a disclosure is an admin's alone, so this kind reads them
+        itself and hands the same answer to the row and to the spec."""
+        rows = await self._rows(ext, member_id=member_id, prompt_max=None, admin=admin)
+        found = next((row for row in rows if row.name == name), None)
+        if found is None or not self._visible(found.owner, member_id, admin):
+            return None
+        detail = await self._member_object(ext, name, found.owner, member_id=member_id, admin=admin)
+        if detail is None:
+            return None
+        return MemberObject(
+            row=ObjectRow(name=found.name, summary=found.summary, fields=found.fields),
+            detail=detail,
+        )
 
     async def member_conversation_rows(
         self,
@@ -224,11 +253,12 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         tasks = await _require_scheduler(ext).list_reported(
             conversation_id=conversation_id, limit=limit
         )
+        disclosed = await self._disclosed(ext, tasks, member_id=member_id, admin=admin)
         return tuple(
             ConversationObjectGrant(
                 name=listed.task.name,
                 generation=listed.task.id,
-                content_visible=task_content_visible(listed, member_id),
+                content_visible=task_content_visible(listed, member_id, disclosed),
             )
             for listed in tasks
             if self._visible(_owner(listed), member_id, admin)
@@ -238,6 +268,20 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         self, ext: ExtensionContext | None, *, member_id: UUID | None
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         return await self._rows(ext, member_id=member_id, prompt_max=None)
+
+    async def _disclosed(
+        self,
+        ext: ExtensionContext | None,
+        listed_rows: Sequence[ListedTask],
+        *,
+        member_id: UUID | None,
+        admin: bool,
+    ) -> frozenset[UUID]:
+        if not admin or member_id is None:
+            return frozenset()
+        return await _require_ext(ext).disclosed_conversations(
+            member_id, tuple({listed.task.conversation_id for listed in listed_rows})
+        )
 
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         """The rows a turn reads. One `object_list` puts a whole page of these in the model's
@@ -255,48 +299,48 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         member_id: UUID | None,
         prompt_max: int | None,
         conversation_id: UUID | None = None,
+        admin: bool = False,
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         scheduler = _require_scheduler(ext)
         listed_rows = await scheduler.list_reported(conversation_id=conversation_id)
+        disclosed = await self._disclosed(ext, listed_rows, member_id=member_id, admin=admin)
         emails = await owner_emails(row.task.created_by_member_id for row in listed_rows)
         inspections = await scheduler.inspect_many(tuple(listed.task for listed in listed_rows))
         endings = {task_id: found.last_turn_status for task_id, found in inspections.items()}
-        return tuple(
-            OwnedRow(
-                name=listed.task.name,
-                summary=(
-                    _summary(listed.task)
-                    if task_content_visible(listed, member_id)
-                    else f"{listed.task.schedule} — {PRIVATE_PROMPT}"
-                ),
-                owner=_owner(listed),
-                fields={
-                    "id": str(listed.task.id),
-                    "conversation": str(listed.task.conversation_id),
-                    "schedule": listed.task.schedule,
-                    "description": (
-                        listed.task.description if task_content_visible(listed, member_id) else ""
+        rows: list[OwnedRow[GeneratedObjectOwner]] = []
+        for listed in listed_rows:
+            readable = task_content_visible(listed, member_id, disclosed)
+            rows.append(
+                OwnedRow(
+                    name=listed.task.name,
+                    summary=(
+                        _summary(listed.task)
+                        if readable
+                        else f"{listed.task.schedule} — {PRIVATE_PROMPT}"
                     ),
-                    "next_run_at": listed.task.next_run_at.isoformat(),
-                    "last_run_at": (
-                        None
-                        if listed.task.last_run_at is None
-                        else listed.task.last_run_at.isoformat()
-                    ),
-                    "last_run_status": endings.get(listed.task.id),
-                    "paused": listed.task.paused,
-                    "owner_email": emails.get(listed.task.created_by_member_id),
-                    "origin": listed.surface_label or "Portal",
-                    "mine": listed.task.created_by_member_id == member_id,
-                    "prompt": (
-                        listed.task.prompt[:prompt_max]
-                        if task_content_visible(listed, member_id)
-                        else PRIVATE_PROMPT
-                    ),
-                },
+                    owner=_owner(listed),
+                    fields={
+                        "id": str(listed.task.id),
+                        "conversation": str(listed.task.conversation_id),
+                        "schedule": listed.task.schedule,
+                        "description": listed.task.description if readable else "",
+                        "next_run_at": listed.task.next_run_at.isoformat(),
+                        "last_run_at": (
+                            None
+                            if listed.task.last_run_at is None
+                            else listed.task.last_run_at.isoformat()
+                        ),
+                        "last_run_status": endings.get(listed.task.id),
+                        "paused": listed.task.paused,
+                        "owner_email": emails.get(listed.task.created_by_member_id),
+                        "origin": listed.surface_label or "Portal",
+                        "mine": listed.task.created_by_member_id == member_id,
+                        "readable": readable,
+                        "prompt": (listed.task.prompt[:prompt_max] if readable else PRIVATE_PROMPT),
+                    },
+                )
             )
-            for listed in listed_rows
-        )
+        return tuple(rows)
 
     async def _member_object(
         self,
@@ -305,6 +349,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         owner: GeneratedObjectOwner,
         *,
         member_id: UUID | None,
+        admin: bool = False,
     ) -> ObjectDetail[ScheduledTaskSpec] | None:
         listed = await self._find(ext, name)
         if listed is None or listed.task.id != owner.generation:
@@ -326,7 +371,11 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     target=ObjectRef(kind=CONVERSATION_KIND, name=str(task.conversation_id)),
                 ),
             ),
-            spec_visible=task_content_visible(listed, member_id),
+            spec_visible=task_content_visible(
+                listed,
+                member_id,
+                await self._disclosed(ext, (listed,), member_id=member_id, admin=admin),
+            ),
         )
 
     async def _status(
@@ -466,7 +515,10 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "never moves where it reports. A task is as visible as the conversation it reports into: "
         "one reporting into a shared conversation is listed and read by every member, one "
         "reporting into a member's own conversation by that member alone, and a private or "
-        "externally-shared channel's tasks by nobody else at all. Seeing a task is not changing "
+        "externally-shared channel's tasks by nobody else at all. An admin lists another member's "
+        "private task as a management row and reads its content only after recording the "
+        "`read_private_transcript` acknowledgement on the conversation it reports into; `readable` "
+        "says whether the reader sees that content. Seeing a task is not changing "
         "it — only its creator may edit or delete it, and an admin may inspect or change another "
         "member's cadence, expiry, or pause, or delete it, but cannot alter its prompt or "
         "description. The main agent may name another agent only when updating that agent's "
@@ -502,6 +554,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
             "owner_email",
             "origin",
             "mine",
+            "readable",
             "prompt",
         }
     ),

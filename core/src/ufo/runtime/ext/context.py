@@ -64,6 +64,7 @@ from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.runtime.ext.surface import (
     OPERATOR_EMAIL_DOMAIN,
     TERMINAL_TURN_STATUSES,
+    TRANSCRIPT_ACCESS_WINDOW,
     ScheduledRun,
     SharedArtifact,
     SurfaceInstallationAccess,
@@ -2041,6 +2042,32 @@ class ExtensionContext:
             )
             for row in rows
         }
+
+    async def disclosed_conversations(
+        self, member_id: UUID, conversation_ids: tuple[UUID, ...]
+    ) -> frozenset[UUID]:
+        """Which of these conversations this member has an open disclosure on: the ones they
+        acknowledged with `read_private_transcript` inside `TRANSCRIPT_ACCESS_WINDOW`, which is the
+        one sanctioned way an admin reads another member's private content. A member-facing listing
+        whose rows report into conversations answers content visibility from this beside the
+        audience, so a row's words open exactly as long as the transcript it reports into does and
+        a second reading is a second recorded access. The caller establishes that the member is an
+        admin — nobody else can hold a row here."""
+        if not conversation_ids:
+            return frozenset()
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.transcript_access.c.conversation_id).where(
+                        tables.transcript_access.c.workspace_id == self.workspace_id,
+                        tables.transcript_access.c.reader_member_id == member_id,
+                        tables.transcript_access.c.conversation_id.in_(conversation_ids),
+                        tables.transcript_access.c.created_at
+                        >= datetime.now(UTC) - TRANSCRIPT_ACCESS_WINDOW,
+                    )
+                )
+            ).all()
+        return frozenset(row.conversation_id for row in rows)
 
     async def conversation_arrival_seq(self, conversation_id: UUID) -> int:
         """How far this conversation's member arrivals have got: the highest `seq` a member-sourced

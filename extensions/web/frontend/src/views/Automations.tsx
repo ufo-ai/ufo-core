@@ -3,9 +3,11 @@ import { IconClockPlay, IconPlayerPause, IconPlus } from "@tabler/icons-react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Field, Input, Textarea } from "@/components/ui/field";
+import { MarkTile } from "@/components/ui/item";
 import { Sheet } from "@/components/ui/sheet";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Td, TdFact, TdFill } from "@/components/ui/table";
-import { CardGrid } from "@/kernel/cards";
+import { rowControl } from "@/kernel/row";
 import type { ObjectRow, ObjectValue } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import { Pager } from "@/kernel/pager";
@@ -53,6 +55,7 @@ import { newChatHash } from "@/lib/route";
 import { navigate } from "@/lib/router";
 import type { SpecSchema } from "@/lib/types";
 import { ChatPane } from "@/views/ChatPane";
+import { DiscloseBand } from "@/views/Conversations";
 
 const TURN_KIND = "turn";
 const TASK_KIND = "scheduled_task";
@@ -92,7 +95,20 @@ const PART_COUNT = "-";
 const NOT_FOUND = 404;
 const NAME_UNREAD = "The automations could not be read. Try again.";
 const WATCHING = "Watching ";
+const PRIVATE_AUTOMATION = "Private automation";
+const ANOTHER_MEMBER = "another member";
+const EVERY_STREAM = "Every stream synced from ";
+const WHOLE_FEED = "the whole feed of ";
+const ON = " on ";
 const NEVER_RAN = "No run yet";
+/** The surface a connection card draws, which these cards share: one radius, one hairline, one
+ *  ground, so the two grids read as one product. */
+const HERO_CARD = "flex flex-col gap-2xl rounded-card border border-edge bg-raised p-2xl";
+const HERO_LINE = "m-0 line-clamp-2 text-small text-ink-soft";
+const HERO_PLACES = [0, 1, 2];
+const HERO_LINES = ["w-full", "w-4/5"];
+/** A blank the type sets a line box on, which the skeleton over it is then the height of. */
+const BLANK = "\u00a0";
 const NO_RUNS_FOR_ONE = "No run yet. It will report into ";
 const NO_AUTOMATIONS = "No automation yet.";
 const NOT_ON_PAGE = "That item is not on this page.";
@@ -172,10 +188,16 @@ type Entry = {
   name: string;
   label: string;
   conversation: string;
+  owner: string;
+  readable: boolean;
   prompt: string;
   schedule: string;
   watching: string;
+  feed: string;
   provider: string;
+  connection: string;
+  resource: string;
+  streams: string[];
   nextRunAt: string;
   lastRunAt: string;
   paused: boolean;
@@ -224,10 +246,16 @@ function taskEntry(row: IndexRow): Entry {
     name: row.name,
     label: said(row.description) || firstLine(said(row.prompt)) || row.name,
     conversation: said(row.conversation),
+    owner: said(row.owner_email),
+    readable: row.readable !== false,
     prompt: said(row.prompt),
     schedule: said(row.schedule),
     watching: "",
+    feed: "",
     provider: "",
+    connection: "",
+    resource: "",
+    streams: [],
     nextRunAt: paused ? "" : said(row.next_run_at),
     lastRunAt: said(row.last_run_at),
     paused,
@@ -239,22 +267,28 @@ function taskEntry(row: IndexRow): Entry {
  *  the streams of it that wake a conversation, never the account behind the feed. */
 function triggerEntry(row: IndexRow): Entry {
   const resource = said(row.resource);
-  const watched = [said(row.provider_label), ...said(row.streams).split(",")]
-    .filter(Boolean)
-    .join(" ");
+  const streams = said(row.streams).split(",").filter(Boolean);
+  const feed = said(row.provider_label) || said(row.provider);
+  const watched = [feed, ...streams].filter(Boolean).join(" ");
   return {
     agent: row.agent_id,
     kind: TRIGGER_KIND,
     name: row.name,
     label: WATCHING + (resource || watched),
     conversation: said(row.conversation),
+    owner: said(row.owner_email),
+    readable: true,
     prompt: "",
     schedule: "",
     watching: watched,
+    feed,
     provider: said(row.provider),
+    connection: said(row.connection),
+    resource,
+    streams,
     nextRunAt: "",
     lastRunAt: said(row.last_run_at),
-    paused: false,
+    paused: row.paused === true,
     mine: row.mine === true,
   };
 }
@@ -322,12 +356,18 @@ function runAt(id: string): { agent: string; name: string } {
   return { agent, name };
 }
 
-/** When the automation runs next, as the Details pane states it: a task says its next fire, a
- *  trigger says the feed it wakes on, and a stopped task says it is stopped. */
-function whenLine(entry: Entry): ReactNode {
-  if (entry.paused) return PAUSED;
-  if (entry.kind === TRIGGER_KIND) return entry.watching;
-  return entry.nextRunAt ? <Moment at={entry.nextRunAt} /> : NEVER_RAN;
+/** The streams that wake a trigger and the resource they are watched on — every stream the
+ *  connection syncs, or its whole feed, where the trigger narrows to neither. */
+function watchedLine(entry: Entry): string {
+  const streams = entry.streams.length
+    ? entry.streams.map(streamWords).join(", ")
+    : EVERY_STREAM + entry.feed;
+  const scope = entry.resource || WHOLE_FEED + entry.feed;
+  return `${streams}${ON}${scope}`;
+}
+
+function streamWords(stream: string): string {
+  return stream.replaceAll("_", " ");
 }
 
 function RunMark({ status }: { status: string }) {
@@ -522,13 +562,50 @@ function TaskFields({
   );
 }
 
-/** A trigger fires on the feed it watches rather than on a clock, so its Details state what it is
- *  called and what wakes it. */
-function TriggerInfo({ entry }: { entry: Entry }) {
+/** What wakes the trigger, then the two acts a standing one takes. What it watches is its
+ *  identity, so nothing here edits it. */
+function TriggerInfo({
+  entry,
+  applies,
+  deletes,
+  onPause,
+  onDelete,
+}: {
+  entry: Entry;
+  applies: boolean;
+  deletes: boolean;
+  onPause: (paused: boolean) => Promise<NoticeState>;
+  onDelete: () => Promise<NoticeState>;
+}) {
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
+  async function act(run: Promise<NoticeState>): Promise<void> {
+    const outcome = await run;
+    setNotice(outcome.refused ? outcome : QUIET);
+  }
   return (
     <div className="flex shrink-0 flex-col gap-2xl">
+      <OutcomeNotice state={notice} />
       <h3 className="m-0 text-subtitle font-medium">{entry.label}</h3>
-      <Stated label={WHEN_TO_RUN}>{whenLine(entry)}</Stated>
+      <Stated label={WHEN_TO_RUN}>{watchedLine(entry)}</Stated>
+      <div className="flex flex-wrap gap-sm">
+        {applies ? (
+          <Button
+            variant="row"
+            disabled={!entry.mine}
+            onClick={() => void act(onPause(!entry.paused))}
+          >
+            {entry.paused ? RESUME : PAUSE}
+          </Button>
+        ) : null}
+        {deletes ? (
+          <ConfirmButton
+            verb={DELETE}
+            variant="row"
+            disabled={!entry.mine}
+            onClick={() => void act(onDelete())}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -659,47 +736,72 @@ function DetailsSheet({
   lane,
   entry,
   deletes,
+  triggerApplies,
+  triggerDeletes,
   after,
   opens,
   onPlace,
   onApply,
+  onPause,
   onDelete,
+  onDisclosed,
 }: {
   lane: AutomationLane;
   entry: Entry | null;
   deletes: boolean;
+  triggerApplies: boolean;
+  triggerDeletes: boolean;
   after: string | undefined;
   opens: string[];
   onPlace: (place: Placement) => void;
   onApply: (entry: Entry, spec: Record<string, SpecValue>) => Promise<NoticeState>;
+  onPause: (entry: Entry, paused: boolean) => Promise<NoticeState>;
   onDelete: (entry: Entry) => Promise<NoticeState>;
+  onDisclosed: () => void;
 }) {
   const shut = () => onPlace({ opens: closed(opens, automationId(lane)), runs: undefined });
+  const ended = async (entry: Entry) => {
+    const outcome = await onDelete(entry);
+    if (!outcome.refused) shut();
+    return outcome;
+  };
   return (
     <Sheet open title={DETAILS} onClose={shut}>
       {entry === null ? (
         <PanelEmpty>{NOT_ON_PAGE}</PanelEmpty>
+      ) : !entry.readable ? (
+        <DiscloseBand
+          agentId={entry.agent}
+          conversationId={entry.conversation}
+          owner={entry.owner || ANOTHER_MEMBER}
+          title={PRIVATE_AUTOMATION}
+          onOpened={onDisclosed}
+        />
       ) : entry.kind === TASK_KIND ? (
         <TaskFields
           entry={entry}
           deletes={deletes}
           onApply={(spec) => onApply(entry, spec)}
-          onDelete={async () => {
-            const outcome = await onDelete(entry);
-            if (!outcome.refused) shut();
-            return outcome;
-          }}
+          onDelete={() => ended(entry)}
         />
       ) : (
-        <TriggerInfo entry={entry} />
+        <TriggerInfo
+          entry={entry}
+          applies={triggerApplies}
+          deletes={triggerDeletes}
+          onPause={(paused) => onPause(entry, paused)}
+          onDelete={() => ended(entry)}
+        />
       )}
-      <RunHistory
-        lane={lane}
-        conversation={entry?.conversation ?? ""}
-        after={after}
-        opens={opens}
-        onPlace={onPlace}
-      />
+      {entry !== null && !entry.readable ? null : (
+        <RunHistory
+          lane={lane}
+          conversation={entry?.conversation ?? ""}
+          after={after}
+          opens={opens}
+          onPlace={onPlace}
+        />
+      )}
     </Sheet>
   );
 }
@@ -786,8 +888,8 @@ function NewAutomation({
   );
 }
 
-/** Ranked where the start screen's starters are, under the automations instructions. A card is
- *  drawn as a connection is: mark in its tile, name, line, and the act that starts it. */
+/** Ranked starters, drawn on the surface a connection card draws. While the ranking is read the
+ *  grid holds three cards of that size, so the answer lands where its placeholder stood. */
 function Heroes({ agentId }: { agentId: string }) {
   const read = usePanelRead<HeroesPayload>(HEROES_READ, 0, HEROES_MS);
   const answered = read.phase === "ready" ? read.payload : null;
@@ -798,24 +900,68 @@ function Heroes({ agentId }: { agentId: string }) {
   };
   return (
     <Section title={EXPLORE} note={EXPLORE_NOTE}>
-      <CardGrid
-        columns={3}
-        rows={heroes}
-        rowKey={(hero) => hero.ask}
-        mark={{
-          shape: "square",
-          body: (hero) => <AgentIcon name={hero.mark} className="size-(--size-brand-mark)" />,
-        }}
-        primary={(hero) => hero.title}
-        body={(hero) => hero.line}
-        action={(hero) => (
-          <Button variant="send" size="bar" onClick={start(hero)}>
-            {CREATE}
-          </Button>
-        )}
-        open={start}
-      />
+      <ul className="m-0 grid list-none grid-cols-3 gap-2xl p-0 max-narrow:grid-cols-1">
+        {read.phase === "loading"
+          ? HERO_PLACES.map((place) => <HeroWaiting key={place} />)
+          : heroes.map((hero) => (
+              <HeroCard key={hero.ask} hero={hero} onStart={start(hero)} />
+            ))}
+      </ul>
     </Section>
+  );
+}
+
+function HeroCard({ hero, onStart }: { hero: Hero; onStart: () => void }) {
+  const control = rowControl(onStart);
+  return (
+    <li {...control} className={cn(HERO_CARD, control.className, "hover:bg-fill")}>
+      <MarkTile>
+        <AgentIcon name={hero.mark} className="size-(--size-brand-mark)" />
+      </MarkTile>
+      <div className="flex min-w-0 flex-col">
+        <span
+          data-part="primary"
+          className="truncate text-body leading-(--leading-chrome) font-medium text-ink"
+        >
+          {hero.title}
+        </span>
+        <p data-part="body" className={HERO_LINE}>
+          {hero.line}
+        </p>
+      </div>
+      <div className="mt-auto flex items-center">
+        <Button variant="send" size="bar" onClick={onStart}>
+          {CREATE}
+        </Button>
+      </div>
+    </li>
+  );
+}
+
+/** Every line is drawn over a blank the card's own type sets the height of, so the settled card
+ *  takes the same room the placeholder held. */
+function HeroWaiting() {
+  return (
+    <li className={HERO_CARD}>
+      <Skeleton className="size-(--size-touch) shrink-0 rounded-control" />
+      <div className="flex min-w-0 flex-col">
+        <span className="relative text-body leading-(--leading-chrome)">
+          {BLANK}
+          <Skeleton className="absolute inset-y-0 left-0 w-3/5" />
+        </span>
+        <p className={cn(HERO_LINE, "m-0")}>
+          {HERO_LINES.map((width, index) => (
+            <span key={index} className="relative block">
+              {BLANK}
+              <Skeleton className={cn("absolute inset-y-0 left-0", width)} />
+            </span>
+          ))}
+        </p>
+      </div>
+      <div className="mt-auto flex items-center">
+        <Skeleton className="h-(--size-control) w-(--size-act) rounded-full" />
+      </div>
+    </li>
   );
 }
 
@@ -842,6 +988,7 @@ export function Automations({
   const entries = payload === null ? [] : entriesOf(payload);
   const owner = mainAgent?.id ?? agents[0]?.id ?? null;
   const held = payload?.kinds.find((one) => one.kind === TASK_KIND) ?? null;
+  const watching = payload?.kinds.find((one) => one.kind === TRIGGER_KIND) ?? null;
   const applies = held?.applies === true;
   const deletes = held?.deletes === true;
   const top = opens[opens.length - 1];
@@ -927,6 +1074,8 @@ export function Automations({
           key={top}
           lane={standing}
           deletes={deletes}
+          triggerApplies={watching?.applies === true}
+          triggerDeletes={watching?.deletes === true}
           after={place.runs}
           entry={
             entries.find(
@@ -941,9 +1090,23 @@ export function Automations({
           onApply={(entry, spec) =>
             submit(entry.agent, { verb: "apply", kind: entry.kind, name: entry.name, spec })
           }
+          onPause={(entry, paused) =>
+            submit(entry.agent, {
+              verb: "apply",
+              kind: TRIGGER_KIND,
+              name: entry.name,
+              spec: {
+                connection: entry.connection,
+                resource: entry.resource,
+                streams: entry.streams,
+                paused,
+              },
+            })
+          }
           onDelete={(entry) =>
             submit(entry.agent, { verb: "delete", kind: entry.kind, name: entry.name })
           }
+          onDisclosed={() => setReloads((count) => count + 1)}
         />
       ) : top.startsWith(RUN_PREFIX) ? (
         <RunSheet key={top} id={top} opens={opens} onPlace={onPlace} />

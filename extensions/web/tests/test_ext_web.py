@@ -8537,20 +8537,49 @@ async def test_an_intent_naming_another_kind_is_refused_at_validation(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_delete_only_kind_admits_a_delete_and_refuses_an_apply(
+async def test_a_credential_admits_a_delete_and_refuses_an_apply(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """A source trigger is created from its owning conversation, and this lane runs on the
-    member's own intent conversation, so the portal can only ever end one. The lane refuses apply
-    at validation, before a turn exists, and the object read the screen is drawn from carries that
-    same answer — `deletes` without `applies` — so no control is offered that the lane would
+    """A credential's value is set through its private prompt, never a spec, so the lane refuses
+    apply at validation, before a turn exists, and the object read the screen is drawn from carries
+    that same answer — `deletes` without `applies` — so no control is offered that the lane would
     refuse."""
     client, workspace_id, agent_id = web
     _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/intents",
-        json={"verb": "apply", "kind": "source_trigger", "name": "x", "spec": {"source": "y"}},
+        json={"verb": "apply", "kind": "credential", "name": "x", "spec": {"value": "y"}},
+        headers=cookie,
+    )
+    assert refused.status_code == 400
+    index = await client.get(f"/surface/web/objects/credential?agent={agent_id}", headers=cookie)
+    assert index.status_code == 200
+    assert index.json()["applies"] is False
+    assert index.json()["deletes"] is True
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_panel_pauses_a_source_trigger_and_never_creates_one(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """A source trigger is created from the conversation it wakes, and this lane runs on the
+    member's own intent conversation, so a panel never creates one: an apply that carries no
+    `paused` is refused at validation, before a turn exists. Pausing is the one field a standing
+    trigger changes, so the lane admits that apply and the object read carries both `applies` and
+    `deletes` — the controls the screen draws."""
+    client, workspace_id, agent_id = web
+    _admin_id, token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "source_trigger",
+            "name": "x",
+            "spec": {"connection": "y"},
+        },
         headers=cookie,
     )
     assert refused.status_code == 400
@@ -8558,7 +8587,7 @@ async def test_a_delete_only_kind_admits_a_delete_and_refuses_an_apply(
         f"/surface/web/objects/source_trigger?agent={agent_id}", headers=cookie
     )
     assert index.status_code == 200
-    assert index.json()["applies"] is False
+    assert index.json()["applies"] is True
     assert index.json()["deletes"] is True
 
 

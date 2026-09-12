@@ -108,7 +108,7 @@ parenthesis and an escaped newline written as two characters."""
 LINK_TRAIL = ".,;:!?*"
 CHANGE_LOG_DIR = "sources"
 DISPOSITIONS = ("added", "updated", "removed")
-TRIGGER_GATE = "only the member who created a source trigger may change it"
+TRIGGER_GATE = "only the trigger's creator may change it; an admin may pause or resume it"
 TRIGGER_DELETE_GATE = "only the trigger's creator or a workspace admin may delete a source trigger"
 
 
@@ -202,6 +202,15 @@ class SourceTriggerSpec(BaseModel):
         title="Delivery",
         description="Current delivery wakes this conversation for each batch of changes.",
     )
+    paused: bool = Field(
+        default=False,
+        title="Paused",
+        description=(
+            "True stops the trigger waking its conversation without losing it; false wakes it "
+            "again from the next batch of changes. It is the one field an apply on a standing "
+            "trigger may change."
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -227,13 +236,18 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
     """The kind's handlers over the trigger store: a trigger is seen by whoever reads the
     conversation that owns it, plus its creator and a workspace admin — the gate is the base's, and
     this kind supplies only the `shared` fact it decides from, taken from that conversation's
-    audience. Deleting stays the creator's and an admin's, so a member reading a shared trigger is
-    never a member who can silence it. A trigger whose connection is gone is absent from every read
-    here: disconnecting the account cascaded its rows away."""
+    audience. Pausing and deleting stay the creator's and an admin's, so a member reading a shared
+    trigger is never a member who can silence it. A trigger whose connection is gone is absent from
+    every read here: disconnecting the account cascaded its rows away."""
 
     kind_name: ClassVar[str] = SOURCE_TRIGGER_KIND
     mutate_gate: ClassVar[str] = TRIGGER_GATE
     delete_gate: ClassVar[str] = TRIGGER_DELETE_GATE
+
+    def _admin_can_apply(self, old: SourceTriggerSpec, spec: SourceTriggerSpec) -> bool:
+        """Pausing is management and an admin's, the same acts the delete gate already gives them;
+        nothing else on a trigger can be applied in place at all."""
+        return spec.paused != old.paused
 
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
@@ -259,6 +273,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                     "resource": row.listed.trigger.resource,
                     "streams": ",".join(row.listed.trigger.streams),
                     "delivery": row.listed.trigger.delivery,
+                    "paused": row.listed.trigger.paused,
                     "provider": row.connection.provider,
                     "last_run_at": (None if row.name not in fires else fires[row.name].isoformat()),
                     "origin": row.listed.surface_label or "Portal",
@@ -302,6 +317,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                 resource=trigger.resource,
                 streams=trigger.streams,
                 delivery=trigger.delivery,
+                paused=trigger.paused,
             ),
             created_at=trigger.created_at,
             updated_at=trigger.updated_at,
@@ -322,6 +338,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             "resource": trigger.resource,
             "streams": ",".join(trigger.streams),
             "delivery": trigger.delivery,
+            "paused": trigger.paused,
             "origin": found.listed.surface_label or "Portal",
             "owner_email": emails.get(trigger.created_by_member_id),
             "mine": trigger.created_by_member_id == authority_member_id(ctx.authority),
@@ -335,12 +352,16 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         old: SourceTriggerSpec | None,
         owner: GeneratedObjectOwner | None,
     ) -> None:
-        """A trigger has nothing to change — re-applying the one that exists is a no-op — so the
-        only act here is creating one. A resource is read against the connection's provider into the
-        one link the row stores, so every spelling of a pull request is the one trigger. The name is
+        """Creating a trigger, and pausing or resuming a standing one — the trigger's identity is
+        the connection, resource, streams and conversation it names, so nothing else can be changed
+        in place. A resource is read against the connection's provider into the one link the row
+        stores, so every spelling of a pull request is the one trigger. On a create the name is
         checked before any write, because it names the conversation: applying the name of a trigger
         some other conversation already holds would otherwise report success for a conversation no
-        row was written for."""
+        row was written for — which is also what keeps the portal's lane, whose turn runs in the
+        member's own intent conversation, from creating a trigger there. What the connection syncs
+        today is weighed on the create alone: a stream the feed stopped carrying is when a member
+        reaches for Pause, and refusing it would leave the trigger standing and unstoppable."""
         connection = await self._watchable(ctx, spec.connection)
         if spec.resource:
             resource = canonical_resource(connection.provider, spec.resource)
@@ -350,6 +371,22 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                     f"a {SOURCE_TRIGGER_KIND} narrows to"
                 )
             spec = spec.model_copy(update={"resource": resource})
+        if spec.streams:
+            spec = spec.model_copy(update={"streams": tuple(sorted(set(spec.streams)))})
+        if owner is not None:
+            found = await self._find(ctx.ext, name)
+            if found is None or found.listed.trigger.id != owner.generation:
+                raise ValueError(f"{SOURCE_TRIGGER_KIND} {name!r} changed while editing")
+            trigger = found.listed.trigger
+            identity = (_feed_name(found.connection), trigger.resource, trigger.streams)
+            if identity != (spec.connection, spec.resource, spec.streams):
+                raise ValueError(
+                    f"a {SOURCE_TRIGGER_KIND} is the connection, resource, streams and "
+                    "conversation it names — delete this one and apply another"
+                )
+            if spec.paused != trigger.paused:
+                await _require_triggers(ctx.ext).set_paused(trigger, spec.paused)
+            return
         if spec.streams:
             synced = frozenset(
                 stream
@@ -362,7 +399,6 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                     f"{spec.connection!r} syncs no {', '.join(unknown)} — it syncs "
                     f"{', '.join(sorted(synced))}"
                 )
-            spec = spec.model_copy(update={"streams": tuple(sorted(set(spec.streams)))})
         expected = trigger_name(
             _feed_name(connection), ctx.turn.conversation_id, spec.resource, spec.streams
         )
@@ -370,13 +406,8 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             raise ValueError(
                 f"a {SOURCE_TRIGGER_KIND} is named for the triple it is — apply it as {expected!r}"
             )
-        if owner is not None:
-            if old == spec:
-                return
-            raise ValueError(
-                f"a {SOURCE_TRIGGER_KIND} is the connection, resource, streams and conversation "
-                "it names — delete this one and apply another"
-            )
+        if spec.paused:
+            raise ValueError(f"a new {SOURCE_TRIGGER_KIND} watches from the moment it is applied")
         await _require_triggers(ctx.ext).create(
             conversation_id=ctx.turn.conversation_id,
             connection_id=connection.id,
@@ -775,7 +806,7 @@ SOURCE_TRIGGER_OBJECT = ObjectKind(
     description=(
         "A standing wake-up for one shared connection's feed, or for one resource or some "
         "streams of it: each batch of changed pages wakes a conversation. Only its creator or an "
-        "admin may delete it."
+        "admin may pause or delete it."
     ),
     guidance=(
         "Apply a manifest naming a shared connection with `delivery: current` to wake this "
@@ -789,7 +820,11 @@ SOURCE_TRIGGER_OBJECT = ObjectKind(
         f"A {SOURCE_TRIGGER_KIND} IS the connection, resource, streams, and owning conversation "
         "it names, so its name derives from all of them. Delete it to stop. A private or unknown "
         "connection cannot be watched. Disconnecting the account removes every trigger on it. "
-        "Listing returns `connection`, `resource`, `streams`, `delivery`, the owning "
+        "Applying `paused: true` on a standing trigger stops it waking the conversation and keeps "
+        "it; false wakes it again from the next batch. That is the one field an apply may change — "
+        "an apply naming a different connection, resource or streams is refused, and an admin who "
+        "did not create it may pause, resume or delete it and nothing else. "
+        "Listing returns `connection`, `resource`, `streams`, `delivery`, `paused`, the owning "
         "`conversation`, its creator (`owner_email`), `origin`, the `provider` whose feed it "
         "watches, and `last_run_at` — when it last woke a conversation, null until it has."
     ),
@@ -802,6 +837,7 @@ SOURCE_TRIGGER_OBJECT = ObjectKind(
             "resource",
             "streams",
             "delivery",
+            "paused",
             "provider",
             "last_run_at",
             "origin",

@@ -72,6 +72,7 @@ const WATCHED_PULL = owned({
   resource: PULL_REQUEST,
   streams: "pull_requests",
   delivery: "current",
+  paused: false,
   last_run_at: "2026-08-27T18:00:00+00:00",
   origin: "Portal",
   mine: true,
@@ -88,9 +89,62 @@ const WATCHED_FEED = owned({
   resource: "",
   streams: "pull_requests",
   delivery: "current",
+  paused: false,
   last_run_at: "2026-08-26T18:00:00+00:00",
   origin: "Portal",
   mine: true,
+});
+
+const WHOLE_CONNECTION = owned({
+  kind: "source_trigger",
+  name: "github-9f2c1a-31c4b2",
+  summary: "github (github account 9f2c1a)",
+  conversation: CONVO_ID,
+  connection: "github-9f2c1a",
+  provider: "github",
+  provider_label: "GitHub",
+  resource: "",
+  streams: "",
+  delivery: "current",
+  paused: false,
+  last_run_at: "2026-08-25T18:00:00+00:00",
+  origin: "Portal",
+  mine: true,
+});
+
+const MANY_STREAMS = owned({
+  kind: "source_trigger",
+  name: "github-9f2c1a-5d20ff",
+  summary: "github (github account 9f2c1a), issues and pull_requests",
+  conversation: CONVO_ID,
+  connection: "github-9f2c1a",
+  provider: "github",
+  provider_label: "GitHub",
+  resource: "",
+  streams: "issues,pull_requests",
+  delivery: "current",
+  paused: false,
+  last_run_at: "2026-08-24T18:00:00+00:00",
+  origin: "Portal",
+  mine: true,
+});
+
+const PRIVATE_TASK = owned({
+  kind: "scheduled_task",
+  name: "morning-brief",
+  summary: "0 9 * * * — private member task",
+  conversation: CONVO_ID,
+  schedule: "0 9 * * *",
+  description: "",
+  prompt: "private member task",
+  readable: false,
+  owner_email: "owner@example.com",
+  next_run_at: "2026-08-28T09:00:00+00:00",
+  last_run_at: null,
+  last_run_status: null,
+  paused: false,
+  origin: "Portal",
+  mine: false,
 });
 
 const RUN = owned({
@@ -132,6 +186,19 @@ const HEROES = [
 
 const LONG_NAME =
   "Digest every change that landed on the nightly branch and everything it touched downstream";
+
+const OPEN_TRANSCRIPT = {
+  name: "read_private_transcript",
+  description: "Record that an admin opened another member's private conversation.",
+  input_schema: { properties: {} },
+  call: {
+    kind: "conversation",
+    action: "read_private_transcript",
+    name: CONVO_ID,
+    input: {},
+  },
+  label: "Open transcript",
+};
 
 const TURN_INDEX = {
   kind: "turn",
@@ -269,8 +336,8 @@ test("a task pauses, resumes and deletes from its own Details", async () => {
   await vi.waitFor(() => expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull());
 });
 
-test("a paused task offers Resume, and a trigger offers neither act", async () => {
-  automationsOnWire();
+test("a paused task offers Resume, and so does a paused trigger", async () => {
+  automationsOnWire([PAUSED_TASK, { ...WATCHED_FEED, paused: true }]);
   location.hash = automationsHash();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -279,10 +346,76 @@ test("a paused task offers Resume, and a trigger offers neither act", async () =
   expect(within(paused).getByRole("button", { name: "Resume" })).toBeTruthy();
 
   await userEvent.click(within(paused).getByRole("button", { name: "Close" }));
+  await userEvent.click(await screen.findByText("Watching GitHub pull_requests"));
+  const stopped = await screen.findByRole("dialog", { name: "Details" });
+  expect(within(stopped).getByRole("button", { name: "Resume" })).toBeTruthy();
+});
+
+test("a trigger pauses and deletes from its own Details, and never edits what it watches", async () => {
+  const posted: Record<string, unknown>[] = [];
+  automationsOnWire(undefined, posted);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
   await userEvent.click(await screen.findByText("Watching " + PULL_REQUEST));
   const watched = await screen.findByRole("dialog", { name: "Details" });
-  expect(within(watched).queryByRole("button", { name: "Pause" })).toBeNull();
-  expect(within(watched).queryByRole("button", { name: "Delete" })).toBeNull();
+  expect(within(watched).queryByLabelText("Name")).toBeNull();
+
+  await userEvent.click(within(watched).getByRole("button", { name: "Pause" }));
+  await vi.waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toEqual({
+    verb: "apply",
+    kind: "source_trigger",
+    name: TRIGGER_NAME,
+    spec: {
+      connection: "github-9f2c1a",
+      resource: PULL_REQUEST,
+      streams: ["pull_requests"],
+      paused: true,
+    },
+  });
+  await within(watched).findByRole("button", { name: "Resume" });
+
+  await userEvent.click(within(watched).getByRole("button", { name: "Delete" }));
+  await userEvent.click(within(watched).getByRole("button", { name: "Confirm delete" }));
+
+  await vi.waitFor(() => expect(posted.length).toBe(2));
+  expect(posted[1]).toEqual({ verb: "delete", kind: "source_trigger", name: TRIGGER_NAME });
+  await vi.waitFor(() => expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull());
+});
+
+test("a trigger another member wrote stands its acts disabled", async () => {
+  automationsOnWire([{ ...WATCHED_PULL, mine: false }]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByText("Watching " + PULL_REQUEST));
+  const watched = await screen.findByRole("dialog", { name: "Details" });
+  expect(within(watched).getByRole("button", { name: "Pause" })).toHaveProperty("disabled", true);
+  expect(within(watched).getByRole("button", { name: "Delete" })).toHaveProperty("disabled", true);
+});
+
+test("a trigger states the streams it watches and the resource it watches them on", async () => {
+  automationsOnWire([WATCHED_PULL, MANY_STREAMS, WHOLE_CONNECTION]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const said = async (name: string) => {
+    await userEvent.click(await screen.findByText(name));
+    const details = await screen.findByRole("dialog", { name: "Details" });
+    const line = within(details).getByText("When to run").nextElementSibling;
+    const words = String(line?.textContent);
+    await userEvent.click(within(details).getByRole("button", { name: "Close" }));
+    return words;
+  };
+
+  expect(await said("Watching " + PULL_REQUEST)).toBe("pull requests on " + PULL_REQUEST);
+  expect(await said("Watching GitHub issues pull_requests")).toBe(
+    "issues, pull requests on the whole feed of GitHub",
+  );
+  expect(await said("Watching GitHub")).toBe(
+    "Every stream synced from GitHub on the whole feed of GitHub",
+  );
 });
 
 test("an automation with no run yet points at the conversation it reports into", async () => {
@@ -521,6 +654,91 @@ test("a task another member wrote states the refusal and stands its cadence disa
   ).toBeTruthy();
 });
 
+test("a private task another member wrote opens the acknowledgement instead of its words", async () => {
+  const posted: { url: string; body: unknown }[] = [];
+  let readable = false;
+  wire({
+    "/read_private_transcript": (url: string, init?: RequestInit) => {
+      posted.push({ url, body: JSON.parse(String(init?.body)) });
+      readable = true;
+      return json({ applied: true, message: "Recorded." });
+    },
+    ["/actions/conversation/" + CONVO_ID + "$"]: () => json({ actions: [OPEN_TRANSCRIPT] }),
+    "/workspace/automations": () => json({ heroes: HEROES }),
+    "/automations": () =>
+      automationsIndex([
+        readable
+          ? {
+              ...PRIVATE_TASK,
+              readable: true,
+              description: "Daily brief",
+              prompt: "write the daily brief",
+            }
+          : PRIVATE_TASK,
+      ]),
+    "/objects/turn": () => json({ ...TURN_INDEX, objects: [], next_cursor: null }),
+  });
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByText("private member task"));
+  const details = await screen.findByRole("dialog", { name: "Details" });
+  expect(within(details).getByText(/private to owner@example.com/).textContent).toContain(
+    "records your email, theirs, and the time",
+  );
+  expect(within(details).queryByLabelText("Name")).toBeNull();
+  expect(within(details).queryByText("Run history")).toBeNull();
+
+  await userEvent.click(within(details).getByRole("button", { name: "Open transcript" }));
+
+  await vi.waitFor(() => expect(posted.length).toBe(1));
+  expect(await within(details).findByDisplayValue("Daily brief")).toBeTruthy();
+  expect(within(details).getByText("Run history")).toBeTruthy();
+});
+
+test("the suggestions hold their cards' place while the ranking is read", async () => {
+  let rank: (() => void) | null = null;
+  const ranked = new Promise<void>((settle) => {
+    rank = settle;
+  });
+  wire({
+    "/workspace/automations": async () => {
+      await ranked;
+      return json({ heroes: HEROES });
+    },
+    "/automations": () => automationsIndex([]),
+    "/objects/turn": () => json({ ...TURN_INDEX, objects: [], next_cursor: null }),
+  });
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const grid = (await screen.findByRole("heading", { name: "Explore automations" })).closest(
+    "section",
+  )!;
+  const waiting = [...grid.querySelectorAll("li")];
+  expect(waiting).toHaveLength(3);
+  expect(waiting[0].querySelectorAll("[data-part=skeleton]")).toHaveLength(5);
+  expect(screen.queryByText(HEROES[0].line)).toBeNull();
+
+  rank!();
+
+  const settled = (await screen.findByText(HEROES[0].line)).closest("li")!;
+  expect(settled.className.split(" ")).toEqual(
+    expect.arrayContaining(waiting[0].className.split(" ")),
+  );
+});
+
+test("a suggestion card draws the surface a connection card draws", async () => {
+  automationsOnWire([]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const card = (await screen.findByText(HEROES[0].line)).closest("li")!;
+  for (const held of ["rounded-card", "border-edge", "bg-raised", "p-2xl"])
+    expect(card.className).toContain(held);
+  expect(card.className).not.toContain("rounded-panel");
+});
+
 test("the New automation act is the header's filled pill, marked with a plus", async () => {
   automationsOnWire();
   location.hash = automationsHash();
@@ -713,10 +931,10 @@ test("a suggestion card is drawn as a connection card is: mark, title, line, and
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const card = (await screen.findByText(HEROES[0].line)).closest("li")!;
-  expect(card.className).toContain("rounded-panel");
+  expect(card.className).toContain("rounded-card");
   expect(card.className).toContain("border-edge");
-  const tile = card.querySelector("[data-part=mark]")!;
-  expect(tile.className).toContain("rounded-panel");
+  const tile = card.querySelector("[data-slot=mark]")!;
+  expect(tile.className).toContain("rounded-control");
   expect(tile.className).toContain("bg-fill");
   expect(tile.querySelector("svg")).toBeTruthy();
   expect(card.querySelector("[data-part=primary]")?.textContent).toBe(HEROES[0].title);

@@ -40,7 +40,7 @@ from ufo_ext_web.audience import granted_emails, web_extension
 INTENT_MAX_BYTES = 65_536
 INTENT_RESULT_TIMEOUT_SECONDS = 120
 ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
-DELETE_ONLY_KINDS = frozenset({"credential", "source_trigger"})
+DELETE_ONLY_KINDS = frozenset({"credential"})
 CONNECT_KINDS = frozenset({"connection"})
 AGENT_SPEC_REQUIRED = frozenset({"model", "internet_access_allowed", "reasoning"})
 DEEPSEEK_FLASH_MODEL = "deepseek/deepseek-v4.1-flash"
@@ -76,9 +76,10 @@ class ApplyIntent(BaseModel):
     `credential` kind pairs the other way: a slot's value is a secret a private prompt collects, so
     only `delete` (clear) names it here, while `credential_slot` — the declaration a workspace
     writes for a provider no extension covers — takes the `apply` and the `delete` of the
-    declaration itself. The `source_trigger` kind pairs that way too: a trigger IS
+    declaration itself. The `source_trigger` kind pairs a third way: a trigger IS
     the conversation it wakes, and the lane runs on the member's intent conversation, so the portal
-    can only ever end one. A delete names its object and carries no spec."""
+    never creates one — its `apply` carries `paused`, the one field a standing trigger changes, and
+    its `delete` ends it. A delete names its object and carries no spec."""
 
     verb: Literal["apply", "delete", "connect", "attach", "detach"]
     kind: Literal[
@@ -129,9 +130,14 @@ class ApplyIntent(BaseModel):
             raise ValueError(
                 "a credential slot's value is set through its private prompt, never a spec"
             )
-        if self.kind == "source_trigger" and self.verb != "delete":
+        if (
+            self.kind == "source_trigger"
+            and self.verb == "apply"
+            and "paused" not in (self.spec or {})
+        ):
             raise ValueError(
-                "a source trigger is created from the conversation it wakes, never from a panel"
+                "a source trigger is created from the conversation it wakes, never from a panel; "
+                "a panel applies its paused state"
             )
         if self.verb == "delete" and self.spec is not None:
             raise ValueError("a delete intent carries no spec")

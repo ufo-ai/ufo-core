@@ -65,6 +65,7 @@ from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent as bind_agent
 from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.surface import record_transcript_access
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.skills.runtime import RuntimeSkill
 from ufo.runtime.sources.sync import feed_handle_for
@@ -581,10 +582,13 @@ async def test_the_automations_read_hides_a_private_task_and_elides_it_for_an_ad
     """Who reads another member's private automation on the Automations screen. A member who is not
     an admin never learns it exists: the row is absent from the listing and its detail is
     not-found, so no row stands there naming a task they can neither read nor act on. An admin
-    lists it as the management row whose cadence is theirs to change, and its content stays
-    elided."""
+    lists it as the management row whose cadence is theirs to change, and its content stays elided
+    until they acknowledge the conversation it reports into — the one sanctioned way into another
+    member's private words. That acknowledgement opens the task with the transcript: the prompt,
+    the description and the spec answer the admin, on the record, for as long as the disclosure
+    stands, and the member who is not an admin still learns nothing."""
     client, workspace_id, agent_a, _agent_b = portal
-    _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
+    admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
     creator_id, _creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
     _other_id, other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
     with ws(workspace_id):
@@ -611,9 +615,27 @@ async def test_the_automations_read_hides_a_private_task_and_elides_it_for_an_ad
     assert row["prompt"] == PRIVATE_PROMPT
     assert row["summary"] == f"0 9 * * * — {PRIVATE_PROMPT}"
     assert row["mine"] is False
+    assert row["readable"] is False
     read = await client.get(detail, headers=admin_headers)
     assert read.json()["spec"] is None
     assert read.json()["status"]["next_run_at"] == NEXT_RUN.isoformat()
+
+    with ws(workspace_id):
+        recorded = await record_transcript_access(workspace_id, private, agent_a, admin_id)
+    assert recorded is not None
+
+    disclosed = await client.get("/surface/web/automations", headers=admin_headers)
+    (opened,) = disclosed.json()["objects"]
+    assert opened["prompt"] == "write the daily brief"
+    assert opened["description"] == "daily brief"
+    assert opened["summary"] == "0 9 * * * — daily brief"
+    assert opened["readable"] is True
+    assert opened["mine"] is False
+    opened_detail = await client.get(detail, headers=admin_headers)
+    assert opened_detail.json()["spec"]["prompt"] == "write the daily brief"
+
+    still_hidden = await client.get("/surface/web/automations", headers=other_headers)
+    assert still_hidden.json()["objects"] == []
 
 
 async def test_skills_list_the_workspaces_own_and_the_deploys(portal) -> None:

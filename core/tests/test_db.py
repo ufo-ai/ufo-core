@@ -542,7 +542,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "memory_0025",
         "sample_ext_note_0001",
         "scheduled_tasks_0001",
-        "sources_0006",
+        "sources_0007",
         "monitors_0001",
         "skill_create_0004",
         "coding_0004",
@@ -1105,6 +1105,27 @@ def test_the_trigger_tables_merge_onto_one_keyed_by_resource(tmp_path: Path) -> 
         ).fetchone()
     assert {delivery for _, delivery in normalized} == {"current"}
     assert defaulted == ("current",)
+    command.upgrade(config, "sources_0007")
+    running_id = uuid4()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "insert into source_trigger (id, workspace_id, conversation_id, agent_id, "
+            "connection_id, resource, created_by_member_id, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                running_id.hex,
+                workspace_id.hex,
+                conversation_id.hex,
+                agent_id.hex,
+                connection_id.hex,
+                "https://github.com/metalcraftai/ufo/pull/3509",
+                member_id.hex,
+                now,
+                now,
+            ),
+        )
+        paused = connection.execute("select paused from source_trigger").fetchall()
+    assert {state for (state,) in paused} == {0}
 
 
 SOURCE_AUTHORITY_REVISION = "20260907150257"

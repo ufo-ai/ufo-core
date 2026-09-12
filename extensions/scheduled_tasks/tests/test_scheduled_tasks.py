@@ -36,6 +36,7 @@ from ufo_ext_scheduled_tasks.schedules import (
 )
 from ufo_ext_scheduled_tasks.schedules import scheduled_task as schedule_table
 from ufo_ext_scheduled_tasks.tools import (
+    PRIVATE_PROMPT,
     PROMPT_EXCERPT_MAX,
     SCHEDULE_MAX,
     SCHEDULED_TASK_KIND,
@@ -62,6 +63,7 @@ from ufo.host.ext.loader import turn_tools
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
+from ufo.runtime.ext.surface import record_transcript_access
 from ufo.runtime.objects import AdminRequired, ObjectListQuery, UnknownObject, VerbNotSupported
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
@@ -1886,6 +1888,48 @@ async def test_admin_edits_a_task_no_member_created(db: None) -> None:
     assert tasks[0].prompt == "v2"
     assert tasks[0].schedule == "0 17 * * 1"
     assert tasks[0].created_by_member_id is None
+
+
+async def test_a_recorded_disclosure_opens_no_task_in_chat(db: None) -> None:
+    """The acknowledgement that opens another member's private transcript is a portal disclosure to
+    one authenticated reader. A turn is not that reader: an agent asked in chat would pull the
+    content into a context that summarizes, embeds and recalls it, so the same admin holding the
+    same open disclosure still reads the task elided here."""
+    workspace_id, agent_id, conversation_id = await _seed()
+    admin = await _member(workspace_id, is_admin=True)
+    creator = await _member(workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(tables.conversation.c.id == conversation_id)
+            .values(member_id=creator, audience=str(conversation_audience(creator)))
+        )
+    creator_ctx = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=creator
+    )
+    admin_ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=admin)
+    private_prompt = "creator's private medical prompt"
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            creator_ctx,
+            manifest=_task_manifest("digest", DAILY_9AM, private_prompt, "private digest"),
+        )
+        assert (
+            await record_transcript_access(workspace_id, conversation_id, agent_id, admin)
+        ) is not None
+        listed = json.loads(
+            await _dispatch(_object_tool("object_list"), admin_ctx, kind=SCHEDULED_TASK_KIND)
+        )
+        read = yaml.safe_load(
+            await _dispatch(
+                _object_tool("object_get"), admin_ctx, ref=f"{SCHEDULED_TASK_KIND}/digest"
+            )
+        )
+    assert private_prompt not in json.dumps((listed, read))
+    [row] = listed["objects"]
+    assert row["prompt"] == PRIVATE_PROMPT
+    assert read["spec"] is None
 
 
 async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> None:

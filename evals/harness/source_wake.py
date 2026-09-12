@@ -43,6 +43,7 @@ def woken_inbound(
             resource=resource,
             streams=(),
             delivery="current",
+            paused=False,
             created_by_member_id=None,
             created_at=WAKE_TIME,
             updated_at=WAKE_TIME,

@@ -26,6 +26,54 @@ function Back({ onBack }: { onBack: () => void }) {
   );
 }
 
+/** The acknowledgement that opens one member's private conversation to an admin, wherever that
+ *  content is read: the transcript itself, and the automations reporting into it, which the same
+ *  disclosure opens. It names whose words they are and what opening records, and reads nothing
+ *  until the act is taken. */
+export function DiscloseBand({
+  agentId,
+  conversationId,
+  owner,
+  title,
+  onOpened,
+}: {
+  agentId: string;
+  conversationId: string;
+  owner: string;
+  title: ReactNode;
+  onOpened: () => void;
+}) {
+  const live = useRef(true);
+  const acts = usePanelRead<{ actions: ActionView[] }>("/actions/conversation/" + conversationId);
+
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+
+  return (
+    <Section title={title}>
+      <p className="m-0 max-w-hint">
+        This conversation is private to {owner} and may contain private information. Opening it
+        records your email, theirs, and the time.
+      </p>
+      <Panel state={acts} loading={() => null} failed={(message) => <Notice>{message}</Notice>}>
+        {({ actions }) => (
+          <ActionControls
+            views={actions}
+            post={(view, input) => postAction(agentId, view.call, input)}
+            onApplied={() => {
+              if (live.current) onOpened();
+            }}
+          />
+        )}
+      </Panel>
+    </Section>
+  );
+}
+
 export function Disclose({
   agent,
   conversation,
@@ -37,40 +85,17 @@ export function Disclose({
   onBack?: () => void;
   onOpened: () => void;
 }) {
-  const live = useRef(true);
   const viewer = useViewer();
-  const owner = conversation.member_email || "another member";
-  const acts = usePanelRead<{ actions: ActionView[] }>(
-    "/actions/conversation/" + conversation.id,
-  );
-
-  useEffect(() => {
-    live.current = true;
-    return () => {
-      live.current = false;
-    };
-  }, []);
-
   return (
     <>
       {onBack ? <Back onBack={onBack} /> : null}
-      <Section title={conversationTitle(conversation, viewer)}>
-        <p className="m-0 max-w-hint">
-          This conversation is private to {owner} and may contain private information. Opening it
-          records your email, theirs, and the time.
-        </p>
-        <Panel state={acts} loading={() => null} failed={(message) => <Notice>{message}</Notice>}>
-          {({ actions }) => (
-            <ActionControls
-              views={actions}
-              post={(view, input) => postAction(agent.id, view.call, input)}
-              onApplied={() => {
-                if (live.current) onOpened();
-              }}
-            />
-          )}
-        </Panel>
-      </Section>
+      <DiscloseBand
+        agentId={agent.id}
+        conversationId={conversation.id}
+        owner={conversation.member_email || "another member"}
+        title={conversationTitle(conversation, viewer)}
+        onOpened={onOpened}
+      />
     </>
   );
 }

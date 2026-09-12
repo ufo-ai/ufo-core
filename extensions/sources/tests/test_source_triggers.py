@@ -330,16 +330,19 @@ def _trigger_manifest(
     delivery: str = "current",
     resource: str = "",
     streams: tuple[str, ...] = (),
+    paused: bool = False,
+    name: str | None = None,
 ) -> str:
     return yaml.safe_dump(
         {
             "kind": SOURCE_TRIGGER_KIND,
-            "name": trigger_name(feed.name, conversation_id, resource, streams),
+            "name": name or trigger_name(feed.name, conversation_id, resource, streams),
             "spec": {
                 "connection": feed.name,
                 "delivery": delivery,
                 "resource": resource,
                 "streams": list(streams),
+                "paused": paused,
             },
         }
     )
@@ -477,6 +480,7 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
         assert fetched["spec"] == {
             "connection": feed.name,
             "delivery": "current",
+            "paused": False,
             "resource": "",
             "streams": [],
         }
@@ -495,6 +499,115 @@ async def test_a_trigger_wakes_its_own_conversation_until_it_is_deleted(db: None
             ),
         )
         assert await _woken(state, feed) == {}
+
+
+async def test_a_paused_trigger_keeps_its_row_and_wakes_nothing_until_it_resumes(db: None) -> None:
+    """Pausing is what stops a trigger without losing it: the sweep's read drops it, the row still
+    lists and reads back as paused, and resuming puts it back on the next batch."""
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state)
+    name = trigger_name(feed.name, state.conversation_id)
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state), _trigger_manifest(feed, state.conversation_id))
+        assert await _woken(state, feed) == {state.conversation_id: state.agent_id}
+
+        paused = await _apply(
+            _context(state), _trigger_manifest(feed, state.conversation_id, paused=True)
+        )
+        assert paused["result"] == "updated"
+        assert await _woken(state, feed) == {}
+        fetched = await _get(_context(state), name)
+        assert fetched["spec"]["paused"] is True
+        assert fetched["status"]["paused"] is True
+
+        await _apply(_context(state), _trigger_manifest(feed, state.conversation_id))
+        assert await _woken(state, feed) == {state.conversation_id: state.agent_id}
+        assert (await _get(_context(state), name))["spec"]["paused"] is False
+
+
+async def test_a_trigger_pauses_after_its_stream_stops_syncing(db: None) -> None:
+    """A stream the connection stopped syncing is exactly when a member reaches for Pause, so a
+    standing trigger's pause is weighed against the row it names rather than the feed's streams
+    today."""
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state)
+    retired = await _stream(state, feed, stream="projects")
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state), _trigger_manifest(feed, state.conversation_id, streams=("projects",))
+        )
+    async with workspace_tx() as connection:
+        await connection.execute(sa.delete(tables.source).where(tables.source.c.uid == retired))
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state),
+            _trigger_manifest(feed, state.conversation_id, streams=("projects",), paused=True),
+        )
+        assert await _woken(state, feed) == {}
+
+
+async def test_a_new_trigger_cannot_be_applied_already_paused(db: None) -> None:
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state)
+    tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id), agent(state.agent_id):
+        with pytest.raises(ValueError, match="watches from the moment"):
+            await tool.handler(
+                _context(state),
+                tool.input_model.model_validate(
+                    {"manifest": _trigger_manifest(feed, state.conversation_id, paused=True)}
+                ),
+            )
+        assert await _woken(state, feed) == {}
+
+
+async def test_an_admin_pauses_another_members_trigger_but_never_re_points_it(db: None) -> None:
+    """Pausing a trigger is management, which an admin already holds through the delete gate. What
+    the trigger watches is its identity: an apply naming another resource under the same name is
+    refused whoever sends it, so a pause can never become a re-pointing."""
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state, provider=GITHUB, stream="pull_requests")
+    name = trigger_name(feed.name, state.conversation_id)
+    tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state, speaker_id=state.member_id),
+            _trigger_manifest(feed, state.conversation_id),
+        )
+        await _apply(
+            _context(state),
+            _trigger_manifest(feed, state.conversation_id, paused=True),
+        )
+        assert await _woken(state, feed) == {}
+
+        with pytest.raises(ValueError, match="delete this one and apply another"):
+            await tool.handler(
+                _context(state),
+                tool.input_model.model_validate(
+                    {
+                        "manifest": _trigger_manifest(
+                            feed, state.conversation_id, resource=PR_URL, name=name
+                        )
+                    }
+                ),
+            )
+
+
+async def test_a_member_who_neither_created_nor_administers_cannot_pause(db: None) -> None:
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state)
+    stranger = await _stranger(state)
+    tool = _TOOLS["object_apply"]
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state), _trigger_manifest(feed, state.conversation_id))
+        with pytest.raises(UnknownObject):
+            await tool.handler(
+                _context(state, speaker_id=stranger),
+                tool.input_model.model_validate(
+                    {"manifest": _trigger_manifest(feed, state.conversation_id, paused=True)}
+                ),
+            )
+        assert await _woken(state, feed) == {state.conversation_id: state.agent_id}
 
 
 async def test_stored_delivery_cannot_change_current_trigger_behavior(db: None) -> None:
@@ -820,6 +933,7 @@ async def test_a_stream_narrowed_trigger_reads_back_its_streams_and_re_applies(d
         assert fetched["spec"] == {
             "connection": feed.name,
             "delivery": "current",
+            "paused": False,
             "resource": "",
             "streams": ["projects", "tasks"],
         }
@@ -1190,6 +1304,7 @@ async def test_a_trigger_narrowed_to_a_link_wakes_on_that_resource_alone(db: Non
         assert fetched["spec"] == {
             "connection": feed.name,
             "delivery": "current",
+            "paused": False,
             "resource": PR_URL,
             "streams": [],
         }

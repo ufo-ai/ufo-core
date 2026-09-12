@@ -252,6 +252,8 @@ The audience atom is one rule; what each projection does with an admin differs b
 | Artifacts, `artifact` object kind | `audience_subjects` of own audience | same — the `admin` flag is accepted and ignored |
 | Sites, portal listing | own private sites plus workspace/public sites | same — another member's private site adds no row; its known detail and frame still admit an admin |
 | Radar / scheduled-runs feed | `readable_audiences`, unconditional | same — the projection takes no admin parameter |
+| `scheduled_task` content (prompt, description, spec), portal reads | the reporting conversation decides, plus the task's creator | + the disclosure path above, read on that conversation; without one the row lists its cadence and its content reads `private member task` |
+| `scheduled_task` content, chat `object_list` / `object_get` | same | same — a turn establishes no portal reader, so no disclosure is read there |
 | Agent homepage, portal Home tab | the agent's own `visibility`: `workspace` → every member, `private` → the agent's owner | + private-agent homepages — admins reach every agent, so the frame admits them and the read hands out the link |
 | Memory (portal + `memory` kind) | `{shared, member:<me>}` | same — admin ignored |
 | Usage | own window, no other member or agent named | + workspace rollup |

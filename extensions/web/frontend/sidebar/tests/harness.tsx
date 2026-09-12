@@ -343,14 +343,23 @@ export const TASK_KIND = {
 
 export const TRIGGER_KIND = {
   kind: "source_trigger",
-  fields: ["conversation", "source", "delivery", "origin", "owner_email", "mine"],
+  fields: [
+    "conversation",
+    "source",
+    "delivery",
+    "paused",
+    "origin",
+    "owner_email",
+    "mine",
+  ],
   spec_schema: {
     properties: {
       source: { type: "string", title: "Source" },
       delivery: { type: "string", enum: ["current"], title: "Delivery" },
+      paused: { type: "boolean", title: "Paused" },
     },
   },
-  applies: false,
+  applies: true,
   deletes: true,
 };
 

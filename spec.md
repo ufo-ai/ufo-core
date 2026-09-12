@@ -909,7 +909,14 @@ The acknowledgement is a granting act, so it rides the prepared-intent lane like
 mutation — `read_private_transcript`, admin-only — and the turn is its audit record; the row it
 writes names the reader, the subject, and the moment before any content is served, and is what the
 content gate answers on, opening that conversation to that admin for an hour, so a second visit is
-a second recorded access rather than a silent re-read. The record is the operator's, not a product
+a second recorded access rather than a silent re-read. The disclosure opens the conversation and
+the automations reporting into it together: a scheduled task's prompt, description and run
+responses are words of that conversation, so an admin reads them on the same acknowledgement, for
+the same hour, on the same record. An admin who has not acknowledged lists another member's private
+task as the management row whose cadence, pause and expiry are already theirs, and its content
+reads `private member task`. Chat never carries it: the disclosure answers where the reader's role
+is established, which is a portal member read, so an agent asked in chat elides that content
+however it asks. The record is the operator's, not a product
 surface: no portal read lists those rows, the disclosure emits `surface.transcript_disclosed`, and
 `ufoctl transcript-reads` reads the table — so the acknowledgement tells the admin their email,
 the subject's, and the time are recorded, and promises no member-facing listing. Chat stays
