@@ -227,7 +227,7 @@ export function PanelBlank({
   mark,
   action,
 }: {
-  body: string;
+  body: ReactNode;
   mark?: ReactNode;
   action?: ReactNode;
 }) {

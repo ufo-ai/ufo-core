@@ -12,7 +12,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import CORE_OBJECT_KINDS
-from ufo.host.kinds.turns import TURN_OBJECT, TurnSpec
+from ufo.host.kinds.turns import TURN_OBJECT, TurnSpec, last_fires
 from ufo.runtime.object_scope import ObjectAgent, object_agent
 from ufo.runtime.objects import ObjectListQuery, VerbNotSupported
 from ufo.runtime.tools.context import SpawnResult, ToolContext
@@ -322,6 +322,37 @@ async def test_fired_turns_list_newest_first_and_narrow_in_sql(db: None) -> None
     assert said.fields["fired"] is False
     assert said.fields["source"] is None
     assert said.summary.startswith("member, done, 2026-08-14 09:00")
+
+
+async def test_the_last_fire_of_each_name_reads_off_the_index_it_groups_on(db: None) -> None:
+    """`last_fires` answers the newest fire of each named object of one kind, over the whole
+    workspace and never one agent. It filters and groups on `fired_by_kind` and `fired_by_name`, so
+    the plan walks `turn_fired_by` — the index that leads on those two — rather than scanning every
+    fired turn the workspace holds."""
+    workspace_id, _member_id, agent_id, shared = await _seed_workspace()
+    await _seed_turn(workspace_id, agent_id, shared, seq=1, at=FIRED, fired_by=NIGHTLY)
+    await _seed_turn(
+        workspace_id, agent_id, shared, seq=2, at=FIRED + timedelta(hours=1), fired_by=WATCH
+    )
+    await _seed_turn(
+        workspace_id, agent_id, shared, seq=3, at=FIRED + timedelta(hours=2), fired_by=WATCH
+    )
+
+    with ws(workspace_id):
+        fires = await last_fires(WATCH.kind, (WATCH.name, NIGHTLY.name))
+        async with workspace_tx() as connection:
+            plan = (
+                await connection.exec_driver_sql(
+                    "explain query plan select fired_by_name, max(created_at) from turn "
+                    "where workspace_id = ? and fired_by_kind = ? and fired_by_name in (?) "
+                    "group by fired_by_name",
+                    (str(workspace_id), WATCH.kind, WATCH.name),
+                )
+            ).all()
+
+    assert set(fires) == {WATCH.name}
+    assert fires[WATCH.name] == FIRED + timedelta(hours=2)
+    assert any("turn_fired_by" in str(step) for step in plan)
 
 
 async def test_a_turn_reads_whole_with_its_links_under_the_same_fence(db: None) -> None:

@@ -4538,6 +4538,7 @@ class AutomationHero(BaseModel):
     workspace already holds, so pressing one opens on the work rather than on an account request."""
 
     mark: str
+    title: str
     line: str
     ask: str
 
@@ -4576,7 +4577,9 @@ async def workspace_automations(ctx: SurfaceContext, request: Request) -> Respon
         row = UNLOCKS_BY_NAME.get(entry.unlock)
         if row is None or row.missing(held):
             continue
-        heroes.append(AutomationHero(mark=row.mark, line=entry.line, ask=entry.ask))
+        heroes.append(
+            AutomationHero(mark=row.mark, title=entry.title, line=entry.line, ask=entry.ask)
+        )
         if len(heroes) == AUTOMATION_HEROES:
             break
     return JSONResponse({"heroes": [hero.model_dump(mode="json") for hero in heroes]})

@@ -9443,6 +9443,7 @@ async def test_the_automation_cards_draw_the_rows_whose_accounts_the_workspace_h
         "heroes": [
             {
                 "mark": "wedjat",
+                "title": "Competitors",
                 "line": "Reads the open web each morning.",
                 "ask": "Read the open web for me each morning.",
             }

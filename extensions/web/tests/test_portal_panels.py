@@ -575,6 +575,47 @@ async def test_the_automations_read_merges_both_kinds_on_one_last_run_column(por
     assert (await client.get("/surface/web/automations")).status_code == 401
 
 
+async def test_the_automations_read_hides_a_private_task_and_elides_it_for_an_admin(
+    portal,
+) -> None:
+    """Who reads another member's private automation on the Automations screen. A member who is not
+    an admin never learns it exists: the row is absent from the listing and its detail is
+    not-found, so no row stands there naming a task they can neither read nor act on. An admin
+    lists it as the management row whose cadence is theirs to change, and its content stays
+    elided."""
+    client, workspace_id, agent_a, _agent_b = portal
+    _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
+    creator_id, _creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    _other_id, other_headers = await _seed_member(workspace_id, OTHER_EMAIL)
+    with ws(workspace_id):
+        private = await _seed_conversation(workspace_id, agent_a, creator_id)
+        with bind_agent(agent_a):
+            await _schedule_store().create(
+                private,
+                "daily-brief",
+                "0 9 * * *",
+                "write the daily brief",
+                "daily brief",
+                NEXT_RUN,
+                created_by_member_id=creator_id,
+            )
+    detail = f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}"
+
+    theirs = await client.get("/surface/web/automations", headers=other_headers)
+    assert theirs.json()["objects"] == []
+    assert (await client.get(detail, headers=other_headers)).status_code == 404
+
+    managed = await client.get("/surface/web/automations", headers=admin_headers)
+    (row,) = managed.json()["objects"]
+    assert (row["name"], row["description"]) == ("daily-brief", "")
+    assert row["prompt"] == PRIVATE_PROMPT
+    assert row["summary"] == f"0 9 * * * — {PRIVATE_PROMPT}"
+    assert row["mine"] is False
+    read = await client.get(detail, headers=admin_headers)
+    assert read.json()["spec"] is None
+    assert read.json()["status"]["next_run_at"] == NEXT_RUN.isoformat()
+
+
 async def test_skills_list_the_workspaces_own_and_the_deploys(portal) -> None:
     """The skills read answers the workspace's saved set beside the deploy's, whichever agent the
     read names — the set the portal's workspace page manages, and an app's own setting decides only

@@ -10,6 +10,7 @@ import {
   ARRIVAL_ID,
   CONVO_ID,
   MEMBER,
+  SECOND,
   TASK_KIND,
   TRIGGER_KIND,
   TURN_ID,
@@ -123,10 +124,14 @@ const REFUSED_EDIT = "Only the member who wrote this task can change it.";
 const HEROES = [
   {
     mark: "kalyx",
+    title: "Deploy recap",
     line: "Recap yesterday's deploys every weekday at 9am.",
     ask: "Set up an automation that recaps yesterday's deploys every weekday at 9am.",
   },
 ];
+
+const LONG_NAME =
+  "Digest every change that landed on the nightly branch and everything it touched downstream";
 
 const TURN_INDEX = {
   kind: "turn",
@@ -207,6 +212,75 @@ test("one table lists tasks and triggers, most recently run first, in the member
   expect(screen.getByRole("img", { name: "Paused" })).toBeTruthy();
   expect(screen.getAllByRole("img", { name: "Schedule" })).toHaveLength(2);
   expect(screen.getAllByRole("img", { name: "GitHub pull_requests" })).toHaveLength(2);
+});
+
+test("a long automation name is cut to its column rather than stretching the table", async () => {
+  automationsOnWire([{ ...NIGHTLY, description: LONG_NAME }]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const said = await screen.findByText(LONG_NAME);
+  expect(said.className).toContain("truncate");
+  const cell = said.closest("td")!;
+  expect(cell.className).toContain("truncate");
+  expect(cell.className).not.toContain("whitespace-nowrap");
+  expect(screen.getAllByRole("columnheader")[0].className).not.toContain("w-(--size-fact-column)");
+});
+
+test("a task pauses, resumes and deletes from its own Details", async () => {
+  const posted: Record<string, unknown>[] = [];
+  automationsOnWire(undefined, posted);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByText("Digest the night's changes"));
+  const details = await screen.findByRole("dialog", { name: "Details" });
+
+  await userEvent.click(within(details).getByRole("button", { name: "Pause" }));
+  await vi.waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toEqual({
+    verb: "apply",
+    kind: "scheduled_task",
+    name: "nightly-digest",
+    spec: { paused: true },
+  });
+  await within(details).findByRole("button", { name: "Resume" });
+
+  await userEvent.click(within(details).getByRole("button", { name: "Delete" }));
+  await userEvent.click(within(details).getByRole("button", { name: "Confirm delete" }));
+
+  await vi.waitFor(() => expect(posted.length).toBe(2));
+  expect(posted[1]).toEqual({ verb: "delete", kind: "scheduled_task", name: "nightly-digest" });
+  await vi.waitFor(() => expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull());
+});
+
+test("a paused task offers Resume, and a trigger offers neither act", async () => {
+  automationsOnWire();
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByText("Round up the week"));
+  const paused = await screen.findByRole("dialog", { name: "Details" });
+  expect(within(paused).getByRole("button", { name: "Resume" })).toBeTruthy();
+
+  await userEvent.click(within(paused).getByRole("button", { name: "Close" }));
+  await userEvent.click(await screen.findByText("Watching " + PULL_REQUEST));
+  const watched = await screen.findByRole("dialog", { name: "Details" });
+  expect(within(watched).queryByRole("button", { name: "Pause" })).toBeNull();
+  expect(within(watched).queryByRole("button", { name: "Delete" })).toBeNull();
+});
+
+test("an automation with no run yet points at the conversation it reports into", async () => {
+  automationsOnWire([PAUSED_TASK]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByText("Round up the week"));
+  const details = await screen.findByRole("dialog", { name: "Details" });
+
+  const link = await within(details).findByRole("link");
+  expect(link.getAttribute("href")).toContain(CONVO_ID);
+  expect(within(details).getByText(/No run yet/)).toBeTruthy();
 });
 
 test("the list draws no run, so a run is reached through the automation it ran for", async () => {
@@ -421,6 +495,8 @@ test("a task another member wrote states the refusal and stands its cadence disa
     true,
   );
   expect(within(details).getByLabelText("Name")).toHaveProperty("readOnly", true);
+  expect(within(details).getByRole("button", { name: "Pause" })).toHaveProperty("disabled", true);
+  expect(within(details).getByRole("button", { name: "Delete" })).toHaveProperty("disabled", true);
 
   fireEvent.change(within(details).getByLabelText("Name"), { target: { value: "Theirs" } });
   fireEvent.blur(within(details).getByLabelText("Name"));
@@ -489,6 +565,17 @@ test("the New automation pane edits what Details edits, and nothing the old form
   expect(within(pane).queryByLabelText("Description")).toBeNull();
   expect(within(pane).queryByLabelText("Prompt")).toBeNull();
   expect(within(pane).queryByLabelText("Schedule")).toBeNull();
+});
+
+test("the New automation pane asks nothing about apps, whatever the workspace holds", async () => {
+  creationOnWire([NIGHTLY], []);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "New automation" }));
+  const pane = await screen.findByRole("dialog", { name: "New automation" });
+  expect(within(pane).queryByLabelText("App")).toBeNull();
+  expect(within(pane).queryByRole("combobox")).toBeNull();
 });
 
 test("a new automation is filed under the name it is given, slugged", async () => {
@@ -603,6 +690,35 @@ test("the suggestions head the list once the member holds automations", async ()
   );
   expect(drawn[0]).toBe(HEROES[0].line);
   expect(drawn).toContain("Digest the night's changes");
+});
+
+test("a suggestion card is drawn as a connection card is: mark, title, line, and Create", async () => {
+  automationsOnWire([]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const card = (await screen.findByText(HEROES[0].line)).closest("li")!;
+  expect(card.className).toContain("rounded-panel");
+  expect(card.className).toContain("border-edge");
+  const tile = card.querySelector("[data-part=mark]")!;
+  expect(tile.className).toContain("rounded-panel");
+  expect(tile.className).toContain("bg-fill");
+  expect(tile.querySelector("svg")).toBeTruthy();
+  expect(card.querySelector("[data-part=primary]")?.textContent).toBe(HEROES[0].title);
+  expect(card.querySelector("[data-part=body]")?.textContent).toBe(HEROES[0].line);
+  const act = within(card).getByRole("button", { name: "Create" });
+  expect(act.className).toContain("bg-ink");
+  expect(act.className).toContain("rounded-full");
+});
+
+test("the Create act on a suggestion opens a new chat with the main agent", async () => {
+  automationsOnWire([]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Create" }));
+
+  await vi.waitFor(() => expect(location.hash).toBe(newChatHash(AGENT.id)));
 });
 
 test("a suggestion opens a new chat with the main agent", async () => {

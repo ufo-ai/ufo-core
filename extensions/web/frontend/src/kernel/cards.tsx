@@ -4,7 +4,7 @@ import { rowControl } from "@/kernel/row";
 import { cn } from "@/lib/cn";
 
 export type CardMark<Row> =
-  | { shape: "square" }
+  | { shape: "square"; body?: (row: Row) => ReactNode }
   | { shape: "band"; image?: (row: Row) => string | null; body?: (row: Row) => ReactNode }
   | { shape: "tile"; image?: (row: Row) => string | null; body?: (row: Row) => ReactNode };
 
@@ -147,8 +147,10 @@ export function CardGrid<Row>({
                   <div
                     data-part="mark"
                     aria-hidden
-                    className="size-7xl rounded-panel bg-fill"
-                  />
+                    className="flex size-7xl items-center justify-center rounded-panel bg-fill"
+                  >
+                    {mark.body?.(row)}
+                  </div>
                   {state}
                 </div>
               ) : null}

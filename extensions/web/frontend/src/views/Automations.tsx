@@ -1,17 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { IconClockPlay, IconPlayerPause, IconPlus } from "@tabler/icons-react";
 
-import { Button } from "@/components/ui/button";
+import { Button, ConfirmButton } from "@/components/ui/button";
 import { Field, Input, Textarea } from "@/components/ui/field";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Sheet } from "@/components/ui/sheet";
-import { Td, TdFact, TdWhole } from "@/components/ui/table";
+import { Td, TdFact } from "@/components/ui/table";
 import { CardGrid } from "@/kernel/cards";
 import type { ObjectRow, ObjectValue } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
@@ -34,10 +27,11 @@ import { closed, opened } from "@/kernel/slots";
 import { DataTable } from "@/kernel/table";
 import { Pill, SelfSaving } from "@/kernel/task";
 import { getJson, postIntent } from "@/lib/api";
-import { agentName } from "@/lib/agentName";
+import { AgentIcon } from "@/lib/agentIcon";
 import { automationId, automationLane, type AutomationLane } from "@/lib/automationLane";
 import { useMe } from "@/lib/audience";
 import { BrandMark } from "@/lib/brandMark";
+import { ConversationLink } from "@/lib/conversationLink";
 import {
   HOURS_OF_DAY,
   asMode,
@@ -57,7 +51,7 @@ import { Moment } from "@/lib/moments";
 import { setPendingAsk } from "@/lib/pendingAsk";
 import { newChatHash } from "@/lib/route";
 import { navigate } from "@/lib/router";
-import type { Agent, SpecSchema } from "@/lib/types";
+import type { SpecSchema } from "@/lib/types";
 import { ChatPane } from "@/views/ChatPane";
 
 const TURN_KIND = "turn";
@@ -84,8 +78,9 @@ const SCHEDULE = "Schedule";
 const PAUSED = "Paused";
 const NEW_AUTOMATION = "New automation";
 const CREATE = "Create";
-const APP = "App";
-const AGENT_FIELD = "automation-app";
+const PAUSE = "Pause";
+const RESUME = "Resume";
+const DELETE = "Delete";
 const NAME_FIELD = "automation-name";
 const INSTRUCTIONS_FIELD = "automation-instructions";
 const DEFAULT_SCHEDULE = "0 9 * * *";
@@ -98,7 +93,7 @@ const NOT_FOUND = 404;
 const NAME_UNREAD = "The automations could not be read. Try again.";
 const WATCHING = "Watching ";
 const NEVER_RAN = "No run yet";
-const NO_RUNS_FOR_ONE = "No run yet for this one.";
+const NO_RUNS_FOR_ONE = "No run yet. It will report into ";
 const NO_AUTOMATIONS = "No automation yet.";
 const NOT_ON_PAGE = "That item is not on this page.";
 const NO_AGENT = "The app that ran this is not listed for you.";
@@ -113,7 +108,7 @@ const EVERY_OPTIONS: { mode: CadenceMode; label: string }[] = [
   { mode: "monthly", label: "Every month" },
 ];
 const COLUMNS = [
-  { label: "Name", whole: true },
+  "Name",
   { label: "Events", fact: true },
   { label: "Next run", fact: true },
   { label: "Last run", fact: true },
@@ -135,25 +130,27 @@ const HEROES_MS = 300_000;
 
 const EXPLORE = "Explore automations";
 const EXPLORE_NOTE = "Put your recurring work on autopilot.";
-const AUTOMATION = "Automation";
 
-type Hero = { mark: string; line: string; ask: string };
+type Hero = { mark: string; title: string; line: string; ask: string };
 type HeroesPayload = { heroes: Hero[] };
 
 /** A workspace whose memory is still empty ranks nothing, and these cards are the empty state. */
 const FALLBACK_HEROES: Hero[] = [
   {
     mark: "nephele",
+    title: "Meeting brief",
     line: "Daily meeting brief to get you ready for your day.",
     ask: "Set up a daily automation that briefs me each morning on the meetings I have that day.",
   },
   {
     mark: "wedjat",
+    title: "Morning update",
     line: "Morning update from across my team at 9am.",
     ask: "Set up an automation that sends me a morning update from across my team every weekday at 9am.",
   },
   {
     mark: "kalyx",
+    title: "End of day summary",
     line: "End of day summary and actions for my team.",
     ask: "Set up an automation that sends my team an end of day summary and the actions it left open.",
   },
@@ -174,6 +171,7 @@ type Entry = {
   kind: string;
   name: string;
   label: string;
+  conversation: string;
   prompt: string;
   schedule: string;
   watching: string;
@@ -185,7 +183,12 @@ type Entry = {
 };
 
 type IndexRow = ObjectRow & { agent_id: string };
-type KindPayload = { kind: string; spec_schema: SpecSchema | null; applies: boolean };
+type KindPayload = {
+  kind: string;
+  spec_schema: SpecSchema | null;
+  applies: boolean;
+  deletes: boolean;
+};
 type AutomationsPayload = {
   kinds: KindPayload[];
   objects: (IndexRow & { kind: string })[];
@@ -220,6 +223,7 @@ function taskEntry(row: IndexRow): Entry {
     kind: TASK_KIND,
     name: row.name,
     label: said(row.description) || firstLine(said(row.prompt)) || row.name,
+    conversation: said(row.conversation),
     prompt: said(row.prompt),
     schedule: said(row.schedule),
     watching: "",
@@ -243,6 +247,7 @@ function triggerEntry(row: IndexRow): Entry {
     kind: TRIGGER_KIND,
     name: row.name,
     label: WATCHING + (resource || watched),
+    conversation: said(row.conversation),
     prompt: "",
     schedule: "",
     watching: watched,
@@ -455,16 +460,24 @@ function everyLabel(cadence: Cadence): string {
  *  so the pane is the one place the automation's own words are written. */
 function TaskFields({
   entry,
+  deletes,
   onApply,
+  onDelete,
 }: {
   entry: Entry;
+  deletes: boolean;
   onApply: (spec: Record<string, SpecValue>) => Promise<NoticeState>;
+  onDelete: () => Promise<NoticeState>;
 }) {
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   async function save(spec: Record<string, SpecValue>): Promise<NoticeState> {
     const outcome = await onApply(spec);
     setNotice(outcome.refused ? outcome : QUIET);
     return outcome;
+  }
+  async function remove(): Promise<void> {
+    const outcome = await onDelete();
+    setNotice(outcome.refused ? outcome : QUIET);
   }
   return (
     <div className="flex shrink-0 flex-col gap-2xl">
@@ -488,6 +501,23 @@ function TaskFields({
         readOnly={!entry.mine}
         onSave={(schedule) => save({ schedule })}
       />
+      <div className="flex flex-wrap gap-sm">
+        <Button
+          variant="row"
+          disabled={!entry.mine}
+          onClick={() => void save({ paused: !entry.paused })}
+        >
+          {entry.paused ? RESUME : PAUSE}
+        </Button>
+        {deletes ? (
+          <ConfirmButton
+            verb={DELETE}
+            variant="row"
+            disabled={!entry.mine}
+            onClick={() => void remove()}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -507,11 +537,13 @@ function TriggerInfo({ entry }: { entry: Entry }) {
  *  other listing. Pressing one opens that run's transcript beside the automation. */
 function RunHistory({
   lane,
+  conversation,
   after,
   opens,
   onPlace,
 }: {
   lane: AutomationLane;
+  conversation: string;
   after: string | undefined;
   opens: string[];
   onPlace: (place: Placement) => void;
@@ -534,7 +566,21 @@ function RunHistory({
       <Panel state={state}>
         {(held) => {
           const runs = held.objects.map(toRun);
-          if (!runs.length) return <PanelBlank body={NO_RUNS_FOR_ONE} />;
+          if (!runs.length)
+            return (
+              <PanelBlank
+                body={
+                  conversation ? (
+                    <>
+                      {NO_RUNS_FOR_ONE}
+                      <ConversationLink id={conversation} />.
+                    </>
+                  ) : (
+                    NO_RUNS_FOR_ONE
+                  )
+                }
+              />
+            );
           return (
             <>
               <RowLines
@@ -611,17 +657,21 @@ function RunSheet({
 function DetailsSheet({
   lane,
   entry,
+  deletes,
   after,
   opens,
   onPlace,
   onApply,
+  onDelete,
 }: {
   lane: AutomationLane;
   entry: Entry | null;
+  deletes: boolean;
   after: string | undefined;
   opens: string[];
   onPlace: (place: Placement) => void;
   onApply: (entry: Entry, spec: Record<string, SpecValue>) => Promise<NoticeState>;
+  onDelete: (entry: Entry) => Promise<NoticeState>;
 }) {
   const shut = () => onPlace({ opens: closed(opens, automationId(lane)), runs: undefined });
   return (
@@ -629,29 +679,41 @@ function DetailsSheet({
       {entry === null ? (
         <PanelEmpty>{NOT_ON_PAGE}</PanelEmpty>
       ) : entry.kind === TASK_KIND ? (
-        <TaskFields entry={entry} onApply={(spec) => onApply(entry, spec)} />
+        <TaskFields
+          entry={entry}
+          deletes={deletes}
+          onApply={(spec) => onApply(entry, spec)}
+          onDelete={async () => {
+            const outcome = await onDelete(entry);
+            if (!outcome.refused) shut();
+            return outcome;
+          }}
+        />
       ) : (
         <TriggerInfo entry={entry} />
       )}
-      <RunHistory lane={lane} after={after} opens={opens} onPlace={onPlace} />
+      <RunHistory
+        lane={lane}
+        conversation={entry?.conversation ?? ""}
+        after={after}
+        opens={opens}
+        onPlace={onPlace}
+      />
     </Sheet>
   );
 }
 
-/** The pane the New automation act opens: the fields Details edits, filled in before the automation
- *  exists. The name the member writes is its description, slugged for the row it is filed under. */
+/** The pane the New automation act opens: the fields Details edits, before the automation exists.
+ *  The name is its description, slugged; the automation is the main agent's, so no app is asked. */
 function NewAutomation({
-  agents,
-  owner,
+  lane,
   onDone,
   onClose,
 }: {
-  agents: Agent[];
-  owner: string;
+  lane: string;
   onDone: (lane: string, envelope: unknown) => Promise<NoticeState>;
   onClose: () => void;
 }) {
-  const [lane, setLane] = useState(owner);
   const [description, setDescription] = useState("");
   const [prompt, setPrompt] = useState("");
   const [schedule, setSchedule] = useState(DEFAULT_SCHEDULE);
@@ -684,22 +746,6 @@ function NewAutomation({
   return (
     <div className="flex shrink-0 flex-col gap-2xl">
       <OutcomeNotice state={notice} />
-      {agents.length > 1 ? (
-        <Field label={APP} htmlFor={AGENT_FIELD}>
-          <Select value={lane} onValueChange={setLane}>
-            <SelectTrigger id={AGENT_FIELD}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {agents.map((agent) => (
-                <SelectItem key={agent.id} value={agent.id}>
-                  {agentName(agent.name)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </Field>
-      ) : null}
       <Field label={NAME} htmlFor={NAME_FIELD}>
         <Input
           id={NAME_FIELD}
@@ -739,29 +785,34 @@ function NewAutomation({
   );
 }
 
-/** Ranked where the start screen's starters are ranked, under the automations instructions, so one
- *  catalog answers both screens. */
+/** Ranked where the start screen's starters are, under the automations instructions. A card is
+ *  drawn as a connection is: mark in its tile, name, line, and the act that starts it. */
 function Heroes({ agentId }: { agentId: string }) {
   const read = usePanelRead<HeroesPayload>(HEROES_READ, 0, HEROES_MS);
   const answered = read.phase === "ready" ? read.payload : null;
   const heroes = answered?.heroes?.length ? answered.heroes : FALLBACK_HEROES;
+  const start = (hero: Hero) => () => {
+    setPendingAsk(agentId, hero.ask, true);
+    navigate(newChatHash(agentId));
+  };
   return (
     <Section title={EXPLORE} note={EXPLORE_NOTE}>
       <CardGrid
         columns={3}
         rows={heroes}
         rowKey={(hero) => hero.ask}
-        primary={() => (
-          <span className="flex items-center gap-2xs text-ink-soft">
-            <IconClockPlay className="size-(--size-glyph) shrink-0" aria-hidden />
-            {AUTOMATION}
-          </span>
-        )}
-        body={(hero) => hero.line}
-        open={(hero) => () => {
-          setPendingAsk(agentId, hero.ask, true);
-          navigate(newChatHash(agentId));
+        mark={{
+          shape: "square",
+          body: (hero) => <AgentIcon name={hero.mark} className="size-(--size-brand-mark)" />,
         }}
+        primary={(hero) => hero.title}
+        body={(hero) => hero.line}
+        action={(hero) => (
+          <Button variant="send" size="bar" onClick={start(hero)}>
+            {CREATE}
+          </Button>
+        )}
+        open={start}
       />
     </Section>
   );
@@ -791,6 +842,7 @@ export function Automations({
   const owner = mainAgent?.id ?? agents[0]?.id ?? null;
   const held = payload?.kinds.find((one) => one.kind === TASK_KIND) ?? null;
   const applies = held?.applies === true;
+  const deletes = held?.deletes === true;
   const top = opens[opens.length - 1];
   const standing = top === undefined ? null : automationLane(top);
 
@@ -833,7 +885,7 @@ export function Automations({
                 >
                   {(entry) => (
                     <>
-                      <TdWhole>
+                      <Td>
                         <span className="flex items-center gap-sm">
                           {entry.paused ? (
                             <IconPlayerPause
@@ -842,9 +894,9 @@ export function Automations({
                               className="size-(--size-glyph) shrink-0 text-ink-soft"
                             />
                           ) : null}
-                          {entry.label}
+                          <span className="truncate">{entry.label}</span>
                         </span>
-                      </TdWhole>
+                      </Td>
                       <Td>
                         <EventMark entry={entry} />
                       </Td>
@@ -866,18 +918,14 @@ export function Automations({
       </Section>
       {creating && owner ? (
         <Sheet open title={NEW_AUTOMATION} onClose={() => setCreating(false)}>
-          <NewAutomation
-            agents={agents}
-            owner={owner}
-            onDone={submit}
-            onClose={() => setCreating(false)}
-          />
+          <NewAutomation lane={owner} onDone={submit} onClose={() => setCreating(false)} />
         </Sheet>
       ) : null}
       {top === undefined ? null : standing !== null ? (
         <DetailsSheet
           key={top}
           lane={standing}
+          deletes={deletes}
           after={place.runs}
           entry={
             entries.find(
@@ -891,6 +939,9 @@ export function Automations({
           onPlace={onPlace}
           onApply={(entry, spec) =>
             submit(entry.agent, { verb: "apply", kind: entry.kind, name: entry.name, spec })
+          }
+          onDelete={(entry) =>
+            submit(entry.agent, { verb: "delete", kind: entry.kind, name: entry.name })
           }
         />
       ) : top.startsWith(RUN_PREFIX) ? (

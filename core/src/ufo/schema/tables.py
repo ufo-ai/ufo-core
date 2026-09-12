@@ -302,6 +302,15 @@ turn = sa.Table(
         sqlite_where=sa.text("fired_by_kind is not null"),
     ),
     sa.Index(
+        "turn_fired_by",
+        "workspace_id",
+        "fired_by_kind",
+        "fired_by_name",
+        "created_at",
+        postgresql_where=sa.text("fired_by_kind is not null"),
+        sqlite_where=sa.text("fired_by_kind is not null"),
+    ),
+    sa.Index(
         "turn_parked",
         "workspace_id",
         postgresql_where=sa.text("status = 'parked'"),
