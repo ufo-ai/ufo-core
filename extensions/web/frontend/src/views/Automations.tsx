@@ -4,7 +4,7 @@ import { IconClockPlay, IconPlayerPause, IconPlus } from "@tabler/icons-react";
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Field, Input, Textarea } from "@/components/ui/field";
 import { Sheet } from "@/components/ui/sheet";
-import { Td, TdFact } from "@/components/ui/table";
+import { Td, TdFact, TdFill } from "@/components/ui/table";
 import { CardGrid } from "@/kernel/cards";
 import type { ObjectRow, ObjectValue } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
@@ -108,7 +108,7 @@ const EVERY_OPTIONS: { mode: CadenceMode; label: string }[] = [
   { mode: "monthly", label: "Every month" },
 ];
 const COLUMNS = [
-  "Name",
+  { label: "Name", fill: true },
   { label: "Events", fact: true },
   { label: "Next run", fact: true },
   { label: "Last run", fact: true },
@@ -885,8 +885,8 @@ export function Automations({
                 >
                   {(entry) => (
                     <>
-                      <Td>
-                        <span className="flex items-center gap-sm">
+                      <TdFill>
+                        <span className="flex min-w-0 items-center gap-sm">
                           {entry.paused ? (
                             <IconPlayerPause
                               role="img"
@@ -896,7 +896,7 @@ export function Automations({
                           ) : null}
                           <span className="truncate">{entry.label}</span>
                         </span>
-                      </Td>
+                      </TdFill>
                       <Td>
                         <EventMark entry={entry} />
                       </Td>

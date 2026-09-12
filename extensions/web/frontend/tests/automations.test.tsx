@@ -223,8 +223,22 @@ test("a long automation name is cut to its column rather than stretching the tab
   expect(said.className).toContain("truncate");
   const cell = said.closest("td")!;
   expect(cell.className).toContain("truncate");
+  expect(cell.className).toContain("max-w-0");
   expect(cell.className).not.toContain("whitespace-nowrap");
-  expect(screen.getAllByRole("columnheader")[0].className).not.toContain("w-(--size-fact-column)");
+});
+
+test("Name takes the width the other columns leave, and they take what they hold", async () => {
+  automationsOnWire();
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByText("Digest the night's changes");
+  const [name, ...rest] = screen.getAllByRole("columnheader");
+  expect(name.textContent).toBe("Name");
+  expect(name.className).toContain("w-full");
+  expect(name.className).not.toContain("w-(--size-prose-column)");
+  for (const head of rest) expect(head.className).not.toContain("w-(--size-fact-column)");
+  expect(name.closest("table")!.className).toContain("table-auto");
 });
 
 test("a task pauses, resumes and deletes from its own Details", async () => {

@@ -8,7 +8,9 @@ import { cn } from "@/lib/cn";
 
 export const OPEN = "Open";
 
-export type Column = string | { label: string; sort?: string; fact?: boolean; whole?: boolean };
+export type Column =
+  | string
+  | { label: string; sort?: string; fact?: boolean; whole?: boolean; fill?: boolean };
 
 export type Sort = { by: string; descending: boolean; onSort: (key: string) => void };
 
@@ -17,9 +19,10 @@ function label(column: Column): string {
 }
 
 /** The tracks are fixed, so a width declared on a body cell arrives too late — the head is what sizes
- *  the column. */
-function width(column: Column, measured: boolean): string | undefined {
-  if (isFact(column)) return "w-(--size-fact-column)";
+ *  the column. A filled table runs auto, where the fill claim leaves the rest what it holds. */
+function width(column: Column, measured: boolean, filled: boolean): string | undefined {
+  if (isFill(column)) return "w-full";
+  if (isFact(column)) return filled ? undefined : "w-(--size-fact-column)";
   if (!measured || isWhole(column)) return undefined;
   return "w-(--size-prose-column)";
 }
@@ -30,6 +33,10 @@ function isFact(column: Column): boolean {
 
 function isWhole(column: Column): boolean {
   return typeof column !== "string" && Boolean(column.whole);
+}
+
+function isFill(column: Column): boolean {
+  return typeof column !== "string" && Boolean(column.fill);
 }
 
 function Caret({ descending }: { descending: boolean }) {
@@ -47,8 +54,18 @@ function Caret({ descending }: { descending: boolean }) {
   );
 }
 
-function Head({ column, sort, measured }: { column: Column; sort?: Sort; measured: boolean }) {
-  const track = width(column, measured);
+function Head({
+  column,
+  sort,
+  measured,
+  filled,
+}: {
+  column: Column;
+  sort?: Sort;
+  measured: boolean;
+  filled: boolean;
+}) {
+  const track = width(column, measured, filled);
   const key = typeof column === "string" ? undefined : column.sort;
   if (!key || !sort) return <Th className={track}>{label(column)}</Th>;
   const active = sort.by === key;
@@ -124,7 +141,8 @@ export function DataTable<Row>({
   if (!rows.length && !note) return <PanelBlank body={empty} />;
   const span = columns.length + (act ? 1 : 0);
   const facts = columns.filter(isFact).length;
-  const measured = columns.some(isWhole);
+  const filled = columns.some(isFill);
+  const measured = filled || columns.some(isWhole);
   return (
     <Table
       columns={stacks ? [...columns.map(label), ...(act ? [""] : [])] : undefined}
@@ -138,7 +156,13 @@ export function DataTable<Row>({
       <thead>
         <tr>
           {columns.map((column, index) => (
-            <Head key={label(column) + index} column={column} sort={sort} measured={measured} />
+            <Head
+              key={label(column) + index}
+              column={column}
+              sort={sort}
+              measured={measured}
+              filled={filled}
+            />
           ))}
           {act ? <Th className="w-(--size-act)">{""}</Th> : null}
         </tr>

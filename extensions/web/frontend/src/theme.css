@@ -1050,6 +1050,7 @@ body[data-shell="sidebar"] {
       justify-content: flex-end;
       gap: var(--spacing-sm);
       width: auto;
+      max-width: none;
       height: auto;
       min-height: var(--size-record);
       padding: 0;

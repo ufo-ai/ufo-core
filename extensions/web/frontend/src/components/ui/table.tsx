@@ -89,6 +89,14 @@ export function Td({ className, ...props }: ComponentProps<"td">) {
   return <td data-slot="table-cell" className={cn(CELL, "truncate", className)} {...props} />;
 }
 
+/** The cell of the column that takes whatever width the columns beside it leave. An auto-layout
+ *  table sizes a column from what it holds, so `max-width: 0` is what makes the cell yield to the
+ *  head's `width: 100%` track instead of widening the table; `truncate` then cuts the line. The
+ *  stacked rule lifts the bound, where a cell is a flex row rather than a track. */
+export function TdFill({ className, ...props }: ComponentProps<"td">) {
+  return <Td className={cn("max-w-0", className)} {...props} />;
+}
+
 /** A cell whose value is read entire — the name a member finds a record by. It holds one line, like
  *  every other cell, but the line is not cut: the column it stands in is measured from the rows, so
  *  the cell is as wide as it needs and the container scrolls sideways to reach the rest of the
