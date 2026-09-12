@@ -1,5 +1,5 @@
 import { IconTerminal2 } from "@tabler/icons-react";
-import { Suspense, lazy, useCallback, useState } from "react";
+import { Suspense, lazy, useCallback, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Sheet } from "@/components/ui/sheet";
@@ -74,6 +74,84 @@ export function ConversationSlot({
   );
 }
 
+type ThreadActs = {
+  acts: ReactNode;
+  selected: ConversationSlotSummary | undefined;
+  settled: () => void;
+  shell: ReactNode;
+};
+
+function useThreadActs({
+  agent,
+  conversationId,
+  enabled,
+  slot,
+  onSelectSlot,
+}: {
+  agent: ConversationAgent;
+  conversationId: string | null | undefined;
+  enabled: boolean;
+  slot?: string;
+  onSelectSlot?: (slot: string | null) => void;
+}): ThreadActs {
+  const [slotReloads, setSlotReloads] = useState(0);
+  const [shellOpen, setShellOpen] = useState(false);
+  const open = enabled && conversationId ? conversationId : null;
+  const slots = usePanelRead<ConversationSlotsPayload>(
+    open ? "/agents/" + agent.id + "/conversations/" + open + "/slots" : null,
+    slotReloads,
+  );
+  const shell = usePanelRead<ShellReport>(open ? shellPath(agent.id, open) : null);
+  const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
+  const closeShell = useCallback(() => setShellOpen(false), []);
+  const selected =
+    slots.phase === "ready" ? slots.payload.slots.find((entry) => entry.id === slot) : undefined;
+  const terminal = open && shell.phase === "ready" && shell.payload.available ? shell.payload : null;
+  return {
+    selected,
+    settled,
+    acts: (
+      <>
+        {open && slots.phase === "ready"
+          ? slots.payload.slots.map((entry) => (
+              <Button
+                key={entry.id}
+                variant="quiet"
+                size="icon"
+                aria-label={entry.count ? entry.label + " " + entry.count : entry.label}
+                aria-pressed={slot === entry.id}
+                className={cn(slot === entry.id && "bg-fill")}
+                onClick={() => onSelectSlot?.(slot === entry.id ? null : entry.id)}
+              >
+                <SlotIcon icon={entry.icon} />
+              </Button>
+            ))
+          : null}
+        {terminal ? (
+          <Button
+            variant="quiet"
+            size="icon"
+            aria-label={terminal.active ? "Shell, sandbox running" : "Shell"}
+            aria-pressed={shellOpen}
+            className={cn(shellOpen && "bg-fill", !terminal.active && "text-ink-soft")}
+            onClick={() => setShellOpen((raised) => !raised)}
+          >
+            <IconTerminal2 aria-hidden />
+          </Button>
+        ) : null}
+      </>
+    ),
+    shell:
+      open && terminal && shellOpen ? (
+        <Sheet open title="Shell" onClose={closeShell}>
+          <Suspense fallback={<Loading />}>
+            <ShellPane agent={agent} conversationId={open} onEnded={closeShell} />
+          </Suspense>
+        </Sheet>
+      ) : null,
+  };
+}
+
 /** The chat screen for one agent's conversation: a header with the slot acts, the transcript, and
  * the composer; a conversation founded here is reported through `onCreated`. */
 export function ChatPane({
@@ -93,63 +171,23 @@ export function ChatPane({
   onSelectSlot,
   crumb,
 }: ChatPaneProps) {
-  const [slotReloads, setSlotReloads] = useState(0);
-  const [shellOpen, setShellOpen] = useState(false);
-  const slots = usePanelRead<ConversationSlotsPayload>(
-    conversationId && !conversationOnly
-      ? "/agents/" + agent.id + "/conversations/" + conversationId + "/slots"
-      : null,
-    slotReloads,
-  );
-  const shell = usePanelRead<ShellReport>(
-    conversationId && !conversationOnly ? shellPath(agent.id, conversationId) : null,
-  );
-  const selected =
-    slots.phase === "ready" ? slots.payload.slots.find((entry) => entry.id === slot) : undefined;
-  const settled = useCallback(() => setSlotReloads((count) => count + 1), []);
-  const closeShell = useCallback(() => setShellOpen(false), []);
-  const terminal =
-    !conversationOnly && shell.phase === "ready" && shell.payload.available ? shell.payload : null;
+  const { acts, selected, settled, shell } = useThreadActs({
+    agent,
+    conversationId,
+    enabled: !conversationOnly,
+    slot,
+    onSelectSlot,
+  });
   const header =
     conversationId && !readOnly ? (
-    <Header
-      crumb={crumb}
-      title={title ?? agentName(agent.name)}
-      note={audience ? <AudienceMark entry={audience} /> : null}
-      acts={
-        <>
-          {!conversationOnly && slots.phase === "ready"
-            ? slots.payload.slots.map((entry) => (
-                <Button
-                  key={entry.id}
-                  variant="quiet"
-                  size="icon"
-                  aria-label={entry.count ? entry.label + " " + entry.count : entry.label}
-                  aria-pressed={slot === entry.id}
-                  className={cn(slot === entry.id && "bg-fill")}
-                  onClick={() => onSelectSlot?.(slot === entry.id ? null : entry.id)}
-                >
-                  <SlotIcon icon={entry.icon} />
-                </Button>
-              ))
-            : null}
-          {terminal ? (
-            <Button
-              variant="quiet"
-              size="icon"
-              aria-label={terminal.active ? "Shell, sandbox running" : "Shell"}
-              aria-pressed={shellOpen}
-              className={cn(shellOpen && "bg-fill", !terminal.active && "text-ink-soft")}
-              onClick={() => setShellOpen((open) => !open)}
-            >
-              <IconTerminal2 aria-hidden />
-            </Button>
-          ) : null}
-        </>
-      }
-      pinned
-    />
-  ) : null;
+      <Header
+        crumb={crumb}
+        title={title ?? agentName(agent.name)}
+        note={audience ? <AudienceMark entry={audience} /> : null}
+        acts={acts}
+        pinned
+      />
+    ) : null;
   return (
     <Pane>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -167,13 +205,7 @@ export function ChatPane({
           onSettled={settled}
         />
       </div>
-      {conversationId && terminal && shellOpen ? (
-        <Sheet open title="Shell" onClose={closeShell}>
-          <Suspense fallback={<Loading />}>
-            <ShellPane agent={agent} conversationId={conversationId} onEnded={closeShell} />
-          </Suspense>
-        </Sheet>
-      ) : null}
+      {shell}
       {conversationId && slot ? (
         <ConversationSlot
           agent={agent}
@@ -207,6 +239,13 @@ export function LinkedPane({
   const [disclosed, setDisclosed] = useState(false);
   const viewer = useViewer();
   const readable = conversation.readable || disclosed;
+  const { acts, selected, settled, shell } = useThreadActs({
+    agent,
+    conversationId: conversation.id,
+    enabled: readable,
+    slot,
+    onSelectSlot,
+  });
   return (
     <Pane>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -214,7 +253,12 @@ export function LinkedPane({
           crumb={crumb}
           title={subject(conversation, viewer)}
           note={<AudienceMark entry={conversation} />}
-          acts={<SurfaceMark conversation={conversation} />}
+          acts={
+            <>
+              <SurfaceMark conversation={conversation} />
+              {acts}
+            </>
+          }
           pinned
         />
         {readable ? (
@@ -224,6 +268,7 @@ export function LinkedPane({
               member={member}
               conversationId={conversation.id}
               onActivity={onActivity}
+              onSettled={settled}
             />
           ) : (
             <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
@@ -248,11 +293,13 @@ export function LinkedPane({
           </div>
         )}
       </div>
+      {shell}
       {readable && slot ? (
         <ConversationSlot
           agent={agent}
           conversationId={conversation.id}
           slot={slot}
+          summary={selected}
           onClose={() => onSelectSlot(null)}
         />
       ) : null}

@@ -4163,6 +4163,47 @@ test("the shell chip is drawn for a conversation that did coding work, and for n
   expect(chip.getAttribute("aria-pressed")).toBe("false");
 });
 
+const SLACK_THREAD = {
+  id: CONVO_ID,
+  agent: { id: AGENT_ID, name: "assistant" },
+  surface: "slack",
+  surface_label: "#general",
+  audience: "room:slack:C1",
+  member_email: null,
+  description: "",
+  source: "https://example.slack.com/archives/C1/p1789239497408479",
+  speakers: [],
+  turn_count: 2,
+  created_at: "2026-08-01T09:00:00Z",
+  last_turn_at: "2026-08-01T09:05:00Z",
+  readable: true,
+  disclosable: false,
+  commentable: false,
+};
+
+test("a thread that arrived on Slack draws the slot chips and the shell beside its channel link", async () => {
+  wire({
+    "/api/chats": (url) =>
+      url.includes("conversation=")
+        ? json({ chats: [], conversation: SLACK_THREAD })
+        : json({ chats: [] }),
+    "/transcript": () => json({ messages: [] }),
+    "/slots": () =>
+      json({
+        slots: [
+          { id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifacts", count: 2 },
+        ],
+      }),
+    "/shell$": () => json({ available: true, active: true }),
+  });
+  open();
+
+  const link = await screen.findByRole("link", { name: "Open #general in Slack" });
+  expect(link.getAttribute("href")).toBe(SLACK_THREAD.source);
+  expect(await screen.findByRole("button", { name: "Artifacts 2" })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: "Shell, sandbox running" })).toBeTruthy();
+});
+
 test("a read-only chat draws no composer, and its one control stops the live turn", async () => {
   const { handler } = wire({
     ...transcript({ messages: [], turn: TURN_ID, turn_started_at: "2026-08-14T09:00:00Z" }),
