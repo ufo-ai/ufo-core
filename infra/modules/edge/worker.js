@@ -79,6 +79,7 @@ function robots() {
     ...UNCRAWLED.map((path) => `Disallow: ${path}`),
     "",
     `Sitemap: ${APEX}/sitemap.xml`,
+    `Sitemap: ${APEX}/sitemap-index.xml`,
     "",
   ].join("\n");
 }

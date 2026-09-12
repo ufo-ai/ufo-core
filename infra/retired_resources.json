@@ -1,4 +1,6 @@
 [
+  "module.docs_prod.cloudflare_workers_custom_domain.docs",
+  "module.docs_testing.cloudflare_workers_custom_domain.docs",
   "module.prod.cloudflare_d1_database.waitlist",
   "module.prod.cloudflare_queue.waitlist_email",
   "module.prod.cloudflare_queue.waitlist_email_dead_letters",

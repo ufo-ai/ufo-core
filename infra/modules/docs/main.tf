@@ -4,8 +4,6 @@ terraform {
   }
 }
 
-# The built site is the whole worker: no code runs and the assets answer. A plan reads `dist`, so
-# the deploy runs `make docs` ahead of terraform.
 resource "cloudflare_workers_script" "docs" {
   account_id  = var.account_id
   script_name = var.name
@@ -19,11 +17,10 @@ resource "cloudflare_workers_script" "docs" {
   }
 }
 
-# A custom domain writes the host's own DNS record, which takes the request ahead of the zone's `*`
-# wildcard — the record every hosted member site answers under.
-resource "cloudflare_workers_custom_domain" "docs" {
-  account_id = var.account_id
-  zone_id    = var.zone_id
-  hostname   = var.hostname
-  service    = cloudflare_workers_script.docs.script_name
+resource "cloudflare_workers_route" "docs" {
+  for_each = var.routes
+
+  zone_id = var.zone_id
+  pattern = "${var.hostname}${each.value}"
+  script  = cloudflare_workers_script.docs.script_name
 }

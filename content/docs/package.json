@@ -3,7 +3,7 @@
   "private": true,
   "packageManager": "pnpm@11.24.0",
   "type": "module",
-  "description": "The docs site served at docs.ufo.ai: Starlight content and the build the edge worker uploads.",
+  "description": "The member documentation served under ufo.ai/docs.",
   "scripts": {
     "dev": "node brand.mjs && astro dev",
     "build": "node brand.mjs && astro build",

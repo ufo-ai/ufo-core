@@ -482,9 +482,9 @@ function signOut(): void {
 const SETTINGS_LABEL = "Settings";
 const DOCUMENTATION = "Documentation";
 const DOCUMENTATION_URLS: Record<Deployment, string> = {
-  production: "https://docs.ufo.ai",
-  testing: "https://docs.testing.ufo.ai",
-  local: "https://docs.ufo.ai",
+  production: "https://ufo.ai/docs/",
+  testing: "https://testing.ufo.ai/docs/",
+  local: "https://ufo.ai/docs/",
 };
 const THEME = "Theme";
 const SIGN_OUT = "Sign out";

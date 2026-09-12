@@ -5,12 +5,17 @@ variable "name" {
 
 variable "hostname" {
   type        = string
-  description = "Hostname the docs site answers on (the custom domain claims the whole host)."
+  description = "Hostname whose documentation paths the worker answers."
 }
 
 variable "dist" {
   type        = string
   description = "Built docs site the worker serves as its assets."
+}
+
+variable "routes" {
+  type        = set(string)
+  description = "Path patterns the documentation worker answers on its hostname."
 }
 
 variable "zone_id" {

@@ -94,8 +94,9 @@ module "docs_prod" {
   source = "../../modules/docs"
 
   name       = "ufo-docs"
-  hostname   = "docs.ufo.ai"
+  hostname   = "ufo.ai"
   dist       = local.docs_dist
+  routes     = ["/docs", "/docs/*", "/_astro/*", "/pagefind/*", "/sitemap-*"]
   zone_id    = data.cloudflare_zone.ufo_ai.id
   account_id = data.cloudflare_zone.ufo_ai.account.id
 }
@@ -104,8 +105,9 @@ module "docs_testing" {
   source = "../../modules/docs"
 
   name       = "ufo-docs-testing"
-  hostname   = "docs.testing.ufo.ai"
+  hostname   = "testing.ufo.ai"
   dist       = local.docs_dist
+  routes     = ["/docs", "/docs/*", "/_astro/*", "/pagefind/*", "/sitemap-*"]
   zone_id    = data.cloudflare_zone.ufo_ai.id
   account_id = data.cloudflare_zone.ufo_ai.account.id
 }

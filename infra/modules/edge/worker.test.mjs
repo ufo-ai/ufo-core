@@ -731,6 +731,7 @@ test("robots.txt opens the pages, refuses the endpoints, and names the sitemap",
   assert.match(served, /^User-agent: \*\nAllow: \/\n/);
   assert.deepEqual(refusals(served), ["/ufo", "/fleet", "/v1/onboard/", "/login"]);
   assert.match(served, /^Sitemap: https:\/\/ufo\.ai\/sitemap\.xml$/m);
+  assert.match(served, /^Sitemap: https:\/\/ufo\.ai\/sitemap-index\.xml$/m);
 });
 
 test("no page the sitemap lists is a path robots.txt refuses", async () => {

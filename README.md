@@ -51,7 +51,7 @@ not type the token. The token is not part of a URL.
 | `docs/plan.md` | The build order. |
 | `docs/salvage.md` | The files that port from the previous repo. |
 | `docs/handbook/` | A generated reference to the harness. Start at `overview.md`. |
-| `content/docs/` | The member documentation served at docs.ufo.ai. |
+| `content/docs/` | The member documentation served under ufo.ai/docs. |
 | `evals/README.md` | The eval suites, stacks, ablations, and GEPA. |
 | `evals/swebench/README.md` | SWE-bench Verified: local generation and official grading. |
 | `evals/terminal_bench/README.md` | Terminal-Bench 2.1: the pinned official roster through the native client in Harbor. |

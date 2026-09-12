@@ -1,0 +1,36 @@
+---
+title: Connecting Stripe
+description: Connect Stripe to work with customers, payments, invoices, and subscriptions.
+---
+
+import ConnectorAccess from "../../../../components/ConnectorAccess.astro";
+
+## Connect Stripe
+
+<ConnectorAccess
+  name="Stripe"
+  prompt="Connect my Stripe account."
+  query="Stripe"
+  tags={["OAuth", "Personal"]}
+/>
+
+Open the private authorization control and select the correct Stripe account. The Stripe grant
+controls access.
+
+## What ufo can do
+
+- Read customers, payments, invoices, subscriptions, products, and related records.
+- Analyze revenue and payment state.
+- Make supported changes only when you request them and the grant allows them.
+
+State whether the task uses test or live data, the time range, currency, and allowed actions.
+
+> Report failed live payments from the last seven days. Group them by failure reason and customer.
+> Do not retry a payment or contact a customer.
+
+## Fix Stripe access
+
+Confirm that the connected account can open the target Stripe account. Reconnect when the grant
+expires. Always state **test** or **live** when the same account contains both modes.
+
+See [Analyze data](/docs/recipes/data-analysis/) and [Weekly progress report](/docs/recipes/weekly-progress-report/).

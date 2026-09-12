@@ -1,0 +1,42 @@
+---
+title: Connecting Slack
+description: Install ufo in Slack and start work from channels, threads, and direct messages.
+---
+
+import ConnectorAccess from "../../../../components/ConnectorAccess.astro";
+
+## Connect Slack
+
+<ConnectorAccess
+  name="Slack"
+  prompt="Connect this workspace to Slack."
+  query="Slack"
+  tags={["OAuth", "Workspace", "Admin only"]}
+/>
+
+Open the install control and approve the workspace. Then invite ufo to each channel where it must
+work.
+
+## Start work
+
+Mention `@ufo` with a request in a channel. The agent replies in a thread. After the first mention,
+new messages in that thread continue the same conversation.
+
+Use a direct message for work that must remain private to you. Channel messages and their results
+remain visible to the channel audience.
+
+## What ufo can do
+
+- Complete tasks from a channel or direct message.
+- Read the thread that started the work.
+- Post progress, final results, files, and links in the same thread.
+- Run scheduled work and post it to a selected Slack destination.
+
+Slack cannot stop a running turn. Open the web portal when you must stop one.
+
+## Fix Slack access
+
+If an install link fails, ask for a new one. Install links are short-lived. If the agent does not
+answer, confirm that ufo is in the channel and mention `@ufo` once.
+
+See [Working in Slack](/docs/work/slack/).

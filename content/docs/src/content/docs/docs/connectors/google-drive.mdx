@@ -1,0 +1,41 @@
+---
+title: Connecting Google Drive
+description: Connect Google Drive to search, read, and create files.
+---
+
+import ConnectorAccess from "../../../../components/ConnectorAccess.astro";
+
+## Connect Google Drive
+
+<ConnectorAccess
+  name="Google Drive"
+  prompt="Connect my Google Drive account."
+  query="Google Drive"
+  tags={["OAuth", "Personal"]}
+/>
+
+Open the private authorization control and approve the correct Google account. ufo can use only
+the files and shared drives that this account can access.
+
+## What ufo can do
+
+- Search files and folders.
+- Read documents, spreadsheets, presentations, PDFs, and other supported files.
+- Create or update files when the request allows it.
+- Use Drive content in reports, briefs, and research.
+
+Name the folder, file, owner, or date range when you know it.
+
+> Find the latest board deck in the Finance shared drive. Check its revenue totals against the
+> connected spreadsheet and report differences. Do not edit either file.
+
+## Use Drive as knowledge
+
+Use a [synced source](/docs/work/sources/) to keep selected folders searchable as workspace knowledge or
+to start work after changes.
+
+## Fix Drive access
+
+Confirm that the connected account can open the file in Google Drive. Reconnect if the grant
+expired. Connect [Google Sheets](/docs/connectors/google-sheets/) when a task must update spreadsheet
+cells or formulas.

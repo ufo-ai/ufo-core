@@ -359,12 +359,12 @@ async function documentationAct(host: string) {
 
 test("a page served on the testing deploy opens the testing documentation", async () => {
   const docs = await documentationAct("app.testing.ufo.ai");
-  expect(docs.getAttribute("href")).toBe("https://docs.testing.ufo.ai");
+  expect(docs.getAttribute("href")).toBe("https://testing.ufo.ai/docs/");
 });
 
 test("the account's acts open the documentation in a tab of its own, over the divider above Theme", async () => {
   const docs = await documentationAct("app.ufo.ai");
-  expect(docs.getAttribute("href")).toBe("https://docs.ufo.ai");
+  expect(docs.getAttribute("href")).toBe("https://ufo.ai/docs/");
   expect(docs.getAttribute("target")).toBe("_blank");
   expect(docs.getAttribute("rel")).toBe("noopener noreferrer");
 
@@ -397,4 +397,3 @@ test("a boot still reading says Loading… rather than rendering an empty page",
 
   expect(screen.getByText("Loading…")).toBeTruthy();
 });
-

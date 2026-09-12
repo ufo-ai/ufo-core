@@ -47,7 +47,7 @@ const connectorHref = `https://app.ufo.ai${connectorPath}`;
 </div>
 
 <script>
-  const connectorHost = window.location.hostname === "docs.ufo.ai" ? "app.ufo.ai" : "app.testing.ufo.ai";
+  const connectorHost = window.location.hostname === "ufo.ai" ? "app.ufo.ai" : "app.testing.ufo.ai";
   for (const link of document.querySelectorAll<HTMLAnchorElement>("[data-connector-path]")) {
     const path = link.dataset.connectorPath;
     if (!path) throw new Error("Connector path is missing");

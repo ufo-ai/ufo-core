@@ -235,8 +235,8 @@ case "$URL" in
     [ "$BAD_LEGAL_PATH" != terms ] || { printf 'wrong\\n'; exit; }
     printf '<h1>Terms of Service</h1>\\n'
     ;;
-  */getting-started/introduction/)
-    [ "$BAD_DOCS_HOST" != "$HOST" ] || { printf 'wrong\\n'; exit; }
+  */docs/getting-started/introduction/)
+    [ "$BAD_DOCS_URL" != "$URL" ] || { printf 'wrong\\n'; exit; }
     printf '<h1>How ufo works</h1>\\n'
     ;;
   */)
@@ -1573,7 +1573,7 @@ def test_edge_deploys_are_isolated(
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "BAD_HOST": "",
         "BAD_FLEET_HOST": "",
-        "BAD_DOCS_HOST": "",
+        "BAD_DOCS_URL": "",
         "BAD_LEGAL_PATH": "",
         "BAD_LOGIN_HOST": "",
         "BAD_ONBOARD_HOST": "",
@@ -1593,7 +1593,7 @@ def test_edge_deploys_are_isolated(
         f"https://{host}/",
         f"https://{host}/login",
         f"https://{host}/v1/onboard/ufo",
-        f"https://docs.{host}/getting-started/introduction/",
+        f"https://{host}/docs/getting-started/introduction/",
         f"https://{host}/ufo",
         f"https://{host}/fleet",
         f"https://{host}/privacy",
@@ -1617,14 +1617,14 @@ def test_edge_deploys_are_isolated(
         )
         assert failed.returncode != 0
     environment["BAD_LEGAL_PATH"] = ""
-    environment["BAD_DOCS_HOST"] = f"docs.{host}"
+    environment["BAD_DOCS_URL"] = f"https://{host}/docs/getting-started/introduction/"
     failed = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", script],
         capture_output=True,
         env=environment,
     )
     assert failed.returncode != 0
-    environment["BAD_DOCS_HOST"] = ""
+    environment["BAD_DOCS_URL"] = ""
     environment["BAD_ROOT_HOST"] = host
     failed = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", script],
