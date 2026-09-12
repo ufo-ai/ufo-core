@@ -1,0 +1,90 @@
+---
+import Search from "@astrojs/starlight/components/Search.astro";
+import SiteTitle from "@astrojs/starlight/components/SiteTitle.astro";
+
+const path = Astro.url.pathname;
+---
+
+<div class="site-header">
+  <div class="site-identity"><SiteTitle /></div>
+  <nav aria-label="Site">
+    <a href="/docs/" aria-current={path.startsWith("/docs/") ? "page" : undefined}>Docs</a>
+    <a href="/blog/" aria-current={path === "/blog" || path.startsWith("/blog/") ? "page" : undefined}>Blog</a>
+  </nav>
+  <div class="site-actions">
+    <Search />
+    <a class="try-ufo" href="https://app.ufo.ai" data-app-link>Try ufo</a>
+  </div>
+</div>
+
+<script>
+  const appLink = document.querySelector<HTMLAnchorElement>("[data-app-link]");
+  if (!appLink) throw new Error("App link is missing");
+  const appHost = window.location.hostname === "ufo.ai" ? "app.ufo.ai" : "app.testing.ufo.ai";
+  appLink.href = `https://${appHost}`;
+</script>
+
+<style>
+  .site-header {
+    align-items: center;
+    display: grid;
+    gap: 1.5rem;
+    grid-template-columns: 1fr auto 1fr;
+    height: 100%;
+  }
+
+  .site-identity {
+    min-width: 0;
+  }
+
+  nav,
+  .site-actions {
+    align-items: center;
+    display: flex;
+  }
+
+  nav {
+    gap: 1.5rem;
+  }
+
+  nav a {
+    color: var(--sl-color-gray-2);
+    text-decoration: none;
+  }
+
+  nav a:hover,
+  nav a[aria-current="page"] {
+    color: var(--sl-color-white);
+  }
+
+  .site-actions {
+    gap: 1rem;
+    justify-content: flex-end;
+  }
+
+  .try-ufo {
+    background: var(--sl-color-white);
+    border-radius: 999px;
+    color: var(--sl-color-black);
+    line-height: 1;
+    padding: 0.75rem 1rem;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .try-ufo:hover {
+    opacity: 0.85;
+  }
+
+  @media (max-width: 49.99rem) {
+    .site-header {
+      gap: 0.75rem;
+      grid-template-columns: 1fr auto;
+    }
+
+    nav,
+    .try-ufo {
+      display: none;
+    }
+  }
+</style>

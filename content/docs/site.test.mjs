@@ -138,6 +138,62 @@ test("the blog has no RSS links", async () => {
   await assert.rejects(readFile(new URL("blog/rss.xml", dist), "utf8"), { code: "ENOENT" });
 });
 
+test("the blog has no tags", () => {
+  assert.deepEqual(
+    [...built.keys()].filter((route) => route.startsWith("/blog/tags/")),
+    [],
+  );
+  for (const [route, html] of built) {
+    if (route.startsWith("/blog/")) assert.doesNotMatch(html, /\/blog\/tags\//);
+  }
+});
+
+test("the blog has no documentation sidebar", () => {
+  for (const [route, html] of built) {
+    if (route.startsWith("/blog/")) {
+      assert.doesNotMatch(html, /<nav[^>]+aria-label="Main"/, `${route} has a sidebar`);
+    }
+  }
+  assert.match(
+    built.get("/docs/getting-started/introduction/"),
+    /<nav[^>]+aria-label="Main"/,
+  );
+});
+
+test("the header links the docs, blog, and app", () => {
+  for (const route of ["/docs/", "/blog/"]) {
+    const html = built.get(route);
+    assert.match(html, /<a href="\/docs\/"[^>]*>Docs<\/a>/);
+    assert.match(html, /<a href="\/blog\/"[^>]*>Blog<\/a>/);
+    assert.match(
+      html,
+      /<a[^>]+href="https:\/\/app\.ufo\.ai"[^>]+data-app-link[^>]*>Try ufo<\/a>/,
+    );
+    assert.ok(
+      html.includes('window.location.hostname===`ufo.ai`?`app.ufo.ai`:`app.testing.ufo.ai`'),
+      `${route} sends testing to production`,
+    );
+  }
+});
+
+test("blog posts have breadcrumbs and contents", () => {
+  assert.doesNotMatch(built.get("/blog/"), />On this page</);
+  const posts = [...built.entries()].filter(
+    ([route]) =>
+      route.startsWith("/blog/") &&
+      route !== "/blog/" &&
+      !route.startsWith("/blog/tags/") &&
+      !route.startsWith("/blog/authors/") &&
+      !/^\/blog\/\d+\/$/.test(route),
+  );
+  for (const [route, html] of posts) {
+    assert.match(html, /aria-label="Breadcrumb"/, `${route} has no breadcrumb`);
+    assert.match(html, />On this page</, `${route} has no contents`);
+  }
+  if (posts.length > 0) assert.match(built.get("/blog/"), />Latest post</);
+  if (posts.length > 1) assert.match(built.get("/blog/"), />Recent posts</);
+});
+
 test("the header draws the lockup, one file per scheme", () => {
   const header = built.get("/docs/").match(/<a[^>]*class="site-title[^"]*"[^>]*>(.*?)<\/a>/s);
   assert.ok(header, "no site title in the header");

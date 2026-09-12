@@ -2,6 +2,25 @@ import starlight from "@astrojs/starlight";
 import { defineConfig } from "astro/config";
 import starlightBlog from "starlight-blog";
 
+const blogLayout = {
+  name: "blog-layout",
+  hooks: {
+    "config:setup": async ({ addRouteMiddleware, config, updateConfig }) => {
+      addRouteMiddleware({
+        entrypoint: new URL("./src/blog-layout.ts", import.meta.url).pathname,
+        order: "post",
+      });
+      updateConfig({
+        components: {
+          ...config.components,
+          MarkdownContent: new URL("./src/components/MarkdownContent.astro", import.meta.url)
+            .pathname,
+        },
+      });
+    },
+  },
+};
+
 // One build serves both doors, so every canonical and the sitemap name production. The testing door
 // is the same bytes under testing.ufo.ai, which keeps that copy out of the index by pointing at
 // its production twin rather than by a rule a crawler may ignore.
@@ -17,7 +36,12 @@ export default defineConfig({
       },
       description: "Learn how to use ufo, connect your tools, automate work, and manage your workspace.",
       customCss: ["./src/styles/brand.css"],
-      plugins: [starlightBlog({ prefix: "blog", rss: false })],
+      components: {
+        Header: "./src/components/Header.astro",
+        PageSidebar: "./src/components/PageSidebar.astro",
+        PageTitle: "./src/components/PageTitle.astro",
+      },
+      plugins: [starlightBlog({ navigation: "none", prefix: "blog", rss: false }), blogLayout],
       // The code theme carries hexes of its own, and the house style admits no colour that is not a
       // token. The mono face already comes from `--sl-font-mono`.
       expressiveCode: {

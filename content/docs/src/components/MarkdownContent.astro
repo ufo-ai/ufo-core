@@ -1,0 +1,103 @@
+---
+import MarkdownContent from "@astrojs/starlight/components/MarkdownContent.astro";
+import BlogPost from "starlight-blog/components/MarkdownContent.astro";
+
+const path = Astro.url.pathname;
+const isBlogRoot = path === "/blog" || path === "/blog/";
+const isBlogPost =
+  path.startsWith("/blog/") &&
+  path !== "/blog/" &&
+  !path.startsWith("/blog/tags/") &&
+  !path.startsWith("/blog/authors/") &&
+  !/^\/blog\/\d+\/?$/.test(path);
+const postCount = isBlogRoot ? Astro.locals.starlightBlog.posts.length : 0;
+---
+
+{
+  isBlogPost ? (
+    <BlogPost>
+      <slot />
+    </BlogPost>
+  ) : isBlogRoot ? (
+    <MarkdownContent>
+      <div class="blog-home">
+        <h1 id="_top">Blog</h1>
+        {postCount > 0 ? (
+          <>
+          <h2 class="latest-post">Latest post</h2>
+          <slot />
+          {postCount > 1 && <h2 class="recent-posts">Recent posts</h2>}
+          </>
+        ) : (
+          <p class="empty-blog">No posts yet.</p>
+        )}
+      </div>
+    </MarkdownContent>
+  ) : (
+    <MarkdownContent>
+      <slot />
+    </MarkdownContent>
+  )
+}
+
+<style>
+  .blog-home {
+    display: grid;
+    gap: 1.5rem 2rem;
+  }
+
+  .blog-home > h1 {
+    grid-column: 1 / -1;
+    margin-bottom: 1rem;
+    order: 1;
+  }
+
+  .latest-post,
+  .recent-posts {
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-sm);
+    font-weight: 500;
+    grid-column: 1 / -1;
+  }
+
+  .latest-post {
+    order: 2;
+  }
+
+  .empty-blog {
+    grid-column: 1 / -1;
+    order: 2;
+  }
+
+  .blog-home :global(.sl-blog-posts) {
+    display: contents;
+  }
+
+  .blog-home :global(.sl-blog-preview:first-child) {
+    grid-column: 1 / -1;
+    order: 3;
+  }
+
+  .blog-home :global(.sl-blog-preview:first-child .sl-blog-preview-title) {
+    font-size: var(--sl-text-h2);
+  }
+
+  .recent-posts {
+    border-top: 1px solid var(--sl-color-hairline);
+    margin-top: 1rem;
+    order: 4;
+    padding-top: 2rem;
+  }
+
+  .blog-home :global(.sl-blog-preview:not(:first-child)) {
+    border-top: 1px solid var(--sl-color-hairline);
+    order: 5;
+    padding-top: 1.5rem;
+  }
+
+  @media (min-width: 50rem) {
+    .blog-home {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+</style>

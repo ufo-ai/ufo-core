@@ -1,0 +1,31 @@
+---
+import PageSidebar from "@astrojs/starlight/components/PageSidebar.astro";
+
+const path = Astro.url.pathname;
+const isBlogPost =
+  path.startsWith("/blog/") &&
+  path !== "/blog/" &&
+  !path.startsWith("/blog/tags/") &&
+  !path.startsWith("/blog/authors/") &&
+  !/^\/blog\/\d+\/?$/.test(path);
+---
+
+<div data-blog-contents={isBlogPost || undefined}>
+  <PageSidebar />
+</div>
+
+<style>
+  :global([data-blog-contents] mobile-starlight-toc) {
+    display: block !important;
+  }
+
+  @media (min-width: 72rem) {
+    :global([data-blog-contents] mobile-starlight-toc) {
+      display: none !important;
+    }
+
+    :global([data-blog-contents] .right-sidebar-panel) {
+      display: block !important;
+    }
+  }
+</style>

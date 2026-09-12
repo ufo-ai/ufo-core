@@ -1,0 +1,44 @@
+---
+import PageTitle from "@astrojs/starlight/components/PageTitle.astro";
+
+const path = Astro.url.pathname;
+const isBlogRoot = path === "/blog" || path === "/blog/";
+const isBlogPost =
+  path.startsWith("/blog/") &&
+  path !== "/blog/" &&
+  !path.startsWith("/blog/tags/") &&
+  !path.startsWith("/blog/authors/") &&
+  !/^\/blog\/\d+\/?$/.test(path);
+const title = Astro.locals.starlightRoute.entry.data.title;
+---
+
+{
+  isBlogPost && (
+    <nav class="blog-breadcrumbs" aria-label="Breadcrumb">
+      <a href="/blog/">Blog</a>
+      <span aria-hidden="true">/</span>
+      <span aria-current="page">{title}</span>
+    </nav>
+  )
+}
+{!isBlogRoot && <PageTitle />}
+
+<style>
+  .blog-breadcrumbs {
+    align-items: center;
+    color: var(--sl-color-gray-3);
+    display: flex;
+    font-size: var(--sl-text-xs);
+    gap: 0.6rem;
+    margin-top: 1rem;
+  }
+
+  .blog-breadcrumbs a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .blog-breadcrumbs a:hover {
+    color: var(--sl-color-white);
+  }
+</style>
