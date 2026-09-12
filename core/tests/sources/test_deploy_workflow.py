@@ -243,6 +243,10 @@ case "$URL" in
     [ "$BAD_BLOG_URL" != "$URL" ] || { printf 'wrong\\n'; exit; }
     printf '<h1>Blog</h1>\\n'
     ;;
+  */blog/rss.xml)
+    [ "$BAD_BLOG_FEED_URL" != "$URL" ] || { printf 'wrong\\n'; exit; }
+    printf '<atom:link rel="self" href="https://ufo.ai/blog/rss.xml"/>\\n'
+    ;;
   */)
     [ "$BAD_ROOT_HOST" != "$HOST" ] || { printf 'wrong\\n'; exit; }
     printf '  Sign up: https://ufo.ai/join/ufo\\n'
@@ -1576,6 +1580,7 @@ def test_edge_deploys_are_isolated(
     environment = {
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "BAD_HOST": "",
+        "BAD_BLOG_FEED_URL": "",
         "BAD_BLOG_URL": "",
         "BAD_FLEET_HOST": "",
         "BAD_DOCS_URL": "",
@@ -1589,7 +1594,7 @@ def test_edge_deploys_are_isolated(
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 14
+    assert len(invoked) == 15
     assert [call.rsplit(" ", 1)[-1] for call in invoked] == [
         f"https://{host}/",
         f"https://{host}/",
@@ -1600,6 +1605,7 @@ def test_edge_deploys_are_isolated(
         f"https://{host}/v1/onboard/ufo",
         f"https://{host}/docs/getting-started/introduction/",
         f"https://{host}/blog/",
+        f"https://{host}/blog/rss.xml",
         f"https://{host}/ufo",
         f"https://{host}/fleet",
         f"https://{host}/privacy",
@@ -1639,6 +1645,14 @@ def test_edge_deploys_are_isolated(
     )
     assert failed.returncode != 0
     environment["BAD_BLOG_URL"] = ""
+    environment["BAD_BLOG_FEED_URL"] = f"https://{host}/blog/rss.xml"
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["BAD_BLOG_FEED_URL"] = ""
     environment["BAD_ROOT_HOST"] = host
     failed = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", script],
