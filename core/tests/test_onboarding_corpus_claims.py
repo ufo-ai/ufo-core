@@ -523,7 +523,8 @@ CLAIMS = (
     Claim(
         claim="Automations can pause or resume a scheduled task",
         corpus="references/capabilities.md",
-        phrase="object panel, in the settings of the app that holds it, can\npause or resume that task",
+        phrase="object panel, in the settings of the app that holds it, can\npause or"
+        " resume that task",
         source=TASK_PANE,
         pattern=r'\{paused \? "Resume" : "Pause"\}',
     ),
