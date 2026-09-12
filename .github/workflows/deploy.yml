@@ -749,7 +749,6 @@ jobs:
           curl -fsS -X POST "https://$HOST/v1/onboard/ufo" | grep -F "x-ufo-session header is required."
           curl -fsS "https://$HOST/docs/getting-started/introduction/" | grep -F "How ufo works"
           curl -fsS "https://$HOST/blog/" | grep -F ">Blog</h1>"
-          curl -fsS "https://$HOST/blog/rss.xml" | grep -F 'href="https://ufo.ai/blog/rss.xml"'
           # shellcheck disable=SC2016  # literal ${UFO_URL:-...} text from the curl card, not an expansion
           curl -fsS "https://$HOST/ufo" | grep -F 'UFO_URL="${UFO_URL:-https://'"$HOST"'}"'
           curl -fsS "https://$HOST/fleet" | jq -e '.craft | type == "number" and . >= 0' >/dev/null

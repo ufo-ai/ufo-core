@@ -17,7 +17,7 @@ export default defineConfig({
       },
       description: "Learn how to use ufo, connect your tools, automate work, and manage your workspace.",
       customCss: ["./src/styles/brand.css"],
-      plugins: [starlightBlog({ prefix: "blog", rss: true })],
+      plugins: [starlightBlog({ prefix: "blog", rss: false })],
       // The code theme carries hexes of its own, and the house style admits no colour that is not a
       // token. The mono face already comes from `--sl-font-mono`.
       expressiveCode: {

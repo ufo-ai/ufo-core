@@ -133,14 +133,9 @@ test("documentation and blog pages stay under their paths", () => {
   );
 });
 
-test("the blog advertises its production feed", async () => {
-  assert.match(
-    built.get("/blog/"),
-    /<link href="https:\/\/ufo\.ai\/blog\/rss\.xml" rel="alternate" title="Blog" type="application\/rss\+xml"\/>/,
-  );
-  const feed = await readFile(new URL("blog/rss.xml", dist), "utf8");
-  assert.match(feed, /<title>UFO \| Blog<\/title>/);
-  assert.match(feed, /<atom:link rel="self" href="https:\/\/ufo\.ai\/blog\/rss\.xml"\/>/);
+test("the blog has no RSS links", async () => {
+  assert.doesNotMatch(built.get("/blog/"), /application\/rss|rss\.xml|>RSS</i);
+  await assert.rejects(readFile(new URL("blog/rss.xml", dist), "utf8"), { code: "ENOENT" });
 });
 
 test("the header draws the lockup, one file per scheme", () => {
