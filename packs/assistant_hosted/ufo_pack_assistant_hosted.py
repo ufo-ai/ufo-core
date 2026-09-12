@@ -1,7 +1,8 @@
 """The hosted assistant pack: the same assistant config backed by managed infrastructure.
 
 Activating it (config `[pack] name = "assistant_hosted"`) brings up the assistant capabilities —
-memory and recall, Perplexity research, brokered connectors (Composio's open namespace plus the
+memory and recall, Perplexity research, the prefetch grounding a question in both corpora
+before the model reads it, brokered connectors (Composio's open namespace plus the
 Pipedream allowlist), keyed connectors (a workspace API key injected at the egress proxy) and MCP,
 the browser/computer-use tools,
 website building and the code REPL, document generation, todos, durable objectives, sign-up
@@ -63,6 +64,7 @@ EXTENSIONS = (
     "bedrock",
     "openrouter",
     "memory",
+    "rag",
     "mcp",
     "e2b",
     "documents",

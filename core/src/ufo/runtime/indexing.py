@@ -5,7 +5,10 @@ retrieval and embedding; `Chunk`/`Hit`/`IndexScope` are the dialect-neutral valu
 that seam. `TextChunker.chunk` is the workflow — recursive-delimiter split to ~target-word pieces
 with sentence-aware overlap, char-capped. `chunk_embed_upsert` is the derivation step a memory or
 page indexer shares: chunk one body, embed each chunk, upsert them under the owner, then prune the
-owner's chunks outside that set so an edit leaves no orphan. None of these touch the database or a
+owner's chunks outside that set so an edit leaves no orphan. `chunk_digest` is the identity a chunk
+carries into the index — owner, the digest of the content it was derived from, ordinal and text —
+so a reader holding the owner's live content digest tells a chunk of that content from a chunk of
+what the content used to say. None of these touch the database or a
 dialect — a backend does storage, ANN/FTS, and the subject filter; these stay in-process value
 objects reached by both core and the extensions that implement the seam.
 """
@@ -96,6 +99,20 @@ class EmbedClient(Protocol):
     async def embed(self, texts: tuple[str, ...]) -> tuple[tuple[float, ...], ...]: ...
 
 
+def chunk_digest(
+    owner_kind: str, owner_id: str, content_digest: str, ordinal: int, text: str
+) -> str:
+    """One chunk's identity: its owner, the digest of the content it was derived from, its ordinal
+    and its text — never its subject, which the index restamps in place.
+
+    The content digest is what makes the identity a claim about one version of that content. A
+    reader holding the owner's live digest recomputes this over a hit and drops the hit whose
+    content has moved on, without reading the body and without a mirror of its own. An owner kind
+    that publishes no digest passes an empty string and makes no such claim."""
+    payload = "\x00".join((owner_kind, owner_id, content_digest, str(ordinal), text))
+    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+
+
 async def chunk_embed_upsert(
     index: IndexBackend,
     embed: EmbedClient,
@@ -104,6 +121,7 @@ async def chunk_embed_upsert(
     owner_id: str,
     subject: str,
     body: str,
+    content_digest: str,
 ) -> None:
     """Chunk one body, embed each chunk, upsert them under the owner, then prune the owner's chunks
     outside this desired set — the derivation step both indexers share. Upsert is idempotent on
@@ -111,16 +129,17 @@ async def chunk_embed_upsert(
     digests an edit no longer produces (all of them when the new body is empty), so re-chunked
     content leaves no orphaned chunk to surface as a stale hit.
 
-    A chunk's identity is its owner, its ordinal and its text — never its subject — so a body the
-    index already holds chunk for chunk needs no embedding: the index restamps the subject on the
-    rows it has and this returns. Only a body that differs is chunked, embedded and written.
+    A chunk's identity is its owner, `content_digest`, its ordinal and its text — never its subject
+    — so a body the index already holds chunk for chunk needs no embedding: the index restamps the
+    subject on the rows it has and this returns. Only a body that differs is chunked, embedded and
+    written.
 
     Chunking is pure-Python CPU work over the whole body, so it runs on `CHUNK_POOL`, a pool of
     `CHUNKERS_AT_ONCE` threads shared by the process: a job re-indexing thousands of pages must not
     hold the loop that serves every turn and every request, and eight such jobs must not hold the
     interpreter between them."""
     chunks = await asyncio.get_running_loop().run_in_executor(
-        CHUNK_POOL, chunker.chunk, body, owner_kind, owner_id, subject
+        CHUNK_POOL, chunker.chunk, body, owner_kind, owner_id, subject, content_digest
     )
     scope = IndexScope(owner_kind, owner_id)
     if await index.restamp(scope, subject, frozenset(chunk.chunk_digest for chunk in chunks)):
@@ -142,10 +161,12 @@ class TextChunker:
     overlap_words: int = CHUNK_OVERLAP_WORDS
     max_chars: int = CHUNK_MAX_CHARS
 
-    def chunk(self, text: str, owner_kind: str, owner_id: str, subject: str) -> tuple[Chunk, ...]:
+    def chunk(
+        self, text: str, owner_kind: str, owner_id: str, subject: str, content_digest: str
+    ) -> tuple[Chunk, ...]:
         return tuple(
             Chunk(
-                chunk_digest=self._digest(owner_kind, owner_id, ordinal, piece),
+                chunk_digest=chunk_digest(owner_kind, owner_id, content_digest, ordinal, piece),
                 owner_kind=owner_kind,
                 owner_id=owner_id,
                 subject=subject,
@@ -267,8 +288,3 @@ class TextChunker:
             if after.strip():
                 return after
         return trailing
-
-    @staticmethod
-    def _digest(owner_kind: str, owner_id: str, ordinal: int, text: str) -> str:
-        payload = "\x00".join((owner_kind, owner_id, str(ordinal), text))
-        return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()

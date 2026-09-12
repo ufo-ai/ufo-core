@@ -346,6 +346,7 @@ class CorpusAttestor:
                     OWNER_KIND_PAGE,
                     str(row.uid),
                     row.subject,
+                    row.digest,
                 )
             )
         for row in memory_rows:
@@ -364,6 +365,7 @@ class CorpusAttestor:
                     OWNER_KIND_MEMORY_ITEM,
                     str(row.id),
                     row.subject,
+                    "",
                 )
             )
         return tuple(chunks)

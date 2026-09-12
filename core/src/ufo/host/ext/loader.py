@@ -103,6 +103,7 @@ from ufo.runtime.objects import (
     action_registry,
     object_registry,
 )
+from ufo.runtime.search import SearchProvider
 from ufo.runtime.skills.runtime import (
     CORE_SKILLS_BY_NAME,
     RuntimeSkill,
@@ -1038,6 +1039,7 @@ def turn_hooks(
     *,
     audience: Audience,
     public_base_url: str | None = None,
+    search: SearchProvider | None = None,
 ) -> HookChain:
     """The turn's reactive hook chain — every declared turn-lifecycle hook bound to its extension's
     workspace-scoped ExtensionContext (the same handle its tools and jobs receive), grouped by
@@ -1047,8 +1049,9 @@ def turn_hooks(
     turn it fires under reads the frames that turn publishes, and `public_base_url` is the deploy's
     externally reachable base, which a hook rendering a link a member opens cannot reach any other
     way. Its surfaces are declared exactly as a tool's context declares them, so a hook reads the
-    installation its own surface bound. An extension that declares hooks without a credential key
-    set fails loud, since its context needs the credential store."""
+    installation its own surface bound. `search` is the deploy's web-search backend,
+    which a hook that grounds a turn before its first model round reads. An extension that declares
+    hooks without a credential key set fails loud, since its context needs the credential store."""
     grouped: dict[HookEvent, list[BoundHook]] = {event: [] for event in TURN_HOOK_EVENTS}
     for manifest in manifests:
         if not manifest.hooks:
@@ -1070,6 +1073,7 @@ def turn_hooks(
             tailer=tailer,
             audience=audience,
             public_base_url=public_base_url,
+            search=search,
         )
         for spec in manifest.hooks:
             if spec.event not in TURN_HOOK_EVENTS:

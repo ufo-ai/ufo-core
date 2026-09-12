@@ -59,6 +59,27 @@ item before it seeds and after it settles, so no run inherits another's memory:
 uv run python -m evals --only memory_staleness --workspace <workspace-id> --label staleness
 ```
 
+`rag_prefetch` grades the prefetch RAG hook (`docs/rfcs/0050-prefetch-rag.md`). Each case seeds one
+web corpus and one workspace corpus, then asks one message. The web corpus is served by the
+`eval_search` backend, so the ranking a run grades is the one the case wrote. The workspace corpus
+is staged as files a folder source syncs and the memory extension's page-change consumer indexes,
+so the pages arrive the way a tenant's own documents do. The stack therefore needs the Postgres
+stack, a model key, and an embedding key: the vector leg of the page store is silent without one,
+and the cases that read the workspace corpus then rest on the lexical leg alone.
+
+The suite is explicit-only, and the stack must select the eval search backend. Put
+`[research] search_provider = "eval_search"` in the config the serve process reads, start
+`ufoctl serve` against it, then:
+
+```bash
+uv run python -m evals --only rag_prefetch --workspace <workspace-id> --label rag-prefetch
+```
+
+A stack pointed at the live web cannot grade a seeded ranking; it scores the web of the day
+instead. `evals/rag-prefetch-routing.toml` runs the router and preface arms over the same suite
+with `python -m evals.ablate evals/rag-prefetch-routing.toml`, and carries that setting in its
+`[template]`.
+
 Corpus runs use the same concurrency control:
 
 ```bash

@@ -33,5 +33,8 @@ from ufo.runtime.indexing import (
     TextChunker as TextChunker,
 )
 from ufo.runtime.indexing import (
+    chunk_digest as chunk_digest,
+)
+from ufo.runtime.indexing import (
     chunk_embed_upsert as chunk_embed_upsert,
 )

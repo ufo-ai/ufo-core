@@ -1205,6 +1205,7 @@ class MemoryIndexer:
                 str(item.id),
                 item.subject,
                 item.body,
+                "",
             )
         async with self.transaction() as connection:
             binding = (
@@ -1313,6 +1314,7 @@ class PageIndexer:
             str(change.page_id),
             current.subject,
             change.body,
+            current.digest,
         )
         if (await self.page_states((change.page_id,))).get(change.page_id) != current:
             await self._drop(change.page_id)

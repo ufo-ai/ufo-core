@@ -379,6 +379,7 @@ def run(fleet: Fleet) -> None:
     embed = embed_backend(manifests, config.memory.embed_backend, credentials)
     index = index_backend(manifests, config.memory.index_backend, credentials)
     memory = memory_search(manifests, credentials, index, embed)
+    search = _select_search_provider(config, manifests, credentials)
     subagents = SubagentRegistry((*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests)))
     subagent_grants = turn_subagent_grants(manifests)
     skills = skill_registry(manifests, (model_catalog_skill(registry),))
@@ -434,7 +435,7 @@ def run(fleet: Fleet) -> None:
         ),
         hub=hub,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),
-        search_provider=_select_search_provider(config, manifests, credentials),
+        search_provider=search,
         connectors=connectors,
         run_tokens=run_tokens,
         dbos=dbos_client,
@@ -447,6 +448,7 @@ def run(fleet: Fleet) -> None:
             credentials=credentials,
             index=index,
             embed=embed,
+            search=search,
             blob=blob,
             tailer=tailer,
             public_base_url=config.connect.public_base_url,

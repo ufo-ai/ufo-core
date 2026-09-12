@@ -79,6 +79,7 @@ from ufo.runtime.hub import LiveFrame
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.governance import Governance, prompt_digest
 from ufo.runtime.media.artifact_url import is_text_media, mint_image_preview_url
+from ufo.runtime.search import SearchProvider
 from ufo.runtime.seats import Seats, workspace_domain
 from ufo.runtime.sources.sync import (
     PageFeed,
@@ -1232,6 +1233,7 @@ class ExtensionContext:
     )
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
+    search: SearchProvider | None = None
     pages: PageFeed | None = None
     corpus: TrajectoryCorpus | None = None
     files: ConversationFiles | None = None
@@ -2709,6 +2711,7 @@ def context_for(
     member_context_read: bool = False,
     member_context_authority: ExecutionAuthority = WORKSPACE_AUTHORITY,
     member_context_blob: WorkspaceBlobStore | None = None,
+    search: SearchProvider | None = None,
     *,
     audience: Audience = SHARED_AUDIENCE,
     public_base_url: str | None = None,
@@ -2730,7 +2733,9 @@ def context_for(
     row carries a picture mints its preview link over the two. A `tailer` lets a handler
     firing inside a turn watch that turn's frames — the one seam a hook's own side-channel work
     reads the loop through. `probes` is the off-turn sandbox exec, wired only where a handler runs
-    outside every turn: a tool or in-turn hook already holds the turn's own sandbox."""
+    outside every turn: a tool or in-turn hook already holds the turn's own sandbox. `search` is the
+    deploy's selected web-search backend: the seam a handler grounding a turn before the model runs
+    reads, built once at boot and reaching its key host-side."""
     if model_resolver is not None and model_job is None:
         raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     return ExtensionContext(
@@ -2740,6 +2745,7 @@ def context_for(
         installations=SurfaceInstallationAccess(declared=surfaces, addressed=addressed_surfaces),
         index=index,
         embed=embed,
+        search=search,
         pages=pages,
         corpus=None if blob is None else TrajectoryCorpus(blob),
         files=None if sandboxes is None else ConversationFiles(sandboxes),

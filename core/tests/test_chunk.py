@@ -7,12 +7,13 @@ from ufo.runtime.indexing import (
     Hit,
     IndexScope,
     TextChunker,
+    chunk_digest,
     chunk_embed_upsert,
 )
 
 
 def _check_short_text_is_one_chunk() -> None:
-    chunks = TextChunker().chunk("A short note about apples.", "memory_item", "m1", "member:me")
+    chunks = TextChunker().chunk("A short note about apples.", "memory_item", "m1", "member:me", "")
     assert len(chunks) == 1
     chunk = chunks[0]
     assert chunk.ordinal == 0
@@ -26,26 +27,34 @@ def _check_short_text_is_one_chunk() -> None:
 
 def _check_long_text_splits_with_sequential_ordinals_and_unique_digests() -> None:
     text = ". ".join(f"Sentence number {index} about the topic" for index in range(400))
-    chunks = TextChunker().chunk(text, "page", "p1", "shared")
+    chunks = TextChunker().chunk(text, "page", "p1", "shared", "sha256:body")
     assert len(chunks) > 1
     assert [chunk.ordinal for chunk in chunks] == list(range(len(chunks)))
     assert len({chunk.chunk_digest for chunk in chunks}) == len(chunks)
 
 
 def _check_blank_text_yields_no_chunks() -> None:
-    assert TextChunker().chunk("   \n  ", "memory_item", "m1", "member:me") == ()
+    assert TextChunker().chunk("   \n  ", "memory_item", "m1", "member:me", "") == ()
 
 
 def _check_each_chunk_respects_char_cap() -> None:
-    chunks = TextChunker(max_chars=6_000).chunk("x" * 20_000, "memory_item", "m1", "member:me")
+    chunks = TextChunker(max_chars=6_000).chunk("x" * 20_000, "memory_item", "m1", "member:me", "")
     assert chunks
     assert all(len(chunk.text) <= 6_000 for chunk in chunks)
 
 
 def _check_digest_is_deterministic_for_identical_content() -> None:
-    a = TextChunker().chunk("Same content here.", "memory_item", "m1", "member:me")
-    b = TextChunker().chunk("Same content here.", "memory_item", "m1", "member:me")
+    a = TextChunker().chunk("Same content here.", "memory_item", "m1", "member:me", "")
+    b = TextChunker().chunk("Same content here.", "memory_item", "m1", "member:me", "")
     assert a[0].chunk_digest == b[0].chunk_digest
+
+
+def _check_digest_binds_the_content_the_chunk_came_from() -> None:
+    before = TextChunker().chunk("The rate is $24.", "page", "p1", "shared", "sha256:first")
+    after = TextChunker().chunk("The rate is $24.", "page", "p1", "shared", "sha256:second")
+    assert before[0].text == after[0].text
+    assert before[0].chunk_digest != after[0].chunk_digest
+    assert chunk_digest("page", "p1", "sha256:first", 0, before[0].text) == before[0].chunk_digest
 
 
 def _check_delimiter_split_ends_each_piece_at_its_delimiter_and_drops_blank_pieces() -> None:
@@ -64,13 +73,15 @@ def _check_delimiter_split_ends_each_piece_at_its_delimiter_and_drops_blank_piec
 
 def test_chunk_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 6
+    assert len(checks) == 7
     for check in checks:
         check()
 
 
 class _SlowChunker(TextChunker):
-    def chunk(self, text: str, owner_kind: str, owner_id: str, subject: str) -> tuple[Chunk, ...]:
+    def chunk(
+        self, text: str, owner_kind: str, owner_id: str, subject: str, content_digest: str
+    ) -> tuple[Chunk, ...]:
         time.sleep(0.3)
         return ()
 
@@ -117,7 +128,9 @@ async def test_chunking_leaves_the_loop_free_for_the_turns_it_shares_it_with() -
             ticks += 1
 
     ticker = asyncio.create_task(tick())
-    await chunk_embed_upsert(_Index(), _Embed(), _SlowChunker(), "page", "p1", "shared", "body")
+    await chunk_embed_upsert(
+        _Index(), _Embed(), _SlowChunker(), "page", "p1", "shared", "body", "sha256:body"
+    )
     ticks_while_chunking = ticks
     await ticker
     assert ticks_while_chunking == 10

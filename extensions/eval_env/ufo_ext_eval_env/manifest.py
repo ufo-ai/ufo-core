@@ -41,6 +41,7 @@ from ufo.sdk.manifest import (
     HookSpec,
     Manifest,
     PreToolUse,
+    SearchProviderSpec,
 )
 from ufo.sdk.objects import (
     ObjectDetail,
@@ -51,6 +52,7 @@ from ufo.sdk.objects import (
     VerbNotSupported,
     object_page,
 )
+from ufo.sdk.search import FetchedPage, FetchRequest, SearchHit, SearchQuery, SearchResults
 from ufo.sdk.tools import ToolContext
 
 NAME = "eval_env"
@@ -82,6 +84,8 @@ GREENHOUSE_LABEL = "Greenhouse (eval)"
 GREENHOUSE_HOST = "greenhouse.evalenv.test"
 APP_FIXTURE_PREFIX = "app_fixture:"
 GITHUB_ITEM_FIXTURE_PREFIX = "github_item:"
+SEARCH_BACKEND = "eval_search"
+SEARCH_CORPUS_KEY = "search_corpus"
 GITHUB_ARGUMENT_TOOLS = frozenset({"create_commit_status", "get_pull_request"})
 APP_ACTION_KIND = "eval_app_action"
 APP_ACTION_KEY_PREFIX = "app_action:"
@@ -713,6 +717,60 @@ class EvalEnvBroker:
         return Credential(bearer=f"eval-env:{account}")
 
 
+class SearchDocument(BaseModel):
+    """One page the eval web holds: what a hit renders, and the `terms` a query must carry to reach
+    it. A case seeds the list under `SEARCH_CORPUS_KEY` in its workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    title: str
+    text: str
+    published_date: str | None = None
+    terms: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EvalSearchProvider:
+    """The web an eval case wrote. A document is reached by the seeded terms its query carries, and
+    documents matching more terms rank first, so a case controls the ranking it grades without
+    pinning the exact query text a turn searches with. A workspace that seeded no corpus has no web:
+    the search answers with no hits, which is what every case not about retrieval expects."""
+
+    supports_fetch: bool = False
+
+    async def search(self, query: SearchQuery) -> SearchResults:
+        seeded = await ScopedStore(extension=NAME).get(SEARCH_CORPUS_KEY)
+        if seeded is None:
+            return SearchResults(hits=())
+        if not isinstance(seeded, list):
+            raise ValueError(f"{SEARCH_CORPUS_KEY} holds a list of documents")
+        text = query.query.lower()
+        documents = [SearchDocument.model_validate(entry) for entry in seeded]
+        matched = sorted(
+            (
+                (sum(1 for term in document.terms if term.lower() in text), order, document)
+                for order, document in enumerate(documents)
+            ),
+            key=lambda scored: (-scored[0], scored[1]),
+        )
+        return SearchResults(
+            hits=tuple(
+                SearchHit(
+                    url=document.url,
+                    title=document.title,
+                    text=document.text,
+                    published_date=document.published_date,
+                )
+                for score, _order, document in matched[: query.num_results]
+                if score > 0
+            )
+        )
+
+    async def fetch(self, request: FetchRequest) -> FetchedPage:
+        raise RuntimeError("the eval search backend extracts no pages")
+
+
 @dataclass(frozen=True)
 class _EvalEnvOAuth:
     """A stub handoff: the connect flow is never exercised in evals — grants are seeded directly —
@@ -1020,6 +1078,11 @@ def manifest() -> Manifest:
             ),
         ),
         objects=(APP_ACTION_OBJECT,),
+        search_providers=(
+            SearchProviderSpec(
+                backend=SEARCH_BACKEND, build=lambda credentials: EvalSearchProvider()
+            ),
+        ),
         agents=(APP_QA_REPAIR_AGENT,),
         hooks=(
             HookSpec(

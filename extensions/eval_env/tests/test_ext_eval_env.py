@@ -46,6 +46,7 @@ from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import CredentialAccess, ExtensionContext, ScopedStore
 from ufo.sdk.manifest import HookContext, PreToolUse
+from ufo.sdk.search import SearchQuery
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -728,3 +729,37 @@ def _ranked(query: str, path: tuple[str, ...]) -> JsonObject:
             node = node[key]
         node["result_rank"] = index
     return page
+
+
+async def test_the_seeded_web_ranks_by_the_terms_a_query_carries(db: None) -> None:
+    workspace_id = await _workspace()
+    pricing = env.SearchDocument(
+        url="https://northwind.example/pricing",
+        title="Northwind pricing",
+        text="Team is $30 per seat.",
+        published_date="2026-02-11",
+        terms=("northwind", "price", "seat"),
+    )
+    support = env.SearchDocument(
+        url="https://status.northwind.example",
+        title="Northwind support hours",
+        text="Support answers 09:00 to 17:00 UTC.",
+        terms=("northwind", "support"),
+    )
+    provider = env.EvalSearchProvider()
+    with ws(workspace_id):
+        empty = await provider.search(
+            SearchQuery(query="what does northwind charge", num_results=5)
+        )
+        await ScopedStore(extension=env.NAME).put(
+            env.SEARCH_CORPUS_KEY, [support.model_dump(), pricing.model_dump()]
+        )
+        priced = await provider.search(
+            SearchQuery(query="What is the Northwind price per seat?", num_results=5)
+        )
+        unseeded = await provider.search(SearchQuery(query="quarterly tax filing", num_results=5))
+
+    assert empty.hits == ()
+    assert [hit.url for hit in priced.hits] == [pricing.url, support.url]
+    assert priced.hits[0].published_date == "2026-02-11"
+    assert unseeded.hits == ()

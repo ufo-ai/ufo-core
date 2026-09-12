@@ -480,6 +480,7 @@ async def _index_card(
         row.name,
         SKILL_SUBJECT,
         f"{row.name}: {row.description[:SKILL_INDEX_DESCRIPTION_MAX_CHARS]}",
+        "",
     )
     async with ctx.transaction() as connection:
         settled = await connection.execute(

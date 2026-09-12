@@ -81,6 +81,7 @@ from ufo.runtime.queue import (
     _with_action_verbs,
     _without_workspace_skills,
 )
+from ufo.runtime.search import SearchProvider
 from ufo.runtime.skills.runtime import (
     SKILL_MD,
     LoadedSkill,
@@ -117,6 +118,7 @@ class HostEnvironment:
     credentials: CredentialStore | None
     index: IndexBackend | None = None
     embed: EmbedClient | None = None
+    search: SearchProvider | None = None
     blob: WorkspaceBlobStore | None = None
     tailer: TurnTailer | None = None
     public_base_url: str | None = None
@@ -275,6 +277,7 @@ class HostEnvironment:
             self.tailer,
             audience=audience,
             public_base_url=self.public_base_url,
+            search=self.search,
         )
 
     async def member_skills(

@@ -1,0 +1,109 @@
+name = "rag-prefetch-routing"
+base = "HEAD"
+suites = ["rag_prefetch"]
+repeats = 3
+concurrency = 2
+max_stacks = 1
+budget_usd = 90.0
+est_usd_per_case = 0.30
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "default" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "eval_search" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "no-prefetch"
+
+[[arm.replacements]]
+path = "extensions/rag/ufo_ext_rag/route.py"
+old = '''    queries = tuple(
+        question[:MAX_QUERY_CHARS] for question in questions if len(question) >= MIN_QUERY_CHARS
+    )[:MAX_QUERIES]
+    return Route(queries, "question" if queries else "questions too short")'''
+new = '''    return Route((), "prefetch withheld")'''
+
+[[arm]]
+name = "prefetch-every-turn"
+
+[[arm.replacements]]
+path = "extensions/rag/ufo_ext_rag/route.py"
+old = '''    if not questions:
+        return Route((), "no question")
+    if any(_asks_for_action(question) for question in questions):
+        return Route((), "action requested")'''
+new = '''    if not questions:
+        return Route((inbound[:MAX_QUERY_CHARS],), "whole inbound")'''
+
+[[arm]]
+name = "bare-preface"
+
+[[arm.replacements]]
+path = "extensions/rag/ufo_ext_rag/manifest.py"
+old = '''PREFACE = (
+    "A web search and a workspace search ran on this message before you read it; nobody asked for "
+    "them and nothing below is the member's words. Answer from these passages when they answer the "
+    "question. Name, in the sentence that states it, where every figure, date and name came from: "
+    "a web passage by its address, a workspace passage by the record it names. Call tools when the "
+    "message asks for an action, when it needs live state, or when the passages do not hold the "
+    "answer. When two passages disagree, say so, name each source with its date, and do not merge "
+    "them.\n"
+)
+'''
+new = '''PREFACE = "Search results for this message:\n"'''
+
+[[arm]]
+name = "no-tool-clause"
+
+[[arm.replacements]]
+path = "extensions/rag/ufo_ext_rag/manifest.py"
+old = '''    "a web passage by its address, a workspace passage by the record it names. Call tools when the "
+    "message asks for an action, when it needs live state, or when the passages do not hold the "
+    "answer. When two passages disagree, say so, name each source with its date, and do not merge "
+    "them.\n"'''
+new = '''    "a web passage by its address, a workspace passage by the record it names. When two passages "
+    "disagree, say so, name each source with its date, and do not merge them.\n"'''
+
+[[arm]]
+name = "no-conflict-clause"
+
+[[arm.replacements]]
+path = "extensions/rag/ufo_ext_rag/manifest.py"
+old = '''    "message asks for an action, when it needs live state, or when the passages do not hold the "
+    "answer. When two passages disagree, say so, name each source with its date, and do not merge "
+    "them.\n"'''
+new = '''    "message asks for an action, when it needs live state, or when the passages do not hold the "
+    "answer.\n"'''
+
+[[arm]]
+name = "unnamed-source-clause"
+
+[[arm.replacements]]
+path = "extensions/rag/ufo_ext_rag/manifest.py"
+old = '''    "question. Name, in the sentence that states it, where every figure, date and name came from: "
+    "a web passage by its address, a workspace passage by the record it names. Call tools when the "'''
+new = '''    "question, and name the source you took each fact from. Call tools when the "'''
+
+[[arm]]
+name = "external-only"
+
+[[arm.replacements]]
+path = "extensions/rag/ufo_ext_rag/prefetch.py"
+old = '''        if self.pages is None:
+            return ()'''
+new = '''        if self.pages is None or True:
+            return ()'''
+
+[[arm]]
+name = "internal-only"
+
+[[arm.replacements]]
+path = "extensions/rag/ufo_ext_rag/prefetch.py"
+old = '''        if self.search is None:
+            return ()'''
+new = '''        if self.search is None or True:
+            return ()'''
