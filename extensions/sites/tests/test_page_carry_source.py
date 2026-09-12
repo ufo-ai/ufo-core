@@ -6,9 +6,54 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from ufo_ext_sites.source import PAGE_DIR
+from ufo_ext_sites.source import KIT_DIR, PAGE_DIR
 
 pytestmark = pytest.mark.integration
+
+VITE = Path(__file__).resolve().parents[2] / "web" / "frontend" / "node_modules" / ".bin" / "vite"
+BUILD_CEILING_S = 240
+
+BLOCKS_PAGE = """import { mountApp, Header, Page } from "ufo/kit";
+import { BlockRoot, Item, ItemContent, ItemGroup, ItemTitle, StatGrid, StatTile } from "ufo/blocks";
+
+function App() {
+  return (
+    <Page>
+      <Header>Queue</Header>
+      <BlockRoot>
+        <div data-app-region="overview">
+          <StatGrid columns={2}>
+            <StatTile label="Waiting" value="3" />
+            <StatTile label="Done" value="9" />
+          </StatGrid>
+        </div>
+        <div data-app-region="records">
+          <ItemGroup>
+            <Item>
+              <ItemContent>
+                <ItemTitle>Rotate the signing key</ItemTitle>
+              </ItemContent>
+            </Item>
+          </ItemGroup>
+        </div>
+      </BlockRoot>
+    </Page>
+  );
+}
+
+mountApp(document.getElementById("root")!, () => <App />);
+"""
+
+BLOCKS_DOCUMENT = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Application</title>
+<link rel="stylesheet" href="./sdk/kit.css">
+</head>
+<body><div id="root"></div><script type="module" src="./app.tsx"></script></body>
+</html>
+"""
 
 DRIVER = """
 import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -66,3 +111,37 @@ def test_a_second_deploy_carries_the_source_over_its_own_output(tmp_path: Path) 
     result = json.loads(done.stdout.strip().splitlines()[-1])
     assert result["mode"] == "644"
     assert result["carried"] == "// second"
+
+
+@pytest.mark.skipif(not VITE.is_file(), reason="the deploy config is built by this package's vite")
+def test_a_page_importing_a_block_resolves_and_builds_through_the_deploy_config(
+    tmp_path: Path,
+) -> None:
+    """`ufo/blocks` is a second alias onto a second SDK entry, so a page that imports a block
+    resolves nothing unless the deploy's own config carries it and the kit build emitted
+    `blocks.js` beside `kit.js`. A unit test over the alias list proves neither."""
+
+    project = tmp_path / "ufo-app"
+    project.mkdir()
+    shutil.copytree(KIT_DIR, project / "sdk")
+    (project / "vite.config.ts").write_bytes((PAGE_DIR / "vite.config.ts").read_bytes())
+    (project / "app.tsx").write_text(BLOCKS_PAGE)
+    (project / "index.html").write_text(BLOCKS_DOCUMENT)
+
+    done = subprocess.run(
+        [str(VITE), "build"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        timeout=BUILD_CEILING_S,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "failed to resolve import" not in done.stderr.lower()
+
+    bundled = "".join(
+        path.read_text(errors="ignore") for path in (project / "dist" / "assets").glob("*.js")
+    )
+    assert "blk-item-title" in bundled
+    styled = "".join(path.read_text() for path in (project / "dist" / "assets").glob("*.css"))
+    assert "--blk-bg-100" in styled and ".blk-root" in styled

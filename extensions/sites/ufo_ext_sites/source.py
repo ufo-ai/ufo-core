@@ -125,8 +125,8 @@ UNPACK_TIMEOUT_SECONDS = 300
 def _page_kit_archive() -> bytes:
     """The deploy's SDK as one gzipped tar, read from this package once at import.
 
-    148 files and 6.8 MB on disk become a 2.3 MB archive in about 0.16 s, so a read spends one
-    sandbox write and one unpack instead of 148 round trips. Built at import because a site object
+    154 files and 8.0 MB on disk become a 2.6 MB archive in about 0.2 s, so a read spends one
+    sandbox write and one unpack instead of 154 round trips. Built at import because a site object
     is read for reasons far smaller than an edit — its link, its visibility — and re-archiving per
     read would pay that on every one of them."""
     buffer = BytesIO()

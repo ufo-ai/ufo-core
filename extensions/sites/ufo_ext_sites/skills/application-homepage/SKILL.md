@@ -126,7 +126,8 @@ Write `/workspace/ufo-app/application-design.svg`:
 
 - `viewBox="0 0 1440 H"`, `width="1440"`, `height="H"`, integer `H` from 900 through 4096.
 - 2 to 6 `<g data-app-region="slug">` groups, none nested inside another, none drawn as a band
-  across y=900. One carries `data-kit-component="ComponentName"` naming a visual `ufo/kit` export.
+  across y=900. One carries `data-kit-component="ComponentName"` naming a visual export of `ufo/kit` or
+  `ufo/blocks`.
 - The primary task and every required fact above y=900.
 - Every band inside x=24..1416. `Page` gutters 24 px each side, so the page has 1392 px to
   divide and a band drawn wider than that renders off the pane.
@@ -164,7 +165,13 @@ cat "$UFO_HOME/skills/ufo-style/references/kit.md"
 
 Then write `/workspace/ufo-app/app.tsx`:
 
-- Named imports from `ufo/kit` and nothing else. No exports.
+- Named imports from `ufo/kit` and `ufo/blocks`, and nothing else. No exports. Any other module
+  fails the deploy with `failed to resolve import`, including one you install.
+- `ufo/kit` holds the page chrome, the one write and the narrowing control. `ufo/blocks` holds the
+  record, measure and chart shapes a recipe names, and every block draws inside one `BlockRoot`.
+  Eleven names are published by both as different components — `Avatar`, `AvatarStack`, `Card`,
+  `CardAction`, `CardContent`, `CardDescription`, `CardFooter`, `CardHeader`, `CardTitle`,
+  `DataTable` and `Stat` — so import each from the one namespace you mean and never both.
 - `mountApp(document.getElementById("root")!, () => <App />)`.
 - `<Page>` wraps everything. It holds the gutters that keep the page off the pane's edges; a page
   built out of bare `div`s runs edge to edge and reads as a wall of content.
@@ -197,13 +204,13 @@ in it judges how the page looks — you settle that in the browser, repairing an
 until the look finds nothing on the reference's broken list, and answer with the deploy's `site`
 and `site_url`.
 
-Never run `vite build` yourself: the deploy writes the config that resolves `ufo/kit`, and
-without it the build cannot succeed.
+Never run `vite build` yourself: the deploy writes the config that resolves `ufo/kit` and
+`ufo/blocks`, and without it the build cannot succeed.
 
 ## Traps
 
 - Do not embed the SVG in the app. The design fixes layout; it is not content.
-- Do not install packages. The project resolves `ufo/kit` and nothing else.
+- Do not install packages. The project resolves `ufo/kit` and `ufo/blocks`, and nothing else.
 - Do not deploy the project as its own source. `deploy_website` builds it.
 - Write the page for a member who has nothing in it yet, because that is the state it is measured
   in. Every region draws its own container and a line saying it is empty, never nothing at all, and

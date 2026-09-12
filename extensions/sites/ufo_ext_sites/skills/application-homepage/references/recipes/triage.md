@@ -2,44 +2,80 @@
 
 ## Intent
 
-A queue the member clears one record at a time: each record carries a drafted act the member
-approves or skips.
+A queue the member reads one record at a time, each carrying a drafted reply.
+
+## Imports
+
+```tsx
+import { ApplicationAction, Button, Header, Page, Segmented } from "ufo/kit";
+import {
+  Avatar,
+  BlockRoot,
+  Count,
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemHeader,
+  ItemMedia,
+  ItemMeta,
+  ItemTitle,
+  Prose,
+  StatGrid,
+  StatTile,
+} from "ufo/blocks";
+```
 
 ## Roles
 
-- Required — record list, primary text, status field (waiting or handled), the drafted act per
+- Required — record list, primary text, a group key the queue divides on, one drafted reply per
   record.
-- Optional — people, secondary text, date, a priority flag the queue groups by.
+- Optional — people, secondary text, date.
 
 ## Regions
 
 ```
-Header → the app name, and up to 3 acts: Review in chat, prepare the top record, setup
-Stat row → the records waiting and those handled, 2 across, each StatDescription naming what
-           it counts
+Page → Header, its acts at most three: review in chat, setup, the page-wide menu
+BlockRoot wraps every band below the header
+
+StatGrid → StatTile of the records still waiting, its label naming what it counts
 Segmented → the groups, and one member for the whole list, active on the one in force
-the record list → one Section per group, the priority group first, its heading carrying its count
-└── RowLines → one row per record
-    ├── the person as an AvatarStack, the primary text cut at its column, a Badge of the state
-    ├── the secondary text on the same line and the date in --font-mono
-    ├── the row's own controls: Approve and Skip, variant="row"
-    └── PressRow → Sheet holding the drafted act in full, with one line saying the act is sent
-        only after approval in chat
-Empty → one line per Section naming what will appear there
+the record list → ItemGroup, one ItemHeader per group, the priority group first, carrying its Count
+└── Item, accent primary in the priority group, selected on the opened record
+    ├── ItemMedia variant="avatar" → Avatar of the person
+    ├── ItemContent → ItemTitle of the primary text, ItemDescription of the secondary text
+    ├── ItemMeta of the person and the date
+    └── ItemActions → ApplicationAction staging the drafted reply
+the opened record → Prose of the draft, under the row, read before it is staged
 ```
 
 ## Controls
 
-- Segmented, a group → only that group's records draw, and both Stats answer what is drawn.
-- Approve on a row → its Badge reads handled, the row leaves the waiting Section, and the waiting
-  Stat drops by one as the handled Stat lifts.
-- Skip on a row → the row leaves the queue and the waiting Stat drops by one.
-- A row → its Sheet opens on the record, holding the draft the row could not.
+- A row → the opened record, `Item` selected → its draft draws in `Prose` beneath it.
+- An `ItemHeader` → its group's open state → the rows fold, the heading and its `Count` staying.
+- `Segmented`, a group → only that group's records draw, and the `StatTile` counts what is drawn.
+- A row's `ApplicationAction` → stages the reply and sends nothing until chat approves it.
+- `Button` reading `Review in chat` → the whole page hands off, drawn once in the `Header` acts.
+
+## What the contract keeps out
+
+The product supplies the page chrome and chat carries every member act, so the original's bar, its
+composer and its per-row sends do not ship.
+
+- `ActionBar`, `ActionBarTitle`, `ActionBarActions` and `IconButton` — the page's bar is `Header`,
+  whose acts hold at most three.
+- `Composer` — a reply is read on the page and sent from chat; a field on the page would send a
+  message no turn recorded, which is the one thing this recipe must not do.
+- `Prompt` and `Prompts` — a chip that fills a composer has no composer to fill, and a chip that
+  narrows records is `Segmented`.
+- `Menu` and `MenuItem` — archiving or starring a record is a write, and it is a turn.
+- `ItemSection` — the group heading is `ItemHeader`.
 
 ## Checklist
 
-- Each Stat states what it counts, and each Section heading reads its own count.
-- Approving a record moves it between the Sections and moves both Stats.
-- Skipping a record drops the waiting count and leaves the other rows in place.
-- A row's Sheet holds the drafted act, and the row itself stays one line.
-- A group in force draws selected, and the whole-list member restores every record.
+- The `StatTile` reads the records still in the queue, and each `ItemHeader` reads its own `Count`.
+- Opening a row draws its draft beneath it and closes the one before it.
+- Staging a reply creates nothing and sends nothing until chat approves it.
+- Folding a group hides its rows and leaves the other heading drawn.
+- At the narrow lane a row keeps its primary text, its person and its date.

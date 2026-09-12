@@ -2,46 +2,83 @@
 
 ## Intent
 
-One period's records and measures: a period is picked, its rows and figures follow, and the
-questions it raised clear.
+One period's records and measures, the period picked and its questions read.
+
+## Imports
+
+```tsx
+import { Button, Header, Page, Segmented } from "ufo/kit";
+import {
+  BlockRoot,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemFooter,
+  ItemGroup,
+  ItemMeta,
+  ItemTitle,
+  Prose,
+  StatGrid,
+  StatTile,
+} from "ufo/blocks";
+```
 
 ## Roles
 
-- Required — period list with a label and its own measures, record list with a period key, primary
-  text and secondary text, question list with primary text and a resolved flag.
-- Optional — the person who leads a record, a measure per record, a detail per record, the date a
-  question has waited, the setting the digest runs under.
+- Required — period list with a label per period, record list with a period key, primary text and
+  secondary text, the measures each period carries.
+- Optional — a question list, a detail per record, people, a measure per record, a source.
 
 ## Regions
 
 ```
-Header → the app name, and up to 3 acts: Review in chat, clear the questions, setup
-Attention band → the questions still open, at most 2 rows, one line each, each carrying
-                 Prepare <the answer>
-Stat row → the selected period's measures — the records drawn, their counts summed, 2 to 4 across
-Segmented → the period labels, active on the one in force
-the record list → the selected period's records, one Section
-└── RowLines → one row per record
-    ├── the primary text cut at its column, the secondary text on the same line
-    ├── the lead as an AvatarStack and the measure in --font-mono
-    └── PressRow → Sheet holding the detail in full
-the question list → one Section, its heading carrying the count still open
-└── RowLines → the primary text, a Badge once resolved, the wait in --font-mono
-Empty → one line per Section naming what will appear there
+Page → Header, its acts at most three: review in chat, setup, the page-wide menu
+BlockRoot wraps every band below the header
+
+Segmented → one member per period label, active on the period in force
+the selected period → StatGrid at four columns, collapsing as the container narrows
+└── StatTile per measure: the records drawn, their counts summed, and the period's own
+the record list → the selected period's records
+└── Card variant="outline" → CardHeader → CardTitle naming the period
+    └── CardContent → ItemGroup
+        └── Item variant="outline", selected while open
+            ├── ItemContent → ItemTitle of the primary text, ItemDescription of the secondary text
+            ├── ItemActions → ItemMeta of the people and the measure
+            └── ItemFooter → the detail, only while the record is open
+the question list → Card variant="plain" → CardTitle
+└── CardContent → ItemGroup → Item, ItemTitle of the question, ItemMeta of the source and the wait
+    └── empty → one line of Prose naming what will appear here
 ```
 
 ## Controls
 
-- Segmented, a period → every figure and every row swaps to that period, and the record Section's
-  heading names it.
-- A row → its Sheet opens on the record, holding the detail the row cut.
-- A question's Prepare control → its ApplicationAction stages the answer; the row's Badge reads
-  resolved and the open count drops.
+- `Segmented`, a period → the record card, its `CardTitle` and every `StatTile` swap to it.
+- A record row → its open state, `Item` selected → the detail draws in its `ItemFooter`; a second
+  press folds it.
+- `Button` reading `Review in chat` → the whole page hands off, drawn once in the `Header` acts.
+
+## What the contract keeps out
+
+The product supplies the page chrome and chat carries every member act, so the original's bar, its
+question checkboxes and its clear-all button do not ship.
+
+- `ActionBar`, `ActionBarTitle`, `ActionBarActions` and `IconButton` — the page's bar is `Header`,
+  whose acts hold at most three.
+- `Checkbox` — resolving a question is a write; the page reads the questions and chat clears them.
+- `CardAction` and `CardButton` — clearing every question at once is one write, and it is a turn.
+- `SearchField` — one narrowing control per page, and it is `Segmented`.
+- `Prompt` and `Prompts` — a chip that narrows records is `Segmented`.
+- `Tag` — a state a record is in reads in its `ItemMeta` here; the card needs no badge of its own.
 
 ## Checklist
 
-- The Stat row reads the selected period and the record Section names it.
-- Picking another period swaps every row and every figure on the page.
-- Resolving a question drops the open count by one and leaves the row drawn with its Badge.
-- Clearing them all leaves the question Section's own empty line drawn.
-- The Stat row collapses to one column at the narrow lane and no row runs past the pane.
+- Every `StatTile` reads the selected period, and the record card's `CardTitle` names it.
+- Picking another period swaps every row and every measure.
+- Opening a record draws its detail beneath its secondary text and closes it on a second press.
+- With no question left to read, one line names what appears there.
+- At the narrow lane the `StatGrid` draws one column; at the full width it draws four.

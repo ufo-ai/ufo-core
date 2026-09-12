@@ -2,6 +2,7 @@ import { chmodSync, cpSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 
 const HERE = new URL("./", import.meta.url).pathname;
 const KIT = new URL("./sdk/kit.js", import.meta.url).pathname;
+const BLOCKS = new URL("./sdk/blocks.js", import.meta.url).pathname;
 const DEPLOY_WRITTEN = new Set(["vite.config.ts", "preview.html"]);
 const SOURCE_MODE = 0o644;
 
@@ -12,6 +13,7 @@ export default {
     alias: [
       { find: "ufo/kit/jsx-runtime", replacement: KIT },
       { find: "ufo/kit", replacement: KIT },
+      { find: "ufo/blocks", replacement: BLOCKS },
     ],
   },
   plugins: [

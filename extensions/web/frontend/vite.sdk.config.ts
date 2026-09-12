@@ -5,6 +5,7 @@ import { defineConfig } from "vite";
 import { tablerMarks } from "./vite-marks";
 
 const KIT = new URL("./src/apps/kit.ts", import.meta.url).pathname;
+const BLOCKS = new URL("./src/blocks/kit.tsx", import.meta.url).pathname;
 
 export default defineConfig({
   base: "./",
@@ -22,10 +23,10 @@ export default defineConfig({
     cssCodeSplit: false,
     modulePreload: false,
     rollupOptions: {
-      input: KIT,
+      input: { kit: KIT, blocks: BLOCKS },
       preserveEntrySignatures: "strict",
       output: {
-        entryFileNames: "kit.js",
+        entryFileNames: "[name].js",
         chunkFileNames: "[name]-[hash].js",
         assetFileNames: (asset) =>
           asset.names.includes("style.css") ? "kit.css" : "assets/[name]-[hash][extname]",

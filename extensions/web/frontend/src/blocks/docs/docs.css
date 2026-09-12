@@ -1,3 +1,9 @@
+/* Only this page declares the scheme the --blk tokens read: on an app page the host theme owns
+   :root, and a second declaration from outside its layer would outrank the theme's own. */
+:root { color-scheme: light dark; }
+:root[data-scheme="light"] { color-scheme: light; }
+:root[data-scheme="dark"] { color-scheme: dark; }
+
 .blk-docs { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
 .blk-docs-nav { position: sticky; top: 0; height: 100vh; padding: 24px 16px; border-right: 1px solid var(--blk-bg-200); display: flex; flex-direction: column; gap: 4px; }
 .blk-docs-nav-title { font-weight: 500; letter-spacing: 0.005em; padding: 0 8px 16px; display: flex; align-items: center; justify-content: space-between; }

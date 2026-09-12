@@ -2,10 +2,10 @@ name = "app-builder-blocks-recipes"
 base = "HEAD"
 suites = ["ufo-app-bench"]
 cases = ["pre-meeting-briefs", "issue-planner", "engineering-metrics", "code-review-queue"]
-repeats = 1
+repeats = 3
 concurrency = 2
 max_stacks = 1
-budget_usd = 45.0
+budget_usd = 130.0
 est_usd_per_case = 3.30
 
 [template]

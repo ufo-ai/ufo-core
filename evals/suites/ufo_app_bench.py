@@ -47,6 +47,7 @@ from ufo_ext_eval_env.manifest import (
     NAME as EVAL_ENV_NAME,
 )
 from ufo_ext_sites.application_audit import (
+    APPLICATION_BLOCK_COMPONENTS,
     APPLICATION_KIT_COMPONENTS,
     DESKTOP_HEIGHT,
     DESKTOP_WIDTH,
@@ -106,6 +107,8 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 from ufo.sdk.context import ScopedStore
+
+APPLICATION_PUBLISHED_COMPONENTS = APPLICATION_KIT_COMPONENTS | APPLICATION_BLOCK_COMPONENTS
 
 COPY_CAPTURE_CONTENT = Path(__file__).with_name("ufo_app_copy_capture.cjs").read_bytes()
 COPY_CAPTURE_DIGEST = sha256(COPY_CAPTURE_CONTENT).hexdigest()
@@ -206,8 +209,11 @@ SOURCE_COPY_MIN_WORDS = 6
 SOURCE_COPY_MIN_SHARED_WORDS = 5
 SOURCE_COPY_SHARE_LIMIT = 0.70
 KIT_NAMED_IMPORT = re.compile(
-    r"\bimport\s*\{(?P<bindings>[^{}]+)\}\s*from\s*['\"]ufo/kit['\"]", re.DOTALL
+    r"\bimport\s*\{(?P<bindings>[^{}]+)\}\s*from\s*['\"]ufo/(?:kit|blocks)['\"]", re.DOTALL
 )
+"""Both namespaces a page may import from. A page composed of blocks names its components in the
+wireframe and renders them the same way a kit page does, so a scorer blind to `ufo/blocks` reads a
+blocks page as using no published component at all."""
 KIT_IMPORT_BINDING = re.compile(
     r"(?P<type>type\s+)?(?P<imported>[A-Za-z_$][\w$]*)"
     r"(?:\s+as\s+(?P<local>[A-Za-z_$][\w$]*))?"
@@ -1836,7 +1842,7 @@ def _kit_component_scorer() -> Grader:
                     continue
                 exported = binding.group("imported")
                 local = binding.group("local") or binding.group("imported")
-                if exported in APPLICATION_KIT_COMPONENTS:
+                if exported in APPLICATION_PUBLISHED_COMPONENTS:
                     imported[local] = exported
         code = KIT_SOURCE_LITERAL_OR_COMMENT.sub("", source)
         local_declarations = _local_source_bindings(code)
@@ -1853,7 +1859,9 @@ def _kit_component_scorer() -> Grader:
                 proof,
             )
         unknown = tuple(
-            dict.fromkeys(name for name in wireframe if name not in APPLICATION_KIT_COMPONENTS)
+            dict.fromkeys(
+                name for name in wireframe if name not in APPLICATION_PUBLISHED_COMPONENTS
+            )
         )
         if unknown:
             return CapabilityVerdict(

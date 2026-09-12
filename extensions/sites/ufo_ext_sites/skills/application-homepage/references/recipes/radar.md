@@ -2,42 +2,77 @@
 
 ## Intent
 
-Subjects watched for movement: long-form entries grouped by what shipped them, narrowed by tag and
-marked read.
+Entries grouped by what shipped them, read one at a time and narrowed by tag.
+
+## Imports
+
+```tsx
+import { Button, Header, Page, Segmented } from "ufo/kit";
+import {
+  BlockRoot,
+  Count,
+  Item,
+  ItemContent,
+  ItemDescription,
+  ItemFooter,
+  ItemGroup,
+  ItemHeader,
+  ItemTitle,
+  Prose,
+  Tag,
+} from "ufo/blocks";
+```
 
 ## Roles
 
-- Required — group list (the release, the week, the source), record list with a group key, primary
-  text, secondary text, status field (read or unread), tags.
-- Optional — a note per group, a date per group, a measure of what moved.
+- Required — group list, record list with a group key, primary text, secondary text, a tag set the
+  records are narrowed by.
+- Optional — a note per group, a date per group.
 
 ## Regions
 
 ```
-Header → the app name, and up to 3 acts: Review in chat, mark the drawn records read, setup
-Attention band → the records that moved and need a person, at most 2 rows, one line each
-Stat row → the groups watched, the entries unread, and what moved in the newest group, 3 across
-Segmented → the tags, and one member for the whole list, active on the one in force
-the record list → one Section per group, the newest group first, its heading carrying its date
-                  and its unread count
-└── RowLines → one row per record
-    ├── the primary text cut at its column, a Badge while unread, a Badge per tag
-    ├── the group's note as one line under the heading, never a band of its own
-    └── PressRow → Sheet holding the secondary text in full
-Empty → one line per Section naming what will appear there
+Page → Header, its acts at most three: review in chat, setup, the page-wide menu
+BlockRoot wraps every band below the header
+
+Segmented → the tag set, and one member for the whole list, active on the one in force
+the record list → ItemGroup, one ItemHeader per group, the newest group first, carrying its Count
+└── the group note → Prose under the heading, capping its own measure
+└── Item variant="outline", selected on the opened record
+    ├── ItemContent → ItemTitle of the primary text
+    ├── ItemDescription of the secondary text, in full while the record is open
+    └── ItemFooter → Tag per record tag
 ```
+
+Long-form secondary text goes in `Prose`, which holds its own measure rather than running the
+container's width.
 
 ## Controls
 
-- Segmented, a tag → only the records carrying it draw, every Section heading counting what is
-  drawn; the whole-list member restores them.
-- A row → its Sheet opens on the entry, holding the body the row cut to one line.
-- Mark read → every drawn record loses its Badge and each Section's unread count reads zero.
+- A row → the opened record, `Item` selected → its secondary text opens to full and the rest cut.
+- An `ItemHeader` → its group's open state → the note and rows under it fold, the `Count` staying.
+- `Segmented`, a tag → only records carrying that tag draw, and every `Count` answers what is drawn.
+- `Button` reading `Review in chat` → the whole page hands off, drawn once in the `Header` acts.
+
+## What the contract keeps out
+
+The product supplies the page chrome and chat carries every member act, so the original's bar, its
+read flag and its pressable tags do not ship.
+
+- `ActionBar`, `ActionBarTitle`, `ActionBarActions` and `IconButton` — the page's bar is `Header`,
+  whose acts hold at most three.
+- `Checkbox` — marking an entry read is a write, and this page carries none.
+- `SearchField` — one narrowing control per page, and it is `Segmented`.
+- `Prompt` and `Prompts` — a chip that narrows records is `Segmented`.
+- `ItemSection` — the group heading is `ItemHeader`, whose unread badge would count a flag the page
+  cannot write.
+- `ItemMedia` — with no read flag to draw there is nothing for a row's leading slot to hold.
 
 ## Checklist
 
-- Each Section heading reads its group, its date and the count of its unread records.
-- A tag in force draws selected, and every row drawn carries it.
-- The whole-list member restores every record and every Section heading.
-- A row's Sheet holds the body, and the row itself stays one line.
-- Marking the drawn records read leaves every unread count at zero.
+- Each `ItemHeader` reads its group, its date and the `Count` of the records under it.
+- Opening a row draws its secondary text in full and closes the one before it.
+- Folding a group hides its note and its rows and leaves the other headings drawn.
+- The tag in force draws active, and every record drawn carries it.
+- At the narrow lane the secondary text runs the row's full width; wider, `Prose` holds it to its
+  own measure rather than stretching it.

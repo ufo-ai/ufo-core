@@ -601,6 +601,7 @@ IMPORT_MODULE = re.compile(r"\bfrom\s*['\"]([^'\"]+)['\"]|\bimport\s*\(\s*['\"](
 SIDE_EFFECT_IMPORT = re.compile(r"(?m)^[ \t]*import\s*['\"]")
 NON_NAMED_IMPORT = re.compile(r"(?m)^[ \t]*import\s+(?!type\s*\{|\{)")
 SIBLING_MODULE = re.compile(r"\./[\w-]+\.(?:md\?raw|[a-z0-9]+\?url)")
+PUBLISHED_MODULES = ("ufo/kit", "ufo/blocks")
 SIBLING_IMPORT = re.compile(
     r"(?m)^[ \t]*import\s+[A-Za-z_$][\w$]*\s*from\s*['\"]"
     r"\./[\w-]+\.(?:md\?raw|[a-z0-9]+\?url)['\"]"
@@ -743,6 +744,98 @@ APPLICATION_KIT_COMPONENTS = frozenset(
         "ViewSwitch",
     }
 )
+APPLICATION_BLOCK_COMPONENTS = frozenset(
+    {
+        "ActionBar",
+        "ActionBarActions",
+        "ActionBarCenter",
+        "ActionBarTitle",
+        "Avatar",
+        "AvatarPair",
+        "AvatarStack",
+        "BlockRoot",
+        "Card",
+        "CardAction",
+        "CardButton",
+        "CardContent",
+        "CardDescription",
+        "CardFooter",
+        "CardHeader",
+        "CardImage",
+        "CardTitle",
+        "ChartContainer",
+        "ChartLegend",
+        "ChartLegendContent",
+        "ChartStyle",
+        "ChartTick",
+        "ChartTooltip",
+        "ChartTooltipContent",
+        "Checkbox",
+        "CodeBlock",
+        "Composer",
+        "Count",
+        "DataTable",
+        "DataTableColumnHeader",
+        "DataTablePagination",
+        "DataTableSelectCell",
+        "DataTableSelectHeader",
+        "DataTableToolbar",
+        "DataTableViewOptions",
+        "Delta",
+        "Figure",
+        "IconButton",
+        "Item",
+        "ItemActions",
+        "ItemContent",
+        "ItemDescription",
+        "ItemFooter",
+        "ItemGroup",
+        "ItemHeader",
+        "ItemMedia",
+        "ItemMeta",
+        "ItemSection",
+        "ItemSeparator",
+        "ItemTitle",
+        "Mark",
+        "Menu",
+        "MenuButton",
+        "MenuCheckboxItem",
+        "MenuContent",
+        "MenuItem",
+        "MenuLabel",
+        "MenuSeparator",
+        "MenuTrigger",
+        "ProgressStat",
+        "Prompt",
+        "Prompts",
+        "Prose",
+        "ScoreDot",
+        "SearchField",
+        "Sparkline",
+        "Stat",
+        "StatGrid",
+        "StatRow",
+        "StatRows",
+        "StatTile",
+        "StatusIcon",
+        "Table",
+        "TableBody",
+        "TableCaption",
+        "TableCell",
+        "TableEmpty",
+        "TableFooter",
+        "TableHead",
+        "TableHeader",
+        "TableMeta",
+        "TableRow",
+        "TableSection",
+        "TableSkeleton",
+        "TableTag",
+        "Tag",
+        "useDataTable",
+    }
+)
+AMBIGUOUS_COMPONENTS = APPLICATION_KIT_COMPONENTS & APPLICATION_BLOCK_COMPONENTS
 ROOT_MOUNT = re.compile(
     r"\bmountApp\s*\(\s*document\.getElementById\(\s*['\"]root['\"]\s*\)\s*!?\s*,"
 )
@@ -768,14 +861,15 @@ def _validate_application_imports(source: str) -> None:
     if IMPORT_DECLARATION.search(source) is None or "ufo/kit" not in modules:
         raise ValueError("app.tsx must import its runtime and components from ufo/kit")
     if SIDE_EFFECT_IMPORT.search(source) or any(
-        module != "ufo/kit" and SIBLING_MODULE.fullmatch(module) is None for module in modules
+        module not in PUBLISHED_MODULES and SIBLING_MODULE.fullmatch(module) is None
+        for module in modules
     ):
         raise ValueError(
-            "app.tsx may import only from ufo/kit and a file beside it, "
+            "app.tsx may import only from ufo/kit, ufo/blocks and a file beside it, "
             "as ./name.md?raw or ./name.ext?url"
         )
     if NON_NAMED_IMPORT.search(SIBLING_IMPORT.sub("", source)):
-        raise ValueError("app.tsx must use named imports from ufo/kit")
+        raise ValueError("app.tsx must use named imports from ufo/kit and ufo/blocks")
     if EXPORT_DECLARATION.search(source):
         raise ValueError("app.tsx must not export declarations")
     if "UfoAppKit" in source:

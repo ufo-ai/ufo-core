@@ -16,7 +16,9 @@ from ufo_ext_research.tools import FETCH_URL_TOOL, SEARCH_VERTICAL_TOOL, SEARCH_
 from ufo_ext_sites import manifest as sites_manifest
 from ufo_ext_sites import tools as sites_tools
 from ufo_ext_sites.application_audit import (
+    AMBIGUOUS_COMPONENTS,
     APPLICATION_BAND_GAP,
+    APPLICATION_BLOCK_COMPONENTS,
     APPLICATION_CONTENT_WIDTH,
     APPLICATION_DESIGN_FOLD,
     APPLICATION_DESIGN_MAX_HEIGHT,
@@ -1496,16 +1498,87 @@ def test_the_skill_routes_to_every_recipe_it_ships_and_to_no_other() -> None:
     assert index == shipped
 
 
-def test_every_component_a_recipe_names_is_one_the_kit_publishes() -> None:
-    """These recipes were translated out of a design system the app kit does not export, where
-    `ActionBar`, `Composer` and `StatGrid` would each fail the deploy with `failed to resolve
-    import`."""
+PUBLISHED_COMPONENTS = {
+    "ufo/kit": APPLICATION_KIT_COMPONENTS,
+    "ufo/blocks": APPLICATION_BLOCK_COMPONENTS,
+}
+RECIPE_IMPORT = re.compile(r'^import \{([^}]*)\} from "(ufo/kit|ufo/blocks)";$', re.MULTILINE)
+RECIPE_WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+RECIPE_REFUSED = re.compile(r"^- (.+?) —", re.MULTILINE)
+RECIPE_NAME = re.compile(r"`([A-Z][A-Za-z0-9]*)`")
+RECIPE_REFUSALS_HEADING = "## What the contract keeps out"
+
+
+def _recipe_declarations(text: str) -> dict[str, list[str]]:
+    declared: dict[str, list[str]] = {}
+    for names, module in RECIPE_IMPORT.findall(text):
+        for name in (raw.strip() for raw in names.split(",")):
+            if name:
+                declared.setdefault(name, []).append(module)
+    return declared
+
+
+def test_every_component_a_recipe_names_is_published_by_the_namespace_it_imports_it_from() -> None:
+    """Eleven names — `Card`, `Item`'s neighbours, `Stat`, `DataTable` among them — are published by
+    both `ufo/kit` and `ufo/blocks` as different components, so a bare name in prose names neither.
+    A recipe declares its imports and every component word it uses resolves against that
+    declaration, which is also what makes the recipe's own import lines copyable into a page. The
+    shapes the homepage contract keeps out are declared the same way, so a recipe cannot name one
+    without saying which side of the line it falls on."""
 
     recipes = APPLICATION_SKILL_DIR / "references" / "recipes"
-    named = set()
+    every = APPLICATION_KIT_COMPONENTS | APPLICATION_BLOCK_COMPONENTS
+    failures = []
     for path in sorted(recipes.glob("*.md")):
-        named |= set(re.findall(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b", path.read_text()))
-    assert named <= APPLICATION_KIT_COMPONENTS, sorted(named - APPLICATION_KIT_COMPONENTS)
+        if path.stem == "README":
+            continue
+        text = path.read_text()
+        declared = _recipe_declarations(text)
+        _, _, refusals = text.partition(RECIPE_REFUSALS_HEADING)
+        refused = {
+            name
+            for bullet in RECIPE_REFUSED.findall(refusals.split("\n## ")[0])
+            for name in RECIPE_NAME.findall(bullet)
+        }
+        for name in sorted(refused & set(declared)):
+            failures.append(f"{path.name}: refuses {name} and imports it")
+        for name in sorted(refused - every):
+            failures.append(f"{path.name}: refuses {name}, which neither namespace publishes")
+        for name, modules in sorted(declared.items()):
+            if len(modules) > 1:
+                failures.append(f"{path.name}: {name} is imported from {' and '.join(modules)}")
+            for module in modules:
+                if name not in PUBLISHED_COMPONENTS[module]:
+                    failures.append(f"{path.name}: {module} does not publish {name}")
+        body = RECIPE_IMPORT.sub("", text)
+        named = {word for word in RECIPE_WORD.findall(body) if word in every}
+        for name in sorted(named - set(declared) - refused):
+            where = "both namespaces publish" if name in AMBIGUOUS_COMPONENTS else "no import names"
+            failures.append(f"{path.name}: names {name}, which {where}")
+        for name in sorted(set(declared) - named):
+            failures.append(f"{path.name}: imports {name} and never names it")
+        if not refused:
+            failures.append(f"{path.name}: refuses no shape under {RECIPE_REFUSALS_HEADING!r}")
+    assert not failures, "\n".join(failures)
+
+
+def test_the_component_sets_are_the_names_the_two_namespaces_actually_export() -> None:
+    """Both sets are read by the recipe gate and by the app bench, so a name in either that its
+    entry module never exports would admit a component no page can import."""
+
+    frontend = Path(__file__).resolve().parents[3] / "extensions" / "web" / "frontend" / "src"
+    for entry, published in (
+        (frontend / "apps" / "kit.ts", APPLICATION_KIT_COMPONENTS),
+        (frontend / "blocks" / "kit.tsx", APPLICATION_BLOCK_COMPONENTS),
+    ):
+        source = entry.read_text()
+        block = source[source.index("export {") :]
+        exported = set(re.findall(r"^  ([A-Za-z][A-Za-z0-9]*),$", block, re.MULTILINE))
+        exported |= set(
+            re.findall(r"^export function ([A-Za-z][A-Za-z0-9]*)", source, re.MULTILINE)
+        )
+        assert published <= exported, sorted(published - exported)
+    assert AMBIGUOUS_COMPONENTS, "the two namespaces share no name, so the gate proves nothing"
 
 
 def test_the_scaffold_copies_files_and_never_the_template_directory() -> None:
