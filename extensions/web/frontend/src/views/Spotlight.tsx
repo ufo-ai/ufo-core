@@ -6,7 +6,6 @@ import {
   IconFilter2,
   IconMessage,
   IconMessageCircle,
-  IconMessages,
   IconPlug,
   IconSearch,
   IconTerminal2,
@@ -105,7 +104,6 @@ const SEARCHED_THREADS = THREADS;
 
 const SECTION_ICONS: Partial<Record<Section, TablerIcon>> = {
   connectors: IconPlug,
-  messaging: IconMessages,
 };
 
 const SURFACE_ICONS: Partial<Record<string, TablerIcon>> = {

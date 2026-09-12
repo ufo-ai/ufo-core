@@ -254,6 +254,7 @@ test("the sidebar offers the workspace, which opens on the roster", async () => 
 });
 
 test("a credential's provider mark carries no round mask", async () => {
+  location.hash = "#/workspace/credentials";
   wire({
     "/workspace/credentials": () =>
       json({
@@ -271,8 +272,6 @@ test("a credential's provider mark carries no round mask", async () => {
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await goTo("Credentials");
-
   const row = (await screen.findByText("OPENAI_API_KEY")).closest("[data-slot=item]")!;
   const mark = row.querySelector<HTMLElement>('[style*="--brand-openai"]');
   expect(mark).not.toBeNull();
@@ -282,19 +281,8 @@ test("a credential's provider mark carries no round mask", async () => {
 test("an outcome notice does not follow the member to another view", async () => {
   wire({
     "/workspace/team": () => json(ROSTER),
-    "/workspace/credentials": () =>
-      json({
-        slots: [
-          {
-            name: "openai",
-            slot: "OPENAI_API_KEY",
-            extension: "models",
-            description: "the key",
-            filled: true,
-          },
-        ],
-        actions: [],
-      }),
+    "/workspace/memory": () =>
+      json({ available: true, actions: [], kinds: ["fact", "profile"], matches: [] }),
     "/transcript": () => json({ messages: [] }),
     "/add_member": () => json({ applied: true, message: "Added member@example.com." }),
   });
@@ -306,9 +294,9 @@ test("an outcome notice does not follow the member to another view", async () =>
   await userEvent.click(submit);
   expect(await screen.findByText("Added member@example.com.")).toBeTruthy();
 
-  await goTo("Credentials");
+  await goTo("Memory");
 
-  expect(await screen.findByText("OPENAI_API_KEY")).toBeTruthy();
+  expect(await screen.findByText("No memories yet.")).toBeTruthy();
   expect(screen.queryByText("Added member@example.com.")).toBeNull();
 
   await goTo("Team");

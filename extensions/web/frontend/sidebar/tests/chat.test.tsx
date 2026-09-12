@@ -3643,7 +3643,7 @@ test("the starters close on a link to the connectors screen, which the press rea
   await userEvent.click(cta);
 
   expect(location.hash).toBe("#/connectors");
-  await screen.findByText("No connector is offered yet.");
+  await screen.findByRole("link", { name: "Add credential" });
   expect(screen.queryByRole("button", { name: /open pull request/ })).toBeNull();
 });
 

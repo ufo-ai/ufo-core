@@ -46,9 +46,7 @@ test("every page names where the member is, innermost first, then the product", 
   expect(titled({ kind: "store" })).toBe("App Store · ufo");
   expect(titled({ kind: "agent", agentId: AGENT_ID, ...PLACE })).toBe("Assistant · ufo");
   expect(titled({ kind: "workspace", view: "team", ...PLACE })).toBe("Team · Workspace · ufo");
-  expect(titled({ kind: "workspace", view: "credentials", ...PLACE })).toBe(
-    "Credentials · Workspace · ufo",
-  );
+  expect(titled({ kind: "workspace", view: "memory", ...PLACE })).toBe("Memory · Workspace · ufo");
   expect(titled({ kind: "section", section: "connectors", ...PLACE })).toBe("Connections · ufo");
   expect(titled({ kind: "first-run" })).toBe("Set up this workspace · ufo");
   expect(titled({ kind: "bad-link" })).toBe("Invalid link · ufo");

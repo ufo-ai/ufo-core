@@ -3,7 +3,6 @@ import { holdableTrack, unholdable } from "@/lib/tracks";
 export const WORKSPACE_TABS = [
   "team",
   "apps",
-  "channels",
   "skills",
   "memory",
   "credentials",
@@ -13,11 +12,19 @@ export const WORKSPACE_TABS = [
 
 export const TASK_TABS = ["runs", "scheduled", "triggers"] as const;
 
-export const SECTIONS = ["wiki", "radar", "artifacts", "connectors", "messaging"] as const;
+export const SECTIONS = ["wiki", "radar", "artifacts", "connectors"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 export type TaskTab = (typeof TASK_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
+
+export const CONNECTION_TABS = ["connectors"] as const satisfies readonly Section[];
+
+export type ConnectionTab = (typeof CONNECTION_TABS)[number];
+
+export function connectionTab(section: Section): section is ConnectionTab {
+  return CONNECTION_TABS.includes(section as ConnectionTab);
+}
 
 export type PlaceStep = "push" | "replace" | "back";
 
@@ -377,9 +384,8 @@ const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
     const name = match[1];
     const place = parsePlace(match[2]);
     if (!place) return null;
-    if (name === "connectors") return null;
     if (isSection(name)) {
-      return { kind: "section", section: name, place };
+      return connectionTab(name) ? null : { kind: "section", section: name, place };
     }
     const tab = WORKSPACE_TABS.find((candidate) => candidate === name);
     return tab === undefined ? null : { kind: "workspace", view: tab, place };

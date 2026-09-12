@@ -1,6 +1,13 @@
 import { IconLoader2 } from "@tabler/icons-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
+import {
+  Empty as EmptyBlock,
+  EmptyContent,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { aborted, getJson } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -215,12 +222,23 @@ export function PanelEmpty({ children }: { children: ReactNode }) {
  *  heading already names
  *  what is absent, so the card states only what fills it. `PanelEmpty` stays the centred note for a
  *  passing condition: loading, a failed read, a search that matched nothing. */
-export function PanelBlank({ body, action }: { body: string; action?: ReactNode }) {
+export function PanelBlank({
+  body,
+  mark,
+  action,
+}: {
+  body: string;
+  mark?: ReactNode;
+  action?: ReactNode;
+}) {
   return (
-    <div className="rounded-panel border border-edge bg-surface px-xl py-4xl text-center">
-      <p className="m-0 mx-auto max-w-hint text-ink-soft">{body}</p>
-      {action ? <div className="mt-lg">{action}</div> : null}
-    </div>
+    <EmptyBlock>
+      <EmptyHeader>
+        {mark ? <EmptyMedia>{mark}</EmptyMedia> : null}
+        <EmptyTitle>{body}</EmptyTitle>
+      </EmptyHeader>
+      {action ? <EmptyContent>{action}</EmptyContent> : null}
+    </EmptyBlock>
   );
 }
 
@@ -248,7 +266,7 @@ export function Notice({
     <div
       role="status"
       className={cn(
-        "mt-md min-h-(--size-notice) px-sm py-hair text-ui",
+        "min-h-(--size-notice) px-sm py-hair text-ui",
         tone === "attention" && children
           ? "w-fit rounded-sm border border-ink bg-attention [color:var(--color-attention-ink)]"
           : null,
@@ -289,14 +307,18 @@ export function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="flex w-full flex-col gap-6xl">
+    <section className="@container/head flex w-full flex-col gap-2xl">
       {title || note ? (
-        <div className="flex w-full items-center gap-2xl">
-          <div className="flex min-w-0 flex-1 flex-col gap-2xs">
+        <div className="flex w-full flex-wrap items-center gap-2xl @max-md/head:flex-col @max-md/head:items-start">
+          <div className="flex min-w-0 flex-1 flex-col gap-sm">
             {title ? <h2 className="m-0 text-subtitle font-medium">{title}</h2> : null}
             {note ? <p className="m-0 max-w-hint text-label text-ink-quiet">{note}</p> : null}
           </div>
-          {action ? <div className="flex shrink-0 items-center gap-sm">{action}</div> : null}
+          {action ? (
+            <div className="flex shrink-0 flex-wrap items-center gap-sm @max-md/head:w-full">
+              {action}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {bar ? <div className="flex items-stretch gap-sm">{bar}</div> : null}

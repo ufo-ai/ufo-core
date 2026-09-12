@@ -1,9 +1,8 @@
-import { IconCheck } from "@tabler/icons-react";
+import { IconDots, IconKey } from "@tabler/icons-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
-import { Button, ConfirmButton } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { MarkTile } from "@/components/ui/item";
-import { ACTS } from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
@@ -24,11 +23,17 @@ import {
 import { codeSpans } from "@/kernel/cards";
 import {
   OutcomeNotice,
+  QUIET,
   outcomeNotice,
   type NoticeState,
-  QUIET,
-  Section,
 } from "@/kernel/panel";
+import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Listing, type ListingSpec, type RowContext } from "@/kernel/listing";
 import type { Placement } from "@/kernel/pager";
 import { BASE, postAction } from "@/lib/api";
@@ -36,7 +41,6 @@ import { useMainAgent } from "@/lib/mainAgent";
 import { BrandMark, BRAND_MARKS } from "@/lib/brandMark";
 import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
 import type { ActionView, CredentialPrompt } from "@/lib/types";
-import { ConnectAccount } from "@/views/ConnectAccount";
 import {
   CredentialValueFields,
   MCP_SERVERS_SLOT,
@@ -81,17 +85,17 @@ const MODEL_PROVIDER_SLOTS = [
   "openrouter_api_key",
 ] as const;
 
-const SECTION_ORDER = ["Model providers", "Service keys", "Workspace keys", "MCP"];
+const SECTION_ORDER = ["Model provider", "Service key", "Workspace key", "MCP"];
 
 /* A closed set of four. A section per extension gave Slack a heading and one row under it, and
    every extension that declares a key would earn one the same way. */
 function credentialSection(row: Slot) {
-  if (row.extension === WORKSPACE_EXTENSION) return "Workspace keys";
+  if (row.extension === WORKSPACE_EXTENSION) return "Workspace key";
   const slot = row.slot.toLowerCase();
   if (slot === MCP_SERVERS_SLOT) return "MCP";
   if (MODEL_PROVIDER_SLOTS.includes(slot as (typeof MODEL_PROVIDER_SLOTS)[number]))
-    return "Model providers";
-  return "Service keys";
+    return "Model provider";
+  return "Service key";
 }
 
 /** The longest provider the portal draws that the slot's own name starts with. Read off the two sets
@@ -121,17 +125,71 @@ function slotName(slot: string) {
     .replace(/^-+|-+$/g, "");
 }
 
+/** The row's own press is Configure; what replaces or drops the value stands behind the dots, where
+ *  a destructive act cannot be hit on the way to the edit. */
+function CredentialActs({ row, context }: { row: Slot; context: RowContext }) {
+  const [dropping, setDropping] = useState(false);
+  const { act, action, busy, actions } = context;
+  const request = actions.find((view) => view.name === "request_credentials");
+  const workspaceKey = row.extension === WORKSPACE_EXTENSION;
+  const named = row.env || row.slot;
+  const ask = request ? () => void action(request, credentialRequest(row)) : null;
+  if (!workspaceKey && !ask) return null;
+  return (
+    <>
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button variant="quiet" size="icon" aria-label={"Menu for " + named} disabled={busy}>
+          <IconDots aria-hidden />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-(--container-menu)">
+        {workspaceKey && ask ? (
+          <DropdownMenuItem onSelect={ask}>
+            {row.slot === MCP_SERVERS_SLOT ? "Update" : row.filled ? "Replace" : "Set"}
+          </DropdownMenuItem>
+        ) : null}
+        <DropdownMenuItem onSelect={() => setDropping(true)}>
+          {workspaceKey ? "Remove" : "Clear"}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+      {/* The menu shuts on the pick, so an act armed inside it would take its confirmation with it. */}
+      <Dialog open={dropping} onOpenChange={setDropping}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{(workspaceKey ? "Remove " : "Clear ") + named}</DialogTitle>
+            <DialogDescription>
+              {workspaceKey
+                ? "The declaration and its value go. An app asking for this key is refused."
+                : "The value goes. An app asking for this key is refused until it is set again."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="send"
+              aria-label={(workspaceKey ? "Remove " : "Clear ") + named}
+              disabled={busy}
+              onClick={() => {
+                setDropping(false);
+                void act({
+                  verb: "delete",
+                  kind: workspaceKey ? SLOT_KIND : "credential",
+                  name: row.name,
+                });
+              }}
+            >
+              {workspaceKey ? "Remove" : "Clear"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   read: "/workspace/credentials",
-  lead: (
-    <Section
-      title="Coding providers"
-      note="This account is yours alone. Each member connects their own, and it is used only for coding tasks."
-    >
-      <ConnectAccount />
-    </Section>
-  ),
-  group: credentialSection,
   /* An unset slot is nothing to read and nothing to replace, so it draws no row; a workspace
      declaration draws one either way, because it names a key even before it holds a value. */
   rows: (payload) =>
@@ -160,7 +218,20 @@ const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     ),
     /* The variable, not the slug core files it under: a workspace key drawn as `acme_api_key`
        beside `OPENAI_API_KEY` reads as a second kind of name for the same thing. */
-    primary: { field: "env", render: (env, row) => env || row.slot },
+    primary: {
+      field: "env",
+      render: (env, row) => (
+        <span className="flex items-center gap-sm">
+          {env || row.slot}
+          <Badge>{credentialSection(row)}</Badge>
+          {row.filled ? null : (
+            <Badge data-part="status" aria-label={(env || row.slot) + " unset"}>
+              No value
+            </Badge>
+          )}
+        </span>
+      ),
+    },
     meta: [
       { field: "description", render: (description) => codeSpans(description) },
       { field: "host", render: (host) => codeSpans(host) },
@@ -168,6 +239,7 @@ const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
   },
 
   empty: "No credential is set.",
+  emptyMark: <IconKey aria-hidden />,
   /* Over the rows rather than among them: an act drawn as a row is filtered out by a search, and
      the member searching for the key they have not added yet is the one who needs it. */
   offer: (payload, context) => {
@@ -193,52 +265,18 @@ const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     );
   },
   views: (payload) => payload.actions,
-  actions: (row, context) => {
-    const { act, action, busy, actions } = context;
-    const request = actions.find((view) => view.name === "request_credentials");
-    return (
-      <div className={ACTS}>
-        {row.filled ? (
-          <span data-part="status" className="flex items-center gap-xs text-label text-ink-soft">
-            <IconCheck
-              role="img"
-              aria-label={(row.env || row.slot) + " filled"}
-              className="size-icon"
-            />
-            Filled
-          </span>
-        ) : (
-          <span data-part="status" className="text-label text-ink-soft">
-            No value
-          </span>
-        )}
-        {row.extension === WORKSPACE_EXTENSION ? (
-          <DeclareCredential busy={busy} context={context} slot={row} />
-        ) : null}
-        {request ? (
-          <Button
-            variant="row"
-            disabled={busy}
-            onClick={() => void action(request, credentialRequest(row))}
-          >
-            {row.slot === MCP_SERVERS_SLOT ? "Update" : row.filled ? "Replace" : "Set"}
-          </Button>
-        ) : null}
-        <ConfirmButton
-          verb={row.extension === WORKSPACE_EXTENSION ? "Remove" : "Clear"}
-          variant="row"
-          disabled={busy}
-          onClick={() =>
-            void act({
-              verb: "delete",
-              kind: row.extension === WORKSPACE_EXTENSION ? SLOT_KIND : "credential",
-              name: row.name,
-            })
-          }
-        />
-      </div>
-    );
+  actions: (row, context) => <CredentialActs row={row} context={context} />,
+  /* A slot with no declaration to edit configures by asking for its value; a workspace key opens
+     the declaration its record holds. */
+  open: (row, context) => {
+    if (row.extension === WORKSPACE_EXTENSION) return null;
+    const request = context.actions.find((view) => view.name === "request_credentials");
+    return request ? () => void context.action(request, credentialRequest(row)) : null;
   },
+  record: (row, context, close) =>
+    row.extension === WORKSPACE_EXTENSION ? (
+      <DeclareCredential busy={context.busy} context={context} slot={row} open onOpen={close} />
+    ) : null,
   credentials: (request, onStored, close) => (
     <Dialog open onOpenChange={(next) => (next ? undefined : close())}>
       <DialogContent>
@@ -274,7 +312,7 @@ function PromptHeader({ provider, children }: { provider: string | null; childre
       <MarkTile>
         <BrandMark provider={provider} className="text-ink" />
       </MarkTile>
-      <div className="flex min-w-0 flex-col gap-2xs">{children}</div>
+      <div className="flex min-w-0 flex-col gap-sm">{children}</div>
     </DialogHeader>
   );
 }
@@ -318,24 +356,26 @@ function DeclareCredential({
   context,
   taken = [],
   slot,
+  open: held,
+  onOpen,
 }: {
   busy: boolean;
   context: RowContext;
   taken?: Slot[];
   slot?: Slot;
+  open?: boolean;
+  onOpen?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [standing, setStanding] = useState(false);
+  const open = held ?? standing;
+  const setOpen = onOpen ?? setStanding;
   return (
     <>
-      {slot ? (
-        <Button variant="row" disabled={busy} onClick={() => setOpen(true)}>
-          Edit
-        </Button>
-      ) : (
+      {held === undefined ? (
         <Button variant="outline" size="bar" disabled={busy} onClick={() => setOpen(true)}>
           Add workspace key
         </Button>
-      )}
+      ) : null}
       {/* Mounted only while it stands, so every open starts on empty fields rather than on the
           last key's host and the secret typed into it. */}
       {open ? (
@@ -426,7 +466,7 @@ function DeclareForm({
   return (
     <form onSubmit={save} className="flex flex-col gap-2xl">
       <OutcomeNotice state={notice} />
-      <div className="flex flex-col gap-lg">
+      <div className="flex flex-col gap-2xl">
         <Field
           label="Variable"
           htmlFor="credential-env"
@@ -689,7 +729,7 @@ function CredentialPromptDialogForm({
       <form
         id="set-credentials"
         onSubmit={submit}
-        className="flex flex-col gap-lg"
+        className="flex flex-col gap-2xl"
       >
         {pending.map((prompt) =>
           prompt.slot === MCP_SERVERS_SLOT ? (

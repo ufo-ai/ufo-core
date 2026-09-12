@@ -17,6 +17,54 @@ import {
   wire,
 } from "./harness";
 
+/** A slot's acts stand behind its row menu, except the edit the row's own press commits — a slot with
+ *  no declaration to open asks for its value instead, so the row is the Replace. */
+async function slotAct(verb: string | RegExp, named?: string): Promise<HTMLElement> {
+  await userEvent.keyboard("{Escape}");
+  const menus = await screen.findAllByRole("button", { name: /^Menu for / });
+  const menu = named
+    ? menus.find((one) => one.getAttribute("aria-label") === "Menu for " + named)
+    : menus[0];
+  if (!menu) throw new Error("no menu for " + named);
+  await userEvent.click(menu);
+  const item = screen.queryByRole("menuitem", { name: verb });
+  if (item) return item;
+  if (verb === "Clear" || verb === "Remove") throw new Error("no " + verb + " stands in the menu");
+  await userEvent.keyboard("{Escape}");
+  const row = menus[0].closest("li");
+  if (!row) throw new Error("no row carries " + String(verb));
+  return row as HTMLElement;
+}
+
+/** A slot's name is the first thing in its row's primary; the kind and the unset state stand beside
+ *  it as tags. */
+function credentialNames(): string[] {
+  return [...document.querySelectorAll("[data-part=primary]")].map((primary) => {
+    const named = primary.cloneNode(true) as Element;
+    named.querySelectorAll("[data-slot=badge]").forEach((tag) => tag.remove());
+    return named.textContent?.trim() ?? "";
+  });
+}
+
+/** A row is found by the name alone: the kind and the unset state stand beside it as tags. */
+async function pressSlot(named: string): Promise<void> {
+  const row = [...document.querySelectorAll("[data-part=primary]")]
+    .find((primary) => {
+      const bare = primary.cloneNode(true) as Element;
+      bare.querySelectorAll("[data-slot=badge]").forEach((tag) => tag.remove());
+      return (bare.textContent ?? "").trim() === named;
+    })
+    ?.closest("li");
+  if (!row) throw new Error("no slot row named " + named);
+  await userEvent.click(row);
+}
+
+function kinds(): string[] {
+  return [...document.querySelectorAll("[data-part=primary] [data-slot=badge]")].map(
+    (tag) => tag.textContent ?? "",
+  );
+}
+
 const ADMIN = { ...MEMBER, admin: true };
 
 const SLOT = {
@@ -142,7 +190,7 @@ test("a credential intent that answers with a request renders the prompt carryin
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+  await userEvent.click(await slotAct("Replace"));
   expect(await screen.findByText("models authenticates with this value.")).toBeTruthy();
 
   await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
@@ -163,7 +211,7 @@ test("a credential intent that answers with a request renders the prompt carryin
 });
 
 test("the credentials screen offers the member their own coding accounts", async () => {
-  location.hash = "#/workspace/credentials";
+  location.hash = "#/connectors";
   wire({
     "/workspace/credentials": () => json({ slots: [SLOT] }),
     "/workspace/accounts": () =>
@@ -176,18 +224,10 @@ test("the credentials screen offers the member their own coding accounts", async
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  expect(
-    await screen.findByText(
-      "This account is yours alone. Each member connects their own, and it is used only for coding tasks.",
-    ),
-  ).toBeTruthy();
   const held = (await screen.findByRole("button", { name: "Disconnect" })).closest("li")!;
   expect(held.textContent).toContain("ChatGPT");
-  expect(within(held).getByRole("button", { name: "Replace" })).toBeTruthy();
+  expect(within(held).getByRole("button", { name: "Configure" })).toBeTruthy();
   expect(screen.getByText("Claude")).toBeTruthy();
-  expect(
-    [...document.querySelectorAll("main h2")].map((heading) => heading.textContent),
-  ).toEqual(["Coding providers", "Model providers"]);
 });
 
 test("credentials group and sort the filled slots, and render their literals", async () => {
@@ -198,26 +238,15 @@ test("credentials group and sort the filled slots, and render their literals", a
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  expect(
-    (await screen.findAllByText("Filled", { selector: '[data-part="status"]' })).length,
-  ).toBe(2);
-  expect([...document.querySelectorAll("main h2")].map((heading) => heading.textContent)).toEqual([
-    "Coding providers",
-    "Model providers",
-    "Service keys",
-  ]);
+  await screen.findByText("OPENAI_API_KEY");
+  expect(screen.queryAllByText("No value", { selector: '[data-part="status"]' })).toHaveLength(0);
+  expect(kinds()).toEqual(["Model provider", "Service key"]);
   expect(screen.queryByText("APOLLO_API_KEY")).toBeNull();
   expect(screen.getByRole("button", { name: "Add workspace key" })).toBeTruthy();
   const code = screen.getByText("api.datadoghq.com");
   expect(code.tagName).toBe("CODE");
   expect(code.textContent).not.toContain("`");
-  const cards = screen
-    .getAllByRole("listitem")
-    .filter((card) => card.querySelector("[data-part=primary]"));
-  expect(cards.map((card) => card.querySelector("[data-part=primary]")?.textContent)).toEqual([
-    "OPENAI_API_KEY",
-    "DATADOG_API_KEY",
-  ]);
+  expect(credentialNames()).toEqual(["OPENAI_API_KEY", "DATADOG_API_KEY"]);
 });
 
 test("a workspace key is declared and filled by one save, and edited by one intent", async () => {
@@ -250,9 +279,10 @@ test("a workspace key is declared and filled by one save, and edited by one inte
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  expect(await screen.findByText("Workspace keys")).toBeTruthy();
+  expect(await screen.findByText("Workspace key")).toBeTruthy();
   expect(screen.getByText("No value")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Set" })).toBeTruthy();
+  expect(await slotAct("Set")).toBeTruthy();
+  await userEvent.keyboard("{Escape}");
 
   /* A field takes the focus, not the header's Close, where Enter would discard the form. */
   await userEvent.click(screen.getByRole("button", { name: "Add workspace key" }));
@@ -318,7 +348,7 @@ test("a workspace key is declared and filled by one save, and edited by one inte
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   intents.length = 0;
-  await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  await pressSlot("ACME_API_KEY");
   /* The Variable is fixed on an edit, so the focus lands on the first field that takes one. */
   await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Host")));
   const host = screen.getByLabelText("Host");
@@ -336,8 +366,12 @@ test("a workspace key is declared and filled by one save, and edited by one inte
   expect(posts).toHaveLength(1);
 
   intents.length = 0;
-  await userEvent.click(await screen.findByRole("button", { name: "Remove" }));
-  await userEvent.click(screen.getByRole("button", { name: "Confirm remove" }));
+  await userEvent.click(await slotAct("Remove", "ACME_API_KEY"));
+  await userEvent.click(
+    within(await screen.findByRole("dialog", { name: "Remove ACME_API_KEY" })).getByRole("button", {
+      name: "Remove ACME_API_KEY",
+    }),
+  );
   await waitFor(() => expect(intents).toHaveLength(1));
   expect(intents[0]).toEqual({
     verb: "delete",
@@ -398,20 +432,13 @@ test("a credential row names the variable, and a row with no prose leads with no
   const row = (await screen.findByText("ACME_API_KEY")).closest("li")!;
   expect(within(row).queryByText("acme_api_key")).toBeNull();
   /* What a reader hears is what the row is titled, not the slug behind it. */
-  expect(within(row).getByRole("img", { name: "ACME_API_KEY filled" })).toBeTruthy();
+  expect(within(row).queryByText("No value")).toBeNull();
   /* An absent description takes no separator dot of its own. */
   expect(row.querySelector("[data-part=body]")?.textContent).toBe("api.acme.com");
 
-  /* An extension that declares a key does not earn a heading of its own. */
-  expect([...document.querySelectorAll("main h2")].map((heading) => heading.textContent)).toEqual([
-    "Coding providers",
-    "Model providers",
-    "Service keys",
-    "Workspace keys",
-  ]);
-  expect(screen.getByText("SLACK_BOT_TOKEN").closest("section")!.querySelector("h2")!.textContent).toBe(
-    "Service keys",
-  );
+  /* An extension that declares a key earns a tag of its own, never a heading. */
+  expect([...kinds()].sort()).toEqual(["Model provider", "Service key", "Workspace key"]);
+
 });
 
 test("a search over the credentials keeps the acts that add one", async () => {
@@ -434,7 +461,7 @@ test("a search over the credentials keeps the acts that add one", async () => {
 });
 
 test("a coding provider row and a credential row each lead with their provider's mark", async () => {
-  location.hash = "#/workspace/credentials";
+  location.hash = "#/connectors";
   wire({
     "/workspace/credentials": () =>
       json({
@@ -447,7 +474,9 @@ test("a coding provider row and a credential row each lead with their provider's
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const account = (await screen.findByRole("button", { name: "Connect" })).closest("li")!;
-  const slot = screen.getByText("OPENAI_API_KEY").closest("li")!;
+  location.hash = "#/workspace/credentials";
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+  const slot = (await screen.findByText("OPENAI_API_KEY")).closest("li")!;
   for (const row of [account, slot]) {
     expect(row.firstElementChild?.getAttribute("data-slot")).toBe("mark");
     const mark = row.querySelector("[data-slot=mark] > *")!;
@@ -465,32 +494,6 @@ test("a coding provider row and a credential row each lead with their provider's
   expect(slack.querySelector("[data-slot=mark] > *")?.getAttribute("style")).toContain(
     "--brand-slack",
   );
-});
-
-test("a credential family stands further from the family above it than from its own cards", async () => {
-  location.hash = "#/workspace/credentials";
-  wire({ "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, HOST_SLOT, EMPTY_SLOT] }) });
-  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
-
-  await screen.findByRole("button", { name: "Add workspace key" });
-  const families = [...document.querySelectorAll("main h2")]
-    .filter((heading) => heading.textContent !== "Coding providers")
-    .map((heading) => heading.closest("section")!);
-  expect(families).toHaveLength(2);
-  const between = families[0].parentElement!;
-  expect(between.className).toContain("gap-8xl");
-  expect(families[0].className).toContain("gap-6xl");
-});
-
-test("a row's acts stand on one line, so the row keeps its pitch", async () => {
-  location.hash = "#/workspace/credentials";
-  wire({ "/workspace/credentials": () => json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT] }) });
-  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
-
-  const replace = await screen.findByRole("button", { name: "Replace" });
-  const cluster = replace.parentElement!;
-  expect(cluster.className).toContain("flex-nowrap");
-  expect(cluster.contains(screen.getByRole("button", { name: "Clear" }))).toBe(true);
 });
 
 test("a stored credential states the slot it stored and re-reads the listing", async () => {
@@ -516,7 +519,7 @@ test("a stored credential states the slot it stored and re-reads the listing", a
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+  await userEvent.click(await slotAct("Replace"));
   await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
   await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
 
@@ -554,7 +557,7 @@ test("a request whose second slot is refused keeps the first stored and asks onl
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+  await userEvent.click(await slotAct("Replace"));
   await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
   await userEvent.type(screen.getByLabelText("the organization"), "org-1");
   await userEvent.click(screen.getByRole("button", { name: "Set credentials" }));
@@ -583,14 +586,16 @@ test("a cleared credential states the outcome and re-reads the listing", async (
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Clear" }));
-  await userEvent.click(await screen.findByRole("button", { name: "Confirm clear" }));
+  await userEvent.click(await slotAct("Clear"));
+  await userEvent.click(within(await screen.findByRole("dialog", { name: /^Clear / })).getByRole("button", {
+      name: /^Clear /,
+    }));
 
   expect(await screen.findByText("Cleared OPENAI_API_KEY.")).toBeTruthy();
   await waitFor(() => expect(reads).toBe(2));
 });
 
-test("a destructive act posts nothing until a second click confirms it, and leaving it disarms", async () => {
+test("a destructive act posts nothing until its confirmation is taken, and cancelling posts none", async () => {
   location.hash = "#/workspace/credentials";
   const intents: string[] = [];
   const refused = (_url: string, init?: RequestInit) => {
@@ -604,17 +609,19 @@ test("a destructive act posts nothing until a second click confirms it, and leav
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Clear" }));
+  await userEvent.click(await slotAct("Clear"));
   expect(intents.length).toBe(0);
 
-  await userEvent.click(screen.getByRole("button", { name: "Replace" }));
-  expect(screen.queryByRole("button", { name: "Confirm clear" })).toBe(null);
-  await waitFor(() => expect(intents.length).toBe(1));
+  const asking = screen.getByRole("dialog", { name: /^Clear / });
+  await userEvent.click(within(asking).getByRole("button", { name: "Cancel" }));
+  expect(intents.length).toBe(0);
 
-  await userEvent.click(screen.getByRole("button", { name: "Clear" }));
-  await userEvent.click(screen.getByRole("button", { name: "Confirm clear" }));
-  await waitFor(() => expect(intents.length).toBe(2));
-  expect(JSON.parse(intents[1]).verb).toBe("delete");
+  await userEvent.click(await slotAct("Clear"));
+  await userEvent.click(
+    within(screen.getByRole("dialog", { name: /^Clear / })).getByRole("button", { name: /^Clear / }),
+  );
+  await waitFor(() => expect(intents.length).toBe(1));
+  expect(JSON.parse(intents[0]).verb).toBe("delete");
 });
 
 test("two acts in a row each re-read, even though the server answers one constant message", async () => {
@@ -629,15 +636,21 @@ test("two acts in a row each re-read, even though the server answers one constan
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  const clears = await screen.findAllByRole("button", { name: "Clear" });
-  await userEvent.click(clears[0]);
-  await userEvent.click(await screen.findByRole("button", { name: "Confirm clear" }));
+  await userEvent.click(await slotAct("Clear"));
+  await userEvent.click(
+    within(await screen.findByRole("dialog", { name: /^Clear / })).getByRole("button", {
+      name: /^Clear /,
+    }),
+  );
   expect(await screen.findByText("Saved.")).toBeTruthy();
   await waitFor(() => expect(reads).toBe(2));
 
-  const again = await screen.findAllByRole("button", { name: "Clear" });
-  await userEvent.click(again[1]);
-  await userEvent.click(await screen.findByRole("button", { name: "Confirm clear" }));
+  await userEvent.click(await slotAct("Clear"));
+  await userEvent.click(
+    within(await screen.findByRole("dialog", { name: /^Clear / })).getByRole("button", {
+      name: /^Clear /,
+    }),
+  );
   await waitFor(() => expect(reads).toBe(3));
 });
 
@@ -660,7 +673,7 @@ test("a refused act states the refusal in place", async () => {
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+  await userEvent.click(await slotAct("Replace"));
 
   await refusedNotice("Only an admin may set it.");
 });
@@ -747,7 +760,7 @@ test("a credential prompt is headed by the one provider every slot it asks for b
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click((await screen.findAllByRole("button", { name: "Replace" }))[0]);
+  await userEvent.click(await slotAct("Replace"));
 
   const head = (await screen.findByText("Credential values")).closest("[data-slot=dialog-header]")!;
   expect(head.querySelector("[data-slot=mark] > *")?.getAttribute("style")).toContain(
@@ -777,7 +790,7 @@ test("a credential prompt spanning two providers is headed by the words alone", 
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click((await screen.findAllByRole("button", { name: "Replace" }))[0]);
+  await userEvent.click(await slotAct("Replace"));
 
   const head = (await screen.findByText("Credential values")).closest("[data-slot=dialog-header]")!;
   expect(head.querySelector("[data-slot=mark]")).toBeNull();
@@ -796,7 +809,7 @@ test("the secret field hides what a member types and refuses whitespace", async 
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+  await userEvent.click(await slotAct("Replace"));
   const field = await screen.findByLabelText("the key");
   expect(field.getAttribute("type")).toBe("password");
 
@@ -814,7 +827,7 @@ test("a refused store states the reason the server gave and keeps the field", as
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByRole("button", { name: "Replace" }));
+  await userEvent.click(await slotAct("Replace"));
   await userEvent.type(await screen.findByLabelText("the key"), "sk-live");
   await userEvent.click(screen.getByRole("button", { name: "Set credential" }));
 

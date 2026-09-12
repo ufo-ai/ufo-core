@@ -15,6 +15,7 @@ import {
   artifactTarget,
   bootRoute,
   chatHash,
+  CONNECTION_TABS,
   conversationSlotHash,
   firstRunHash,
   homeHash,
@@ -102,6 +103,9 @@ function serve() {
           ],
         });
       }
+      if (url.includes("/workspace/team")) {
+        return json({ members: [MEMBER], can_add: false, actions: [] });
+      }
       if (url.includes("/workspace/usage")) return json(NO_USAGE);
       if (url.includes("/objects/conversation")) return json({ objects: [] });
       if (url.includes("/api/chats")) return json({ chats: [] });
@@ -123,9 +127,9 @@ test("a workspace tab and a section carry their place and parse back to it", () 
     range: "7d",
     opens: [OLDER_KEY],
   };
-  expect(parseHash(workspaceHash("credentials", place))).toEqual({
+  expect(parseHash(workspaceHash("memory", place))).toEqual({
     kind: "workspace",
-    view: "credentials",
+    view: "memory",
     place,
   });
   expect(parseHash(sectionHash("connectors", place))).toEqual({
@@ -168,10 +172,12 @@ test("a screen moved off the workspace tabs still answers at the address it had"
   expect(parseHash("#/workspace/nothing")).toEqual({ kind: "bad-link" });
 });
 
-test("connectors has one section address", () => {
+test("every connections screen has one section address", () => {
   expect(parseHash("#/workspace/sources")).toEqual({ kind: "bad-link" });
-  expect(parseHash("#/workspace/connectors")).toEqual({ kind: "bad-link" });
-  expect(parseHash("#/connectors")).toEqual({ kind: "section", section: "connectors", place: {} });
+  for (const tab of CONNECTION_TABS) {
+    expect(parseHash("#/workspace/" + tab)).toEqual({ kind: "bad-link" });
+    expect(parseHash("#/" + tab)).toEqual({ kind: "section", section: tab, place: {} });
+  }
 });
 
 test("an address naming an inherited property of an object names no workspace tab", () => {
@@ -586,7 +592,7 @@ test("an address the portal cannot read reports a bad link, whichever part is ma
 
 test("a search rides the hash by replacement, never as a history entry", async () => {
   location.hash = "#/agents";
-  location.hash = workspaceHash("credentials");
+  location.hash = workspaceHash("memory");
   serve();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -622,9 +628,9 @@ test("a search term typed and not submitted does not follow the member to the ne
   expect((screen.getByRole("searchbox") as HTMLInputElement).value).toBe("roadmap");
   expect(location.hash).not.toContain("q=");
 
-  await goTo("Credentials");
+  await goTo("Team");
 
-  const box = (await screen.findByLabelText("Search credentials")) as HTMLInputElement;
+  const box = (await screen.findByLabelText("Search members")) as HTMLInputElement;
   expect(box.value).toBe("");
 });
 

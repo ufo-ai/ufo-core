@@ -19,8 +19,7 @@ export const buttonVariants = cva(
     variants: {
       variant: {
         send: "bg-ink text-surface font-medium px-3xl py-md border border-transparent hover:opacity-(--opacity-muted-soft)",
-        outline:
-          "border border-transparent bg-transparent text-inherit px-lg py-xs hover:bg-fill",
+        outline: "border border-edge bg-transparent text-ink px-lg py-xs hover:bg-fill",
         row: "border border-transparent bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill",
         quiet: "border border-transparent bg-transparent text-inherit px-lg py-xs hover:bg-fill",
         mark: "border-0 bg-transparent p-0 text-ink-soft hover:text-ink",

@@ -7,7 +7,6 @@ import {
   IconLogout,
   IconMenu2,
   IconMoon,
-  IconMessages,
   IconPlug,
   IconPlus,
   IconSun,
@@ -27,7 +26,7 @@ import { Shortcuts } from "@/views/Shortcuts";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
 import {
-  CHANNELS,
+  CONNECTION_VIEWS,
   CONNECTORS,
   SECTION_VIEWS,
   TASK_VIEWS,
@@ -93,7 +92,9 @@ import type { Seek } from "@/kernel/slots";
 import {
   COMPOSE,
   COMPOSING,
+  CONNECTION_TABS,
   TASK_TABS,
+  connectionTab,
   homeConversationLane,
   homeLaneAgent,
   homeLaneConversation,
@@ -568,7 +569,6 @@ const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
 
 const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
   connectors: <IconPlug className={GLYPH} aria-hidden />,
-  messaging: <IconMessages className={GLYPH} aria-hidden />,
 };
 
 
@@ -746,19 +746,10 @@ function WorkspaceSidebar({
         <li>
           <NavRow
             icon={SECTION_GLYPHS.connectors}
-            current={standing(route, "section:connectors")}
-            onClick={() => placeSection("connectors", {}, "push")}
+            current={CONNECTION_TABS.some((tab) => standing(route, `section:${tab}`))}
+            onClick={() => placeSection(CONNECTION_TABS[0], {}, "push")}
           >
             {CONNECTORS.label}
-          </NavRow>
-        </li>
-        <li>
-          <NavRow
-            icon={SECTION_GLYPHS.messaging}
-            current={standing(route, "section:messaging")}
-            onClick={() => placeSection("messaging", {}, "push")}
-          >
-            {CHANNELS.label}
           </NavRow>
         </li>
         <li>
@@ -872,6 +863,18 @@ function RoutedPane({
         />
       );
     case "section": {
+      if (connectionTab(route.section)) {
+        return (
+          <TabbedPane
+            group="connections"
+            tabs={CONNECTION_TABS}
+            views={CONNECTION_VIEWS}
+            view={route.section}
+            place={route.place}
+            onPlace={placeSection}
+          />
+        );
+      }
       const view = SECTION_VIEWS[route.section];
       if (view === undefined) {
         const shipped = agents.find((agent) => agent.app === route.section);

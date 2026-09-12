@@ -1,9 +1,16 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
+import { SheetHost } from "@/components/ui/sheet";
 import { ConnectAccount } from "@/views/ConnectAccount";
 import { json, wire, type Route } from "./harness";
+
+/** The sheet stands beside the rows rather than over them, so both its Connect and the row's are in
+ *  the tree and a press has to name which. */
+function asking(): HTMLElement {
+  return screen.getByRole("dialog");
+}
 
 const DEVICE = { user_code: "HY0H-0FOKK", verification_uri: "https://auth.test/device", interval: 1 };
 const REFUSED_LINE = "ChatGPT did not accept that.";
@@ -19,7 +26,11 @@ function accounts(openai = false, anthropic = false) {
 
 function open(routes: Record<string, Route> = {}, onConnected = () => {}) {
   const wired = wire({ "/workspace/accounts": () => accounts(), ...routes });
-  render(<ConnectAccount onConnected={onConnected} />);
+  render(
+    <SheetHost>
+      <ConnectAccount onConnected={onConnected} />
+    </SheetHost>,
+  );
   return wired;
 }
 
@@ -32,7 +43,7 @@ test("both accounts are offered, whatever the member already holds", async () =>
 
   expect(await screen.findByText("ChatGPT")).toBeTruthy();
   expect(screen.getByText("Claude")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Configure" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Connect" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy();
 });
@@ -41,16 +52,19 @@ test("every coding provider states the coding subagent it is available in", asyn
   open({ "/workspace/accounts": () => accounts(true, false) });
 
   expect(await screen.findByText("ChatGPT")).toBeTruthy();
-  expect(screen.getAllByText("Available in")).toHaveLength(2);
-  expect(screen.getAllByText("Coding subagent")).toHaveLength(2);
+  expect(screen.getAllByText("Available in the coding subagent.")).toHaveLength(2);
 });
 
 test("the first run's stacked shape draws no availability chip", async () => {
   wire({ "/workspace/accounts": () => accounts() });
-  render(<ConnectAccount stacked />);
+  render(
+    <SheetHost>
+      <ConnectAccount stacked />
+    </SheetHost>,
+  );
 
   expect(await screen.findByRole("button", { name: "Connect ChatGPT" })).toBeTruthy();
-  expect(screen.queryByText("Coding subagent")).toBeNull();
+  expect(screen.queryByText("Available in the coding subagent.")).toBeNull();
 });
 
 test("the ChatGPT asking draws the code and the setting the grant needs", async () => {
@@ -67,13 +81,13 @@ test("the ChatGPT asking draws the code and the setting the grant needs", async 
   );
 });
 
-test("an account the grant is refused for says why and cannot be confirmed", async () => {
+test("an account the grant is refused for says why and the asking stands", async () => {
   open({ "/openai/device$": () => json({ error: REFUSED_LINE }) });
 
   await userEvent.click((await screen.findAllByRole("button", { name: "Connect" }))[0]);
 
   expect(await screen.findByText(REFUSED_LINE)).toBeTruthy();
-  expect(screen.getByRole("button", { name: "OK" }).getAttribute("disabled")).not.toBeNull();
+  expect(within(asking()).queryByText(/connected\./)).toBeNull();
 });
 
 test("an approved grant closes the asking and states the account", async () => {
@@ -88,19 +102,17 @@ test("an approved grant closes the asking and states the account", async () => {
   await userEvent.click((await screen.findAllByRole("button", { name: "Connect" }))[0]);
   await screen.findByText(DEVICE.user_code);
 
-  expect(screen.getByRole("button", { name: "OK" }).getAttribute("disabled")).not.toBeNull();
+  expect(within(asking()).queryByText(/connected\./)).toBeNull();
 
   claim = { status: "connected" };
   held = true;
 
   await screen.findByText("ChatGPT connected.", undefined, { timeout: 4000 });
-  const ok = screen.getByRole("button", { name: "OK" });
-  expect(ok.getAttribute("disabled")).toBeNull();
   expect(screen.getByRole("dialog")).toBeTruthy();
 
-  await userEvent.click(ok);
+  await userEvent.click(within(asking()).getByRole("button", { name: "Close" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(await screen.findByRole("img", { name: "ChatGPT connected" })).toBeTruthy();
+  expect(await screen.findByLabelText("ChatGPT connected")).toBeTruthy();
 }, 10_000);
 
 test("a session that ended says so rather than blaming the network", async () => {
@@ -131,10 +143,10 @@ test("the Claude asking takes the code the member pastes back", async () => {
     "https://claude.test/authorize",
   );
   await userEvent.type(screen.getByLabelText("Authorization code"), "granted#sealed");
-  await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+  await userEvent.click(within(asking()).getByRole("button", { name: "Connect" }));
 
   await screen.findByText("Claude connected.");
-  await userEvent.click(screen.getByRole("button", { name: "OK" }));
+  await userEvent.click(within(asking()).getByRole("button", { name: "Close" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(bodies).toEqual(["code=granted%23sealed"]);
 });
@@ -148,7 +160,7 @@ test("a refused paste states its line and holds the asking open", async () => {
   await userEvent.click((await screen.findAllByRole("button", { name: "Connect" }))[1]);
   await screen.findByRole("link", { name: /Open Claude/ });
   await userEvent.type(screen.getByLabelText("Authorization code"), "granted#sealed");
-  await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+  await userEvent.click(within(asking()).getByRole("button", { name: "Connect" }));
 
   expect(await screen.findByText(REFUSED_LINE)).toBeTruthy();
   expect(screen.getByRole("dialog")).toBeTruthy();
@@ -205,12 +217,16 @@ test("the first run's shape names each provider on its own act and signals what 
         ],
       }),
   });
-  render(<ConnectAccount stacked />);
+  render(
+    <SheetHost>
+      <ConnectAccount stacked />
+    </SheetHost>,
+  );
 
   expect(await screen.findByText("ChatGPT connected")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Connect Claude" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Replace" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Configure" })).toBeNull();
   expect(wired).toBeTruthy();
 });
 
@@ -220,7 +236,7 @@ test("leaving an asking that did not land reports nothing", async () => {
 
   await userEvent.click((await screen.findAllByRole("button", { name: "Connect" }))[0]);
   await screen.findByText(DEVICE.user_code);
-  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   expect(settled).not.toHaveBeenCalled();
@@ -243,10 +259,10 @@ test("an account that landed is kept even when the member leaves by Cancel", asy
 
   await userEvent.click((await screen.findAllByRole("button", { name: "Connect" }))[0]);
   await screen.findByText("ChatGPT connected.", undefined, { timeout: 4000 });
-  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
 
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-  expect(await screen.findByRole("img", { name: "ChatGPT connected" })).toBeTruthy();
+  expect(await screen.findByLabelText("ChatGPT connected")).toBeTruthy();
   expect(settled).toHaveBeenCalled();
 }, 10_000);
 

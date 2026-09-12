@@ -79,7 +79,7 @@ test("the meetings card is one bordered card of ruled rows, each led by its mome
   render(<Meetings />);
   const card = screen.getByRole("list", { name: "Next meetings" });
   expect(card.className).toContain("border-edge");
-  expect(card.className).toContain("rounded-panel");
+  expect(card.className).toContain("rounded-card");
 
   const rows = card.querySelectorAll("[data-slot=item]");
   expect(rows.length).toBe(MEETINGS.length);
@@ -181,9 +181,9 @@ test("a row draws no edge, so the card's border is the group's and the rules the
   const classes = itemVariants({ variant: "default", size: "default" });
   expect(classes).not.toContain("border");
   expect(classes).not.toContain("bg-");
-  expect(classes).toContain("gap-lg");
-  expect(classes).toContain("px-xl");
-  expect(classes).toContain("py-lg");
+  expect(classes).toContain("gap-2xl");
+  expect(classes).toContain("px-2xl");
+  expect(classes).toContain("py-2xl");
 });
 
 test("a held row is marked by ground on the fill step, never by an edge inside the card's", () => {
@@ -199,15 +199,15 @@ test("a held row is marked by ground on the fill step, never by an edge inside t
   const row = document.querySelector("[data-slot=item]") as HTMLElement;
   expect(row.className).toContain("bg-fill");
   expect(row.className).not.toContain("border");
-  expect(row.className).toContain("px-xl");
+  expect(row.className).toContain("px-2xl");
 });
 
 test("a flush row gives its inset to the child that carries the press", () => {
   const classes = itemVariants({ size: "flush" });
   expect(classes).toMatch(NO_INSET);
   expect(classes).toMatch(NO_GAP);
-  expect(classes).not.toContain("px-xl");
-  expect(classes).not.toContain("py-lg");
+  expect(classes).not.toContain("px-2xl");
+  expect(classes).not.toContain("py-2xl");
 });
 
 test("a caller's own inset still beats the row's, so a row already flushed stays flush", () => {
@@ -222,8 +222,8 @@ test("a caller's own inset still beats the row's, so a row already flushed stays
   );
   const row = document.querySelector("[data-slot=item]") as HTMLElement;
   expect(row.className).toMatch(NO_INSET);
-  expect(row.className).not.toContain("px-xl");
-  expect(row.className).not.toContain("py-lg");
+  expect(row.className).not.toContain("px-2xl");
+  expect(row.className).not.toContain("py-2xl");
 });
 
 test("a row hands the list item every attribute the press needs", () => {

@@ -75,6 +75,7 @@ export type ListingSpec<Payload, Row> = {
   rows: (payload: Payload) => Row[];
   rowKey: (row: Row) => string;
   empty: string;
+  emptyMark?: ReactNode;
   group?: (row: Row) => string;
   unavailable?: (payload: Payload) => string | null;
   paged?: true;
@@ -83,6 +84,10 @@ export type ListingSpec<Payload, Row> = {
   search?: (row: Row) => string;
   chips?: Chip<Row>[];
   actions?: (row: Row, context: RowContext) => ReactNode;
+  /** What pressing a record's whole row does. `open` commits an act outright; where it answers null
+   *  and `record` is declared, the press stands that record's own screen instead. */
+  open?: (row: Row, context: RowContext) => (() => void) | null;
+  record?: (row: Row, context: RowContext, close: () => void) => ReactNode;
   views?: (payload: Payload) => ActionView[];
   offer?: (payload: Payload, context: RowContext) => ReactNode;
   credentials?: (
@@ -111,6 +116,7 @@ export function Listing<Payload, Row>({
   const [credentials, setCredentials] = useState<CredentialRequest | null>(
     null,
   );
+  const [configuring, setConfiguring] = useState<string | null>(null);
   const state = usePanelRead<Payload>(spec.read + cursor(spec, place));
   const query = place.q ?? "";
   const picked = place.chip ?? null;
@@ -158,35 +164,39 @@ export function Listing<Payload, Row>({
   const searched = known?.filter(bySearch) ?? null;
   const search = usePageSearch();
 
+  const bar =
+    known?.length || state.phase === "failed" || (spec.serverQuery && known) ? (
+      <>
+        {spec.chips && (searched?.length || spec.serverQuery) ? (
+          <Filter
+            options={spec.chips.map((chip) => ({
+              label: chip.label,
+              value: chip.label,
+            }))}
+            value={picked ?? ""}
+            onChange={(value) => setPicked(value || null)}
+          />
+        ) : null}
+        {state.phase === "failed" && place.after ? (
+          <Button variant="row" onClick={() => onPlace({ after: undefined })}>
+            First page
+          </Button>
+        ) : null}
+      </>
+    ) : null;
+
+  const banded = (body: ReactNode) => (
+    <Section note={spec.note} bar={bar}>
+      {body}
+    </Section>
+  );
+
   return (
     <>
       <OutcomeNotice state={notice} />
       {search ? <PageToolbar /> : null}
       {spec.lead}
-      <Section
-        note={spec.note}
-        bar={
-          known?.length || state.phase === "failed" || (spec.serverQuery && known) ? (
-            <>
-              {spec.chips && (searched?.length || spec.serverQuery) ? (
-                <Filter
-                  options={spec.chips.map((chip) => ({
-                    label: chip.label,
-                    value: chip.label,
-                  }))}
-                  value={picked ?? ""}
-                  onChange={(value) => setPicked(value || null)}
-                />
-              ) : null}
-              {state.phase === "failed" && place.after ? (
-                <Button variant="row" onClick={() => onPlace({ after: undefined })}>
-                  First page
-                </Button>
-              ) : null}
-            </>
-          ) : null
-        }
-      >
+      {banded(
         <Panel state={state} shape={spec.cards ? "cards" : "table"} empty={spec.unavailable}>
           {(payload) => {
             const rows = spec.rows(payload);
@@ -198,14 +208,18 @@ export function Listing<Payload, Row>({
               actions: spec.views?.(payload) ?? [],
             };
             const offer = spec.offer?.(payload, context) ?? null;
+            const headed = (body: ReactNode) => (
+              <div className={BANDS}>
+                {offer}
+                {body}
+              </div>
+            );
             if (!rows.length)
-              return (
-                <div className={BANDS}>
-                  <PanelBlank
-                    body={spec.serverQuery && (term || picked) ? "Nothing matches." : spec.empty}
-                  />
-                  {offer}
-                </div>
+              return headed(
+                <PanelBlank
+                  body={spec.serverQuery && (term || picked) ? "Nothing matches." : spec.empty}
+                  mark={spec.emptyMark}
+                />,
               );
             const chip = spec.chips?.find((entry) => entry.label === picked);
             const unknown = picked !== null && chip === undefined;
@@ -238,6 +252,7 @@ export function Listing<Payload, Row>({
                   spec={spec}
                   rows={rows}
                   context={context}
+                  onConfigure={setConfiguring}
                 />
               ) : (
                 <Table
@@ -279,9 +294,8 @@ export function Listing<Payload, Row>({
               );
             const families =
               spec.group && matched.length ? groupRows(matched, spec.group) : null;
-            return (
+            return headed(
               <div className={BANDS}>
-                {offer}
                 {families ? (
                   <div className={FAMILIES}>
                     {families.map(({ title: familyTitle, rows }) => (
@@ -304,23 +318,44 @@ export function Listing<Payload, Row>({
                     onPlace={onPlace}
                   />
                 ) : null}
-              </div>
+              </div>,
             );
           }}
-        </Panel>
-        {credentials && spec.credentials
-          ? spec.credentials(
-              credentials,
-              (slots) => onPlace({ notice: counted(slots) }),
-              () => setCredentials(null),
-            )
-          : null}
-      </Section>
+        </Panel>,
+      )}
+      {configuring && spec.record
+        ? (() => {
+            const payload = state.phase === "ready" ? state.payload : null;
+            const row = payload
+              ? spec.rows(payload).find((one) => spec.rowKey(one) === configuring)
+              : undefined;
+            return row
+              ? spec.record(
+                  row,
+                  {
+                    act,
+                    action,
+                    busy,
+                    viewer,
+                    actions: spec.views?.(payload!) ?? [],
+                  },
+                  () => setConfiguring(null),
+                )
+              : null;
+          })()
+        : null}
+      {credentials && spec.credentials
+        ? spec.credentials(
+            credentials,
+            (slots) => onPlace({ notice: counted(slots) }),
+            () => setCredentials(null),
+          )
+        : null}
     </>
   );
 }
 
-const FAMILIES = "flex flex-col gap-8xl";
+const FAMILIES = "flex flex-col gap-6xl";
 
 function groupRows<Row>(rows: Row[], group: (row: Row) => string) {
   const grouped = new Map<string, Row[]>();
@@ -342,11 +377,13 @@ function RowList<Payload, Row>({
   spec,
   rows,
   context,
+  onConfigure,
 }: {
   line: RowLine<Row>;
   spec: ListingSpec<Payload, Row>;
   rows: Row[];
   context: RowContext;
+  onConfigure: (key: string) => void;
 }) {
   const { when, whole } = line;
   const { actions } = spec;
@@ -359,6 +396,10 @@ function RowList<Payload, Row>({
       primary={(row) => part(line.primary, row, context)}
       meta={(row) => line.meta.map((entry) => part(entry, row, context))}
       when={when ? (row) => part(when, row, context) : undefined}
+      open={(row) =>
+        spec.open?.(row, context) ??
+        (spec.record ? () => onConfigure(spec.rowKey(row)) : null)
+      }
       action={actions ? (row) => actions(row, context) : undefined}
     />
   );

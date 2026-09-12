@@ -334,7 +334,6 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     agentName(AGENT.name),
     "Pin " + agentName(AGENT.name),
     "Connections",
-    "Channels",
     "Workspace",
     "Theme",
     "Sign out",

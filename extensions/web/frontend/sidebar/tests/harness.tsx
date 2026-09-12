@@ -164,15 +164,37 @@ export type Route = (url: string, init?: RequestInit) => Response | Promise<Resp
 
 export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
-  const table: Record<string, Route> = {
+  const fallbacks: Record<string, Route> = {
     "/api/chats": () => json({ chats: [] }),
     "/objects/conversation$": () => json({ objects: [] }),
     "/api/agents/status": () => json({ statuses: [] }),
     "/connector-catalog": () => json({ providers: [], after: null }),
+    "/connections": () => json({ connections: [] }),
+    "/workspace/first-run": () =>
+      json({
+        providers: [],
+        connectors: [],
+        actions: { member: [], memory: [], enrichment_profile: [] },
+        model_key_held: false,
+      }),
+    "/workspace/surfaces$": () => json({ surfaces: [] }),
+    "/workspace/team$": () => json({ members: [MEMBER], can_add: false, actions: [] }),
+    "/workspace/accounts$": () => json({ accounts: [] }),
+    "/workspace/credentials$": () => json({ actions: [], slots: [] }),
+    "/workspace/sources$": () => json({ sources: [] }),
+    "/github/coverage": () => json({ api: false, sources: false }),
     "/homepage": () => json({ state: "none" }),
     "/conversations$": () => json({ conversations: [] }),
-    ...routes,
   };
+  /* Order is load-bearing: a longer path must be matched before the prefix it shares, so a named
+     fallback keeps its place and only a differently anchored twin is dropped. */
+  const named = new Set(Object.keys(routes));
+  const table: Record<string, Route> = {};
+  for (const [pattern, route] of Object.entries(fallbacks)) {
+    const twin = pattern.endsWith("$") ? pattern.slice(0, -1) : pattern + "$";
+    if (!named.has(twin)) table[pattern] = route;
+  }
+  Object.assign(table, routes);
   const matches = (url: string, pattern: string) =>
     pattern.endsWith("$")
       ? url.split("?")[0].endsWith(pattern.slice(0, -1))

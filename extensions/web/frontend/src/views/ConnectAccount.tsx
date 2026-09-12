@@ -9,25 +9,20 @@ import {
   type ReactNode,
 } from "react";
 
-import { Badge } from "@/components/ui/badge";
+import { ConnectedBadge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Item,
   ItemActions,
   ItemContent,
+  ItemDescription,
   ItemGroup,
   ItemSeparator,
   ItemTitle,
   MarkTile,
 } from "@/components/ui/item";
 import { Input } from "@/components/ui/field";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Sheet } from "@/components/ui/sheet";
 import { BASE } from "@/lib/api";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
@@ -36,10 +31,9 @@ const ACCOUNTS_READ = "/workspace/accounts";
 const SETTINGS_URL = "https://chatgpt.com/#settings/Security";
 const SIGN_IN_REFUSAL = "Your session ended. Sign in again to connect an account.";
 const NETWORK_REFUSAL = "Could not reach the workspace. Try again.";
-const AVAILABLE_IN = "Available in";
+const AVAILABLE_IN = "Available in the coding subagent.";
 /** Every row this list draws is a coding provider, and the coding subagent is what runs on one, so
  *  the chip stands on the row whether the account is connected yet or not. */
-const CODING_SUBAGENT = "Coding subagent";
 
 type Account = { provider: string; label: string; connected: boolean };
 type Grant = { user_code: string; verification_uri: string; interval: number } | { error: string };
@@ -82,7 +76,7 @@ function Away({ href, children }: { href: string; children: ReactNode }) {
       href={href}
       target="_blank"
       rel="noopener"
-      className={cn(buttonVariants({ variant: "outline" }), "gap-xs")}
+      className={cn(buttonVariants({ variant: "outline", size: "bar" }), "gap-sm")}
     >
       {children}
       <IconExternalLink className="size-icon" aria-hidden />
@@ -136,8 +130,8 @@ function Chatgpt({ onConnected }: { onConnected: () => void }) {
   }, [code]);
 
   return (
-    <div className="flex flex-col gap-lg">
-      <ol className="m-0 grid list-none gap-lg p-0">
+    <div className="flex flex-col gap-2xl">
+      <ol className="m-0 grid list-none gap-2xl p-0">
         <Step index={1}>
           <p className="m-0">Turn on device code authorization for your account.</p>
           <Away href={SETTINGS_URL}>ChatGPT settings</Away>
@@ -150,7 +144,7 @@ function Chatgpt({ onConnected }: { onConnected: () => void }) {
           <p className="m-0">Enter this code when ChatGPT asks for it.</p>
           {busy ? <p className="m-0 text-ink-soft">Asking ChatGPT…</p> : null}
           {code ? (
-            <code className="rounded-input bg-raised px-md py-sm font-mono text-title tracking-code">
+            <code className="rounded-input bg-raised px-2xl py-sm font-mono text-title tracking-code">
               {code.user_code}
             </code>
           ) : null}
@@ -193,8 +187,8 @@ function Claude({ onConnected }: { onConnected: () => void }) {
   };
 
   return (
-    <div className="flex flex-col gap-lg">
-      <ol className="m-0 grid list-none gap-lg p-0">
+    <div className="flex flex-col gap-2xl">
+      <ol className="m-0 grid list-none gap-2xl p-0">
         <Step index={1}>
           <p className="m-0">Open the authorization page and approve access.</p>
           {url ? <Away href={url}>Open Claude</Away> : null}
@@ -291,28 +285,20 @@ export function ConnectAccount({
           {accounts.map((account, index) => (
             <Fragment key={account.provider}>
               {index ? <ItemSeparator /> : null}
-              <Item className="max-narrow:flex-wrap max-narrow:gap-y-sm">
+              <Item>
                 <MarkTile>
                   <BrandMark provider={account.provider} className="text-ink" />
                 </MarkTile>
                 <ItemContent>
-                  <ItemTitle>{account.label}</ItemTitle>
-                  <span className="flex flex-wrap items-center gap-sm text-small text-ink-soft">
-                    {AVAILABLE_IN}
-                    <Badge tone="affirm">{CODING_SUBAGENT}</Badge>
-                  </span>
-                </ItemContent>
-                <ItemActions className="max-narrow:w-full max-narrow:justify-end">
-                  {account.connected ? (
-                    <span className="flex items-center gap-xs text-label text-ink-soft">
-                      <IconCheck
-                        role="img"
-                        aria-label={account.label + " connected"}
-                        className="size-icon"
-                      />
-                      Connected
+                  <ItemTitle>
+                    <span className="flex items-center gap-sm">
+                      {account.label}
+                      {account.connected ? <ConnectedBadge label={account.label} /> : null}
                     </span>
-                  ) : null}
+                  </ItemTitle>
+                  <ItemDescription>{AVAILABLE_IN}</ItemDescription>
+                </ItemContent>
+                <ItemActions>
                   <Button
                     variant={account.connected ? "row" : "outline"}
                     size="bar"
@@ -321,7 +307,7 @@ export function ConnectAccount({
                       setAsking(account);
                     }}
                   >
-                    {account.connected ? "Replace" : "Connect"}
+                    {account.connected ? "Configure" : "Connect"}
                   </Button>
                   {account.connected ? (
                     <Button variant="row" size="bar" onClick={() => disconnect(account)}>
@@ -345,26 +331,22 @@ export function ConnectAccount({
     >
       {rows}
       {refusal ? <p className="m-0 text-label text-danger">{refusal}</p> : null}
-      <Dialog open={asking !== null} onOpenChange={(shown) => (shown ? null : close())}>
-        <DialogContent aria-describedby={undefined}>
-          <DialogHeader>
-            <DialogTitle>{asking ? `Connect ${asking.label}` : ""}</DialogTitle>
-          </DialogHeader>
+      {asking ? (
+        <Sheet
+          open
+          title={`Connect ${asking.label}`}
+          onClose={close}
+        >
           {landed ? (
-            <p className="m-0">{asking ? `${asking.label} connected.` : ""}</p>
+            <p className="m-0">{`${asking.label} connected.`}</p>
           ) : (
             <>
-              {asking?.provider === "openai" ? <Chatgpt onConnected={settled} /> : null}
-              {asking?.provider === "anthropic" ? <Claude onConnected={settled} /> : null}
+              {asking.provider === "openai" ? <Chatgpt onConnected={settled} /> : null}
+              {asking.provider === "anthropic" ? <Claude onConnected={settled} /> : null}
             </>
           )}
-          <DialogFooter>
-            <Button variant="send" className="px-3xl py-md" disabled={!landed} onClick={close}>
-              OK
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        </Sheet>
+      ) : null}
     </div>
   );
 }

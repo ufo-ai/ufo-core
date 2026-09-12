@@ -61,7 +61,13 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { SignIn } from "@/views/SignIn";
 import { Spotlight } from "@/views/Spotlight";
 import { TabbedPane } from "@/views/TabbedPane";
-import { SECTION_VIEWS, TASK_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
+import {
+  CONNECTION_VIEWS,
+  SECTION_VIEWS,
+  TASK_VIEWS,
+  WORKSPACE_VIEWS,
+  type PaneView,
+} from "@/views/registry";
 import {
   IMESSAGE_SURFACE,
   MEMBER_SUBJECT,
@@ -154,7 +160,9 @@ import {
   chatHash,
   COMPOSE,
   COMPOSING,
+  CONNECTION_TABS,
   TASK_TABS,
+  connectionTab,
   standing,
   type Route,
   type Section,
@@ -809,10 +817,10 @@ function WorkspaceSidebar({
         ))}
         <NavRow
           icon={SECTION_GLYPHS.connectors}
-          current={standing(route, "section:connectors")}
+          current={CONNECTION_TABS.some((tab) => standing(route, `section:${tab}`))}
           collapsed={collapsed}
           label={CONNECTIONS}
-          onClick={() => placeSection("connectors", {}, "push")}
+          onClick={() => placeSection(CONNECTION_TABS[0], {}, "push")}
         />
         <NavRow
           icon={<IconSettings className={GLYPH} aria-hidden />}
@@ -909,6 +917,18 @@ function RoutedPane({
         />
       );
     case "section": {
+      if (connectionTab(route.section)) {
+        return (
+          <TabbedPane
+            group="connections"
+            tabs={CONNECTION_TABS}
+            views={CONNECTION_VIEWS}
+            view={route.section}
+            place={route.place}
+            onPlace={placeSection}
+          />
+        );
+      }
       const view = SECTION_VIEWS[route.section];
       if (view === undefined) {
         const shipped = agents.find((agent) => agent.app === route.section);

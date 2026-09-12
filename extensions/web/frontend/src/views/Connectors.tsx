@@ -1,7 +1,7 @@
-import { IconCheck } from "@tabler/icons-react";
+import { IconBuilding, IconDots, IconKey, IconLock } from "@tabler/icons-react";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
-import { Button, ConfirmButton } from "@/components/ui/button";
+import { Button, ConfirmButton, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -11,6 +11,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Label, Search } from "@/components/ui/field";
+import { Segmented } from "@/components/ui/filter";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Item,
   ItemActions,
@@ -34,7 +41,6 @@ import {
 import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import type { Placement } from "@/kernel/pager";
-import { PageToolbar, usePageSearch } from "@/kernel/pane";
 import {
   Notice,
   type NoticeState,
@@ -47,10 +53,12 @@ import {
   outcomeNotice,
   usePanelRead,
 } from "@/kernel/panel";
-import { rowControl } from "@/kernel/row";
 import { RowLines } from "@/kernel/rows";
-import { appended, beside, closed, opened } from "@/kernel/slots";
+import { rowControl } from "@/kernel/row";
+import { closed, opened } from "@/kernel/slots";
+import { workspaceHash } from "@/lib/route";
 import { DataTable, OPEN } from "@/kernel/table";
+import { Badge } from "@/components/ui/badge";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
@@ -63,7 +71,8 @@ import { connectArrival } from "@/lib/router";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
 import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/lib/firstRun";
-import { CONNECT_INSTALLS } from "@/views/Surfaces";
+import { ConnectAccount } from "@/views/ConnectAccount";
+import { CONNECT_INSTALLS, WorkspaceChannels } from "@/views/Surfaces";
 
 type Stream = {
   id: string;
@@ -192,112 +201,183 @@ function matches(entry: Connection | PoolConnection, query: string): boolean {
   return said.toLowerCase().includes(query.toLowerCase());
 }
 
-function accountLine(entry: Connection): string {
-  const access = entry.shared ? "Workspace" : "Only you";
-  const named = accountHeld(entry);
-  return named ? named + " \u00b7 " + access : access;
-}
-
-type Standing = {
+type ConnectionRow = {
   key: string;
   name: string;
   label: string;
-  detail: ReactNode;
-  said: string;
+  summary: string;
   group: string;
   entry: PoolConnection | null;
+  installed: boolean;
 };
 
-type Offer = { name: string; label: string; summary: string; group: string };
 
-function standing(catalog: FirstRunPayload, pool: PoolPayload): Standing[] {
+/** Whose a row is, is the owner address against the viewer, never `own` — that flag is whether the
+ *  viewer may manage the account, which a workspace admin may on every member's. */
+function ownAccount(row: ConnectionRow, viewer: string | null): boolean {
+  return row.entry !== null && row.entry.owner_email !== null && row.entry.owner_email === viewer;
+}
+
+const SHELVES = ["available", "personal", "workspace"] as const;
+
+type Shelf = (typeof SHELVES)[number];
+
+const SHELF_LABELS: Record<Shelf, string> = {
+  available: "Available",
+  personal: "Personal",
+  workspace: "Workspace",
+};
+
+/** The available shelf always draws its rows — the credential offer stands even where every connector
+ *  is connected — so only the two held shelves can be empty. */
+const SHELF_BLANKS: Record<Exclude<Shelf, "available">, string> = {
+  personal: "You have connected no account.",
+  workspace: "The workspace holds no account.",
+};
+
+/** Where a member lands: the shelf holding what they already have, and the catalogue only when they
+ *  hold nothing. An address naming a shelf wins over both. */
+function readShelf(chip: string | undefined, held: Record<Shelf, ConnectionRow[]>): Shelf {
+  const named = SHELVES.find((name) => name === chip);
+  if (named) return named;
+  if (held.personal.length) return "personal";
+  if (held.workspace.length) return "workspace";
+  return "available";
+}
+
+function connectionRows(
+  catalog: FirstRunPayload,
+  pool: PoolPayload,
+  viewer: string | null,
+): ConnectionRow[] {
   const tiles = new Map(catalog.providers.map((tile) => [tile.name, tile]));
+  const held = pool.connections.map((entry) => ({
+    key: entry.grant,
+    name: entry.provider,
+    label: tiles.get(entry.provider)?.label ?? entry.provider,
+    summary: tiles.get(entry.provider)?.summary ?? "",
+    group: tiles.get(entry.provider)?.group ?? "",
+    entry,
+    installed: false,
+  }));
   const installs = catalog.connectors
     .filter((row) => row.installed)
     .map((row) => ({
       key: "install:" + row.name,
       name: row.name,
       label: row.label,
-      detail: tiles.get(row.name)?.summary ?? "",
-      said: row.label + " " + row.name,
+      summary: tiles.get(row.name)?.summary ?? "",
       group: tiles.get(row.name)?.group ?? "",
       entry: null,
+      installed: true,
     }));
-  return [
-    ...installs,
-    ...pool.connections.map((entry) => ({
-      key: entry.grant,
-      name: entry.provider,
-      label: tiles.get(entry.provider)?.label ?? entry.provider,
-      detail: (
-        <>
-          {entry.agents.length
-            ? (entry.agents.length === 1 ? "App: " : "Apps: ") +
-              entry.agents.map((agent) => agentName(agent.name)).join(", ")
-            : "No apps"}
-          {" \u00b7 "}
-          {accountLine(entry)}
-          {" \u00b7 "}
-          <Moment at={entry.connected_at} />
-        </>
-      ),
-      said: [
-        entry.provider,
-        entry.account_label ?? "",
-        entry.account_id,
-        entry.owner_email ?? "",
-        ...entry.agents.map((agent) => agent.name),
-      ].join(" "),
-      group: tiles.get(entry.provider)?.group ?? "",
-      entry,
-    })),
-  ];
-}
-
-function offers(catalog: FirstRunPayload, pool: PoolPayload, viewer: string | null): Offer[] {
-  const installs = new Map(catalog.connectors.map((row) => [row.name, row.installed]));
   const connected = new Set(
     pool.connections
       .filter((entry) => entry.owner_email !== null && entry.owner_email === viewer)
       .map((entry) => entry.provider),
   );
-  return catalog.providers.filter((tile) => {
-    const installed = installs.get(tile.name);
-    return installed === undefined ? !connected.has(tile.name) : !installed;
-  });
+  const offered = catalog.providers
+    .filter((tile) => {
+      const installed = catalog.connectors.find((row) => row.name === tile.name)?.installed;
+      return installed === undefined ? !connected.has(tile.name) : !installed;
+    })
+    .map((tile) => ({
+      key: "offer:" + tile.name,
+      name: tile.name,
+      label: tile.label,
+      summary: tile.summary,
+      group: tile.group,
+      entry: null,
+      installed: false,
+    }));
+  return [
+    ...held.filter((row) => ownAccount(row, viewer)),
+    ...held.filter((row) => !ownAccount(row, viewer)),
+    ...installs,
+    ...offered,
+  ];
 }
 
-/** Whose a row is, is the owner address against the viewer, never `own` — that flag is whether the
- *  viewer may manage the account, which a workspace admin may on every member's. */
-function ownHeld(row: Standing, viewer: string | null): boolean {
-  return row.entry !== null && row.entry.owner_email !== null && row.entry.owner_email === viewer;
+/** A member hunting the shelf for a service ufo brokers no connector for finds the key path here,
+ *  rather than learning that credentials live under settings by not finding them. */
+function CredentialOffer() {
+  return (
+    <Item>
+      <MarkTile>
+        <IconKey className="size-(--size-brand-mark)" aria-hidden />
+      </MarkTile>
+      <ItemContent>
+        <ItemTitle>Credential</ItemTitle>
+        <ItemDescription>A key or token for a service with no connector.</ItemDescription>
+      </ItemContent>
+      <ItemActions>
+        <a
+          href={workspaceHash("credentials")}
+          className={cn(buttonVariants({ variant: "outline", size: "bar" }))}
+        >
+          Add credential
+        </a>
+      </ItemActions>
+    </Item>
+  );
 }
 
-const HELD_ZONES: [string, string, (row: Standing, viewer: string | null) => boolean][] = [
-  ["Your connections", "Accounts you connected, and the apps that can use them.", ownHeld],
-  [
-    "Shared with the workspace",
-    "Accounts the workspace holds, and the tools it installed.",
-    (row, viewer) => !ownHeld(row, viewer),
-  ],
-];
-
-function grouped(rows: Offer[]): [string, Offer[]][] {
-  const groups: [string, Offer[]][] = [];
-  for (const row of rows) {
-    const last = groups.at(-1);
-    if (last && last[0] === row.group) last[1].push(row);
-    else groups.push([row.group, [row]]);
-  }
-  return groups;
+function ConnectionRowItem({
+  row,
+  open,
+  current,
+  act,
+}: {
+  row: ConnectionRow;
+  open: (() => void) | null;
+  current: boolean;
+  act: ReactNode;
+}) {
+  const control = open ? rowControl(open) : null;
+  return (
+    <Item
+      {...control}
+      aria-current={current || undefined}
+      variant={current ? "muted" : undefined}
+      className={cn(control?.className, open && "hover:bg-fill")}
+    >
+      <MarkTile>
+        <BrandMark provider={row.name} className="text-ink" />
+      </MarkTile>
+      <ItemContent>
+        <ItemTitle>
+          <span className="flex items-center gap-sm">
+            {row.label}
+            {row.entry && !row.entry.shared ? (
+              <Badge className="gap-2xs">
+                <IconLock className="size-(--size-glyph)" aria-hidden />
+                Private
+              </Badge>
+            ) : null}
+            {row.installed || row.entry?.shared ? (
+              <Badge className="gap-2xs">
+                <IconBuilding className="size-(--size-glyph)" aria-hidden />
+                Workspace
+              </Badge>
+            ) : null}
+          </span>
+        </ItemTitle>
+        <ItemDescription>{said(row)}</ItemDescription>
+      </ItemContent>
+      <ItemActions>{act}</ItemActions>
+    </Item>
+  );
 }
 
-function categories(catalog: FirstRunPayload): string[] {
-  return [...new Set(catalog.providers.map((tile) => tile.group))];
+/** What a row says under its name: which account it stands on and who reaches it, or — where the row
+ *  is still an offer — what connecting it would give the app. */
+function said(row: ConnectionRow): string {
+  return row.entry ? accountName(row.entry) : row.summary;
 }
 
-/** Radix names an option by a value, and an empty one is how it says nothing is selected. */
-const EVERY_CATEGORY = "all";
+
+
+
 
 const COVERAGE = "github-coverage";
 
@@ -437,15 +517,13 @@ export function Connectors({
   place: Placement;
   onPlace: (place: Placement) => void;
 }) {
-  const query = place.q ?? "";
-  const picked = place.chip ?? EVERY_CATEGORY;
   const opens = place.opens ?? [];
   const [reloads, setReloads] = useState(0);
   const [waiting, setWaiting] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [watching, setWatching] = useState<string | null>(null);
   const [handoff, setHandoff] = useState<Handoff | null>(null);
-  const [removing, setRemoving] = useState<Standing | null>(null);
+  const [removing, setRemoving] = useState<ConnectionRow | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [toast, setToast] = useState<ToastState>(arrivedToast);
   const consent = useRef<Window | null>(null);
@@ -458,16 +536,18 @@ export function Connectors({
     waiting ? WATCH_MS : undefined,
   );
   const pool = usePanelRead<PoolPayload>("/connections", reloads, waiting ? WATCH_MS : undefined);
-  const expanded = useConnectorCatalog(query, reloads);
+  const expanded = useConnectorCatalog("", reloads);
   const coverage = usePanelRead<GithubCoverage>("/github/coverage", reloads);
   const state = joined(catalog, pool, expanded.state);
-  const held =
-    state.phase === "ready" ? standing(state.payload.catalog, state.payload.pool) : null;
-  if (waiting && held?.some((row) => row.name === waiting)) setWaiting(null);
+  const landed =
+    state.phase === "ready" &&
+    (state.payload.pool.connections.some((entry) => entry.provider === waiting) ||
+      state.payload.catalog.connectors.some((row) => row.name === waiting && row.installed));
+  if (waiting && landed) setWaiting(null);
   const pooled = pool.phase === "ready" ? pool.payload.connections : [];
 
-  function show(id: string, aside: boolean) {
-    onPlace({ opens: aside ? appended(opens, id) : opened(opens, id) });
+  function show(id: string) {
+    onPlace({ opens: opened(opens, id) });
   }
 
   function shut(id: string) {
@@ -572,34 +652,9 @@ export function Connectors({
     );
   });
 
-  const search = usePageSearch();
 
   return (
     <>
-      {search || (catalog.phase === "ready" && categories(catalog.payload).length > 1) ? (
-        <PageToolbar>
-          {catalog.phase === "ready" && categories(catalog.payload).length > 1 ? (
-          <Select
-            value={picked}
-            onValueChange={(next) =>
-              onPlace({ chip: next === EVERY_CATEGORY ? undefined : next })
-            }
-          >
-            <SelectTrigger aria-label="Category" className={cn(BAR_CONTROL, "w-auto")}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={EVERY_CATEGORY}>All categories</SelectItem>
-              {categories(catalog.payload).map((group) => (
-                <SelectItem key={group} value={group}>
-                  {group}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          ) : null}
-        </PageToolbar>
-      ) : null}
       {handoff ? (
         <Notice>
           <ConsentLink url={handoff.url}>{handoff.text}</ConsentLink>
@@ -609,142 +664,118 @@ export function Connectors({
       <OutcomeNotice state={expanded.error} />
       <Panel state={state}>
         {(reads) => {
-          const term = query.toLowerCase();
-          const inCategory = (group: string) =>
-            picked === EVERY_CATEGORY || group === picked;
-          const mine = standing(reads.catalog, reads.pool).filter(
-            (row) =>
-              inCategory(row.group) &&
-              (row.label + " " + row.said).toLowerCase().includes(term),
-          );
-          const open = offers(reads.catalog, reads.pool, viewer).filter(
-            (row) =>
-              inCategory(row.group) &&
-              (row.label + " " + row.name + " " + row.summary).toLowerCase().includes(term),
-          );
-          const more = expanded.state.phase === "ready" && expanded.state.payload.after;
-          if (!mine.length && !open.length && !more) {
-            return (
-              <PanelBlank
-                body={
-                  query || picked !== EVERY_CATEGORY
-                    ? "No connector matches this search."
-                    : "No connector is offered yet."
-                }
-              />
-            );
-          }
+          const rows = connectionRows(reads.catalog, reads.pool, viewer);
+          const shelves: Record<Shelf, ConnectionRow[]> = {
+            available: rows.filter((row) => !row.entry && !row.installed),
+            personal: rows.filter((row) => row.entry !== null && ownAccount(row, viewer)),
+            workspace: rows.filter(
+              (row) => row.installed || (row.entry !== null && !ownAccount(row, viewer)),
+            ),
+          };
+          const shelf = readShelf(place.chip, shelves);
+          const standing = shelves[shelf];
+          const more = shelf === "available" && expanded.state.phase === "ready" && expanded.state.payload.after;
           return (
-            <div className="flex flex-col gap-8xl">
-              {HELD_ZONES.map(([title, note, holds]) => {
-                const rows = mine.filter((row) => holds(row, viewer));
-                if (!rows.length) return null;
-                return (
-                  <Section key={title} title={title} note={note}>
+            <div className="@container flex flex-col gap-6xl">
+              <Section title="Reach ufo from wherever you already work">
+                <WorkspaceChannels opens={opens} onOpen={show} onClose={shut} />
+              </Section>
+              <Section title="Coding providers">
+                <ConnectAccount />
+              </Section>
+              <Section
+                title="Integrations"
+                action={
+                  <Segmented
+                    label="Integrations"
+                    segments={SHELVES.map((name) => ({
+                      label: SHELF_LABELS[name],
+                      value: name,
+                    }))}
+                    value={shelf}
+                    onPick={(next: string) => onPlace({ chip: next })}
+                  />
+                }
+              >
+                <div className="flex flex-col gap-2xl">
+                  {standing.length || shelf === "available" ? (
                     <ItemGroup>
-                      {rows.map((row, index) => {
-                        const held = row.entry;
-                        return (
-                          <Fragment key={row.key}>
-                            {index ? <ItemSeparator /> : null}
-                            <Row
-                              name={row.name}
-                              label={row.label}
-                              detail={row.detail}
-                              open={
-                                held
-                                  ? (aside) => show(CONNECTION + held.grant, aside)
-                                  : row.name === GITHUB
-                                    ? (aside) => show(COVERAGE, aside)
-                                    : null
-                              }
-                              current={opens.includes(held ? CONNECTION + held.grant : COVERAGE)}
-                              act={
-                                <>
-                                  <span
-                                    className={cn(
-                                      "flex items-center gap-xs text-label text-ink-soft",
-                                      held?.own && "max-narrow:hidden",
-                                    )}
-                                  >
-                                    <IconCheck
-                                      role="img"
-                                      aria-label={row.label + " connected"}
-                                      className="size-icon"
-                                    />
-                                    Connected
-                                  </span>
-                                  {held?.own ? (
-                                    <Button
-                                      variant="row"
-                                      aria-label={"Remove " + row.label}
-                                      onClick={() => setRemoving(row)}
+                      {standing.map((row, index) => (
+                        <Fragment key={row.key}>
+                          {index ? <ItemSeparator /> : null}
+                          <ConnectionRowItem
+                            row={row}
+                            current={
+                              row.entry
+                                ? opens.includes(CONNECTION + row.entry.grant)
+                                : row.name === GITHUB && opens.includes(COVERAGE)
+                            }
+                            open={
+                              row.entry
+                                ? () => show(CONNECTION + row.entry!.grant)
+                                : row.name === GITHUB
+                                  ? () => show(COVERAGE)
+                                  : null
+                            }
+                            act={
+                              row.entry || row.installed ? (
+                                row.entry?.own ? (
+                                  <DropdownMenu modal={false}>
+                                    <DropdownMenuTrigger asChild>
+                                      <Button
+                                        variant="quiet"
+                                        size="icon"
+                                        aria-label={"Menu for " + row.label}
+                                      >
+                                        <IconDots aria-hidden />
+                                      </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent
+                                      align="end"
+                                      className="w-(--container-menu)"
                                     >
-                                      Remove
-                                    </Button>
-                                  ) : null}
-                                </>
-                              }
-                            />
-                          </Fragment>
-                        );
-                      })}
+                                      <DropdownMenuItem
+                                        onSelect={() => setRemoving(row)}
+                                      >
+                                        {"Remove " + row.label}
+                                      </DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                ) : null
+                              ) : (
+                                <Button
+                                  variant="outline"
+                                  size="bar"
+                                  busy={waiting === row.name}
+                                  disabled={busy !== null && waiting !== row.name}
+                                  onClick={() => connect(row.name, row.label)}
+                                >
+                                  {waiting === row.name ? "Connecting" : "Connect"}
+                                </Button>
+                              )
+                            }
+                          />
+                        </Fragment>
+                      ))}
+                      {shelf === "available" ? (
+                        <>
+                          {standing.length ? <ItemSeparator /> : null}
+                          <CredentialOffer />
+                        </>
+                      ) : null}
                     </ItemGroup>
-                  </Section>
-                );
-              })}
-              {!open.length && !more ? null : (
-                <Section title="Available" note="Connect an account to let the app reach it.">
-                  <div className="flex flex-col gap-4xl">
-                    {grouped(open).map(([group, members]) => (
-                      <div key={group} className="flex flex-col gap-sm">
-                        <h3 className="m-0 flex items-baseline gap-xs text-label font-medium text-ink-soft">
-                          {group}
-                          <span className="font-normal text-ink-faint">{members.length}</span>
-                        </h3>
-                        <ItemGroup>
-                          {members.map((row, index) => (
-                            <Fragment key={row.name}>
-                              {index ? <ItemSeparator /> : null}
-                              <Row
-                                name={row.name}
-                                label={row.label}
-                                detail={row.summary}
-                                open={
-                                  row.name === GITHUB ? (aside) => show(COVERAGE, aside) : null
-                                }
-                                current={row.name === GITHUB && opens.includes(COVERAGE)}
-                                act={
-                                  <Button
-                                    variant="outline"
-                                    size="bar"
-                                    busy={waiting === row.name}
-                                    disabled={busy !== null && waiting !== row.name}
-                                    onClick={() => connect(row.name, row.label)}
-                                  >
-                                    {waiting === row.name ? "Connecting" : "Connect"}
-                                  </Button>
-                                }
-                              />
-                            </Fragment>
-                          ))}
-                        </ItemGroup>
-                      </div>
-                    ))}
-                    {more ? (
-                      <div>
-                        <Button
-                          variant="row"
-                          busy={expanded.loadingMore}
-                          onClick={expanded.loadMore}
-                        >
-                          Load more
-                        </Button>
-                      </div>
-                    ) : null}
-                  </div>
-                </Section>
-              )}
+                  ) : (
+                    <PanelBlank body={SHELF_BLANKS[shelf as Exclude<Shelf, "available">]} />
+                  )}
+                  {more ? (
+                    <div>
+                      <Button variant="row" busy={expanded.loadingMore} onClick={expanded.loadMore}>
+                        Load more
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              </Section>
             </div>
           );
         }}
@@ -821,47 +852,6 @@ function RemoveConnection({
         </Button>
       </DialogFooter>
     </DialogContent>
-  );
-}
-
-function Row({
-  name,
-  label,
-  detail,
-  open,
-  current,
-  act,
-}: {
-  name: string;
-  label: string;
-  detail: ReactNode;
-  open: ((aside: boolean) => void) | null;
-  current: boolean;
-  act: ReactNode;
-}) {
-  const control = open ? rowControl(() => open(false)) : null;
-  const alongside = open ? rowControl(() => open(true)) : null;
-  return (
-    <Item
-      {...control}
-      aria-current={current || undefined}
-      onClick={(event) => (beside(event) ? alongside : control)?.onClick?.(event)}
-      onAuxClick={(event) => {
-        if (!beside(event)) return;
-        alongside?.onClick?.(event);
-      }}
-      variant={current ? "muted" : undefined}
-      className={cn(control?.className, open && "hover:bg-fill")}
-    >
-      <MarkTile>
-        <BrandMark provider={name} className="text-ink" />
-      </MarkTile>
-      <ItemContent>
-        <ItemTitle>{label}</ItemTitle>
-        <ItemDescription>{detail}</ItemDescription>
-      </ItemContent>
-      <ItemActions>{act}</ItemActions>
-    </Item>
   );
 }
 

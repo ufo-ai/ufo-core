@@ -75,43 +75,73 @@ function track(): string[] {
   return open ? open.split("~") : [];
 }
 
+/** A provider the workspace holds and still offers stands twice in the one table — the account on
+ *  top, the offer below it — so the act each row carries is what tells them apart. */
+function rowsNamed(label: string): HTMLElement[] {
+  const found = [...document.querySelectorAll("[data-part=primary]")]
+    .filter((primary) => {
+      const named = primary.cloneNode(true) as Element;
+      named.querySelectorAll("[data-slot=badge]").forEach((tag) => tag.remove());
+      return (named.textContent ?? "").trim() === label;
+    })
+    .map((primary) => primary.closest("li"))
+    .filter((node): node is HTMLLIElement => node !== null);
+  return [...new Set(found)];
+}
+
 function row(label: string): HTMLElement {
-  const item = screen.getByText(label).closest("li");
-  if (!item) throw new Error("no row headed " + label);
-  return item as HTMLElement;
-}
-
-function connects(label: string): HTMLElement {
-  return within(row(label)).getByRole("button", { name: "Connect" });
-}
-
-function zone(title: string): HTMLElement {
-  const found = screen.getByRole("heading", { name: title }).closest("section");
-  if (!found) throw new Error("no zone headed " + title);
-  return found as HTMLElement;
-}
-
-function item(label: string): HTMLElement {
-  const found = screen
-    .getAllByText(label)
-    .map((node) => node.closest("li"))
-    .find(Boolean);
+  const found = rowsNamed(label)[0];
   if (!found) throw new Error("no row headed " + label);
   return found;
 }
 
-/** One `userEvent` instance holds the key down across the click; the module's own verbs each set up a
- *  fresh one and would let go of it in between. */
-async function besideItem(label: string): Promise<void> {
-  const user = userEvent.setup();
-  await user.keyboard("{Meta>}");
-  await user.click(item(label));
-  await user.keyboard("{/Meta}");
+function offer(label: string): HTMLElement {
+  const found = rowsNamed(label).find((one) =>
+    within(one).queryByRole("button", { name: "Connect" }),
+  );
+  if (!found) throw new Error("no offered row headed " + label);
+  return found;
 }
+
+function held(label: string): HTMLElement {
+  const found = rowsNamed(label).find(
+    (one) => !within(one).queryByRole("button", { name: "Connect" }),
+  );
+  if (!found) throw new Error("no connected row headed " + label);
+  return found;
+}
+
+async function connected(label: string): Promise<HTMLElement> {
+  await screen.findAllByText(label);
+  return held(label);
+}
+
+/** One shelf stands at a time, so a check spanning two of them presses through to the second. */
+async function atShelf(name: string): Promise<void> {
+  const label = name[0].toUpperCase() + name.slice(1);
+  await userEvent.click(await screen.findByRole("tab", { name: label }));
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: label }).getAttribute("aria-selected")).toBe("true"),
+  );
+}
+
+/** The catalogue heads nothing of its own, so its first offer is what says it has arrived. */
+async function offered(): Promise<HTMLElement> {
+  return (await screen.findAllByRole("button", { name: "Connect" }))[0];
+}
+
+function connects(label: string): HTMLElement {
+  return within(offer(label)).getByRole("button", { name: "Connect" });
+}
+
 
 function library(routes: Record<string, (url: string, init?: RequestInit) => Response> = {}) {
   return wire({
     "/workspace/first-run": () => json(CATALOG),
+    "/workspace/surfaces$": () => json({ surfaces: [] }),
+    "/workspace/team$": () => json({ members: [MEMBER], can_add: false, actions: [] }),
+    "/workspace/accounts$": () => json({ accounts: [] }),
+    "/workspace/credentials$": () => json({ actions: [], slots: [] }),
     "/connections": () => json({ connections: [] }),
     "/github/coverage": () => json(COVERAGE),
     "/workspace/sources": () => json({ sources: [] }),
@@ -174,6 +204,10 @@ function connectors() {
       }),
     "/github/coverage": () => json({ api: true, sources: true }),
     "/workspace/first-run": () => json(BARE),
+    "/workspace/surfaces$": () => json({ surfaces: [] }),
+    "/workspace/team$": () => json({ members: [MEMBER], can_add: false, actions: [] }),
+    "/workspace/accounts$": () => json({ accounts: [] }),
+    "/workspace/credentials$": () => json({ actions: [], slots: [] }),
     "/settings": () => json(SETTINGS),
     "/transcript": () => json({ messages: [] }),
   });
@@ -185,7 +219,22 @@ test("the connectors section lists the connection pool", async () => {
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("github")).toBeTruthy();
-  expect(screen.getByText(/Only you/)).toBeTruthy();
+  expect(within(held("github")).getByText("Private")).toBeTruthy();
+});
+
+test("the page stands the channels, the coding accounts and the pool in order", async () => {
+  location.hash = sectionHash("connectors");
+  connectors();
+  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("github")).toBeTruthy();
+  expect(
+    screen.getAllByRole("heading", { level: 2 }).map((head) => head.textContent),
+  ).toEqual([
+    "Reach ufo from wherever you already work",
+    "Coding providers",
+    "Integrations",
+  ]);
 });
 
 test("a forwarded connect arrival is stated, and leaves the address", async () => {
@@ -273,7 +322,7 @@ test("the GitHub row opens the coverage its install stands on", async () => {
   library({ "/github/coverage": () => json({ api: true, sources: false }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("GitHub connected");
+  await connected("GitHub");
   expect(screen.queryByText("API")).toBeNull();
 
   await pressItem("GitHub");
@@ -294,44 +343,17 @@ test("a second connector row replaces the first, and the address carries one", a
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
+  await connected("Notion");
+  await atShelf("workspace");
   await pressItem("GitHub");
   expect(await screen.findByRole("dialog", { name: "GitHub" })).toBeTruthy();
 
+  await atShelf("personal");
   await pressItem("Notion");
 
   expect(await screen.findByRole("dialog", { name: "Notion team" })).toBeTruthy();
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "GitHub" })).toBeNull());
   expect(track()).toEqual(["connection/g1"]);
-});
-
-test("a modifier press keeps one connector sheet visible over the path", async () => {
-  location.hash = sectionHash("connectors");
-  library({ "/connections": () => json(POOLED_NOTION) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await pressItem("GitHub");
-  expect(await screen.findByRole("dialog", { name: "GitHub" })).toBeTruthy();
-
-  await besideItem("Notion");
-
-  expect(await screen.findByRole("dialog", { name: "Notion team" })).toBeTruthy();
-  expect(screen.queryByRole("dialog", { name: "GitHub" })).toBeNull();
-  expect(track()).toEqual(["github-coverage", "connection/g1"]);
-});
-
-test("the middle button keeps one connector sheet visible over the path", async () => {
-  location.hash = sectionHash("connectors");
-  library({ "/connections": () => json(POOLED_NOTION) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await pressItem("GitHub");
-  expect(await screen.findByRole("dialog", { name: "GitHub" })).toBeTruthy();
-
-  await userEvent.pointer({ target: item("Notion"), keys: "[MouseMiddle]" });
-
-  expect(await screen.findByRole("dialog", { name: "Notion team" })).toBeTruthy();
-  expect(screen.queryByRole("dialog", { name: "GitHub" })).toBeNull();
-  expect(track()).toEqual(["github-coverage", "connection/g1"]);
 });
 
 test("pressing the row whose record already stands changes nothing", async () => {
@@ -358,9 +380,12 @@ test("the row the standing record was opened from is marked", async () => {
   await pressItem("Notion");
   await screen.findByRole("dialog", { name: "Notion team" });
 
-  expect(item("Notion").getAttribute("aria-current")).toBe("true");
-  expect(item("Notion").className).toContain("bg-fill");
-  expect(item("GitHub").getAttribute("aria-current")).toBeNull();
+  expect(row("Notion").getAttribute("aria-current")).toBe("true");
+  expect(row("Notion").className).toContain("bg-fill");
+
+  await atShelf("workspace");
+
+  expect(row("GitHub").getAttribute("aria-current")).toBeNull();
 });
 
 test("a link carrying a path shows only its last record", async () => {
@@ -398,28 +423,6 @@ test("closing the last record leaves the one it was opened from standing", async
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "Notion team" })).toBeNull());
   expect(screen.getByRole("dialog", { name: "GitHub" })).toBeTruthy();
   expect(track()).toEqual(["github-coverage"]);
-});
-
-test("the pool narrows on the toolbar's search, which names what it searches", async () => {
-  location.hash = sectionHash("connectors");
-  wire({
-    "/connections": () =>
-      json({ connections: [grant("github", false, "g1"), grant("notion", true, "g2")] }),
-    "/github/coverage": () => json({ api: true, sources: true }),
-    "/workspace/first-run": () => json(BARE),
-    "/transcript": () => json({ messages: [] }),
-  });
-  render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
-
-  expect(await screen.findByText("notion")).toBeTruthy();
-  const box = screen.getByLabelText("Search connections");
-  expect(document.querySelector('[data-slot="header"]')!.contains(box)).toBe(false);
-
-  await userEvent.type(box, "github{enter}");
-
-  await waitFor(() => expect(screen.queryByText("notion")).toBeNull());
-  expect(screen.getByText("github")).toBeTruthy();
-  expect(location.hash).toContain("q=github");
 });
 
 test("the agent's own edges fit that same desktop", async () => {
@@ -768,7 +771,7 @@ test("the account column names the account the member holds, not the broker id",
   expect(within(row).queryByText(/acct/)).toBeNull();
 });
 
-test("an empty pool stands the catalog alone, with no connected zone", async () => {
+test("an empty pool stands the catalogue alone, with no held shelf to land on", async () => {
   location.hash = sectionHash("connectors");
   wire({
     "/connections": () => json({ connections: [] }),
@@ -778,8 +781,8 @@ test("an empty pool stands the catalog alone, with no connected zone", async () 
   });
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByRole("heading", { name: "Available" });
-  expect(screen.queryByRole("heading", { name: "Your connections" })).toBeNull();
+  await offered();
+  expect(rowsNamed("github")).toHaveLength(0);
 });
 
 test("the bar is drawn while the first read is still in flight", async () => {
@@ -941,8 +944,14 @@ const POOLED_PAIR = {
   connections: [POOLED_NOTION.connections[0], grant("gmail", true, "g2")],
 };
 
-function removes(label: string): HTMLElement {
-  return within(row(label)).getByRole("button", { name: "Remove " + label });
+/** Removing an account stands behind the row's menu, so reaching it is a press and then a pick. */
+async function removes(label: string): Promise<HTMLElement> {
+  await userEvent.click(within(held(label)).getByRole("button", { name: "Menu for " + label }));
+  return await screen.findByRole("menuitem", { name: "Remove " + label });
+}
+
+function removable(label: string): boolean {
+  return within(held(label)).queryByRole("button", { name: "Menu for " + label }) !== null;
 }
 
 test("a connected row removes that one account behind a confirmation naming it", async () => {
@@ -959,8 +968,8 @@ test("a connected row removes that one account behind a confirmation naming it",
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  await userEvent.click(removes("Notion"));
+  await connected("Notion");
+  await userEvent.click(await removes("Notion"));
 
   const dialog = await screen.findByRole("dialog");
   expect(within(dialog).getByRole("heading", { name: "Remove Notion" })).toBeTruthy();
@@ -973,7 +982,7 @@ test("a connected row removes that one account behind a confirmation naming it",
   expect(posted[0].body).toEqual({ verb: "delete", kind: "connection", name: "g1" });
 
   await waitFor(() => expect(screen.queryByLabelText("Notion connected")).toBeNull());
-  expect(screen.getByLabelText("Gmail connected")).toBeTruthy();
+  expect(held("Gmail")).toBeTruthy();
 });
 
 test("the confirmation warns what a synced account's removal deletes", async () => {
@@ -991,8 +1000,8 @@ test("the confirmation warns what a synced account's removal deletes", async () 
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  await userEvent.click(removes("Notion"));
+  await connected("Notion");
+  await userEvent.click(await removes("Notion"));
 
   const dialog = await screen.findByRole("dialog");
   expect(within(dialog).getByText(/Notion account Notion team/)).toBeTruthy();
@@ -1011,8 +1020,8 @@ test("an account no stream syncs is removed without a deletion warning", async (
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  await userEvent.click(removes("Notion"));
+  await connected("Notion");
+  await userEvent.click(await removes("Notion"));
 
   const dialog = await screen.findByRole("dialog");
   await within(dialog).findByText(/Notion account Notion team/);
@@ -1031,14 +1040,16 @@ test("the confirmation cancels and nothing is disconnected", async () => {
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  await userEvent.click(removes("Notion"));
+  await connected("Notion");
+  await userEvent.click(await removes("Notion"));
   const dialog = await screen.findByRole("dialog");
   await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await waitFor(() =>
+    expect(screen.queryByRole("heading", { name: "Remove Notion" })).toBeNull(),
+  );
   expect(posted.length).toBe(0);
-  expect(screen.getByLabelText("Notion connected")).toBeTruthy();
+  expect(held("Notion")).toBeTruthy();
 });
 
 test("a refused removal states itself in the confirmation and the account stays", async () => {
@@ -1050,14 +1061,14 @@ test("a refused removal states itself in the confirmation and the account stays"
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  await userEvent.click(removes("Notion"));
+  await connected("Notion");
+  await userEvent.click(await removes("Notion"));
   await userEvent.click(
     within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove account" }),
   );
 
   expect(await screen.findByText(refusal)).toBeTruthy();
-  expect(screen.getByLabelText("Notion connected")).toBeTruthy();
+  expect(held("Notion")).toBeTruthy();
 });
 
 test("a row the member holds no claim on draws no remove", async () => {
@@ -1077,13 +1088,12 @@ test("a row the member holds no claim on draws no remove", async () => {
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  const shared = within(zone("Shared with the workspace"));
-  expect(shared.queryByRole("button", { name: "Remove Notion" })).toBeNull();
-  expect(shared.queryByRole("button", { name: "Remove GitHub" })).toBeNull();
+  await connected("Notion");
+  expect(removable("Notion")).toBe(false);
+  expect(removable("GitHub")).toBe(false);
 });
 
-test("a shared account stands under a heading of its own", async () => {
+test("the access column says whose an account is, own before shared", async () => {
   location.hash = sectionHash("connectors");
   library({
     "/connections": () =>
@@ -1096,13 +1106,14 @@ test("a shared account stands under a heading of its own", async () => {
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  const own = within(zone("Your connections"));
-  expect(own.getByLabelText("Notion connected")).toBeTruthy();
-  expect(own.queryByLabelText("Gmail connected")).toBeNull();
-  const shared = within(zone("Shared with the workspace"));
-  expect(shared.getByLabelText("Gmail connected")).toBeTruthy();
-  expect(shared.queryByRole("button", { name: "Remove Gmail" })).toBeNull();
+  const notion = await connected("Notion");
+  expect(within(notion).getByText("Private")).toBeTruthy();
+
+  await atShelf("workspace");
+
+  const gmail = held("Gmail");
+  expect(within(gmail).getByText("Workspace")).toBeTruthy();
+  expect(removable("Gmail")).toBe(false);
 });
 
 test("an admin reads a colleague's account as the workspace's, not their own", async () => {
@@ -1118,15 +1129,15 @@ test("an admin reads a colleague's account as the workspace's, not their own", a
   });
   render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  const own = within(zone("Your connections"));
-  expect(own.getByLabelText("Gmail connected")).toBeTruthy();
-  expect(own.queryByLabelText("Notion connected")).toBeNull();
-  expect(within(zone("Shared with the workspace")).getByLabelText("Notion connected")).toBeTruthy();
+  expect(within(await connected("Gmail")).getByText("Private")).toBeTruthy();
+
+  await atShelf("workspace");
+
+  expect(within(held("Notion")).getByText("Workspace")).toBeTruthy();
 });
 
 test("a provider another member shares still offers the member their own connect", async () => {
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/connections": () =>
       json({
@@ -1142,12 +1153,15 @@ test("a provider another member shares still offers the member their own connect
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  expect(within(zone("Available")).getByText("Notion")).toBeTruthy();
+  await atShelf("workspace");
+  expect(held("Notion")).toBeTruthy();
+
+  await atShelf("available");
+  expect(connects("Notion")).toBeTruthy();
 });
 
 test("the library offers a provider another member holds and not the member's own", async () => {
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/connections": () =>
       json({
@@ -1163,35 +1177,35 @@ test("the library offers a provider another member holds and not the member's ow
   });
   render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  const available = within(zone("Available"));
-  expect(available.getByText("Notion")).toBeTruthy();
-  expect(available.queryByText("Gmail")).toBeNull();
+  await atShelf("available");
+  expect(connects("Notion")).toBeTruthy();
+  expect(rowsNamed("Gmail")).toHaveLength(0);
 });
 
-test("the library offers every catalog tool and hoists the connected ones", async () => {
-  location.hash = sectionHash("connectors");
+test("the catalogue offers what no one holds, and a held provider stands on its own shelf", async () => {
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { name: "Your connections" })).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "Available" })).toBeTruthy();
+  await offered();
   expect(connects("Slack")).toBeTruthy();
   expect(connects("Gmail")).toBeTruthy();
-  expect(screen.getByLabelText("GitHub connected")).toBeTruthy();
-  expect(screen.getByLabelText("Notion connected")).toBeTruthy();
-  expect(within(zone("Available")).queryByText("Notion")).toBeNull();
+  expect(rowsNamed("Notion")).toHaveLength(0);
+
+  await atShelf("personal");
+
+  expect(held("Notion")).toBeTruthy();
 });
 
 test("the library adds providers from the broker catalog", async () => {
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/connector-catalog": () =>
       json({ providers: [{ name: "salesforce", label: "Salesforce" }], after: null }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { name: /More connectors/ })).toBeTruthy();
+  await offered();
   expect(connects("Salesforce")).toBeTruthy();
   expect(within(row("Salesforce")).getByText("Connect this account to use its tools.")).toBeTruthy();
 });
@@ -1204,15 +1218,19 @@ test("a broker catalog failure leaves held and fixed connectors available", asyn
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByLabelText("Notion connected")).toBeTruthy();
-  expect(screen.getByLabelText("GitHub connected")).toBeTruthy();
-  expect(connects("Slack")).toBeTruthy();
+  expect(await connected("Notion")).toBeTruthy();
   expect(screen.getByText("Error 503 — reload to retry.")).toBeTruthy();
+
+  await atShelf("workspace");
+  expect(held("GitHub")).toBeTruthy();
+
+  await atShelf("available");
+  expect(connects("Slack")).toBeTruthy();
 });
 
 test("the library follows broker cursors until one press adds 25 to 50 connectors", async () => {
   const calls: string[] = [];
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/connector-catalog": (url) => {
       calls.push(url);
@@ -1267,11 +1285,10 @@ test("a connected row names the account it stands on and who reaches it", async 
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  expect(
-    within(row("Notion")).getByText(/Apps: Assistant, Second · Notion team · Only you/),
-  ).toBeTruthy();
-  expect(within(row("GitHub")).getByText(CATALOG.providers[1].summary)).toBeTruthy();
+  await connected("Notion");
+  const notion = held("Notion");
+  expect(within(notion).getByText("Notion team")).toBeTruthy();
+  expect(within(notion).getByText("Private")).toBeTruthy();
 });
 
 test("a connected row with no app states that no app holds its grant", async () => {
@@ -1279,16 +1296,16 @@ test("a connected row with no app states that no app holds its grant", async () 
   library({ "/connections": () => json(POOLED_NOTION) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByLabelText("Notion connected");
-  expect(within(row("Notion")).getByText(/No apps · Notion team · Only you/)).toBeTruthy();
+  await connected("Notion");
+  expect(within(held("Notion")).getByText("Notion team")).toBeTruthy();
 });
 
 test("provider marks keep their own shape", async () => {
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByRole("heading", { name: "Available" });
+  await offered();
   const mark = row("Slack").querySelector<HTMLElement>('[style*="--brand-slack"]');
   expect(mark).not.toBeNull();
   expect(mark!.className).not.toContain("rounded-full");
@@ -1301,21 +1318,11 @@ test("a connection outside the catalog still stands in the library", async () =>
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByLabelText("sentry connected")).toBeTruthy();
+  expect(await connected("sentry")).toBeTruthy();
 });
 
-test("an available row stands under the group the catalog gives it", async () => {
-  location.hash = sectionHash("connectors");
-  library();
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  expect(await screen.findByRole("heading", { name: /Communication/ })).toBeTruthy();
-  expect(screen.getByRole("heading", { name: /Email and calendar/ })).toBeTruthy();
-  expect(within(row("Slack")).getByText(CATALOG.providers[0].summary)).toBeTruthy();
-});
-
-test("a fully connected catalog stands as one zone", async () => {
-  location.hash = sectionHash("connectors");
+test("a catalogue with nothing left to offer still stands the credential row", async () => {
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/workspace/first-run": () =>
       json({ providers: [CATALOG.providers[2]], connectors: [] }),
@@ -1323,51 +1330,13 @@ test("a fully connected catalog stands as one zone", async () => {
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("heading", { name: "Your connections" })).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "Available" })).toBeNull();
-});
-
-test("the search narrows the catalog and states when nothing matches", async () => {
-  location.hash = sectionHash("connectors");
-  library();
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await screen.findByRole("heading", { name: "Available" });
-
-  await userEvent.type(screen.getByLabelText("Search connections"), "notion{Enter}");
-  expect(connects("Notion")).toBeTruthy();
-  expect(screen.queryByText("Slack")).toBeNull();
-
-  await userEvent.clear(screen.getByLabelText("Search connections"));
-  await userEvent.type(screen.getByLabelText("Search connections"), "salesforce{Enter}");
-  expect(await screen.findByText("No connector matches this search.")).toBeTruthy();
-});
-
-test("the search reads providers outside the fixed catalog", async () => {
-  const calls: string[] = [];
-  location.hash = sectionHash("connectors");
-  library({
-    "/connector-catalog": (url) => {
-      calls.push(url);
-      return json({
-        providers: url.includes("q=salesforce")
-          ? [{ name: "salesforce", label: "Salesforce" }]
-          : [],
-        after: null,
-      });
-    },
-  });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await screen.findByRole("heading", { name: "Available" });
-
-  await userEvent.type(screen.getByLabelText("Search connections"), "salesforce{Enter}");
-
-  expect(await screen.findByText("Salesforce")).toBeTruthy();
-  expect(calls.some((url) => url.includes("q=salesforce"))).toBe(true);
+  expect(await screen.findByRole("link", { name: "Add credential" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Connect" })).toBeNull();
 });
 
 test("a library row connects the member's account through the main agent", async () => {
   const posted: { url: string; body: unknown }[] = [];
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/intents": (url, init) => {
       posted.push({ url, body: JSON.parse(String(init?.body)) });
@@ -1378,7 +1347,7 @@ test("a library row connects the member's account through the main agent", async
   const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
   const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
 
-  await screen.findByRole("heading", { name: "Available" });
+  await offered();
   await userEvent.click(connects("Notion"));
 
   expect(posted[0].url).toContain("/agents/" + AGENT_ID + "/intents");
@@ -1422,7 +1391,7 @@ test("the GitHub row connects the member's account through the broker", async ()
   const consent = { focus: vi.fn(), close: vi.fn(), location: { href: "" } };
   const opened = vi.spyOn(window, "open").mockReturnValue(consent as unknown as Window);
 
-  await screen.findByRole("heading", { name: "Available" });
+  await offered();
   await userEvent.click(connects("GitHub"));
 
   expect(posted[0].url).toContain("/agents/" + AGENT_ID + "/intents");
@@ -1437,11 +1406,11 @@ test("the GitHub row connects the member's account through the broker", async ()
 });
 
 test("a library consent the browser refuses still renders the link", async () => {
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({ "/intents": () => json({ applied: true, message: "", turn_id: TURN_ID }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByRole("heading", { name: "Available" });
+  await offered();
   await userEvent.click(connects("Notion"));
   StreamFake.last().emit("connect", { provider: "notion", label: "Notion", turn: TURN_ID });
 
@@ -1451,7 +1420,7 @@ test("a library consent the browser refuses still renders the link", async () =>
 
 test("a workspace install posts the surface object's own action and hands back its install page", async () => {
   const posted: unknown[] = [];
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/slack_connect": (url, init) => {
       posted.push({ url, body: JSON.parse(String(init?.body)) });
@@ -1472,7 +1441,7 @@ test("a workspace install posts the surface object's own action and hands back i
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByRole("heading", { name: "Available" });
+  await offered();
   await userEvent.click(connects("Slack"));
 
   await waitFor(() =>
@@ -1486,7 +1455,7 @@ test("a workspace install posts the surface object's own action and hands back i
 });
 
 test("a refused intent states itself and the row stays open", async () => {
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/slack_connect": () =>
       json({ applied: false, message: "Only a workspace admin connects Slack." }),
@@ -1505,7 +1474,7 @@ test("a refused intent states itself and the row stays open", async () => {
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await screen.findByRole("heading", { name: "Available" });
+  await offered();
   await userEvent.click(connects("Slack"));
 
   expect(await screen.findByText("Only a workspace admin connects Slack.")).toBeTruthy();
@@ -1514,42 +1483,20 @@ test("a refused intent states itself and the row stays open", async () => {
 
 test("the row moves up when the account lands", async () => {
   let pool: unknown = { connections: [] };
-  location.hash = sectionHash("connectors");
+  location.hash = sectionHash("connectors", { chip: "available" });
   library({ "/connections": () => json(pool) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await screen.findByRole("heading", { name: "Available" });
+  await offered();
   expect(connects("Notion")).toBeTruthy();
 
   pool = POOLED_NOTION;
   await returning();
 
-  expect(await screen.findByLabelText("Notion connected")).toBeTruthy();
-  expect(within(row("Notion")).queryByRole("button", { name: "Connect" })).toBeNull();
-});
+  await waitFor(() => expect(rowsNamed("Notion")).toHaveLength(0));
 
-test("the category picker narrows both zones and lands in the place", async () => {
-  location.hash = sectionHash("connectors");
-  library({ "/connections": () => json(POOLED_NOTION) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await screen.findByLabelText("Notion connected");
+  await atShelf("personal");
 
-  await pick("Category", "Communication");
-
-  expect(location.hash).toContain("chip=Communication");
-  expect(connects("Slack")).toBeTruthy();
-  expect(screen.queryByText("Notion")).toBeNull();
-  expect(screen.queryByRole("heading", { name: "Your connections" })).toBeNull();
-  expect(screen.queryByText("Gmail")).toBeNull();
-});
-
-test("a connection outside the catalog stands only under every category", async () => {
-  location.hash = sectionHash("connectors");
-  library({ "/connections": () => json({ connections: [grant("sentry", false, "g9")] }) });
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  await screen.findByLabelText("sentry connected");
-
-  await pick("Category", "Communication");
-  expect(screen.queryByLabelText("sentry connected")).toBeNull();
+  expect(held("Notion")).toBeTruthy();
 });
 
 test("each biz-ops connector is drawn by a mark of its own", () => {

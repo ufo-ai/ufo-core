@@ -1,5 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { act, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
@@ -29,7 +28,7 @@ const TERMINAL: SurfaceRow = {
   install_command: "curl ufo.example.com | sh",
 };
 
-const CHANNELS_HASH = "#/workspace/channels";
+const CHANNELS_HASH = "#/connectors";
 
 function portal(surfaces: SurfaceRow[], surfacesRoute?: () => Response) {
   const wired = wire({
@@ -43,6 +42,7 @@ function portal(surfaces: SurfaceRow[], surfacesRoute?: () => Response) {
         model_key_held: false,
       }),
     "/actions/surface/imessage$": () => json({ actions: [] }),
+    "/workspace/credentials$": () => json({ actions: [], slots: [] }),
     "/transcript": () => json({ messages: [] }),
     "/objects/": () => json({ objects: [] }),
   });
@@ -63,12 +63,14 @@ test("the Channels tab draws a row for every channel this deploy offers", async 
   expect(screen.getByRole("listitem", { name: "Terminal" })).toBeTruthy();
 });
 
-test("the workspace tabs name Channels, and the tab opens the rows", async () => {
-  location.hash = "#/workspace/team";
+test("the channels stand on the connections page, above the integrations", async () => {
   portal([SLACK, IMESSAGE, TERMINAL]);
 
-  await userEvent.click(await screen.findByRole("tab", { name: "Channels" }));
   expect(await screen.findByRole("listitem", { name: "Slack" })).toBeTruthy();
+  const heads = within(screen.getByRole("main"))
+    .getAllByRole("heading", { level: 2 })
+    .map((one) => one.textContent);
+  expect(heads[0]).toBe("Reach ufo from wherever you already work");
 });
 
 test("a refused surfaces read states the refusal once and settles", async () => {

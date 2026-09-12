@@ -7,20 +7,20 @@ export function ItemGroup({ className, ...props }: ComponentProps<"ul">) {
   return (
     <ul
       data-slot="item-group"
-      className={cn("m-0 list-none rounded-panel border border-edge bg-card text-card-foreground p-0", className)}
+      className={cn("@container m-0 list-none rounded-card border border-edge bg-raised p-0", className)}
       {...props}
     />
   );
 }
 
-export const itemVariants = cva("flex items-center", {
+export const itemVariants = cva("flex items-center @max-md:flex-wrap @max-md:gap-y-sm", {
   variants: {
     variant: {
       default: "",
       muted: "bg-fill",
     },
     size: {
-      default: "gap-lg px-xl py-lg",
+      default: "gap-2xl px-2xl py-2xl",
       flush: "gap-0 p-0",
     },
   },
@@ -59,7 +59,7 @@ export function MarkTile({ children }: { children: ReactNode }) {
 }
 
 export function ItemContent({ children }: { children: ReactNode }) {
-  return <div className="flex min-w-0 flex-1 flex-col gap-2xs">{children}</div>;
+  return <div className="flex min-w-0 flex-1 flex-col">{children}</div>;
 }
 
 export function ItemTitle({ children }: { children: ReactNode }) {
@@ -80,7 +80,10 @@ export function ItemDescription({
   return (
     <p
       data-part="body"
-      className={cn("m-0 text-small text-ink-soft", whole ? "text-pretty" : "truncate")}
+      className={cn(
+        "m-0 text-small text-ink-soft",
+        whole ? "text-pretty" : "truncate @max-md:overflow-visible @max-md:whitespace-normal",
+      )}
     >
       {children}
     </p>
@@ -88,5 +91,14 @@ export function ItemDescription({
 }
 
 export function ItemActions({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cn("flex shrink-0 items-center gap-sm", className)}>{children}</div>;
+  return (
+    <div
+      className={cn(
+        "flex shrink-0 items-center gap-sm @max-md:w-full @max-md:justify-end",
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
 }

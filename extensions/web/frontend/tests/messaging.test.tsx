@@ -71,6 +71,14 @@ function messaging(
   });
 }
 
+/** A card names the channel and carries one act; the steps that finish it stand in the sheet that act
+ *  opens. */
+async function openChannel(label: string): Promise<HTMLElement> {
+  const card = await screen.findByRole("listitem", { name: label });
+  await userEvent.click(within(card).getByRole("button", { name: "Connect" }));
+  return await screen.findByRole("dialog", { name: label });
+}
+
 beforeEach(() => {
   useStreamFake();
   location.hash = "";
@@ -91,7 +99,7 @@ test("the rail's Channels tile opens the rows in a dialog, dotted while one is u
 });
 
 test("the page lists the three surfaces, each with its state or its act", async () => {
-  location.hash = sectionHash("messaging");
+  location.hash = sectionHash("connectors");
   messaging([SLACK, IMESSAGE, TERMINAL]);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -99,18 +107,22 @@ test("the page lists the three surfaces, each with its state or its act", async 
   const imessage = within(screen.getByRole("listitem", { name: "iMessage" }));
   const terminal = within(screen.getByRole("listitem", { name: "Terminal" }));
 
-  expect(slack.getByRole("button", { name: "Connect" }).hasAttribute("disabled")).toBe(true);
+  expect(slack.getByRole("button", { name: "Connect" })).toBeTruthy();
   expect(slack.getByText("Mention @ufo or DM it.")).toBeTruthy();
-  expect(imessage.getByRole("textbox", { name: "Phone number" })).toBeTruthy();
-  expect(imessage.getByText("Text UFO from your phone.")).toBeTruthy();
-  expect(terminal.getByText("Connected")).toBeTruthy();
+  expect(imessage.getByText("Text ufo from your phone.")).toBeTruthy();
+  expect(imessage.getByRole("button", { name: "Connect" })).toBeTruthy();
+  expect(terminal.getByLabelText("Terminal connected")).toBeTruthy();
+  expect(terminal.getByRole("button", { name: "Configure" })).toBeTruthy();
   expect(terminal.queryByRole("button", { name: "Connect" })).toBeNull();
-  expect(imessage.getByText("Popular")).toBeTruthy();
   expect(terminal.getByText("Chat and run tasks from your terminal.")).toBeTruthy();
+
+  expect(
+    within(await openChannel("iMessage")).getByRole("textbox", { name: "Phone number" }),
+  ).toBeTruthy();
 });
 
 test("an admin sees the Slack install act", async () => {
-  location.hash = sectionHash("messaging");
+  location.hash = sectionHash("connectors");
   wire({
     "/workspace/surfaces$": () => json({ surfaces: [SLACK] }),
     "/workspace/team$": () =>
@@ -130,16 +142,15 @@ test("an admin sees the Slack install act", async () => {
 });
 
 test("the Terminal row states the install command under it and copies it on one press", async () => {
-  location.hash = sectionHash("messaging");
+  location.hash = sectionHash("connectors");
   messaging([{ ...TERMINAL, connected: false }]);
   const writeText = vi.fn(() => Promise.resolve());
   vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const row = await screen.findByRole("listitem", { name: "Terminal" });
-  const terminal = within(row);
-  await waitFor(() => expect(row.querySelector("code")?.textContent).toBe(INSTALL));
-  expect(terminal.queryByRole("button", { name: "Connect" })).toBeNull();
+  const sheet = await openChannel("Terminal");
+  const terminal = within(sheet);
+  await waitFor(() => expect(sheet.querySelector("code")?.textContent).toBe(INSTALL));
 
   await userEvent.click(terminal.getByRole("button", { name: "Copy command" }));
 
@@ -148,22 +159,21 @@ test("the Terminal row states the install command under it and copies it on one 
 });
 
 test("a deploy with no public address says so on the Terminal row", async () => {
-  location.hash = sectionHash("messaging");
+  location.hash = sectionHash("connectors");
   messaging([{ ...TERMINAL, connected: false, install_command: null }]);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const terminal = within(await screen.findByRole("listitem", { name: "Terminal" }));
+  const terminal = within(await openChannel("Terminal"));
   expect(terminal.getByText("This deploy has no public address.")).toBeTruthy();
-  expect(terminal.queryByRole("button", { name: "Connect" })).toBeNull();
 });
 
 test("the iMessage act takes a phone number, posts it, and shows the Messages link", async () => {
-  location.hash = sectionHash("messaging");
+  location.hash = sectionHash("connectors");
   const posted: { url: string; body: unknown }[] = [];
   messaging([IMESSAGE], posted);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const imessage = within(await screen.findByRole("listitem", { name: "iMessage" }));
+  const imessage = within(await openChannel("iMessage"));
   await userEvent.type(imessage.getByRole("textbox", { name: "Phone number" }), "+1 415 555 0100");
   await userEvent.click(imessage.getByRole("button", { name: "Send code" }));
 
@@ -179,11 +189,11 @@ test("the iMessage act takes a phone number, posts it, and shows the Messages li
 });
 
 test("a refused code is said in the toast", async () => {
-  location.hash = sectionHash("messaging");
+  location.hash = sectionHash("connectors");
   messaging([IMESSAGE], [], { applied: false, message: "That number cannot receive texts." });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const imessage = within(await screen.findByRole("listitem", { name: "iMessage" }));
+  const imessage = within(await openChannel("iMessage"));
   await userEvent.type(imessage.getByRole("textbox", { name: "Phone number" }), "+1 415 555 0100");
   await userEvent.click(imessage.getByRole("button", { name: "Send code" }));
 
@@ -192,13 +202,13 @@ test("a refused code is said in the toast", async () => {
 });
 
 test("a deploy with no iMessage provider says so instead of asking for a number", async () => {
-  location.hash = sectionHash("messaging");
+  location.hash = sectionHash("connectors");
   messaging([{ ...IMESSAGE, offered: false }]);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const imessage = within(await screen.findByRole("listitem", { name: "iMessage" }));
   expect(imessage.getByText("This deploy has no iMessage provider.")).toBeTruthy();
-  expect(imessage.queryByRole("textbox", { name: "Phone number" })).toBeNull();
+  expect(imessage.queryByRole("button", { name: "Connect" })).toBeNull();
 });
 
 test("a hidden row is not drawn", async () => {
@@ -215,7 +225,7 @@ test("a hidden row is not drawn", async () => {
 });
 
 test("a surface this deploy does not offer states so instead of a Connect", async () => {
-  location.hash = sectionHash("messaging");
+  location.hash = sectionHash("connectors");
   messaging([{ ...SLACK, offered: false }, IMESSAGE, TERMINAL]);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 

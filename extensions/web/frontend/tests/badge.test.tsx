@@ -10,7 +10,7 @@ test("a badge is a pill on the fill step, so a state reads as a chip and not as 
   const classes = screen.getByText("Draft").className;
   expect(classes).toContain("bg-fill");
   expect(classes).toContain("rounded-row");
-  expect(classes).toContain("text-small");
+  expect(classes).toContain("text-fine");
   expect(classes).toContain("text-ink-quiet");
   expect(classes).not.toContain("border");
 });
@@ -24,7 +24,7 @@ test("the attention tone names the second accent, so no screen spells the colour
 });
 
 test("both tones are the same pill, so a row changing state does not change shape", () => {
-  const shape = ["inline-flex", "items-center", "justify-center", "h-4xl", "rounded-row", "px-sm", "text-small"];
+  const shape = ["inline-flex", "items-center", "justify-center", "h-4xl", "rounded-row", "px-sm", "text-fine"];
   for (const tone of ["default", "attention"] as const) {
     const classes = badgeVariants({ tone });
     for (const utility of shape) expect(classes).toContain(utility);

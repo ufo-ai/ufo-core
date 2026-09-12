@@ -6,7 +6,7 @@ import { cn } from "@/lib/cn";
 export const badgeVariants = cva(
   cn(
     "inline-flex h-4xl shrink-0 items-center justify-center",
-    "rounded-row px-sm text-small whitespace-nowrap",
+    "rounded-row px-sm text-fine whitespace-nowrap",
   ),
   {
     variants: {
@@ -14,6 +14,7 @@ export const badgeVariants = cva(
         default: "bg-fill text-ink-quiet",
         attention: "bg-attention text-ink",
         affirm: "bg-affirm text-link",
+        connected: "bg-connected text-connected-ink gap-xs",
       },
     },
     defaultVariants: { tone: "default" },
@@ -48,5 +49,16 @@ export function Badge({ className, tone, ...props }: BadgeProps) {
       className={cn(badgeVariants({ tone }), className)}
       {...props}
     />
+  );
+}
+
+/** The one pill that says a thing is wired up, drawn beside the name rather than in the row's acts.
+ *  Its label names which thing, so a reader hears "Slack connected" rather than a bare state. */
+export function ConnectedBadge({ label }: { label: string }) {
+  return (
+    <Badge tone="connected" aria-label={label + " connected"}>
+      <span className="size-xs shrink-0 rounded-full bg-live" aria-hidden />
+      Connected
+    </Badge>
   );
 }

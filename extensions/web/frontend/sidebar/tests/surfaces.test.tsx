@@ -41,10 +41,10 @@ test("a withheld app still opens from its own address", async () => {
 });
 
 test("a withheld workspace screen loses its tab", async () => {
-  location.hash = "#/workspace/credentials";
+  location.hash = "#/workspace/usage";
   render(<App agents={[AGENT]} member={MEMBER} surfaces={WITHHELD} onAgents={() => {}} />);
 
-  await waitFor(() => expect(screen.queryByRole("tab", { name: "Credentials" })).toBeTruthy());
+  await waitFor(() => expect(screen.queryByRole("tab", { name: "Usage" })).toBeTruthy());
   expect(screen.queryByRole("tab", { name: "Apps" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Team" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Memory" })).toBeNull();
@@ -52,7 +52,7 @@ test("a withheld workspace screen loses its tab", async () => {
 });
 
 test("the skills tab stands while either of its two panels is offered", async () => {
-  location.hash = "#/workspace/credentials";
+  location.hash = "#/workspace/usage";
   render(
     <App
       agents={[AGENT]}

@@ -1,7 +1,7 @@
 import { lazy, type ComponentType, type ReactNode } from "react";
 
 import type { Placement } from "@/kernel/pager";
-import type { Section, TaskTab, WorkspaceTab } from "@/lib/route";
+import type { ConnectionTab, Section, TaskTab, WorkspaceTab } from "@/lib/route";
 
 export type PaneView = {
   label: string;
@@ -21,16 +21,6 @@ function placed(load: () => Promise<{ default: ComponentType<Placed> }>) {
     <View place={place} onPlace={onPlace} />
   );
 }
-
-const WorkspaceMessaging = lazy(() =>
-  import("@/views/Surfaces").then((module) => ({ default: module.WorkspaceMessaging })),
-);
-
-export const CHANNELS: PaneView = {
-  label: "Channels",
-  remountOnPlace: false,
-  render: () => <WorkspaceMessaging />,
-};
 
 export const TASK_VIEWS: Record<TaskTab, PaneView> = {
   runs: {
@@ -73,10 +63,13 @@ export const ARTIFACTS: PaneView = {
 export const CONNECTORS: PaneView = {
   label: "Connections",
   remountOnPlace: false,
-  search: "Search connections",
   render: placed(() =>
     import("@/views/Connectors").then((module) => ({ default: module.Connectors })),
   ),
+};
+
+export const CONNECTION_VIEWS: Record<ConnectionTab, PaneView> = {
+  connectors: CONNECTORS,
 };
 
 export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
@@ -91,7 +84,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     remountOnPlace: false,
     render: placed(() => import("@/views/Apps").then((module) => ({ default: module.Apps }))),
   },
-  channels: CHANNELS,
   skills: {
     label: "Skills",
     remountOnPlace: false,
@@ -99,12 +91,6 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     render: placed(() =>
       import("@/views/WorkspaceSkills").then((module) => ({ default: module.WorkspaceSkills })),
     ),
-  },
-  memory: {
-    label: "Memory",
-    remountOnPlace: false,
-    search: "Search memory",
-    render: placed(() => import("@/views/Memory").then((module) => ({ default: module.Memory }))),
   },
   credentials: {
     label: "Credentials",
@@ -115,6 +101,12 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
         default: module.WorkspaceCredentials,
       })),
     ),
+  },
+  memory: {
+    label: "Memory",
+    remountOnPlace: false,
+    search: "Search memory",
+    render: placed(() => import("@/views/Memory").then((module) => ({ default: module.Memory }))),
   },
   usage: {
     label: "Usage",
@@ -135,6 +127,5 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
 export const SECTION_VIEWS: Partial<Record<Section, PaneView>> = {
   radar: RADAR,
   artifacts: ARTIFACTS,
-  connectors: CONNECTORS,
-  messaging: CHANNELS,
+  ...CONNECTION_VIEWS,
 };

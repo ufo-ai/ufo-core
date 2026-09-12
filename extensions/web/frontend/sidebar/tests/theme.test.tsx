@@ -76,7 +76,7 @@ const AUTHORED = new RegExp(
 );
 
 const PALETTE_STEP =
-  /--(?:bkgd-\d+|text-(?:primary|secondary|tertiary)|accent-(?:primary|secondary)|color-fill-ink|color-(?:live|blocked)):(?:light-dark\(#[0-9a-f]{6},#[0-9a-f]{6}\)|#[0-9a-f]{6})/g;
+  /--(?:bkgd-\d+|text-(?:primary|secondary|tertiary)|accent-(?:primary|secondary|live)|color-fill-ink|color-(?:live|blocked)):(?:light-dark\(#[0-9a-f]{3,6},#[0-9a-f]{3,6}\)|#[0-9a-f]{3,6})/g;
 
 const authoredColours = (css: string) =>
   css.replace(PROBES, "").replace(HUELESS, "").match(AUTHORED) ?? [];
@@ -101,6 +101,7 @@ test("every colour the portal paints resolves through the palette's eight steps"
     "--text-tertiary": "light-dark(#919090,#7d7f7f)",
     "--accent-primary": "#0095ff",
     "--accent-secondary": "#ff6700",
+    "--accent-live": "#16a34a",
   };
   for (const [step, value] of Object.entries(steps)) {
     expect(css.replace(/\s+/g, "")).toContain(`${step}:${value}`);
@@ -117,14 +118,12 @@ test("every colour the portal paints resolves through the palette's eight steps"
     "--color-fill-ink": "#191a1a",
     "--color-link": String.raw`color-mix\(in srgb, var\(--accent-primary\) 70%, var\(--text-primary\)\)`,
     "--color-attention-ink": String.raw`color-mix\(in srgb, var\(--accent-secondary\) 70%, var\(--text-primary\)\)`,
+    "--color-live": String.raw`var\(--accent-live\)`,
   };
   for (const [token, step] of Object.entries(basis)) {
     expect(new RegExp(`${token}:\\s*${step}`).test(css)).toBe(true);
   }
-  const hues = {
-    "--color-live": "#16a34a",
-    "--color-blocked": "#eab308",
-  };
+  const hues = { "--color-blocked": "#eab308" };
   for (const [token, value] of Object.entries(hues)) {
     expect(packedStyles()).toContain(`${token}:${value}`);
   }
