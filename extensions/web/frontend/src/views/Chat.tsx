@@ -97,6 +97,9 @@ export type ChatProps = {
   /** The one turn a read-only screen may stop. Stop draws only while that turn is the live one, so
    *  a drawer on a settled run never ends the run that came after it in the same conversation. */
   stops?: string;
+  /** The run the member arrived on, whose own words the transcript stands at and marks. A screen
+   *  reached by address takes the run off the address instead. */
+  focusRun?: string;
   unsaid?: ReactNode;
   onCreated?: (conversationId: string, title: string) => void;
   onActivity?: (conversationId: string, turn: ChatTurn) => void;
@@ -111,6 +114,7 @@ export function Chat({
   focusComposer = false,
   readOnly = false,
   stops,
+  focusRun,
   unsaid,
   onCreated,
   onActivity,
@@ -206,6 +210,12 @@ export function Chat({
               route.kind === "chat" && route.conversationId === conversationId
                 ? (route.report ?? null)
                 : null
+            }
+            focus={
+              focusRun ??
+              (route.kind === "chat" && route.conversationId === conversationId
+                ? (route.run ?? null)
+                : null)
             }
             className={cn(COLUMN, "p-2xl")}
             question={

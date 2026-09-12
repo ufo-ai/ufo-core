@@ -190,6 +190,50 @@ function spoken(message: Spoken) {
   return message.markdown ? <Markdown text={message.text} /> : <Linked text={message.text} />;
 }
 
+/** The member moving, in every way a browser reports it. A scroll is not among them: the mark
+ *  scrolls the transcript itself, and a mark that cleared on its own scroll would never be seen. */
+const MEMBER_ACTS = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
+
+const MARKED = "rounded-panel bg-affirm outline-2 outline-affirm transition-colors";
+
+/** The mark is taken off `focus` rather than read from it each render, so a transcript settling
+ *  under it — earlier pages landing, a turn streaming — leaves it standing until the member acts. */
+function useMarkedTurn(focus: string | null): {
+  marked: string | null;
+  land: (node: HTMLDivElement | null) => void;
+} {
+  const [marked, setMarked] = useState<string | null>(focus);
+  const scrolled = useRef<string | null>(null);
+  useEffect(() => setMarked(focus), [focus]);
+  useEffect(() => {
+    if (marked === null) return;
+    const clear = () => setMarked(null);
+    for (const act of MEMBER_ACTS) window.addEventListener(act, clear, { passive: true });
+    return () => {
+      for (const act of MEMBER_ACTS) window.removeEventListener(act, clear);
+    };
+  }, [marked]);
+  return {
+    marked,
+    land: (node) => {
+      if (node === null || marked === null || scrolled.current === marked) return;
+      scrolled.current = marked;
+      node.scrollIntoView({ block: "center" });
+    },
+  };
+}
+
+/** The key of the last reply a turn spoke on an earlier page, or null where no loaded page holds
+ *  one. */
+function earlierKey(earlier: EarlierMessages | undefined, turn: string): string | null {
+  let key: string | null = null;
+  for (const page of earlier?.pages ?? [])
+    page.messages.forEach((said, at) => {
+      if (said.role === "assistant" && said.turn === turn) key = "h" + page.cursor + ":" + at;
+    });
+  return key;
+}
+
 export function MessageLog({
   messages,
   earlier,
@@ -198,6 +242,7 @@ export function MessageLog({
   className,
   children,
   report = null,
+  focus = null,
 }: {
   messages: Spoken[];
   earlier?: EarlierMessages;
@@ -206,6 +251,9 @@ export function MessageLog({
   className?: string;
   children?: ReactNode;
   report?: string | null;
+  /** The turn a member arrived on, whose closing words are scrolled to and marked. A turn this
+   *  transcript does not hold marks nothing. */
+  focus?: string | null;
 }) {
   const [opened, setOpened] = useState<Opened | null>(null);
   const openedReport = useRef<string | null>(null);
@@ -228,6 +276,18 @@ export function MessageLog({
     ...(live ? [{ at: settled.length, live }] : []),
     ...queued.map((said, index) => ({ at: settled.length + (live ? 1 : 0) + index, said })),
   ];
+  const { marked, land } = useMarkedTurn(focus);
+  const spoke = rows.reduce<number | null>(
+    (found, row) =>
+      row.said?.role === "assistant" && row.said.turn === marked ? row.at : found,
+    null,
+  );
+  const markedKey =
+    marked === null
+      ? null
+      : spoke === null
+        ? earlierKey(earlier, marked)
+        : "m" + String(spoke);
   const bubble = (message: Spoken, key: string, last = false) => {
     if (message.role === "error")
       return (
@@ -244,8 +304,16 @@ export function MessageLog({
       : message.summary
         ? turnMeta(message.summary, message.at)
         : [];
+    const standing = key === markedKey;
     return (
-      <MessageScrollerItem key={key} messageId={key} scrollAnchor={mine}>
+      <MessageScrollerItem
+        key={key}
+        messageId={key}
+        scrollAnchor={mine}
+        ref={standing ? land : undefined}
+        data-highlight={standing || undefined}
+        className={cn(standing && MARKED)}
+      >
         <Speech mine={mine} at={message.at}>
           {message.subagents?.some((run) => run.running) ? (
             <Activity events={message.events ?? []} runs={message.subagents} />

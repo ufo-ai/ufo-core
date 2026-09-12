@@ -2383,6 +2383,8 @@ class _TranscriptRenderer:
         ):
             return state
         reply: dict[str, object] = {"role": "assistant", "text": state.answer}
+        if state.current_turn_id is not None:
+            reply["turn"] = state.current_turn_id
         if state.pending:
             reply["events"] = list(state.pending)
         if runs:
@@ -2452,6 +2454,9 @@ def _rendered_messages(
     on the reply that asked holds each answer under the question it answers, so a bubble of its own
     would say the same words a second time. The words themselves are untouched — the card states
     them, and the turn read them as the member sent them.
+
+    A reply names the turn that wrote it, so a screen the member reached from one run's row finds
+    that run's own words among the conversation's.
 
     `summaries` names what each turn spent and how long it took, keyed like `questions`: the reply
     carries it, so the model, the tokens, the cost and the duration stand under the words they paid

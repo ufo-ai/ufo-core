@@ -173,6 +173,8 @@ export type Message = {
   speaker?: string;
   asked?: string;
   arrival_id?: string;
+  /** The turn that wrote this reply, which is the run a member pressed in a listing of runs. */
+  turn?: string;
   events?: ActivityEvent[];
   subagents?: SubagentRun[];
   question?: ChatQuestion;

@@ -31,7 +31,7 @@ import {
   type WorkspacePlace,
 } from "@/lib/route";
 
-import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, goTo, json, MEMBER, useStreamFake, wire } from "./harness";
+import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, goTo, json, MEMBER, TURN_ID, useStreamFake, wire } from "./harness";
 
 const OLDER = {
   id: "a1",
@@ -230,6 +230,28 @@ test("a conversation slot has a builder, and it writes the address its own read 
     slot: "changes",
     rootConversationId: root,
   });
+});
+
+test("a chat address names the run it stands on, and refuses a run that is not a turn", () => {
+  expect(chatHash(CONVO_ID, undefined, undefined, TURN_ID)).toBe(
+    "#/c/" + CONVO_ID + "?run=" + TURN_ID,
+  );
+  expect(parseHash(chatHash(CONVO_ID, undefined, undefined, TURN_ID))).toEqual({
+    kind: "chat",
+    conversationId: CONVO_ID,
+    run: TURN_ID,
+  });
+  expect(parseHash(chatHash(CONVO_ID, "changes", undefined, TURN_ID))).toEqual({
+    kind: "chat",
+    conversationId: CONVO_ID,
+    slot: "changes",
+    run: TURN_ID,
+  });
+  expect(parseHash("#/c/" + CONVO_ID + "?run=nightly-digest")).toEqual({
+    kind: "chat",
+    conversationId: CONVO_ID,
+  });
+  expect(parseHash(chatHash(CONVO_ID))).toEqual({ kind: "chat", conversationId: CONVO_ID });
 });
 
 test("a screen that carries no place is read whatever the address arrived holding", () => {

@@ -606,7 +606,7 @@ function RunHistory({
 }
 
 /** `stops` names this run, so a sheet standing on an older run cannot end the conversation's newest
- *  turn. */
+ *  turn, and `focusRun` names it again: the transcript opens on this run's own words, marked. */
 function RunSheet({
   id,
   opens,
@@ -644,6 +644,7 @@ function RunSheet({
               conversationId={said(held.status.conversation)}
               readOnly
               stops={run}
+              focusRun={run}
               conversationOnly
             />
           )}

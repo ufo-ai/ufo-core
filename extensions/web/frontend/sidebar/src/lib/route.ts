@@ -39,7 +39,7 @@ export type WorkspacePlace = {
 
 export type Route =
   | { kind: "home" }
-  | { kind: "chat"; conversationId: string; slot?: string; report?: string }
+  | { kind: "chat"; conversationId: string; slot?: string; report?: string; run?: string }
   | {
       kind: "conversation-slot";
       agentId: string;
@@ -194,6 +194,7 @@ const CONVERSATIONS_PART = "/conversations/";
 const SLOTS_PART = "/slots/";
 const SLOT_PARAM = "slot";
 const REPORT_PARAM = "report";
+const RUN_PARAM = "run";
 const ROOT_PARAM = "root";
 const CHAT_TARGET_PARAM = "c";
 const FIRST_RUN_PARAM = "first";
@@ -285,17 +286,20 @@ const CHAT = row(
     const place = new URLSearchParams(match[2]);
     const slot = place.get(SLOT_PARAM);
     const report = place.get(REPORT_PARAM);
+    const run = place.get(RUN_PARAM);
     return {
       kind: "chat",
       conversationId: match[1],
       ...(slot && SLOT_ONLY.test(slot) ? { slot } : {}),
       ...(report && UUID_ONLY.test(report) ? { report } : {}),
+      ...(run && UUID_ONLY.test(run) ? { run } : {}),
     };
   },
-  (conversationId: string, slot?: string, report?: string) => {
+  (conversationId: string, slot?: string, report?: string, run?: string) => {
     const place = new URLSearchParams();
     if (slot) place.set(SLOT_PARAM, slot);
     if (report) place.set(REPORT_PARAM, report);
+    if (run) place.set(RUN_PARAM, run);
     const tail = place.toString();
     return CHAT_PREFIX + conversationId + (tail ? "?" + tail : "");
   },

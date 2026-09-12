@@ -5988,7 +5988,7 @@ def test_a_members_bubble_carries_what_they_attached_rather_than_the_note() -> N
         attached={str(turn_id): {"lights.gif": attached}},
     )
     assert rendered[0] == {"role": "user", "text": "what are these", "files": [attached]}
-    assert rendered[1] == {"role": "assistant", "text": "a lamp"}
+    assert rendered[1] == {"role": "assistant", "text": "a lamp", "turn": str(turn_id)}
 
 
 def test_a_slack_members_bubble_states_their_words_as_markdown() -> None:
@@ -6197,7 +6197,12 @@ def test_a_bubble_and_its_reply_each_carry_the_moment_they_landed() -> None:
     )
     assert rendered == [
         {"role": "user", "text": "what time", "at": "2026-09-09T09:00:00+00:00"},
-        {"role": "assistant", "text": "just gone nine", "at": "2026-09-09T09:00:12+00:00"},
+        {
+            "role": "assistant",
+            "text": "just gone nine",
+            "turn": str(turn_id),
+            "at": "2026-09-09T09:00:12+00:00",
+        },
     ]
 
 
@@ -6217,7 +6222,35 @@ def test_a_transcript_without_turn_moments_carries_no_stamp() -> None:
     )
     assert rendered == [
         {"role": "user", "text": "what time"},
-        {"role": "assistant", "text": "just gone nine"},
+        {"role": "assistant", "text": "just gone nine", "turn": str(turn_id)},
+    ]
+
+
+def test_every_reply_names_the_turn_that_wrote_it() -> None:
+    """A member reaching a conversation from one run's row has only the turn id to find that run's
+    words by, so each reply carries the turn that wrote it. A turn a folded message split speaks
+    twice and both replies name it, the later one holding the words the turn closed on."""
+    first = uuid4()
+    second = uuid4()
+    rendered = _rendered_messages(
+        (
+            Message(role="user", content=f"<context>\nmessage_ref: {first}\n</context>\ndigest"),
+            Message(role="assistant", content="Working on it."),
+            Message(role="user", content=f"<context>\nmessage_ref: {first}\n</context>\nand tags"),
+            Message(role="assistant", content="Nothing changed overnight."),
+            Message(role="user", content=f"<context>\nmessage_ref: {second}\n</context>\nthanks"),
+            Message(role="assistant", content="Any time."),
+        ),
+        turn_ids=frozenset({str(first), str(second)}),
+    )
+
+    assert [(message["role"], message["text"], message.get("turn")) for message in rendered] == [
+        ("user", "digest", None),
+        ("assistant", "Working on it.", str(first)),
+        ("user", "and tags", None),
+        ("assistant", "Nothing changed overnight.", str(first)),
+        ("user", "thanks", None),
+        ("assistant", "Any time.", str(second)),
     ]
 
 
@@ -10127,16 +10160,15 @@ async def _seed_listed_turn(
     return turn_id
 
 
-_OFF_THE_CLOCK = frozenset({"at", "summary"})
+_MINTED = frozenset({"at", "summary", "turn"})
 
 
 def _worded(messages: list[dict[str, object]]) -> list[dict[str, object]]:
-    """The transcript's messages without the moment each landed at or what its turn spent, both of
-    which a seeded turn takes off the clock: an assertion about what the transcript says reads the
-    words, not the time."""
+    """The transcript's messages without the moment each landed at, what its turn spent, or the id
+    of the turn that wrote it, every one of which a seeded turn mints fresh: an assertion about what
+    the transcript says reads the words."""
     return [
-        {key: value for key, value in message.items() if key not in _OFF_THE_CLOCK}
-        for message in messages
+        {key: value for key, value in message.items() if key not in _MINTED} for message in messages
     ]
 
 
@@ -10738,7 +10770,8 @@ async def test_the_transcript_states_when_each_message_landed(
     dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
 ) -> None:
     """The words hold no clock, so the projection reads one off the turn they belong to: the
-    member's bubble states when the turn was admitted and the reply states when it settled."""
+    member's bubble states when the turn was admitted and the reply states when it settled, and
+    names the turn that wrote it, which is the run a listing of runs presses."""
     client, workspace_id, agent_id = web
     _config, _hub, blob, _sandboxes = dbos_runtime
     member_id, token = await _seed_member(workspace_id, "m@example.com")
@@ -10783,7 +10816,12 @@ async def test_the_transcript_states_when_each_message_landed(
         for message in read.json()["messages"]
     ] == [
         {"role": "user", "text": "what time", "at": admitted.isoformat()},
-        {"role": "assistant", "text": "just gone nine", "at": settled.isoformat()},
+        {
+            "role": "assistant",
+            "text": "just gone nine",
+            "turn": str(turn_id),
+            "at": settled.isoformat(),
+        },
     ]
 
 
@@ -12027,7 +12065,9 @@ def test_projection_draws_no_member_bubble_for_a_delivered_subagent_result() -> 
         frozenset({delivered}),
         frozenset({delivered}),
     )
-    assert rendered == [{"role": "assistant", "text": "Here is the joke: a joke"}]
+    assert rendered == [
+        {"role": "assistant", "text": "Here is the joke: a joke", "turn": delivered}
+    ]
 
 
 def test_projection_draws_no_member_bubble_for_a_scheduled_firing() -> None:
@@ -12048,7 +12088,9 @@ def test_projection_draws_no_member_bubble_for_a_scheduled_firing() -> None:
         frozenset({fired}),
         frozenset({fired}),
     )
-    assert rendered == [{"role": "assistant", "text": "Nothing new since yesterday."}]
+    assert rendered == [
+        {"role": "assistant", "text": "Nothing new since yesterday.", "turn": fired}
+    ]
 
 
 def test_projection_keeps_the_bubble_for_what_a_member_spoke() -> None:
@@ -12069,7 +12111,7 @@ def test_projection_keeps_the_bubble_for_what_a_member_spoke() -> None:
     )
     assert rendered == [
         {"role": "user", "text": "ask a subagent for a joke"},
-        {"role": "assistant", "text": "Handing that off."},
+        {"role": "assistant", "text": "Handing that off.", "turn": spoken},
     ]
 
 
@@ -12122,7 +12164,7 @@ def test_a_bubble_reads_as_the_members_words_out_of_the_surface_fence() -> None:
     )
     assert rendered == [
         {"role": "user", "text": "give me three variants on this tweet storm"},
-        {"role": "assistant", "text": "Here are three."},
+        {"role": "assistant", "text": "Here are three.", "turn": spoken},
     ]
 
 
@@ -12145,9 +12187,9 @@ def test_a_bubble_names_its_speaker_exactly_where_the_read_names_one() -> None:
     )
     assert rendered == [
         {"role": "user", "text": "ship it", "speaker": "Mel Okafor (m@example.com)"},
-        {"role": "assistant", "text": "Shipping."},
+        {"role": "assistant", "text": "Shipping.", "turn": theirs},
         {"role": "user", "text": "hold on"},
-        {"role": "assistant", "text": "Holding."},
+        {"role": "assistant", "text": "Holding.", "turn": mine},
     ]
 
 

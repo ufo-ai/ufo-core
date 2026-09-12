@@ -84,6 +84,7 @@ export function ChatPane({
   focusComposer,
   readOnly,
   stops,
+  focusRun,
   onCreated,
   onActivity,
   title,
@@ -160,6 +161,7 @@ export function ChatPane({
           focusComposer={focusComposer}
           readOnly={readOnly}
           stops={stops}
+          focusRun={focusRun}
           onCreated={onCreated}
           onActivity={onActivity}
           onSettled={settled}

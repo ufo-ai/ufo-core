@@ -4263,3 +4263,93 @@ test("a shell that gets no sandbox says so in the terminal it was opened in", as
   );
   expect(screen.getByTestId("shell")).toBeTruthy();
 });
+
+const RAN = "Digested the night's changes.";
+
+function marked(): HTMLElement | null {
+  return document.querySelector("[data-highlight]");
+}
+
+test("a conversation opened at a run stands on that run's words and marks them", async () => {
+  const scrolled = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  location.hash = chatHash(CONVO_ID, undefined, undefined, TURN_ID);
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "Digest the night." },
+        { role: "assistant", text: RAN, turn: TURN_ID },
+        { role: "assistant", text: "A later turn.", turn: ARRIVAL_ID },
+      ],
+    }),
+  );
+  open();
+
+  await screen.findByText(RAN);
+  await waitFor(() => expect(marked()).not.toBeNull());
+  expect(marked()!.textContent).toContain(RAN);
+  expect(marked()!.textContent).not.toContain("A later turn.");
+  expect(scrolled).toHaveBeenCalled();
+});
+
+test("a run the conversation no longer holds lands on the conversation with no mark and no notice", async () => {
+  location.hash = chatHash(CONVO_ID, undefined, undefined, TURN_ID);
+  wire(transcript({ messages: [{ role: "assistant", text: "What is left.", turn: ARRIVAL_ID }] }));
+  open();
+
+  await screen.findByText("What is left.");
+  expect(marked()).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+test("the mark stands while the transcript settles under it, and clears on the member's next act", async () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  const { rerender } = render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[{ role: "assistant", text: RAN, turn: TURN_ID }]}
+        focus={TURN_ID}
+        live={liveTurn()}
+      />
+    </TranscriptScroll>,
+  );
+
+  expect(marked()!.textContent).toContain(RAN);
+
+  rerender(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "assistant", text: RAN, turn: TURN_ID },
+          { role: "assistant", text: "The next run.", turn: ARRIVAL_ID },
+        ]}
+        focus={TURN_ID}
+      />
+    </TranscriptScroll>,
+  );
+
+  expect(marked()!.textContent).toContain(RAN);
+
+  fireEvent.pointerDown(document.body);
+
+  await waitFor(() => expect(marked()).toBeNull());
+  expect(screen.getByText(RAN)).toBeTruthy();
+});
+
+test("a run whose words a turn spoke twice is marked on the words that closed it", () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "assistant", text: "Working on it.", turn: TURN_ID },
+          { role: "user", text: "And the tags?" },
+          { role: "assistant", text: RAN, turn: TURN_ID },
+        ]}
+        focus={TURN_ID}
+      />
+    </TranscriptScroll>,
+  );
+
+  expect(marked()!.textContent).toContain(RAN);
+  expect(document.querySelectorAll("[data-highlight]")).toHaveLength(1);
+});

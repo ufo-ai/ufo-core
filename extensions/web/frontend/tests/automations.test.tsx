@@ -145,6 +145,7 @@ function automationsOnWire(
   rows: unknown[] = [WATCHED_PULL, NIGHTLY, WATCHED_FEED, PAUSED_TASK],
   posted: Record<string, unknown>[] = [],
   runsCursor: string | null = null,
+  said: unknown = { messages: [] },
 ) {
   let held = rows as Record<string, unknown>[];
   return wire({
@@ -184,7 +185,7 @@ function automationsOnWire(
         created_at: "2026-08-01T09:00:00Z",
         updated_at: "2026-08-01T09:00:00Z",
       }),
-    "/transcript": () => json({ messages: [] }),
+    "/transcript": () => json(said),
     "/chat": () => json({ stopped: true }),
   });
 }
@@ -760,4 +761,31 @@ test("a scheduled task states its next run and a trigger leaves that column blan
   expect((await cells("Digest the night's changes"))[2]).toBeTruthy();
   expect((await cells("Watching " + PULL_REQUEST))[2]).toBe("");
   expect((await cells("Round up the week"))[2]).toBe("");
+});
+
+test("a run opened from its automation stands on the words that run wrote", async () => {
+  const scrolled = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  automationsOnWire(undefined, [], null, {
+    messages: [
+      { role: "assistant", text: "The night before was quiet too.", turn: ARRIVAL_ID },
+      { role: "assistant", text: "Nothing changed overnight.", turn: TURN_ID },
+    ],
+  });
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByText("Digest the night's changes"));
+  const details = await screen.findByRole("dialog", { name: "Details" });
+  await userEvent.click((await within(details).findByRole("img", { name: "Done" })).closest("li")!);
+
+  const run = await screen.findByRole("dialog", { name: "Run" });
+  await within(run).findByText("Nothing changed overnight.");
+  const standing = await vi.waitFor(() => {
+    const found = run.querySelector("[data-highlight]");
+    expect(found).not.toBeNull();
+    return found!;
+  });
+  expect(standing.textContent).toContain("Nothing changed overnight.");
+  expect(standing.textContent).not.toContain("The night before was quiet too.");
+  expect(scrolled).toHaveBeenCalled();
 });

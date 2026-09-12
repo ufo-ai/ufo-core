@@ -625,7 +625,10 @@ function Story({
         <a href={sectionHash("radar", { opens: [RUN_PREFIX + run.turn_id] })} className={out}>
           <Moment at={run.fired_at} />
         </a>
-        <a href={chatHash(run.conversation_id)} className={out}>
+        <a
+          href={chatHash(run.conversation_id, undefined, undefined, run.turn_id)}
+          className={out}
+        >
           Conversation
         </a>
         {thread ? (
