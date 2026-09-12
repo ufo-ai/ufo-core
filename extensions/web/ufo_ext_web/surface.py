@@ -214,6 +214,7 @@ from ufo_ext_web.panels import (
 )
 from ufo_ext_web.shell import ShellRelay, shell_state
 from ufo_ext_web.starters import (
+    AUTOMATIONS_SLATE,
     MEMORY_LIMIT,
     MEMORY_TEXT_CHARS,
     Slate,
@@ -253,6 +254,9 @@ MEMORY_KIND = "memory"
 SETUP_READ_FANOUT = 8
 OBJECT_READ_FANOUT = 8
 OBJECT_FANOUT_LIMIT = 50
+TASK_KINDS = ("scheduled_task", "source_trigger")
+LAST_RUN_FIELD = "last_run_at"
+TASK_LANE_SEPARATOR = "|"
 CONVERSATION_LIST_LIMIT = 100
 COMMENT_SURFACES = frozenset({"slack", "ufo"})
 SUBAGENT_ACTIVITY_LIMIT = 40
@@ -4500,6 +4504,59 @@ async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response:
     )
 
 
+AUTOMATION_HEROES = 3
+
+
+class AutomationHero(BaseModel):
+    """One suggestion the automations screen heads its list with: the recurring work the card would
+    set up, said in the member's own voice by pressing it. A card names only work whose accounts the
+    workspace already holds, so pressing one opens on the work rather than on an account request."""
+
+    mark: str
+    line: str
+    ask: str
+
+
+async def workspace_automations(ctx: SurfaceContext, request: Request) -> Response:
+    """The three suggestions the automations screen draws above its list, and alone while the member
+    has saved none.
+
+    Ranked the way the start screen's starters are ranked — same memory, same catalog, same cache
+    rule — under the automations instructions, which ask for work that repeats rather than an
+    application to build. The two slates are stored apart under their own keys, so a member reading
+    both screens reads two rankings rather than one screen's rows twice.
+
+    A row short of an account is dropped rather than drawn as an unlock: this screen offers the
+    member work to automate now, and the accounts question belongs to the start screen. An empty
+    answer is ordinary — a workspace whose memory says nothing yet has nothing to rank — and the
+    page draws its own cards for every slot this read does not fill."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    slate = await StarterCache(
+        store=web_extension().store,
+        member_id=member_id,
+        agents=tuple(sorted(agent.name for agent in audience.agents)),
+        recalled=await _recalled(ctx, member_id),
+        model=ctx.model,
+        solvent=await _solvent(),
+        prompt=AUTOMATIONS_SLATE,
+    ).read()
+    if slate is None:
+        return JSONResponse({"heroes": []})
+    held = await _held_providers(ctx, member_id, admin=audience.admin)
+    heroes: list[AutomationHero] = []
+    for entry in slate.ranked:
+        row = UNLOCKS_BY_NAME.get(entry.unlock)
+        if row is None or row.missing(held):
+            continue
+        heroes.append(AutomationHero(mark=row.mark, line=entry.line, ask=entry.ask))
+        if len(heroes) == AUTOMATION_HEROES:
+            break
+    return JSONResponse({"heroes": [hero.model_dump(mode="json") for hero in heroes]})
+
+
 async def workspace_usage(ctx: SurfaceContext, request: Request) -> Response:
     """The reader's own range and all-time usage and their member-scoped caps — a member's burn is
     theirs to read, so this answers every member. An admin additionally receives the workspace
@@ -4923,15 +4980,16 @@ def _filter_value(raw: str) -> JsonValue:
 
 
 def _fanout_token(walking: dict[str, str]) -> str | None:
-    """One opaque continuation for a fanned-out index — each still-walking agent's own kind cursor
-    under its id — or None when every agent's walk is done."""
+    """One opaque continuation for a fanned-out index — each still-walking lane's own kind cursor
+    under the lane's key — or None when every lane's walk is done. A lane is one agent for a read
+    of one kind, and one kind of one agent for a read merging kinds."""
     if not walking:
         return None
     return json.dumps(walking, sort_keys=True).encode().hex()
 
 
-def _fanout_walks(token: str) -> dict[UUID, str] | None:
-    """The per-agent cursors a fan-out token carries, or None for a token this route never
+def _fanout_walks(token: str) -> dict[str, str] | None:
+    """The per-lane cursors a fan-out token carries, or None for a token this route never
     minted."""
     try:
         decoded = json.loads(bytes.fromhex(token).decode())
@@ -4939,15 +4997,39 @@ def _fanout_walks(token: str) -> dict[UUID, str] | None:
         return None
     if not isinstance(decoded, dict) or not decoded:
         return None
-    walks: dict[UUID, str] = {}
-    for agent, held in decoded.items():
-        if not isinstance(held, str) or not held:
+    walks: dict[str, str] = {}
+    for lane, held in decoded.items():
+        if not lane or not isinstance(held, str) or not held:
             return None
-        try:
-            walks[UUID(agent)] = held
-        except ValueError:
-            return None
+        walks[lane] = held
     return walks
+
+
+def _task_row(row: ObjectRow, kind: str, agent: AgentSummary) -> dict[str, object]:
+    """One row of the merged automations page. A trigger carries the provider slug its feed
+    authenticates as; the screen reads the connector's display name, which is this surface's to
+    spell — the same name the connectors page draws."""
+    provider = row.fields.get("provider")
+    labelled = (
+        {"provider_label": PROVIDER_LABELS.get(provider, provider)}
+        if isinstance(provider, str)
+        else {}
+    )
+    return {
+        "name": row.name,
+        "summary": row.summary,
+        **row.fields,
+        **labelled,
+        "kind": kind,
+        "agent_id": str(agent.id),
+        "agent_name": agent.name,
+    }
+
+
+def _task_lane(kind: str, agent_id: UUID) -> str:
+    """One lane of the merged automations page: one kind of one agent, each walking its own
+    cursor."""
+    return kind + TASK_LANE_SEPARATOR + str(agent_id)
 
 
 def _merged_rank(row: dict[str, object], order_by: str) -> tuple[int, float | str, str]:
@@ -4998,7 +5080,7 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
     cursor = request.query_params.get("cursor", "")
     fanout_agents = audience.member_agents if kind.kind == ARTIFACT_KIND else audience.agents
     agents = fanout_agents
-    continuations: dict[UUID, str] = {}
+    continuations: dict[str, str] = {}
     if named:
         one = _object_agent(request, audience)
         if isinstance(one, Response):
@@ -5009,7 +5091,7 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
         if walks is None:
             return Response("malformed fan-out cursor", status_code=400)
         continuations = walks
-        agents = tuple(agent for agent in fanout_agents if agent.id in walks)
+        agents = tuple(agent for agent in fanout_agents if str(agent.id) in walks)
     query = ObjectListQuery(
         query=request.query_params.get("q", ""),
         filters={
@@ -5030,7 +5112,9 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
                 agent.id,
                 member_id,
                 admin=audience.admin and kind.kind != SITE_KIND,
-                query=(query if named else replace(query, cursor=continuations.get(agent.id, ""))),
+                query=(
+                    query if named else replace(query, cursor=continuations.get(str(agent.id), ""))
+                ),
             )
 
     try:
@@ -5065,6 +5149,80 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
             **_kind_payload(kind),
             "objects": rows,
             "next_cursor": walk,
+        }
+    )
+
+
+async def automations_index(ctx: SurfaceContext, request: Request) -> Response:
+    """The workspace's scheduled tasks and source triggers as one page, most recently run first —
+    the Automations screen's listing.
+
+    Both kinds declare `last_run_at`, so the merge ranks them on one column: a scheduled task's own
+    last fire, a source trigger's newest woken turn, and a row that has never run after every row
+    that has. Each kind answers per agent through its own visibility gate, so a member reads exactly
+    the rows that kind admits. One lane is one kind of one agent; the page takes
+    `OBJECT_FANOUT_LIMIT` rows from each, re-ranks the merge, and continues on one compound cursor
+    holding every still-walking lane's own kind cursor, so the next page resumes each lane where
+    it stopped.
+    `q` searches. A kind this deploy does not register is absent rather than an error, since the
+    screen lists whatever the deploy installs."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, _email, audience = resolved
+    kinds = tuple(
+        held for held in (ctx.object_kind(name) for name in TASK_KINDS) if held is not None
+    )
+    cursor = request.query_params.get("cursor", "")
+    continuations: dict[str, str] = {}
+    if cursor:
+        walks = _fanout_walks(cursor)
+        if walks is None:
+            return Response("malformed fan-out cursor", status_code=400)
+        continuations = walks
+    query = ObjectListQuery(
+        query=request.query_params.get("q", ""),
+        filters={},
+        order_by=LAST_RUN_FIELD,
+        order="desc",
+        cursor="",
+    )
+    lanes = tuple(
+        (kind, agent)
+        for kind in kinds
+        for agent in audience.agents
+        if not cursor or _task_lane(kind.kind, agent.id) in continuations
+    )
+    fanout = asyncio.Semaphore(OBJECT_READ_FANOUT)
+
+    async def page_of(kind: PortalKind, agent: AgentSummary) -> ObjectPage | None:
+        async with fanout:
+            return await ctx.list_member_objects(
+                kind.kind,
+                agent.id,
+                member_id,
+                admin=audience.admin,
+                query=replace(query, cursor=continuations.get(_task_lane(kind.kind, agent.id), "")),
+            )
+
+    try:
+        pages = await asyncio.gather(*(page_of(kind, agent) for kind, agent in lanes))
+    except ValueError as error:
+        return Response(str(error), status_code=400)
+    rows: list[dict[str, object]] = []
+    walking: dict[str, str] = {}
+    for (kind, agent), page in zip(lanes, pages, strict=True):
+        if page is None:
+            return Response(f"{kind.kind} does not list in the portal", status_code=404)
+        rows.extend(_task_row(row, kind.kind, agent) for row in page.rows[:OBJECT_FANOUT_LIMIT])
+        if page.next_cursor:
+            walking[_task_lane(kind.kind, agent.id)] = page.next_cursor
+    rows.sort(key=lambda row: _merged_rank(row, LAST_RUN_FIELD), reverse=True)
+    return JSONResponse(
+        {
+            "kinds": [_kind_payload(kind) for kind in kinds],
+            "objects": rows,
+            "next_cursor": _fanout_token(walking),
         }
     )
 
@@ -5661,6 +5819,8 @@ ROUTES = (
     SurfaceRoute(method="GET", path="workspace/memory", handler=workspace_memory),
     SurfaceRoute(method="GET", path="workspace/first-run", handler=workspace_first_run),
     SurfaceRoute(method="GET", path="workspace/starters", handler=workspace_starters),
+    SurfaceRoute(method="GET", path="workspace/automations", handler=workspace_automations),
+    SurfaceRoute(method="GET", path="automations", handler=automations_index),
     SurfaceRoute(method="GET", path="objects/{kind}", handler=object_index),
     SurfaceRoute(method="GET", path="objects/{kind}/{name}", handler=object_detail),
     SurfaceRoute(method="POST", path="objects/{kind}", handler=object_write),

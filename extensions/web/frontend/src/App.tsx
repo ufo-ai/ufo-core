@@ -29,7 +29,8 @@ import {
   CONNECTION_VIEWS,
   CONNECTORS,
   SECTION_VIEWS,
-  TASK_VIEWS,
+  AUTOMATIONS_TAB,
+  AUTOMATIONS_VIEWS,
   WORKSPACE_VIEWS,
   type PaneView,
 } from "@/views/registry";
@@ -82,7 +83,7 @@ import {
   placeFirstRun,
   placeHome,
   placeSection,
-  placeTasks,
+  placeAutomations,
   placeWorkspace,
   startRouter,
   useRoute,
@@ -93,7 +94,6 @@ import {
   COMPOSE,
   COMPOSING,
   CONNECTION_TABS,
-  TASK_TABS,
   connectionTab,
   homeConversationLane,
   homeLaneAgent,
@@ -838,16 +838,16 @@ function RoutedPane({
     }
     case "bad-link":
       return <PaneNote>This link is not valid.</PaneNote>;
-    case "tasks":
+    case "automations":
       return (
         <TabbedPane
-          group="tasks"
-          tabs={TASK_TABS}
-          views={TASK_VIEWS}
-          view={route.view}
+          group="automations"
+          tabs={[AUTOMATIONS_TAB]}
+          views={AUTOMATIONS_VIEWS}
+          view={AUTOMATIONS_TAB}
           crumb={crumb}
           place={route.place}
-          onPlace={placeTasks}
+          onPlace={(_tab, place, step) => placeAutomations(place, step)}
         />
       );
     case "workspace":

@@ -7,7 +7,7 @@ workspace, newest first, a turn still running included. The fence is the reader'
 the same fence every turn read holds, and it never widens for an admin. Turns exist by admission,
 so every mutation is refused."""
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -208,6 +208,33 @@ async def _turns(
     )
     async with workspace_tx() as connection:
         return tuple((await connection.execute(stmt)).all())
+
+
+async def last_fires(kind: str, names: Collection[str]) -> dict[str, datetime]:
+    """When each named object of `kind` last fired — the newest turn carrying it as `fired_by`.
+
+    A scheduled task keeps its own `last_run_at`; a source trigger keeps none, because a trigger's
+    run history is the turns it woke. A kind whose rows sort beside the other's on one last-run
+    column asks here rather than growing a column of its own. The caller has already answered
+    whether this reader may see the row it stamps, so the fence here is the workspace."""
+    wanted = tuple(names)
+    if not wanted:
+        return {}
+    stmt = (
+        sa.select(
+            tables.turn.c.fired_by_name,
+            sa.func.max(tables.turn.c.created_at).label("fired_at"),
+        )
+        .where(
+            tables.turn.c.workspace_id == ws_current().workspace_id,
+            tables.turn.c.fired_by_kind == kind,
+            tables.turn.c.fired_by_name.in_(wanted),
+        )
+        .group_by(tables.turn.c.fired_by_name)
+    )
+    async with workspace_tx() as connection:
+        rows = (await connection.execute(stmt)).all()
+    return {row.fired_by_name: _utc(row.fired_at) for row in rows}
 
 
 def _narrowed(stmt: sa.Select[Any], filters: Mapping[str, JsonValue]) -> sa.Select[Any]:

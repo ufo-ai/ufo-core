@@ -1528,7 +1528,7 @@ test("the sidebar marks the destination the member is in and leaves the others o
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   const marked = () =>
-    ["New chat", "Tasks", "Connections", "Settings"].filter(
+    ["New chat", "Automations", "Connections", "Settings"].filter(
       (name) => rail.getAllByRole("button", { name })[0].getAttribute("aria-current") === "true",
     );
 
@@ -1538,8 +1538,8 @@ test("the sidebar marks the destination the member is in and leaves the others o
   await waitFor(() => expect(destination()).toBe("Team"));
   expect(marked()).toEqual(["Settings"]);
 
-  await userEvent.click(rail.getByRole("button", { name: "Tasks" }));
-  await waitFor(() => expect(marked()).toEqual(["Tasks"]));
+  await userEvent.click(rail.getByRole("button", { name: "Automations" }));
+  await waitFor(() => expect(marked()).toEqual(["Automations"]));
 
   await userEvent.click(rail.getByRole("button", { name: "Connections" }));
   await waitFor(() => expect(marked()).toEqual(["Connections"]));

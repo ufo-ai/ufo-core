@@ -64,7 +64,8 @@ import { TabbedPane } from "@/views/TabbedPane";
 import {
   CONNECTION_VIEWS,
   SECTION_VIEWS,
-  TASK_VIEWS,
+  AUTOMATIONS_TAB,
+  AUTOMATIONS_VIEWS,
   WORKSPACE_VIEWS,
   type PaneView,
 } from "@/views/registry";
@@ -146,11 +147,11 @@ import {
   openHome,
   openNewChat,
   openSlot,
-  openTasks,
+  openAutomations,
   placeAgent,
   placeFirstRun,
   placeSection,
-  placeTasks,
+  placeAutomations,
   placeWorkspace,
   startRouter,
   useRoute,
@@ -161,7 +162,6 @@ import {
   COMPOSE,
   COMPOSING,
   CONNECTION_TABS,
-  TASK_TABS,
   connectionTab,
   standing,
   type Route,
@@ -601,7 +601,7 @@ const CHATS = "Chats";
  *  hears the page instead. */
 const RAIL_WAIT = "Loading chats";
 const NEW_CHAT = "New chat";
-const TASKS = "Tasks";
+const AUTOMATIONS = "Automations";
 const CONNECTIONS = "Connections";
 
 /** Shift makes the character upper case, so the guard reads the letter. */
@@ -800,10 +800,10 @@ function WorkspaceSidebar({
         ) : null}
         <NavRow
           icon={<IconClockPlay className={GLYPH} aria-hidden />}
-          current={standing(route, "tasks")}
+          current={standing(route, "automations")}
           collapsed={collapsed}
-          label={TASKS}
-          onClick={openTasks}
+          label={AUTOMATIONS}
+          onClick={openAutomations}
         />
         {APP_SECTIONS.map(({ section, label }) => (
           <NavRow
@@ -892,16 +892,16 @@ function RoutedPane({
       return <PaneNote>This link is not valid.</PaneNote>;
     case "store":
       return <Store member={member} onBuild={openBuilder} />;
-    case "tasks":
+    case "automations":
       return (
         <TabbedPane
-          group="tasks"
-          tabs={TASK_TABS}
-          views={TASK_VIEWS}
-          view={route.view}
+          group="automations"
+          tabs={[AUTOMATIONS_TAB]}
+          views={AUTOMATIONS_VIEWS}
+          view={AUTOMATIONS_TAB}
           crumb={crumb}
           place={route.place}
-          onPlace={placeTasks}
+          onPlace={(_tab, place, step) => placeAutomations(place, step)}
         />
       );
     case "workspace":

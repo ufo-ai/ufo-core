@@ -24,10 +24,6 @@ from ufo.sdk.subjects import member_subject
 from ufo.sdk.surfaces import SurfaceModel
 from ufo_ext_web.panels import UNLOCKS, UNLOCKS_BY_NAME
 
-STARTERS_KEY_PREFIX = "starters"
-CLAIM_KEY_PREFIX = "starters-claim"
-COOLDOWN_KEY_PREFIX = "starters-cooldown"
-
 STARTERS_TTL = timedelta(minutes=30)
 CLAIM_LEASE = timedelta(minutes=2)
 COOLDOWN_AFTER_FAILURE = timedelta(minutes=15)
@@ -42,12 +38,33 @@ SLATE_MAX_TOKENS = 4096
 SLATE_TOOL = "record_slate"
 SLATE_TOOL_DESCRIPTION = "Record the ranked starters for this member."
 
-SLATE_SYSTEM = (
-    (Path(__file__).parent / "prompts" / "starters_slate.md")
-    .read_text()
-    .strip()
-    .replace("{{title_chars}}", str(TITLE_CHARS))
-    .replace("{{line_chars}}", str(LINE_CHARS))
+
+@dataclass(frozen=True)
+class SlatePrompt:
+    """One ranking's instructions and the store keys its answers live under. The start screen and
+    the automations screen ask the same question of the same memory under different instructions, so
+    each holds its own slate: a member reads both screens, and one cache would hand the second
+    screen the first one's rows."""
+
+    key: str
+    system: str
+    digest: str
+
+
+def slate_prompt(key: str, text: str) -> SlatePrompt:
+    system = (
+        text.strip()
+        .replace("{{title_chars}}", str(TITLE_CHARS))
+        .replace("{{line_chars}}", str(LINE_CHARS))
+    )
+    return SlatePrompt(key=key, system=system, digest=hashlib.sha256(system.encode()).hexdigest())
+
+
+STARTERS_SLATE = slate_prompt(
+    "starters", (Path(__file__).parent / "prompts" / "starters_slate.md").read_text()
+)
+AUTOMATIONS_SLATE = slate_prompt(
+    "automations", (Path(__file__).parent / "prompts" / "automations_slate.md").read_text()
 )
 
 
@@ -79,8 +96,8 @@ class Slate(BaseModel):
     ranked: tuple[RankedUnlock, ...] = ()
     check_in: CheckIn | None = None
 
-    def fresh(self, now: datetime) -> bool:
-        return now - self.generated_at < STARTERS_TTL and self.prompt == SLATE_DIGEST
+    def fresh(self, now: datetime, prompt: SlatePrompt) -> bool:
+        return now - self.generated_at < STARTERS_TTL and self.prompt == prompt.digest
 
 
 class _SlateCall(BaseModel):
@@ -88,19 +105,16 @@ class _SlateCall(BaseModel):
     check_in: CheckIn | None = None
 
 
-SLATE_DIGEST = hashlib.sha256(SLATE_SYSTEM.encode()).hexdigest()
+def starters_key(prompt: SlatePrompt, member_id: UUID) -> str:
+    return f"{prompt.key}:{member_subject(member_id)}"
 
 
-def starters_key(member_id: UUID) -> str:
-    return f"{STARTERS_KEY_PREFIX}:{member_subject(member_id)}"
+def claim_key(prompt: SlatePrompt, member_id: UUID) -> str:
+    return f"{prompt.key}-claim:{member_subject(member_id)}"
 
 
-def claim_key(member_id: UUID) -> str:
-    return f"{CLAIM_KEY_PREFIX}:{member_subject(member_id)}"
-
-
-def cooldown_key(member_id: UUID) -> str:
-    return f"{COOLDOWN_KEY_PREFIX}:{member_subject(member_id)}"
+def cooldown_key(prompt: SlatePrompt, member_id: UUID) -> str:
+    return f"{prompt.key}-cooldown:{member_subject(member_id)}"
 
 
 def _stamped(held: object, key: str) -> datetime | None:
@@ -134,11 +148,12 @@ class StarterCache:
     recalled: tuple[str, ...]
     model: SurfaceModel | None
     solvent: bool
+    prompt: SlatePrompt = STARTERS_SLATE
 
     async def read(self) -> Slate | None:
         now = datetime.now(UTC)
         held = await self._held()
-        if held is not None and held.fresh(now):
+        if held is not None and held.fresh(now, self.prompt):
             return held
         if not await self._may_generate(now):
             return held
@@ -146,16 +161,18 @@ class StarterCache:
             made = await self._rank(now)
         except Exception:
             cooled: JsonValue = {"failed_at": now.isoformat()}
-            await self.store.put(cooldown_key(self.member_id), cooled)
-            warn("web.starters_failed", member_id=str(self.member_id))
+            await self.store.put(cooldown_key(self.prompt, self.member_id), cooled)
+            warn("web.starters_failed", member_id=str(self.member_id), slate=self.prompt.key)
             return held
         finally:
-            await self.store.delete(claim_key(self.member_id))
-        await self.store.put(starters_key(self.member_id), made.model_dump(mode="json"))
+            await self.store.delete(claim_key(self.prompt, self.member_id))
+        await self.store.put(
+            starters_key(self.prompt, self.member_id), made.model_dump(mode="json")
+        )
         return made
 
     async def _held(self) -> Slate | None:
-        stored = await self.store.get(starters_key(self.member_id))
+        stored = await self.store.get(starters_key(self.prompt, self.member_id))
         if not isinstance(stored, dict):
             return None
         try:
@@ -170,7 +187,8 @@ class StarterCache:
         another read already holds the claim."""
         if self.model is None or not self.recalled or not self.solvent:
             return False
-        failed = _stamped(await self.store.get(cooldown_key(self.member_id)), "failed_at")
+        cooled = await self.store.get(cooldown_key(self.prompt, self.member_id))
+        failed = _stamped(cooled, "failed_at")
         if failed is not None and now - failed < COOLDOWN_AFTER_FAILURE:
             return False
         return await self._claim(now)
@@ -184,7 +202,7 @@ class StarterCache:
         reader that died is taken over once it is older than `CLAIM_LEASE`, by comparing against the
         exact value read — there is no primitive that displaces a live row, so the stale value is
         the token."""
-        key = claim_key(self.member_id)
+        key = claim_key(self.prompt, self.member_id)
         mine: JsonValue = {"claimed_at": now.isoformat()}
         if await self.store.put_if(key, mine, expected=None):
             return True
@@ -204,7 +222,7 @@ class StarterCache:
         reply = await self.model.turn(
             ModelRequest(
                 model=self.model.model,
-                system=SLATE_SYSTEM,
+                system=self.prompt.system,
                 messages=(
                     Message(role="user", content=json.dumps(payload, separators=(",", ":"))),
                 ),
@@ -221,10 +239,10 @@ class StarterCache:
                 reasoning="off",
             )
         )
-        return settle_slate(reply, now)
+        return settle_slate(reply, now, self.prompt)
 
 
-def settle_slate(reply: Message, generated_at: datetime) -> Slate:
+def settle_slate(reply: Message, generated_at: datetime, prompt: SlatePrompt) -> Slate:
     """The slate a `record_slate` reply carries, entry by entry: a row the contract does not
     satisfy, one naming no catalog row, and a repeat of a row already taken each drop without
     taking the rest of the slate with them, while a reply that recorded no call at all raises —
@@ -254,7 +272,7 @@ def settle_slate(reply: Message, generated_at: datetime) -> Slate:
         check_in = None
     return Slate(
         generated_at=generated_at,
-        prompt=SLATE_DIGEST,
+        prompt=prompt.digest,
         ranked=tuple(ranked[:RANKED_MAX]),
         check_in=check_in,
     )

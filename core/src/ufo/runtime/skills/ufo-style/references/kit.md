@@ -222,7 +222,7 @@ the theme, both colour schemes and every width at once, and a shape built beside
 - **`parseHash`** — What the address says, read off the table.
 - **`routeIs`** — Whether a route is of a kind, and the narrowing that goes with it.
 - **`sectionHash`** — The address of a section, optionally at a place.
-- **`tasksHash`** — The address of a tasks tab, optionally at a place.
+- **`automationsHash`** — The address of the automations screen, optionally at a place.
 - **`workspaceHash`** — The address of a workspace tab, optionally at a place.
 
 ## rows

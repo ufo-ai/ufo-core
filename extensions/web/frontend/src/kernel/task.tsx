@@ -19,6 +19,7 @@ import type { ObjectAddress, ObjectLink, ObjectValue } from "@/kernel/objects";
 import {
   CADENCE_MODES,
   INTERVAL_HOURS,
+  MONTH_DAY_NUMBERS,
   asMode,
   cadenceOf,
   clockFromValue,
@@ -39,6 +40,8 @@ const SETTLE_MS = 800;
 
 const SAVING = "Saving…";
 const SAVED = "Saved";
+const EXPAND = "Expand";
+const COLLAPSE = "Collapse";
 
 const CONTENT_IS_THE_CREATORS = "Only the member who wrote this task can change what it says.";
 const PRIVATE_CONTENT = "This task's prompt is not visible to you.";
@@ -87,10 +90,13 @@ function useSettled(value: string, onSave: (value: string) => Promise<NoticeStat
   return { held, state, typed, commit };
 }
 
-function SelfSaving({
+/** One field that saves what it is left holding. `moreLines` gives a multiline field a press that
+ *  grows it for a longer edit and shrinks it back. */
+export function SelfSaving({
   label,
   value,
   lines,
+  moreLines,
   type,
   readOnly,
   note,
@@ -99,6 +105,7 @@ function SelfSaving({
   label: string;
   value: string;
   lines?: number;
+  moreLines?: number;
   type?: "datetime-local";
   readOnly?: boolean;
   note?: string;
@@ -106,11 +113,12 @@ function SelfSaving({
 }) {
   const id = useId();
   const { held, state, typed, commit } = useSettled(value, onSave);
+  const [grown, setGrown] = useState(false);
 
   const box = lines ? (
     <Textarea
       id={id}
-      rows={lines}
+      rows={grown && moreLines ? moreLines : lines}
       value={held}
       readOnly={readOnly}
       className="max-w-full"
@@ -138,6 +146,11 @@ function SelfSaving({
         <span aria-live="polite" className="shrink-0 text-small text-ink-soft">
           {state === "saving" ? SAVING : state === "saved" ? SAVED : ""}
         </span>
+        {lines && moreLines ? (
+          <Button variant="quiet" size="bar" onClick={() => setGrown(!grown)}>
+            {grown ? COLLAPSE : EXPAND}
+          </Button>
+        ) : null}
       </div>
       {box}
       {note ? <p className="m-0 text-small text-ink-soft">{note}</p> : null}
@@ -145,23 +158,25 @@ function SelfSaving({
   );
 }
 
-function Pill({
+export function Pill({
   label,
   said,
   value,
   options,
+  disabled,
   onPick,
 }: {
   label: string;
   said: string;
   value: string;
   options: { value: string; label: string }[];
+  disabled?: boolean;
   onPick: (value: string) => void;
 }) {
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <Button variant="row" size="bar" aria-label={label}>
+        <Button variant="row" size="bar" aria-label={label} disabled={disabled}>
           {said}
           <IconChevronDown aria-hidden className="size-(--size-glyph)" />
         </Button>
@@ -241,6 +256,18 @@ function CadencePills({
           onPick={(hours) => void onPick({ mode: "interval", hours: Number(hours) })}
         />
       ) : null}
+      {cadence.mode === "monthly" ? (
+        <Pill
+          label="Day of month"
+          said={dayOfMonthLabel(cadence.day)}
+          value={String(cadence.day)}
+          options={MONTH_DAY_NUMBERS.map((day) => ({
+            value: String(day),
+            label: dayOfMonthLabel(day),
+          }))}
+          onPick={(day) => void onPick({ ...cadence, day: Number(day) })}
+        />
+      ) : null}
       {cadence.mode === "weekly" ? (
         <Pill
           label="Day"
@@ -266,6 +293,10 @@ function CadencePills({
 
 function intervalLabel(hours: number): string {
   return hours === 1 ? "Every hour" : `Every ${hours} hours`;
+}
+
+function dayOfMonthLabel(day: number): string {
+  return `Day ${day}`;
 }
 
 export function ScheduledTaskPane({

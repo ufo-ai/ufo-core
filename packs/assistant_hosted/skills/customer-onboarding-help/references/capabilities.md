@@ -7,19 +7,22 @@ assemble an install step, a link, or a request for a token here.
 
 ## Finding existing work
 
-Radar, Artifacts, and Tasks are rows in the web portal's sidebar; the Tasks screen has a tab
-each for Runs, Scheduled and Triggers:
+Radar, Artifacts, and Automations are rows in the web portal's sidebar:
 
 - Radar opens each scheduled run as a full report with its files and conversation.
 - Artifacts lists shared files and hosted sites.
-- Tasks lists the runs of recurring tasks and source triggers, newest first; a run opens its
-  transcript, and a running one can be stopped.
+- Automations lists every recurring task and source trigger in one table, most recently run first;
+  opening one lists its runs, newest first; a run opens its transcript, and a running one can be
+  stopped.
 - In Memory in the web portal, a member can read saved facts and record a correction that
   supersedes the earlier statement. The agent can also correct a fact when the member states the
   correction in chat.
 
-These pages let the member inspect work. Tasks can also pause or resume a scheduled task and edit
-or delete a row. When the member asks you to change something you can change, do it in chat.
+These pages let the member inspect work. An automation's Details pane edits its name, instructions
+and when it runs; a scheduled task's object panel, in the settings of the app that holds it, can
+pause or resume that task and edit or delete its row. A source trigger has no such panel: the
+portal lists it and the member asks you in chat to stop or delete it.
+When the member asks you to change something you can change, do it in chat.
 
 ## Explaining application creation
 

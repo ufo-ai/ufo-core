@@ -53,6 +53,7 @@ export function CardGrid<Row>({
   open,
   current,
   whole,
+  columns = 2,
 }: {
   rows: Row[];
   rowKey: (row: Row) => string;
@@ -65,6 +66,7 @@ export function CardGrid<Row>({
   open?: (row: Row) => (() => void) | null;
   current?: (row: Row) => boolean;
   whole?: boolean;
+  columns?: 2 | 3;
 }) {
   return (
     <ul
@@ -72,7 +74,9 @@ export function CardGrid<Row>({
         "m-0 grid list-none gap-lg p-0",
         mark?.shape === "tile"
           ? "grid-cols-[repeat(auto-fill,minmax(var(--size-tile),1fr))]"
-          : "grid-cols-2 max-narrow:grid-cols-1",
+          : columns === 3
+            ? "grid-cols-3 max-narrow:grid-cols-1"
+            : "grid-cols-2 max-narrow:grid-cols-1",
       )}
     >
       {rows.map((row) => {

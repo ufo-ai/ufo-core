@@ -30,6 +30,7 @@ from ufo_ext_memory.store import (
 )
 from ufo_ext_scheduled_tasks.manifest import NAME as SCHEDULED_TASKS_NAME
 from ufo_ext_scheduled_tasks.schedules import ScheduleStore
+from ufo_ext_scheduled_tasks.schedules import scheduled_task as schedule_table
 from ufo_ext_scheduled_tasks.tools import (
     PRIVATE_PROMPT,
     PROMPT_EXCERPT_MAX,
@@ -39,6 +40,9 @@ from ufo_ext_scheduled_tasks.tools import (
 from ufo_ext_skill_create.manifest import manifest as skill_create_manifest
 from ufo_ext_skill_create.store import UserSkillStore
 from ufo_ext_slack.manifest import manifest as slack_manifest
+from ufo_ext_sources.manifest import NAME as SOURCES_NAME
+from ufo_ext_sources.tools import trigger_name
+from ufo_ext_sources.triggers import SourceTriggerStore
 from ufo_ext_web import surface as web_surface
 from ufo_ext_web.audience import AUDIENCE_PREFIX, web_extension
 from ufo_ext_web.manifest import manifest as web_manifest
@@ -58,6 +62,7 @@ from ufo.host.ext.loader import (
     skill_registry,
 )
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent as bind_agent
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.hub import InProcessHub
@@ -68,6 +73,8 @@ from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
+from ufo.schema.records import TerminalFrame
+from ufo.sdk.grants import account_object_name
 from ufo.sdk.index import OWNER_KIND_PAGE, Chunk
 from ufo.sdk.manifest import Manifest
 from ufo.serve import _mount_shared_surfaces
@@ -84,6 +91,47 @@ CREATOR_EMAIL = "creator@example.com"
 OTHER_EMAIL = "other@example.com"
 NEXT_RUN = datetime(2027, 1, 1, tzinfo=UTC)
 EXPIRES = datetime(2027, 6, 1, tzinfo=UTC)
+TASK_RAN = datetime(2026, 8, 27, 9, tzinfo=UTC)
+TRIGGER_RAN = datetime(2026, 8, 27, 18, tzinfo=UTC)
+WATCHED_PULL = "https://github.com/metalcraftai/ufo/pull/3459"
+
+
+async def _task_ran(task_id: UUID, at: datetime) -> None:
+    """One task's own record of its latest fire, which the fire itself writes as it reschedules."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(schedule_table)
+            .where(schedule_table.c.id == task_id)
+            .values(last_run_at=at, updated_at=sa.func.now())
+        )
+
+
+async def _trigger_fired(
+    workspace_id: UUID, conversation_id: UUID, agent_id: UUID, name: str, at: datetime
+) -> None:
+    """One turn the named trigger woke — a trigger's whole run history, since the trigger row keeps
+    no last-run column."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid7(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="done",
+                inbound="the feed changed",
+                admission_source="internal",
+                terminal=TerminalFrame(status="done", text="the pull request moved").model_dump(
+                    mode="json"
+                ),
+                fired_by_kind="source_trigger",
+                fired_by_name=name,
+                fired_by_title=name,
+                created_at=at,
+                updated_at=at,
+            )
+        )
 
 
 def _schedule_store() -> ScheduleStore:
@@ -453,6 +501,78 @@ async def test_the_index_without_an_agent_fans_out_over_the_audience(portal) -> 
     walking = await client.get(index + "?cursor=abc", headers=creator_headers)
     assert walking.status_code == 400
     assert (await client.get(index)).status_code == 401
+
+
+async def test_the_automations_read_merges_both_kinds_on_one_last_run_column(portal) -> None:
+    """The Automations screen's listing: scheduled tasks and source triggers as one page, most
+    recently run first, each row naming the kind and the agent it belongs to. A trigger keeps no
+    last-run column of its own, so its last run is the newest turn it fired; a row that has never
+    run falls after every row that has. The row carries the connector's display name beside the
+    provider slug, because the screen says GitHub where the feed says github."""
+    client, workspace_id, agent_a, agent_b = portal
+    creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
+    await _grant(workspace_id, agent_b, CREATOR_EMAIL)
+    with ws(workspace_id):
+        watching = await _seed_conversation(workspace_id, agent_a)
+        with bind_agent(agent_a):
+            ran = await _schedule_store().create(
+                watching,
+                "daily-brief",
+                "0 9 * * *",
+                "write the daily brief",
+                "daily brief",
+                NEXT_RUN,
+                created_by_member_id=creator_id,
+            )
+            connection_id = await GrantStore().record(
+                provider="github",
+                account_id="acct-one",
+                host="api.github.test",
+                grantor_member_id=creator_id,
+                shared=True,
+            )
+            await SourceTriggerStore(context_for(SOURCES_NAME, frozenset())).create(
+                watching,
+                connection_id,
+                "current",
+                created_by_member_id=creator_id,
+                resource=WATCHED_PULL,
+            )
+        sweeping = await _seed_conversation(workspace_id, agent_b)
+        with bind_agent(agent_b):
+            await _schedule_store().create(
+                sweeping,
+                "alpha-sweep",
+                "0 3 * * *",
+                "sweep the queue",
+                "queue sweep",
+                NEXT_RUN,
+                created_by_member_id=creator_id,
+            )
+    await _task_ran(ran.id, TASK_RAN)
+    watched = trigger_name(account_object_name("github", "acct-one"), watching, WATCHED_PULL)
+    await _trigger_fired(workspace_id, watching, agent_a, watched, TRIGGER_RAN)
+
+    page = await client.get("/surface/web/automations", headers=creator_headers)
+    assert [held["kind"] for held in page.json()["kinds"]] == ["scheduled_task", "source_trigger"]
+    assert [(row["kind"], row["name"], row["last_run_at"]) for row in page.json()["objects"]] == [
+        ("source_trigger", watched, TRIGGER_RAN.isoformat()),
+        ("scheduled_task", "daily-brief", TASK_RAN.isoformat()),
+        ("scheduled_task", "alpha-sweep", None),
+    ]
+    assert page.json()["next_cursor"] is None
+    trigger_row, task_row, swept = page.json()["objects"]
+    assert (trigger_row["provider"], trigger_row["provider_label"]) == ("github", "GitHub")
+    assert trigger_row["resource"] == WATCHED_PULL
+    assert (trigger_row["agent_id"], trigger_row["agent_name"]) == (str(agent_a), "assistant")
+    assert task_row["description"] == "daily brief"
+    assert (swept["agent_id"], swept["agent_name"]) == (str(agent_b), "ops")
+
+    searched = await client.get("/surface/web/automations?q=sweep", headers=creator_headers)
+    assert [row["name"] for row in searched.json()["objects"]] == ["alpha-sweep"]
+    walking = await client.get("/surface/web/automations?cursor=abc", headers=creator_headers)
+    assert walking.status_code == 400
+    assert (await client.get("/surface/web/automations")).status_code == 401
 
 
 async def test_skills_list_the_workspaces_own_and_the_deploys(portal) -> None:

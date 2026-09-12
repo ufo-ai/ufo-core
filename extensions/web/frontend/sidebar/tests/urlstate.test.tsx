@@ -10,7 +10,7 @@ import {
   AGENTS_HASH,
   BUILDER_HASH,
   STORE_HASH,
-  tasksHash,
+  automationsHash,
   FIRST_RUN_HASH,
   agentHash,
   artifactTarget,
@@ -175,19 +175,28 @@ test("an address naming an inherited property of an object names no workspace ta
   expect(parseHash("#/constructor")).toEqual({ kind: "bad-link" });
 });
 
-test("each tasks tab carries its own place, and the workspace holds none of them", () => {
-  expect(parseHash(tasksHash("runs"))).toEqual({ kind: "tasks", view: "runs", place: {} });
-  expect(parseHash(tasksHash("runs") + "?scope=scheduled_task%2Fnightly&open=run%2Fa")).toEqual({
-    kind: "tasks",
-    view: "runs",
-    place: { scope: "scheduled_task/nightly", opens: ["run/a"] },
+test("the automations screen carries one place, and the workspace holds none of it", () => {
+  expect(parseHash(automationsHash())).toEqual({ kind: "automations", place: {} });
+  expect(parseHash(automationsHash() + "?runs=older&open=run%2Fa%2Fturn1")).toEqual({
+    kind: "automations",
+    place: { runs: "older", opens: ["run/a/turn1"] },
   });
-  expect(parseHash(tasksHash("scheduled", { opens: ["object/a/scheduled_task/nightly"] }))).toEqual({
-    kind: "tasks",
-    view: "scheduled",
+  expect(
+    parseHash(
+      automationsHash() +
+        "?open=automation%2Fa%2Fscheduled_task%2Fnightly~run%2Fa%2Fscheduled_task%2Fnightly%2Fturn1",
+    ),
+  ).toEqual({
+    kind: "automations",
+    place: {
+      opens: ["automation/a/scheduled_task/nightly", "run/a/scheduled_task/nightly/turn1"],
+    },
+  });
+  expect(parseHash(automationsHash({ opens: ["object/a/scheduled_task/nightly"] }))).toEqual({
+    kind: "automations",
     place: { opens: ["object/a/scheduled_task/nightly"] },
   });
-  expect(parseHash("#/workspace/tasks")).toEqual({ kind: "bad-link" });
+  expect(parseHash("#/workspace/automations")).toEqual({ kind: "bad-link" });
 });
 
 test("a conversation slot has a builder, and it writes the address its own read takes", () => {

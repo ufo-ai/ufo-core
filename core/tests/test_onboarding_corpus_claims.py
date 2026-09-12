@@ -57,8 +57,7 @@ CREATE_APPLICATION_SKILL_MD = "core/src/ufo/runtime/skills/create-application/SK
 CODING_SKILL_MD = "extensions/coding/ufo_ext_coding/skills/coding/SKILL.md"
 RADAR_VIEW = "extensions/web/frontend/src/views/Radar.tsx"
 ARTIFACTS_VIEW = "extensions/web/frontend/src/views/Artifacts.tsx"
-TASKS_VIEW = "extensions/web/frontend/src/views/Tasks.tsx"
-TASK_RUNS_VIEW = "extensions/web/frontend/src/views/TaskRuns.tsx"
+AUTOMATIONS_VIEW = "extensions/web/frontend/src/views/Automations.tsx"
 TASK_PANE = "extensions/web/frontend/src/kernel/task.tsx"
 WEB_OBJECTS = "extensions/web/frontend/src/kernel/objects.tsx"
 MEMORY_MANIFEST = "extensions/memory/ufo_ext_memory/manifest.py"
@@ -505,10 +504,10 @@ CLAIMS = (
         pattern=r"A file or site an app makes in a conversation is listed here",
     ),
     Claim(
-        claim="Tasks lists the runs of scheduled tasks and source triggers",
+        claim="Automations lists every scheduled task and source trigger, and their runs",
         corpus="references/capabilities.md",
-        phrase="Tasks lists the runs of recurring tasks and source triggers",
-        source=TASK_RUNS_VIEW,
+        phrase="Automations lists every recurring task and source trigger in one table",
+        source=AUTOMATIONS_VIEW,
         pattern=(
             r'const TASK_KIND = "scheduled_task";\n'
             r'const TRIGGER_KIND = "source_trigger";\n(?:.*\n)*?.*fired: "true"'
@@ -517,28 +516,31 @@ CLAIMS = (
     Claim(
         claim="a run opens its transcript read-only",
         corpus="references/capabilities.md",
-        phrase="a run opens its\n  transcript",
-        source=TASK_RUNS_VIEW,
-        pattern=r"<ChatPane\n(?:.*\n){0,5}?\s+readOnly\n\s+stops=\{id\}",
+        phrase="a run opens its transcript",
+        source=AUTOMATIONS_VIEW,
+        pattern=r"<ChatPane\n(?:.*\n){0,5}?\s+readOnly\n\s+stops=\{run\}",
     ),
     Claim(
-        claim="Tasks can pause or resume a scheduled task",
+        claim="Automations can pause or resume a scheduled task",
         corpus="references/capabilities.md",
-        phrase="Tasks can also pause or resume a scheduled task",
+        phrase="object panel, in the settings of the app that holds it, can\npause or resume that task",
         source=TASK_PANE,
         pattern=r'\{paused \? "Resume" : "Pause"\}',
     ),
     Claim(
-        claim="Tasks uses the editable object panel for its rows",
+        claim="an automation's Details pane edits its own fields",
         corpus="references/capabilities.md",
-        phrase="edit\nor delete a row",
-        source=TASKS_VIEW,
-        pattern=r"<ObjectPane",
+        phrase="Details pane edits its name, instructions and when it runs",
+        source=AUTOMATIONS_VIEW,
+        pattern=(
+            r"<SelfSaving\n\s+label=\{NAME\}\n(?:.*\n)*?"
+            r"\s+<WhenToRun\n\s+schedule=\{entry\.schedule\}"
+        ),
     ),
     Claim(
         claim="the object panel can edit or delete a row",
         corpus="references/capabilities.md",
-        phrase="edit\nor delete a row",
+        phrase="pause or resume that task and edit or delete its row",
         source=WEB_OBJECTS,
         pattern=(
             r"<Button variant=\"send\" onClick=\{\(\) => setEditing\(record\)\}>\n"

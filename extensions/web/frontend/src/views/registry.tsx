@@ -1,7 +1,7 @@
 import { lazy, type ComponentType, type ReactNode } from "react";
 
 import type { Placement } from "@/kernel/pager";
-import type { ConnectionTab, Section, TaskTab, WorkspaceTab } from "@/lib/route";
+import type { ConnectionTab, Section, WorkspaceTab } from "@/lib/route";
 
 export type PaneView = {
   label: string;
@@ -22,25 +22,16 @@ function placed(load: () => Promise<{ default: ComponentType<Placed> }>) {
   );
 }
 
-export const TASK_VIEWS: Record<TaskTab, PaneView> = {
-  runs: {
-    label: "Runs",
+export const AUTOMATIONS_TAB = "automations";
+
+export const AUTOMATIONS_VIEWS: Record<typeof AUTOMATIONS_TAB, PaneView> = {
+  automations: {
+    label: "Automations",
     remountOnPlace: false,
+    search: "Search automations",
     render: placed(() =>
-      import("@/views/TaskRuns").then((module) => ({ default: module.TaskRuns })),
+      import("@/views/Automations").then((module) => ({ default: module.Automations })),
     ),
-  },
-  scheduled: {
-    label: "Scheduled",
-    remountOnPlace: false,
-    render: placed(() =>
-      import("@/views/Tasks").then((module) => ({ default: module.Scheduled })),
-    ),
-  },
-  triggers: {
-    label: "Triggers",
-    remountOnPlace: false,
-    render: placed(() => import("@/views/Tasks").then((module) => ({ default: module.Triggers }))),
   },
 };
 

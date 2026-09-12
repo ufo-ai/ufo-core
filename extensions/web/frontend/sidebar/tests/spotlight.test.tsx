@@ -175,7 +175,7 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Threads", "Artifacts", "Tasks"]);
+  expect(headings()).toEqual(["Threads", "Artifacts", "Automations"]);
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
   expect(asked.some((url) => url.includes("/objects/artifact"))).toBe(true);
@@ -242,9 +242,9 @@ test("two agents' same-named records both stand, each opening its own", async ()
   expect(rows).toHaveLength(2);
 
   await userEvent.click(rows[1]);
-  expect(location.hash.startsWith("#/tasks/scheduled")).toBe(true);
+  expect(location.hash.startsWith("#/automations")).toBe(true);
   expect(decodeURIComponent(location.hash)).toContain(
-    "object/" + SECOND_ID + "/" + TASK_KIND.kind + "/nightly-deploy",
+    "automation/" + SECOND_ID + "/" + TASK_KIND.kind + "/nightly-deploy",
   );
 });
 
@@ -311,7 +311,7 @@ test("a kind stands as soon as it answers, while a slower kind is still being re
   conversations.lands();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   await waitFor(() =>
-    expect(headings()).toEqual(["Threads", "Artifacts", "Tasks"]),
+    expect(headings()).toEqual(["Threads", "Artifacts", "Automations"]),
   );
 });
 
@@ -361,7 +361,7 @@ test("an unopened term lists what to do and where to go, and reads nothing", asy
   ).toEqual([
     "New chat",
     "Chat",
-    "Tasks",
+    "Automations",
     "Apps",
     "App Store",
     "Radar",

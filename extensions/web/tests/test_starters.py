@@ -23,8 +23,9 @@ from ufo_ext_web.panels import (
     Unlock,
 )
 from ufo_ext_web.starters import (
-    SLATE_DIGEST,
+    AUTOMATIONS_SLATE,
     SLATE_TOOL,
+    STARTERS_SLATE,
     CheckIn,
     RankedUnlock,
     Slate,
@@ -77,7 +78,7 @@ MEETINGS_ID = UUID("22222222-2222-4222-8222-222222222222")
 
 
 def _slate(**kw: object) -> Slate:
-    return Slate(generated_at=STAMP, prompt=SLATE_DIGEST, **kw)  # type: ignore[arg-type]
+    return Slate(generated_at=STAMP, prompt=STARTERS_SLATE.digest, **kw)  # type: ignore[arg-type]
 
 
 def _ranked(unlock: str, title: str) -> RankedUnlock:
@@ -148,12 +149,21 @@ def test_a_row_needing_nothing_is_ready_in_an_empty_workspace() -> None:
 
 def test_the_slate_is_stored_under_the_members_own_subject() -> None:
     member_id = uuid4()
-    assert starters_key(member_id).endswith(member_subject(member_id))
+    assert starters_key(STARTERS_SLATE, member_id).endswith(member_subject(member_id))
+
+
+def test_the_two_slates_are_stored_apart_under_their_own_instructions() -> None:
+    member_id = uuid4()
+    assert starters_key(AUTOMATIONS_SLATE, member_id) != starters_key(STARTERS_SLATE, member_id)
+    assert AUTOMATIONS_SLATE.digest != STARTERS_SLATE.digest
+    held = Slate(generated_at=STAMP, prompt=STARTERS_SLATE.digest)
+    assert held.fresh(STAMP, STARTERS_SLATE)
+    assert not held.fresh(STAMP, AUTOMATIONS_SLATE)
 
 
 def test_a_reply_recording_no_call_raises_rather_than_settling_an_empty_slate() -> None:
     with pytest.raises(ValueError, match="record_slate"):
-        settle_slate(_reply(TextBlock(text="here are some ideas")), STAMP)
+        settle_slate(_reply(TextBlock(text="here are some ideas")), STAMP, STARTERS_SLATE)
 
 
 def test_one_unusable_entry_drops_without_taking_the_slate_with_it() -> None:
@@ -168,6 +178,7 @@ def test_one_unusable_entry_drops_without_taking_the_slate_with_it() -> None:
             )
         ),
         STAMP,
+        STARTERS_SLATE,
     )
     assert [entry.unlock for entry in slate.ranked] == ["pr-babysitter", "runway-report"]
 
@@ -183,12 +194,13 @@ def test_an_entry_naming_no_catalog_row_drops() -> None:
             )
         ),
         STAMP,
+        STARTERS_SLATE,
     )
     assert [entry.unlock for entry in slate.ranked] == ["inbox-triage"]
 
 
 def test_an_unusable_check_in_leaves_the_slate_without_one() -> None:
-    slate = settle_slate(_reply(_call(ranked=[], check_in={"title": "x"})), STAMP)
+    slate = settle_slate(_reply(_call(ranked=[], check_in={"title": "x"})), STAMP, STARTERS_SLATE)
     assert slate.check_in is None
 
 
@@ -391,18 +403,18 @@ async def test_a_failed_generation_answers_what_is_held_and_then_stands_down(db:
     with ws(workspace_id):
         first = await _cache(member_id, good).read()
         assert first is not None
-        await _backdate(store, starters_key(member_id), "generated_at", 31)
-        aged = await store.get(starters_key(member_id))
+        await _backdate(store, starters_key(STARTERS_SLATE, member_id), "generated_at", 31)
+        aged = await store.get(starters_key(STARTERS_SLATE, member_id))
 
         answered = await _cache(member_id, bad).read()
         assert bad.calls == 1
         assert answered is not None
         assert answered.ranked == first.ranked
-        assert await store.get(starters_key(member_id)) == aged
+        assert await store.get(starters_key(STARTERS_SLATE, member_id)) == aged
 
         await _cache(member_id, bad).read()
         assert bad.calls == 1
-        assert await store.get(claim_key(member_id)) is None
+        assert await store.get(claim_key(STARTERS_SLATE, member_id)) is None
 
 
 async def test_a_refusing_balance_generates_nothing(db: None) -> None:

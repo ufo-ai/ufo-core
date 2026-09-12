@@ -2,7 +2,6 @@ import { useSyncExternalStore } from "react";
 
 import {
   BUILDER_HASH,
-  TASK_TABS,
   HOME_CONNECTORS_LANE,
   HOME_NEW_LANE,
   agentHash,
@@ -14,11 +13,10 @@ import {
   newChatHash,
   parseHash,
   sectionHash,
-  tasksHash,
+  automationsHash,
   workspaceHash,
   type PlaceStep,
   type Route,
-  type TaskTab,
   type Section,
   type WorkspacePlace,
   type WorkspaceTab,
@@ -253,13 +251,12 @@ export function placeAgent(place: WorkspacePlace, step: PlaceStep): void {
   );
 }
 
-export function placeTasks(view: TaskTab, place: WorkspacePlace, step: PlaceStep): void {
-  const seen = heldRoute();
-  stepPlace(step, seen.kind === "tasks" && seen.view === view, () => tasksHash(view, place));
+export function placeAutomations(place: WorkspacePlace, step: PlaceStep): void {
+  stepPlace(step, heldRoute().kind === "automations", () => automationsHash(place));
 }
 
-export function openTasks(): void {
-  navigate(tasksHash(TASK_TABS[0]));
+export function openAutomations(): void {
+  navigate(automationsHash());
 }
 
 export function placeWorkspace(view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep): void {

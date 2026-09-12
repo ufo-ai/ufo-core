@@ -102,7 +102,13 @@ from ufo_ext_web.panels import (
     offered_models,
 )
 from ufo_ext_web.shell import SHELL_UNSUPPORTED_MESSAGE
-from ufo_ext_web.starters import SLATE_DIGEST, RankedUnlock, Slate, starters_key
+from ufo_ext_web.starters import (
+    AUTOMATIONS_SLATE,
+    STARTERS_SLATE,
+    RankedUnlock,
+    Slate,
+    starters_key,
+)
 from ufo_ext_web.surface import (
     DEFAULT_APP_SETUP_ASK,
     LANES_SHELL_FLAG,
@@ -9322,7 +9328,7 @@ async def test_starters_offer_an_unconfigured_app_until_one_setup_offer_is_accep
     account = await _seed_account(workspace_id, code, member_id, "github")
     slate = Slate(
         generated_at=datetime.now(UTC),
-        prompt=SLATE_DIGEST,
+        prompt=STARTERS_SLATE.digest,
         ranked=(
             RankedUnlock(
                 unlock="pr-babysitter",
@@ -9333,7 +9339,9 @@ async def test_starters_offer_an_unconfigured_app_until_one_setup_offer_is_accep
         ),
     )
     with ws(workspace_id):
-        await web_extension().store.put(starters_key(member_id), slate.model_dump(mode="json"))
+        await web_extension().store.put(
+            starters_key(STARTERS_SLATE, member_id), slate.model_dump(mode="json")
+        )
 
     offered = await client.get("/surface/web/workspace/starters", headers=cookie)
     assert offered.json()["starters"] == [
@@ -9350,6 +9358,49 @@ async def test_starters_offer_an_unconfigured_app_until_one_setup_offer_is_accep
     await _grant_account(workspace_id, code, account)
     configured = await client.get("/surface/web/workspace/starters", headers=cookie)
     assert configured.json()["starters"] == []
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_automation_cards_draw_the_rows_whose_accounts_the_workspace_holds(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    slate = Slate(
+        generated_at=datetime.now(UTC),
+        prompt=AUTOMATIONS_SLATE.digest,
+        ranked=(
+            RankedUnlock(
+                unlock="runway-report",
+                title="Runway",
+                line="Reports the runway left every Monday.",
+                ask="Report my runway every Monday.",
+            ),
+            RankedUnlock(
+                unlock="competitor-watch",
+                title="Competitors",
+                line="Reads the open web each morning.",
+                ask="Read the open web for me each morning.",
+            ),
+        ),
+    )
+    with ws(workspace_id):
+        await web_extension().store.put(
+            starters_key(AUTOMATIONS_SLATE, member_id), slate.model_dump(mode="json")
+        )
+
+    answered = await client.get("/surface/web/workspace/automations", headers=cookie)
+    assert answered.json() == {
+        "heroes": [
+            {
+                "mark": "wedjat",
+                "line": "Reads the open web each morning.",
+                "ask": "Read the open web for me each morning.",
+            }
+        ]
+    }
 
 
 @pytest.mark.usefixtures("database_url")

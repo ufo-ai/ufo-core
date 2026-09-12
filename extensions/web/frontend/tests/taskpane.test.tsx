@@ -146,6 +146,7 @@ test("the schedule pill names the cadence and writes the cron the pick stands fo
     "Daily",
     "Weekdays",
     "Weekly",
+    "Monthly",
     "Custom",
   ]);
   expect(

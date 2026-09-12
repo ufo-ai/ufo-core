@@ -25,7 +25,7 @@ import {
   routeIs,
   sectionHash,
   standing,
-  tasksHash,
+  automationsHash,
   workspaceHash,
   type PlaceStep,
   type WorkspacePlace,
@@ -125,6 +125,7 @@ test("a workspace tab and a section carry their place and parse back to it", () 
     face: "table",
     scope: "mine",
     range: "7d",
+    runs: "older",
     opens: [OLDER_KEY],
   };
   expect(parseHash(workspaceHash("memory", place))).toEqual({
@@ -195,15 +196,26 @@ test("an address naming an inherited property of an object names no workspace ta
   expect(parseHash("#/constructor")).toEqual({ kind: "bad-link" });
 });
 
-test("each tasks tab answers at its own address, and the workspace holds none of them", () => {
-  expect(parseHash("#/tasks/runs")).toEqual({ kind: "tasks", view: "runs", place: {} });
-  expect(parseHash("#/tasks/scheduled?q=nightly")).toEqual({
-    kind: "tasks",
-    view: "scheduled",
-    place: { q: "nightly" },
+test("the automations screen is one address, carrying both its list pages and its open lane", () => {
+  expect(parseHash("#/automations")).toEqual({ kind: "automations", place: {} });
+  expect(parseHash("#/automations?after=page2&runs=older")).toEqual({
+    kind: "automations",
+    place: { after: "page2", runs: "older" },
   });
-  expect(tasksHash("triggers", { q: "github" })).toBe("#/tasks/triggers?q=github");
-  expect(parseHash("#/workspace/tasks")).toEqual({ kind: "bad-link" });
+  expect(automationsHash({ opens: ["run/a/" + OLDER_KEY], runs: "older" })).toBe(
+    "#/automations?runs=older&open=run%2Fa%2F" + OLDER_KEY,
+  );
+  expect(automationsHash({ opens: ["automation/a/scheduled_task/nightly"] })).toBe(
+    "#/automations?open=automation%2Fa%2Fscheduled_task%2Fnightly",
+  );
+  expect(
+    automationsHash({
+      opens: ["automation/a/scheduled_task/nightly", "object/a/scheduled_task/nightly"],
+    }),
+  ).toBe(
+    "#/automations?open=automation%2Fa%2Fscheduled_task%2Fnightly%7Eobject%2Fa%2Fscheduled_task%2Fnightly",
+  );
+  expect(parseHash("#/workspace/automations")).toEqual({ kind: "bad-link" });
 });
 
 test("a conversation slot has a builder, and it writes the address its own read takes", () => {

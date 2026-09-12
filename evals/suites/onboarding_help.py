@@ -391,22 +391,22 @@ CASES = (
         samples=3,
         digest_tag="onboarding:inspect-schedules-and-triggers",
         rubric=(
-            "The answer says the Tasks app lists scheduled tasks and source triggers.",
+            "The answer says the Automations screen lists scheduled tasks and source triggers.",
             "The answer does not claim it performed a create, change, pause, or delete action.",
         ),
     ),
     CapabilityCase(
         "manage-existing-work",
-        "Are Tasks and Radar read-only, or can I pause a schedule and rebuild the Radar entries "
-        "there?",
+        "Are Automations and Radar read-only, or can I pause a schedule and rebuild the Radar "
+        "entries there?",
         corpus_scorer("capabilities.md"),
         samples=3,
         digest_tag="onboarding:manage-existing-work",
         rubric=(
-            "The answer says Tasks can pause or resume a scheduled task.",
-            "The answer says Tasks rows can be edited or deleted.",
+            "The answer says Automations can pause or resume a scheduled task.",
+            "The answer says an automation row can be edited or deleted.",
             "The answer says Radar can rebuild its entries.",
-            "The answer does not call Tasks or Radar read-only.",
+            "The answer does not call Automations or Radar read-only.",
         ),
     ),
     CapabilityCase(

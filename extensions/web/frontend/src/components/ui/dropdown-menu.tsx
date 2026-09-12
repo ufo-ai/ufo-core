@@ -14,8 +14,12 @@ export const DropdownMenuSub = DropdownMenuPrimitive.Sub;
 /** A set of DropdownMenuRadioItem rows of which one is chosen — a sort, an order. */
 export const DropdownMenuRadioGroup = DropdownMenuPrimitive.RadioGroup;
 
+/** A menu is as tall as the room the popper measured and scrolls inside it: an hour picker holds
+ *  twenty-four rows, and a menu that states no height draws them past the edge of the page. */
 const POPUP =
-  "z-10 flex min-w-(--container-menu) origin-(--radix-dropdown-menu-content-transform-origin) flex-col gap-px rounded-menu border border-edge bg-popover text-popover-foreground p-sm [box-shadow:var(--shadow-raised)] animate-raise";
+  "z-10 flex max-h-(--radix-dropdown-menu-content-available-height) min-w-(--container-menu) origin-(--radix-dropdown-menu-content-transform-origin) flex-col gap-px overflow-y-auto rounded-menu border border-edge bg-popover text-popover-foreground p-sm [box-shadow:var(--shadow-raised)] animate-raise";
+
+const EDGE_GAP = 8;
 
 const ITEM =
   "flex h-(--size-row) cursor-default select-none items-center justify-between gap-sm rounded-control p-sm text-ui outline-none data-[highlighted]:bg-fill";
@@ -61,6 +65,7 @@ function Tick() {
 export function DropdownMenuContent({
   className,
   sideOffset = 4,
+  collisionPadding = EDGE_GAP,
   container,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.Content> & {
@@ -72,6 +77,7 @@ export function DropdownMenuContent({
       <DropdownMenuPrimitive.Content
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
+        collisionPadding={collisionPadding}
         className={cn(POPUP, className)}
         {...props}
       />
@@ -120,6 +126,7 @@ export function DropdownMenuSubTrigger({
 export function DropdownMenuSubContent({
   className,
   sideOffset = 4,
+  collisionPadding = EDGE_GAP,
   container,
   ...props
 }: ComponentProps<typeof DropdownMenuPrimitive.SubContent> & {
@@ -131,6 +138,7 @@ export function DropdownMenuSubContent({
       <DropdownMenuPrimitive.SubContent
         data-slot="dropdown-menu-sub-content"
         sideOffset={sideOffset}
+        collisionPadding={collisionPadding}
         className={cn(POPUP, className)}
         {...props}
       />

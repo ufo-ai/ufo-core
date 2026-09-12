@@ -368,6 +368,10 @@ export function objectIndex(kind: unknown, objects: unknown[], next: string | nu
   return json({ ...(kind as object), objects, next_cursor: next });
 }
 
+export function automationsIndex(objects: unknown[], next: string | null = null) {
+  return json({ kinds: [TASK_KIND, TRIGGER_KIND], objects, next_cursor: next });
+}
+
 export function owned(row: object, agent = AGENT) {
   return { ...row, agent_id: agent.id, agent_name: agent.name };
 }

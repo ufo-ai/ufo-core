@@ -29,8 +29,7 @@ import {
   AGENTS_HASH,
   HOME_HASH,
   STORE_HASH,
-  TASK_TABS,
-  tasksHash,
+  automationsHash,
   SECTIONS,
   newChatHash,
   sectionHash,
@@ -71,7 +70,7 @@ function places(
 ): { label: string; hash: string; icon: TablerIcon }[] {
   return [
     { label: "Chat", hash: HOME_HASH, icon: IconMessage },
-    { label: "Tasks", hash: tasksHash(TASK_TABS[0]), icon: IconClockPlay },
+    { label: "Automations", hash: automationsHash(), icon: IconClockPlay },
     ...(surfaces.apps ? [{ label: "Apps", hash: AGENTS_HASH, icon: IconApps }] : []),
     ...(surfaces.apps && surfaces["app-store"]
       ? [{ label: "App Store", hash: STORE_HASH, icon: IconBuildingStore }]

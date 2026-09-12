@@ -10,12 +10,9 @@ export const WORKSPACE_TABS = [
   "billing",
 ] as const;
 
-export const TASK_TABS = ["runs", "scheduled", "triggers"] as const;
-
 export const SECTIONS = ["wiki", "radar", "artifacts", "connectors"] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
-export type TaskTab = (typeof TASK_TABS)[number];
 export type Section = (typeof SECTIONS)[number];
 
 export const CONNECTION_TABS = ["connectors"] as const satisfies readonly Section[];
@@ -37,6 +34,7 @@ export type WorkspacePlace = {
   scope?: string;
   opens?: string[];
   range?: string;
+  runs?: string;
 };
 
 export type Route =
@@ -52,7 +50,7 @@ export type Route =
   | { kind: "new-chat"; agentId: string }
   | { kind: "agents"; build?: boolean }
   | { kind: "store" }
-  | { kind: "tasks"; view: TaskTab; place: WorkspacePlace }
+  | { kind: "automations"; place: WorkspacePlace }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "agent-setup"; agentId: string }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
@@ -116,6 +114,7 @@ const PLACE_CODEC: { [Key in PlaceKey]: PlaceField<Key> } = {
   face: text("face"),
   scope: text("scope"),
   range: text("range"),
+  runs: text("runs"),
   opens: TRACK,
 };
 
@@ -181,7 +180,7 @@ export const BUILDER_HASH = AGENTS_HASH + "/builder";
 
 export const STORE_HASH = AGENTS_HASH + "/store";
 
-const TASKS_PREFIX = "#/tasks/";
+const AUTOMATIONS_HASH = "#/automations";
 
 export const FIRST_RUN_HASH = "#/first-run";
 
@@ -269,15 +268,14 @@ const STORE = row(
   () => STORE_HASH,
 );
 
-const TASKS = row<"tasks", [TaskTab, WorkspacePlace?]>(
-  "tasks",
-  new RegExp(`^${TASKS_PREFIX}(${TAB_NAME})${PLACE_TAIL}`),
+const AUTOMATIONS = row<"automations", [WorkspacePlace?]>(
+  "automations",
+  new RegExp(`^${AUTOMATIONS_HASH}${PLACE_TAIL}`),
   (match) => {
-    const tab = TASK_TABS.find((candidate) => candidate === match[1]);
-    const place = parsePlace(match[2]);
-    return tab === undefined || !place ? null : { kind: "tasks", view: tab, place };
+    const place = parsePlace(match[1]);
+    return place && { kind: "automations", place };
   },
-  (view: TaskTab, place: WorkspacePlace = {}) => TASKS_PREFIX + view + serializePlace(place),
+  (place: WorkspacePlace = {}) => AUTOMATIONS_HASH + serializePlace(place),
 );
 
 const CHAT = row(
@@ -390,7 +388,7 @@ const ROUTES: readonly RouteReader[] = [
   BUILDER,
   STORE,
   AGENTS,
-  TASKS,
+  AUTOMATIONS,
   CHAT,
   CONVERSATION_SLOT,
   NEW_CHAT,
@@ -422,7 +420,7 @@ const FRAMED: { [Kind in RouteKind]: boolean } = {
   "first-run": false,
   agents: false,
   store: false,
-  tasks: false,
+  automations: false,
   chat: true,
   "conversation-slot": false,
   "new-chat": true,
@@ -441,7 +439,7 @@ export type Stand =
   | `agent:${string}`
   | `open:${string}`
   | "workspace"
-  | "tasks"
+  | "automations"
   | "store"
   | `section:${Section}`;
 
@@ -466,8 +464,8 @@ function stands(route: Route): Stand[] {
       return [`agent:${route.agentId}`];
     case "workspace":
       return ["workspace"];
-    case "tasks":
-      return ["tasks"];
+    case "automations":
+      return ["automations"];
     case "store":
       return ["store"];
     case "section":
@@ -508,6 +506,6 @@ export const agentHash = AGENT.write;
 export const agentSetupHash = AGENT_SETUP.write;
 export const workspaceHash = WORKSPACE.write;
 export const sectionHash = SECTION.write;
-/** The address of a tasks tab, optionally at a place. */
-export const tasksHash = TASKS.write;
+/** The address of the automations screen, optionally at a place. */
+export const automationsHash = AUTOMATIONS.write;
 export const firstRunHash = FIRST_RUN.write;

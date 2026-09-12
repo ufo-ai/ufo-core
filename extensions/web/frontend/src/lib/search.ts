@@ -9,9 +9,10 @@ import {
 
 import { slotOf, titled } from "@/kernel/objects";
 import { agentName } from "@/lib/agentName";
+import { automationId } from "@/lib/automationLane";
 import { getJson } from "@/lib/api";
 import { subject } from "@/lib/audience";
-import { chatHash, agentHash, sectionHash, tasksHash } from "@/lib/route";
+import { chatHash, agentHash, sectionHash, automationsHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
 
 export type Hit = {
@@ -131,7 +132,7 @@ export async function searchConnectors(term: string, signal: AbortSignal): Promi
   };
 }
 
-type Slot = "apps" | "conversations" | "files" | "sites" | "tasks" | "connectors";
+type Slot = "apps" | "conversations" | "files" | "sites" | "automations" | "connectors";
 
 /** A conversation search is one read per agent the member reaches, because no projection searches
  *  conversations across agents. */
@@ -163,7 +164,7 @@ export async function searchEverywhere(
       held.get("apps"),
       held.get("conversations"),
       artifacts,
-      held.get("tasks"),
+      held.get("automations"),
       held.get("connectors"),
     ]
       .filter((entry): entry is Group => entry !== undefined && entry !== null)
@@ -238,17 +239,17 @@ export async function searchEverywhere(
       ),
     ),
     lands(
-      "tasks",
+      "automations",
       group<"objects">(
-        "Tasks",
+        "Automations",
         IconClockPlay,
         TASK_KINDS.map((entry) => "/objects/" + entry.kind + query(wanted)),
         (payload, path) => {
           const kind = path.slice("/objects/".length).split("?")[0];
           return payload.objects.map((row) => ({
             key: row.agent_id + "/" + kind + "/" + row.name,
-            hash: tasksHash(kind === SCHEDULED_TASK_KIND ? "scheduled" : "triggers", {
-              opens: [slotOf({ agent: row.agent_id, kind, name: row.name })],
+            hash: automationsHash({
+              opens: [automationId({ agent: row.agent_id, kind, name: row.name })],
             }),
             primary: titled(kind, row.name, row),
             fact: TASK_KINDS.find((entry) => entry.kind === kind)?.label ?? kind,

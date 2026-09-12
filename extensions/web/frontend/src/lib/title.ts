@@ -4,7 +4,7 @@ import type { ChatRow } from "@/lib/rail";
 import { agentHash, newChatHash, workspaceHash, type Route } from "@/lib/route";
 import type { Agent, OwnedConversation } from "@/lib/types";
 import { APP_CREATOR_TITLE } from "@/lib/wizard";
-import { SECTION_VIEWS, TASK_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 
 const PRODUCT = "ufo";
 const TRAIL = " · ";
@@ -12,7 +12,7 @@ const HOME = "Home";
 const NEW_CONVERSATION = "New conversation";
 const FIRST_RUN = "Set up this workspace";
 const WORKSPACE = "Workspace";
-const TASKS = "Tasks";
+const AUTOMATIONS = "Automations";
 const APPS = "Apps";
 export const SETUP = "Set up";
 const INVALID_LINK = "Invalid link";
@@ -103,8 +103,8 @@ function where(
       return [named(route.agentId)];
     case "agent-setup":
       return [{ label: SETUP }, named(route.agentId)];
-    case "tasks":
-      return [{ label: TASK_VIEWS[route.view].label }, { label: TASKS }];
+    case "automations":
+      return [{ label: AUTOMATIONS }];
     case "workspace":
       return [{ label: WORKSPACE_VIEWS[route.view].label }, { label: WORKSPACE }];
     case "section":

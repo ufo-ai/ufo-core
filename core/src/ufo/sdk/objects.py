@@ -19,6 +19,9 @@ from ufo.host.kinds.members import (
 from ufo.host.kinds.surface_kind import (
     SURFACE_KIND as SURFACE_KIND,
 )
+from ufo.host.kinds.turns import (
+    last_fires as last_fires,
+)
 from ufo.host.kinds.workspace_kind import (
     WORKSPACE_KIND as WORKSPACE_KIND,
 )

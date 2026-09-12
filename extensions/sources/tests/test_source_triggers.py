@@ -750,6 +750,38 @@ async def test_one_trigger_watches_two_streams_and_not_a_third(db: None) -> None
         assert str(unwatched.page_id) not in turn["inbound"]
 
 
+async def test_a_stream_narrowed_trigger_reports_the_run_it_woke(db: None) -> None:
+    """The listed name spells the streams, so a fire that stamped the turn with any other name would
+    leave every stream-narrowed trigger reading as never run, however often it ran."""
+    state = await _workspace()
+    feed, tasks = await _feed_with_stream(state, stream="tasks")
+    narrowed = trigger_name(feed.name, state.conversation_id, "", ("tasks",))
+    with ws(state.workspace_id), agent(state.agent_id):
+        ctx = _context(state)
+        await _apply(ctx, _trigger_manifest(feed, state.conversation_id, streams=("tasks",)))
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        await on_page_change(
+            HookContext(
+                ext=ext,
+                payload=PageChangeBatch(
+                    changes=(_change(tasks, "# asana tasks: Ship the launch list", stream="tasks"),)
+                ),
+            )
+        )
+
+        (turn,) = await _turns(state.conversation_id)
+        assert turn["fired_by_name"] == narrowed
+        tool = _TOOLS["object_list"]
+        result = await tool.handler(
+            ctx, tool.input_model.model_validate({"kind": SOURCE_TRIGGER_KIND})
+        )
+        assert result.is_error is False
+        (row,) = json.loads(result.content[0].text)["objects"]
+
+    assert row["name"] == narrowed
+    assert row["last_run_at"] == turn["created_at"].replace(tzinfo=UTC).isoformat()
+
+
 async def test_one_conversation_watches_two_streams_of_one_connection(db: None) -> None:
     state = await _workspace()
     feed, tasks = await _feed_with_stream(state, stream="tasks")

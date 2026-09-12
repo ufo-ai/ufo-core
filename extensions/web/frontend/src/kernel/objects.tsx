@@ -571,11 +571,12 @@ function ObjectIndex({
   );
 }
 
-function NewObject({
+export function NewObject({
   schema,
   kind,
   agents,
   owner,
+  nameFrom,
   onDone,
   onClose,
 }: {
@@ -583,6 +584,7 @@ function NewObject({
   kind: string;
   agents: Agent[];
   owner: string;
+  nameFrom?: (spec: Record<string, SpecValue>) => string;
   onDone: (lane: string, envelope: unknown) => Promise<NoticeState>;
   onClose: () => void;
 }) {
@@ -593,6 +595,7 @@ function NewObject({
       kind={kind}
       name={null}
       spec={null}
+      nameFrom={nameFrom}
       lead={
         agents.length > 1 ? (
           <Field label="App" htmlFor={AGENT_FIELD}>
@@ -871,6 +874,8 @@ export type SpecEnvelope = {
   spec: Record<string, SpecValue>;
 };
 
+/** `nameFrom` is the kind whose name is not the member's to type: the panel derives it from the
+ *  spec they filled in and draws no Name field. */
 export function SpecPanel({
   schema,
   kind,
@@ -878,6 +883,7 @@ export function SpecPanel({
   spec,
   lead,
   options,
+  nameFrom,
   onDone,
   onClose,
 }: {
@@ -887,6 +893,7 @@ export function SpecPanel({
   spec: Record<string, ObjectValue> | null;
   lead?: ReactNode;
   options?: Record<string, string[] | null>;
+  nameFrom?: (spec: Record<string, SpecValue>) => string;
   onDone: (envelope: SpecEnvelope) => Promise<NoticeState>;
   onClose: () => void;
 }) {
@@ -914,7 +921,8 @@ export function SpecPanel({
       }
       if (String(held ?? "").trim()) submitted[field] = String(held).trim();
     }
-    const outcome = await onDone({ verb: "apply", kind, name: objectName.trim(), spec: submitted });
+    const asked = nameFrom === undefined ? objectName.trim() : nameFrom(submitted);
+    const outcome = await onDone({ verb: "apply", kind, name: asked, spec: submitted });
     setBusy(false);
     if (outcome.refused) {
       setNotice(outcome);
@@ -928,15 +936,17 @@ export function SpecPanel({
       <OutcomeNotice state={notice} />
       <form onSubmit={send} className="flex flex-col gap-xl">
         {lead}
-        <Field label="Name" htmlFor="object-name">
-          <Input
-            id="object-name"
-            value={objectName}
-            required={name === null}
-            disabled={name !== null}
-            onChange={(event) => setObjectName(event.target.value)}
-          />
-        </Field>
+        {nameFrom === undefined ? (
+          <Field label="Name" htmlFor="object-name">
+            <Input
+              id="object-name"
+              value={objectName}
+              required={name === null}
+              disabled={name !== null}
+              onChange={(event) => setObjectName(event.target.value)}
+            />
+          </Field>
+        ) : null}
         <FormFromSchema
           schema={schema}
           fields={fields}

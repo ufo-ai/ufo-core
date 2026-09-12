@@ -60,6 +60,7 @@ from ufo.sdk.objects import (
     ObjectRef,
     OwnedRow,
     UnknownObject,
+    last_fires,
     owner_emails,
 )
 from ufo.sdk.sources import PageChange
@@ -242,6 +243,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         member came to read is which feed wakes them and not the triple's derived name."""
         watched = await self._watched(ext)
         emails = await owner_emails(row.listed.trigger.created_by_member_id for row in watched)
+        fires = await last_fires(SOURCE_TRIGGER_KIND, tuple(row.name for row in watched))
         return tuple(
             OwnedRow(
                 name=row.name,
@@ -257,6 +259,8 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                     "resource": row.listed.trigger.resource,
                     "streams": ",".join(row.listed.trigger.streams),
                     "delivery": row.listed.trigger.delivery,
+                    "provider": row.connection.provider,
+                    "last_run_at": (None if row.name not in fires else fires[row.name].isoformat()),
                     "origin": row.listed.surface_label or "Portal",
                     "owner_email": emails.get(row.listed.trigger.created_by_member_id),
                     "mine": row.listed.trigger.created_by_member_id == member_id,
@@ -786,7 +790,8 @@ SOURCE_TRIGGER_OBJECT = ObjectKind(
         "it names, so its name derives from all of them. Delete it to stop. A private or unknown "
         "connection cannot be watched. Disconnecting the account removes every trigger on it. "
         "Listing returns `connection`, `resource`, `streams`, `delivery`, the owning "
-        "`conversation`, its creator (`owner_email`), and `origin`."
+        "`conversation`, its creator (`owner_email`), `origin`, the `provider` whose feed it "
+        "watches, and `last_run_at` — when it last woke a conversation, null until it has."
     ),
     spec_model=SourceTriggerSpec,
     store=SourceTriggerObjects(),
@@ -797,6 +802,8 @@ SOURCE_TRIGGER_OBJECT = ObjectKind(
             "resource",
             "streams",
             "delivery",
+            "provider",
+            "last_run_at",
             "origin",
             "owner_email",
             "mine",

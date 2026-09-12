@@ -7,7 +7,7 @@ import { wakeAppStatus } from "@/lib/appStatusStore";
 import { homeConversationLane, homeHash, mintHomeLane, parseHash, sectionHash } from "@/lib/route";
 import { REST_MS } from "@/views/Spotlight";
 
-import { AGENT, AGENT_ID, atPhoneWidth, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, atPhoneWidth, automationsIndex, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "";
@@ -230,7 +230,7 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
   expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]);
+  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Automations"]);
   expect(found.queryByText(/Error 500/)).toBeNull();
 
   const asked = calls.filter((url) => url.includes("q=deploy"));
@@ -360,12 +360,27 @@ test("two agents' same-named records both stand, each opening its own", async ()
   expect(rows).toHaveLength(2);
 
   await userEvent.click(rows[1]);
-  expect(location.hash.startsWith("#/tasks/scheduled")).toBe(true);
+  expect(location.hash.startsWith("#/automations")).toBe(true);
   expect(decodeURIComponent(location.hash)).toContain(
-    "object/" + SECOND_ID + "/" + TASK_KIND.kind + "/nightly-deploy",
+    "automation/" + SECOND_ID + "/" + TASK_KIND.kind + "/nightly-deploy",
   );
 });
 
+
+test("an automation hit opens that automation's Details on the screen it lands on", async () => {
+  everything({
+    "/automations": () => automationsIndex([{ ...FOUND_TASK, kind: TASK_KIND.kind }]),
+    "/workspace/automations": () => json({ heroes: [] }),
+    "/objects/turn": () => json({ objects: [], next_cursor: null }),
+  });
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  await userEvent.click(await found.findByRole("option", { name: /nightly-deploy/ }));
+
+  expect(await screen.findByRole("dialog", { name: "Details" })).toBeTruthy();
+});
 
 test("a read that fails states so under its own heading, and the others still answer", async () => {
   wire({
@@ -435,12 +450,12 @@ test("a kind that answers last still stands in its own place", async () => {
 
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Artifacts", "Tasks"]);
+  expect(headings()).toEqual(["Actions", "Artifacts", "Automations"]);
 
   conversations.lands();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
   await waitFor(() =>
-    expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]),
+    expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Automations"]),
   );
 });
 
@@ -476,7 +491,7 @@ test("the artifacts group stands on the read that landed and takes the other's h
   sites.lands();
   expect(await found.findByRole("option", { name: /deploy-board/ })).toBeTruthy();
   expect(rowsUnder("Artifacts")).toHaveLength(2);
-  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Tasks"]);
+  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Automations"]);
 });
 
 test("an empty box reads nothing at all", async () => {

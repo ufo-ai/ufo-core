@@ -273,6 +273,10 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 fields={
                     "id": str(listed.task.id),
                     "conversation": str(listed.task.conversation_id),
+                    "schedule": listed.task.schedule,
+                    "description": (
+                        listed.task.description if task_content_visible(listed, member_id) else ""
+                    ),
                     "next_run_at": listed.task.next_run_at.isoformat(),
                     "last_run_at": (
                         None
@@ -469,7 +473,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "existing task; creation requires the executor's own conversation. A fire acts as the "
         "creator and uses the creator's private connections, but "
         "recalls only the memory its reporting conversation can see (shared-only in a channel). "
-        "Listing returns each task's name, schedule, description, creator (`owner_email`), and "
+        "Listing returns each task's name, schedule, `description`, creator (`owner_email`), and "
         "`origin` — the surface label of the conversation it reports into, else `Portal` — "
         "plus the latest fire as `last_run_at` and `last_run_status`, and filters and orders on "
         "`next_run_at`, `last_run_at`, `paused`, and `mine` — order by `next_run_at` asc for "
@@ -489,6 +493,8 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         {
             "id",
             "conversation",
+            "schedule",
+            "description",
             "next_run_at",
             "last_run_at",
             "last_run_status",

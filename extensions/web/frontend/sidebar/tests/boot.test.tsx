@@ -168,7 +168,7 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Search",
     "Collapse sidebar",
     "New chat\u21e7\u2318O",
-    "Tasks",
+    "Automations",
     "Radar",
     "Artifacts",
     "Connections",
@@ -192,8 +192,8 @@ test("every nav row lands on its own portal view", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(rail.getByRole("button", { name: "Tasks" }));
-  expect(location.hash).toBe("#/tasks/runs");
+  await userEvent.click(rail.getByRole("button", { name: "Automations" }));
+  expect(location.hash).toBe("#/automations");
 
   await userEvent.click(rail.getByRole("button", { name: "Radar" }));
   await waitFor(() => expect(location.hash).toBe("#/radar"));
@@ -276,7 +276,7 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Search",
     "Collapse sidebar",
     "New chat\u21e7\u2318O",
-    "Tasks",
+    "Automations",
     "Radar",
     "Artifacts",
     "Connections",
