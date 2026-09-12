@@ -64,6 +64,21 @@ A coding subagent should not spend startup time deciding whether to clone.
 
 When the requesting message's `<context>` carries a `source`, put it in the objective too — a subagent never sees the parent's context — so a PR or issue it opens can name where the request came from.
 
+## Watching the Pull Request
+
+When the child reports a pull request, subscribe to it in the same turn. Apply a `source_trigger`
+with `object_apply`: name the shared GitHub connection, set `delivery: current`, and set `resource`
+to the pull request's URL. The trigger narrows to that one pull request and wakes this conversation
+on the changes about it — workflow runs, comments, reviews — on the streams that connection syncs.
+Leave `streams` empty so no synced stream is left out.
+
+Those wake-ups are how the pull request gets babysat to mergeable: each one names what changed, so
+read it and clear what blocks the merge.
+
+When the pull request is merged, delete that `source_trigger`. A trigger is created by an apply and
+removed by a delete, and only its creator or a workspace admin may pause or delete it. Until you
+delete it, it keeps waking the conversation.
+
 ## Connecting GitHub
 
 One connection covers GitHub whole: private `git clone` and `git push`, `gh`, and issue and pull-request reads and writes through the API all ride the member's connected GitHub account. When a clone fails to authenticate or a GitHub API call is refused, start the handoff with `connect_account` carrying `provider: github` — even when a connector listing shows no GitHub row, because the listing is not the verdict: the call either begins the handoff or names the deploy's actual gap. The member authorizes on GitHub and the connection completes itself; nothing is pasted back and no token is ever typed. Never accept a token pasted into the conversation.
