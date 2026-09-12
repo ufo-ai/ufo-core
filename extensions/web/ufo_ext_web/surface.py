@@ -2346,6 +2346,8 @@ class _TranscriptRenderer:
         if turn_id in self.agent_origin or turn_id in self.answers:
             return state
         bubble = _member_bubble(text, self.attached.get(turn_id or "", {}), slack=self.slack)
+        if state.current_turn_id is not None:
+            bubble["turn"] = state.current_turn_id
         label = None if self.speakers is None or turn_id is None else self.speakers.get(turn_id)
         if label is not None:
             bubble["speaker"] = label
@@ -2875,6 +2877,7 @@ async def _conversation_messages(
         and str(detail.turn.id) not in stated
     ):
         prompt = _member_bubble(detail.turn.inbound, member_rows, slack=slack)
+        prompt["turn"] = str(detail.turn.id)
         if (
             detail.turn.context is not None
             and detail.turn.context.sender is not None

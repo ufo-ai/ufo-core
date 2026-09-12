@@ -234,6 +234,17 @@
     }
   }
 
+  /* A run's words on arrival: the second accent deepens and lets go twice, so the eye is drawn once
+     and the transcript is left as it stood. */
+  --animate-marked: marked 0.75s var(--ease-control) 2;
+
+  @keyframes marked {
+    50% {
+      background-color: color-mix(in srgb, var(--accent-secondary) 34%, var(--bkgd-100));
+      outline-color: var(--accent-secondary);
+    }
+  }
+
   --opacity-muted: 0.6;
   --opacity-muted-strong: 0.5;
   --opacity-muted-soft: 0.7;

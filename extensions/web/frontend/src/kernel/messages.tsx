@@ -194,17 +194,38 @@ function spoken(message: Spoken) {
  *  scrolls the transcript itself, and a mark that cleared on its own scroll would never be seen. */
 const MEMBER_ACTS = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
 
-const MARKED = "rounded-panel bg-affirm outline-2 outline-affirm transition-colors";
+/** The second accent, because the first is the fill a member's own words carry: a mark in that
+ *  fill reads as a message the member sent. */
+const MARKED =
+  "rounded-panel bg-attention outline-2 outline-attention-ink" +
+  " transition-[background-color,outline-color] duration-500";
+const THROB = "animate-marked";
+const LETTING_GO = "bg-transparent outline-transparent";
 
-/** The mark is taken off `focus` rather than read from it each render, so a transcript settling
- *  under it — earlier pages landing, a turn streaming — leaves it standing until the member acts. */
-function useMarkedTurn(focus: string | null): {
-  marked: string | null;
+const MARK_HOLD_MS = 2200;
+const MARK_FADE_MS = 500;
+
+/** The mark is taken off `focus` and holds the row it first stood on, so a transcript settling
+ *  under it neither moves it, restarts it, nor cuts it short. A member's act is sooner. */
+function useMarkedTurn(
+  focus: string | null,
+  found: string | null,
+): {
+  letting: boolean;
+  markedKey: string | null;
   land: (node: HTMLDivElement | null) => void;
 } {
   const [marked, setMarked] = useState<string | null>(focus);
+  const [letting, setLetting] = useState(false);
   const scrolled = useRef<string | null>(null);
-  useEffect(() => setMarked(focus), [focus]);
+  const landed = useRef<{ turn: string; key: string } | null>(null);
+  if (marked !== null && found !== null && landed.current?.turn !== marked)
+    landed.current = { turn: marked, key: found };
+  const markedKey = landed.current?.turn === marked ? landed.current.key : null;
+  useEffect(() => {
+    setMarked(focus);
+    setLetting(false);
+  }, [focus]);
   useEffect(() => {
     if (marked === null) return;
     const clear = () => setMarked(null);
@@ -213,8 +234,20 @@ function useMarkedTurn(focus: string | null): {
       for (const act of MEMBER_ACTS) window.removeEventListener(act, clear);
     };
   }, [marked]);
+  /** The hold starts when the mark lands on a row, not when the run reaches the address: a
+   *  transcript still being read holds no row, and a mark that let go first would never be seen. */
+  useEffect(() => {
+    if (markedKey === null) return;
+    const hold = window.setTimeout(() => setLetting(true), MARK_HOLD_MS);
+    const gone = window.setTimeout(() => setMarked(null), MARK_HOLD_MS + MARK_FADE_MS);
+    return () => {
+      window.clearTimeout(hold);
+      window.clearTimeout(gone);
+    };
+  }, [markedKey]);
   return {
-    marked,
+    letting,
+    markedKey,
     land: (node) => {
       if (node === null || marked === null || scrolled.current === marked) return;
       scrolled.current = marked;
@@ -223,15 +256,32 @@ function useMarkedTurn(focus: string | null): {
   };
 }
 
-/** The key of the last reply a turn spoke on an earlier page, or null where no loaded page holds
- *  one. */
+/** The row a run is marked on: the last reply the turn spoke, else the words that woke it. A
+ *  source trigger's alert says no member is reading the run, so such a run often writes no reply. */
+function markedRow(rows: Row[], turn: string | null): number | null {
+  if (turn === null) return null;
+  let reply: number | null = null;
+  let woke: number | null = null;
+  for (const row of rows) {
+    if (row.said === undefined || row.said.turn !== turn) continue;
+    if (row.said.role === "assistant") reply = row.at;
+    else woke = row.at;
+  }
+  return reply ?? woke;
+}
+
+/** The key of a turn's own words on an earlier page, or null where no loaded page holds them. */
 function earlierKey(earlier: EarlierMessages | undefined, turn: string): string | null {
-  let key: string | null = null;
+  let reply: string | null = null;
+  let woke: string | null = null;
   for (const page of earlier?.pages ?? [])
     page.messages.forEach((said, at) => {
-      if (said.role === "assistant" && said.turn === turn) key = "h" + page.cursor + ":" + at;
+      if (said.turn !== turn) return;
+      const key = "h" + page.cursor + ":" + at;
+      if (said.role === "assistant") reply = key;
+      else woke = key;
     });
-  return key;
+  return reply ?? woke;
 }
 
 export function MessageLog({
@@ -276,18 +326,12 @@ export function MessageLog({
     ...(live ? [{ at: settled.length, live }] : []),
     ...queued.map((said, index) => ({ at: settled.length + (live ? 1 : 0) + index, said })),
   ];
-  const { marked, land } = useMarkedTurn(focus);
-  const spoke = rows.reduce<number | null>(
-    (found, row) =>
-      row.said?.role === "assistant" && row.said.turn === marked ? row.at : found,
-    null,
+  const still = useReducedMotion();
+  const spoke = markedRow(rows, focus);
+  const { letting, markedKey, land } = useMarkedTurn(
+    focus,
+    focus === null ? null : spoke === null ? earlierKey(earlier, focus) : "m" + String(spoke),
   );
-  const markedKey =
-    marked === null
-      ? null
-      : spoke === null
-        ? earlierKey(earlier, marked)
-        : "m" + String(spoke);
   const bubble = (message: Spoken, key: string, last = false) => {
     if (message.role === "error")
       return (
@@ -312,7 +356,12 @@ export function MessageLog({
         scrollAnchor={mine}
         ref={standing ? land : undefined}
         data-highlight={standing || undefined}
-        className={cn(standing && MARKED)}
+        data-letting-go={(standing && letting) || undefined}
+        className={cn(
+          standing && MARKED,
+          standing && !letting && !still && THROB,
+          standing && letting && LETTING_GO,
+        )}
       >
         <Speech mine={mine} at={message.at}>
           {message.subagents?.some((run) => run.running) ? (

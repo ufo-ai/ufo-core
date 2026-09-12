@@ -173,7 +173,8 @@ export type Message = {
   speaker?: string;
   asked?: string;
   arrival_id?: string;
-  /** The turn that wrote this reply, which is the run a member pressed in a listing of runs. */
+  /** The turn this message belongs to — the run a member presses in a listing of runs: the turn
+   *  that wrote a reply, and the turn the words that woke it founded. */
   turn?: string;
   events?: ActivityEvent[];
   subagents?: SubagentRun[];

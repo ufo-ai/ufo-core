@@ -214,7 +214,7 @@ the theme, both colour schemes and every width at once, and a shape built beside
 
 - **`agentHash`** — The address of an agent's screen at a place.
 - **`agentSetupHash`** — The address of an agent's setup screen.
-- **`chatHash`** — The address of one conversation, optionally at a slot.
+- **`chatHash`** — The address of one conversation, optionally at a slot, at a report, or at the run whose own words the transcript stands on.
 - **`conversationSlotHash`** — The address of one slot in a conversation.
 - **`firstRunHash`** — The address of the first run, at a step or at its welcome.
 - **`homeHash`** — The address of the workspace home at a place.

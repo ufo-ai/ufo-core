@@ -4353,3 +4353,235 @@ test("a run whose words a turn spoke twice is marked on the words that closed it
   expect(marked()!.textContent).toContain(RAN);
   expect(document.querySelectorAll("[data-highlight]")).toHaveLength(1);
 });
+
+const WOKE = "GitHub: 2 pages changed.";
+
+test("a run whose turn wrote no reply is marked on the words that woke it", () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "user", text: WOKE, turn: TURN_ID },
+          { role: "user", text: "And this one?", turn: ARRIVAL_ID },
+          { role: "assistant", text: "A later run.", turn: ARRIVAL_ID },
+        ]}
+        focus={TURN_ID}
+      />
+    </TranscriptScroll>,
+  );
+
+  expect(marked()!.textContent).toContain(WOKE);
+  expect(document.querySelectorAll("[data-highlight]")).toHaveLength(1);
+});
+
+test("a run that wrote a reply is marked on the reply, not on the words that woke it", () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  render(
+    <TranscriptScroll>
+      <MessageLog
+        messages={[
+          { role: "user", text: WOKE, turn: TURN_ID },
+          { role: "assistant", text: RAN, turn: TURN_ID },
+        ]}
+        focus={TURN_ID}
+      />
+    </TranscriptScroll>,
+  );
+
+  expect(marked()!.textContent).toContain(RAN);
+  expect(marked()!.textContent).not.toContain(WOKE);
+});
+
+test("the mark is the attention accent, never the fill a member's own words carry", () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  render(
+    <TranscriptScroll>
+      <MessageLog messages={[{ role: "assistant", text: RAN, turn: TURN_ID }]} focus={TURN_ID} />
+    </TranscriptScroll>,
+  );
+
+  const mark = marked()!.className;
+  expect(mark).toContain("bg-attention");
+  expect(mark).toContain("outline-attention-ink");
+  expect(mark).not.toContain("bg-said");
+  expect(mark).not.toContain("bg-affirm");
+});
+
+function markOnly() {
+  return render(
+    <TranscriptScroll>
+      <MessageLog messages={[{ role: "assistant", text: RAN, turn: TURN_ID }]} focus={TURN_ID} />
+    </TranscriptScroll>,
+  );
+}
+
+test("the mark throbs once, holds, then fades and lets the words go", async () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    markOnly();
+
+    expect(marked()!.className).toContain("animate-marked");
+    expect(marked()!.getAttribute("data-letting-go")).toBeNull();
+
+    await act(() => vi.advanceTimersByTimeAsync(2_200));
+
+    expect(marked()!.getAttribute("data-letting-go")).toBe("true");
+    expect(marked()!.className).not.toContain("animate-marked");
+    expect(marked()!.className).toContain("bg-transparent");
+
+    await act(() => vi.advanceTimersByTimeAsync(500));
+
+    expect(marked()).toBeNull();
+    expect(screen.getByText(RAN)).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a member who asks for less motion gets the hold and the fade with no throb", async () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  vi.stubGlobal("matchMedia", (media: string) => ({
+    media,
+    matches: media.includes("prefers-reduced-motion"),
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  }));
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    markOnly();
+
+    expect(marked()!.className).not.toContain("animate-marked");
+
+    await act(() => vi.advanceTimersByTimeAsync(2_200));
+
+    expect(marked()!.getAttribute("data-letting-go")).toBe("true");
+
+    await act(() => vi.advanceTimersByTimeAsync(500));
+
+    expect(marked()).toBeNull();
+  } finally {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
+test("a transcript settling under the mark neither restarts it nor holds it open", async () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { rerender } = render(
+      <TranscriptScroll>
+        <MessageLog
+          messages={[{ role: "assistant", text: RAN, turn: TURN_ID }]}
+          focus={TURN_ID}
+          live={liveTurn()}
+        />
+      </TranscriptScroll>,
+    );
+
+    await act(() => vi.advanceTimersByTimeAsync(2_000));
+
+    rerender(
+      <TranscriptScroll>
+        <MessageLog
+          messages={[
+            { role: "assistant", text: RAN, turn: TURN_ID },
+            { role: "assistant", text: "The next run.", turn: ARRIVAL_ID },
+          ]}
+          focus={TURN_ID}
+        />
+      </TranscriptScroll>,
+    );
+
+    await act(() => vi.advanceTimersByTimeAsync(200));
+
+    expect(marked()!.getAttribute("data-letting-go")).toBe("true");
+
+    await act(() => vi.advanceTimersByTimeAsync(500));
+
+    expect(marked()).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a reply landing for a marked run keeps the mark on the words it first stood on", async () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { rerender } = render(
+      <TranscriptScroll>
+        <MessageLog
+          messages={[{ role: "user", text: WOKE, turn: TURN_ID }]}
+          focus={TURN_ID}
+          live={liveTurn()}
+        />
+      </TranscriptScroll>,
+    );
+
+    expect(marked()!.textContent).toContain(WOKE);
+
+    await act(() => vi.advanceTimersByTimeAsync(1_000));
+
+    rerender(
+      <TranscriptScroll>
+        <MessageLog
+          messages={[
+            { role: "user", text: WOKE, turn: TURN_ID },
+            { role: "assistant", text: RAN, turn: TURN_ID },
+          ]}
+          focus={TURN_ID}
+        />
+      </TranscriptScroll>,
+    );
+
+    expect(marked()!.textContent).toContain(WOKE);
+    expect(marked()!.textContent).not.toContain(RAN);
+    expect(document.querySelectorAll("[data-highlight]")).toHaveLength(1);
+
+    await act(() => vi.advanceTimersByTimeAsync(2_700));
+
+    expect(marked()).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a run pressed while the transcript is still read is marked when its words land", async () => {
+  vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const { rerender } = render(
+      <TranscriptScroll>
+        <MessageLog messages={[]} focus={TURN_ID} />
+      </TranscriptScroll>,
+    );
+
+    await act(() => vi.advanceTimersByTimeAsync(4_000));
+
+    rerender(
+      <TranscriptScroll>
+        <MessageLog messages={[{ role: "assistant", text: RAN, turn: TURN_ID }]} focus={TURN_ID} />
+      </TranscriptScroll>,
+    );
+
+    expect(marked()!.textContent).toContain(RAN);
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+
+    await act(() => vi.advanceTimersByTimeAsync(2_200));
+
+    expect(marked()!.getAttribute("data-letting-go")).toBe("true");
+
+    await act(() => vi.advanceTimersByTimeAsync(500));
+
+    expect(marked()).toBeNull();
+  } finally {
+    vi.useRealTimers();
+  }
+});

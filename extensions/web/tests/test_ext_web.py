@@ -5987,7 +5987,12 @@ def test_a_members_bubble_carries_what_they_attached_rather_than_the_note() -> N
         turn_ids=frozenset({str(turn_id)}),
         attached={str(turn_id): {"lights.gif": attached}},
     )
-    assert rendered[0] == {"role": "user", "text": "what are these", "files": [attached]}
+    assert rendered[0] == {
+        "role": "user",
+        "text": "what are these",
+        "turn": str(turn_id),
+        "files": [attached],
+    }
     assert rendered[1] == {"role": "assistant", "text": "a lamp", "turn": str(turn_id)}
 
 
@@ -6006,11 +6011,13 @@ def test_a_slack_members_bubble_states_their_words_as_markdown() -> None:
     assert _rendered_messages(spoken, turn_ids=turns, slack=True)[0] == {
         "role": "user",
         "text": "**ship it** by ~~friday~~",
+        "turn": str(turn_id),
         "markdown": True,
     }
     assert _rendered_messages(spoken, turn_ids=turns)[0] == {
         "role": "user",
         "text": "*ship it* by ~friday~",
+        "turn": str(turn_id),
     }
 
 
@@ -6046,12 +6053,14 @@ def test_a_slack_members_bubble_draws_the_files_the_fence_delivered() -> None:
     ] == {
         "role": "user",
         "text": "what is this",
+        "turn": str(turn_id),
         "markdown": True,
         "files": [drawn],
     }
     assert _rendered_messages(_spoken(""), turn_ids=turns, attached=rows, slack=True)[0] == {
         "role": "user",
         "text": "",
+        "turn": str(turn_id),
         "markdown": True,
         "files": [drawn],
     }
@@ -6107,6 +6116,7 @@ def test_a_slack_members_bubble_draws_the_emoji_their_shortcode_named() -> None:
     assert _rendered_messages(spoken, turn_ids=frozenset({str(turn_id)}), slack=True)[0] == {
         "role": "user",
         "text": "ship it \U0001f604 not `:tada:`",
+        "turn": str(turn_id),
         "markdown": True,
     }
 
@@ -6126,6 +6136,7 @@ def test_a_portal_comment_on_a_slack_conversation_stays_the_characters_typed() -
     assert _rendered_messages(typed, turn_ids=frozenset({str(turn_id)}), slack=True)[0] == {
         "role": "user",
         "text": "*ship it* by ~friday~",
+        "turn": str(turn_id),
     }
 
 
@@ -6196,7 +6207,12 @@ def test_a_bubble_and_its_reply_each_carry_the_moment_they_landed() -> None:
         answered_at={str(turn_id): "2026-09-09T09:00:12+00:00"},
     )
     assert rendered == [
-        {"role": "user", "text": "what time", "at": "2026-09-09T09:00:00+00:00"},
+        {
+            "role": "user",
+            "text": "what time",
+            "turn": str(turn_id),
+            "at": "2026-09-09T09:00:00+00:00",
+        },
         {
             "role": "assistant",
             "text": "just gone nine",
@@ -6221,7 +6237,7 @@ def test_a_transcript_without_turn_moments_carries_no_stamp() -> None:
         turn_ids=frozenset({str(turn_id)}),
     )
     assert rendered == [
-        {"role": "user", "text": "what time"},
+        {"role": "user", "text": "what time", "turn": str(turn_id)},
         {"role": "assistant", "text": "just gone nine", "turn": str(turn_id)},
     ]
 
@@ -6245,13 +6261,32 @@ def test_every_reply_names_the_turn_that_wrote_it() -> None:
     )
 
     assert [(message["role"], message["text"], message.get("turn")) for message in rendered] == [
-        ("user", "digest", None),
+        ("user", "digest", str(first)),
         ("assistant", "Working on it.", str(first)),
-        ("user", "and tags", None),
+        ("user", "and tags", str(first)),
         ("assistant", "Nothing changed overnight.", str(first)),
-        ("user", "thanks", None),
+        ("user", "thanks", str(second)),
         ("assistant", "Any time.", str(second)),
     ]
+
+
+def test_a_run_that_wrote_no_reply_is_found_by_the_words_that_woke_it() -> None:
+    """A source trigger's alert tells the run no member is reading it, so a run that found nothing
+    the member needs writes no reply and the projection has no reply to name the turn on. The words
+    that woke the run name it instead, so pressing that run still lands on the run's own words."""
+    woken = uuid4()
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {woken}\n</context>\nGitHub: 2 pages changed.",
+            ),
+            Message(role="assistant", content=""),
+        ),
+        turn_ids=frozenset({str(woken)}),
+    )
+
+    assert rendered == [{"role": "user", "text": "GitHub: 2 pages changed.", "turn": str(woken)}]
 
 
 def test_a_message_folded_into_a_turn_draws_its_own_attachment() -> None:
@@ -6291,8 +6326,18 @@ def test_a_message_folded_into_a_turn_draws_its_own_attachment() -> None:
         turn_ids=frozenset({str(turn_id)}),
         attached={str(turn_id): {"opener.pdf": opener, "folded.png": folded}},
     )
-    assert rendered[0] == {"role": "user", "text": "first", "files": [opener]}
-    assert rendered[1] == {"role": "user", "text": "second", "files": [folded]}
+    assert rendered[0] == {
+        "role": "user",
+        "text": "first",
+        "turn": str(turn_id),
+        "files": [opener],
+    }
+    assert rendered[1] == {
+        "role": "user",
+        "text": "second",
+        "turn": str(turn_id),
+        "files": [folded],
+    }
 
 
 def test_a_member_bubble_older_than_the_row_reads_its_files_off_the_note() -> None:
@@ -6318,6 +6363,7 @@ def test_a_member_bubble_older_than_the_row_reads_its_files_off_the_note() -> No
     assert rendered[0] == {
         "role": "user",
         "text": "what are these",
+        "turn": str(turn_id),
         "files": [
             {
                 "id": None,
@@ -10844,7 +10890,12 @@ async def test_the_transcript_states_when_each_message_landed(
         {key: value for key, value in message.items() if key != "summary"}
         for message in read.json()["messages"]
     ] == [
-        {"role": "user", "text": "what time", "at": admitted.isoformat()},
+        {
+            "role": "user",
+            "text": "what time",
+            "turn": str(turn_id),
+            "at": admitted.isoformat(),
+        },
         {
             "role": "assistant",
             "text": "just gone nine",
@@ -12139,7 +12190,7 @@ def test_projection_keeps_the_bubble_for_what_a_member_spoke() -> None:
         frozenset(),
     )
     assert rendered == [
-        {"role": "user", "text": "ask a subagent for a joke"},
+        {"role": "user", "text": "ask a subagent for a joke", "turn": spoken},
         {"role": "assistant", "text": "Handing that off.", "turn": spoken},
     ]
 
@@ -12192,7 +12243,7 @@ def test_a_bubble_reads_as_the_members_words_out_of_the_surface_fence() -> None:
         frozenset(),
     )
     assert rendered == [
-        {"role": "user", "text": "give me three variants on this tweet storm"},
+        {"role": "user", "text": "give me three variants on this tweet storm", "turn": spoken},
         {"role": "assistant", "text": "Here are three.", "turn": spoken},
     ]
 
@@ -12215,9 +12266,14 @@ def test_a_bubble_names_its_speaker_exactly_where_the_read_names_one() -> None:
         {theirs: "Mel Okafor (m@example.com)"},
     )
     assert rendered == [
-        {"role": "user", "text": "ship it", "speaker": "Mel Okafor (m@example.com)"},
+        {
+            "role": "user",
+            "text": "ship it",
+            "turn": theirs,
+            "speaker": "Mel Okafor (m@example.com)",
+        },
         {"role": "assistant", "text": "Shipping.", "turn": theirs},
-        {"role": "user", "text": "hold on"},
+        {"role": "user", "text": "hold on", "turn": mine},
         {"role": "assistant", "text": "Holding.", "turn": mine},
     ]
 
@@ -12430,6 +12486,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
     assert own.json()["messages"][-2] == {
         "role": "user",
         "text": "and a blog post",
+        "turn": str(running),
         "markdown": True,
         "asked": "A blog post too?",
     }
