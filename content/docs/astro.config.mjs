@@ -1,5 +1,6 @@
 import starlight from "@astrojs/starlight";
 import { defineConfig } from "astro/config";
+import starlightBlog from "starlight-blog";
 
 // One build serves both doors, so every canonical and the sitemap name production. The testing door
 // is the same bytes under testing.ufo.ai, which keeps that copy out of the index by pointing at
@@ -16,6 +17,7 @@ export default defineConfig({
       },
       description: "Learn how to use ufo, connect your tools, automate work, and manage your workspace.",
       customCss: ["./src/styles/brand.css"],
+      plugins: [starlightBlog({ prefix: "blog", rss: false })],
       // The code theme carries hexes of its own, and the house style admits no colour that is not a
       // token. The mono face already comes from `--sl-font-mono`.
       expressiveCode: {

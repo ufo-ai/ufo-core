@@ -91,23 +91,23 @@ module "testing" {
 }
 
 module "docs_prod" {
-  source = "../../modules/docs"
+  source = "../../modules/site"
 
   name       = "ufo-docs"
   hostname   = "ufo.ai"
   dist       = local.docs_dist
-  routes     = ["/docs", "/docs/*", "/_astro/*", "/pagefind/*", "/sitemap-*"]
+  routes     = ["/blog", "/blog/*", "/docs", "/docs/*", "/_astro/*", "/pagefind/*", "/sitemap-*"]
   zone_id    = data.cloudflare_zone.ufo_ai.id
   account_id = data.cloudflare_zone.ufo_ai.account.id
 }
 
 module "docs_testing" {
-  source = "../../modules/docs"
+  source = "../../modules/site"
 
   name       = "ufo-docs-testing"
   hostname   = "testing.ufo.ai"
   dist       = local.docs_dist
-  routes     = ["/docs", "/docs/*", "/_astro/*", "/pagefind/*", "/sitemap-*"]
+  routes     = ["/blog", "/blog/*", "/docs", "/docs/*", "/_astro/*", "/pagefind/*", "/sitemap-*"]
   zone_id    = data.cloudflare_zone.ufo_ai.id
   account_id = data.cloudflare_zone.ufo_ai.account.id
 }

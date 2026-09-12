@@ -239,6 +239,10 @@ case "$URL" in
     [ "$BAD_DOCS_URL" != "$URL" ] || { printf 'wrong\\n'; exit; }
     printf '<h1>How ufo works</h1>\\n'
     ;;
+  */blog/)
+    [ "$BAD_BLOG_URL" != "$URL" ] || { printf 'wrong\\n'; exit; }
+    printf '<h1>Blog</h1>\\n'
+    ;;
   */)
     [ "$BAD_ROOT_HOST" != "$HOST" ] || { printf 'wrong\\n'; exit; }
     printf '  Sign up: https://ufo.ai/join/ufo\\n'
@@ -633,7 +637,7 @@ def _check_pull_request_plans_active_deployment_inputs() -> None:
         r"terraform_plan_guard\.py|"
         r"production_prerequisites\.sh))$|"
         r"infra/(production_secrets|testing_secrets)\.py$|"
-        r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge|docs)|templates)/)"
+        r"infra/(production-access|envs/(testing|prod|edge)|modules/(platform|edge|site)|templates)/)"
     )
     script = selector["run"]
     assert isinstance(script, str)
@@ -1572,6 +1576,7 @@ def test_edge_deploys_are_isolated(
     environment = {
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "BAD_HOST": "",
+        "BAD_BLOG_URL": "",
         "BAD_FLEET_HOST": "",
         "BAD_DOCS_URL": "",
         "BAD_LEGAL_PATH": "",
@@ -1584,7 +1589,7 @@ def test_edge_deploys_are_isolated(
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], check=True, env=environment)
     invoked = calls.read_text().splitlines()
-    assert len(invoked) == 13
+    assert len(invoked) == 14
     assert [call.rsplit(" ", 1)[-1] for call in invoked] == [
         f"https://{host}/",
         f"https://{host}/",
@@ -1594,6 +1599,7 @@ def test_edge_deploys_are_isolated(
         f"https://{host}/login",
         f"https://{host}/v1/onboard/ufo",
         f"https://{host}/docs/getting-started/introduction/",
+        f"https://{host}/blog/",
         f"https://{host}/ufo",
         f"https://{host}/fleet",
         f"https://{host}/privacy",
@@ -1625,6 +1631,14 @@ def test_edge_deploys_are_isolated(
     )
     assert failed.returncode != 0
     environment["BAD_DOCS_URL"] = ""
+    environment["BAD_BLOG_URL"] = f"https://{host}/blog/"
+    failed = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", script],
+        capture_output=True,
+        env=environment,
+    )
+    assert failed.returncode != 0
+    environment["BAD_BLOG_URL"] = ""
     environment["BAD_ROOT_HOST"] = host
     failed = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", script],

@@ -1,9 +1,9 @@
 {
-  "name": "ufo-docs",
+  "name": "ufo-content",
   "private": true,
   "packageManager": "pnpm@11.24.0",
   "type": "module",
-  "description": "The member documentation served under ufo.ai/docs.",
+  "description": "The Starlight documentation and blog served under ufo.ai.",
   "scripts": {
     "dev": "node brand.mjs && astro dev",
     "build": "node brand.mjs && astro build",
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@astrojs/starlight": "0.42.0",
-    "astro": "7.3.2"
+    "astro": "7.3.2",
+    "starlight-blog": "0.29.0"
   }
 }

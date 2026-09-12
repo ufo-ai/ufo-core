@@ -121,10 +121,14 @@ test("every canonical names production, so the testing door is never the indexed
   }
 });
 
-test("every documentation page is under the documentation path", () => {
+test("documentation and blog pages stay under their paths", () => {
   assert.ok(built.has("/docs/"));
+  assert.ok(built.has("/blog/"));
   assert.deepEqual(
-    [...built.keys()].filter((route) => route !== NOT_FOUND && !route.startsWith("/docs/")),
+    [...built.keys()].filter(
+      (route) =>
+        route !== NOT_FOUND && !route.startsWith("/docs/") && !route.startsWith("/blog/"),
+    ),
     [],
   );
 });
