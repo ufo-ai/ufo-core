@@ -2467,6 +2467,27 @@ class ExtensionContext:
                 )
         return present.uid
 
+    async def remove_source(self, source_id: UUID) -> None:
+        """The inverse of `register_source`: drop one live source row and, by cascade, the pages it
+        landed — the one act that stops a row syncing a dataset whose registration should no longer
+        stand, leaving every other row of the connection exactly as it is. The registrar uses it to
+        take away a stream its connector release stopped marking canonical; a connection never loses
+        its whole feed this way, and disconnecting the account remains `GrantStore.disconnect`.
+
+        Fails loud on an unknown row in this workspace, so a caller is never told a feed was
+        withdrawn that was already gone."""
+        async with workspace_tx() as connection:
+            removed = (
+                await connection.execute(
+                    sa.delete(tables.source).where(
+                        tables.source.c.uid == source_id,
+                        tables.source.c.workspace_id == self.store.workspace_id,
+                    )
+                )
+            ).rowcount
+        if removed != 1:
+            raise ValueError(f"no source {source_id} in this workspace")
+
     async def sources(self, backend: str | None = None) -> tuple[SourceRecord, ...]:
         """This workspace's registered sources, optionally narrowed to one backend — the read half
         of `register_source`, scoped exactly as it is."""

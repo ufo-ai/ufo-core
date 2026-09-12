@@ -24,8 +24,9 @@ nothing until the member names it, which the next tick reads. A connector that d
 reads through broker tool executions instead, so its empty `base_url` is its whole address and its
 rows land with the connection like a fixed-host provider's.
 
-Nothing marks a connection done, because the rows are the record: a stream a later connector release
-marks canonical reaches accounts that already sync. Each stream's first sync reaches back as far as
+Nothing marks a connection done, because the rows are the record in both directions: a stream a
+later connector release marks canonical reaches accounts that already sync, and a stream a release
+stops marking canonical leaves them. Each stream's first sync reaches back as far as
 the connection's `backfill_days` asks, and where it asks nothing, as far as the stream declares.
 Raising that window re-pins the rows it now reaches further back and refetches them; lowering it
 leaves them where they are, because the pages between the two floors would otherwise be stranded —
@@ -88,6 +89,7 @@ class ConnectedSources:
             if connector_cls.dials_host and not (connector_cls.base_url or connection.base_url):
                 continue
             streams = {stream.name: stream for stream in connector_cls().streams()}
+            await self._retire(connection, streams, live)
             await self._create(connection, streams, live)
             await self._rewindow(connection, streams, live)
 
@@ -129,6 +131,36 @@ class ConnectedSources:
         connected = {connection.provider for connection in connections}
         for provider in sorted((CONNECTORS.keys() - connected) & keyed):
             await self.ext.register_connection(provider)
+
+    async def _retire(
+        self,
+        connection: FeedConnection,
+        streams: dict[str, StreamSpec],
+        live: tuple[SourceRecord, ...],
+    ) -> None:
+        """A stream a later connector release stops marking canonical leaves the connections that
+        already sync it, so the rows are the record in both directions of a release: the one that
+        adds a stream and the one that withdraws it reach a connection registered long ago alike.
+
+        Only a row this provider registered for a stream it no longer declares canonical is
+        removed, and it is removed rather than parked, because the rows are the record of what a
+        connection carries: a row left inert would be found by the next registration of that stream
+        and read as a feed the member asked for. Its pages go with it by cascade, and a
+        `source_trigger` narrowed to that stream stops being woken by it, while every other row of
+        the connection — and every trigger on one — is left exactly as it is.
+
+        A row of another backend names no stream (a gbrain origin's config is a repository, not a
+        stream) and is never a row this registrar looks at, so it is passed over."""
+        for record in live:
+            if record.connection_id != connection.id or record.backend != connection.provider:
+                continue
+            stream = record.config.get("stream")
+            if not isinstance(stream, str):
+                continue
+            declared = streams.get(stream)
+            if declared is not None and declared.canonical:
+                continue
+            await self.ext.remove_source(record.id)
 
     async def _create(
         self,

@@ -731,8 +731,194 @@ async def test_workflows_lands_its_records_from_its_own_envelope_key() -> None:
 
 
 def test_the_streams_a_run_of_the_machine_writes_about_itself_do_not_reach_memory() -> None:
-    """Actions runs, star events and contributor tallies state what GitHub states again on demand;
-    their pages land for triggers and `object_get` and derive no chunks and no facts. `workflows` is
-    the list of workflow definitions, configuration a member may want, and stays indexed."""
+    """Actions runs, check runs, commit statuses, star events and contributor tallies state what
+    GitHub states again on demand; their pages land for triggers and `object_get` and derive no
+    chunks and no facts. `workflows` is the list of workflow definitions, configuration a member may
+    want, and stays indexed."""
     unindexed = {spec.name for spec in GitHubConnector().streams() if not spec.indexed}
-    assert unindexed == {"contributor_activity", "stargazers", "workflow_runs"}
+    assert unindexed == {
+        "check_runs",
+        "commit_statuses",
+        "contributor_activity",
+        "stargazers",
+        "workflow_runs",
+    }
+
+
+def _open_pull(
+    *,
+    number: int = 7,
+    head_sha: str = "headsha",
+    updated_at: str = "2026-09-10T00:00:00Z",
+) -> dict[str, object]:
+    return {
+        "id": 700 + number,
+        "number": number,
+        "state": "open",
+        "title": f"pr {number}",
+        "updated_at": updated_at,
+        "head": {"label": "ada:feature", "ref": "feature", "sha": head_sha},
+        "base": {"label": "acme:main", "ref": "main", "sha": "basesha"},
+    }
+
+
+def _page_body(result: SyncResult) -> dict[str, object]:
+    return json.loads(result.pages[0].body.split("\n\n", 1)[1])
+
+
+async def test_check_runs_fan_out_over_the_open_pull_request_heads() -> None:
+    """A check run is published under a commit, never under the repo, so the walk enumerates the
+    repo's open pull requests and reads the ref-scoped path once per head. The record links itself
+    back with `pull_requests[].url`, the alias a trigger narrowed to that pull request matches, so a
+    check run that fails wakes the watcher the way a comment does.
+
+    The endpoint answers the same counted envelope `/actions/runs` does, so the records come out of
+    the `check_runs` key; read as a bare array it lands nothing while the link header still
+    advances."""
+    paths: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/pulls":
+            assert request.url.params.get("state") == "open"
+            return httpx.Response(200, json=[_open_pull()])
+        if request.url.path == "/repos/acme/repo1/commits/headsha/check-runs":
+            return httpx.Response(
+                200,
+                json={
+                    "total_count": 1,
+                    "check_runs": [
+                        {
+                            "id": 103,
+                            "name": "test",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "started_at": "2026-09-12T21:22:30Z",
+                            "pull_requests": [
+                                {
+                                    "number": 7,
+                                    "url": "https://api.github.com/repos/acme/repo1/pulls/7",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("check_runs", handle)
+
+    assert "/repos/acme/repo1/commits/headsha/check-runs" in paths
+    assert _refs(result) == {"check_runs/acme/repo1/103"}
+    body = _page_body(result)
+    assert body["conclusion"] == "failure"
+    assert body["pull_requests"] == [
+        {"number": 7, "url": "https://api.github.com/repos/acme/repo1/pulls/7"}
+    ]
+
+
+async def test_a_commit_status_page_is_one_per_head_and_names_its_pull_request() -> None:
+    """The combined status endpoint answers one object per ref — every context rolled into one
+    `state` — so a head is one page rather than one page per context, and a verdict flipping changes
+    that page. The record names a SHA and no pull request, so the fan-out stamps the pull request
+    whose head supplied the ref: without it a trigger narrowed to the pull request matches nothing,
+    the four alias forms being the only link a page is found by.
+
+    The repository object the endpoint repeats under every ref is dropped: its `pushed_at` moves on
+    every push to the repo and would change every open pull request's status page at once."""
+    statuses: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/pulls":
+            return httpx.Response(200, json=[_open_pull()])
+        if request.url.path == "/repos/acme/repo1/commits/headsha/status":
+            statuses.append(str(request.url))
+            return httpx.Response(
+                200,
+                json={
+                    "sha": "headsha",
+                    "state": "failure",
+                    "total_count": 2,
+                    "repository": REPO,
+                    "statuses": [
+                        {"context": "ufo review", "state": "failure"},
+                        {"context": "test", "state": "success"},
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("commit_statuses", handle)
+
+    assert len(statuses) == 1
+    assert _refs(result) == {"commit_statuses/acme/repo1/headsha"}
+    body = _page_body(result)
+    assert body["pull_request_url"] == "https://api.github.com/repos/acme/repo1/pulls/7"
+    assert body["state"] == "failure"
+    assert len(body["statuses"]) == 2
+    assert "repository" not in body
+
+
+def _mergeability_handler(
+    detail: dict[str, object], reads: list[str] | None = None
+) -> Callable[[httpx.Request], httpx.Response]:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if reads is not None:
+            reads.append(request.url.path)
+        if request.url.path == "/user/orgs":
+            return httpx.Response(200, json=[ORG])
+        if request.url.path == "/orgs/acme/repos":
+            return httpx.Response(200, json=[REPO])
+        if request.url.path == "/repos/acme/repo1/pulls":
+            return httpx.Response(200, json=[_open_pull()])
+        if request.url.path == "/repos/acme/repo1/pulls/7":
+            return httpx.Response(200, json={**_open_pull(), **detail})
+        return httpx.Response(404, json={"path": request.url.path})
+
+    return handle
+
+
+async def test_a_conflict_appearing_changes_the_pull_request_page() -> None:
+    """Mergeability is the fact a reviewer waits on and the list endpoint omits it, so each open
+    pull request of a walked page is supplemented from its own resource. It has to reach the page
+    body: a conflict appearing while neither SHA moves changes no other field, so without these two
+    the digest is identical and nobody is woken."""
+    clean = await _fetch(
+        "pull_requests", _mergeability_handler({"mergeable": True, "mergeable_state": "clean"})
+    )
+    conflicted = await _fetch(
+        "pull_requests", _mergeability_handler({"mergeable": False, "mergeable_state": "dirty"})
+    )
+
+    assert _page_body(clean)["mergeable"] is True
+    assert _page_body(clean)["mergeable_state"] == "clean"
+    assert _page_body(conflicted)["mergeable"] is False
+    assert clean.pages[0].digest != conflicted.pages[0].digest
+
+
+async def test_a_merge_test_still_computing_leaves_the_page_alone() -> None:
+    """GitHub computes mergeability lazily and answers `mergeable: null` while the background merge
+    test runs, with a `mergeable_state` that moves through its own interim values. Storing that
+    would wake a narrowed trigger for GitHub's bookkeeping rather than for the branch, so a null is
+    dropped and the two passes are one page."""
+    reads: list[str] = []
+    first = await _fetch(
+        "pull_requests",
+        _mergeability_handler({"mergeable": None, "mergeable_state": "unknown"}, reads),
+    )
+    second = await _fetch(
+        "pull_requests", _mergeability_handler({"mergeable": None, "mergeable_state": "draft"})
+    )
+
+    assert reads.count("/repos/acme/repo1/pulls/7") == 1
+    assert "mergeable" not in _page_body(first)
+    assert "mergeable_state" not in _page_body(first)
+    assert first.pages[0].digest == second.pages[0].digest

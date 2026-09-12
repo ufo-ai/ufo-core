@@ -432,6 +432,102 @@ async def test_a_stream_newly_marked_canonical_joins_a_connection_that_already_s
     assert held[0]["uid"] in {row["uid"] for row in rows}
 
 
+async def test_a_stream_a_release_stops_marking_canonical_leaves_an_existing_connection(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rows are the record in both directions. A stream a connector release marks canonical
+    joins a connection registered long ago; a stream a release stops marking canonical leaves it,
+    because a row left behind would be found by the next registration of that stream and read as a
+    feed the member asked for. Every other row of the connection is left exactly as it is."""
+    monkeypatch.setitem(CONNECTORS, WINDOWED, _WindowedConnector)
+    state = await _workspace()
+    connection_id = await _connect_without_the_hook(state, WINDOWED)
+    await _register(state)
+    retired = next(row for row in await _rows(state) if row["config"]["stream"] == "undated")
+    kept = next(row for row in await _rows(state) if row["config"]["stream"] == "dated")
+
+    monkeypatch.setitem(CONNECTORS, WINDOWED, _OneStreamFewer)
+    await _register(state)
+
+    rows = await _rows(state)
+    streams = {row["config"]["stream"] for row in rows}
+    assert retired["uid"] not in {row["uid"] for row in rows}
+    assert kept["uid"] in {row["uid"] for row in rows}
+    assert streams == {"dated", "instant"}
+    assert {row["connection_id"] for row in rows} == {connection_id}
+
+
+async def test_a_retired_stream_takes_its_pages_while_the_other_rows_stay(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retired row's pages go with it by cascade, so nothing it synced stays recallable and no
+    page-change it caused can wake a conversation again. The connection's other rows, and so the
+    triggers narrowed to their streams, are untouched: the reconcile looks only at the one row."""
+    monkeypatch.setitem(CONNECTORS, WINDOWED, _WindowedConnector)
+    state = await _workspace()
+    await _connect_without_the_hook(state, WINDOWED)
+    await _register(state)
+    retired = next(row for row in await _rows(state) if row["config"]["stream"] == "undated")
+    kept = next(row for row in await _rows(state) if row["config"]["stream"] == "dated")
+    await _land_a_page(state, retired["uid"], stream="undated")
+    await _land_a_page(state, kept["uid"], stream="dated")
+
+    monkeypatch.setitem(CONNECTORS, WINDOWED, _OneStreamFewer)
+    await _register(state)
+
+    rows = await _rows(state)
+    assert retired["uid"] not in {row["uid"] for row in rows}
+    assert kept["uid"] in {row["uid"] for row in rows}
+    assert await _page_source_ids(state) == {kept["uid"]}
+
+
+async def _land_a_page(state: _Workspace, source_uid: UUID, *, stream: str) -> None:
+    """One synced page under a row, so the cascade and the trigger's own source are asserted on
+    durable rows rather than on the code path alone."""
+    now = datetime(2026, 8, 16, tzinfo=UTC)
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.page).values(
+                    uid=uuid7(),
+                    workspace_id=state.workspace_id,
+                    source_uid=source_uid,
+                    source_identity=f"{stream}/one",
+                    digest="d",
+                    body_ref="b",
+                    stream=stream,
+                    title="one",
+                    subject="shared",
+                    revision=1,
+                    tombstone=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+
+async def _page_source_ids(state: _Workspace) -> set[UUID]:
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            return set(
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.source_uid).where(
+                            tables.page.c.workspace_id == state.workspace_id
+                        )
+                    )
+                ).scalars()
+            )
+
+
+class _OneStreamFewer(_WindowedConnector):
+    """The same provider one release later: `undated` is no longer canonical, so the connections
+    already syncing it have to lose that row while every other stream stays put."""
+
+    def streams(self) -> list[StreamSpec]:
+        return [stream for stream in super().streams() if stream.name != "undated"]
+
+
 async def test_a_source_declaring_no_stream_leaves_a_connection_its_feeds(db: None) -> None:
     """A workspace's source rows are not all a connector's streams: a gbrain origin hangs off a
     connection of its own and its config names a repository, never a stream. The registrar reads
@@ -621,10 +717,11 @@ async def test_the_connections_window_governs_every_stream_that_takes_one(
 async def test_github_reaches_back_as_far_as_each_of_its_streams_is_read(db: None) -> None:
     """The shipped catalog's windows, asserted through the registrar rather than as declarations.
     Each is how far back that collection is worth reading against what it costs to read: a repo's
-    Actions runs only from the day the account connects, its comments a week, its pull requests a
-    month, its issues a year. The streams left unpinned read their whole history — `repositories`
-    and `workflows` are small catalogs, and `commit_comments` and `releases` answer no time filter,
-    so a cutoff on either would be honoured by nothing."""
+    comments a week, its pull requests a month, its issues a year. The streams left unpinned read
+    their whole history — `repositories` and `workflows` are small catalogs, `commit_comments` and
+    `releases` answer no time filter, so a cutoff on either would be honoured by nothing, and
+    `check_runs` and `commit_statuses` are read once per open pull request head, so the open set is
+    their bound and a date is not."""
     state = await _workspace()
     await _connect_without_the_hook(state, GITHUB)
 
@@ -633,12 +730,13 @@ async def test_github_reaches_back_as_far_as_each_of_its_streams_is_read(db: Non
     pins = _pins(await _rows(state))
     windows = {stream: pin[0] for stream, pin in pins.items()}
     assert windows == {
-        "workflow_runs": 0,
         "comments": 7,
         "review_comments": 7,
         "pull_requests": 30,
         "issues": 365,
+        "check_runs": None,
         "commit_comments": None,
+        "commit_statuses": None,
         "releases": None,
         "repositories": None,
         "workflows": None,

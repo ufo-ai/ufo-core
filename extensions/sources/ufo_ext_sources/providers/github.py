@@ -36,7 +36,12 @@ the repo boundary only, and re-walked whole on every completed pass. `workflow_r
 those that carries a floor: Actions runs outnumber every other collection a busy repo publishes, so
 the stream declares a zero-day backfill window and each repo slice sends the pinned floor as the
 Actions API's `created=>=` range. A `none` stream re-walks whole every pass, so that bound governs
-every pass, not just the first. GitHub surfaces no delete signal, so the sync runner's row-level
+every pass, not just the first. `check_runs` and `commit_statuses` fan out a second level inside the
+repo partition: GitHub publishes both under a commit ref, so each repo's open pull request heads are
+enumerated and the ref-scoped path is walked per head. `pull_requests` carries the merge test
+itself — `mergeable` and `mergeable_state` come from a per-pull-request read the list endpoint has
+no room for, so a conflict appearing against the base changes the page the way a new commit does.
+GitHub surfaces no delete signal, so the sync runner's row-level
 cursor skips already-seen rows. A grant that can't enumerate orgs at all (`/user/orgs` refused with
 a 403) can read no stream, so the walk raises `StreamSkipped` and the run records a skip, not a
 failure. The write path is
@@ -83,6 +88,7 @@ _UNTIL_STREAMS = frozenset({"commits"})
 _CREATED_FLOOR_STREAMS = frozenset({"workflow_runs"})
 _UPDATED_DESC_STREAMS = frozenset({"pull_requests"})
 WORKFLOW_RUNS_BACKFILL_WINDOW_DAYS = 0
+_MERGEABILITY_CONCURRENCY = 8
 _REPO_SKIP_STATUS = frozenset({404, 409, 410})
 _ORG_SKIP_STATUS = frozenset({403, 404, 410})
 _ORG_SCOPE_GATE_STATUS = frozenset({403})
@@ -145,8 +151,23 @@ ALL_STREAMS: list[StreamSpec] = [
     _stream("users", cursor_field=None),
     _stream("assignees", cursor_field=None),
     _stream("branches", primary_key="name", cursor_field=None),
+    _stream(
+        "check_runs",
+        cursor_field=None,
+        created_at_field="started_at",
+        canonical=True,
+        indexed=False,
+    ),
     _stream("collaborators", cursor_field=None),
     _stream("commit_comments", cursor_field="updated_at", canonical=True),
+    _stream(
+        "commit_statuses",
+        primary_key="sha",
+        cursor_field=None,
+        created_at_field=None,
+        canonical=True,
+        indexed=False,
+    ),
     _stream(
         "commits",
         primary_key="sha",
@@ -193,7 +214,6 @@ ALL_STREAMS: list[StreamSpec] = [
     _stream(
         "workflow_runs",
         cursor_field="updated_at",
-        canonical=True,
         backfill_window_days=WORKFLOW_RUNS_BACKFILL_WINDOW_DAYS,
         indexed=False,
     ),
@@ -204,9 +224,11 @@ ALL_STREAMS: list[StreamSpec] = [
 _PATHS: dict[str, str] = {
     "assignees": "/repos/{owner}/{repo}/assignees",
     "branches": "/repos/{owner}/{repo}/branches",
+    "check_runs": "/repos/{owner}/{repo}/commits/{ref}/check-runs",
     "collaborators": "/repos/{owner}/{repo}/collaborators",
     "comments": "/repos/{owner}/{repo}/issues/comments",
     "commit_comments": "/repos/{owner}/{repo}/comments",
+    "commit_statuses": "/repos/{owner}/{repo}/commits/{ref}/status",
     "commits": "/repos/{owner}/{repo}/commits",
     "contributor_activity": "/repos/{owner}/{repo}/stats/contributors",
     "deployments": "/repos/{owner}/{repo}/deployments",
@@ -230,6 +252,7 @@ _PATHS: dict[str, str] = {
 }
 
 _RECORD_PATHS: dict[str, str] = {
+    "check_runs": "check_runs",
     "workflow_runs": "workflow_runs",
     "workflows": "workflows",
 }
@@ -259,11 +282,17 @@ class GitHubConnector(RestConnector):
 
         The key is read as a flat field first and then as a dotted path, so a nested id scopes the
         same way a flat one does; the scoped value is written back under the declared path's own
-        name, which is where the adapter reads it."""
+        name, which is where the adapter reads it.
+
+        `commit_statuses` drops the repository object the combined endpoint repeats under every ref:
+        its `pushed_at` moves on every push to the repo, so keeping it would change every open pull
+        request's status page at once, for a fact none of them is about."""
         match stream.name:
             case "stargazers":
                 user = record.get("user")
                 shaped = {**user, **record} if isinstance(user, dict) else record
+            case "commit_statuses":
+                shaped = {key: value for key, value in record.items() if key != "repository"}
             case "pull_requests":
                 head = record.get("head")
                 base = record.get("base")
@@ -388,10 +417,15 @@ class GitHubConnector(RestConnector):
             if backfill_after is None
             else backfill_after.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         )
+        pages = (
+            partial(self._ref_pages, client, stream, path)
+            if "{ref}" in path
+            else partial(self._repo_pages, client, stream, path, floor)
+        )
         walk = PartitionWalk(
             ordering=stream.ordering,
             partitions=partial(self._repo_partitions, client),
-            pages=partial(self._repo_pages, client, stream, path, floor),
+            pages=pages,
             floor=floor,
         ).stream(cursor)
         try:
@@ -458,7 +492,6 @@ class GitHubConnector(RestConnector):
         arrives as `floor` instead — sent as the Actions API's `created=>=` range, which bounds the
         repo's runs server-side on every pass."""
         owner, _, repo = repo_key.partition("/")
-        scoped = path.format(owner=owner, repo=repo)
         params: dict[str, Any] = {"per_page": PAGE_SIZE}
         if stream.name in _STATE_ALL_STREAMS:
             params["state"] = "all"
@@ -477,28 +510,18 @@ class GitHubConnector(RestConnector):
             params |= {"sort": "updated", "direction": "desc"}
         try:
             async for page in self._paginate_link_header(
-                client, scoped, params=dict(params), record_path=_RECORD_PATHS.get(stream.name)
+                client,
+                path.format(owner=owner, repo=repo),
+                params=dict(params),
+                record_path=_RECORD_PATHS.get(stream.name),
             ):
                 if stream.name == "issues":
                     page = [record for record in page if "pull_request" not in record]
                 if not page:
                     continue
-                landed = page
-                if (
-                    stream.ordering is Ordering.newest_first
-                    and stream.name not in _UNTIL_STREAMS
-                    and (bound.before or bound.since)
-                ):
-                    before, since = bound.before, bound.since
-                    field = stream.cursor_field
-                    landed = [
-                        record
-                        for record in page
-                        if field
-                        and isinstance(record.get(field), str)
-                        and (before is None or record[field] <= before)
-                        and (since is None or record[field] >= since)
-                    ]
+                landed = _within_bound(page, stream, bound)
+                if stream.name == "pull_requests":
+                    landed = await self._with_mergeability(client, owner, repo, landed)
                 high, _ = _cursor_bounds(landed, stream.cursor_field)
                 _, low = _cursor_bounds(page, stream.cursor_field)
                 yield WalkPage(
@@ -510,6 +533,105 @@ class GitHubConnector(RestConnector):
             if error.response.status_code in _REPO_SKIP_STATUS:
                 raise PartitionSkipped(f"github: {repo_key} refused") from error
             raise
+
+    async def _ref_pages(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        path: str,
+        repo_key: str,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
+        """The other repo page factory: one repo's `{ref}` stream, fanned out once per open pull
+        request head. GitHub publishes a commit's check runs and its combined status under a ref and
+        nowhere else, so the ref is a second level of fan-out nested inside the repo partition the
+        walk checkpoints. Both streams are ordered `none` — a per-SHA collection has no cursor to
+        resume from — so the `bound` the factory is handed is always empty and the heads are
+        re-walked whole each pass, the open set being what bounds them.
+
+        Which pull request supplied the ref is known here and nowhere downstream, so this is where a
+        record carrying no link of its own is stamped with one: a combined status names a SHA, a
+        state and a context, and a page is matched to a narrowed trigger on the pull request's own
+        URL forms alone. That endpoint answers one object per ref rather than a collection, so it is
+        read whole — one page per head, not one per context."""
+        owner, _, repo = repo_key.partition("/")
+        try:
+            async for number, head_sha in self._open_pull_request_heads(client, owner, repo):
+                scoped = path.format(owner=owner, repo=repo, ref=head_sha)
+                if stream.name == "commit_statuses":
+                    status = await self._get(client, scoped)
+                    if status:
+                        yield WalkPage(
+                            records=with_context(
+                                [status],
+                                **{REPO_PARTITION_FIELD: repo_key},
+                                pull_request_url=(
+                                    f"{self.base_url}/repos/{owner}/{repo}/pulls/{number}"
+                                ),
+                            )
+                        )
+                    continue
+                async for page in self._paginate_link_header(
+                    client,
+                    scoped,
+                    params={"per_page": PAGE_SIZE},
+                    record_path=_RECORD_PATHS.get(stream.name),
+                ):
+                    if page:
+                        yield WalkPage(
+                            records=with_context(page, **{REPO_PARTITION_FIELD: repo_key})
+                        )
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _REPO_SKIP_STATUS:
+                raise PartitionSkipped(f"github: {repo_key} refused") from error
+            raise
+
+    async def _open_pull_request_heads(
+        self, client: httpx.AsyncClient, owner: str, repo: str
+    ) -> AsyncIterator[tuple[int, str]]:
+        """`(number, head sha)` per open pull request — the refs a repo's merge-blocking signals are
+        published under. A closed pull request is left out: nothing lands on its head any more, and
+        its checks are what the run that closed it already reported."""
+        async for page in self._paginate_link_header(
+            client,
+            f"/repos/{owner}/{repo}/pulls",
+            params={"per_page": PAGE_SIZE, "state": "open"},
+        ):
+            for record in page:
+                number = record.get("number")
+                head_sha = get_path(record, "head.sha")
+                if isinstance(number, int) and isinstance(head_sha, str) and head_sha:
+                    yield number, head_sha
+
+    async def _with_mergeability(
+        self, client: httpx.AsyncClient, owner: str, repo: str, page: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Merge `mergeable` and `mergeable_state` into every open pull request of a walked page, so
+        a conflict that appears or clears changes the page body and wakes whoever watches the pull
+        request. The list endpoint carries neither field — GitHub computes the merge test on the
+        single-resource read alone — so this costs one request per open pull request per pass.
+
+        A `mergeable` of null is dropped rather than stored. GitHub answers null while its
+        background merge test runs, so storing it would make one recompute two page changes and let
+        `mergeable_state` flap through its interim values; a true/false answer is a fact about the
+        branch and changes the page when it flips."""
+        semaphore = asyncio.Semaphore(_MERGEABILITY_CONCURRENCY)
+
+        async def one(record: dict[str, Any]) -> dict[str, Any]:
+            number = record.get("number")
+            if record.get("state") != "open" or not isinstance(number, int):
+                return record
+            async with semaphore:
+                detail = await self._get(client, f"/repos/{owner}/{repo}/pulls/{number}")
+            if detail.get("mergeable") is None:
+                return record
+            return {
+                **record,
+                "mergeable": detail["mergeable"],
+                "mergeable_state": detail.get("mergeable_state"),
+            }
+
+        return list(await asyncio.gather(*[one(record) for record in page]))
 
     async def _iter_user_repos(self, client: httpx.AsyncClient) -> AsyncIterator[tuple[str, str]]:
         """Yield `(owner, repo)` from granted-org repos. `/user/repos` is too broad (personal,
@@ -611,7 +733,9 @@ class GitHubConnector(RestConnector):
 def _partition_field(path: str) -> str | None:
     """The record field a path's fan-out stamps its partition into, read off the placeholders the
     path declares: a repo-scoped path is walked once per repo, an org-scoped one once per granted
-    org, and `/user/orgs` over nothing at all."""
+    org, and `/user/orgs` over nothing at all. A `{ref}` path is repo-scoped too — its per-head
+    fan-out is nested inside the repo partition rather than being one of its own, so the repo is
+    still what qualifies its records."""
     if "{repo}" in path:
         return REPO_PARTITION_FIELD
     if "{org}" in path:
@@ -641,6 +765,30 @@ def _repo_identity(
     if isinstance(repo_name, str) and repo_name and fallback_owner:
         return fallback_owner, repo_name
     return None
+
+
+def _within_bound(
+    page: list[dict[str, Any]], stream: StreamSpec, bound: PartitionBound
+) -> list[dict[str, Any]]:
+    """The records of a page a newest-first walk may land, for the streams whose API takes no time
+    filter: everything outside the resume window is dropped client-side. Every other stream lands
+    its page whole, its bound already sent as a query parameter."""
+    if (
+        stream.ordering is not Ordering.newest_first
+        or stream.name in _UNTIL_STREAMS
+        or not (bound.before or bound.since)
+    ):
+        return page
+    field = stream.cursor_field
+    before, since = bound.before, bound.since
+    return [
+        record
+        for record in page
+        if field
+        and isinstance(record.get(field), str)
+        and (before is None or record[field] <= before)
+        and (since is None or record[field] >= since)
+    ]
 
 
 def _cursor_bounds(
