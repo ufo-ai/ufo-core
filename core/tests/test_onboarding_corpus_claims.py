@@ -549,6 +549,20 @@ CLAIMS = (
         ),
     ),
     Claim(
+        claim="a source trigger's own Details pane pauses, resumes and deletes it, not chat alone",
+        corpus="references/capabilities.md",
+        phrase="its own Details pane still pauses, resumes or deletes it",
+        source=AUTOMATIONS_VIEW,
+        pattern=(
+            r"function TriggerInfo\(\{\n"
+            r"(?:.*\n){0,30}?"
+            r"\s+\{entry\.paused \? RESUME : PAUSE\}\n"
+            r"(?:.*\n){0,10}?"
+            r"\s+<ConfirmButton\n"
+            r"\s+verb=\{DELETE\}"
+        ),
+    ),
+    Claim(
         claim="the portal memory view reads saved facts and records corrections",
         corpus="references/capabilities.md",
         phrase="In Memory in the web portal, a member can read saved facts and record a correction",

@@ -20,8 +20,8 @@ Radar, Artifacts, and Automations are rows in the web portal's sidebar:
 
 These pages let the member inspect work. An automation's Details pane edits its name, instructions
 and when it runs; a scheduled task's object panel, in the settings of the app that holds it, can
-pause or resume that task and edit or delete its row. A source trigger has no such panel: the
-portal lists it and the member asks you in chat to stop or delete it.
+pause or resume that task and edit or delete its row. A source trigger has no fields to edit — what
+it watches is fixed at creation — but its own Details pane still pauses, resumes or deletes it.
 When the member asks you to change something you can change, do it in chat.
 
 ## Explaining application creation
