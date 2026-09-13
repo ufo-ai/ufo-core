@@ -90,8 +90,6 @@ from evals.suites.ufo_app_bench import (
     CONNECTED_APPS,
     CONNECTED_CASES,
     CONTROL_CASES,
-    COPY_CAPTURE_CONTENT,
-    COPY_CAPTURE_DIGEST,
     COPY_CASES,
     DESKTOP_HEIGHT,
     DESKTOP_WIDTH,
@@ -569,16 +567,6 @@ def test_app_bench_audit_builds_interactive_and_static_html() -> None:
     assert 'path==="objects/eval_app_action"' in preview
     assert 'typeof message.body==="string"?JSON.parse(message.body):message.body' in preview
     assert "localStorage.setItem(actionKey" in preview
-
-
-def test_app_copy_capture_renders_one_static_dom_without_screenshots() -> None:
-    source = COPY_CAPTURE_CONTENT.decode()
-
-    assert "await page.goto(url, { waitUntil: 'load' })" in source
-    assert "fs.writeFileSync(staticPath, await page.content())" in source
-    assert "renderedText" in source
-    assert "page.screenshot" not in source
-    assert "interactionAudit" not in source
 
 
 def _run_application_audit(
@@ -1121,10 +1109,17 @@ def test_app_bench_design_measurement_uses_painted_pixels(
     assert all(region["width"] > 0 and region["height"] > 0 for region in report["designRegions"])
 
 
-async def test_app_copy_probe_returns_the_browser_rendered_dom_and_text(tmp_path: Path) -> None:
+async def test_app_copy_probe_audits_the_application_the_turn_built(tmp_path: Path) -> None:
+    """The copy probe runs the same grader-owned audit as the bench probe, over `ufo-app`. Serving
+    whichever HTML file `/workspace` happened to hold captured the sites page shell instead, so
+    every copy report carried an empty `renderedText` and every case failed on its rendered facts
+    (2026-09-10 to 2026-09-12). It names no design SVG: the copy graders read rendered text
+    alone."""
+    captured: list[str] = []
+
     class Probe:
         async def run(self, command: str, timeout_s: int = 60) -> ProbeCommandResult:
-            assert "ufo-app-copy-capture.cjs" in command
+            captured.append(command)
             assert timeout_s == 120
             directory = tmp_path / ".eval-output" / "meeting-tasks"
             directory.mkdir(parents=True)
@@ -1136,6 +1131,11 @@ async def test_app_copy_probe_returns_the_browser_rendered_dom_and_text(tmp_path
         CapabilityOutput("", (), workspace_dir=tmp_path), Probe()
     )
 
+    command = captured[0]
+    assert "ufo-app-bench-audit.cjs" in command
+    assert "/workspace/ufo-app" in command
+    assert "http.server" not in command
+    assert "application-design.svg" not in command
     assert result.error == ""
     assert result.artifacts == (
         SharedArtifact("meeting-tasks-static.html", b"<main>Rendered</main>"),
@@ -2504,13 +2504,11 @@ def test_copy_cases_reuse_connected_prompts_fixtures_and_browser_rendering() -> 
         assert copy_case.workspace_files == connected_case.workspace_files == APP_WORKSPACE_FILES
         assert connected_case.artifact_probe == _AppBenchProbe(spec.name)
         assert copy_case.artifact_probe == _AppCopyProbe(spec.name)
-        assert "ufo-app-copy-capture.cjs" in copy_case.artifact_probe._command()
-        assert ".png" not in copy_case.artifact_probe._command()
         assert copy_case.visual_rubric == ()
         assert copy_case.artifact_rubric == ()
         assert f"wait-{UFO_APP_BENCH_WORKFLOW_WAIT_SECONDS:g}" in copy_case.digest_tag
         assert APP_DATA_DIGEST[:12] in copy_case.digest_tag
-        assert COPY_CAPTURE_DIGEST[:12] in copy_case.digest_tag
+        assert AUDIT_DIGEST[:12] in copy_case.digest_tag
 
 
 def _rendered_artifacts(name: str, text: str) -> tuple[SharedArtifact, ...]:

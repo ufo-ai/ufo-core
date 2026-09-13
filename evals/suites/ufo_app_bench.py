@@ -1,12 +1,10 @@
 """Natural app requests, connected source fixtures, and post-turn browser proof."""
 
 import asyncio
-import base64
 import fcntl
 import json
 import os
 import re
-import shlex
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -110,8 +108,6 @@ from ufo.sdk.context import ScopedStore
 
 APPLICATION_PUBLISHED_COMPONENTS = APPLICATION_KIT_COMPONENTS | APPLICATION_BLOCK_COMPONENTS
 
-COPY_CAPTURE_CONTENT = Path(__file__).with_name("ufo_app_copy_capture.cjs").read_bytes()
-COPY_CAPTURE_DIGEST = sha256(COPY_CAPTURE_CONTENT).hexdigest()
 APP_INDEX_CONTENT = (
     files("ufo_ext_app_wiki").joinpath("skills/app-wiki-home/index.html").read_bytes()
 )
@@ -184,7 +180,6 @@ APP_WORKSPACE_FILES = (
 )
 APP_DESIGN_PATH = f"{APP_WORKSPACE_ROOT}/application-design.svg"
 PROBE_OUTPUT = ".eval-output"
-PROBE_PORT = 8137
 PROBE_TIMEOUT_SECONDS = 120
 DOCKER_INSPECT_TIMEOUT_SECONDS = 10
 DOCKER_OWNERSHIP_TIMEOUT_SECONDS = 30
@@ -1471,6 +1466,13 @@ class _AppSetupProbe:
 
 @dataclass(frozen=True)
 class _AppCopyProbe:
+    """The copy cases' capture: the same grader-owned audit the bench cases run, over the
+    application the turn built. Hunting `/workspace` for an HTML file and serving it statically
+    captured the sites page shell instead — an empty `#root` under the title `Wiki` — so every copy
+    report carried `renderedText: ""` and every case failed on its rendered facts (three sweeps,
+    2026-09-10 to 2026-09-12). It takes no design path: the copy graders read rendered text alone,
+    and requiring the SVG would lose the copy verdict to a missing design."""
+
     name: str
 
     async def __call__(
@@ -1479,7 +1481,14 @@ class _AppCopyProbe:
         if output.workspace_dir is None:
             return ArtifactProbeResult(error="app copy probe has no workspace")
         directory = output.workspace_dir / PROBE_OUTPUT / self.name
-        result = await probe.run(self._command(), PROBE_TIMEOUT_SECONDS)
+        audit = app_audit(
+            name=self.name,
+            output_dir=f"/workspace/{PROBE_OUTPUT}/{self.name}",
+            project=APP_WORKSPACE_ROOT,
+            design_path=None,
+            compile_source=False,
+        )
+        result = await probe.run(audit.command, PROBE_TIMEOUT_SECONDS)
         if result.exit_code != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "no command output"
             return ArtifactProbeResult(error=f"app copy probe failed: {detail[:500]}")
@@ -1496,54 +1505,6 @@ class _AppCopyProbe:
                 SharedArtifact(path.name, content)
                 for path, content in zip(paths, contents, strict=True)
             )
-        )
-
-    def _command(self) -> str:
-        directory = f"/workspace/{PROBE_OUTPUT}/{self.name}"
-        capture = base64.b64encode(COPY_CAPTURE_CONTENT).decode()
-        find_page = """python3 - <<'PY'
-from pathlib import Path
-
-root = Path('/workspace')
-excluded = {'.eval-output', 'node_modules'}
-pages = [
-    path
-    for path in root.rglob('*.html')
-    if not excluded.intersection(path.parts) and path.is_file()
-]
-pages.sort(key=lambda path: (path.name == 'index.html', path.stat().st_mtime), reverse=True)
-if pages:
-    print(pages[0])
-PY
-"""
-        readiness = f"""python3 - <<'PY'
-import socket
-import time
-
-deadline = time.time() + 15
-while time.time() < deadline:
-    try:
-        with socket.create_connection(('127.0.0.1', {PROBE_PORT}), timeout=1):
-            raise SystemExit(0)
-    except OSError:
-        time.sleep(0.2)
-raise SystemExit(1)
-PY"""
-        return (
-            "set -eu\n"
-            f"capture={shlex.quote(directory)}\n"
-            'rm -rf "$capture"\n'
-            'mkdir -p "$capture"\n'
-            f"printf %s {shlex.quote(capture)} | base64 -d > /tmp/ufo-app-copy-capture.cjs\n"
-            f"page=$({find_page})\n"
-            'if [ -z "$page" ]; then printf %s "no generated HTML page" >&2; exit 2; fi\n'
-            f"(fuser -k {PROBE_PORT}/tcp 2>/dev/null || true)\n"
-            f"nohup python3 -m http.server {PROBE_PORT} --bind 127.0.0.1 "
-            ' --directory "$(dirname "$page")" >/tmp/ufo-app-copy-server.log 2>&1 &\n'
-            f"{readiness}\n"
-            "node /tmp/ufo-app-copy-capture.cjs "
-            f'http://localhost:{PROBE_PORT}/$(basename "$page") '
-            f'"$capture/{self.name}-static.html" "$capture/{self.name}-audit.json"'
         )
 
 
@@ -2424,7 +2385,7 @@ COPY_CASES = tuple(
         ),
         digest_tag=(
             f"ufo-app-copy:{spec.name}:source-use-and-reader-copy:actions:"
-            f"wait-{WORKFLOW_WAIT_SECONDS:g}:capture-{COPY_CAPTURE_DIGEST[:12]}:"
+            f"wait-{WORKFLOW_WAIT_SECONDS:g}:capture-{AUDIT_DIGEST[:12]}:"
             f"data-{APP_DATA_DIGEST[:12]}"
         ),
         artifact_probe=_AppCopyProbe(spec.name),
