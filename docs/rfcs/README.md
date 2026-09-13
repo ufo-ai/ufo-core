@@ -45,7 +45,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0045](0045-open-agent-module.md) | Open agent module — two repos, one internal RPC | proposed |
 | [0048](0048-cubesandbox-carrier.md) | CubeSandbox carrier — self-hosted microVM sandboxes on AWS | proposed |
 | [0049](0049-selfhosted-inference.md) | Self-hosted inference for the agent fleet — GLM-5.3-Flash and DeepSeek-V4.1-Flash on AWS | proposed |
-| [0050](0050-prefetch-rag.md) | Adaptive prefetch RAG — retrieve both corpora before the first model round | implemented |
+| [0050](0050-prefetch-rag.md) | Prefetch RAG — retrieve both corpora before the first model round | implemented |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working

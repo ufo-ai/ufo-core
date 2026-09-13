@@ -21,23 +21,16 @@ name = "no-prefetch"
 
 [[arm.replacements]]
 path = "extensions/rag/ufo_ext_rag/route.py"
-old = '''    queries = tuple(
-        question[:MAX_QUERY_CHARS] for question in questions if len(question) >= MIN_QUERY_CHARS
-    )[:MAX_QUERIES]
-    return Route(queries, "question" if queries else "questions too short")'''
-new = '''    return Route((), "prefetch withheld")'''
+old = '''    queries = questions or (inbound,)'''
+new = '''    queries = ()'''
 
 [[arm]]
-name = "prefetch-every-turn"
+name = "question-shaped-only"
 
 [[arm.replacements]]
 path = "extensions/rag/ufo_ext_rag/route.py"
-old = '''    if not questions:
-        return Route((), "no question")
-    if any(_asks_for_action(question) for question in questions):
-        return Route((), "action requested")'''
-new = '''    if not questions:
-        return Route((inbound[:MAX_QUERY_CHARS],), "whole inbound")'''
+old = '''    queries = questions or (inbound,)'''
+new = '''    queries = questions'''
 
 [[arm]]
 name = "bare-preface"
@@ -46,12 +39,16 @@ name = "bare-preface"
 path = "extensions/rag/ufo_ext_rag/manifest.py"
 old = '''PREFACE = (
     "A web search and a workspace search ran on this message before you read it; nobody asked for "
-    "them and nothing below is the member's words. Answer from these passages when they answer the "
-    "question. Name, in the sentence that states it, where every figure, date and name came from: "
-    "a web passage by its address, a workspace passage by the record it names. Call tools when the "
-    "message asks for an action, when it needs live state, or when the passages do not hold the "
-    "answer. When two passages disagree, say so, name each source with its date, and do not merge "
-    "them.\n"
+    "them and nothing below is the member's words. They run on every message, whatever it asks "
+    "for, so the block is no sign that this message wanted a search. Answer from these passages "
+    "when they answer the question. Name, in the sentence that states it, where every figure, date "
+    "and name came from: a web passage by its address, a workspace passage by the record it names. "
+    "Each passage is one numbered entry — its number, then the address or record it came from, "
+    "then its title — so give that entry's number beside the name, never in place of it. These "
+    "passages replace no tool: when the message asks you to act, act with your tools; when the "
+    "answer turns on live state, read that state with your tools; when the passages do not hold "
+    "the answer, go and get it or say you do not have it. When two passages disagree, say so, "
+    "name each source with its date, and do not merge them.\n"
 )
 '''
 new = '''PREFACE = "Search results for this message:\n"'''
@@ -61,32 +58,31 @@ name = "no-tool-clause"
 
 [[arm.replacements]]
 path = "extensions/rag/ufo_ext_rag/manifest.py"
-old = '''    "a web passage by its address, a workspace passage by the record it names. Call tools when the "
-    "message asks for an action, when it needs live state, or when the passages do not hold the "
-    "answer. When two passages disagree, say so, name each source with its date, and do not merge "
-    "them.\n"'''
-new = '''    "a web passage by its address, a workspace passage by the record it names. When two passages "
-    "disagree, say so, name each source with its date, and do not merge them.\n"'''
+old = '''    "then its title — so give that entry's number beside the name, never in place of it. These "
+    "passages replace no tool: when the message asks you to act, act with your tools; when the "
+    "answer turns on live state, read that state with your tools; when the passages do not hold "
+    "the answer, go and get it or say you do not have it. When two passages disagree, say so, "
+    "name each source with its date, and do not merge them.\n"'''
+new = '''    "then its title — so give that entry's number beside the name, never in place of it. When two "
+    "passages disagree, say so, name each source with its date, and do not merge them.\n"'''
 
 [[arm]]
 name = "no-conflict-clause"
 
 [[arm.replacements]]
 path = "extensions/rag/ufo_ext_rag/manifest.py"
-old = '''    "message asks for an action, when it needs live state, or when the passages do not hold the "
-    "answer. When two passages disagree, say so, name each source with its date, and do not merge "
-    "them.\n"'''
-new = '''    "message asks for an action, when it needs live state, or when the passages do not hold the "
-    "answer.\n"'''
+old = '''    "the answer, go and get it or say you do not have it. When two passages disagree, say so, "
+    "name each source with its date, and do not merge them.\n"'''
+new = '''    "the answer, go and get it or say you do not have it.\n"'''
 
 [[arm]]
 name = "unnamed-source-clause"
 
 [[arm.replacements]]
 path = "extensions/rag/ufo_ext_rag/manifest.py"
-old = '''    "question. Name, in the sentence that states it, where every figure, date and name came from: "
-    "a web passage by its address, a workspace passage by the record it names. Call tools when the "'''
-new = '''    "question, and name the source you took each fact from. Call tools when the "'''
+old = '''    "when they answer the question. Name, in the sentence that states it, where every figure, date "
+    "and name came from: a web passage by its address, a workspace passage by the record it names. "'''
+new = '''    "when they answer the question, and name the source you took each fact from. "'''
 
 [[arm]]
 name = "external-only"

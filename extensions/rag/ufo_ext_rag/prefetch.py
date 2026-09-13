@@ -51,16 +51,19 @@ class Passage:
     """One retrieved piece of text with the provenance a reply cites it by."""
 
     origin: Origin
-    label: str
+    title: str
+    reference: str
     dated: str
     text: str
 
     @property
     def key(self) -> str:
-        return f"{self.label}\x00{self.text}"
+        return f"{self.reference}\x00{self.text}"
 
-    def rendered(self) -> str:
-        head = f"[{self.origin}] {self.label}"
+    def rendered(self, number: int) -> str:
+        """The numbered entry a reply cites: the number, the reference the reader opens — a web
+        address or a workspace record ref — then the title the reply names the source by."""
+        head = f"[{number}] {self.reference} — {self.title}"
         return f"{head} ({self.dated})\n{self.text}" if self.dated else f"{head}\n{self.text}"
 
 
@@ -84,7 +87,10 @@ class Prefetch:
         )
         if not chosen:
             return ""
-        return wall(WALL_SOURCE, "\n\n".join(passage.rendered() for passage in chosen))
+        return wall(
+            WALL_SOURCE,
+            "\n\n".join(passage.rendered(number) for number, passage in enumerate(chosen, start=1)),
+        )
 
     async def _legs(
         self, queries: tuple[str, ...], reader: SourceReader
@@ -115,7 +121,8 @@ class Prefetch:
         return tuple(
             Passage(
                 origin=EXTERNAL_LABEL,
-                label=f"{hit.title} — {hit.url}",
+                title=hit.title,
+                reference=hit.url,
                 dated=hit.published_date or "",
                 text=chunk.text[:PASSAGE_MAX_CHARS],
             )
@@ -137,7 +144,8 @@ class Prefetch:
     def _page_passage(hit: PageHit) -> Passage:
         return Passage(
             origin=INTERNAL_LABEL,
-            label=f"{hit.title} — {hit.ref}",
+            title=hit.title,
+            reference=hit.ref,
             dated="",
             text=hit.text[:PASSAGE_MAX_CHARS],
         )

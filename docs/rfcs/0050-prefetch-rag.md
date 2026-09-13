@@ -1,18 +1,18 @@
 ---
 rfc: 0050
-title: "Adaptive prefetch RAG — retrieve both corpora before the first model round"
+title: "Prefetch RAG — retrieve both corpora before the first model round"
 status: implemented
 date: 2026-09-19
 ---
 
-# Adaptive prefetch RAG
+# Prefetch RAG
 
 > A member who asks a factual question pays two model rounds for the answer: one round calls a
 > search tool, one round reads its result. The deploy already holds both retrieval seams at boot —
 > the selected web backend and the workspace's own index — so this RFC spends them once, in
 > parallel, on the `user_prompt_submit` hook, and folds what they found into the founding message.
-> The router decides per inbound whether retrieval is worth it, the two legs fuse by reciprocal
-> rank, and the block is rendered inside the untrusted wall. Every constant that shapes a model's
+> The router prefetches on every member message and decides only what is searched for, the two legs
+> fuse by reciprocal rank, and the block is rendered inside the untrusted wall. Every constant that shapes a model's
 > reading of the block is an arm in `evals/rag-prefetch-routing.toml`.
 
 ## Current state
@@ -47,28 +47,37 @@ hosted packs.
 
 ### The router
 
-Retrieving on every turn is the failure this design starts from: an instruction to send an email is
-answered by tools, and a retrieved block in front of it only competes with the work. Adaptive
-retrieval — decide per query whether to retrieve — is the published answer.
-[Self-RAG](https://arxiv.org/abs/2310.11511) trains the model to emit a retrieve/no-retrieve
-reflection token; [Adaptive-RAG](https://arxiv.org/abs/2403.14403) routes by question complexity;
-[FLARE](https://arxiv.org/abs/2305.06983) retrieves only when the generation's own confidence
-drops. All three report the same thing: the decision is what keeps the quality while cutting the
-retrieval cost.
+The router prefetches on every member message (`route.py:72`). It decides what is searched for, not
+whether to search.
 
-This router (`route.py:121`) is a read of the text, not a model call. The prefetch exists to save a
-round trip, and a classifier round trip spends exactly what it saves. The published decision
-procedures assume a retrieval budget spread across a generation; this one has a 5-second hook
-deadline and one shot before the first token.
+Adaptive retrieval — decide per query whether to retrieve — is the published answer, and it is what
+this router did first. [Self-RAG](https://arxiv.org/abs/2310.11511) trains the model to emit a
+retrieve/no-retrieve reflection token; [Adaptive-RAG](https://arxiv.org/abs/2403.14403) routes by
+question complexity; [FLARE](https://arxiv.org/abs/2305.06983) retrieves only when the generation's
+own confidence drops. All three spend a model's own judgement on the decision. This hook cannot:
+the prefetch exists to save a round trip, a classifier round trip spends exactly what it saves, and
+the whole budget is a 5-second hook deadline and one shot before the first token. What was left was
+a read of the text — a `?`, an interrogative opener, a 12-character floor — and that read refused
+real questions. `s&p close` carries no question mark, no opener and nine characters, and reached no
+provider at all; a member reported exactly that on the testing cluster.
+
+The two costs are not symmetric. Refusing a real question costs the turn its grounding, and the
+member reads a worse answer. Retrieving for an instruction costs one block the preface tells the
+model to step past, inside a deadline that is bounded whatever the legs do. So the gate is gone,
+and the action turn is guarded by the preface clause instead — measured by the `no-tool-clause` arm
+and by `R05-action-still-uses-tools` and `R06-request-phrased-as-a-question`.
 
 | inbound | decision |
 |---|---|
-| ends in `?`, or opens with a question word | prefetch, one query per question, at most 3 |
-| second-person request (`can you`, `please`) whose next two words hold an action verb | refuse |
-| no question segment | refuse |
-| under 12 or over 2,000 characters | refuse |
+| holds question segments | one query per question, at most 3 |
+| holds none | one query, the message as it stands |
+| no content after stripping | refuse |
+| over 2,000 characters | refuse |
 
-The refusal reason is logged as `rag.route`, so a routing decision is legible per turn.
+A message over `MAX_INBOUND_CHARS` is a pasted document. Sending it verbatim is not a search — the
+provider is handed thousands of characters of the member's own text, which matches nothing and
+spends the turn's retrieval budget — and finding the ask inside the paste needs the model call this
+hook runs before. The decision is logged as `rag.route`, so a routing decision is legible per turn.
 
 ### Fusion
 
@@ -100,11 +109,35 @@ Each leg is bounded at 3 seconds and the handler at 4 seconds, under the chain's
 The block is text a web page controls, injected into the founding message with no member asking for
 it — the exact shape [indirect prompt injection](https://arxiv.org/abs/2302.12173) exploits. It
 renders through `wall`, so the passages arrive as data, the closing delimiter is escaped inside the
-body, and the notice states they are not instructions. The preface adds what the wall cannot say:
-nobody asked for this search, every figure, date and name carries its source in the sentence that
-states it — a web passage by its address, a workspace passage by the record it names — the model
-must still call tools for an action or for live state, and disagreeing passages are reported rather
-than merged.
+body, and the notice states they are not instructions. Inside the wall each selected passage is one
+numbered entry, numbered from 1 in the order the passages render:
+
+```
+[1] https://northwind.example/pricing — Northwind pricing (2026-02-11)
+Team plan is $30 a seat.
+
+[2] page/2f1c… — Northwind order form
+Northwind bills this workspace $24 per seat per month.
+```
+
+The number is the handle a reply cites, and the entry carries beside it the two things the prompt's
+citation rules need: the reference a reader opens — a web address, or the workspace record ref for a
+page — and the title, which is the descriptive name a citation is anchored on instead of a bare
+address. A workspace passage therefore cites exactly as a web passage does. The numbering costs the
+head of each entry and nothing else: `PASSAGE_MAX_CHARS`, `TOTAL_MAX_CHARS` and `MAX_PASSAGES` bound
+the passage text as before.
+
+The preface adds what the wall cannot say: nobody asked for this search, every figure, date and name
+carries its source in the sentence that states it — a web passage by its address, a workspace
+passage by the record it names, with the entry number beside that name and never in place of it —
+the model must still call tools for an action or for live state, and disagreeing passages are
+reported rather than merged.
+
+The number is an addition to the naming clause, not a replacement for it. A first wording that asked
+for "its number and the source in words" measured worse than the wording it replaced: over 5 samples
+it took R02-internal-fact from 5/5 to 0/5 and R05-action-still-uses-tools from 5/5 to 3/5, with
+replies citing "passage 2" or "[2]" and naming no page or record at all. A number is cheaper for a
+model to write than a name, so the clause states that the name is still owed.
 
 The attribution clause names those two forms because the looser "name the source you took each fact
 from" left two cases split: over 20 samples each it held R02-internal-fact at 11/20 and
@@ -134,7 +167,7 @@ rather than searched again, an action still reaches for tools, disagreeing sourc
 not merged, and several questions in one message are all answered.
 
 `evals/rag-prefetch-routing.toml` is the hill climb. Eight arms run beside the always-run control:
-`no-prefetch`, `prefetch-every-turn`, `bare-preface`, `no-tool-clause`, `no-conflict-clause`,
+`no-prefetch`, `question-shaped-only`, `bare-preface`, `no-tool-clause`, `no-conflict-clause`,
 `unnamed-source-clause`, `external-only`, `internal-only`. The first two bound what the router is
 worth, the next four measure each preface clause the AGENTS.md Prompts rule requires ablated —
 `unnamed-source-clause` putting the looser attribution wording back — and the last two measure each
@@ -146,15 +179,13 @@ search the preface wording against the same suite, with the ablation deciding.
 | option | why not |
 |---|---|
 | A model call to route | Spends the round trip the prefetch exists to save. |
-| Retrieve on every turn | Costs latency and context on action turns; `prefetch-every-turn` measures it. |
+| Route by question shape | Refuses what members type: `s&p close` is a factual ask with no question mark, no interrogative opener and nine characters. `question-shaped-only` measures it. |
 | Score normalization instead of RRF | Needs a shared scale across a third-party web rank and two index legs, which does not exist. |
 | A tool the model calls | Already the current state, and the two-round cost is the problem. |
 | Rerank the fused set with a cross-encoder | A second model call inside a 5-second deadline. |
 
 ## Open decisions
 
-- Whether the router should admit a statement that implies a question (`I need Northwind's price`),
-  which the current reading refuses.
 - Whether `RRF_K` should itself become an arm once the routing arms settle.
 - Whether the internal leg should read memory items beside pages, which needs the memory-search
   seam on the hook context that this change deliberately does not add.

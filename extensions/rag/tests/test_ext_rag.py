@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -5,12 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 import ufo_ext_rag.manifest as rag
 from ufo_ext_rag.pages import PageStore
-from ufo_ext_rag.prefetch import (
-    EXTERNAL_LABEL,
-    INTERNAL_LABEL,
-    TOTAL_MAX_CHARS,
-    Prefetch,
-)
+from ufo_ext_rag.prefetch import TOTAL_MAX_CHARS, Prefetch
 from ufo_ext_rag.route import route
 
 from ufo.runtime.ext.context import ExtensionContext, PageState, ScopedStore, SourceReader
@@ -187,7 +183,12 @@ def _hit(url: str, title: str, text: str, date: str | None = None) -> SearchHit:
     return SearchHit(url=url, title=title, text=text, published_date=date)
 
 
-def _turn(inbound: str, member_id: UUID | None = None, admission: str = "member") -> Turn:
+def _turn(
+    inbound: str,
+    member_id: UUID | None = None,
+    admission: str = "member",
+    parent_turn_id: UUID | None = None,
+) -> Turn:
     return Turn(
         id=uuid4(),
         workspace_id=WORKSPACE,
@@ -199,6 +200,7 @@ def _turn(inbound: str, member_id: UUID | None = None, admission: str = "member"
         created_at=datetime(2026, 3, 1, tzinfo=UTC),
         admission_source=admission,
         speaker_member_id=member_id,
+        parent_turn_id=parent_turn_id,
     )
 
 
@@ -212,25 +214,55 @@ def _ext(search: object | None, index: object | None = None) -> ExtensionContext
     )
 
 
-def _hook_ctx(ext: ExtensionContext, inbound: str, admission: str = "member") -> HookContext:
-    member_id = None if admission != "member" else uuid4()
+def _hook_ctx(
+    ext: ExtensionContext,
+    inbound: str,
+    admission: str = "member",
+    parent_turn_id: UUID | None = None,
+    spoken: bool = True,
+) -> HookContext:
+    member_id = uuid4() if spoken and admission == "member" else None
     return HookContext(
         ext=ext,
         payload=UserPromptSubmit(text=inbound),
-        turn=_turn(inbound, member_id, admission),
+        turn=_turn(inbound, member_id, admission, parent_turn_id),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         speaker_member_id=member_id,
     )
 
 
-def test_route_admits_a_question_and_refuses_an_instruction() -> None:
+def test_route_queries_every_message_whatever_its_shape() -> None:
     assert route("What does Northwind charge for the team plan?").queries == (
         "What does Northwind charge for the team plan?",
     )
-    assert route("Send Dana the signed Northwind order form.").queries == ()
-    assert route("Can you open the pull request for the retry fix?").reason == "action requested"
+    assert route("Send Dana the signed Northwind order form.").queries == (
+        "Send Dana the signed Northwind order form.",
+    )
+    assert route("Can you open the pull request for the retry fix?").prefetches
     assert route("How do I connect the Slack account?").prefetches
-    assert route("no").queries == ()
+    assert route("no").queries == ("no",)
+
+
+def test_route_sends_a_two_word_query_as_it_stands() -> None:
+    decision = route("s&p close")
+
+    assert decision.queries == ("s&p close",)
+    assert decision.reason == "message"
+
+
+@pytest.mark.parametrize("inbound", ["", "   ", "\n\n"])
+def test_route_refuses_a_message_with_no_content(inbound: str) -> None:
+    decision = route(inbound)
+
+    assert decision.queries == ()
+    assert decision.reason == "no content"
+
+
+def test_route_refuses_a_pasted_document() -> None:
+    decision = route("Northwind order form, signed 6 March 2025. " * 60)
+
+    assert decision.queries == ()
+    assert decision.reason == "too long"
 
 
 def test_route_splits_a_multi_question_inbound() -> None:
@@ -258,11 +290,32 @@ async def test_both_legs_reach_the_block_with_their_provenance() -> None:
     with ws(WORKSPACE):
         block = await prefetch.passages(("What does Northwind charge?",), READER)
 
-    assert f"[{EXTERNAL_LABEL}] Northwind pricing — {PRICING_PAGE}" in block
-    assert "2026-02-11" in block
-    assert f"[{INTERNAL_LABEL}] Northwind order form — page/{ORDER_FORM}" in block
+    assert f"[1] {PRICING_PAGE} — Northwind pricing (2026-02-11)" in block
+    assert f"[2] page/{ORDER_FORM} — Northwind order form" in block
+    assert "Team plan is $30 a seat." in block
     assert "$24 per seat" in block
     assert "<untrusted-content" in block
+
+
+async def test_the_block_numbers_every_entry_from_one() -> None:
+    prefetch = Prefetch(
+        search=StubSearch(
+            {
+                "northwind": (
+                    _hit(PRICING_PAGE, "Northwind pricing", "Team plan is $30 a seat."),
+                    _hit("https://northwind.example/support", "Support", "Support runs 9 to 5."),
+                )
+            }
+        ),
+        pages=_store({ORDER_FORM: ("Northwind order form", ORDER_FORM_BODY)}),
+    )
+    with ws(WORKSPACE):
+        block = await prefetch.passages(("What does Northwind charge?",), READER)
+
+    numbers = re.findall(r"\[(\d+)\] \S+ — ", block)
+    assert numbers == [str(number) for number in range(1, len(numbers) + 1)]
+    assert len(numbers) >= 3
+    assert "numbered entry" in rag.PREFACE
 
 
 async def test_a_failed_leg_leaves_the_other_grounding_the_turn() -> None:
@@ -282,7 +335,7 @@ async def test_a_failed_leg_leaves_the_other_grounding_the_turn() -> None:
         )
 
     assert "renews on 1 July 2026" in without_web
-    assert f"[{EXTERNAL_LABEL}]" not in without_web
+    assert PRICING_PAGE not in without_web
     assert "Renewals run annually." in without_workspace
     assert without_either == ""
 
@@ -322,7 +375,18 @@ async def test_a_passage_both_queries_return_outranks_one_only_a_single_query_re
     assert block.index("Team plan is $30 a seat.") < block.index("Support runs 9 to 5.")
 
 
-async def test_the_hook_injects_for_a_question_and_stays_out_of_an_action_turn() -> None:
+async def test_a_two_word_query_reaches_both_legs() -> None:
+    decision = route("s&p close")
+    search = RecordingSearch()
+    pages = _store({ORDER_FORM: ("Market note", "The S&P 500 closed at 6,120 on 12 September.")})
+    with ws(WORKSPACE):
+        block = await Prefetch(search=search, pages=pages).passages(decision.queries, READER)
+
+    assert search.queries == ("s&p close",)
+    assert "The S&P 500 closed at 6,120" in block
+
+
+async def test_the_hook_injects_for_every_member_turn_and_stays_out_of_an_internal_one() -> None:
     ext = _ext(
         StubSearch({"northwind": (_hit(PRICING_PAGE, "Northwind pricing", "Team plan is $30."),)})
     )
@@ -338,8 +402,34 @@ async def test_the_hook_injects_for_a_question_and_stays_out_of_an_action_turn()
     assert isinstance(asked, InjectContext)
     assert asked.text.startswith(rag.PREFACE)
     assert "Team plan is $30." in asked.text
-    assert instructed is None
+    assert isinstance(instructed, InjectContext)
+    assert instructed.text.startswith(rag.PREFACE)
     assert internal is None
+
+
+async def test_the_hook_sends_no_query_for_an_arrival_no_member_spoke() -> None:
+    search = RecordingSearch()
+    ext = _ext(search)
+    with ws(WORKSPACE):
+        child = await rag.prefetch_hook(
+            _hook_ctx(
+                ext,
+                "Read the Northwind order form and report what it bills per seat.",
+                admission="internal",
+                parent_turn_id=uuid4(),
+            )
+        )
+        fired = await rag.prefetch_hook(
+            _hook_ctx(ext, "Post the Northwind renewal digest.", admission="scheduled")
+        )
+        folded = await rag.prefetch_hook(
+            _hook_ctx(ext, "The Northwind subagent reports the order form is signed.", spoken=False)
+        )
+
+    assert child is None
+    assert fired is None
+    assert folded is None
+    assert search.queries == ()
 
 
 async def test_the_hook_drops_its_injection_when_every_leg_fails() -> None:
@@ -355,12 +445,19 @@ def test_the_manifest_declares_one_best_effort_prompt_hook() -> None:
     assert [(hook.event, hook.best_effort) for hook in hooks] == [("user_prompt_submit", True)]
 
 
-@pytest.mark.parametrize(
-    "inbound",
-    ["Book the Thursday slot with Dana.", "Please push the branch.", "ok"],
-)
-def test_no_question_no_prefetch(inbound: str) -> None:
-    assert not route(inbound).prefetches
+async def test_the_hook_calls_no_provider_for_a_message_with_no_content() -> None:
+    search = RecordingSearch()
+    with ws(WORKSPACE):
+        outcome = await rag.prefetch_hook(_hook_ctx(_ext(search), "   "))
+
+    assert outcome is None
+    assert search.queries == ()
+
+
+def test_the_preface_keeps_the_model_reaching_for_its_tools() -> None:
+    assert "These passages replace no tool" in rag.PREFACE
+    assert "act with your tools" in rag.PREFACE
+    assert "read that state with your tools" in rag.PREFACE
 
 
 async def test_the_page_leg_serves_only_pages_the_reader_may_read() -> None:
