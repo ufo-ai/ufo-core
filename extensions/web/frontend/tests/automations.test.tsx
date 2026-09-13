@@ -744,7 +744,8 @@ test("a private task another member wrote opens the acknowledgement instead of i
   location.hash = automationsHash();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  await userEvent.click(await screen.findByText("private member task"));
+  expect(await screen.findByRole("img", { name: "Private" })).toBeTruthy();
+  await userEvent.click(await screen.findByText("morning-brief"));
   const details = await screen.findByRole("dialog", { name: "Details" });
   expect(within(details).getByText(/private to owner@example.com/).textContent).toContain(
     "records your email, theirs, and the time",

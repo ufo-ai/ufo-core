@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { IconClockPlay, IconPlayerPause, IconPlus } from "@tabler/icons-react";
+import { IconClockPlay, IconLock, IconPlayerPause, IconPlus } from "@tabler/icons-react";
 
 import { Button, ConfirmButton } from "@/components/ui/button";
 import { Field, Input, Textarea } from "@/components/ui/field";
@@ -244,17 +244,17 @@ function toRun(row: IndexRow): Run {
   };
 }
 
-/** A task reads as its own words, never as the name it is filed under. */
 function taskEntry(row: IndexRow): Entry {
   const paused = row.paused === true;
+  const readable = row.readable !== false;
   return {
     agent: row.agent_id,
     kind: TASK_KIND,
     name: row.name,
-    label: said(row.description) || firstLine(said(row.prompt)) || row.name,
+    label: readable ? said(row.description) || firstLine(said(row.prompt)) || row.name : row.name,
     conversation: said(row.conversation),
     owner: said(row.owner_email),
-    readable: row.readable !== false,
+    readable,
     prompt: said(row.prompt),
     schedule: said(row.schedule),
     watching: "",
@@ -1059,6 +1059,13 @@ export function Automations({
                     <>
                       <TdFill>
                         <span className="flex min-w-0 items-center gap-sm">
+                          {!entry.readable ? (
+                            <IconLock
+                              role="img"
+                              aria-label="Private"
+                              className="size-(--size-glyph) shrink-0 text-ink-soft"
+                            />
+                          ) : null}
                           {entry.paused ? (
                             <IconPlayerPause
                               role="img"

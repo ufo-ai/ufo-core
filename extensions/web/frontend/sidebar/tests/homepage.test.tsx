@@ -380,7 +380,7 @@ test("a sidebar chat on the chat app stands in the page's column alone", async (
   );
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
-  await userEvent.click(await rail.findByRole("button", { name: /Pick one thread/ }));
+  fireEvent.click(await rail.findByRole("button", { name: /Pick one thread/ }));
 
   expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + CONVO_ID);
   const frame = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;

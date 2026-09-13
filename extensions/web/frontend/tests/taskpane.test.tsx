@@ -490,14 +490,14 @@ test("a task somebody else wrote states its prompt and refuses the keystroke", a
   expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
 });
 
-test("a task whose prompt the reader may not see states its summary instead", async () => {
+test("a task whose prompt the reader may not see states its name instead", async () => {
   wire({
     "/objects/scheduled_task/daily-brief": () =>
-      json({ ...TASK, spec: null, summary: "0 9 * * * — private member task" }),
+      json({ ...TASK, spec: null, summary: "0 9 * * * — daily-brief" }),
   });
   mount();
 
-  expect(await screen.findByText(/private member task/)).toBeTruthy();
+  expect(await screen.findByText(/daily-brief/)).toBeTruthy();
   expect(screen.queryByLabelText("Prompt")).toBeNull();
   expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
 });
@@ -508,7 +508,7 @@ test("an admin may stop or delete a private task without opening its content", a
       json({
         ...TASK,
         spec: null,
-        summary: "0 9 * * * — private member task",
+        summary: "0 9 * * * — daily-brief",
         status: {
           ...TASK.status,
           mine: false,
@@ -524,7 +524,7 @@ test("an admin may stop or delete a private task without opening its content", a
   });
   mount();
 
-  expect(await screen.findByText(/private member task/)).toBeTruthy();
+  expect(await screen.findByText(/daily-brief/)).toBeTruthy();
   expect(screen.queryByLabelText("Prompt")).toBeNull();
   expect(screen.getByRole("button", { name: "Pause" })).toHaveProperty("disabled", false);
   expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();

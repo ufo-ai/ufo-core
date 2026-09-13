@@ -413,7 +413,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     summary=(
                         _summary(listed.task)
                         if content_readable
-                        else f"{listed.task.schedule} — {PRIVATE_PROMPT}"
+                        else f"{listed.task.schedule} — {listed.task.name}"
                     ),
                     owner=_owner(listed),
                     fields={

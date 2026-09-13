@@ -2164,7 +2164,7 @@ async def test_admin_may_stop_or_delete_but_not_run_or_rewrite_a_members_task(db
     assert private_response not in admin_rendered
     [admin_row] = admin_listing["objects"]
     assert admin_row["name"] == "digest"
-    assert admin_row["summary"] == f"{DAILY_9AM} — private member task"
+    assert admin_row["summary"] == f"{DAILY_9AM} — digest"
     assert admin_row["paused"] is False
     assert admin_get["spec"] is None
     assert admin_get["status"]["last_run"] == {
@@ -2436,7 +2436,7 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
     assert admin_updated["result"] == "updated"
     [after_row] = admin_after["objects"]
     assert after_row["name"] == "digest"
-    assert after_row["summary"] == "0 17 * * 1 — private member task"
+    assert after_row["summary"] == "0 17 * * 1 — digest"
     assert after_row["paused"] is True
     assert remaining == ()
 

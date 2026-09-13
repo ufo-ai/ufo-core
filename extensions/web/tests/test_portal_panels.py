@@ -367,8 +367,8 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
 
     admin_view = await client.get(index, headers=admin_headers)
     by_name = {row["name"]: row for row in admin_view.json()["objects"]}
-    assert by_name["daily-brief"]["summary"] == "0 9 * * * — private member task"
-    assert by_name["creatorless-sweep"]["summary"] == "0 3 * * * — private member task"
+    assert by_name["daily-brief"]["summary"] == "0 9 * * * — daily-brief"
+    assert by_name["creatorless-sweep"]["summary"] == "0 3 * * * — creatorless-sweep"
     assert by_name["daily-brief"]["prompt"] == PRIVATE_PROMPT
     assert by_name["creatorless-sweep"]["prompt"] == PRIVATE_PROMPT
     assert by_name["daily-brief"]["connections"] is None
@@ -622,7 +622,7 @@ async def test_the_automations_read_hides_a_private_task_and_elides_it_for_an_ad
     (row,) = managed.json()["objects"]
     assert (row["name"], row["description"]) == ("daily-brief", "")
     assert row["prompt"] == PRIVATE_PROMPT
-    assert row["summary"] == f"0 9 * * * — {PRIVATE_PROMPT}"
+    assert row["summary"] == "0 9 * * * — daily-brief"
     assert row["mine"] is False
     assert row["readable"] is False
     read = await client.get(detail, headers=admin_headers)
