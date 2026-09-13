@@ -33,11 +33,11 @@ class EvalCaseResult(BaseModel):
     evidence: JsonObject
     excluded: bool = False
     provider_fault: bool = False
-    """Whether this case excluded on a fault the provider owns — a timeout, an overload, a 429, a
-    wait that expired on a turn the provider held — rather than on the sweep's own shape. Such a
-    fault lands on whichever case the provider happened to drop, so no list can name it ahead of
-    time: the nightly cohort gate reads this flag to tell a night of provider weather from a suite
-    that quietly stopped scoring a case."""
+    """Whether this case excluded on something no list could have named ahead of the night — a
+    timeout, an overload, a 429, or the harness's own wait expiring on a turn that was still
+    working — rather than on the sweep's own shape. Each lands on whichever case the clock or the
+    provider happened to catch: the nightly cohort gate reads this flag to tell such a night from a
+    suite that quietly stopped scoring a case."""
     tier: int | None = None
 
 
@@ -323,23 +323,25 @@ harness's own stopwatch against the model (measured on three cases of the 2026-0
 each at 300.0s wall with no transcript). Any other failure reason on a cancelled turn is
 untouched."""
 
-PROVIDER_WAIT_EXPIRY_STATUSES = frozenset({RUNNING})
-"""The one status an expired wait can be the provider's on, read off what the turn held when the
-deadline fired. Only `running` can have had the turn with the model. A turn still `queued` never
-reached a model — it sat behind our own worker backlog — and a `parked` one waits on us, so an
-expiry there is the sweep's own shape and stays the cohort drift the nightly gate refuses.
-`cancelled` is no member of this set: the harness writes it over every overdue turn through
-`cancel_one_turn`, queued ones included, so that terminal names the harness rather than whoever
-held the turn. The status alone does not settle it — the row turns `running` at the dispatch claim
-— so `provider_owned_fault` asks for the turn's own first step beside it."""
+LIVE_WAIT_EXPIRY_STATUSES = frozenset({RUNNING})
+"""The one status on which an expired wait is the clock's rather than the sweep's, read off what
+the turn held when the deadline fired. Only `running` had the turn actually working — with the
+model or in its own tool. A turn still `queued` never reached a model and sat behind our own worker
+backlog, and a `parked` one waits on us, so an expiry there is the sweep's own shape and stays the
+cohort drift the nightly gate refuses. `cancelled` is no member of this set: the harness writes it
+over every overdue turn through `cancel_one_turn`, queued ones included, so that terminal names the
+harness rather than what the turn was doing. The status alone does not settle it — the row turns
+`running` at the dispatch claim — so `provider_owned_fault` asks for the turn's own first step
+beside it."""
 
 
 def infra_owned_fault(
     error_class: str | None, failure_reason: str, status: TurnStatus | None
 ) -> bool:
-    """Whether an unclean run's fault lies outside the model's capability: a provider-owned
-    transient, rejected eval credentials, or a wait that expired while the turn was still live or
-    was cancelled by the expiry itself. None put a capability question to the model. A turn that
+    """Whether an unclean run's fault lies outside the model's answer: a provider-owned transient,
+    rejected eval credentials, or a wait that expired while the turn was still live or was
+    cancelled by the expiry itself. None of them is a capability signal — an expired wait measures
+    the budget the shard chose, not what the model could do — so none is scored. A turn that
     reached `done` or `failed` without a transcript for any other reason is a wedge of ours and
     stays a failure."""
     if is_transient_fault(error_class) or error_class in CONFIGURATION_ERROR_CLASSES:
@@ -353,19 +355,19 @@ def provider_owned_fault(
     expiry_status: TurnStatus | None,
     work_started: bool,
 ) -> bool:
-    """Who owns the fault an exclusion rests on, read off that same exclusion so the two cannot
-    disagree. A transient is the provider's, and so is a wait that expired on a turn the provider
-    held — `PROVIDER_WAIT_EXPIRY_STATUSES` names that one. Rejected eval credentials, a turn that
-    never left our queue, and a parked turn are ours, and stay the cohort drift the nightly gate
-    refuses. Weather lands on whichever case it lands on, so no list names it ahead of the night,
-    and a gate that refuses it costs the sweep its trend point over a case the harness already
-    declined to score.
+    """Whether an exclusion is one no list could have named ahead of the night, read off that same
+    exclusion so the two cannot disagree. A transient is the provider's, and a wait that expired on
+    a turn still working is the shard's own stopwatch — `LIVE_WAIT_EXPIRY_STATUSES` names that one.
+    Both land on whichever case they land on, so the nightly gate accepts them; a gate that refused
+    them would cost the sweep its trend point over a case the harness already declined to score.
+    Rejected eval credentials, a turn that never left our queue, and a parked turn are the sweep's
+    own shape, and stay the cohort drift the gate refuses.
 
     `expiry_status` is `TargetResult.expiry_status`: the status the turn held when the wait expired,
     read before the harness's own cancel terminalized it. Never the status the record carries
     afterwards — `cancel_one_turn` commits `cancelled` over `queued`, `parked` and `running` alike,
-    so once the cancel lands a turn that never left our queue reads exactly like one the provider
-    was holding. An expiry whose status is unknown is ours.
+    so once the cancel lands a turn that never left our queue reads exactly like one that was
+    working. An expiry whose status is unknown is ours.
 
     `work_started` is `TargetResult.work_started`: whether the turn had recorded a step of its own.
     A turn turns `running` at the dispatch claim, before the engine steps, so a `running` turn with
@@ -377,5 +379,5 @@ def provider_owned_fault(
     if error_class in CONFIGURATION_ERROR_CLASSES:
         return False
     return is_transient_fault(error_class) or (
-        work_started and expiry_status in PROVIDER_WAIT_EXPIRY_STATUSES
+        work_started and expiry_status in LIVE_WAIT_EXPIRY_STATUSES
     )

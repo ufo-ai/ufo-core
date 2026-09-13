@@ -23,7 +23,7 @@ from uuid import UUID
 
 import sqlalchemy as sa
 
-from evals.harness.capability import WorkspaceFile, expired_after_model_output, source_digest
+from evals.harness.capability import WorkspaceFile, source_digest
 from evals.harness.harness import (
     EvalCaseResult,
     Json,
@@ -196,9 +196,7 @@ class ArcRun:
             )
             if not opening.clean:
                 status = opening.trajectory.status if opening.trajectory is not None else None
-                excluded = not expired_after_model_output(opening) and infra_owned_fault(
-                    opening.error_class, opening.failure_reason, status
-                )
+                excluded = infra_owned_fault(opening.error_class, opening.failure_reason, status)
                 return EvalCaseResult(
                     name=self.case.name,
                     passed=False,

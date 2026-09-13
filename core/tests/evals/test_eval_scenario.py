@@ -1155,9 +1155,12 @@ async def test_nontransient_turn_failure_counts_as_a_real_failure(db: None, tmp_
     assert result.evidence["excludedTrials"] == 0
 
 
-def test_scenario_wait_expiry_after_an_own_tool_call_is_scored() -> None:
+def test_scenario_wait_expiry_is_the_rigs_clock_whether_or_not_the_turn_spoke() -> None:
+    """The wait is a budget the shard chose. A trial it cuts short never answered the scenario, so
+    it leaves the denominator; only a turn that reached its own terminal without a transcript is a
+    failure the model owns."""
     call = ToolInvocation("ask_user", {"question": "Which inbox?"}, "awaiting", True)
-    trajectory = EvalTrajectory(
+    cancelled = EvalTrajectory(
         conversation_id=uuid4(),
         turn_id=uuid4(),
         status="cancelled",
@@ -1167,15 +1170,14 @@ def test_scenario_wait_expiry_after_an_own_tool_call_is_scored() -> None:
         CapabilityOutput("", ()),
         clean=False,
         failure_reason=WAIT_EXPIRED,
-        trajectory=trajectory,
+        trajectory=cancelled,
     )
-    looping = replace(
-        untouched,
-        output=CapabilityOutput("", (call,), own_calls=(call,)),
-    )
+    looping = replace(untouched, output=CapabilityOutput("", (call,), own_calls=(call,)))
+    ended = replace(untouched, trajectory=cancelled.model_copy(update={"status": "done"}))
 
     assert _infra_owned_result(untouched)
-    assert not _infra_owned_result(looping)
+    assert _infra_owned_result(looping)
+    assert not _infra_owned_result(ended)
 
 
 def test_a_trial_the_wait_cancelled_names_who_held_the_turn() -> None:

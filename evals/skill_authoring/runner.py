@@ -26,7 +26,6 @@ from uuid import UUID
 
 from ufo_ext_skill_create.store import UserSkillStore
 
-from evals.harness.capability import expired_after_model_output
 from evals.harness.harness import (
     EvalCaseResult,
     EvalReport,
@@ -359,10 +358,8 @@ class SkillAuthoringSuite:
         passed, reason = authored_verdict(case, skill)
         status = result.trajectory.status if result.trajectory is not None else None
         unwritten = skill is None and not result.clean
-        excluded = (
-            unwritten
-            and not expired_after_model_output(result)
-            and infra_owned_fault(result.error_class, result.failure_reason, status)
+        excluded = unwritten and infra_owned_fault(
+            result.error_class, result.failure_reason, status
         )
         provider = excluded and provider_owned_fault(
             result.error_class, result.failure_reason, result.expiry_status, result.work_started

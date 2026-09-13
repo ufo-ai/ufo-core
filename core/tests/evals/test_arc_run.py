@@ -141,10 +141,10 @@ async def test_arc_names_the_owner_of_every_exclusion_it_archives(tmp_path: Path
     assert not credential.provider_fault
 
 
-async def test_arc_scores_an_opening_the_model_spent_the_deadline_on(tmp_path: Path) -> None:
-    """A model that answers or calls its own tool and then runs past the wait spent that deadline
-    itself, which the capability and scenario harnesses score. An arc that excluded it instead
-    dropped a model stall out of the fixed cohort and credited the provider with it."""
+async def test_arc_excludes_an_opening_the_harness_wait_cut_short(tmp_path: Path) -> None:
+    """The wait is a budget the shard chose, so an opening it cuts short measures the rig, whether
+    or not the model had already spoken. Arc asks `infra_owned_fault` the one question every other
+    archiver asks, so one answer covers the cohort."""
     call = ToolInvocation("bash", {"command": "true"}, "{}", True)
     narrated = await _unclean_arc(
         tmp_path,
@@ -158,8 +158,11 @@ async def test_arc_scores_an_opening_the_model_spent_the_deadline_on(tmp_path: P
         expiry_status="running",
         output=CapabilityOutput("", (call,), own_calls=(call,)),
     )
+    ended = await _unclean_arc(tmp_path, "done", expiry_status="done")
 
-    assert not narrated.excluded
-    assert not narrated.provider_fault
-    assert not called.excluded
-    assert not called.provider_fault
+    assert narrated.excluded
+    assert narrated.provider_fault
+    assert called.excluded
+    assert called.provider_fault
+    assert not ended.excluded
+    assert not ended.provider_fault

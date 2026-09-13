@@ -12,7 +12,6 @@ from evals.harness.capability import (
     CapabilityVerdict,
     EvalTrajectory,
     ToolInvocation,
-    expired_after_model_output,
     run_capability_case,
 )
 from evals.harness.harness import (
@@ -39,7 +38,12 @@ from ufo.schema.records import TurnStatus
 from ufo.sdk.models import Message
 
 
-def test_a_wait_expired_before_model_output_is_excluded_a_started_loop_is_not() -> None:
+def test_the_harness_stopwatch_excludes_whether_or_not_the_model_had_spoken() -> None:
+    """A wait the harness's own cancel ended is its measurement, not the model's answer. While
+    prose or one of the turn's own calls kept such an expiry scored, the 2026-09-12 sweep charged
+    24 cases for a budget the shard chose — every one of them ending at its wait to the tenth of a
+    second. Only a turn that reached its own terminal without a transcript stays a failure."""
+
     def unclean(
         status: TurnStatus | None,
         reason: str = WAIT_EXPIRED,
@@ -58,30 +62,20 @@ def test_a_wait_expired_before_model_output_is_excluded_a_started_loop_is_not() 
             ),
         )
 
+    call = ToolInvocation("object_list", {"kind": "member"}, "{}", True)
     assert harness_capability._unclean_verdict(unclean("running")).excluded
     assert harness_capability._unclean_verdict(unclean("queued")).excluded
+    assert harness_capability._unclean_verdict(unclean("cancelled")).excluded
+    assert harness_capability._unclean_verdict(
+        unclean("cancelled", output=CapabilityOutput("Still checking.", ()))
+    ).excluded
+    assert harness_capability._unclean_verdict(
+        unclean("cancelled", output=CapabilityOutput("", (call,), own_calls=(call,)))
+    ).excluded
     assert not harness_capability._unclean_verdict(unclean("failed")).excluded
+    assert not harness_capability._unclean_verdict(unclean("done")).excluded
     assert not harness_capability._unclean_verdict(unclean(None)).excluded
     assert not harness_capability._unclean_verdict(unclean("running", "turn row vanished")).excluded
-    assert harness_capability._unclean_verdict(unclean("cancelled")).excluded
-    narrated = harness_capability._unclean_verdict(
-        unclean("cancelled", output=CapabilityOutput("Still checking.", ()))
-    )
-    call = ToolInvocation("object_list", {"kind": "member"}, "{}", True)
-    called = harness_capability._unclean_verdict(
-        unclean(
-            "cancelled",
-            output=CapabilityOutput("", (call,), own_calls=(call,)),
-        )
-    )
-    inherited = harness_capability._unclean_verdict(
-        unclean("cancelled", output=CapabilityOutput("", (call,)))
-    )
-    assert not narrated.excluded
-    assert narrated.reason == WAIT_EXPIRED
-    assert not called.excluded
-    assert called.reason == WAIT_EXPIRED
-    assert inherited.excluded
     assert not harness_capability._unclean_verdict(unclean("cancelled", "no artifact")).excluded
     provider = TargetResult(
         CapabilityOutput("", ()),
@@ -95,40 +89,16 @@ def test_a_wait_expired_before_model_output_is_excluded_a_started_loop_is_not() 
     assert not infra_owned_fault(None, WAIT_EXPIRED, "done")
 
 
-def test_one_answer_decides_whether_the_model_spent_the_deadline() -> None:
-    """Capability, scenario, arc and skill authoring each archive an expired wait, and each asks
-    `expired_after_model_output` first. While the question lived as a copy inside the capability
-    and scenario archivers, arc and skill authoring asked it nowhere and excluded a model that
-    looped on its own tools until the deadline. Prose or one of the turn's own calls spends that
-    deadline; a call inherited from the seeded transcript spends it only where the caller hands in
-    the round's own output; and a failure that is not the wait expiring is never this question."""
-    call = ToolInvocation("bash", {"command": "true"}, "{}", True)
-
-    def result(output: CapabilityOutput, reason: str = WAIT_EXPIRED) -> TargetResult:
-        return TargetResult(output, clean=False, failure_reason=reason)
-
-    silent = result(CapabilityOutput("", ()))
-    narrated = result(CapabilityOutput("Still checking.", ()))
-    called = result(CapabilityOutput("", (call,), own_calls=(call,)))
-    inherited = result(CapabilityOutput("", (call,)))
-
-    assert not expired_after_model_output(silent)
-    assert expired_after_model_output(narrated)
-    assert expired_after_model_output(called)
-    assert not expired_after_model_output(inherited)
-    assert expired_after_model_output(inherited, inherited.output)
-    assert not expired_after_model_output(result(narrated.output, "no artifact"))
-
-
 def test_every_exclusion_names_the_owner_the_cohort_gate_reads() -> None:
     """`excluded` and `provider_fault` come out of one decision. While two decisions drew them, a
     wait that expired with no transcript excluded a case that named no owner, and the nightly gate
     read that as cohort drift and reds the sweep over it. The harness cancels every overdue turn,
-    so the record reads `cancelled` whoever held it and only the status the wait expired on, with
-    the turn's own first step beside it, names the owner. A turn the provider was still answering
-    is weather; a turn behind our own workers, a parked turn, a `running` turn the engine had not
-    stepped yet — the dispatch claim writes that status before the sandbox has even booted — an
-    expiry no status was read for, and a rejected eval credential are ours, and stay refused."""
+    so the record reads `cancelled` whatever the turn was doing, and only the status the wait
+    expired on, with the turn's own first step beside it, names the owner. A turn that was working
+    is a clock the gate accepts; a turn behind our own workers, a parked turn, a `running` turn the
+    engine had not stepped yet — the dispatch claim writes that status before the sandbox has even
+    booted — an expiry no status was read for, and a rejected eval credential are the sweep's own
+    shape, and stay refused."""
 
     def unclean(
         expiry_status: TurnStatus | None,
@@ -163,13 +133,13 @@ def test_every_exclusion_names_the_owner_the_cohort_gate_reads() -> None:
 
     assert answering.excluded
     assert answering.provider_fault
-    assert answering.reason.endswith("the wait expired on a turn the provider was holding")
+    assert answering.reason.endswith("the harness's wait expired on a turn still working")
     assert booting.excluded
     assert not booting.provider_fault
-    assert booting.reason.endswith("the wait expired on a turn we still held")
+    assert booting.reason.endswith("the harness's wait expired before the turn began its own work")
     assert queued.excluded
     assert not queued.provider_fault
-    assert queued.reason.endswith("the wait expired on a turn we still held")
+    assert queued.reason.endswith("the harness's wait expired before the turn began its own work")
     assert parked.excluded
     assert not parked.provider_fault
     assert unread.excluded

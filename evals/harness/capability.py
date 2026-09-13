@@ -21,7 +21,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from evals.harness.handoff import SubagentHandoff
 from evals.harness.harness import (
-    WAIT_EXPIRED,
     EvalCaseResult,
     Json,
     JsonObject,
@@ -670,30 +669,26 @@ async def run_capability_case(case: CapabilityCase, target: CapabilityTarget) ->
     return EvalCaseResult(name=case.name, passed=passed, reason=reason, evidence=evidence)
 
 
-def expired_after_model_output(
-    result: TargetResult, current_output: CapabilityOutput | None = None
-) -> bool:
-    """Whether the harness's wait expired on a turn the evaluated model was already answering. A
-    turn that produced prose or one of its own tool calls spent the deadline itself, so its expiry
-    is incomplete model behavior and stays scored — excluding it would let a model loop on tools
-    until the deadline and leave the fixed cohort as an infra exclusion. Every suite that archives
-    an expired wait asks this first, so one answer covers the cohort."""
-    output = current_output or result.output
-    return result.failure_reason == WAIT_EXPIRED and bool(
-        output.response or output.own_calls or (current_output is not None and output.calls)
-    )
-
-
-def _unclean_verdict(
-    result: TargetResult, current_output: CapabilityOutput | None = None
-) -> CapabilityVerdict:
+def _unclean_verdict(result: TargetResult) -> CapabilityVerdict:
     """The verdict for a turn that never reached a grader. A provider fault, rejected eval
-    credential, or wait that expired with no model output is excluded rather than scored. A wait
-    that expires after a model response or tool call is model behavior, as is every other unclean
-    end. Exclusion reaches only turns that never put the capability question to the model, so a
-    graded answer, refusal, failed rubric, and incomplete agent loop remain scored. The owner the
-    reason names and the `provider_fault` the record carries come out of that one exclusion, so the
-    nightly cohort gate reads the line this verdict drew."""
+    credential, or wait the harness's own stopwatch ended is excluded rather than scored; every
+    other unclean end is model behavior. Exclusion reaches only turns that never put the capability
+    question to the model, so a graded answer, refusal, failed rubric, and incomplete agent loop
+    remain scored. The owner the reason names and the `provider_fault` the record carries come out
+    of that one exclusion, so the nightly cohort gate reads the line this verdict drew.
+
+    A wait that expired on a live turn is the rig's measurement, not the model's answer, whether or
+    not the model had already spoken: every one of the 24 such cases in the 2026-09-12 sweep ended
+    at its wall-clock wait to the tenth of a second, across waits of 300s and 900s. This wait bounds
+    the whole turn, and a shard sets one for suites that want minutes and suites that want seconds,
+    so scoring its expiry charged the model for a budget the shard chose. A deadline charged against
+    the turn's own work is the opposite and stays scored — `skill_loading`'s mount deadline is twice
+    the slowest mount ever measured, and its misses record 0.5s of rig startup against 60s of the
+    agent's own.
+
+    The cost is that a model looping on its own tools until the wall-clock wait leaves the cohort as
+    an exclusion rather than a failure; the summary names every excluded case, so it leaves a mark
+    rather than vanishing."""
     status = result.trajectory.status if result.trajectory is not None else None
     provider_configuration = result.error_class == "APIError" and bool(
         infra_error((result.error_message,))
@@ -706,10 +701,7 @@ def _unclean_verdict(
     if (
         not provider_configuration
         and not local_client_execution
-        and (
-            expired_after_model_output(result, current_output)
-            or not infra_owned_fault(result.error_class, result.failure_reason, status)
-        )
+        and not infra_owned_fault(result.error_class, result.failure_reason, status)
     ):
         return CapabilityVerdict(False, result.failure_reason)
     provider = provider_owned_fault(
@@ -722,9 +714,9 @@ def _unclean_verdict(
     elif local_client_execution:
         owner = "the eval runner owns this fault"
     elif provider:
-        owner = "the wait expired on a turn the provider was holding"
+        owner = "the harness's wait expired on a turn still working"
     else:
-        owner = "the wait expired on a turn we still held"
+        owner = "the harness's wait expired before the turn began its own work"
     return CapabilityVerdict(
         False,
         f"{result.failure_reason}; {owner}",
@@ -825,7 +817,7 @@ async def _sample_capability(case: CapabilityCase, target: CapabilityTarget) -> 
             if not result.clean:
                 return CapabilitySample(
                     result.output,
-                    _unclean_verdict(result, step_output),
+                    _unclean_verdict(result),
                     result.trajectory,
                 )
     deterministic = await case.grader(result.output)

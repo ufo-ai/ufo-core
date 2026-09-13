@@ -102,5 +102,7 @@ def test_the_cohort_accepts_an_exclusion_the_provider_owns(summary, cohort) -> N
 
     summary.require_comparable(cohort, smoke=False)
 
-    assert "1 cases excluded on provider faults" in summary.render(cohort, smoke=False)
+    assert "1 cases excluded on a provider fault or an expired wait" in summary.render(
+        cohort, smoke=False
+    )
     assert "xlsx-formula-structure" in summary.render(cohort, smoke=False)

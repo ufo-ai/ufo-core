@@ -14,7 +14,6 @@ from evals.harness.capability import (
     CapabilityOutput,
     CapabilityVerdict,
     EvalSeed,
-    expired_after_model_output,
     grading_statement,
     judge_unavailable_verdict,
     linked_artifacts,
@@ -242,14 +241,9 @@ async def run_scenario_case(case: ScenarioCase, target: CapabilityTarget) -> Eva
 
 
 def _infra_owned_result(result: TargetResult) -> bool:
-    """A wait is infrastructure only until the evaluated model starts answering it.
-
-    Scenario turns used to pass a cancelled wait straight to ``infra_owned_fault``, unlike the
-    capability harness. A model could therefore spend the whole deadline calling a tool in a loop
-    and disappear from the fixed cohort as an infra exclusion. Once the turn has produced prose or
-    one of its own tool calls, expiry is scored as incomplete model behavior.
-    """
-    return not expired_after_model_output(result) and infra_owned_fault(
+    """Whether the trial ended on something outside the model's answer — a provider fault or the
+    harness's own wait. `infra_owned_fault` draws that line for every suite."""
+    return infra_owned_fault(
         result.error_class,
         result.failure_reason,
         result.trajectory.status if result.trajectory is not None else None,
