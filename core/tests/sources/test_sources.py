@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -443,6 +444,28 @@ async def test_folder_syncs_a_page_body_to_blob_no_chunk_until_indexed(
 
     await index_pages()
     assert await _chunk_count() >= 1
+
+
+async def test_a_folder_page_carries_the_files_modification_date(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    root = tmp_path / "src"
+    root.mkdir()
+    note = root / "seat-audit.md"
+    note.write_text("this workspace holds 52 seats")
+    stamped = datetime(2026, 8, 7, 9, 30, tzinfo=UTC).timestamp()
+    os.utime(note, (stamped, stamped))
+    driver, _, _ = _wire(database_url, vec((7, 1.0)), tmp_path / "blobs", workspace_id)
+    await _register_folder(root)
+
+    await _sync(driver)
+
+    page = (await _pages())[0]
+    assert page["record_updated_at"].startswith("2026-08-07")
+    with ws(workspace_id):
+        states = await context_for("memory", frozenset()).page_states((page["uid"],))
+    assert states[page["uid"]].as_of == "2026-08-07"
 
 
 async def test_folder_sync_preserves_bare_carriage_returns(

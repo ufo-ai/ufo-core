@@ -123,6 +123,7 @@ class ReclassifyingPage:
                 title="Q3 pricing rollout",
                 stream="pull_requests",
                 indexed=True,
+                as_of="2026-03-01",
             )
         }
 

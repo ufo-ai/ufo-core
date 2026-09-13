@@ -149,6 +149,7 @@ def _store(
     subject: str = "shared",
     raises: bool = False,
     live_digest: str = PAGE_DIGEST,
+    as_of: str = "2025-03-06",
 ):
     """A page store over chunks of `pages` (page id → title, body), fenced on those same pages.
     `live_digest` is what the page holds now, so a value other than the indexed one is a page
@@ -169,6 +170,7 @@ def _store(
                 title=pages[page_id][0],
                 stream="notes",
                 indexed=True,
+                as_of=as_of,
             )
             for page_id in page_ids
             if page_id in pages and subject in reader.subjects
@@ -291,7 +293,7 @@ async def test_both_legs_reach_the_block_with_their_provenance() -> None:
         block = await prefetch.passages(("What does Northwind charge?",), READER)
 
     assert f"[1] {PRICING_PAGE} — Northwind pricing (2026-02-11)" in block
-    assert f"[2] page/{ORDER_FORM} — Northwind order form" in block
+    assert f"[2] page/{ORDER_FORM} — Northwind order form (2025-03-06)" in block
     assert "Team plan is $30 a seat." in block
     assert "$24 per seat" in block
     assert "<untrusted-content" in block

@@ -1071,6 +1071,18 @@ class PageState:
     title: str
     stream: str
     indexed: bool
+    as_of: str
+
+
+def _page_as_of(
+    record_updated_at: str | None, record_created_at: str | None, updated_at: datetime
+) -> str:
+    """The date this page states itself as of: the source's own record date where it supplies one,
+    the date the workspace last wrote the row otherwise."""
+    supplied = record_updated_at or record_created_at
+    if supplied is None:
+        return updated_at.date().isoformat()
+    return datetime.fromisoformat(supplied.replace("Z", "+00:00")).date().isoformat()
 
 
 def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
@@ -2231,6 +2243,9 @@ class ExtensionContext:
             tables.page.c.title,
             tables.page.c.stream,
             tables.page.c.indexed,
+            tables.page.c.record_created_at,
+            tables.page.c.record_updated_at,
+            tables.page.c.updated_at,
         ).where(
             tables.page.c.workspace_id == self.store.workspace_id,
             tables.page.c.uid.in_(page_ids),
@@ -2247,6 +2262,7 @@ class ExtensionContext:
                 title=row.title,
                 stream=row.stream,
                 indexed=bool(row.indexed),
+                as_of=_page_as_of(row.record_updated_at, row.record_created_at, row.updated_at),
             )
             for row in rows
         }
@@ -2266,6 +2282,9 @@ class ExtensionContext:
                 tables.page.c.title,
                 tables.page.c.stream,
                 tables.page.c.indexed,
+                tables.page.c.record_created_at,
+                tables.page.c.record_updated_at,
+                tables.page.c.updated_at,
             )
             .select_from(
                 tables.page.join(
@@ -2295,6 +2314,7 @@ class ExtensionContext:
                 title=row.title,
                 stream=row.stream,
                 indexed=bool(row.indexed),
+                as_of=_page_as_of(row.record_updated_at, row.record_created_at, row.updated_at),
             )
             for row in rows
         }

@@ -365,17 +365,22 @@ class FolderSource:
                 body=text,
                 stream="files",
                 title=source_ref,
+                updated_at=modified,
             )
-            for source_ref, text in entries
+            for source_ref, text, modified in entries
         )
         return SyncResult(pages=pages, next_cursor=None, snapshot=True)
 
     @staticmethod
-    def _read(root: Path) -> tuple[tuple[str, str], ...]:
+    def _read(root: Path) -> tuple[tuple[str, str, str], ...]:
         if not root.is_dir():
             raise FileNotFoundError(f"source folder not found: {root}")
         return tuple(
-            (str(path.relative_to(root)), path.read_bytes().decode("utf-8"))
+            (
+                str(path.relative_to(root)),
+                path.read_bytes().decode("utf-8"),
+                datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(),
+            )
             for path in sorted(root.rglob("*"))
             if path.is_file()
         )

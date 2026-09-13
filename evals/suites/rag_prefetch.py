@@ -1,32 +1,45 @@
-"""What the prefetch is worth, and what it must not cost.
+"""Whether the answer is right, now that every message is prefetched.
 
 Every case seeds one workspace corpus and one web corpus and then asks one message. The web is the
 `eval_search` backend the eval environment registers, answering from documents the case wrote, so a
-run grades ranking and wording rather than what the live web said today. The workspace side is
-staged as files a folder source syncs and the memory extension's page-change indexer chunks, so the
-pages the prefetch reads arrived the way a tenant's own documents do.
+run grades the answer against a corpus whose true values the case knows rather than against what
+the live web said today. The workspace side is staged as files a folder source syncs and the memory
+extension's page-change indexer chunks, so the pages the prefetch reads arrived the way a tenant's
+own documents do.
 
-Five behaviours are graded across the set:
+The prefetch runs on every member message, so whether it routed is not a question a case asks. What
+is graded is accuracy:
 
-| behaviour | cases |
+| what a right answer does | cases |
 | --- | --- |
-| the answer comes from the right corpus | R01, R02, R03, R10 |
-| a factual question is answered, not searched again | R01, R02, R04 |
-| an action still reaches for tools | R05, R06 |
-| disagreeing sources are reported, not merged | R07, R08 |
-| several questions in one message are all answered | R09, R10 |
+| states the corpus value, named with the source that holds it | R01, R02, R03, R04, R09, R10 |
+| states every value a multi-part question asks for | R09, R10, R13 |
+| says what the corpus does not answer instead of inventing it | R13 |
+| states a rate in the unit its passage gives it | R14 |
+| resolves two web passages that disagree | R08 |
+| resolves a workspace record against a web passage | R07, R12 |
+| resolves two workspace records that disagree | R11, R15 |
+| acts, because the member asked for an action | R05, R06 |
+
+A conflict case grades the resolution, not the detection: the reply names each side with its source
+and its date, lands on one value, and gives the reason that value wins — authority, recency, or
+specificity. A figure merged out of the two fails deterministically.
+
+Whether the turn answered without searching again is recorded and never gates a verdict. R05 and
+R06 still require tool calls, because the member asked for an action.
 
 The deploy must select the eval search backend (`[research] search_provider = "eval_search"`), so
-the suite is explicit-only: a stack pointed at the live web cannot grade a seeded ranking.
+the suite is explicit-only: a stack pointed at the live web cannot grade a seeded corpus.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import tempfile
-from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -34,6 +47,7 @@ import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from ufo_ext_eval_env.manifest import NAME as EVAL_ENV_NAME
 from ufo_ext_eval_env.manifest import SEARCH_CORPUS_KEY, SearchDocument
+from ufo_ext_memory.store import memory_item
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -44,7 +58,7 @@ from evals.harness.capability import (
     Grader,
 )
 from evals.harness.harness import JsonObject
-from evals.harness.scorers import combine
+from evals.harness.scorers import combine, scored_only
 from ufo.blob import WorkspaceBlobStore
 from ufo.config import SourceConfig, SourceEntry, load_config
 from ufo.db import workspace_tx
@@ -66,14 +80,19 @@ PRICING_URL = "https://northwind.example/pricing"
 CHANGELOG_URL = "https://northwind.example/changelog"
 STATUS_URL = "https://status.northwind.example"
 ARCHIVE_URL = "https://northwind.example/2025/pricing"
+USAGE_URL = "https://northwind.example/usage-rates"
 
 
 @dataclass(frozen=True)
 class Document:
-    """One document the tenant has synced: what the page is called and what it says."""
+    """One document the tenant has synced: what the page is called, what it says, and the date it
+    carries. `dated` becomes the staged file's modification time, which the folder source reports
+    as the page's record date, so the passage header states it the way a web hit's date is
+    stated."""
 
     name: str
     body: str
+    dated: str
 
 
 @dataclass(frozen=True)
@@ -118,9 +137,17 @@ SUPPORT_WINDOW = SearchDocument(
     published_date="2026-01-20",
     terms=("northwind", "support", "hours", "sev", "severity"),
 )
+USAGE_RATES = SearchDocument(
+    url=USAGE_URL,
+    title="Northwind usage rates",
+    text="Northwind bills API calls over the plan limit at $0.40 per 1,000 calls.",
+    published_date="2026-02-11",
+    terms=("northwind", "api", "call", "calls", "overage", "over", "limit", "usage", "charge"),
+)
 
 ORDER_FORM = Document(
     name="northwind-order-form",
+    dated="2025-03-06",
     body=(
         "Northwind order form, signed 6 March 2025.\n\n"
         "Northwind bills this workspace $24 per seat per month. The rate is fixed until renewal.\n"
@@ -130,9 +157,36 @@ ORDER_FORM = Document(
 )
 SEAT_REGISTER = Document(
     name="northwind-seats",
+    dated="2026-03-02",
     body=(
-        "Northwind seat register.\n\n"
+        "Northwind seat register, updated 2 March 2026.\n\n"
         "This workspace holds 48 Northwind seats. 41 of them are assigned; 7 are spare."
+    ),
+)
+SEAT_AUDIT = Document(
+    name="northwind-seat-audit",
+    dated="2026-08-07",
+    body=(
+        "Northwind seat audit, completed 7 August 2026.\n\n"
+        "This workspace holds 52 Northwind seats after the June expansion. 44 are assigned; "
+        "8 are spare."
+    ),
+)
+ORDER_AMENDMENT = Document(
+    name="northwind-order-amendment",
+    dated="2026-06-12",
+    body=(
+        "Northwind order form amendment, signed 12 June 2026.\n\n"
+        "From 1 July 2026 Northwind bills this workspace $27 per seat per month. This amendment "
+        "replaces the rate in the order form signed 6 March 2025."
+    ),
+)
+SUPPORT_NOTE = Document(
+    name="northwind-support-note",
+    dated="2024-09-09",
+    body=(
+        "Northwind support note, written 9 September 2024.\n\n"
+        "Northwind support answers 08:00 to 16:00 UTC on weekdays."
     ),
 )
 
@@ -237,7 +291,10 @@ class PageIngest:
         for stale in STAGING_ROOT.iterdir():
             stale.unlink()
         for document in self.documents:
-            (STAGING_ROOT / f"{document.name}.txt").write_text(document.body, encoding="utf-8")
+            path = STAGING_ROOT / f"{document.name}.txt"
+            path.write_text(document.body, encoding="utf-8")
+            stamped = datetime.fromisoformat(document.dated).replace(tzinfo=UTC).timestamp()
+            os.utime(path, (stamped, stamped))
 
 
 def _seeding(corpus: Corpus) -> CapabilitySeed:
@@ -250,44 +307,103 @@ def _seeding(corpus: Corpus) -> CapabilitySeed:
     return seed
 
 
-async def _cleaning(_workspace_id: UUID, _agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+async def _cleaning(workspace_id: UUID, _agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+    """Drop what this case left behind: its web corpus, its staged pages, and every memory row the
+    turn wrote. The cases share one workspace, so a row remembering Northwind's price would answer
+    the next case out of memory rather than out of the corpus that case seeded."""
     await ScopedStore(extension=EVAL_ENV_NAME).put(SEARCH_CORPUS_KEY, [])
     await PageIngest(()).run(blob)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(memory_item).where(memory_item.c.workspace_id == workspace_id)
+        )
 
 
-def _states(text: str, terms: Sequence[str]) -> tuple[str, ...]:
-    folded = text.casefold()
-    return tuple(term for term in terms if term.casefold() in folded)
+@dataclass(frozen=True)
+class Fact:
+    """One truth the seeded corpus holds: the phrasings a right answer may state the value in, and
+    the ways it may name the source that holds it. A case grades the value and the source, never
+    the wording around them."""
+
+    name: str
+    values: tuple[str, ...]
+    sources: tuple[str, ...]
 
 
-def answers_with(terms: tuple[str, ...], source: str) -> Grader:
-    """Every term reaches the reply, so the answer carries what only `source` holds."""
+def _stated(response: str, option: str) -> bool:
+    """Whether the reply states this value as a value of its own. A digit sits inside longer
+    figures a reply computes — `48` inside `$1,248`, `52` inside `1,152` — so a value is read only
+    where no digit runs into it. A sentence-ending point is not a digit and keeps the match."""
+    return (
+        re.search(rf"(?<![\d.,]){re.escape(option)}(?!\d|[.,]\d)", response, re.IGNORECASE)
+        is not None
+    )
+
+
+def states(*facts: Fact) -> Grader:
+    """Every fact reaches the reply as one of its values, named with one of its sources."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
-        stated = _states(output.response, terms)
-        missing = tuple(term for term in terms if term not in stated)
+        response = output.response
+        stated: list[str] = []
+        missing: list[str] = []
+        for fact in facts:
+            value = next((option for option in fact.values if _stated(response, option)), "")
+            source = next((option for option in fact.sources if _stated(response, option)), "")
+            if not value:
+                missing.append(f"{fact.name}: no value")
+            elif not source:
+                missing.append(f"{fact.name}: {value} with no source")
+            else:
+                stated.append(f"{fact.name}: {value} from {source}")
         evidence: JsonObject = {"stated": list(stated), "missing": list(missing)}
         if missing:
-            return CapabilityVerdict(
-                False, f"the reply omits {', '.join(missing)} from the {source} record", evidence
-            )
-        return CapabilityVerdict(True, f"the reply states the {source} record", evidence)
+            return CapabilityVerdict(False, f"the reply misses {'; '.join(missing)}", evidence)
+        return CapabilityVerdict(True, f"the reply states {'; '.join(stated)}", evidence)
 
-    return DescribedGrader(f"the reply states {', '.join(terms)} from the {source} record", grade)
+    return DescribedGrader(
+        "; ".join(
+            f"the reply states {fact.name} as {' or '.join(fact.values)}, sourced to "
+            f"{' or '.join(fact.sources)}"
+            for fact in facts
+        ),
+        grade,
+    )
+
+
+HEDGE = r"somewhere between|anywhere between|split the difference|average of the two"
+"""A reply that states a span instead of a value has merged the two sources as surely as one that
+states their midpoint, so every conflict case fails on both."""
+
+
+def never_states(description: str, pattern: str) -> Grader:
+    """No figure matching `pattern` reaches the reply: the merged, invented, or wrongly united
+    value a right answer never lands on."""
+
+    expression = re.compile(pattern, re.IGNORECASE)
+
+    async def grade(output: CapabilityOutput) -> CapabilityVerdict:
+        found = tuple(match.group(0) for match in expression.finditer(output.response))
+        evidence: JsonObject = {"found": list(found)}
+        if found:
+            return CapabilityVerdict(
+                False, f"the reply gives {description}: {', '.join(found)}", evidence
+            )
+        return CapabilityVerdict(True, f"the reply gives no {description}", evidence)
+
+    return DescribedGrader(f"the reply gives no {description}", grade)
 
 
 async def _no_tools(output: CapabilityOutput) -> CapabilityVerdict:
     called = tuple(call.call for call in output.calls)
     evidence: JsonObject = {"calls": list(called)}
     if called:
-        return CapabilityVerdict(
-            False, f"searched again instead of answering: {', '.join(called)}", evidence
-        )
+        return CapabilityVerdict(False, f"called {', '.join(called)}", evidence)
     return CapabilityVerdict(True, "answered from the prefetched passages", evidence)
 
 
-ANSWERS_DIRECTLY = DescribedGrader(
-    "the turn answers the question without calling a tool", _no_tools
+ANSWERED_WITHOUT_A_SEARCH = scored_only(
+    DescribedGrader("whether the turn called a tool, recorded and not required", _no_tools)
 )
 
 
@@ -327,33 +443,96 @@ BOTH = Corpus(
     pages=(ORDER_FORM, SEAT_REGISTER),
 )
 DISAGREEING_WEB = Corpus(web=(PUBLISHED_PRICE, ARCHIVED_PRICE), pages=())
+DISAGREEING_SEATS = Corpus(web=(), pages=(SEAT_REGISTER, SEAT_AUDIT))
+DISAGREEING_RATES = Corpus(web=(), pages=(ORDER_FORM, ORDER_AMENDMENT))
+DISAGREEING_SUPPORT = Corpus(web=(SUPPORT_WINDOW,), pages=(SUPPORT_NOTE,))
+USAGE_WEB = Corpus(web=(PUBLISHED_PRICE, USAGE_RATES), pages=())
+
+PRICING_PAGE = ("northwind.example/pricing", "pricing page")
+ARCHIVE_PAGE = ("northwind.example/2025/pricing", "2025 archive", "2025 pricing")
+CHANGELOG_PAGE = ("northwind.example/changelog", "changelog")
+STATUS_PAGE = ("status.northwind.example", "status page")
+USAGE_PAGE = ("northwind.example/usage-rates", "usage rates")
+ORDER_FORM_RECORD = ("order form", "northwind-order-form")
+AMENDMENT_RECORD = ("amendment", "northwind-order-amendment")
+SEAT_REGISTER_RECORD = ("seat register", "northwind-seats")
+SEAT_AUDIT_RECORD = ("seat audit", "northwind-seat-audit")
+SUPPORT_NOTE_RECORD = ("support note", "northwind-support-note")
+
+LIST_PRICE = Fact("the $30 list price", ("$30",), PRICING_PAGE)
+ARCHIVED_LIST_PRICE = Fact("the superseded $22 price", ("$22",), ARCHIVE_PAGE)
+CONTRACT_RATE = Fact("the $24 contracted rate", ("$24",), ORDER_FORM_RECORD)
+AMENDED_RATE = Fact("the $27 amended rate", ("$27",), AMENDMENT_RECORD)
+RENEWAL_DATE = Fact(
+    "the renewal date",
+    ("1 july 2026", "july 1, 2026", "2026-07-01", "1 jul 2026"),
+    ORDER_FORM_RECORD,
+)
+FRANKFURT_DATE = Fact(
+    "the Frankfurt opening date",
+    ("3 february 2026", "february 3, 2026", "2026-02-03", "3 feb 2026"),
+    CHANGELOG_PAGE,
+)
+SUPPORT_HOURS = Fact(
+    "the published support window",
+    ("09:00 to 17:00", "09:00-17:00", "09:00\u201317:00", "9:00 to 17:00", "9am to 5pm"),
+    STATUS_PAGE,
+)
+NOTED_SUPPORT_HOURS = Fact(
+    "the workspace note's support window",
+    ("08:00 to 16:00", "08:00-16:00", "08:00\u201316:00", "8:00 to 16:00", "8am to 4pm"),
+    SUPPORT_NOTE_RECORD,
+)
+REGISTERED_SEATS = Fact("the registered 48 seats", ("48",), SEAT_REGISTER_RECORD)
+AUDITED_SEATS = Fact("the audited 52 seats", ("52",), SEAT_AUDIT_RECORD)
+OVERAGE_RATE = Fact(
+    "the overage rate in its own unit",
+    ("$0.40 per 1,000", "$0.40 per 1000", "$0.40 per thousand", "$0.0004"),
+    USAGE_PAGE,
+)
 
 CITES_ITS_SOURCE = (
-    "The reply names where each fact came from — the page, its address, or the workspace's own "
-    "record.",
-    "The reply states no figure it attributes to no source.",
+    "The reply names where the answer came from — the page, its address, or the workspace record "
+    "it came from. A passage number beside that name is part of the convention and is not a "
+    "missing source; a passage number in place of the name is.",
 )
+"""One criterion, and it is the one accuracy rests on. A second criterion counting whether every
+figure in the reply carries its own citation failed two correct answers in three runs, because the
+judge reads the answer without the corpus and can only measure how often the reply repeats a
+source."""
+
+
+def resolving(value: str, reason: str, losing: str) -> tuple[str, ...]:
+    """The three criteria a conflict case grades: both sides reported, one value acted on, and the
+    reason it wins."""
+    return (
+        "The reply names each side with its source and its date, and states that the two do not "
+        "agree or that one supersedes the other.",
+        f"The reply lands on {value} as the value to act on, and gives {reason} as the reason.",
+        f"The reply neither merges the two into one figure nor leaves {losing}.",
+    )
+
 
 CASES = (
     _case(
         "R01-external-fact",
         "What does Northwind charge per seat on its team plan?",
         WEB_ONLY,
-        combine(answers_with(("$30",), "published"), ANSWERS_DIRECTLY),
+        combine(states(LIST_PRICE), ANSWERED_WITHOUT_A_SEARCH),
         rubric=CITES_ITS_SOURCE,
     ),
     _case(
         "R02-internal-fact",
         "What are we paying Northwind per seat?",
         WORKSPACE_ONLY,
-        combine(answers_with(("$24",), "workspace"), ANSWERS_DIRECTLY),
+        combine(states(CONTRACT_RATE), ANSWERED_WITHOUT_A_SEARCH),
         rubric=CITES_ITS_SOURCE,
     ),
     _case(
         "R03-mixed-sources",
         "What is Northwind's list price per seat, and what do we actually pay?",
         BOTH,
-        combine(answers_with(("$30", "$24"), "web and workspace"), ANSWERS_DIRECTLY),
+        combine(states(LIST_PRICE, CONTRACT_RATE), ANSWERED_WITHOUT_A_SEARCH),
         rubric=(
             "The reply attributes the list price to Northwind's own page and the paid rate to the "
             "workspace's record.",
@@ -361,10 +540,10 @@ CASES = (
         ),
     ),
     _case(
-        "R04-factual-answer-not-another-search",
+        "R04-external-date-fact",
         "When did Northwind open its Frankfurt region?",
         WEB_ONLY,
-        combine(answers_with(("Frankfurt", "2026"), "published"), ANSWERS_DIRECTLY),
+        combine(states(FRANKFURT_DATE), ANSWERED_WITHOUT_A_SEARCH),
     ),
     _case(
         "R05-action-still-uses-tools",
@@ -384,22 +563,29 @@ CASES = (
         "R07-workspace-contradicts-the-web",
         "What is our per-seat cost for Northwind? I have seen two different numbers.",
         BOTH,
-        answers_with(("$24", "$30"), "web and workspace"),
-        rubric=(
-            "The reply states that the two sources disagree.",
-            "The reply names which source gives $30 and which gives $24, and does not average, "
-            "merge, or silently pick between them.",
+        combine(
+            states(CONTRACT_RATE, LIST_PRICE),
+            never_states("a rate merged out of $24 and $30", HEDGE + r"|\$2[5-9]\b"),
+        ),
+        rubric=resolving(
+            "$24, the rate the workspace's own signed order form fixes",
+            "that the tenant's signed contract is the authority for what this workspace pays, "
+            "while $30 is Northwind's public list price",
+            "$30 standing as what this workspace pays",
         ),
     ),
     _case(
         "R08-two-web-pages-disagree",
         "What is Northwind's published team price per seat?",
         DISAGREEING_WEB,
-        answers_with(("$30",), "current published"),
-        rubric=(
-            "The reply gives the 2026 price as the current one and dates it.",
-            "The reply names the older $22 figure as out of date, or states that the sources "
-            "disagree and gives each one's date.",
+        combine(
+            states(LIST_PRICE, ARCHIVED_LIST_PRICE),
+            never_states("a price merged out of $22 and $30", HEDGE + r"|\$2[3-9]\b"),
+        ),
+        rubric=resolving(
+            "$30, the price on the page published 11 February 2026",
+            "that the 2026 page is newer than the 2025 archive holding $22",
+            "$22 standing as the current published price",
         ),
     ),
     _case(
@@ -407,20 +593,98 @@ CASES = (
         "What does Northwind charge per seat on the team plan? What are its support hours? "
         "When did it open the Frankfurt region?",
         WEB_ONLY,
-        combine(answers_with(("$30", "Frankfurt"), "published"), ANSWERS_DIRECTLY),
-        rubric=(
-            "The reply answers all three questions.",
-            "The reply gives Northwind's support hours as 09:00 to 17:00 UTC on weekdays.",
-        ),
+        combine(states(LIST_PRICE, SUPPORT_HOURS, FRANKFURT_DATE), ANSWERED_WITHOUT_A_SEARCH),
+        rubric=("The reply answers all three questions.",),
     ),
     _case(
         "R10-two-questions-two-corpora",
         "When does our Northwind contract renew, and what does Northwind charge per seat on its "
         "public price list?",
         BOTH,
-        combine(answers_with(("July", "$30"), "web and workspace"), ANSWERS_DIRECTLY),
+        combine(states(RENEWAL_DATE, LIST_PRICE), ANSWERED_WITHOUT_A_SEARCH),
         rubric=(
             "The reply answers both questions and attributes each to the corpus it came from.",
+        ),
+    ),
+    _case(
+        "R11-two-workspace-records-disagree",
+        "How many Northwind seats do we hold?",
+        DISAGREEING_SEATS,
+        combine(
+            states(AUDITED_SEATS, REGISTERED_SEATS),
+            never_states("a seat count merged out of 48 and 52", HEDGE + r"|\b(?:49|50|51)\b"),
+        ),
+        rubric=resolving(
+            "52 seats, the count the audit completed 7 August 2026 gives",
+            "that the audit is the newer record, taken after the June expansion the register of "
+            "2 March 2026 predates",
+            "48 seats standing as the current count",
+        ),
+    ),
+    _case(
+        "R12-web-overrules-a-stale-workspace-note",
+        "What are Northwind's support hours?",
+        DISAGREEING_SUPPORT,
+        combine(
+            states(SUPPORT_HOURS, NOTED_SUPPORT_HOURS),
+            never_states(
+                "a support window merged out of the two",
+                HEDGE + "|08:00\\s*(?:to|-|\u2013)\\s*17:00|09:00\\s*(?:to|-|\u2013)\\s*16:00",
+            ),
+        ),
+        rubric=resolving(
+            "09:00 to 17:00 UTC on weekdays, the hours Northwind's own status page gives",
+            "that the status page of 20 January 2026 is newer than the workspace note of "
+            "9 September 2024, or that Northwind's own page is the authority for its support "
+            "hours",
+            "08:00 to 16:00 standing as the current support window",
+        ),
+    ),
+    _case(
+        "R13-half-the-question-is-answerable",
+        "What does Northwind charge per seat on the team plan, and what uptime does its SLA "
+        "promise?",
+        WEB_ONLY,
+        combine(
+            states(LIST_PRICE),
+            never_states("an uptime figure no passage carries", r"\b99(?:\.\d+)?\s*%"),
+            ANSWERED_WITHOUT_A_SEARCH,
+        ),
+        rubric=(
+            "The reply states that it has no uptime commitment for Northwind, or that its sources "
+            "do not give one.",
+            "The reply states no uptime figure as a fact about Northwind.",
+        ),
+    ),
+    _case(
+        "R14-rate-keeps-its-unit",
+        "What does Northwind charge for API calls over the plan limit?",
+        USAGE_WEB,
+        combine(
+            states(OVERAGE_RATE),
+            never_states(
+                "the overage rate as a per-call price", r"\$?0\.40\s*(?:per|/|a)\s*(?:api\s+)?call"
+            ),
+            ANSWERED_WITHOUT_A_SEARCH,
+        ),
+        rubric=(
+            "The reply gives the overage rate per 1,000 calls, or converts it to a per-call price "
+            "of $0.0004.",
+        ),
+    ),
+    _case(
+        "R15-amendment-supersedes-the-order-form",
+        "What are we paying Northwind per seat now?",
+        DISAGREEING_RATES,
+        combine(
+            states(AMENDED_RATE, CONTRACT_RATE),
+            never_states("a rate merged out of $24 and $27", HEDGE + r"|\$2(?:5|6)(?:\.\d+)?\b"),
+        ),
+        rubric=resolving(
+            "$27 per seat per month, the rate the amendment signed 12 June 2026 sets from "
+            "1 July 2026",
+            "that the amendment replaces the rate in the order form signed 6 March 2025",
+            "$24 standing as the rate paid today",
         ),
     ),
 )

@@ -40,11 +40,13 @@ type ReadablePages = Callable[[tuple[UUID, ...], SourceReader], Awaitable[dict[U
 
 @dataclass(frozen=True)
 class PageHit:
-    """One passage of one synced page, with the ref a reply opens it by."""
+    """One passage of one synced page, with the ref a reply opens it by and the date the page
+    states itself as of, so a reply weighing two records can tell the newer from the older."""
 
     page_id: UUID
     title: str
     text: str
+    dated: str
 
     @property
     def ref(self) -> str:
@@ -69,7 +71,9 @@ class PageStore:
         for leg in legs:
             for hit in leg:
                 held.setdefault(hit.chunk_digest, hit)
-        ranked = sorted(held.values(), key=lambda hit: scores[hit.chunk_digest], reverse=True)
+        ranked = sorted(
+            held.values(), key=lambda hit: (-scores[hit.chunk_digest], hit.chunk_digest)
+        )
         return await self._readable(ranked, reader, limit)
 
     async def _legs(
@@ -105,7 +109,7 @@ class PageStore:
         page_ids = tuple(dict.fromkeys(UUID(hit.owner_id) for hit in ranked))
         states = await self.readable(page_ids, reader)
         return tuple(
-            PageHit(page_id=page_id, title=state.title, text=hit.text)
+            PageHit(page_id=page_id, title=state.title, text=hit.text, dated=state.as_of)
             for hit in ranked
             if (state := states.get(page_id := UUID(hit.owner_id))) is not None
             and state.subject == hit.subject

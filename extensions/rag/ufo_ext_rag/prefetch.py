@@ -67,6 +67,13 @@ class Passage:
         return f"{head} ({self.dated})\n{self.text}" if self.dated else f"{head}\n{self.text}"
 
 
+def _rank(fused: dict[str, float], passage: Passage) -> tuple[float, str]:
+    """Best first, and one order for a given set of passages whatever order the legs arrived in:
+    two passages of equal fused score are ranked by their own key, never by which leg answered
+    first."""
+    return (-fused[passage.key], passage.key)
+
+
 @dataclass(frozen=True)
 class Prefetch:
     """Run both legs for one turn's queries and render what they found."""
@@ -146,7 +153,7 @@ class Prefetch:
             origin=INTERNAL_LABEL,
             title=hit.title,
             reference=hit.ref,
-            dated="",
+            dated=hit.dated,
             text=hit.text[:PASSAGE_MAX_CHARS],
         )
 
@@ -156,7 +163,7 @@ class Prefetch:
         for leg in ranked:
             for passage in leg:
                 held.setdefault(passage.key, passage)
-        order = sorted(held.values(), key=lambda passage: fused[passage.key], reverse=True)
+        order = sorted(held.values(), key=lambda passage: _rank(fused, passage))
         heads = [
             next((passage for passage in order if passage.origin == origin), None)
             for origin in (EXTERNAL_LABEL, INTERNAL_LABEL)
@@ -171,4 +178,4 @@ class Prefetch:
                 continue
             selected.append(passage)
             total += len(passage.text)
-        return tuple(sorted(selected, key=lambda passage: fused[passage.key], reverse=True))
+        return tuple(sorted(selected, key=lambda passage: _rank(fused, passage)))
