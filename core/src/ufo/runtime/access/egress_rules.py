@@ -218,7 +218,9 @@ async def derive_credential_rules(
 
 
 def derive_grant_rules(
-    grants: tuple[Grant, ...], transfer_hosts: "ConnectorTransferHosts | None" = None
+    grants: tuple[Grant, ...],
+    transfer_hosts: "ConnectorTransferHosts | None" = None,
+    connections: tuple[UUID, ...] | None = None,
 ) -> tuple[Rule, ...]:
     """Each active grant admits its provider's own host — plus the broker file-store hosts
     `transfer_hosts` resolves for it, where the sandbox fetches a tool's presigned file outputs and
@@ -227,9 +229,12 @@ def derive_grant_rules(
     at the broker, and the one grant whose token reaches the wire is a CLI credential's, derived
     by `derive_cli_rules`. A brokered grant admits no provider host of its own (its `host` is
     empty), so only its transfer hosts scope; an ungranted host derives no exact ScopeRule,
-    MeterRule, or authenticated path."""
+    MeterRule, or authenticated path. A connection allowlist removes every unlisted grant before
+    its connector hosts are admitted."""
     rules: list[Rule] = []
     for grant in grants:
+        if connections is not None and grant.connection_id not in connections:
+            continue
         extra = transfer_hosts.of(grant.provider) if transfer_hosts is not None else ()
         hosts = tuple(dict.fromkeys(host for host in (grant.host, *extra) if host))
         if hosts:
@@ -243,13 +248,15 @@ async def derive_cli_rules(
     authority: ExecutionAuthority,
     clis: Mapping[str, CliCredential],
     workspace_id: UUID,
+    connections: tuple[UUID, ...] | None = None,
 ) -> tuple[Rule, ...]:
     """Each grant whose connector declares a CLI credential and whose account the execution
     authority may use swaps that account's real token in for the grant's sentinel: on the provider
     host the CLI sends it as ordinary auth, and on the connector's git host — admitted and metered
     here, since a grant's own rules scope only the API host — the sandbox's git helper sends it as
     the password half of a Basic credential, which the proxy re-encodes around the token. Member
-    authority admits its own and shared grants; workspace authority admits shared grants only.
+    authority admits its own and shared grants; workspace authority admits shared grants only. A
+    connection allowlist removes every unlisted grant before any token is resolved.
 
     The token is read from the broker per grant, and one grant's fault withholds that grant alone:
     an account the broker can no longer authenticate costs the member that account's wire and
@@ -258,6 +265,8 @@ async def derive_cli_rules(
     rules: list[Rule] = []
     git_hosts: dict[str, list[InjectionRule]] = {}
     for grant in grants:
+        if connections is not None and grant.connection_id not in connections:
+            continue
         cli = clis.get(grant.provider)
         if cli is None or not (grant.connection_shared or grant.owner_member_id == member_id):
             continue

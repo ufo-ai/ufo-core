@@ -1,5 +1,7 @@
 {"wire": "workspace", "verb": "absorbed", "fields": ["arr-1", "arr-2"], "line": "absorbed\tarr-1\tarr-2"}
 {"wire": "workspace", "verb": "ask", "fields": [">"], "line": "ask\t>"}
+{"wire": "workspace", "verb": "choose", "fields": ["Allow this request?", "Allow", "Deny", "Always Allow"], "line": "choose\tAllow this request?\tAllow\tDeny\tAlways Allow"}
+{"wire": "workspace", "verb": "choose_many", "fields": ["Select services", "Mail", "Calendar"], "line": "choose_many\tSelect services\tMail\tCalendar"}
 {"wire": "workspace", "verb": "exit", "fields": ["0"], "line": "exit\t0"}
 {"wire": "workspace", "verb": "file", "fields": ["quarterly report.pdf", "2048", "https://ws.example/artifacts/a?exp=1&sig=2"], "line": "file\tquarterly report.pdf\t2048\thttps://ws.example/artifacts/a?exp=1&sig=2"}
 {"wire": "workspace", "verb": "install", "fields": [], "line": "install"}

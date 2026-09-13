@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from ufo.harness.agent import (
+    TURN_ENDED_TOOL_RESULT,
     AgentDefinition,
     AgentEngine,
     Finished,
@@ -46,6 +47,7 @@ class Tools:
     )
     safe: frozenset[str] = frozenset({"echo"})
     calls: list[ToolCall] = field(default_factory=list)
+    preflights: list[tuple[ToolCall, ...]] = field(default_factory=list)
     rounds: list[tuple[tuple[ToolCall, ...], tuple[ToolResult, ...]]] = field(default_factory=list)
     interruptions: int = 0
 
@@ -54,6 +56,9 @@ class Tools:
 
     def parallel_safe(self, call: ToolCall) -> bool:
         return call.name in self.safe
+
+    async def preflight(self, calls: tuple[ToolCall, ...]) -> None:
+        self.preflights.append(calls)
 
     async def prepare(self, calls: tuple[ToolCall, ...]) -> None:
         return None
@@ -289,11 +294,13 @@ async def test_tool_segments_run_concurrently_and_follow_the_resolved_boundary()
 
     model = ScriptedModel([round_("", first, second), round_("done")])
 
-    result = await AgentEngine(definition(), model, ParallelTools()).run(())
+    tools = ParallelTools()
+    result = await AgentEngine(definition(), model, tools).run(())
 
     assert result.messages[-1] == Message(
         "user", (ToolResult("one", "one"), ToolResult("two", "two"))
     )
+    assert tools.preflights == [(first, second)]
 
     safe_one = ToolCall("one", "dispatch", {"value": "one", "safe": True})
     safe_two = ToolCall("two", "dispatch", {"value": "two", "safe": True})
@@ -321,6 +328,39 @@ async def test_tool_segments_run_concurrently_and_follow_the_resolved_boundary()
         "user",
         (ToolResult("one", "one"), ToolResult("two", "two"), ToolResult("three", "three")),
     )
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_tool_result_stops_before_later_segments_or_another_model_round() -> None:
+    first = ToolCall("one", "echo", {"value": "approval"})
+    later = ToolCall("two", "unsafe", {"value": "later"})
+
+    @dataclass
+    class TerminalTools(Tools):
+        def parallel_safe(self, call: ToolCall) -> bool:
+            return False
+
+        async def execute(self, call: ToolCall) -> ToolResult:
+            self.calls.append(call)
+            return ToolResult(call.id, str(call.input["value"]), ends_turn=call.id == "one")
+
+    model = ScriptedModel([round_("", first, later)])
+    tools = TerminalTools()
+    conversation = Conversation()
+
+    result = await AgentEngine(definition(), model, tools, conversation).run(())
+
+    assert tools.calls == [first]
+    assert len(model.requests) == 1
+    assert result.answer == ""
+    assert result.messages[-1] == Message(
+        "user",
+        (
+            ToolResult("one", "approval", ends_turn=True),
+            ToolResult("two", TURN_ENDED_TOOL_RESULT, is_error=True),
+        ),
+    )
+    assert conversation.exchanges == [result.messages]
 
 
 def test_definitions_reject_invalid_values() -> None:

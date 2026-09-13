@@ -20,6 +20,9 @@ from ufo.runtime.tools.context import (
     CommandDiagnostics as CommandDiagnostics,
 )
 from ufo.runtime.tools.context import (
+    ConnectorAccount as ConnectorAccount,
+)
+from ufo.runtime.tools.context import (
     ConnectorConnection as ConnectorConnection,
 )
 from ufo.runtime.tools.context import (

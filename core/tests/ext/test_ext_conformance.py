@@ -1139,11 +1139,11 @@ async def test_undeclared_credential_slot_is_refused(db: None) -> None:
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_only_an_off_turn_role_carries_the_probe_seam(db: None, tmp_path: Path) -> None:
-    """A job's context carries the off-turn exec. A tool's and a turn hook's do not: those run
-    inside a turn that already holds its sandbox, and a probe there would open a second,
-    unattributed exec beside it. The absence is structural — those roles never pass the seam to
-    `context_for` — so it reads as no capability at all rather than a disabled one.
+async def test_jobs_and_wired_tools_carry_the_probe_seam(db: None, tmp_path: Path) -> None:
+    """A job's context carries the scoped exec. A turn tool receives it only when the composition
+    root wires it, for an action that must run under less authority than the turn's open sandbox.
+    A turn hook receives none. The absence is structural, so it reads as no capability at all
+    rather than a disabled one.
 
     The capability a job does hold is one verb. No carrier, no handle, no session: a handler cannot
     widen a bounded command into arbitrary reach into the container."""
@@ -1155,13 +1155,16 @@ async def test_only_an_off_turn_role_carries_the_probe_seam(db: None, tmp_path: 
     assert {name for name in dir(probes) if not name.startswith("_")} == {"run"}
 
     _, ext_by_tool, _ = turn_tools(
-        (manifest,), _credential_store(), audience=conversation_audience(None)
+        (manifest,),
+        _credential_store(),
+        audience=conversation_audience(None),
+        probes=probes,
     )
     hooks = turn_hooks((manifest,), _credential_store(), audience=conversation_audience(None))
     bound = [hook.ext for event in hooks.hooks.values() for hook in event]
     assert bound
-    for context in (ext_by_tool[sample.TOOL_NAME], *bound):
-        assert context.probes is None
+    assert ext_by_tool[sample.TOOL_NAME].probes is probes
+    assert all(context.probes is None for context in bound)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

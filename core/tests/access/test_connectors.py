@@ -42,7 +42,7 @@ from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
 from ufo.serve import (
     CONNECT_CALLBACK_PATH,
     _connect_flow,
@@ -540,3 +540,42 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
             )
         )
     return conversation_id
+
+
+async def test_connector_account_stops_at_the_turn_connection_scope(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    with ws(workspace_id), agent(agent_id):
+        listed = await store.record(
+            provider=sample.CONNECTOR_PROVIDER,
+            account_id="acct-listed",
+            host=sample.CONNECTOR_HOST,
+            grantor_member_id=member_id,
+            shared=False,
+        )
+        await store.record(
+            provider=sample.CONNECTOR_PROVIDER,
+            account_id="acct-other",
+            host=sample.CONNECTOR_HOST,
+            grantor_member_id=member_id,
+            shared=True,
+        )
+        unrestricted = _turn_context(
+            workspace_id, agent_id, conversation_id, member_id, grants=store
+        )
+        restricted = replace(
+            unrestricted,
+            turn=unrestricted.turn.model_copy(
+                update={"runtime_config": TurnRuntimeConfig(connections=(listed,))}
+            ),
+        )
+        assert await unrestricted.connector_accounts(sample.CONNECTOR_PROVIDER) == (
+            "acct-listed",
+            "acct-other",
+        )
+        assert await restricted.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-listed",)
+        assert await restricted.connector_account(sample.CONNECTOR_PROVIDER) == "acct-listed"
+        with pytest.raises(ValueError, match="acct-other"):
+            await restricted.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-other")

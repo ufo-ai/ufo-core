@@ -71,8 +71,8 @@ import {
 } from "@/views/registry";
 import {
   IMESSAGE_SURFACE,
-  MEMBER_SUBJECT,
   Me,
+  MEMBER_SUBJECT,
   SLACK_SURFACE,
   UFO_SURFACE,
   WEB_SURFACE,
@@ -369,7 +369,8 @@ export function App({
   );
 }
 
-function founded(agent: Agent, conversationId: string, title: string): void {
+function founded(agent: Agent, member: Member, conversationId: string, title: string): void {
+  if (member.id === undefined) throw new Error("member id missing");
   railFounded({
     conversation_id: conversationId,
     agent_id: agent.id,
@@ -379,8 +380,8 @@ function founded(agent: Agent, conversationId: string, title: string): void {
     last_at: stampIso(new Date()),
     surface: WEB_SURFACE,
     surface_label: null,
-    audience: MEMBER_SUBJECT,
-    member_email: null,
+    audience: MEMBER_SUBJECT + member.id,
+    member_email: member.email,
     mine: true,
     speaker: null,
     source: null,
@@ -971,7 +972,9 @@ function RoutedPane({
             selected={selected}
             build={route.kind === "agents" && route.build === true}
             chats={rail.phase === "ready" ? rail.rows : null}
-            onCreated={founded}
+            onCreated={(agent, conversationId, title) =>
+              founded(agent, member, conversationId, title)
+            }
             place={route.kind === "agent" ? route.place : {}}
             onPlace={(place, step) =>
               route.kind === "agent"
@@ -1081,7 +1084,7 @@ function RoutedPane({
           member={member}
           conversationId={null}
           focusComposer
-          onCreated={(conversationId, title) => founded(agent, conversationId, title)}
+          onCreated={(conversationId, title) => founded(agent, member, conversationId, title)}
           onActivity={railActivity}
         />
       );

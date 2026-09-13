@@ -31,7 +31,6 @@ from uuid import UUID
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from ufo.sdk.audience import Audience, conversation_audience
 from ufo.sdk.authority import authority_from_member_id, authority_member_id
 from ufo.sdk.context import (
     SUBAGENT_SURFACE,
@@ -39,6 +38,7 @@ from ufo.sdk.context import (
     ExtensionContext,
     FiredBy,
     SourceReader,
+    TurnRuntimeConfig,
 )
 from ufo.sdk.grants import FeedConnection, account_object_name, feed_connections
 from ufo.sdk.manifest import (
@@ -64,7 +64,7 @@ from ufo.sdk.objects import (
     owner_emails,
 )
 from ufo.sdk.sources import PageChange
-from ufo.sdk.subjects import SHARED_SUBJECT, subject_shared
+from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sources.pages import CONNECTION_OBJECT_KIND, PAGE_KIND
 from ufo_ext_sources.resources import (
@@ -136,11 +136,14 @@ def _feed_summary(connection: FeedConnection) -> str:
     return f"{connection.provider} account {connection.account_id}"
 
 
-def _shared_reader(agent_id: UUID) -> SourceReader:
+def _shared_reader(agent_id: UUID, connections: tuple[UUID, ...] | None = None) -> SourceReader:
     """Which feeds one agent may read of what the whole workspace shares. An alert and an offer both
     ask it, and neither has a live speaker whose private content could widen the answer."""
     return SourceReader(
-        agent_id=agent_id, requesting_member_id=None, subjects=frozenset({SHARED_SUBJECT})
+        agent_id=agent_id,
+        requesting_member_id=None,
+        subjects=frozenset({SHARED_SUBJECT}),
+        connections=connections,
     )
 
 
@@ -255,7 +258,19 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         """A trigger is shared exactly as far as its owning conversation, so every surface listing
         the kind answers one question one way. Its summary names the connection, since what a
         member came to read is which feed wakes them and not the triple's derived name."""
-        watched = await self._watched(ext)
+        return await self._rows(await self._watched(ext), member_id=member_id)
+
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        watched = await self._watched(ctx.ext)
+        connections = ctx.connection_scope
+        if connections is not None:
+            allowed = frozenset(connections)
+            watched = tuple(row for row in watched if row.listed.trigger.connection_id in allowed)
+        return await self._rows(watched, member_id=authority_member_id(ctx.authority))
+
+    async def _rows(
+        self, watched: tuple[_Watched, ...], *, member_id: UUID | None
+    ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         emails = await owner_emails(row.listed.trigger.created_by_member_id for row in watched)
         fires = await last_fires(SOURCE_TRIGGER_KIND, tuple(row.name for row in watched))
         return tuple(
@@ -264,7 +279,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
                 summary=_trigger_summary(row.connection, row.listed.trigger),
                 owner=GeneratedObjectOwner(
                     member_id=row.listed.trigger.created_by_member_id,
-                    shared=subject_shared(row.listed.audience),
+                    audience=row.listed.audience,
                     generation=row.listed.trigger.id,
                 ),
                 fields={
@@ -387,6 +402,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             if spec.paused != trigger.paused:
                 await _require_triggers(ctx.ext).set_paused(trigger, spec.paused)
             return
+        creating_member_id = ctx.require_speaker()
         if spec.streams:
             synced = frozenset(
                 stream
@@ -412,7 +428,10 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             conversation_id=ctx.turn.conversation_id,
             connection_id=connection.id,
             delivery=spec.delivery,
-            created_by_member_id=authority_member_id(ctx.authority),
+            created_by_member_id=creating_member_id,
+            internet_access=(
+                None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.internet_access
+            ),
             resource=spec.resource,
             streams=spec.streams,
         )
@@ -484,13 +503,13 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
         woken = await triggers.waking(feed.id)
         if not woken:
             continue
-        facts = await ctx.ext.conversation_facts(
-            tuple(trigger.conversation_id for trigger in woken)
-        )
         shared = [change for change in feed_changes if change.subject == SHARED_SUBJECT]
         if not shared:
             continue
         for trigger in woken:
+            if trigger.created_by_member_id is None:
+                await triggers.retire_unattributed(trigger)
+                continue
             readable = await ctx.ext.readable_source_ids(_shared_reader(trigger.agent_id))
             authorized = [change for change in shared if change.source_id in readable]
             authorized = _about_resource(feed.provider, trigger, authorized)
@@ -503,7 +522,6 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
                     ctx.ext,
                     feed,
                     trigger,
-                    facts[trigger.conversation_id].audience,
                     authorized,
                 )
     return None
@@ -564,7 +582,13 @@ async def on_link_seen(ctx: HookContext) -> HookOutcome:
         ext.store.extension,
     ):
         return None
-    feeds = await _reachable_feeds(ext, _shared_reader(ctx.turn.agent_id))
+    feeds = await _reachable_feeds(
+        ext,
+        _shared_reader(
+            ctx.turn.agent_id,
+            None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.connections,
+        ),
+    )
     if not feeds:
         return None
     named = [
@@ -628,7 +652,6 @@ async def _fire_trigger(
     ext: ExtensionContext,
     connection: FeedConnection,
     trigger: SourceTrigger,
-    audience: Audience,
     authorized: list[PageChange],
 ) -> None:
     """Deliver one trigger's changes to its conversation."""
@@ -638,12 +661,6 @@ async def _fire_trigger(
             _feed_name(connection), trigger.conversation_id, trigger.resource, trigger.streams
         ),
         title=_trigger_summary(connection, trigger),
-    )
-    member_id = (
-        trigger.created_by_member_id
-        if trigger.created_by_member_id is not None
-        and audience == conversation_audience(trigger.created_by_member_id)
-        else None
     )
     batch_id = sha256(
         "\n".join(f"{change.revision}:{change.page_id.hex}" for change in authorized).encode()
@@ -664,10 +681,14 @@ async def _fire_trigger(
             f"source-trigger:{_trigger_scope(connection, trigger)}:"
             f"{trigger.conversation_id.hex}:{batch_id}"
         ),
-        authority=authority_from_member_id(member_id),
+        authority=authority_from_member_id(trigger.created_by_member_id),
         holds_work_already_done=True,
         standalone=True,
         fired_by=fired_by,
+        runtime_config=TurnRuntimeConfig(
+            connections=(trigger.connection_id,),
+            internet_access=trigger.internet_access,
+        ),
     )
 
 

@@ -1,7 +1,7 @@
 """The reach projection: where an invoke reaches a member who is not in the invoking conversation.
-Only a durable-surface conversation with the member's own audience in which they personally spoke
-is returned, newest such turn first; a live surface, another member's room, a shared room, and a
-conversation they never spoke in are all absent."""
+Only a durable-surface conversation the member reads — their own or the workspace's — in which
+they personally spoke is returned, newest such turn first; a live surface, another member's room,
+a private channel, and a conversation they never spoke in are all absent."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -17,7 +17,12 @@ from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
-from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.runtime.turns.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+    room_audience,
+)
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
@@ -85,9 +90,11 @@ async def _conversation(
     *,
     spoken_by: UUID | None,
     spoke_at: datetime,
+    audience: Audience | None = None,
 ) -> UUID:
-    """A conversation on `surface` with `owner`'s private audience (shared when None), holding one
-    turn `spoken_by` spoke at `spoke_at`, or a speakerless one when None."""
+    """A conversation on `surface` with `owner`'s private audience (shared when None, or the
+    `audience` named), holding one turn `spoken_by` spoke at `spoke_at`, or a speakerless one when
+    None."""
     conversation_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -98,7 +105,7 @@ async def _conversation(
                 surface=surface,
                 queue_key=conversation_id.hex,
                 member_id=owner,
-                audience=str(conversation_audience(owner)),
+                audience=str(audience or conversation_audience(owner)),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -121,9 +128,12 @@ async def _conversation(
     return conversation_id
 
 
-async def test_member_reach_is_the_members_own_durable_conversations_newest_first(
+async def test_member_reach_is_the_members_readable_durable_conversations_newest_first(
     db: None,
 ) -> None:
+    """Reach is participation inside a readable audience: the member's own conversations and the
+    workspace-shared channel they spoke in, never a private channel they spoke in (nobody reads a
+    room here), another member's DM, a conversation they never spoke in, or a live surface."""
     workspace_id, member_id, agent_id = await _seed()
     other = await _member(workspace_id)
     now = datetime.now(UTC)
@@ -143,9 +153,26 @@ async def test_member_reach_is_the_members_own_durable_conversations_newest_firs
         spoken_by=member_id,
         spoke_at=now - timedelta(hours=1),
     )
+    shared_channel = await _conversation(
+        workspace_id,
+        agent_id,
+        "slack",
+        None,
+        spoken_by=member_id,
+        spoke_at=now - timedelta(days=1),
+    )
     await _conversation(workspace_id, agent_id, "web", member_id, spoken_by=member_id, spoke_at=now)
     await _conversation(workspace_id, agent_id, "slack", other, spoken_by=other, spoke_at=now)
-    await _conversation(workspace_id, agent_id, "slack", None, spoken_by=member_id, spoke_at=now)
+    await _conversation(workspace_id, agent_id, "slack", None, spoken_by=other, spoke_at=now)
+    await _conversation(
+        workspace_id,
+        agent_id,
+        "slack",
+        None,
+        spoken_by=member_id,
+        spoke_at=now,
+        audience=room_audience("slack", "C1"),
+    )
     await _conversation(workspace_id, agent_id, "slack", member_id, spoken_by=None, spoke_at=now)
     invoker = AdmissionInvoker(
         admission=Admission(dbos=_NoDbos(), durable_surfaces=DURABLE), workspace_id=workspace_id
@@ -159,10 +186,11 @@ async def test_member_reach_is_the_members_own_durable_conversations_newest_firs
 
     assert [(hit.surface, hit.conversation_id) for hit in reach] == [
         ("imessage", newer_imessage),
+        ("slack", shared_channel),
         ("slack", older_slack),
     ]
     assert all(hit.agent_id == agent_id for hit in reach)
-    assert reach[0].last_spoke_at > reach[1].last_spoke_at
+    assert reach[0].last_spoke_at > reach[1].last_spoke_at > reach[2].last_spoke_at
     assert [hit.conversation_id for hit in one] == [newer_imessage]
     assert nobody == ()
 

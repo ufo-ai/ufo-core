@@ -94,18 +94,18 @@ test("an empty conversation states it, and the composer sends a message and stre
   expect(StreamFake.last().closed).toBe(true);
 });
 
-test("the open chat states who reads it on its title line, as the glyph alone", async () => {
+test("the open chat states who reads it on its title line, as the member's own control", async () => {
   wire(transcript());
   open();
 
   await screen.findByText("No messages in this conversation yet.");
   const detail = "Only you read this conversation. " + ADMIN_DISCLOSURE;
-  const mark = audienceMark();
-  expect(mark.parentElement!.textContent).toContain(CHAT_ROW.title);
-  expect(mark.querySelector("svg")).toBeTruthy();
-  expect(mark.textContent).toBe(detail);
-  expect(mark.getAttribute("title")).toBe(detail);
-  fireEvent.focus(mark);
+  const control = screen.getByRole("button", { name: "Visibility: Private" });
+  expect(control.parentElement!.textContent).toContain(CHAT_ROW.title);
+  expect(control.querySelector("svg")).toBeTruthy();
+  expect(control.getAttribute("title")).toBe(detail);
+  expect(document.body.querySelector("[data-slot=audience]")).toBeNull();
+  fireEvent.focus(control);
   expect((await screen.findByRole("tooltip")).textContent).toBe("Only you");
 });
 

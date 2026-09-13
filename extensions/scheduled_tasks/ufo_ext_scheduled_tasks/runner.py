@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from ufo.sdk.authority import authority_from_member_id
-from ufo.sdk.context import AgentArchived, ExtensionContext, FiredBy
+from ufo.sdk.context import AgentArchived, ExtensionContext, FiredBy, TurnRuntimeConfig
 from ufo.sdk.scheduled_fire import scheduled_fire_key
 from ufo_ext_scheduled_tasks.cron import next_fire
 from ufo_ext_scheduled_tasks.schedules import ScheduledTask, ScheduleStore
@@ -108,6 +108,10 @@ class ScheduledTaskRunner:
                 authority=authority_from_member_id(task.created_by_member_id),
                 as_scheduled=True,
                 fired_by=FiredBy(kind=SCHEDULED_TASK_KIND, name=task.name, title=task.name),
+                runtime_config=TurnRuntimeConfig(
+                    connections=task.connections,
+                    internet_access=task.internet_access,
+                ),
             )
         except AgentArchived:
             return None

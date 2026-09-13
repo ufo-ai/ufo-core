@@ -49,6 +49,8 @@ from evals.harness.scorers import combine, required_tools_scorer, skill_scorer
 from ufo.blob import BlobStore
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
+from ufo.host.kinds.member_permissions import MEMBER_PERMISSION_KIND
+from ufo.runtime.access.member_authorization import AuthorizationEffect
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
@@ -519,6 +521,11 @@ async def _mccarren_final_fire(_output: CapabilityOutput) -> str | None:
 
 
 SHARED_ARCHIVE_APP = "stale-standup-digest"
+PERMISSION_CALL = "publish_quarterly_packet"
+PERMISSION_EFFECT = AuthorizationEffect(
+    call=PERMISSION_CALL,
+    arguments={"path": "/workspace/quarterly-packet.pdf", "audience": "workspace"},
+)
 
 
 def _shared_conversation_seed() -> CapabilitySeed:
@@ -603,10 +610,87 @@ async def _graded_shared_archive(output: CapabilityOutput) -> CapabilityVerdict:
     return CapabilityVerdict(True, "the app is archived", evidence)
 
 
+async def _permission_seed(workspace_id: UUID, agent_id: UUID, blob: BlobStore) -> None:
+    async with workspace_tx() as connection:
+        member_id = (
+            await connection.execute(
+                sa.select(tables.member.c.id)
+                .where(
+                    tables.member.c.workspace_id == workspace_id,
+                    tables.member.c.is_admin.is_(True),
+                )
+                .order_by(tables.member.c.created_at)
+                .limit(1)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.delete(tables.member_permission).where(
+                tables.member_permission.c.workspace_id == workspace_id,
+                tables.member_permission.c.member_id == member_id,
+                tables.member_permission.c.agent_id == agent_id,
+                tables.member_permission.c.call == PERMISSION_CALL,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member_permission).values(
+                id=uuid7(),
+                workspace_id=workspace_id,
+                member_id=member_id,
+                agent_id=agent_id,
+                call=PERMISSION_CALL,
+                effect_digest=PERMISSION_EFFECT.digest,
+                effect=PERMISSION_EFFECT.stored(),
+                granted_by=uuid4(),
+                revoked_at=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+
+async def _permission_cleanup(workspace_id: UUID, agent_id: UUID, blob: BlobStore) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.member_permission).where(
+                tables.member_permission.c.workspace_id == workspace_id,
+                tables.member_permission.c.agent_id == agent_id,
+                tables.member_permission.c.call == PERMISSION_CALL,
+            )
+        )
+
+
+async def _graded_permission_revocation(output: CapabilityOutput) -> CapabilityVerdict:
+    async with workspace_tx() as connection:
+        active = (
+            await connection.execute(
+                sa.select(tables.member_permission.c.id).where(
+                    tables.member_permission.c.call == PERMISSION_CALL,
+                    tables.member_permission.c.revoked_at.is_(None),
+                )
+            )
+        ).all()
+    deletes = [
+        call
+        for call in output.calls
+        if call.name == "object_delete" and call.input.get("kind") == MEMBER_PERMISSION_KIND
+    ]
+    evidence: JsonObject = {
+        "activePermissions": len(active),
+        "permissionDeletes": len(deletes),
+        "successfulDeletes": sum(call.succeeded for call in deletes),
+    }
+    if active:
+        return CapabilityVerdict(False, "the standing permission remains active", evidence)
+    if not any(call.succeeded for call in deletes):
+        return CapabilityVerdict(False, "no successful permission delete was recorded", evidence)
+    return CapabilityVerdict(True, "the member found and revoked the standing permission", evidence)
+
+
 CASES = (
     CapabilityCase(
         "O11-archive-in-a-shared-conversation",
-        f"Archive the {SHARED_ARCHIVE_APP} app. It has not posted anything useful in weeks.",
+        f"Archive the {SHARED_ARCHIVE_APP} app. It has not posted anything useful in weeks. "
+        "Go ahead; do not ask me to confirm again.",
         DescribedGrader(
             "in a shared conversation the archive lands, named to the member who asked",
             _graded_shared_archive,
@@ -646,6 +730,18 @@ CASES = (
             "be managed.",
         ),
         digest_tag="object-tools:kind-discovery",
+    ),
+    CapabilityCase(
+        "O18-revoke-standing-permission",
+        "Show me my standing permissions. Revoke the one for publishing the quarterly packet.",
+        DescribedGrader(
+            "the member lists their standing permissions and revokes the "
+            "quarterly-packet permission",
+            _graded_permission_revocation,
+        ),
+        seed=_permission_seed,
+        cleanup=_permission_cleanup,
+        digest_tag="object-tools:revoke-standing-permission",
     ),
     CapabilityCase(
         "O04-create-weekday-digest",

@@ -9,6 +9,8 @@ from typing import Literal, Protocol
 from ufo.harness.replies import MarkedReply, marked_replies
 from ufo.harness.tools import dispatch_segments
 
+TURN_ENDED_TOOL_RESULT = "Not run because an earlier tool ended the turn."
+
 
 @dataclass(frozen=True)
 class Text:
@@ -35,6 +37,7 @@ class ToolResult:
     is_error: bool = False
     activity: bool = False
     activity_text: str = ""
+    ends_turn: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,11 +140,14 @@ class AgentModel(Protocol):
 class AgentTools(Protocol):
     """Describe, prepare, and execute the tools available to one agent run. `parallel_safe` answers
     for the declaration the boundary resolves a call to, so a call a wire dispatcher makes on
-    another declaration's behalf schedules by that declaration's flag, never the dispatcher's."""
+    another declaration's behalf schedules by that declaration's flag, never the dispatcher's.
+    `preflight` sees the whole round before ordered dispatch segments begin."""
 
     def definitions(self) -> tuple[ToolDefinition, ...]: ...
 
     def parallel_safe(self, call: ToolCall) -> bool: ...
+
+    async def preflight(self, calls: tuple[ToolCall, ...]) -> None: ...
 
     async def prepare(self, calls: tuple[ToolCall, ...]) -> None: ...
 
@@ -329,6 +335,7 @@ class AgentEngine:
         finish_ids = {call.id for call in finish_calls}
         results: tuple[ToolResult, ...] = ()
         try:
+            await self.tools.preflight(streamed.calls)
             for segment in dispatch_segments(
                 streamed.calls,
                 parallel_safe=self.tools.parallel_safe,
@@ -353,6 +360,17 @@ class AgentEngine:
                 )
                 if failure is not None:
                     raise failure
+                if any(result.ends_turn for result in results):
+                    completed = {result.call_id for result in results}
+                    results = (
+                        *results,
+                        *(
+                            ToolResult(call.id, TURN_ENDED_TOOL_RESULT, is_error=True)
+                            for call in streamed.calls
+                            if call.id not in completed
+                        ),
+                    )
+                    break
         finally:
             await self.tools.after_round(streamed.calls, results)
         content: tuple[Content, ...] = (
@@ -360,11 +378,15 @@ class AgentEngine:
             *((Text(streamed.text),) if streamed.text else ()),
             *streamed.calls,
         )
-        return (
+        messages = (
             *streamed.messages,
             Message(role="assistant", content=content),
             Message(role="user", content=results),
         )
+        if any(result.ends_turn for result in results):
+            await self.conversation.checkpoint(messages)
+            return Finished(messages, "")
+        return messages
 
     async def _close(
         self,

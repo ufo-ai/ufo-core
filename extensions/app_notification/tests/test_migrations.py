@@ -5,8 +5,10 @@ row still says what the release before said â€” a member's own wording stands â€
 every live shipped row, and an archived row and another extension's row stand."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
+from uuid import uuid4
 
 import sqlalchemy as sa
 from alembic import command
@@ -18,9 +20,13 @@ from ufo_ext_app_notification.manifest import (
     NOTIFICATION_AGENT_PROMPT,
     VERSION,
 )
+from ufo_ext_app_notification.store import notification as notification_table
+from ufo_ext_app_notification.store import notification_delivery as notification_delivery_table
 
 from ufo.db import MIGRATIONS_DIR
 from ufo.host.ext.loader import migration_locations
+from ufo.schema import tables
+from ufo.schema.records import TurnRuntimeConfig
 
 CORE_HEAD = (MIGRATIONS_DIR / "versions" / "HEAD").read_text().strip()
 RELEASED = "notification_0001"
@@ -30,6 +36,7 @@ CARRY = "notification_0004"
 SPAWN = "notification_0005"
 RECONNECT = "notification_0006"
 BRIEF = "notification_0007"
+SCOPE = "notification_0008"
 EDITED_PROMPT = "only tell me about churn"
 
 
@@ -378,3 +385,237 @@ def test_the_brief_prompt_reaches_a_row_two_releases_behind(tmp_path: Path) -> N
 
     assert after["shipped"] == (NOTIFICATION_AGENT_PROMPT, VERSION, LIVE_TOOLS)
     assert after["other"] == (SPAWN_PROMPT, SPAWN_VERSION, LIVE_TOOLS)
+
+
+def test_notification_runtime_backfill_and_outgoing_writes_fail_closed(tmp_path: Path) -> None:
+    database_path = tmp_path / "notification.db"
+    config = _config(database_path)
+    command.upgrade(config, CORE_HEAD)
+    command.upgrade(config, BRIEF)
+    engine = sa.create_engine(f"sqlite:///{database_path}")
+    workspace_id, member_id, producer_id, inbox_id, conversation_id = (uuid4() for _ in range(5))
+    scoped_turn, ordinary_turn, relay_turn, connection_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
+    now = datetime.now(UTC)
+    with engine.connect() as connection:
+        connection.execute(
+            sa.insert(tables.workspace).values(id=workspace_id, created_at=now, updated_at=now)
+        )
+        connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            sa.insert(tables.agent),
+            [
+                {
+                    "id": producer_id,
+                    "workspace_id": workspace_id,
+                    "name": "assistant",
+                    "prompt": "p",
+                    "model": "claude-opus-4-8",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": inbox_id,
+                    "workspace_id": workspace_id,
+                    "name": "notification",
+                    "prompt": "p",
+                    "model": "claude-opus-4-8",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+        connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=producer_id,
+                surface="cli",
+                queue_key="migration",
+                member_id=member_id,
+                audience=f"member:{member_id}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            sa.insert(tables.turn),
+            [
+                {
+                    "id": scoped_turn,
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation_id,
+                    "agent_id": producer_id,
+                    "seq": 1,
+                    "status": "running",
+                    "inbound": "scoped",
+                    "idempotency_key": None,
+                    "on_behalf_of_member_id": None,
+                    "speaker_member_id": member_id,
+                    "runtime_config": TurnRuntimeConfig(
+                        internet_access=False, connections=(connection_id,)
+                    ).model_dump(mode="json"),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": ordinary_turn,
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation_id,
+                    "agent_id": producer_id,
+                    "seq": 2,
+                    "status": "running",
+                    "inbound": "ordinary",
+                    "idempotency_key": None,
+                    "on_behalf_of_member_id": None,
+                    "speaker_member_id": member_id,
+                    "runtime_config": None,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": relay_turn,
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation_id,
+                    "agent_id": producer_id,
+                    "seq": 3,
+                    "status": "running",
+                    "inbound": "relay",
+                    "runtime_config": None,
+                    "speaker_member_id": None,
+                    "on_behalf_of_member_id": member_id,
+                    "idempotency_key": f"notify-deliver:{ordinary_turn.hex}",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+        connection.execute(
+            sa.insert(notification_table),
+            [
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "to_agent_id": inbox_id,
+                    "member_id": member_id,
+                    "subject": "source/scoped",
+                    "body": "scoped",
+                    "occurrences": 1,
+                    "produced_by_agent_id": producer_id,
+                    "produced_by_agent_name": "assistant",
+                    "produced_by_turn_id": scoped_turn,
+                    "produced_in_conversation_id": conversation_id,
+                    "delivered_turn_id": relay_turn,
+                    "delivered_surface": "slack",
+                    "last_raised_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "to_agent_id": inbox_id,
+                    "member_id": member_id,
+                    "subject": "source/folded",
+                    "body": "latest body with uncertain provenance",
+                    "occurrences": 2,
+                    "produced_by_agent_id": producer_id,
+                    "produced_by_agent_name": "assistant",
+                    "produced_by_turn_id": ordinary_turn,
+                    "produced_in_conversation_id": conversation_id,
+                    "delivered_turn_id": None,
+                    "delivered_surface": None,
+                    "last_raised_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+        connection.commit()
+
+    command.upgrade(config, SCOPE)
+    with engine.connect() as connection:
+        migrated = {
+            row.subject: row
+            for row in connection.execute(
+                sa.select(
+                    notification_table.c.subject,
+                    notification_table.c.runtime_config,
+                    notification_table.c.occurrences,
+                    notification_table.c.scope_occurrences,
+                )
+            )
+        }
+        [delivery] = connection.execute(sa.select(notification_delivery_table)).all()
+        connection.execute(
+            sa.insert(notification_table).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                to_agent_id=inbox_id,
+                member_id=member_id,
+                subject="source/outgoing",
+                body="written without runtime config",
+                occurrences=1,
+                produced_by_agent_id=producer_id,
+                produced_by_agent_name="assistant",
+                produced_by_turn_id=ordinary_turn,
+                produced_in_conversation_id=conversation_id,
+                last_raised_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            sa.update(notification_table)
+            .where(notification_table.c.subject == "source/scoped")
+            .values(occurrences=notification_table.c.occurrences + 1)
+        )
+        rolling = {
+            row.subject: row
+            for row in connection.execute(
+                sa.select(
+                    notification_table.c.subject,
+                    notification_table.c.runtime_config,
+                    notification_table.c.occurrences,
+                    notification_table.c.scope_occurrences,
+                )
+            )
+        }
+        connection.commit()
+
+    assert TurnRuntimeConfig.model_validate(
+        json.loads(migrated["source/scoped"].runtime_config)
+    ) == TurnRuntimeConfig(internet_access=False, connections=(connection_id,))
+    assert migrated["source/scoped"].scope_occurrences == 1
+    assert delivery.delivery_key == f"notify-deliver:{ordinary_turn.hex}"
+    assert delivery.request_digest is None
+    assert delivery.conversation_id == conversation_id
+    assert delivery.agent_id == producer_id
+    assert delivery.surface == "slack"
+    assert delivery.relay_turn_id == relay_turn
+    assert TurnRuntimeConfig.model_validate(
+        json.loads(migrated["source/folded"].runtime_config)
+    ) == TurnRuntimeConfig(internet_access=False, connections=())
+    assert migrated["source/folded"].scope_occurrences == 2
+    assert rolling["source/outgoing"].runtime_config is None
+    assert rolling["source/outgoing"].scope_occurrences is None
+    assert rolling["source/scoped"].occurrences == 2
+    assert rolling["source/scoped"].scope_occurrences == 1
+
+    command.downgrade(config, BRIEF)
+    columns = {column["name"] for column in sa.inspect(engine).get_columns("notification")}
+    assert "runtime_config" not in columns
+    assert "scope_occurrences" not in columns
+    assert "notification_delivery" not in sa.inspect(engine).get_table_names()

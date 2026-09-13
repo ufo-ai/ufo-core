@@ -10,18 +10,27 @@ conversation or from the main agent by naming it — which a workspace admin can
 an admin reaches every agent. Everyone else reaches the agents whose `visibility` is `workspace` —
 main is born one, so the portal answers a member the way the CLI and an unbound Slack install
 already do — plus private agents granted to their email, owned by them, or holding their
-member-private extension conversations."""
+member-private extension conversations.
+
+A portal chat's own audience is the member's to set from the title's visibility control. The
+portal mints it for that member, and `share_conversation` widens it to the workspace — the one
+widening writer there is, admitted exactly for `member:<self>` by the member it names."""
 
 from dataclasses import dataclass
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from ufo.sdk.audience import FOREIGN_AUDIENCE_PREFIX
-from ufo.sdk.context import CredentialAccess, ExtensionContext, ScopedStore
+from ufo.sdk.audience import FOREIGN_AUDIENCE_PREFIX, SHARED_AUDIENCE, conversation_audience
+from ufo.sdk.context import ConversationFacts, CredentialAccess, ExtensionContext, ScopedStore
 from ufo.sdk.objects import CONVERSATION_KIND, MEMBER_KIND
 from ufo.sdk.seats import SeatEntry, Seats
-from ufo.sdk.surfaces import AgentSummary, SurfaceContext, record_transcript_access
+from ufo.sdk.surfaces import (
+    PORTAL_SURFACE,
+    AgentSummary,
+    SurfaceContext,
+    record_transcript_access,
+)
 from ufo.sdk.tools import (
     ActionPresentation,
     ObjectBinding,
@@ -33,6 +42,13 @@ from ufo.sdk.tools import (
 
 EXTENSION_WEB = "web"
 AUDIENCE_PREFIX = "audience/"
+MAKE_CONVERSATION_PRIVATE = "make_conversation_private"
+SHARE_CONVERSATION = "share_conversation"
+MADE_PRIVATE = "Only you read this conversation from now on. Notes made here are yours by default."
+SHARED_WITH_WORKSPACE = (
+    "Every member of the workspace can read this conversation, including its past messages. "
+    "Notes made here are the workspace's by default."
+)
 
 
 def web_extension() -> ExtensionContext:
@@ -256,6 +272,94 @@ async def _read_private_transcript(ctx: ToolContext, args: PrivateTranscriptInpu
     )
 
 
+class ConversationVisibilityInput(BaseModel):
+    """Empty: the conversation is the action's target on the `conversation` kind, and the agent
+    is the wire's `agent` or, unnamed, the turn's own."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+@dataclass(frozen=True)
+class _VisibilityTarget:
+    """A visibility act past its gate: the extension's seam, the speaker, the portal conversation
+    the act targets, and what core stores about it."""
+
+    ext: ExtensionContext
+    speaker: UUID
+    conversation_id: UUID
+    facts: ConversationFacts
+
+
+async def _visibility_target(ctx: ToolContext) -> _VisibilityTarget | ToolResult:
+    """The act's target, or the refusal: a speakerless turn, a conversation of another agent, and
+    any surface but the portal's own. The intent lane the act rides is the speaker's, so the
+    target's audience is read off the row, never off `ctx.audience`."""
+    if ctx.speaker_member_id is None:
+        return _refusal("Only a speaking member can change who reads a conversation.")
+    if ctx.ext is None:
+        raise RuntimeError("a conversation visibility action dispatched without its context")
+    if ctx.target is None or ctx.target.name is None:
+        raise RuntimeError("a conversation visibility action dispatched without its target")
+    conversation_id = UUID(ctx.target.name)
+    agent_id, _label = _target_agent(ctx)
+    if await ctx.ext.conversation_agent(conversation_id) != agent_id:
+        return _refusal("No conversation with that id on this agent.")
+    facts = (await ctx.ext.conversation_facts((conversation_id,))).get(conversation_id)
+    if facts is None:
+        return _refusal("No conversation with that id on this agent.")
+    if facts.surface != PORTAL_SURFACE:
+        return _refusal(
+            "Only a portal conversation changes who reads it here; a Slack or terminal "
+            "conversation takes its audience from where it runs."
+        )
+    return _VisibilityTarget(ctx.ext, ctx.speaker_member_id, conversation_id, facts)
+
+
+async def _make_conversation_private(
+    ctx: ToolContext, args: ConversationVisibilityInput
+) -> ToolResult:
+    """Narrow the speaker's portal conversation to them alone. Refused unless it is the
+    workspace's and the speaker is the only member who has ever spoken in it — another member's
+    words never leave their reach. The write holds that gate itself, under the row lock admission
+    also takes."""
+    gated = await _visibility_target(ctx)
+    if isinstance(gated, ToolResult):
+        return gated
+    if gated.facts.audience != SHARED_AUDIENCE:
+        return _refusal("Only a workspace conversation can be made private.")
+    changed = await gated.ext.change_conversation_audience(
+        gated.conversation_id,
+        SHARED_AUDIENCE,
+        conversation_audience(gated.speaker),
+        sole_speaker=gated.speaker,
+    )
+    if changed:
+        return ToolResult(content=(TextContent(text=MADE_PRIVATE),))
+    if await gated.ext.conversation_speakers(gated.conversation_id) != {gated.speaker}:
+        return _refusal(
+            "Another member has spoken in this conversation, so it stays with the workspace."
+        )
+    return _refusal("This conversation changed under the act; read it again.")
+
+
+async def _share_conversation(ctx: ToolContext, args: ConversationVisibilityInput) -> ToolResult:
+    """Widen the speaker's own private portal conversation to the workspace. Refused unless the
+    audience is exactly the speaker's — an admin widens nobody else's, and a room or channel is
+    never a member's to give."""
+    gated = await _visibility_target(ctx)
+    if isinstance(gated, ToolResult):
+        return gated
+    own = conversation_audience(gated.speaker)
+    if gated.facts.audience != own:
+        return _refusal("Only your own private conversation can be shared with the workspace.")
+    changed = await gated.ext.change_conversation_audience(
+        gated.conversation_id, own, SHARED_AUDIENCE
+    )
+    if not changed:
+        return _refusal("This conversation changed under the act; read it again.")
+    return ToolResult(content=(TextContent(text=SHARED_WITH_WORKSPACE),))
+
+
 WEB_ACCESS_TOOLS = (
     ToolDef(
         name="grant_web_access",
@@ -302,6 +406,31 @@ WEB_ACCESS_TOOLS = (
         presentation=ActionPresentation(
             label="Open transcript",
             confirm="This records that you opened another member's private conversation.",
+        ),
+    ),
+    ToolDef(
+        name=MAKE_CONVERSATION_PRIVATE,
+        description=(
+            "Make this portal conversation private to the member who made it; refused once "
+            "another member has spoken in it."
+        ),
+        input_model=ConversationVisibilityInput,
+        handler=_make_conversation_private,
+        side_effecting=True,
+        bound=ObjectBinding(kind=CONVERSATION_KIND, binding="instance"),
+        agent_targetable=True,
+        presentation=ActionPresentation(label="Make private", confirm=MADE_PRIVATE),
+    ),
+    ToolDef(
+        name=SHARE_CONVERSATION,
+        description="Share the member's own private portal conversation with the workspace.",
+        input_model=ConversationVisibilityInput,
+        handler=_share_conversation,
+        side_effecting=True,
+        bound=ObjectBinding(kind=CONVERSATION_KIND, binding="instance"),
+        agent_targetable=True,
+        presentation=ActionPresentation(
+            label="Share with workspace", confirm=SHARED_WITH_WORKSPACE
         ),
     ),
 )

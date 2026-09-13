@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 import type { ToastState } from "@/components/ui/toast";
-import { getJson } from "@/lib/api";
+import { getJson, type IntentOutcome } from "@/lib/api";
 import { isPortalChat } from "@/lib/audience";
 import type { ChatTurn } from "@/lib/chatStore";
 import {
@@ -50,6 +50,14 @@ function fresh(): RailState {
 
 let state: RailState | null = null;
 const listeners = new Set<() => void>();
+type VisibilityState = { audience: string; member_email: string | null };
+type VisibilityChange = VisibilityState & { previous: VisibilityState };
+const visibilityChanges = new Map<string, VisibilityChange>();
+
+function applyVisibility(row: ChatRow): ChatRow {
+  const change = visibilityChanges.get(row.conversation_id);
+  return change ? { ...row, audience: change.audience, member_email: change.member_email } : row;
+}
 
 export function railState(): RailState {
   state ??= fresh();
@@ -103,7 +111,7 @@ async function walkRail(read: number): Promise<void> {
       }));
       return;
     }
-    gathered.push(...chatRows(result.payload));
+    gathered.push(...chatRows(result.payload).map(applyVisibility));
     update((held) => ({
       ...held,
       phase: "ready" as const,
@@ -134,7 +142,7 @@ export function seekChat(conversationId: string): void {
       ...current,
       sought: { ...current.sought, [conversationId]: outcome },
       ...(result.ok && result.payload.chats.length
-        ? { rows: mergeChats(current.rows, result.payload.chats) }
+        ? { rows: mergeChats(current.rows, result.payload.chats.map(applyVisibility)) }
         : {}),
       ...(result.ok && result.payload.conversation
         ? { linked: { ...current.linked, [conversationId]: result.payload.conversation } }
@@ -145,6 +153,58 @@ export function seekChat(conversationId: string): void {
 
 export function railFounded(row: ChatRow): void {
   update((held) => ({ ...held, rows: mergeChats(held.rows, [row]) }));
+}
+
+export function changeRailVisibility(
+  conversationId: string,
+  audience: string,
+  memberEmail: string | null,
+): boolean {
+  const row = railState().rows.find((entry) => entry.conversation_id === conversationId);
+  if (!row || visibilityChanges.has(conversationId) || row.audience === audience) return false;
+  visibilityChanges.set(conversationId, {
+    audience,
+    member_email: memberEmail,
+    previous: { audience: row.audience, member_email: row.member_email },
+  });
+  update((held) => ({
+    ...held,
+    rows: held.rows.map((entry) =>
+      entry.conversation_id === conversationId
+        ? { ...entry, audience, member_email: memberEmail }
+        : entry,
+    ),
+  }));
+  return true;
+}
+
+export function settleRailVisibility(conversationId: string, outcome: IntentOutcome): void {
+  const change = visibilityChanges.get(conversationId);
+  if (!change) return;
+  visibilityChanges.delete(conversationId);
+  update((held) => ({
+    ...held,
+    rows: outcome.applied
+      ? held.rows
+      : held.rows.map((entry) =>
+          entry.conversation_id === conversationId
+            ? {
+                ...entry,
+                audience: change.previous.audience,
+                member_email: change.previous.member_email,
+              }
+            : entry,
+        ),
+    ...(outcome.applied || !outcome.message
+      ? {}
+      : {
+          fault: {
+            title: "Visibility did not change.",
+            description: outcome.message,
+          },
+        }),
+  }));
+  readRail();
 }
 
 /** A row's moment is the turn it started, never the turn it finished: a send that failed leaves the
@@ -174,4 +234,5 @@ export function resetRailStore(): void {
   state = null;
   reads = 0;
   seeking.clear();
+  visibilityChanges.clear();
 }

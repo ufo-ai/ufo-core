@@ -1254,10 +1254,9 @@ SEAL_FOREIGN = foreign_room_audience("slack", "CCONNECT")
 
 def test_the_audience_seal_holds_for_every_audience_and_speaker() -> None:
     """The whole disclosure contract of the two properties every read and write scopes on, pinned
-    here rather than inferred from any one consumer. A write takes the requester's own subject only
-    in a shared conversation; in a room or a foreign channel it stays keyed to that space, so a
-    private room's fact never rekeys into the next room and a foreign channel's never into the
-    workspace, however the conversation is being driven. Reads still union the requester's own
+    here rather than inferred from any one consumer. A write stays keyed to its conversation, so a
+    workspace conversation's fact is workspace memory, a private room's never rekeys into the next
+    room, and a foreign channel's never enters the workspace. Reads union the requester's own
     subject everywhere except that shared atom a foreign audience is sealed against."""
     for audience, speaker, subjects, write_to in [
         (SHARED_AUDIENCE, None, {"shared"}, SHARED_AUDIENCE),
@@ -1265,7 +1264,7 @@ def test_the_audience_seal_holds_for_every_audience_and_speaker() -> None:
             SHARED_AUDIENCE,
             SEAL_MEMBER,
             {"shared", member_subject(SEAL_MEMBER)},
-            f"member:{SEAL_MEMBER}",
+            SHARED_AUDIENCE,
         ),
         (
             conversation_audience(SEAL_MEMBER),
@@ -1319,7 +1318,13 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
     """A tool that computes an image itself has no sandbox file to preflight, so the size is bounded
     at the call and the row is the same one `share_file` writes — which is what every surface
     already uploads from."""
-    workspace_id, agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4(), uuid4()
+    workspace_id, member_id, agent_id, conversation_id, turn_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
     published = 0
 
     async def publish_artifacts() -> None:
@@ -1344,12 +1349,22 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
             )
         )
         await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
             sa.insert(tables.conversation).values(
                 id=conversation_id,
                 workspace_id=workspace_id,
                 agent_id=agent_id,
                 surface="cli",
                 queue_key="share-bytes",
+                member_id=member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1363,6 +1378,7 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
                 seq=1,
                 status="running",
                 inbound="render it",
+                on_behalf_of_member_id=member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1378,6 +1394,7 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
             seq=1,
             status="running",
             inbound="render it",
+            on_behalf_of_member_id=member_id,
             created_at=datetime(2026, 8, 20, tzinfo=UTC),
         ),
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
@@ -1410,6 +1427,7 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
                 await connection.execute(
                     sa.select(
                         tables.shared_artifact.c.turn_id,
+                        tables.shared_artifact.c.member_id,
                         tables.shared_artifact.c.filename,
                         tables.shared_artifact.c.subject,
                         tables.shared_artifact.c.media_type,
@@ -1447,6 +1465,7 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
             ).scalar_one()
         assert await ctx.blob.exists(cancelled_key)
     assert row.turn_id == turn_id
+    assert row.member_id == member_id
     assert row.filename == "design.svg"
     assert row.subject == "A caption."
     assert row.media_type == "image/svg+xml"

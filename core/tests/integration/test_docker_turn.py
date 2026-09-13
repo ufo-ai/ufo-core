@@ -18,6 +18,7 @@ import pytest
 import sqlalchemy as sa
 from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
 from ufo_ext_docker import DockerCarrier
+from ufo_testsupport.member_authorization import PermitMemberAuthorization
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
@@ -207,6 +208,7 @@ async def test_turn_execs_bash_in_a_live_container(
         audience=conversation_audience(None),
         artifact_token_secret="",
         grants=None,
+        member_authorization=PermitMemberAuthorization(),
     )
 
     frame = await engine.run()

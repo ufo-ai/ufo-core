@@ -58,7 +58,7 @@ from ufo.sdk.models import Message, ModelRequest, ToolSchema, ToolUseBlock
 from ufo.sdk.o11y import warn
 from ufo.sdk.seats import Seats, workspace_domain
 from ufo.sdk.sources import PageChange
-from ufo.sdk.subjects import SHARED_SUBJECT, subject_shared
+from ufo.sdk.subjects import SHARED_SUBJECT
 from ufo_ext_memory.store import (
     DEFAULT_CONFIDENCE,
     FACT,
@@ -150,7 +150,7 @@ def section_headings(subject: str) -> dict[MemoryKind, str]:
     """The headings the page draws over one subject's bands. The paragraph a pass writes opens the
     band the member reads it under, and the model is told which band that is, so a paragraph written
     under the workspace's wording would address the company on a page addressed to one person."""
-    if subject_shared(subject):
+    if subject == SHARED_SUBJECT:
         return WORKSPACE_SECTION_HEADINGS
     return MEMBER_SECTION_HEADINGS
 

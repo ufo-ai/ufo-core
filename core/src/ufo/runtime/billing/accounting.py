@@ -48,6 +48,13 @@ ALLOW: SpendOutcome = "allow"
 
 CAP_PRESENCE_TTL_SECONDS = 5.0
 CAP_PRESENCE_CACHE_MAX = 4096
+TURN_MEMBER_ID = sa.func.coalesce(
+    tables.turn.c.speaker_member_id, tables.turn.c.on_behalf_of_member_id
+)
+"""The member a turn's spend is attributed to, in SQL: the member `turn_authority` names — its
+speaker, else the member it acts for — so a member's turn in a workspace conversation counts as
+theirs. The one column form of that one definition; a caller holding the turn reads
+`authority_member_id(turn.authority)` instead."""
 _no_applicable_caps: dict[tuple[UUID, UUID | None, UUID | None], float] = {}
 
 
@@ -916,13 +923,8 @@ class SpendEvaluator:
             case "member":
                 query = (
                     sa.select(summed)
-                    .select_from(
-                        tables.ledger.join(tables.turn).join(
-                            tables.conversation,
-                            tables.turn.c.conversation_id == tables.conversation.c.id,
-                        )
-                    )
-                    .where(tables.conversation.c.member_id == cap.subject_id, window)
+                    .select_from(tables.ledger.join(tables.turn))
+                    .where(TURN_MEMBER_ID == cap.subject_id, window)
                 )
             case "agent":
                 query = (
@@ -1254,21 +1256,18 @@ class SpendRollup:
             SubjectTotal(row.member_id, row.email, int(row.tokens), int(row.priced))
             for row in await connection.execute(
                 sa.select(
-                    tables.conversation.c.member_id,
+                    tables.member.c.id.label("member_id"),
                     tables.member.c.email,
                     _token_sum().label("tokens"),
                     _token_cost_sum().label("priced"),
                 )
                 .select_from(
-                    tables.ledger.join(tables.turn)
-                    .join(
-                        tables.conversation,
-                        tables.turn.c.conversation_id == tables.conversation.c.id,
+                    tables.ledger.join(tables.turn).join(
+                        tables.member, TURN_MEMBER_ID == tables.member.c.id
                     )
-                    .join(tables.member, tables.conversation.c.member_id == tables.member.c.id)
                 )
                 .where(window, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
-                .group_by(tables.conversation.c.member_id, tables.member.c.email)
+                .group_by(tables.member.c.id, tables.member.c.email)
                 .order_by(tables.member.c.email)
             )
         )
@@ -1402,22 +1401,14 @@ class SpendRollup:
         self, connection: AsyncConnection, member_id: UUID, window_seconds: int | None
     ) -> MemberSpendReport:
         """One member's selected and all-time usage plus their member-scoped caps. Ledger rows
-        reach the member through each turn's conversation, as member caps do."""
+        reach the member through each turn's own member — its speaker, else the member it acts
+        for — as member caps do, so a member's spend in a workspace conversation is theirs."""
         now = datetime.now(UTC)
         cutoff = None if window_seconds is None else now - timedelta(seconds=window_seconds)
-        joined = tables.ledger.join(tables.turn).join(
-            tables.conversation, tables.turn.c.conversation_id == tables.conversation.c.id
-        )
-        window = (tables.ledger.c.workspace_id == self.workspace_id) & (
-            tables.conversation.c.member_id == member_id
-        )
-        if cutoff is not None:
-            window &= tables.ledger.c.created_at >= cutoff
         ledger = await _ledger_rollup(
             connection,
-            joined,
-            (tables.ledger.c.workspace_id == self.workspace_id)
-            & (tables.conversation.c.member_id == member_id),
+            tables.ledger.join(tables.turn),
+            (tables.ledger.c.workspace_id == self.workspace_id) & (TURN_MEMBER_ID == member_id),
             cutoff,
             now,
             tables.turn.c.subagent_profile,

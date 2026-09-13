@@ -301,7 +301,7 @@ export async function searchThreads(
         hash: chatHash(entry.id),
         primary: threadLine(entry, viewer),
         fact: "",
-        mine: entry.member_email !== null && entry.member_email === viewer,
+        mine: entry.mine,
       },
     ]),
   );

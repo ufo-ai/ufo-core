@@ -96,6 +96,9 @@ from ufo.runtime.ext.surface import (
     SurfaceInstallationAccess as SurfaceInstallationAccess,
 )
 from ufo.schema.records import (
+    CONNECTION_SCOPE_MAX as CONNECTION_SCOPE_MAX,
+)
+from ufo.schema.records import (
     SUBAGENT_SURFACE as SUBAGENT_SURFACE,
 )
 from ufo.schema.records import (
@@ -112,4 +115,7 @@ from ufo.schema.records import (
 )
 from ufo.schema.records import (
     Turn as Turn,
+)
+from ufo.schema.records import (
+    TurnRuntimeConfig as TurnRuntimeConfig,
 )

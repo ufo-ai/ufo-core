@@ -19,6 +19,17 @@ class ObjectAgent(BaseModel):
     name: str
 
 
+class ObjectActionRequestTarget(BaseModel):
+    """The validated wire target an object action requests before member-private resolution."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: str
+    name: str | None
+    agent: str | None
+    expected_generation: UUID | None
+
+
 class ObjectActionTarget(BaseModel):
     """What one dispatched object action acts on, resolved by the engine before the handler runs:
     the bound kind, the instance name a collection action leaves None, the agent target an

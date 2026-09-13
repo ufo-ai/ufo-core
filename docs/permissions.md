@@ -44,25 +44,29 @@ flowchart TD
 
 ### Speaker, execution authority, admin
 
-The engine builds each turn's tool context with **no speaker**. A tool call names the member it
-acts for via `requested_by` — a message ref the model copies from a visible, absorbed member
-inbound — and the engine re-binds the call's context and sandbox run token to that member
-(`_bind_requester`, `core/src/ufo/runtime/engine.py`). In a member's own conversation — the
-audience is theirs — an omitted ref binds that member while one of their messages is active, since
-nobody else can be asking there, and the schema does not offer the field; a denied message is absent
-from those, so a denial withholds that member's authority here exactly as it does for a named ref.
-Elsewhere omission means `WorkspaceAuthority`, except a turn carrying a durable `on_behalf_of`
-member — a scheduled fire, a subagent, a monitor's arrival — retains `MemberAuthority`; a handler
-that refuses for want of a member raises `SpeakerRequired`, and the tool error then lists the active
-member refs so the model retries with the right one. Connector account selection is one such
-handler: a call sees the shared connections plus the bound member's own, so when the provider's
-accounts are other members' private ones the miss is `SpeakerRequired` naming their owners, not
-"no account" — in a shared-audience conversation whether the call carries a member or none, since
-a channel can still name the member who owns the connection. A member's own conversation names
-nobody else, so the same miss there stays the plain refusal. A channel shared outside the workspace
-is read by another organization, so its refusal asks for a member of this workspace and names no
-owner address. A `requested_by` that names no active member message raises the same class before
-the handler runs, so a wrong ref is answered with those refs too instead of a dead end.
+The engine builds each turn's tool context with **no speaker**. One active authenticated member
+speaking alone binds automatically, regardless of conversation audience. The tool schema offers
+`requested_by` whenever an authenticated member message is active. With another member or an
+unattributed active message, it names one visible, absorbed member message and selects its author;
+omission means `WorkspaceAuthority`. Before that
+selection can open member authority, a side `gpt-5.6-luna` call classifies the selected member's
+words against the exact validated call arguments and requested object target. A round preflights
+these decisions concurrently, then dispatches in call order. A pre-use policy sees only that
+unresolved target; if it rewrites the arguments, the final effect is classified again before
+member-private target resolution or authority opens. Grounded
+consent or an exact standing permission admits automatically. Ambiguity asks the selected member
+`Allow`, `Deny`, or `Always Allow` in chat; their authenticated answer settles only that pending
+effect. A denied message is absent from the active set, so it cannot confer authority by either
+route.
+
+With no active member message, a durable `on_behalf_of` member — a scheduled fire, subagent, or
+monitor arrival — retains `MemberAuthority`; otherwise the call uses `WorkspaceAuthority`. A
+handler that refuses for want of a member raises `SpeakerRequired`; the model can retry with a
+`message_ref` already present in the turn. Connector account selection is one such handler: a
+call sees shared connections plus the bound member's own, so a miss in a shared workspace
+conversation can name eligible owners instead of reporting no account. A private conversation
+names nobody else, and a channel shared outside the workspace names no owner address. A
+`requested_by` that names no active member message raises the same class before the handler runs.
 
 `speaker_member_id` and `on_behalf_of_member_id` are mutually exclusive durable encodings. Core
 decodes them once, passes the exact value through model selection, internal invocation, probes,
@@ -74,11 +78,15 @@ themselves; the repository gate holds both rules.
 
 ```mermaid
 flowchart TD
-    TC["tool call"] --> RB{"requested_by names a live<br/>member message?"}
-    RB -->|yes| SP["speaker = that member"]
-    RB -->|omitted| OWN{"the member's own conversation,<br/>with a live message of theirs?"}
-    OWN -->|yes| SP
-    OWN -->|no| OB{"turn carries an<br/>on_behalf_of member?"}
+    TC["tool call"] --> AM{"active speakers<br/>this turn"}
+    AM -->|one authenticated member, alone| SP["speaker = that member"]
+    AM -->|member plus another speaker| RB{"requested_by names a live<br/>member message?"}
+    RB -->|yes| AU{"exact consent, pending answer,<br/>or standing permission?"}
+    AU -->|admitted| SP
+    AU -->|unclear| ASK["ask that member:<br/>Allow / Deny / Always Allow"]
+    AU -->|denied| STOP["refuse this occurrence"]
+    RB -->|omitted| NONE
+    AM -->|no authenticated member| OB{"turn carries an<br/>on_behalf_of member?"}
     OB -->|yes| BEH["MemberAuthority(on_behalf_of)<br/>(task creator, spawn requester, monitor armer)"]
     OB -->|no| NONE["WorkspaceAuthority — common work:<br/>shared grants; a shipped agent's own attachments"]
     SP --> ACT["MemberAuthority"]
@@ -195,15 +203,22 @@ more, and is carried unchanged into every turn (`core/src/ufo/runtime/turns/audi
 
 | Atom | Assigned to | Content readable by |
 |---|---|---|
-| `shared` | Slack public channels; extension-opened conversations (triggers, errands) that name no member | every member |
-| `member:<uuid>` | Slack DMs, terminal sessions, web chats, intent lanes; an extension-opened room that names a member — the shape an on-behalf job's turn runs in | that member |
+| `shared` | Slack public channels; a portal chat its member shared; extension-opened conversations (triggers, errands) that name no member | every member |
+| `member:<uuid>` | Slack DMs, terminal sessions, intent lanes, portal chats; an extension-opened room that names a member — the shape a member-bound job's turn runs in | that member |
 | `room:<surface>:<room>` | Slack private channels and MPIMs | **nobody** — no read path answers from room membership |
 | `foreign:<surface>:<room>` | Slack Connect / externally shared channels | **nobody**, and sealed: it can recall nothing internal |
 
-A new Slack conversation whose kind cannot be decided is refused (503), never guessed. The
-audience only narrows (`narrow_audience`): `shared` may become anything, a room may seal to
+A new Slack conversation whose kind cannot be decided is refused (503), never guessed. On the wire
+the audience only narrows (`narrow_audience`): `shared` may become anything, a room may seal to
 `foreign` on the same key (never back), a widening request is ignored, and any other change
-raises. Subagent conversations inherit the spawning turn's audience verbatim.
+raises. Subagent conversations inherit the spawning turn's audience verbatim. A web chat's audience
+is its member's to set from the title's visibility control, each choice a prepared intent on the
+conversation: `make_conversation_private` narrows `shared` to `member:<self>` while the speaker is
+the only member who has spoken in it, and `share_conversation` — the one widening writer — moves
+exactly `member:<self>` back to `shared` by the member it names, past messages included.
+Automations keep the authority and access scope captured when they were created. Both writers
+change `audience` and `member_id` together through the one core seam the CHECK coupling them
+requires.
 
 Room membership is read at send and never served. To map an `@name` onto the id Slack notifies,
 the Slack surface reads that channel's own roster (`conversations.members`, first 100, members of
@@ -238,6 +253,12 @@ lists it. Chat stays narrower on purpose: no tool reads another member's transcr
 agent's context summarizes, embeds, and recalls — one bounded disclosure would become an
 unbounded one.
 
+The record covers member-private chats only. After its member shares a portal chat, an admin reads
+it as any member does, with no disclosure record —
+`record_transcript_access` refuses a `shared` audience — and every member lists every workspace
+portal chat (title, opening line, speakers) as they list a public Slack channel; another member's
+web chat stays read-only there.
+
 ### Read paths and how they differ
 
 The audience atom is one rule; what each projection does with an admin differs by what it serves:
@@ -267,13 +288,14 @@ question is asked (`audience_subjects`, `ToolContext.read_subjects`):
 |---|---|
 | Automatic recall (per-turn hook) | the conversation audience's subjects only — no acting member, so room/shared recall can never inject a member's private memory |
 | Explicit `memory_search` or `search_vertical` on `internal` / opened result objects | conversation subjects **plus** the acting member's own subject — never the shared atom their private audience would also read |
-| Memory writes | a workspace-shared conversation writes to the requester's private subject; a room or foreign conversation is its own memory space and writes stay keyed to it |
+| Memory writes | the conversation's audience, whoever is bound — a workspace conversation remembers for the workspace, while a room or foreign conversation stays keyed to itself; private notes are made in a private conversation |
 | Foreign (`foreign:*`) anywhere | never reads `shared`; automatic recall reads only the sealed subject itself |
 
 Sites are the outlier by design: a hosted site carries its own `visibility` column —
 `private` (creator and workspace admins), `workspace` (any signed-in member), `public` (anyone
 with the link) — taken from the deploying member's request, defaulted from the conversation
-audience when unnamed (member or foreign audience → `private`, else `workspace`), and managed
+audience when unnamed (member or foreign audience → `private`, else `workspace`; a site made in a
+workspace portal chat therefore defaults to `workspace`), and managed
 thereafter by its creator; an admin may only narrow to private. The frame and a named object read
 admit an admin to a private site, but a member listing does not use that role to discover it. An
 agent's homepage is a pointer to one such site, and while bound the site's own column lies dormant:
@@ -362,9 +384,8 @@ Sharing is one act on one row:
 | Widening | monotonic on reconnect; explicit act otherwise; either way every live page the connection's streams synced is restamped in the same transaction |
 | Narrowing | the owner or an admin, from any thread; a connection nobody owns cannot be made private |
 | What sharing means | any member may **use** the account through any granted agent, and any member may **see** what its streams synced in recall — one flag answers both |
-| Admin may | unshare, revoke, disconnect — never share or attach another member's private connection | inspect, resync, delete — never edit; narrowing to private is refused for everyone |
-| Chat visibility (`connection` kind) | owner or admin only, even when shared | its own gate: shared, owned, or admin |
-| Portal visibility | a shared connection names its owner to every member who can use it | a workspace connection has no owner to name |
+| Admin may | inspect, change sync settings, unshare, revoke, or disconnect; never share or attach another member's private connection |
+| Visibility | owner, any workspace member when shared, or admin; account metadata only, never credentials |
 
 Revocation cascades:
 

@@ -18,6 +18,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 from ufo.runtime.authority import ExecutionAuthority, turn_authority
 from ufo.runtime.object_name import ObjectRef
@@ -54,6 +55,7 @@ SPAWN_RESULT_KEY_PREFIX = "subagent-result:"
 SUBAGENT_SURFACE = "subagent"
 PORTAL_SURFACE = "web"
 EXTENSION_SURFACE_PREFIX = "extension:"
+CONNECTION_SCOPE_MAX = 50
 
 TABLER_ICON_MAX_LENGTH = 64
 TABLER_ICON_PATTERN = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*"
@@ -361,6 +363,10 @@ class AskUserInput(BaseModel):
             "a surface that draws one."
         ),
     )
+    target_member_id: SkipJsonSchema[UUID | None] = None
+    """The only member whose authenticated structured answer this question accepts. None leaves
+    the ordinary question open to any member who may speak in its conversation. Hidden from the
+    model's tool schema: runtime policy may target a question; a model call may not."""
 
 
 class CredentialPrompt(BaseModel):
@@ -463,13 +469,22 @@ class TurnRuntimeConfig(BaseModel):
     """The runtime choices one turn tree pins without changing its deployed runtime, each
     independently optional: a concrete model, narrowed sandbox internet access, and the digest of a
     stored environment document the host applies while assembling the turn's prompt, tools, and
-    skills."""
+    skills, plus the connections an automatic turn may use. A connection scope is an allowlist;
+    None leaves ordinary turns unrestricted and an empty tuple reaches no connection."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     model: str | None = Field(default=None, min_length=1)
     internet_access: Literal[False] | None = None
     environment: str | None = None
+    connections: tuple[UUID, ...] | None = Field(default=None, max_length=CONNECTION_SCOPE_MAX)
+
+    @field_validator("connections")
+    @classmethod
+    def _canonical_connections(cls, value: tuple[UUID, ...] | None) -> tuple[UUID, ...] | None:
+        if value is not None and len(set(value)) != len(value):
+            raise ValueError("connection scope cannot contain duplicate ids")
+        return None if value is None else tuple(sorted(value, key=str))
 
     @model_validator(mode="after")
     def _pinned_values(self) -> "TurnRuntimeConfig":
@@ -584,6 +599,7 @@ class Turn(BaseModel):
     created_at: datetime
     updated_at: datetime | None = None
     admission_source: TurnAdmissionSource = INTERNAL_ADMISSION
+    idempotency_key: str | None = None
     speaker_member_id: UUID | None = None
     on_behalf_of_member_id: UUID | None = None
     fired_by: FiredBy | None = None

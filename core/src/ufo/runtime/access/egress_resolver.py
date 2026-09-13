@@ -70,11 +70,13 @@ def _seat_scope(
 @dataclass(frozen=True, slots=True)
 class _Authority:
     """Whose egress a principal carries: the agent whose rules derive, that agent's snapshotted
-    internet policy, and the member whose private grants its CLI credentials may draw on."""
+    internet policy, the member whose private grants its CLI credentials may draw on, and an
+    automatic turn's connection allowlist."""
 
     agent_id: UUID
     internet_access_allowed: bool
     execution: ExecutionAuthority
+    connections: tuple[UUID, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -154,9 +156,13 @@ class PerAgentRules:
                     granted = await self.grants.active_grants()
                     rules = (
                         *rules,
-                        *derive_grant_rules(granted, self.transfer_hosts),
+                        *derive_grant_rules(granted, self.transfer_hosts, authority.connections),
                         *await derive_cli_rules(
-                            granted, authority.execution, self.clis, principal.workspace_id
+                            granted,
+                            authority.execution,
+                            self.clis,
+                            principal.workspace_id,
+                            authority.connections,
                         ),
                     )
                 if isinstance(principal, ProbeToken):
@@ -194,7 +200,10 @@ class PerAgentRules:
                 if cli.git is None or cli.git.host != host:
                     continue
                 accounts = usable_cli_accounts(
-                    granted, provider, authority_member_id(authority.execution)
+                    granted,
+                    provider,
+                    authority_member_id(authority.execution),
+                    authority.connections,
                 )
                 if len(accounts) != 1:
                     continue
@@ -247,7 +256,12 @@ class PerAgentRules:
         internet_access_allowed = row.internet_access_allowed and (
             runtime_config is None or runtime_config.internet_access is None
         )
-        return _Authority(row.agent_id, internet_access_allowed, run.authority)
+        return _Authority(
+            row.agent_id,
+            internet_access_allowed,
+            run.authority,
+            None if runtime_config is None else runtime_config.connections,
+        )
 
     async def _conversation_of(self, probe: ProbeToken) -> _Authority | None:
         """The probed conversation's agent and snapshotted internet policy — the same two columns
@@ -281,7 +295,12 @@ class PerAgentRules:
             ).one_or_none()
         if row is None:
             return None
-        return _Authority(row.agent_id, row.internet_access_allowed, probe.authority)
+        return _Authority(
+            row.agent_id,
+            row.internet_access_allowed and probe.internet_access is None,
+            probe.authority,
+            probe.connections,
+        )
 
     def _without_the_model_key(self, rules: tuple[Rule, ...]) -> tuple[Rule, ...]:
         """`rules` minus the deployment's own model-key injection. A probe's environment exports

@@ -754,6 +754,22 @@ async def test_default_visibility_follows_the_conversation_audience(
     assert row.conversation_id == conversation_id
 
 
+async def test_a_site_deployed_from_a_shared_portal_chat_defaults_to_workspace(db: None) -> None:
+    workspace = await _seed_workspace()
+    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
+    portal_chat = await _seed_conversation(workspace, SHARED_AUDIENCE, None)
+
+    payload = await _deploy(workspace, portal_chat, SHARED_AUDIENCE, member_id)
+
+    assert payload["visibility"] == "workspace"
+    (row,) = await _stored(workspace)
+    assert (row.visibility, row.creator_member_id, row.conversation_id) == (
+        "workspace",
+        member_id,
+        portal_chat,
+    )
+
+
 async def test_an_explicit_visibility_wins_and_a_redeploy_keeps_it(db: None) -> None:
     workspace = await _seed_workspace()
     member_id, _token = await _seed_member(workspace, OWNER_EMAIL)

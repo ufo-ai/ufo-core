@@ -71,7 +71,7 @@ from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
 from ufo.runtime.turns.audience import SHARED_AUDIENCE
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Turn
+from ufo.schema.records import Turn, TurnRuntimeConfig
 
 PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")
 RUN_TOKENS = RunTokenCodec(b"sandbox-handle-test-secret")
@@ -1777,3 +1777,50 @@ async def test_open_sandbox_withdraws_the_identity_when_two_clis_claim_it(
         "GITLAB_TOKEN": grant_sentinel("acct-gl"),
     }
     assert [r.getMessage() for r in caplog.records if "git_identity_ambiguous" in r.getMessage()]
+
+
+async def test_sandbox_cli_export_stops_at_the_turn_connection_scope(db: None) -> None:
+    workspace_id, conversation_id = await _conversation()
+    agent_id, member_id = await _seed_grant(workspace_id, conversation_id, shared=False)
+    with ws(workspace_id), agent(agent_id):
+        listed = await GrantStore().record(
+            provider="hub",
+            account_id="acct-2",
+            host="api.hub.test",
+            grantor_member_id=member_id,
+            shared=False,
+        )
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id, WORKSPACE_AUTHORITY))
+    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
+    base = SandboxSession(
+        carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
+        handle=SandboxHandle(
+            conversation_id=conversation_id,
+            container_id="sbx-1",
+            run_token=common_token,
+            egress_env={
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "http_proxy": proxy,
+                "https_proxy": proxy,
+            },
+        ),
+    )
+
+    def authorizer(selected: Turn) -> SandboxAuthorizer:
+        return SandboxAuthorizer(
+            sandbox=base,
+            run_tokens=RUN_TOKENS,
+            grants=GrantStore(),
+            clis={"hub": HUB_CLI},
+            turn=selected,
+        )
+
+    with ws(workspace_id), agent(agent_id):
+        ambiguous = await authorizer(turn).authorize(MemberAuthority(member_id))
+        pinned = await authorizer(
+            turn.model_copy(update={"runtime_config": TurnRuntimeConfig(connections=(listed,))})
+        ).authorize(MemberAuthority(member_id))
+    assert "HUB_TOKEN" not in ambiguous.handle.egress_env
+    assert pinned.handle.egress_env["HUB_TOKEN"] == grant_sentinel("acct-2")

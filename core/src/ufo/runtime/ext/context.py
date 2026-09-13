@@ -16,7 +16,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -90,6 +90,7 @@ from ufo.runtime.sources.sync import (
 from ufo.runtime.turns.audience import (
     SHARED_AUDIENCE,
     Audience,
+    audience_member,
     conversation_audience,
     parse_audience,
     readable_audiences,
@@ -100,6 +101,7 @@ from ufo.runtime.workspace import PLATFORM_FUNDED, ResolvedModelClient, ws_curre
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
 from ufo.schema.records import (
+    CONNECTION_SCOPE_MAX,
     MEMBER_ADMISSION,
     SUBAGENT_SURFACE,
     AgentChange,
@@ -115,6 +117,37 @@ type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, J
 
 CORE_EXTENSION = "core"
 SPEND_REFUSAL_NOTICE_KEY = "spend_refusal_notice"
+
+
+def _spoke_in(
+    workspace_id: UUID,
+    conversation_id: UUID,
+    speaker: Callable[[sa.ColumnElement[UUID | None]], sa.ColumnElement[bool]],
+) -> sa.ColumnElement[bool]:
+    founded = (
+        sa.select(sa.literal(1))
+        .where(
+            tables.turn.c.workspace_id == workspace_id,
+            tables.turn.c.conversation_id == conversation_id,
+            tables.turn.c.speaker_member_id.is_not(None),
+            speaker(tables.turn.c.speaker_member_id),
+        )
+        .correlate(tables.member)
+        .exists()
+    )
+    arrived = (
+        sa.select(sa.literal(1))
+        .where(
+            tables.inbound_message.c.workspace_id == workspace_id,
+            tables.inbound_message.c.conversation_id == conversation_id,
+            tables.inbound_message.c.admission_source == MEMBER_ADMISSION,
+            tables.inbound_message.c.speaker_member_id.is_not(None),
+            speaker(tables.inbound_message.c.speaker_member_id),
+        )
+        .correlate(tables.member)
+        .exists()
+    )
+    return sa.or_(founded, arrived)
 
 
 def spend_refusal_notice_key(model: str) -> str:
@@ -518,11 +551,13 @@ async def conversation_agent_id(workspace_id: UUID, conversation_id: UUID) -> UU
 PROBE_TIMEOUT_SECONDS = 60
 PROBE_TIMEOUT_MAX_SECONDS = 120
 
-ProbeEnvironment = Callable[[UUID, UUID, ExecutionAuthority], Awaitable[dict[str, str]]]
-"""What a probe's sandbox open exports, answered for one conversation, one probe id, and one exact
-authority: git proxy-auth and credential config, the authority's admitted connector CLI sentinels,
-and the conversation id. The derivation reads the deploy's declared credential slots, so it is wired
-in by the deploy that holds them rather than reached from here."""
+ProbeEnvironment = Callable[
+    [UUID, UUID, ExecutionAuthority, tuple[UUID, ...]], Awaitable[dict[str, str]]
+]
+"""What a probe's sandbox open exports, answered for one conversation, one probe id, one exact
+authority, and its total connection scope: git proxy-auth and credential config, the scoped
+connector CLI sentinels, and the conversation id. The derivation reads the deploy's declared
+credential slots, so it is wired in by the deploy that holds them rather than reached from here."""
 
 
 @dataclass(frozen=True)
@@ -536,9 +571,10 @@ class ConversationProbes:
     under a token this deployment signs for that one exec, and hands back what the command reported.
 
     Its authority is the authority a turn's own sandbox open has: the conversation's agent, that
-    agent's snapshotted internet policy, the workspace's keyed credentials, the grants shared with
-    the agent's audience, and the arming member's private connections under member authority. The
-    one thing it
+    agent's snapshotted internet policy, the workspace's keyed credentials, and only the connector
+    grants in the caller's total `connections` scope. Member authority may select that member's
+    listed private connections; workspace authority may select listed shared connections. The one
+    thing it
     deliberately lacks is the deployment's model key: no sentinel is exported and the proxy
     resolves no injection for it, so an unattended exec cannot spend the deployment's model
     budget.
@@ -558,16 +594,18 @@ class ConversationProbes:
         timeout_s: int = PROBE_TIMEOUT_SECONDS,
         *,
         authority: ExecutionAuthority,
+        connections: tuple[UUID, ...] = (),
+        internet_access: Literal[False] | None = None,
     ) -> ExecResult:
         """Run `command` under `bash -lc` in the conversation's sandbox and return its captured
         stdout, stderr, and exit code. A nonzero exit is a result, not an error — reading what a
         command reports is the whole point of running it.
 
-        `authority` is the member or workspace authority this exec carries from the work it serves,
-        so a command reaching their own connected account keeps reaching it off-turn, the way a
-        scheduled fire keeps its initiator's private connectors. `WorkspaceAuthority` forwards
-        only connections shared with the whole workspace, so an unattended exec is never silently
-        promoted to a member's authority.
+        `authority` is the member or workspace authority this exec carries from the work it serves.
+        `connections` is the caller's immutable total allowlist: an empty tuple reaches no
+        connector, and a listed connection must still be live and usable by that authority. A
+        grant connected, attached, or shared after the work armed stays outside the list.
+        `internet_access=False` preserves a caller's narrower internet policy.
 
         The exec runs bound to the conversation's own agent. A job binds a workspace and no agent —
         nothing has an agent to bind, since a probe answers to no turn — yet the environment is
@@ -584,6 +622,11 @@ class ConversationProbes:
             raise ValueError(
                 f"a probe timeout of {timeout_s}s is outside 1..{PROBE_TIMEOUT_MAX_SECONDS}s"
             )
+        if len(connections) > CONNECTION_SCOPE_MAX:
+            raise ValueError(f"a probe connection scope exceeds {CONNECTION_SCOPE_MAX} connections")
+        if len(set(connections)) != len(connections):
+            raise ValueError("a probe connection scope cannot contain duplicate ids")
+        connections = tuple(sorted(connections, key=str))
         workspace_id = ws_current().workspace_id
         agent_id = await conversation_agent_id(workspace_id, conversation_id)
         if agent_id is None:
@@ -597,13 +640,15 @@ class ConversationProbes:
             probe_id=uuid4(),
             expires_at=int(datetime.now(UTC).timestamp()) + timeout_s,
             authority=authority,
+            connections=connections,
+            internet_access=internet_access,
         )
         with agent(agent_id):
             session = await self._sandboxes.open(
                 conversation_id,
                 None,
                 self._probe_tokens.encode(probe),
-                await self._env(conversation_id, probe.probe_id, authority),
+                await self._env(conversation_id, probe.probe_id, authority, connections),
             )
             return await session.bash(command, timeout_s=timeout_s)
 
@@ -1040,6 +1085,7 @@ class SourceReader:
     agent_id: UUID
     requesting_member_id: UUID | None
     subjects: frozenset[str]
+    connections: tuple[UUID, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -1137,6 +1183,13 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
         granted,
         sa.and_(reader_is_main, sa.or_(tables.connection.c.shared, speaker_owns)),
     )
+    in_scope = (
+        sa.true()
+        if reader.connections is None
+        else tables.connection.c.id.in_(reader.connections)
+        if reader.connections
+        else sa.false()
+    )
     return sa.and_(
         tables.source.c.workspace_id == workspace_id,
         sa.exists(
@@ -1145,6 +1198,7 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
             .where(
                 tables.connection.c.workspace_id == workspace_id,
                 tables.connection.c.id == tables.source.c.connection_id,
+                in_scope,
                 disclosed,
                 reachable,
             )
@@ -1938,6 +1992,7 @@ class ExtensionContext:
         standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
         fired_by: FiredBy | None = None,
     ) -> UUID | None:
         """Kick an internal turn in `conversation_id`, asserting the conversation is bound to
@@ -1969,6 +2024,7 @@ class ExtensionContext:
             standalone=standalone,
             unless_member_since=unless_member_since,
             unless_member_arrival_since=unless_member_arrival_since,
+            runtime_config=runtime_config,
             fired_by=fired_by,
         )
 
@@ -2056,6 +2112,84 @@ class ExtensionContext:
             )
             for row in rows
         }
+
+    async def conversation_speakers(self, conversation_id: UUID) -> frozenset[UUID]:
+        """Every member who founded a turn or folded a message into this workspace's conversation.
+
+        This is the fact a visibility refusal is worded from: narrowing a conversation another
+        member spoke in would take their words out of their reach. An id naming no conversation
+        here answers empty."""
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.member.c.id).where(
+                        tables.member.c.workspace_id == self.workspace_id,
+                        _spoke_in(
+                            self.workspace_id,
+                            conversation_id,
+                            lambda who: who == tables.member.c.id,
+                        ),
+                    )
+                )
+            ).all()
+        return frozenset(row.id for row in rows)
+
+    async def change_conversation_audience(
+        self,
+        conversation_id: UUID,
+        current: Audience,
+        requested: Audience,
+        *,
+        sole_speaker: UUID | None = None,
+    ) -> bool:
+        """Move one conversation of this workspace from `current` to `requested`, as one row
+        change, and say whether it moved. An extension cannot express this write: the
+        `conversation_audience_member` CHECK couples `member_id` to the `member:` prefix, two
+        columns core owns, so both are written here from the one audience. The write is a
+        compare-and-set on `current`, and with `sole_speaker` named, on nobody else having spoken
+        in the conversation. Both are evaluated under the conversation-row lock admission holds,
+        so an arrival lands before the check or after the move, never between them. This is the one
+        widening writer: `narrow_audience`, which every surface's `conversation_for` runs, never
+        widens."""
+        requested = parse_audience(requested)
+        async with workspace_tx() as connection:
+            locked = (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id)
+                    .where(
+                        tables.conversation.c.workspace_id == self.workspace_id,
+                        tables.conversation.c.id == conversation_id,
+                    )
+                    .with_for_update()
+                )
+            ).one_or_none()
+            if locked is None:
+                return False
+            unchanged = [
+                tables.conversation.c.workspace_id == self.workspace_id,
+                tables.conversation.c.id == conversation_id,
+                tables.conversation.c.audience == str(parse_audience(current)),
+            ]
+            if sole_speaker is not None:
+                unchanged.append(
+                    sa.not_(
+                        _spoke_in(
+                            self.workspace_id,
+                            conversation_id,
+                            lambda who: who != sole_speaker,
+                        )
+                    )
+                )
+            changed = await connection.execute(
+                sa.update(tables.conversation)
+                .where(*unchanged)
+                .values(
+                    audience=str(requested),
+                    member_id=audience_member(requested),
+                    updated_at=sa.func.now(),
+                )
+            )
+        return changed.rowcount == 1
 
     async def disclosed_conversations(
         self, member_id: UUID, conversation_ids: tuple[UUID, ...]
@@ -2774,10 +2908,10 @@ def context_for(
     `artifact_token_secret` is what a link into the artifact namespace is signed with — a kind whose
     row carries a picture mints its preview link over the two. A `tailer` lets a handler
     firing inside a turn watch that turn's frames — the one seam a hook's own side-channel work
-    reads the loop through. `probes` is the off-turn sandbox exec, wired only where a handler runs
-    outside every turn: a tool or in-turn hook already holds the turn's own sandbox. `search` is the
-    deploy's selected web-search backend: the seam a handler grounding a turn before the model runs
-    reads, built once at boot and reaching its key host-side."""
+    reads the loop through. `probes` runs one command under an explicit authority and connection
+    scope, whether a job has no turn or an in-turn action must narrow what its turn can reach.
+    `search` is the deploy's selected web-search backend: the seam a handler grounding a turn
+    before the model runs reads, built once at boot and reaching its key host-side."""
     if model_resolver is not None and model_job is None:
         raise ValueError("a wired model_resolver needs the model_job its spend is attributed to")
     return ExtensionContext(

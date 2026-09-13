@@ -307,10 +307,11 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     there for all of them anyway; a task reporting into one member's own conversation is that
     member's alone, reaching an admin as a management row with its content elided (`spec` null,
     the summary saying so) and no one else at all. A task no member created is read the same way —
-    by where it reports, so the private conversation elides it from the admin too. Each read is
-    walled by the agent named on it. The row's `prompt` is the task's own prompt, whole — past
-    both the summary's line and the excerpt a turn's own read is bounded to: a member's screen
-    holds its own length, and a cut made here is one it cannot undo."""
+    by where it reports: the private conversation's own member lists and reads it, and the admin
+    meets it elided like the rest. Each read is walled by the agent named on it. The row's
+    `prompt` is the task's own prompt, whole — past both the summary's line and the excerpt a
+    turn's own read is bounded to: a member's screen holds its own length, and a cut made here is
+    one it cannot undo."""
     client, workspace_id, agent_a, agent_b = portal
     _admin_id, admin_headers = await _seed_member(workspace_id, ADMIN_EMAIL, admin=True)
     creator_id, creator_headers = await _seed_member(workspace_id, CREATOR_EMAIL)
@@ -345,18 +346,23 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
         "expires_at",
         "paused",
         "run_now",
+        "connections",
     }
-    (row,) = creator_view.json()["objects"]
-    assert row["name"] == "daily-brief"
+    rows = {row["name"]: row for row in creator_view.json()["objects"]}
+    assert set(rows) == {"daily-brief", "creatorless-sweep"}
+    assert rows["creatorless-sweep"]["prompt"] == "sweep the queue"
+    row = rows["daily-brief"]
     assert row["paused"] is False
     assert row["next_run_at"] == NEXT_RUN.isoformat()
     assert row["summary"] == "0 9 * * * — daily brief"
     assert row["prompt"] == "write the daily brief"
+    assert row["connections"] == []
     assert (row["agent_id"], row["agent_name"]) == (str(agent_a), "assistant")
     mine = await client.get(
         f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=creator_headers
     )
     assert mine.json()["spec"]["prompt"] == "write the daily brief"
+    assert mine.json()["spec"]["connections"] == []
     assert mine.json()["spec"]["expires_at"].startswith("2027-06-01T00:00:00")
 
     admin_view = await client.get(index, headers=admin_headers)
@@ -365,6 +371,8 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     assert by_name["creatorless-sweep"]["summary"] == "0 3 * * * — private member task"
     assert by_name["daily-brief"]["prompt"] == PRIVATE_PROMPT
     assert by_name["creatorless-sweep"]["prompt"] == PRIVATE_PROMPT
+    assert by_name["daily-brief"]["connections"] is None
+    assert by_name["creatorless-sweep"]["connections"] is None
     management = await client.get(
         f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=admin_headers
     )
@@ -406,6 +414,7 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
         f"/surface/web/objects/scheduled_task/channel-digest?agent={agent_a}", headers=other_headers
     )
     assert read.json()["spec"]["prompt"] == "post the channel digest"
+    assert read.json()["spec"]["connections"] == []
 
     sprawling = "Weekly customer and prospect signal digest, proposals only. " * 6
     sprawling_prompt = "Post the long digest, then thread the open proposals under it. " * 8

@@ -28,6 +28,7 @@ from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import Parked, Terminal
 from ufo.sdk.objects import (
     AGENT_ICONS,
+    CONVERSATION_KIND,
     SURFACE_KIND,
     WORKSPACE_KIND,
     AgentSpec,
@@ -35,7 +36,12 @@ from ufo.sdk.objects import (
 )
 from ufo.sdk.surfaces import SurfaceContext, TerminalFrame, ToolIntent
 from ufo.sdk.tools import ActionBinding
-from ufo_ext_web.audience import granted_emails, web_extension
+from ufo_ext_web.audience import (
+    MAKE_CONVERSATION_PRIVATE,
+    SHARE_CONVERSATION,
+    granted_emails,
+    web_extension,
+)
 
 INTENT_MAX_BYTES = 65_536
 INTENT_RESULT_TIMEOUT_SECONDS = 120
@@ -654,11 +660,12 @@ def _portal_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
     return JSONResponse({"applied": True, "message": "", "url": link, "turn_id": str(turn_id)})
 
 
-def _rebuild_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
-    """What a rebuild made due, in the tool's own words. A rebuild changes nothing the member can
-    see when they press it — the job it marked work for writes the new text minutes later — so the
-    answer has to say what was queued and what was left alone, and the tool that knows both is what
-    says it. A refusal keeps the tool's words the way every other outcome does."""
+def _worded_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
+    """The tool's own words, for an act whose answer is what the member needs to read. A rebuild
+    changes nothing the member can see when they press it — the job it marked work for writes the
+    new text minutes later — so the answer has to say what was queued and what was left alone; a
+    visibility change says who reads the conversation from now on. The tool that knows is what says
+    it. A refusal keeps the tool's words the way every other outcome does."""
     if frame.status != "done":
         return _outcome(frame, turn_id)
     return JSONResponse({"applied": True, "message": frame.text, "turn_id": str(turn_id)})
@@ -667,12 +674,15 @@ def _rebuild_outcome(frame: TerminalFrame, turn_id: UUID) -> Response:
 ACTION_OUTCOMES: dict[tuple[str, str], Callable[[TerminalFrame, UUID], Response]] = {
     (SURFACE_KIND, SLACK_CONNECT_ACTION): _slack_outcome,
     (SURFACE_KIND, IMESSAGE_CONNECT_ACTION): _imessage_outcome,
-    (REPORT_KIND, REBUILD_REPORT_DIGEST_ACTION): _rebuild_outcome,
-    (PAGE_KIND, REBUILD_PAGE_FACTS_ACTION): _rebuild_outcome,
+    (REPORT_KIND, REBUILD_REPORT_DIGEST_ACTION): _worded_outcome,
+    (PAGE_KIND, REBUILD_PAGE_FACTS_ACTION): _worded_outcome,
+    (CONVERSATION_KIND, MAKE_CONVERSATION_PRIVATE): _worded_outcome,
+    (CONVERSATION_KIND, SHARE_CONVERSATION): _worded_outcome,
 }
 """The actions whose answer says more than done or refused, and how each is read: the install link
-Slack mints, the connection state iMessage reports, the queued-work sentence a rebuild states.
-Every other action answers done, or the refusal in its own words."""
+Slack mints, the connection state iMessage reports, the queued-work sentence a rebuild states, who
+reads a conversation once its visibility moved. Every other action answers done, or the refusal in
+its own words."""
 
 
 def _action_outcome(

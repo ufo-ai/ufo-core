@@ -46,7 +46,12 @@ from ufo.runtime.object_name import (
     ObjectRef,
     validate_object_name,
 )
-from ufo.runtime.object_scope import ObjectActionTarget, ObjectAgent, object_agent
+from ufo.runtime.object_scope import (
+    ObjectActionRequestTarget,
+    ObjectActionTarget,
+    ObjectAgent,
+    object_agent,
+)
 from ufo.runtime.object_views import action_view
 from ufo.runtime.seats import member_is_admin
 from ufo.runtime.tools.context import SpeakerRequired, TextContent, ToolContext, ToolResult
@@ -56,6 +61,7 @@ from ufo.runtime.tools.registry import (
     ToolDef,
     validate_tool_declaration,
 )
+from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience, readable_audiences
 from ufo.schema import tables
 
 OBJECT_MANIFEST_MAX_BYTES = 65_536
@@ -347,11 +353,12 @@ class ObjectStore[SpecT: BaseModel](Protocol):
 
 @dataclass(frozen=True)
 class ObjectOwner:
-    """Who a member-owned row belongs to and whether the workspace shares it. `member_id` None
-    means admin-only."""
+    """Who a member-owned row belongs to and who reads it: the audience of the conversation it
+    belongs to, read live. `member_id` None means no member owns it; `audience` None means no
+    audience reaches it, so its owner and a workspace admin read it alone."""
 
     member_id: UUID | None
-    shared: bool
+    audience: Audience | None
 
 
 @dataclass(frozen=True)
@@ -359,6 +366,20 @@ class GeneratedObjectOwner(ObjectOwner):
     """An owner whose row may be replaced under the same object name."""
 
     generation: UUID
+
+
+def readable(
+    owner: ObjectOwner, member_id: UUID | None, *, admin: bool, disclosed: bool = False
+) -> bool:
+    """Whether one reader sees a row: its audience, its owner, or a workspace admin. Content asks
+    the same question with `admin=False` and `disclosed` — whether the reader holds a recorded
+    `read_private_transcript` acknowledgement on the row's conversation, an admin's one way into
+    private content. A reader nobody can name reads only what the workspace shares."""
+    if admin or disclosed:
+        return True
+    if member_id is None:
+        return owner.audience == SHARED_AUDIENCE
+    return owner.member_id == member_id or owner.audience in readable_audiences(member_id)
 
 
 async def owner_emails(owners: Iterable[UUID | None]) -> dict[UUID | None, str]:
@@ -397,14 +418,14 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
     `_status`) and domain mutation (`_apply_owned`, `_delete_owned`); the gate hides a row invisible
     to the acting member (absent from `list`, not-found from `get`/`status`, `UnknownObject` from
     `apply`/`delete`) and refuses `AdminRequired` when a visible row is not the actor's to change.
-    A row is visible when it is shared, owned by the acting member, or the speaker is a workspace
-    admin; a row whose owner `member_id` is None is admin-only. A kind whose mutation or deletion is
-    a grant/disclosure act sets `mutate_requires_speaker`/`delete_requires_speaker` so the gate also
-    refuses it on a speakerless (scheduled/subagent) turn — an act that discloses or revokes access
-    needs a live member, never a background turn acting on someone's behalf. That refusal
-    (`SpeakerRequired`) is answered before ownership is: with nobody bound there is no one to be the
-    owner, and the engine turns the typed refusal into the retry the model can make where a
-    `requested_by` ref would bind someone. The class vars name the kind and the two gate messages
+    A row is visible to its conversation's audience, its owner, or the speaker when they are a
+    workspace admin. A row with no owner and no audience is admin-only. A kind whose mutation or
+    deletion is a grant/disclosure act sets `mutate_requires_speaker`/`delete_requires_speaker` so
+    the gate also refuses it on a speakerless (scheduled/subagent) turn — an act that discloses or
+    revokes access needs a live member, never a background turn acting on someone's behalf. That
+    refusal (`SpeakerRequired`) is answered before ownership is: with nobody bound there is no one
+    to be the owner, and the engine turns the typed refusal into the retry the model can make where
+    a `requested_by` ref would bind someone. The class vars name the kind and the two gate messages
     the refusals carry.
 
     A kind handing up `GeneratedObjectOwner` is fenced on that generation: every active verb refuses
@@ -522,7 +543,7 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         return owner.member_id is not None and owner.member_id == acting
 
     def _visible(self, owner: OwnerT, acting: UUID | None, is_admin: bool) -> bool:
-        return owner.shared or self._owned(owner, acting) or is_admin
+        return readable(owner, acting, admin=is_admin)
 
     def _listed(self, row: OwnedRow[OwnerT], query: ObjectListQuery) -> bool:
         """Whether a row the gate admits also stands in a listing. A kind holding rows that are
@@ -1410,6 +1431,34 @@ class ObjectVerbs:
             )
         return views
 
+    def action_request_target(
+        self, action: ToolDef, wire: ObjectActionInput
+    ) -> ObjectActionRequestTarget:
+        """Validate and project an object action's wire target without resolving member state."""
+        declared = action.bound
+        if declared is None:
+            raise ValueError(f"{action.name!r} is not an object action")
+        if wire.agent and not action.agent_targetable:
+            raise ValueError(f"action {action.canonical_id} takes no agent target")
+        if declared.binding == "collection":
+            return ObjectActionRequestTarget(
+                kind=declared.kind,
+                name=None,
+                agent=wire.agent or None,
+                expected_generation=None,
+            )
+        if declared.name is not None and wire.name != declared.name:
+            raise ValueError(
+                f"action {action.canonical_id} acts on {declared.kind}/{declared.name}, not "
+                f"{declared.kind}/{wire.name}"
+            )
+        return ObjectActionRequestTarget(
+            kind=declared.kind,
+            name=wire.name,
+            agent=wire.agent or None,
+            expected_generation=wire.generation,
+        )
+
     async def action_target(
         self, ctx: ToolContext, action: ToolDef, wire: ObjectActionInput
     ) -> ObjectActionTarget:
@@ -1420,40 +1469,33 @@ class ObjectVerbs:
         contributor's. The read never refuses on the wire's generation: both the live and the
         supplied generation ride the target, and a handler that must fence does so against its
         own write, after the idempotent dedup a resumed dispatch relies on."""
-        declared = action.bound
-        if declared is None:
-            raise ValueError(f"{action.name!r} is not an object action")
+        request = self.action_request_target(action, wire)
         agent_target: ObjectAgent | None = None
-        if wire.agent:
-            if not action.agent_targetable:
-                raise ValueError(f"action {action.canonical_id} takes no agent target")
-            agent_target = await self._agent_gate(ctx, wire.agent)
-        if declared.binding == "collection":
+        if request.agent:
+            agent_target = await self._agent_gate(ctx, request.agent)
+        if request.name is None:
             return ObjectActionTarget(
-                kind=declared.kind,
+                kind=request.kind,
                 name=None,
                 agent=agent_target,
                 generation=None,
                 expected_generation=None,
             )
-        if declared.name is not None and wire.name != declared.name:
-            raise ValueError(
-                f"action {action.canonical_id} acts on {declared.kind}/{declared.name}, not "
-                f"{declared.kind}/{wire.name}"
-            )
-        kind = self._resolve(declared.kind)
+        kind = self._resolve(request.kind)
         kind_ctx = self._bound_ctx(ctx, kind)
         with object_agent(agent_target):
-            detail = await kind.kind.store.get(kind_ctx, wire.name)
+            detail = await kind.kind.store.get(kind_ctx, request.name)
             if detail is None:
-                raise UnknownObject(f"no {declared.kind} object named {wire.name!r}")
-            await kind.kind.store.status(kind_ctx, wire.name, expected_generation=detail.generation)
+                raise UnknownObject(f"no {request.kind} object named {request.name!r}")
+            await kind.kind.store.status(
+                kind_ctx, request.name, expected_generation=detail.generation
+            )
         return ObjectActionTarget(
-            kind=declared.kind,
-            name=wire.name,
+            kind=request.kind,
+            name=request.name,
             agent=agent_target,
             generation=detail.generation,
-            expected_generation=wire.generation,
+            expected_generation=request.expected_generation,
         )
 
     def _resolve(self, kind: str) -> BoundKind:

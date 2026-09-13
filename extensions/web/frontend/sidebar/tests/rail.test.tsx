@@ -615,6 +615,7 @@ test("a first message opens a conversation, lands it in the rail, and routes to 
 
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
   expect(posts[0]).toContain("?conversation=new");
+  expect(screen.getByRole("button", { name: "Visibility: Private" })).toBeTruthy();
   const railRow = await screen.findByRole("button", { name: /hello there/ });
   expect(railRow.getAttribute("aria-current")).toBe("true");
   expect(within(screen.getByTestId("log")).getByText("hello there")).toBeTruthy();

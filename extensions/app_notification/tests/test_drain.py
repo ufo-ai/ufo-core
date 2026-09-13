@@ -41,6 +41,7 @@ from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.records import TurnRuntimeConfig
 
 pytestmark = pytest.mark.usefixtures("database_url")
 
@@ -121,7 +122,14 @@ def _drain_ctx(workspace_id: UUID, dbos: StubDbos) -> ExtensionContext:
 
 
 async def _post(
-    ctx: ExtensionContext, inbox_id: UUID, member_id: UUID, agent_id: UUID, subject: str, body: str
+    ctx: ExtensionContext,
+    inbox_id: UUID,
+    member_id: UUID,
+    agent_id: UUID,
+    subject: str,
+    body: str,
+    *,
+    runtime_config: TurnRuntimeConfig | None = None,
 ) -> Posted:
     posted = await NotificationStore(ctx).post(
         to_agent_id=inbox_id,
@@ -132,6 +140,7 @@ async def _post(
         agent_name="assistant",
         turn_id=uuid4(),
         conversation_id=uuid4(),
+        runtime_config=runtime_config,
     )
     assert isinstance(posted, Posted)
     return posted
@@ -234,6 +243,79 @@ async def test_a_lanes_open_rows_become_one_turn_on_its_own_conversation(db: Non
     assert all(row["claim_expires_at"] is None for row in rows)
 
 
+async def test_exact_runtime_configs_become_separate_triage_turns(db: None) -> None:
+    workspace_id, member_id, agent_id, inbox_id = await _seed()
+    first_connection, second_connection = uuid4(), uuid4()
+    first_config = TurnRuntimeConfig(internet_access=False, connections=(first_connection,))
+    second_config = TurnRuntimeConfig(connections=(second_connection,))
+    dbos = StubDbos()
+    ctx = _drain_ctx(workspace_id, dbos)
+    with ws(workspace_id), agent(inbox_id):
+        await _post(
+            ctx,
+            inbox_id,
+            member_id,
+            agent_id,
+            "source/crm",
+            "changed",
+            runtime_config=first_config,
+        )
+        await _post(
+            ctx,
+            inbox_id,
+            member_id,
+            agent_id,
+            "source/github",
+            "failed",
+            runtime_config=second_config,
+        )
+        await InboxDrain(ctx=ctx).run()
+        turns = await _turns(workspace_id)
+        rows = await NotificationStore(ctx).rows()
+
+    assert len(turns) == 2
+    configs = {
+        turn["id"]: TurnRuntimeConfig.model_validate(turn["runtime_config"]) for turn in turns
+    }
+    assert set(configs.values()) == {first_config, second_config}
+    for row in rows:
+        assert row.triaged_turn_id is not None
+        assert configs[row.triaged_turn_id] == row.runtime_config
+
+
+async def test_a_cooling_connection_scope_does_not_delay_another_scope(db: None) -> None:
+    workspace_id, member_id, agent_id, inbox_id = await _seed()
+    first_connection, second_connection = uuid4(), uuid4()
+    dbos = StubDbos()
+    ctx = _drain_ctx(workspace_id, dbos)
+    with ws(workspace_id), agent(inbox_id):
+        await _post(
+            ctx,
+            inbox_id,
+            member_id,
+            agent_id,
+            "source/crm",
+            "changed",
+            runtime_config=TurnRuntimeConfig(connections=(first_connection,)),
+        )
+        await InboxDrain(ctx=ctx).run()
+        await _post(
+            ctx,
+            inbox_id,
+            member_id,
+            agent_id,
+            "source/github",
+            "failed",
+            runtime_config=TurnRuntimeConfig(connections=(second_connection,)),
+        )
+        await InboxDrain(ctx=ctx).run()
+        turns = await _turns(workspace_id)
+
+    assert {
+        TurnRuntimeConfig.model_validate(turn["runtime_config"]).connections for turn in turns
+    } == {(first_connection,), (second_connection,)}
+
+
 async def test_two_members_are_two_lanes_and_a_cooling_lane_waits(db: None) -> None:
     workspace_id, member_id, agent_id, inbox_id = await _seed()
     other = await _member(workspace_id)
@@ -278,7 +360,7 @@ async def test_a_fold_during_the_claim_keeps_the_row_open_for_the_next_tick(db: 
     dbos = StubDbos()
     ctx = _drain_ctx(workspace_id, dbos)
     store = NotificationStore(ctx)
-    lane = Lane(agent_id=inbox_id, member_id=member_id)
+    lane = Lane(agent_id=inbox_id, member_id=member_id, runtime_config=None)
     with ws(workspace_id), agent(inbox_id):
         await _post(ctx, inbox_id, member_id, agent_id, "source/crm", "first")
         await _post(ctx, inbox_id, member_id, agent_id, "source/github", "deploy failed")
@@ -389,7 +471,7 @@ async def test_a_post_after_triage_reopens_the_row_as_a_new_notification(db: Non
 async def test_a_lapsed_lease_hands_the_rows_to_the_next_tick(db: None) -> None:
     workspace_id, member_id, agent_id, inbox_id = await _seed()
     ctx = _drain_ctx(workspace_id, StubDbos())
-    lane = Lane(agent_id=inbox_id, member_id=member_id)
+    lane = Lane(agent_id=inbox_id, member_id=member_id, runtime_config=None)
     with ws(workspace_id), agent(inbox_id):
         await _post(ctx, inbox_id, member_id, agent_id, "source/crm", "a")
         store = NotificationStore(ctx)
@@ -445,6 +527,7 @@ def test_the_drain_message_walls_each_body_and_escapes_its_own_close() -> None:
         produced_by_agent_name="assistant",
         produced_by_turn_id=uuid4(),
         produced_in_conversation_id=uuid4(),
+        runtime_config=None,
         triaged_turn_id=None,
         triaged_at=None,
         delivered_turn_id=None,

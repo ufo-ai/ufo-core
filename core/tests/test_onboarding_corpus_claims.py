@@ -438,8 +438,9 @@ CLAIMS = (
         phrase="there is no one-shot scheduling",
         source=SCHEDULED_TASKS,
         pattern=(
-            r"if validated_schedule is None or spec\.prompt is None:\n"
-            r'\s+raise ValueError\("creating a scheduled task requires schedule and prompt"\)'
+            r"if validated_schedule is None or spec\.prompt is None or spec\.connections is None:\n"
+            r'\s+raise ValueError\(\n\s+"creating a scheduled task requires schedule, prompt, '
+            r'and connections"\n\s+\)'
         ),
     ),
     Claim(
@@ -448,8 +449,9 @@ CLAIMS = (
         phrase="there is no one-time reminder",
         source=SCHEDULED_TASKS,
         pattern=(
-            r"if validated_schedule is None or spec\.prompt is None:\n"
-            r'\s+raise ValueError\("creating a scheduled task requires schedule and prompt"\)'
+            r"if validated_schedule is None or spec\.prompt is None or spec\.connections is None:\n"
+            r'\s+raise ValueError\(\n\s+"creating a scheduled task requires schedule, prompt, '
+            r'and connections"\n\s+\)'
         ),
     ),
     Claim(

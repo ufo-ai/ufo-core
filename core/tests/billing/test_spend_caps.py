@@ -9,7 +9,7 @@ from dbos import EnqueueOptions
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
-from ufo.runtime.authority import WORKSPACE_AUTHORITY
+from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.billing.accounting import (
     SpendEvaluator,
     record_sandbox_tokens,
@@ -151,6 +151,26 @@ async def _set_cap(
     return cap_id
 
 
+async def _shared_conversation(
+    connection: AsyncConnection, workspace_id: UUID, agent_id: UUID
+) -> UUID:
+    conversation_id = uuid4()
+    await connection.execute(
+        sa.insert(tables.conversation).values(
+            id=conversation_id,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            surface="web",
+            queue_key=uuid4().hex,
+            member_id=None,
+            audience="shared",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    return conversation_id
+
+
 async def _bill(
     connection: AsyncConnection,
     workspace_id: UUID,
@@ -159,6 +179,7 @@ async def _bill(
     priced_micro_usd: int,
     seq: int,
     created_at: datetime | None = None,
+    speaker_member_id: UUID | None = None,
 ) -> UUID:
     """A prior terminal turn and its ledger row — the spend the caps decide against."""
     turn_id = uuid4()
@@ -172,6 +193,7 @@ async def _bill(
             seq=seq,
             status="done",
             inbound="x",
+            speaker_member_id=speaker_member_id,
             terminal=TerminalFrame(status="done").model_dump(mode="json"),
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
@@ -201,6 +223,7 @@ async def _insert_parked(
     conversation_id: UUID,
     agent_id: UUID,
     seq: int,
+    speaker_member_id: UUID | None = None,
 ) -> UUID:
     turn_id = uuid4()
     await connection.execute(
@@ -212,6 +235,7 @@ async def _insert_parked(
             seq=seq,
             status="parked",
             inbound="held",
+            speaker_member_id=speaker_member_id,
             terminal=None,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
@@ -287,17 +311,54 @@ async def test_member_cap_ignores_extension_spend(db: None) -> None:
 async def test_member_cap_parks_when_over(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            100,
+            seq=1,
+            speaker_member_id=member_id,
+        )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
     assert decision.outcome == "park"
     assert "parked" in decision.message
 
 
+async def test_member_cap_counts_the_members_own_turns_wherever_they_speak(db: None) -> None:
+    """A member cap sums the turns the member spoke or delegated, whichever conversation holds
+    them: their turn in a workspace conversation counts, while a speakerless turn in a conversation
+    they founded does not."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, founded = await _seed(connection)
+        shared = await _shared_conversation(connection, workspace_id, agent_id)
+        await _bill(
+            connection, workspace_id, shared, agent_id, 40, seq=1, speaker_member_id=member_id
+        )
+        await _bill(connection, workspace_id, founded, agent_id, 100, seq=1)
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+        under = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+        await _bill(
+            connection, workspace_id, shared, agent_id, 20, seq=2, speaker_member_id=member_id
+        )
+        over = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
+    assert under.outcome == "allow"
+    assert over.outcome == "park"
+
+
 async def test_member_cap_rejects_when_over(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            100,
+            seq=1,
+            speaker_member_id=member_id,
+        )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "reject")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
     assert decision.outcome == "reject"
@@ -307,7 +368,15 @@ async def test_member_cap_rejects_when_over(db: None) -> None:
 async def test_under_cap_allows(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 40, seq=1)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            40,
+            seq=1,
+            speaker_member_id=member_id,
+        )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 100, "park")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
     assert decision.outcome == "allow"
@@ -329,6 +398,7 @@ async def test_sandbox_tokens_count_toward_a_cap(db: None) -> None:
                 seq=1,
                 status="done",
                 inbound="x",
+                speaker_member_id=member_id,
                 terminal=TerminalFrame(status="done").model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -349,7 +419,15 @@ async def test_sandbox_tokens_count_toward_a_cap(db: None) -> None:
 async def test_pending_in_flight_crosses_cap(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 40, seq=1)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            40,
+            seq=1,
+            speaker_member_id=member_id,
+        )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
         evaluator = SpendEvaluator(workspace_id, member_id, agent_id)
         assert (await evaluator.decide(connection, 0)).outcome == "allow"
@@ -360,7 +438,16 @@ async def test_spend_outside_window_not_counted(db: None) -> None:
     old = datetime.now(UTC) - timedelta(hours=2)
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1, created_at=old)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            100,
+            seq=1,
+            created_at=old,
+            speaker_member_id=member_id,
+        )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
     assert decision.outcome == "allow"
@@ -412,7 +499,15 @@ async def test_agent_scope_counts_only_its_agent(db: None) -> None:
 async def test_cap_for_other_member_does_not_apply(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            100,
+            seq=1,
+            speaker_member_id=member_id,
+        )
         await _set_cap(connection, workspace_id, "member", uuid4(), 3600, 50, "park")
         decision = await SpendEvaluator(workspace_id, member_id, agent_id).decide(connection, 0)
     assert decision.outcome == "allow"
@@ -421,24 +516,70 @@ async def test_cap_for_other_member_does_not_apply(db: None) -> None:
 async def test_admission_parks_over_cap_member_without_enqueue(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            100,
+            seq=1,
+            speaker_member_id=member_id,
+        )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
+        workspace_id, conversation_id, agent_id, "hi", authority=MemberAuthority(member_id)
     )
     assert dbos.enqueued == []
     assert await _status(turn_id) == "parked"
 
 
+async def test_admission_caps_the_speaking_member_not_the_conversations_founder(db: None) -> None:
+    """Admission decides a member cap against the turn's own member: the capped member's turn in a
+    workspace conversation parks, while a workspace turn — in another workspace conversation, and
+    in the very conversation the capped member founded — is not held by that member's cap."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, agent_id, founded = await _seed(connection)
+        shared = await _shared_conversation(connection, workspace_id, agent_id)
+        elsewhere = await _shared_conversation(connection, workspace_id, agent_id)
+        await _bill(
+            connection, workspace_id, shared, agent_id, 100, seq=1, speaker_member_id=member_id
+        )
+        await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    held = await admission.invoke(
+        workspace_id, shared, agent_id, "hi", authority=MemberAuthority(member_id)
+    )
+    assert dbos.enqueued == []
+    assert await _status(held) == "parked"
+    workspace_turn = await admission.invoke(
+        workspace_id, elsewhere, agent_id, "hi", authority=WORKSPACE_AUTHORITY
+    )
+    founders_turn = await admission.invoke(
+        workspace_id, founded, agent_id, "hi", authority=WORKSPACE_AUTHORITY
+    )
+    assert dbos.enqueued == [str(workspace_turn), str(founders_turn)]
+    assert await _status(workspace_turn) == "queued"
+    assert await _status(founders_turn) == "queued"
+
+
 async def test_admission_rejects_over_cap_member_with_reason(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            100,
+            seq=1,
+            speaker_member_id=member_id,
+        )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "reject")
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
+        workspace_id, conversation_id, agent_id, "hi", authority=MemberAuthority(member_id)
     )
     assert dbos.enqueued == []
     async with workspace_tx() as connection:
@@ -471,9 +612,19 @@ async def test_dispatch_stamp_excludes_a_concurrent_sweep(db: None) -> None:
 async def test_resume_skips_turn_still_over_cap(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            100,
+            seq=1,
+            speaker_member_id=member_id,
+        )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
-        parked = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
+        parked = await _insert_parked(
+            connection, workspace_id, conversation_id, agent_id, seq=2, speaker_member_id=member_id
+        )
     dbos = StubDbos()
     await _dispatch(dbos)
     assert dbos.enqueued == []
@@ -483,9 +634,19 @@ async def test_resume_skips_turn_still_over_cap(db: None) -> None:
 async def test_resume_readmits_when_cap_raised(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed(connection)
-        await _bill(connection, workspace_id, conversation_id, agent_id, 100, seq=1)
+        await _bill(
+            connection,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            100,
+            seq=1,
+            speaker_member_id=member_id,
+        )
         cap_id = await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
-        parked = await _insert_parked(connection, workspace_id, conversation_id, agent_id, seq=2)
+        parked = await _insert_parked(
+            connection, workspace_id, conversation_id, agent_id, seq=2, speaker_member_id=member_id
+        )
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.spend_cap)
@@ -521,9 +682,13 @@ async def test_resume_scopes_the_cap_decision_to_each_workspace(db: None) -> Non
     spend, never the other's — and only the headroom workspace's turn is enqueued, scoped to it."""
     async with workspace_tx() as connection:
         over_ws, over_member, over_agent, over_conv = await _seed(connection)
-        await _bill(connection, over_ws, over_conv, over_agent, 100, seq=1)
+        await _bill(
+            connection, over_ws, over_conv, over_agent, 100, seq=1, speaker_member_id=over_member
+        )
         await _set_cap(connection, over_ws, "member", over_member, 3600, 50, "park")
-        over_parked = await _insert_parked(connection, over_ws, over_conv, over_agent, seq=2)
+        over_parked = await _insert_parked(
+            connection, over_ws, over_conv, over_agent, seq=2, speaker_member_id=over_member
+        )
         free_ws, _, free_agent, free_conv = await _seed(connection)
         free_parked = await _insert_parked(connection, free_ws, free_conv, free_agent, seq=1)
     dbos = StubDbos()

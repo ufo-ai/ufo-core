@@ -58,6 +58,11 @@ from ufo.runtime.access.credentials import (
     CredentialStore,
 )
 from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.access.member_authorization import (
+    MEMBER_AUTHORIZATION_JOB,
+    MEMBER_AUTHORIZATION_MODEL,
+    MemberAuthorization,
+)
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import (
@@ -1259,6 +1264,12 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             artifact_token_secret=runtime.artifact_token_secret,
             site_previewer=runtime.site_previewer,
             grants=grants,
+            member_authorization=MemberAuthorization(
+                ModelAccess(
+                    replace(runtime.registry, auto_model=MEMBER_AUTHORIZATION_MODEL),
+                    MEMBER_AUTHORIZATION_JOB,
+                )
+            ),
             previous_turn_ended_at=previous_turn_ended_at,
             pricing=billing.pricing(),
             attempt=attempt,
@@ -1381,6 +1392,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.status,
                     tables.turn.c.inbound,
                     tables.turn.c.admission_source,
+                    tables.turn.c.idempotency_key,
                     tables.turn.c.speaker_member_id,
                     tables.turn.c.on_behalf_of_member_id,
                     tables.turn.c.created_at,
@@ -1427,6 +1439,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         status=row.status,
         inbound=row.inbound,
         admission_source=row.admission_source,
+        idempotency_key=row.idempotency_key,
         speaker_member_id=row.speaker_member_id,
         on_behalf_of_member_id=row.on_behalf_of_member_id,
         created_at=row.created_at,
@@ -1660,7 +1673,13 @@ async def _open_sandbox(
                 CONVERSATION_ID_ENV: str(turn.conversation_id),
                 TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL,
                 **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cache_config, *cli_git_config(clis))),
-                **await _grant_cli_env(grants, clis, WORKSPACE_AUTHORITY, turn.id),
+                **await _grant_cli_env(
+                    grants,
+                    clis,
+                    WORKSPACE_AUTHORITY,
+                    turn.id,
+                    None if turn.runtime_config is None else turn.runtime_config.connections,
+                ),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },
         )
@@ -1690,5 +1709,10 @@ class SandboxAuthorizer:
                 self.clis,
                 authority,
                 self.turn.id,
+                (
+                    None
+                    if self.turn.runtime_config is None
+                    else self.turn.runtime_config.connections
+                ),
             ),
         )

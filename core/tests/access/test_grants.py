@@ -1784,6 +1784,23 @@ async def test_a_shipped_agent_spends_the_attachments_it_was_given(db: None) -> 
         assert await shipped.connector_accounts("stub") == ("acct-attached", "acct-shared")
         assert await shipped.connector_account("stub", "acct-attached") == "acct-attached"
 
+        shared_turn = replace(shipped, other_members_active=True)
+        assert await shared_turn.connector_accounts("stub") == ("acct-shared",)
+        with pytest.raises(SpeakerRequired, match="acct-attached"):
+            await shared_turn.connector_account("stub", "acct-attached")
+
+        unattributed_turn = replace(shipped, member_messages_active=True)
+        assert await unattributed_turn.connector_accounts("stub") == ("acct-shared",)
+        with pytest.raises(SpeakerRequired, match="acct-attached"):
+            await unattributed_turn.connector_account("stub", "acct-attached")
+
+        selected_owner = replace(
+            _turn_context(workspace_id, agent_id, conversation_id, grantor_id),
+            grants=store,
+            other_members_active=True,
+        )
+        assert await selected_owner.connector_account("stub", "acct-attached") == "acct-attached"
+
         as_main = replace(
             _turn_context(workspace_id, agent_id, conversation_id, None, main=True), grants=store
         )
@@ -1852,6 +1869,59 @@ async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(
             await speakerless.connector_account("solo")
         with pytest.raises(ValueError, match="connect one with connect_account"):
             await speakerless.connector_account("nobody")
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_colleagues_private_account_is_named_only_while_they_hold_a_message(
+    db: None,
+) -> None:
+    """The withheld tier follows who is speaking, never the audience: a member acting alone in a
+    workspace conversation misses a colleague's private account with the plain refusal, naming
+    nobody; the same call while that colleague holds an active message is `SpeakerRequired`
+    naming them, since `requested_by` can then carry the fix."""
+    workspace_id = await _workspace()
+    speaker_id, agent_id = await _member_agent(workspace_id)
+    other_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=other_id,
+                workspace_id=workspace_id,
+                email="other@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id = await _conversation(workspace_id, speaker_id)
+    store = GrantStore()
+    await _record(
+        store,
+        workspace_id,
+        agent_id,
+        provider="stub",
+        account_id="acct-other-private",
+        host=GRANTED_HOST,
+        grantor_member_id=other_id,
+        conversation_id=conversation_id,
+        shared=False,
+    )
+    alone = replace(
+        _turn_context(workspace_id, agent_id, conversation_id, speaker_id, main=True),
+        grants=store,
+        audience=SHARED_AUDIENCE,
+    )
+    accompanied = replace(alone, other_members_active=True)
+    with ws(workspace_id), agent(agent_id):
+        with pytest.raises(ValueError, match="connect one with connect_account") as plain:
+            await alone.connector_account("stub")
+        assert not isinstance(plain.value, SpeakerRequired)
+        assert "other@x.test" not in str(plain.value)
+        with pytest.raises(ValueError, match="no active 'stub' account 'acct-other-private'"):
+            await alone.connector_account("stub", "acct-other-private")
+        with pytest.raises(SpeakerRequired, match=r"other@x\.test"):
+            await accompanied.connector_account("stub")
+        with pytest.raises(SpeakerRequired, match="acct-other-private"):
+            await accompanied.connector_account("stub", "acct-other-private")
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1942,16 +2012,19 @@ async def test_a_channel_call_asks_for_the_member_a_private_connector_needs(db: 
         _turn_context(workspace_id, agent_id, conversation_id, None, main=True),
         grants=store,
         audience=SHARED_AUDIENCE,
+        other_members_active=True,
     )
     channel_asker = replace(
         _turn_context(workspace_id, agent_id, conversation_id, asker_id),
         grants=store,
         audience=SHARED_AUDIENCE,
+        other_members_active=True,
     )
     channel_owner = replace(
         _turn_context(workspace_id, agent_id, conversation_id, owner_id),
         grants=store,
         audience=SHARED_AUDIENCE,
+        other_members_active=True,
     )
     direct_asker = replace(
         _turn_context(workspace_id, agent_id, conversation_id, asker_id), grants=store

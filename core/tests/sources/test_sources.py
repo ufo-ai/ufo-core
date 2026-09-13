@@ -115,7 +115,7 @@ from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
 
 TOOL_NARRATION = "looking through what they synced"
 
@@ -2099,6 +2099,75 @@ async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db
         assert member_subject(on_behalf_of_member_id) in ctx.read_subjects
         assert ctx.source_reader().requesting_member_id is None
         assert await _reachable(state, ctx.source_reader()) == {state.unowned_source_id}
+
+
+async def test_a_turn_connection_scope_is_an_exact_source_read_allowlist(db: None) -> None:
+    state = await _authority()
+    owned_page_id, shared_page_id = uuid7(), uuid7()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.page),
+            [
+                {
+                    "uid": page_id,
+                    "workspace_id": state.workspace_id,
+                    "source_uid": source_id,
+                    "digest": f"sha256:{page_id.hex}",
+                    "body_ref": f"sources/{page_id}",
+                    "stream": "notes",
+                    "title": f"page {page_id}",
+                    "subject": subject,
+                    "tombstone": False,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+                for page_id, source_id, subject in (
+                    (owned_page_id, state.owned_source_id, member_subject(state.owner_id)),
+                    (shared_page_id, state.unowned_source_id, SHARED_SUBJECT),
+                )
+            ],
+        )
+    for connections, expected_sources, expected_pages in (
+        (
+            None,
+            {state.owned_source_id, state.unowned_source_id},
+            {owned_page_id, shared_page_id},
+        ),
+        ((state.owned_connection_id,), {state.owned_source_id}, {owned_page_id}),
+        ((state.shared_connection_id,), {state.unowned_source_id}, {shared_page_id}),
+        ((), set(), set()),
+    ):
+        runtime_config = None if connections is None else TurnRuntimeConfig(connections=connections)
+        ctx = ToolContext(
+            sandbox=None,
+            blob=None,
+            turn=Turn(
+                id=uuid4(),
+                workspace_id=state.workspace_id,
+                conversation_id=uuid4(),
+                agent_id=state.main_agent_id,
+                seq=1,
+                status="running",
+                inbound="summarise what changed",
+                created_at=datetime(2026, 7, 27, tzinfo=UTC),
+                runtime_config=runtime_config,
+            ),
+            agent=Agent(prompt="p", model="claude-opus-4-8"),
+            spawn=_unavailable_spawn,
+            speaker_member_id=state.owner_id,
+            audience=conversation_audience(state.owner_id),
+            artifact_token_secret="",
+        )
+        reader = ctx.source_reader()
+        assert reader.connections == connections
+        with ws(state.workspace_id):
+            ext = context_for("probe", frozenset())
+            assert await ext.readable_source_ids(reader) == expected_sources
+            assert {page.id for page in await ext.source_pages(reader)} == expected_pages
+            assert (
+                set(await ext.readable_page_states((owned_page_id, shared_page_id), reader))
+                == expected_pages
+            )
 
 
 async def test_a_failing_source_is_isolated_and_released(

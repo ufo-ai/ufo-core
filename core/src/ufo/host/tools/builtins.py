@@ -69,6 +69,7 @@ from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.host.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.runtime.access.credentials import declared_slot_fingerprint
 from ufo.runtime.access.grants import installed_connect_flow
+from ufo.runtime.authority import authority_member_id
 from ufo.runtime.kinds.agents import RESTORE_APPLICATION_TOOL_DEF
 from ufo.runtime.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
@@ -101,6 +102,7 @@ from ufo.runtime.tools.context import (
     store_artifact,
 )
 from ufo.runtime.tools.file_changes import FILE_CHANGE_PATH_MAX_CHARS
+from ufo.runtime.tools.question import question_result_text
 from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.runtime.tools.tasks import (
     BACKGROUND_TASKS_DIR,
@@ -927,6 +929,7 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
                     .values(
                         id=uuid5(NAMESPACE_URL, share.key),
                         turn_id=ctx.turn.id,
+                        member_id=authority_member_id(ctx.authority),
                         blob_key=share.key,
                         workspace_id=ctx.turn.workspace_id,
                         filename=share.safe_name,
@@ -1080,23 +1083,12 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
     )
 
 
-ASK_USER_DIRECTIVE = (
-    "Ask these in your reply, then end your turn — the user's answer arrives as the next message."
-)
-
-
 async def ask_user_handler(ctx: ToolContext, args: AskUserCall) -> ToolResult:
     """Chat-native interaction: the question rides the agent's reply and the answer rides the
     member's next message, never an out-of-band prompt. Returns the structured question so a rich
     surface can render it and the model presents it faithfully, plus the directive to end the turn
     and wait."""
-    payload = {
-        "awaiting": "question",
-        "title": args.title,
-        **({"icon": args.icon} if args.icon else {}),
-        "questions": [question.model_dump(exclude_none=True) for question in args.questions],
-    }
-    return ToolResult(content=(TextContent(text=f"{ASK_USER_DIRECTIVE}\n{json.dumps(payload)}"),))
+    return ToolResult(content=(TextContent(text=question_result_text(args)),))
 
 
 async def load_skill_handler(ctx: ToolContext, args: LoadSkillInput) -> ToolResult:

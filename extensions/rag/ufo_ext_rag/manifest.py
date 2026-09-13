@@ -85,6 +85,9 @@ async def prefetch_hook(ctx: HookContext) -> HookOutcome:
         agent_id=ctx.turn.agent_id,
         requesting_member_id=None,
         subjects=audience_subjects(ctx.audience),
+        connections=(
+            None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.connections
+        ),
     )
     try:
         async with asyncio.timeout(PREFETCH_SOFT_TIMEOUT_SECONDS):

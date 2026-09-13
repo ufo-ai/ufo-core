@@ -1,4 +1,5 @@
 import asyncio
+from base64 import b64encode
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -41,8 +42,11 @@ from ufo.harness.sandbox.exec_env import CONVERSATION_ID_ENV, ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     SENTINEL_MODEL_KEY,
+    ProbeToken,
     ProbeTokenCodec,
     ProxyEndpoint,
+    SandboxHandle,
+    SandboxSpec,
 )
 from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
@@ -84,7 +88,7 @@ from ufo.runtime.workspace import (
     ws,
 )
 from ufo.schema import tables
-from ufo.schema.records import SUBAGENT_SURFACE, Usage
+from ufo.schema.records import CONNECTION_SCOPE_MAX, SUBAGENT_SURFACE, Usage
 
 MODEL = "claude-opus-4-8"
 JOB = "memory:memory_consolidate"
@@ -855,9 +859,18 @@ async def test_turn_outcomes_reads_status_and_terminal_text(db: None) -> None:
     assert outcomes[running] == TurnOutcome(status="running", text=None)
 
 
-def _sandboxes(root: Path) -> ConversationSandbox:
+@dataclass(frozen=True)
+class _RecordingProbeCarrier(LocalCarrier):
+    specs: list[SandboxSpec] = field(default_factory=list)
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        self.specs.append(spec)
+        return await super().create(spec)
+
+
+def _sandboxes(root: Path, carrier: LocalCarrier | None = None) -> ConversationSandbox:
     return ConversationSandbox(
-        carrier=LocalCarrier(),
+        carrier=LocalCarrier() if carrier is None else carrier,
         backend="local",
         off_cluster=False,
         image_ref=SANDBOX_IMAGE_REF,
@@ -905,16 +918,21 @@ async def test_a_probes_authority_reaches_the_environment_and_the_token(
     the proxy derives that member's injections, and the environment, so the CLI inside the sandbox
     has a sentinel to send. This pins the second — the first is the proxy's own test — by recording
     what the env derivation was asked for."""
-    asked: list[tuple[UUID, ExecutionAuthority]] = []
+    asked: list[tuple[UUID, ExecutionAuthority, tuple[UUID, ...]]] = []
 
     async def env(
-        conversation_id: UUID, probe_id: UUID, authority: ExecutionAuthority
+        conversation_id: UUID,
+        probe_id: UUID,
+        authority: ExecutionAuthority,
+        connections: tuple[UUID, ...],
     ) -> dict[str, str]:
-        asked.append((probe_id, authority))
+        asked.append((probe_id, authority, connections))
         return {}
 
     workspace_id = await _workspace()
     member_id = uuid4()
+    carrier = _RecordingProbeCarrier()
+    codec = ProbeTokenCodec(b"probe-token-test-secret")
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
         async with workspace_tx() as connection:
@@ -928,17 +946,60 @@ async def test_a_probes_authority_reaches_the_environment_and_the_token(
                     updated_at=sa.func.now(),
                 )
             )
-        probes = ConversationProbes(
-            _sandboxes(tmp_path / "workspaces"), ProbeTokenCodec(b"probe-token-test-secret"), env
+        probes = ConversationProbes(_sandboxes(tmp_path / "workspaces", carrier), codec, env)
+        first, second = sorted((uuid4(), uuid4()), key=str)
+        await probes.run(
+            conversation_id,
+            "true",
+            authority=MemberAuthority(member_id),
+            connections=(second, first),
+            internet_access=False,
         )
-        await probes.run(conversation_id, "true", authority=MemberAuthority(member_id))
         await probes.run(conversation_id, "true", authority=WORKSPACE_AUTHORITY)
 
-    assert [authority for _, authority in asked] == [
-        MemberAuthority(member_id),
-        WORKSPACE_AUTHORITY,
+    assert [(authority, connections) for _, authority, connections in asked] == [
+        (MemberAuthority(member_id), (first, second)),
+        (WORKSPACE_AUTHORITY, ()),
     ]
-    assert len({probe_id for probe_id, _ in asked}) == 2
+    assert len({probe_id for probe_id, _, _ in asked}) == 2
+    assert len(carrier.specs) == 2
+    principals = tuple(
+        codec.from_proxy_auth("Basic " + b64encode(f"{spec.run_token}:x".encode()).decode())
+        for spec in carrier.specs
+    )
+    assert principals[0] == ProbeToken(
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        probe_id=asked[0][0],
+        expires_at=principals[0].expires_at,
+        authority=MemberAuthority(member_id),
+        connections=(first, second),
+        internet_access=False,
+    )
+    assert principals[1].internet_access is None
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_probe_connection_scope_is_bounded_and_distinct(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        conversation_id = await _conversation(workspace_id)
+        probes = _probes(_sandboxes(tmp_path / "workspaces"))
+        with pytest.raises(ValueError, match=str(CONNECTION_SCOPE_MAX)):
+            await probes.run(
+                conversation_id,
+                "true",
+                authority=WORKSPACE_AUTHORITY,
+                connections=tuple(uuid4() for _ in range(CONNECTION_SCOPE_MAX + 1)),
+            )
+        repeated = uuid4()
+        with pytest.raises(ValueError, match="duplicate"):
+            await probes.run(
+                conversation_id,
+                "true",
+                authority=WORKSPACE_AUTHORITY,
+                connections=(repeated, repeated),
+            )
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

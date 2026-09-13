@@ -1,0 +1,31 @@
+name = "artifact-mine-guidance"
+base = "HEAD"
+suites = ["artifact_ownership"]
+cases = [
+  "A01-list-files-i-shared",
+  "A02-explain-mine",
+]
+repeats = 10
+concurrency = 1
+max_stacks = 2
+budget_usd = 20.0
+est_usd_per_case = 0.50
+model = "z-ai/glm-5.3-flash"
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "conversation-owner"
+
+[[arm.replacements]]
+path = "core/src/ufo/host/kinds/artifacts.py"
+old = '''"session's files, media=image for pictures, mine=true for files whose current "
+            "version you shared, or order by `shared_at` desc'''
+new = '''"session's files, media=image for pictures, mine=true for files from your own "
+            "conversations, or order by `shared_at` desc'''

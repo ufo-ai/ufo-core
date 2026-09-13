@@ -120,6 +120,7 @@ from ufo.sdk.models import (
 )
 from ufo.sdk.objects import (
     AdminRequired,
+    ObjectActionRequestTarget,
     ObjectActionTarget,
     ObjectDetail,
     ObjectKind,
@@ -416,7 +417,10 @@ async def _tick(ctx: ExtensionContext) -> None:
     if ctx.probes is None:
         return
     probed = await ctx.probes.run(
-        target.conversation_id, JOB_PROBE_COMMAND, authority=WORKSPACE_AUTHORITY
+        target.conversation_id,
+        JOB_PROBE_COMMAND,
+        authority=WORKSPACE_AUTHORITY,
+        connections=(),
     )
     await ctx.store.put(JOB_PROBE_KEY, {"stdout": probed.stdout, "exit_code": probed.exit_code})
 
@@ -640,18 +644,32 @@ class BeseechInput(BaseModel):
     question: str = "Which widget?"
 
 
-def _target_record(target: ObjectActionTarget | None) -> dict[str, JsonValue] | None:
-    if target is None:
-        return None
-    return {
-        "kind": target.kind,
-        "name": target.name,
-        "agent": None if target.agent is None else target.agent.name,
-        "generation": None if target.generation is None else str(target.generation),
-        "expected_generation": (
-            None if target.expected_generation is None else str(target.expected_generation)
-        ),
-    }
+def _target_record(
+    target: ObjectActionRequestTarget | ObjectActionTarget | None,
+) -> dict[str, JsonValue] | None:
+    match target:
+        case None:
+            return None
+        case ObjectActionRequestTarget():
+            return {
+                "kind": target.kind,
+                "name": target.name,
+                "agent": target.agent,
+                "generation": None,
+                "expected_generation": (
+                    None if target.expected_generation is None else str(target.expected_generation)
+                ),
+            }
+        case ObjectActionTarget():
+            return {
+                "kind": target.kind,
+                "name": target.name,
+                "agent": None if target.agent is None else target.agent.name,
+                "generation": None if target.generation is None else str(target.generation),
+                "expected_generation": (
+                    None if target.expected_generation is None else str(target.expected_generation)
+                ),
+            }
 
 
 def _action_ext(ctx: ToolContext) -> ExtensionContext:

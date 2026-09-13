@@ -69,6 +69,7 @@ pub enum Directive {
     Choose {
         prompt: String,
         options: Vec<String>,
+        multiple: bool,
     },
     Secret {
         sealed: String,
@@ -139,14 +140,8 @@ pub fn parse_line(line: &str) -> Directive {
         "txt" => Directive::Txt(field(&fields, 0)),
         "status" => Directive::Status(field(&fields, 0)),
         "ask" => Directive::Ask(field(&fields, 0)),
-        "choose" if !fields.is_empty() => Directive::Choose {
-            prompt: fields[0].clone(),
-            options: fields[1..]
-                .iter()
-                .filter(|o| !o.is_empty())
-                .cloned()
-                .collect(),
-        },
+        "choose" if !fields.is_empty() => question(&fields, false),
+        "choose_many" if !fields.is_empty() => question(&fields, true),
         "secret" if fields.len() >= 3 => Directive::Secret {
             sealed: fields[0].clone(),
             slot: fields[1].clone(),
@@ -178,6 +173,18 @@ pub fn parse_line(line: &str) -> Directive {
             .unwrap_or(Directive::Unknown),
         "exit" => Directive::Exit(field(&fields, 0).parse().unwrap_or(0)),
         _ => Directive::Unknown,
+    }
+}
+
+fn question(fields: &[String], multiple: bool) -> Directive {
+    Directive::Choose {
+        prompt: fields[0].clone(),
+        options: fields[1..]
+            .iter()
+            .filter(|option| !option.is_empty())
+            .cloned()
+            .collect(),
+        multiple,
     }
 }
 
@@ -971,14 +978,24 @@ mod tests {
             parse_line("choose\tPick:\ta\tb"),
             Directive::Choose {
                 prompt: "Pick:".into(),
-                options: vec!["a".into(), "b".into()]
+                options: vec!["a".into(), "b".into()],
+                multiple: false,
             }
         );
         assert_eq!(
             parse_line("choose\tFree text?"),
             Directive::Choose {
                 prompt: "Free text?".into(),
-                options: vec![]
+                options: vec![],
+                multiple: false,
+            }
+        );
+        assert_eq!(
+            parse_line("choose_many\tPick all:\ta\tb"),
+            Directive::Choose {
+                prompt: "Pick all:".into(),
+                options: vec!["a".into(), "b".into()],
+                multiple: true,
             }
         );
         assert_eq!(parse_line("ask\t>"), Directive::Ask(">".into()));
@@ -1081,10 +1098,14 @@ mod tests {
             Directive::Txt(text) => Some(("txt", vec![text.clone()])),
             Directive::Status(text) => Some(("status", vec![text.clone()])),
             Directive::Ask(prompt) => Some(("ask", vec![prompt.clone()])),
-            Directive::Choose { prompt, options } => {
+            Directive::Choose {
+                prompt,
+                options,
+                multiple,
+            } => {
                 let mut fields = vec![prompt.clone()];
                 fields.extend(options.iter().cloned());
-                Some(("choose", fields))
+                Some((if *multiple { "choose_many" } else { "choose" }, fields))
             }
             Directive::Secret {
                 sealed,

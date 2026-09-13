@@ -43,7 +43,7 @@ from ufo.runtime.tools.bridge import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import TurnRuntimeConfig
+from ufo.schema.records import CONNECTION_SCOPE_MAX, TurnRuntimeConfig
 
 CONTROL_TOKEN = "egress-control-secret"
 CACHE_TOKEN = "egress-cache-secret"
@@ -207,6 +207,45 @@ async def test_turn_runtime_config_can_disable_but_not_enable_public_egress(db: 
     assert InternetRule() not in rules
     with pytest.raises(ValueError, match="False"):
         TurnRuntimeConfig.model_validate({"model": "claude-opus-4-8", "internet_access": True})
+    connection_id = uuid4()
+    with pytest.raises(ValueError, match="duplicate"):
+        TurnRuntimeConfig(connections=(connection_id, connection_id))
+    with pytest.raises(ValueError, match="50"):
+        TurnRuntimeConfig(connections=tuple(uuid4() for _ in range(CONNECTION_SCOPE_MAX + 1)))
+    connection_ids = tuple(uuid4() for _ in range(2))
+    assert TurnRuntimeConfig(connections=tuple(reversed(connection_ids))).connections == tuple(
+        sorted(connection_ids, key=str)
+    )
+
+
+async def test_a_probe_preserves_a_narrowed_internet_scope(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    expires_at = int(datetime.now(UTC).timestamp()) + 300
+    resolver = PerAgentRules(base=(), grants=None, internet=(InternetRule(),))
+
+    unrestricted = await resolver.resolve(
+        ProbeToken(
+            seeded.workspace_id,
+            seeded.conversation_id,
+            uuid4(),
+            expires_at,
+            WORKSPACE_AUTHORITY,
+        )
+    )
+    narrowed = await resolver.resolve(
+        ProbeToken(
+            seeded.workspace_id,
+            seeded.conversation_id,
+            uuid4(),
+            expires_at,
+            WORKSPACE_AUTHORITY,
+            internet_access=False,
+        )
+    )
+
+    assert InternetRule() in unrestricted
+    assert InternetRule() not in narrowed
 
 
 def test_rule_json_matches_the_golden_contract() -> None:
@@ -868,3 +907,94 @@ async def test_git_credential_is_gated_by_the_cache_token_not_the_egress_token()
     assert none.status_code == 401
     assert egress.status_code == 401
     assert cross.status_code == 401
+
+
+async def test_proxy_and_git_credentials_stop_at_the_turn_connection_scope(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        listed = await GrantStore().record(
+            provider=PROVIDER,
+            account_id=ACCOUNT,
+            host=HOST,
+            grantor_member_id=seeded.member_id,
+            shared=False,
+        )
+        await GrantStore().record(
+            provider=PROVIDER,
+            account_id="acct-other",
+            host=HOST,
+            grantor_member_id=seeded.member_id,
+            shared=False,
+        )
+    tokens = _Tokens()
+    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
+    resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
+    token = RunToken(seeded.workspace_id, seeded.turn_id, MemberAuthority(seeded.member_id))
+
+    unrestricted_rules = await resolver.resolve(token)
+    unrestricted_credential = await resolver.git_credential(token, GIT.host)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == seeded.turn_id)
+            .values(runtime_config=TurnRuntimeConfig(connections=(listed,)).model_dump(mode="json"))
+        )
+    restricted_rules = await resolver.resolve(token)
+    restricted_credential = await resolver.git_credential(token, GIT.host)
+
+    def injected(rules: tuple[object, ...]) -> set[str]:
+        return {rule.sentinel for rule in rules if isinstance(rule, InjectionRule)}
+
+    assert injected(unrestricted_rules) == {grant_sentinel(ACCOUNT), grant_sentinel("acct-other")}
+    assert unrestricted_credential is None
+    assert injected(restricted_rules) == {grant_sentinel(ACCOUNT)}
+    assert restricted_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)
+
+
+async def test_probe_scope_excludes_later_connections_and_rechecks_removal(db: None) -> None:
+    async with workspace_tx() as connection:
+        seeded = await _seed_turn(connection)
+    store = GrantStore()
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        listed = await store.record(
+            provider=PROVIDER,
+            account_id=ACCOUNT,
+            host=HOST,
+            grantor_member_id=seeded.member_id,
+            shared=False,
+        )
+    probe = ProbeToken(
+        seeded.workspace_id,
+        seeded.conversation_id,
+        uuid4(),
+        int(datetime.now(UTC).timestamp()) + 300,
+        MemberAuthority(seeded.member_id),
+        (listed,),
+    )
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        await store.record(
+            provider=PROVIDER,
+            account_id="acct-later",
+            host=HOST,
+            grantor_member_id=seeded.member_id,
+            shared=False,
+        )
+    tokens = _Tokens()
+    clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
+    resolver = PerAgentRules(base=(), grants=store, clis=clis)
+
+    scoped_rules = await resolver.resolve(probe)
+    scoped_credential = await resolver.git_credential(probe, GIT.host)
+    with ws(seeded.workspace_id), agent(seeded.agent_id):
+        assert await store.disconnect(listed, actor_member_id=seeded.member_id) is True
+    removed_rules = await resolver.resolve(probe)
+    removed_credential = await resolver.git_credential(probe, GIT.host)
+
+    def injected(rules: tuple[object, ...]) -> set[str]:
+        return {rule.sentinel for rule in rules if isinstance(rule, InjectionRule)}
+
+    assert injected(scoped_rules) == {grant_sentinel(ACCOUNT)}
+    assert scoped_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)
+    assert injected(removed_rules) == set()
+    assert removed_credential is None

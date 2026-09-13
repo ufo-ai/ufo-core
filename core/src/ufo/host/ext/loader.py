@@ -48,6 +48,7 @@ from ufo.host.kinds.credential_kind import (
     CredentialObjects,
     CredentialSpec,
 )
+from ufo.host.kinds.member_permissions import MEMBER_PERMISSION_OBJECT
 from ufo.host.kinds.members import MEMBER_OBJECT
 from ufo.host.kinds.surface_kind import (
     SURFACE_DESCRIPTION,
@@ -66,6 +67,7 @@ from ufo.runtime.access.grants import ConnectionRecorded
 from ufo.runtime.access.workspace_slots import SlotProvider, WorkspaceSlots
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
 from ufo.runtime.ext.context import (
+    ConversationProbes,
     DeployCredentials,
     ExtensionContext,
     TurnInvoker,
@@ -121,6 +123,7 @@ CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=CONVERSATION_OBJECT, extension=None, context=None),
     BoundKind(kind=TURN_OBJECT, extension=None, context=None),
     BoundKind(kind=MEMBER_OBJECT, extension=None, context=None),
+    BoundKind(kind=MEMBER_PERMISSION_OBJECT, extension=None, context=None),
     BoundKind(kind=WORKSPACE_OBJECT, extension=None, context=None),
 )
 EXTENSION_ENTRY_POINT_GROUP = "ufo.extension"
@@ -498,6 +501,7 @@ def turn_tools(
     member_context_authority: ExecutionAuthority = WORKSPACE_AUTHORITY,
     member_context_blob: WorkspaceBlobStore | None = None,
     invoker: TurnInvoker | None = None,
+    probes: ConversationProbes | None = None,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]:
     """The full tool set a turn dispatches against — core builtins plus every extension's declared
     tools and connector tools — the workspace-scoped ExtensionContext each extension tool's
@@ -553,6 +557,7 @@ def turn_tools(
             member_context_authority=member_context_authority,
             member_context_blob=member_context_blob,
             invoker=invoker,
+            probes=probes,
             deploy_credentials=deploy_credentials,
             workspace_credentials=_resolved_slot_names(manifest),
         )

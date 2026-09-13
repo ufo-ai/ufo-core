@@ -36,6 +36,7 @@ class RecordedTurn:
     idempotency_key: str
     authority: ExecutionAuthority
     standalone: bool
+    runtime_config: TurnRuntimeConfig | None = None
 
 
 @dataclass
@@ -73,6 +74,7 @@ class RecordingInvoker:
                 idempotency_key=idempotency_key,
                 authority=authority,
                 standalone=standalone,
+                runtime_config=runtime_config,
             )
         )
         return uuid4()

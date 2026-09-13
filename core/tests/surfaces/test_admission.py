@@ -1619,6 +1619,44 @@ async def test_an_archived_app_refuses_a_member_and_raises_for_work_fired_by_a_c
     assert await _turn_count(conversation_id) == 1
 
 
+async def test_an_admitted_internal_turn_replays_after_its_agent_is_archived(db: None) -> None:
+    workspace_id, _, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    admitted = await _invoke(
+        admission,
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "scheduled fire",
+        idempotency_key="fire-1",
+        as_scheduled=True,
+    )
+    assert admitted is not None
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.agent)
+            .values(
+                name=f"~archived-{agent_id}",
+                archived_name=tables.agent.c.name,
+                archived_at=sa.func.now(),
+            )
+            .where(tables.agent.c.id == agent_id)
+        )
+
+    replayed = await _invoke(
+        admission,
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "scheduled fire",
+        idempotency_key="fire-1",
+        as_scheduled=True,
+    )
+
+    assert replayed == admitted
+    assert await _turn_count(conversation_id) == 1
+
+
 async def test_a_message_left_by_a_stop_is_refused_by_an_app_archived_under_it(db: None) -> None:
     """A re-admission holds every refusal a return can release, but an archive releases nothing:
     a turn held under it would run on the archived app at the next sweep, so this one cancels."""

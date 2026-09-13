@@ -44,7 +44,7 @@ from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn
+from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn, TurnRuntimeConfig
 
 pytestmark = pytest.mark.usefixtures("database_url")
 
@@ -140,6 +140,7 @@ def _tool_ctx(
     *,
     speaker_member_id: UUID | None,
     on_behalf_of_member_id: UUID | None = None,
+    runtime_config: TurnRuntimeConfig | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=None,  # type: ignore[arg-type]
@@ -154,6 +155,7 @@ def _tool_ctx(
             inbound="sync the crm",
             created_at=datetime(2026, 9, 4, tzinfo=UTC),
             on_behalf_of_member_id=on_behalf_of_member_id,
+            runtime_config=runtime_config,
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
@@ -256,19 +258,79 @@ async def test_a_repeat_on_a_subject_already_raised_folds_and_counts(db: None) -
     """The page-revision rule: one subject is one row, the body is the latest revision, and the
     count is the number of times it was raised — across turns and across agents."""
     workspace_id, member_id, agent_id, _, conversation_id = await _seed()
-    first = _tool_ctx(workspace_id, conversation_id, agent_id, speaker_member_id=member_id)
-    second = _tool_ctx(workspace_id, conversation_id, agent_id, speaker_member_id=member_id)
+    first_connection, second_connection = uuid4(), uuid4()
+    first = _tool_ctx(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        speaker_member_id=member_id,
+        runtime_config=TurnRuntimeConfig(connections=(first_connection,)),
+    )
+    second = _tool_ctx(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        speaker_member_id=member_id,
+        runtime_config=TurnRuntimeConfig(internet_access=False, connections=(second_connection,)),
+    )
     with ws(workspace_id), agent(agent_id):
         await notify(first, NotifyInput(subject=SOURCE, body="14 deals moved"))
         result = await notify(second, NotifyInput(subject=SOURCE, body="now 400 pages changed"))
-        rows = await _rows(workspace_id)
+        [row] = await NotificationStore(second.ext).rows()
 
     assert result.content[0].text == NOTIFY_FOLDED.format(n=2)
-    [row] = rows
-    assert row["occurrences"] == 2
-    assert row["body"] == "now 400 pages changed"
-    assert row["last_raised_at"] >= row["created_at"]
-    assert row["produced_by_turn_id"] == first.turn.id
+    assert row.occurrences == 2
+    assert row.body == "now 400 pages changed"
+    assert row.last_raised_at >= row.created_at
+    assert row.produced_by_turn_id == second.turn.id
+    assert row.runtime_config == second.turn.runtime_config
+
+
+async def test_a_missing_or_stale_runtime_config_fails_closed(db: None) -> None:
+    workspace_id, member_id, agent_id, inbox_id, conversation_id = await _seed()
+    ctx = _tool_ctx(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        speaker_member_id=member_id,
+        runtime_config=TurnRuntimeConfig(connections=(uuid4(),)),
+    )
+    with ws(workspace_id), agent(agent_id):
+        await notify(ctx, NotifyInput(subject=SOURCE, body="first"))
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(notification_table)
+                .where(notification_table.c.workspace_id == workspace_id)
+                .values(
+                    body="folded without scope",
+                    occurrences=notification_table.c.occurrences + 1,
+                )
+            )
+            await connection.execute(
+                sa.insert(notification_table).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    to_agent_id=inbox_id,
+                    member_id=member_id,
+                    subject="source/outgoing",
+                    body="written without runtime config",
+                    occurrences=1,
+                    produced_by_agent_id=agent_id,
+                    produced_by_agent_name="assistant",
+                    produced_by_turn_id=ctx.turn.id,
+                    produced_in_conversation_id=conversation_id,
+                    last_raised_at=sa.func.now(),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        rows = {row.subject: row for row in await NotificationStore(ctx.ext).rows()}
+
+    assert rows[SOURCE].body == "folded without scope"
+    assert rows[SOURCE].runtime_config == TurnRuntimeConfig(internet_access=False, connections=())
+    assert rows["source/outgoing"].runtime_config == TurnRuntimeConfig(
+        internet_access=False, connections=()
+    )
 
 
 def test_notify_is_offered_by_the_apps_flag() -> None:
@@ -318,19 +380,22 @@ async def test_a_delegated_turn_notifies_its_on_behalf_member(db: None) -> None:
     """A scheduled fire or a source trigger speaks for nobody but acts for its creator; that
     member is the one notified."""
     workspace_id, member_id, agent_id, _, conversation_id = await _seed()
+    connections = (uuid4(), uuid4())
     ctx = _tool_ctx(
         workspace_id,
         conversation_id,
         agent_id,
         speaker_member_id=None,
         on_behalf_of_member_id=member_id,
+        runtime_config=TurnRuntimeConfig(internet_access=False, connections=connections),
     )
     with ws(workspace_id), agent(agent_id):
         result = await notify(ctx, NotifyInput(subject=SOURCE, body="auth failed 3 nights"))
-        [row] = await _rows(workspace_id)
+        [row] = await NotificationStore(ctx.ext).rows()
 
     assert result.is_error is False
-    assert row["member_id"] == member_id
+    assert row.member_id == member_id
+    assert row.runtime_config == ctx.turn.runtime_config
 
 
 async def test_workspace_authority_and_the_inbox_agent_itself_are_refused(db: None) -> None:
@@ -397,6 +462,62 @@ async def test_the_kind_reads_the_members_own_rows_and_dismisses_them(db: None) 
     assert {link["relation"] for link in got["links"]} == {"created_in", "scoped_to"}
     assert got["status"]["occurrences"] == 1
     assert remaining == []
+
+
+async def test_a_member_reads_and_dismisses_notifications_across_origin_scopes(db: None) -> None:
+    workspace_id, member_id, agent_id, _, conversation_id = await _seed()
+    first_connection, second_connection = uuid4(), uuid4()
+    first = _tool_ctx(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        speaker_member_id=member_id,
+        runtime_config=TurnRuntimeConfig(connections=(first_connection,)),
+    )
+    second = _tool_ctx(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        speaker_member_id=member_id,
+        runtime_config=TurnRuntimeConfig(connections=(second_connection,)),
+    )
+    reader = _tool_ctx(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        speaker_member_id=member_id,
+    )
+    with ws(workspace_id), agent(agent_id):
+        await notify(first, NotifyInput(subject="source/first", body="first"))
+        await notify(second, NotifyInput(subject="source/second", body="second"))
+        rows = {row.subject: row for row in await NotificationStore(first.ext).rows()}
+        listed = json.loads(
+            await _dispatch(_object_tool("object_list"), reader, kind=NOTIFICATION_KIND)
+        )
+        got = yaml.safe_load(
+            await _dispatch(
+                _object_tool("object_get"),
+                reader,
+                ref=f"{NOTIFICATION_KIND}/{rows['source/second'].name}",
+            )
+        )
+        await _dispatch(
+            _object_tool("object_delete"),
+            reader,
+            kind=NOTIFICATION_KIND,
+            name=rows["source/second"].name,
+        )
+        await _dispatch(
+            _object_tool("object_delete"),
+            reader,
+            kind=NOTIFICATION_KIND,
+            name=rows["source/first"].name,
+        )
+        remaining = await NotificationStore(first.ext).rows()
+
+    assert {row["subject"] for row in listed["objects"]} == {"source/first", "source/second"}
+    assert got["spec"] == {"subject": "source/second", "body": "second"}
+    assert remaining == ()
 
 
 async def test_an_admin_does_not_read_or_dismiss_another_members_notification(db: None) -> None:

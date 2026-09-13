@@ -40,6 +40,7 @@ from ufo_ext_slack.tools import (
     SlackConnectInput,
     SlackManifestInput,
 )
+from ufo_testsupport.member_authorization import PermitMemberAuthorization
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
@@ -387,6 +388,7 @@ async def _dispatch(
         audience=audience,
         artifact_token_secret="",
         grants=None,
+        member_authorization=PermitMemberAuthorization(),
         verbs=verbs,
         granted_actions=granted,
         public_base_url=PUBLIC_BASE_URL,

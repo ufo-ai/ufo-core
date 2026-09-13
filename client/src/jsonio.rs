@@ -59,6 +59,8 @@ pub enum Event {
         id: u64,
         prompt: String,
         options: Vec<String>,
+        #[serde(skip_serializing_if = "is_false")]
+        multi_select: bool,
     },
     SecretRequest {
         id: u64,
@@ -155,9 +157,13 @@ impl Driver {
             Directive::Runtime(attestation) => vec![Event::Runtime {
                 attestation: Box::new(attestation.clone()),
             }],
-            Directive::Ask(prompt) => vec![self.raise_input(prompt.clone(), Vec::new())],
-            Directive::Choose { prompt, options } => {
-                vec![self.raise_input(prompt.clone(), options.clone())]
+            Directive::Ask(prompt) => vec![self.raise_input(prompt.clone(), Vec::new(), false)],
+            Directive::Choose {
+                prompt,
+                options,
+                multiple,
+            } => {
+                vec![self.raise_input(prompt.clone(), options.clone(), *multiple)]
             }
             Directive::Secret {
                 sealed,
@@ -188,13 +194,14 @@ impl Driver {
         }
     }
 
-    fn raise_input(&mut self, prompt: String, options: Vec<String>) -> Event {
+    fn raise_input(&mut self, prompt: String, options: Vec<String>, multi_select: bool) -> Event {
         let id = self.mint();
         self.asks.insert(id);
         Event::InputRequest {
             id,
             prompt,
             options,
+            multi_select,
         }
     }
 
@@ -285,6 +292,10 @@ impl Driver {
             Command::Shutdown => Ok(AnswerRouting::Shutdown),
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 pub fn parse_command(line: &str) -> Result<Command, Event> {
@@ -425,17 +436,20 @@ mod tests {
                 id: 1,
                 prompt: ">".into(),
                 options: Vec::new(),
+                multi_select: false,
             }]
         );
         assert_eq!(
             driver.on_directive(&Directive::Choose {
                 prompt: "Pick:".into(),
                 options: vec!["a".into(), "b".into()],
+                multiple: true,
             }),
             vec![Event::InputRequest {
                 id: 2,
                 prompt: "Pick:".into(),
                 options: vec!["a".into(), "b".into()],
+                multi_select: true,
             }]
         );
         assert_eq!(
@@ -456,6 +470,7 @@ mod tests {
                 id: 4,
                 prompt: "again".into(),
                 options: Vec::new(),
+                multi_select: false,
             }]
         );
     }
@@ -740,16 +755,26 @@ mod tests {
                 id: 1,
                 prompt: "Pick:".into(),
                 options: vec!["a".into()],
+                multi_select: false,
             }),
             "{\"type\":\"input_request\",\"id\":1,\"prompt\":\"Pick:\",\"options\":[\"a\"]}\n"
         );
         assert_eq!(
-            emit(&Event::SecretRequest {
+            emit(&Event::InputRequest {
                 id: 2,
+                prompt: "Pick all:".into(),
+                options: vec!["a".into(), "b".into()],
+                multi_select: true,
+            }),
+            "{\"type\":\"input_request\",\"id\":2,\"prompt\":\"Pick all:\",\"options\":[\"a\",\"b\"],\"multi_select\":true}\n"
+        );
+        assert_eq!(
+            emit(&Event::SecretRequest {
+                id: 3,
                 slot: "SLOT".into(),
                 prompt: "Paste".into(),
             }),
-            "{\"type\":\"secret_request\",\"id\":2,\"slot\":\"SLOT\",\"prompt\":\"Paste\"}\n"
+            "{\"type\":\"secret_request\",\"id\":3,\"slot\":\"SLOT\",\"prompt\":\"Paste\"}\n"
         );
         assert_eq!(emit(&driver.on_turn_end()), "{\"type\":\"turn_end\"}\n");
         assert_eq!(

@@ -39,7 +39,7 @@ from ufo_ext_memory.store import (
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.runtime.ext.context import ExtensionContext, context_for
+from ufo.runtime.ext.context import ExtensionContext, SourceReader, context_for
 from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.runtime.objects import (
     ObjectListQuery,
@@ -50,7 +50,7 @@ from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
 from ufo.sdk.audience import (
     SHARED_AUDIENCE,
     Audience,
@@ -450,6 +450,35 @@ async def test_recall_hook_serves_a_member_message_folded_onto_an_internal_root(
     assert calls == 1
 
 
+async def test_recall_hook_carries_the_turn_connection_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: tuple[UUID, ...] | None = None
+
+    class StubStore:
+        async def recall(
+            self,
+            query: str,
+            subjects: frozenset[str],
+            limit: int,
+            *,
+            source_reader: SourceReader,
+        ) -> tuple[Recalled, ...]:
+            nonlocal seen
+            seen = source_reader.connections
+            return ()
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: StubStore())
+    workspace_id = uuid4()
+    connection_scope = (uuid4(),)
+    turn = _stub_turn(workspace_id).model_copy(
+        update={"runtime_config": TurnRuntimeConfig(connections=connection_scope)}
+    )
+    with ws(workspace_id):
+        await memory.recall_hook(_hook(workspace_id, turn, speaker_member_id=uuid4()))
+    assert seen == connection_scope
+
+
 async def test_recall_hook_bounds_injected_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Four bodies at exactly the per-item cap sum to precisely RECALL_TOTAL_MAX_CHARS on their raw
     text (8,000) but their rendered lines — each with its "- " prefix and "\\n" separator — sum to
@@ -519,7 +548,7 @@ async def test_memory_update_writes_only_the_conversation_audience(
     bound_ctx = _tool_ctx(shared_ext, member, tmp_path, audience=SHARED_AUDIENCE)
     common_ctx = _tool_ctx(shared_ext, None, tmp_path, audience=SHARED_AUDIENCE)
     with ws(workspace_id):
-        await _run("memory_update", bound_ctx, body="a private note")
+        await _run("memory_update", bound_ctx, body="a member note")
         await _run("memory_update", common_ctx, body="a team note")
         async with workspace_tx() as connection:
             subjects = sorted(
@@ -527,29 +556,33 @@ async def test_memory_update_writes_only_the_conversation_audience(
                 for row in (await connection.execute(sa.select(memory_item.c.subject))).all()
             )
         await _indexer(embed).run()
-        private_read = await _run("memory_search", bound_ctx, queries=["note"])
+        member_read = await _run("memory_search", bound_ctx, queries=["note"])
         shared_read = await _run("memory_search", common_ctx, queries=["note"])
-    assert subjects == sorted([member_subject(member), "shared"])
-    assert "a private note" in private_read.content[0].text
-    assert "a team note" in private_read.content[0].text
-    assert "a private note" not in shared_read.content[0].text
+    assert subjects == ["shared", "shared"]
+    assert "a member note" in member_read.content[0].text
+    assert "a team note" in member_read.content[0].text
+    assert "a member note" in shared_read.content[0].text
     assert "a team note" in shared_read.content[0].text
     with pytest.raises(ValidationError):
         memory.MemoryUpdateInput.model_validate({"body": "widened", "shared": True})
 
 
-async def test_shared_recall_excludes_message_bound_private_memory(
-    db: None, tmp_path: Path
-) -> None:
+async def test_shared_recall_includes_the_speakers_private_memory(db: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     member = uuid4()
     embed = StubEmbed(vec((0, 1.0)))
     index = DefaultIndex(transaction=workspace_tx)
     ext = _ext(index, embed)
+    private_audience = conversation_audience(member)
     with ws(workspace_id):
         await _run(
             "memory_update",
-            _tool_ctx(ext, member, tmp_path, audience=SHARED_AUDIENCE),
+            _tool_ctx(
+                _ext(index, embed, private_audience),
+                member,
+                tmp_path,
+                audience=private_audience,
+            ),
             body="member private launch note",
         )
         await _run(
@@ -581,7 +614,7 @@ async def test_shared_recall_excludes_message_bound_private_memory(
 
     assert isinstance(outcome, InjectContext)
     assert "common launch note" in outcome.text
-    assert "member private launch note" not in outcome.text
+    assert "member private launch note" in outcome.text
 
 
 async def test_room_memory_reads_shared_while_foreign_memory_is_sealed(

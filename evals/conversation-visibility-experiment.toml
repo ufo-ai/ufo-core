@@ -1,0 +1,69 @@
+name = "conversation-visibility"
+base = "f44d58a4e385f21b12828b890f328fe4efe40248"
+suites = ["member_add_notify"]
+cases = [
+    "authored-portal-chat-made-private",
+    "authored-portal-chat-shared",
+    "authored-private-portal-chat-stays-put",
+]
+repeats = 3
+concurrency = 2
+max_stacks = 1
+budget_usd = 40.0
+est_usd_per_case = 1.2
+
+[template.database]
+url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo"
+[template.blob]
+backend = "filesystem"
+root = "./blobs"
+[template.connect]
+public_base_url = "http://evals.invalid"
+[template.pack]
+name = "assistant_eval"
+[template.sandbox]
+backend = "local"
+[template.research]
+search_provider = "perplexity"
+
+[[arm]]
+name = "fuller-descriptions"
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/audience.py"
+old = """        description=(
+            "Make this portal conversation private to the member who made it; refused once "
+            "another member has spoken in it."
+        ),
+"""
+new = """        description=(
+            "Make this portal conversation private to the member who made it — refused once "
+            "another member has spoken in it. From then on only they read it, and notes made "
+            "there are theirs by default."
+        ),
+"""
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/audience.py"
+old = """        description="Share the member's own private portal conversation with the workspace.",
+"""
+new = """        description=(
+            "Share the member's own private portal conversation with the workspace. Every member "
+            "reads it, past messages included. Automations keep the access they were created "
+            "with."
+        ),
+"""
+
+[[arm]]
+name = "scope-truth"
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/audience.py"
+old = """SHARED_WITH_WORKSPACE = (
+    "Every member of the workspace can read this conversation, including its past messages. "
+    "Automations reporting into it now run with the workspace's shared accounts, and notes made "
+    "here are the workspace's by default."
+)
+"""
+new = """SHARED_WITH_WORKSPACE = (
+    "Every member of the workspace can read this conversation, including its past messages. "
+    "Notes made here are the workspace's by default."
+)
+"""

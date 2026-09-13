@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from ufo.sdk.authority import AuthorityUnavailable, authority_from_member_id
-from ufo.sdk.context import AgentArchived, ExtensionContext
+from ufo.sdk.context import AgentArchived, ExtensionContext, TurnRuntimeConfig
 from ufo.sdk.terminal import TerminalGone
 from ufo.sdk.untrusted import wall
 from ufo_ext_monitors.monitors import (
@@ -80,6 +80,8 @@ class MonitorRunner:
                 row.command,
                 PROBE_TIMEOUT_SECONDS,
                 authority=authority_from_member_id(row.created_by_member_id),
+                connections=row.connections,
+                internet_access=row.internet_access,
             )
         except (AuthorityUnavailable, TerminalGone):
             await store.skipped_tick(row, datetime.now(UTC) + spacing)
@@ -126,6 +128,10 @@ class MonitorRunner:
                 f"{FIRE_KEY_PREFIX}{row.id}",
                 authority=authority_from_member_id(row.created_by_member_id),
                 holds_work_already_done=True,
+                runtime_config=TurnRuntimeConfig(
+                    connections=row.connections,
+                    internet_access=row.internet_access,
+                ),
             )
         except AgentArchived:
             return

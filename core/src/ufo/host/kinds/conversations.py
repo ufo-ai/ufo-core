@@ -141,12 +141,7 @@ class ConversationObjects:
                 for participation, limit in sides
             )
         )
-        rows = tuple(
-            _member_row(entry, mine=participation == "mine")
-            for (participation, _), side in zip(sides, listed, strict=True)
-            for entry in side
-            if entry.title
-        )
+        rows = tuple(_member_row(entry) for side in listed for entry in side if entry.title)
         return object_page(rows, query)
 
     async def member_detail(
@@ -296,6 +291,7 @@ def _agent_conversations() -> sa.Select:
             tables.conversation.c.surface,
             tables.conversation.c.surface_label,
             tables.conversation.c.audience,
+            tables.conversation.c.title,
             tables.conversation.c.created_at,
             tables.conversation.c.updated_at,
             member_name.label("agent_name"),
@@ -316,7 +312,7 @@ def _visible(subjects: frozenset[str]) -> sa.Select:
     return _agent_conversations().where(tables.conversation.c.audience.in_(subjects))
 
 
-def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
+def _member_row(entry: ListedConversation) -> ObjectRow:
     speakers = [who.sender or who.email for who in entry.speakers]
     stamp = entry.summary.last_turn_at or entry.summary.created_at
     portal = entry.summary.surface == PORTAL_SURFACE or entry.summary.surface.startswith(
@@ -328,8 +324,8 @@ def _member_row(entry: ListedConversation, *, mine: bool) -> ObjectRow:
         fields={
             "title": entry.title,
             "opening": opening_sentence(entry.summary.opening_message),
-            "mine": mine,
-            "speaker": None if mine or not speakers else speakers[0],
+            "mine": entry.mine,
+            "speaker": None if entry.mine or not speakers else speakers[0],
             "surface": entry.summary.surface,
             "surface_label": entry.surface_label,
             "audience": entry.audience,
@@ -349,14 +345,17 @@ def _row(row: sa.Row, *, private: bool = False) -> ObjectRow:
         if row.surface_label is None
         else f"{row.surface_label} on {row.surface}"
     )
+    title = None if private else row.title
     fields: dict[str, JsonValue] = {"surface": row.surface}
     if row.surface_label is not None:
         fields["surface_label"] = row.surface_label
     if private:
         fields["private"] = True
+    if title is not None:
+        fields["title"] = title
     return ObjectRow(
         name=str(row.id),
-        summary=f"{origin}, created {row.created_at.date().isoformat()}",
+        summary=title or f"{origin}, created {row.created_at.date().isoformat()}",
         fields=fields,
     )
 
@@ -394,7 +393,9 @@ CONVERSATION_OBJECT = ObjectKind(
         "Filter or order a listing on `surface` and on `surface_label`, the surface's own name for "
         "where the conversation runs — a Slack channel as `#general`, a Slack DM as `DM`. A "
         "conversation whose surface names no origin carries no `surface_label`. "
-        "A member listing also carries `title`, `mine`, `speaker`, `audience`, `member_email`, "
+        "A readable conversation carries `title`, what its members call it, once it has been "
+        "named; search on it to find the conversation a member names. "
+        "A member listing also carries `mine`, `speaker`, `audience`, `member_email`, "
         "`last_at`, `turn` — the liveest turn the conversation holds as `running`, `queued` or "
         "`parked`, and `idle` where it holds none — and `unread`, whether it moved after the "
         "member last read it and last spoke in it. Order by "

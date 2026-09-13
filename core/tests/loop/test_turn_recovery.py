@@ -118,13 +118,25 @@ class _CrashAfterBindFailureModel:
             aligned = (
                 len(results) == 2
                 and results[0].tool_use_id == "r1"
-                and results[0].is_error
-                and isinstance(results[0].content, str)
-                and "transient bind" in results[0].content
                 and results[1].tool_use_id == "r2"
-                and not results[1].is_error
-                and isinstance(results[1].content, str)
-                and "beta" in results[1].content
+                and (
+                    (
+                        results[0].is_error
+                        and isinstance(results[0].content, str)
+                        and "transient bind" in results[0].content
+                        and not results[1].is_error
+                        and isinstance(results[1].content, str)
+                        and "beta" in results[1].content
+                    )
+                    or (
+                        not results[0].is_error
+                        and isinstance(results[0].content, str)
+                        and "alpha" in results[0].content
+                        and results[1].is_error
+                        and isinstance(results[1].content, str)
+                        and "transient bind" in results[1].content
+                    )
+                )
             )
             yield TextDelta(text="recovered" if aligned else "crossed")
             yield Usage(input_tokens=1, output_tokens=1)
@@ -403,7 +415,7 @@ async def test_bind_failure_keeps_dispatch_step_count_stable_on_recovery(
 
         assert terminal.status == "done"
         assert terminal.text == "recovered"
-        assert binds == 4
+        assert binds == 2
     finally:
         asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
         loop_queue._runtime.dbos.destroy()

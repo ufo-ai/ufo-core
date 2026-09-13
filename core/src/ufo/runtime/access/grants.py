@@ -56,24 +56,31 @@ def grant_sentinel(account_id: str) -> str:
 
 
 def usable_cli_accounts(
-    grants: "tuple[Grant, ...]", provider: str, member_id: UUID | None
+    grants: "tuple[Grant, ...]",
+    provider: str,
+    member_id: UUID | None,
+    connections: tuple[UUID, ...] | None = None,
 ) -> tuple[str, ...]:
     """The connected accounts one provider's CLI may act as under an authority: the member's own
     private grants, else the grants shared with the agent's audience — sorted, so two accounts in
     the winning tier read the same everywhere. A static env var names no account, so a caller
     handed more than one exports nothing rather than silently picking; the egress rules still
-    carry every usable account, since each rides its own sentinel."""
+    carry every usable account, since each rides its own sentinel. A connection allowlist removes
+    every account outside it before the winning tier is chosen."""
     private = sorted(
         grant.account_id
         for grant in grants
         if grant.provider == provider
+        and (connections is None or grant.connection_id in connections)
         and not grant.connection_shared
         and grant.owner_member_id == member_id
     )
     shared = sorted(
         grant.account_id
         for grant in grants
-        if grant.provider == provider and grant.connection_shared
+        if grant.provider == provider
+        and (connections is None or grant.connection_id in connections)
+        and grant.connection_shared
     )
     return tuple(private or shared)
 
@@ -194,6 +201,7 @@ class GrantSummary:
     """The audit view of one connector-grant edge joined to its connection."""
 
     id: UUID
+    connection_id: UUID
     agent: str
     provider: str
     account_id: str
@@ -1403,6 +1411,7 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
             await connection.execute(
                 sa.select(
                     tables.connector_grant.c.id.label("grant_id"),
+                    tables.connection.c.id.label("connection_id"),
                     member_name.label("name"),
                     tables.connection.c.provider,
                     tables.connection.c.account_id,
@@ -1434,6 +1443,7 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
     return tuple(
         GrantSummary(
             id=row.grant_id,
+            connection_id=row.connection_id,
             agent=row.name,
             provider=row.provider,
             account_id=row.account_id,

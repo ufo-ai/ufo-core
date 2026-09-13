@@ -28,7 +28,21 @@ import re
 from hashlib import sha256
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import sqlalchemy as sa
+
 from ufo.harness.sandbox.ingress_token import ingress_secret
+
+HOSTED_SITE = sa.table(
+    "hosted_site",
+    sa.column("workspace_id", sa.Uuid()),
+    sa.column("conversation_id", sa.Uuid()),
+    sa.column("port", sa.Integer()),
+    sa.column("creator_member_id", sa.Uuid()),
+    sa.column("source_manifest", sa.Text()),
+)
+"""The sites extension's registry, read by name under an explicit workspace filter by the ingress
+and report receiver. Its source names the serving mode; its creator is the authority that may
+restart a stopped dynamic site."""
 
 SITE_LABEL_KIND = b"sandbox-site"
 APP_PORT_FLOOR = 20000

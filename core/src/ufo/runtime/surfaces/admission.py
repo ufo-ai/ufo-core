@@ -78,7 +78,7 @@ from ufo.runtime.ext.context import AgentArchived, MemberReach
 from ufo.runtime.ext.surface import Admitted, conversation_name
 from ufo.runtime.hub import Absorbed, ArrivalQueued, Hub, Reply
 from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE, Seats
-from ufo.runtime.turns.audience import conversation_audience
+from ufo.runtime.turns.audience import readable_audiences
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -478,7 +478,6 @@ class Admission:
             conversation = (
                 await connection.execute(
                     sa.select(
-                        tables.conversation.c.member_id,
                         tables.conversation.c.surface,
                         tables.conversation.c.agent_id,
                         sa.select(tables.agent.c.archived_at)
@@ -497,8 +496,6 @@ class Admission:
                 raise ValueError("conversation is bound to another agent")
             agent_id = conversation.agent_id
             archived = conversation.archived_at is not None
-            if archived and not member_admission:
-                raise AgentArchived(ARCHIVED_REFUSAL_MESSAGE)
             if speaker_member_id is not None:
                 speaker = (
                     await connection.execute(
@@ -532,6 +529,8 @@ class Admission:
             if dedupe.admitted is not None:
                 return dedupe.admitted
             deduped = dedupe.existing
+            if archived and not member_admission and deduped is None:
+                raise AgentArchived(ARCHIVED_REFUSAL_MESSAGE)
             inbound = dedupe.inbound
             body = inbound.body
             context = inbound.context
@@ -550,7 +549,6 @@ class Admission:
                     connection,
                     workspace_id,
                     conversation_id,
-                    conversation.member_id,
                     conversation.surface,
                     agent_id,
                     archived,
@@ -586,7 +584,6 @@ class Admission:
                     connection,
                     workspace_id,
                     conversation_id,
-                    conversation.member_id,
                     conversation.surface,
                     agent_id,
                     archived,
@@ -855,7 +852,6 @@ class Admission:
         connection: AsyncConnection,
         workspace_id: UUID,
         conversation_id: UUID,
-        conversation_member_id: UUID | None,
         surface: str,
         agent_id: UUID,
         archived: bool,
@@ -948,9 +944,9 @@ class Admission:
         fold_decision = (
             None
             if not fold_admitted
-            else await SpendEvaluator(workspace_id, conversation_member_id, agent_id).decide(
-                connection, 0
-            )
+            else await SpendEvaluator(
+                workspace_id, authority_member_id(authority), agent_id
+            ).decide(connection, 0)
         )
         fold_balance = (
             None
@@ -1039,7 +1035,6 @@ class Admission:
         connection: AsyncConnection,
         workspace_id: UUID,
         conversation_id: UUID,
-        conversation_member_id: UUID | None,
         surface: str,
         agent_id: UUID,
         archived: bool,
@@ -1095,9 +1090,9 @@ class Admission:
             holds_work_already_done,
         )
         if refusal is None:
-            decision = await SpendEvaluator(workspace_id, conversation_member_id, agent_id).decide(
-                connection, 0
-            )
+            decision = await SpendEvaluator(
+                workspace_id, authority_member_id(authority), agent_id
+            ).decide(connection, 0)
             balance = (
                 SpendDecision(outcome=ALLOW, message="")
                 if intent is not None and admits_spent_balance(intent)
@@ -1401,11 +1396,11 @@ class AdmissionInvoker:
 
     async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]:
         """The conversations an invoke reaches `member_id` through: on a surface this admission
-        registers writebacks for, bound to a live agent, with the member's own audience, and
-        holding a turn the member spoke — newest such turn first. `speaker_member_id` is the
-        privacy fence as well as the recency signal: only a conversation this member personally
-        spoke in, on their own private audience, is ever returned. An archived agent's
-        conversation admits no turn, so it is no reach."""
+        registers writebacks for, bound to a live agent, with an audience the member reads — their
+        own or the workspace's, never a room's — and holding a turn the member spoke, newest such
+        turn first. `speaker_member_id` is the privacy fence as well as the recency signal: only a
+        conversation this member personally spoke in, and can read, is ever returned. An archived
+        agent's conversation admits no turn, so it is no reach."""
         last_spoke_at = sa.func.max(tables.turn.c.created_at).label("last_spoke_at")
         async with workspace_tx() as connection:
             rows = (
@@ -1427,7 +1422,7 @@ class AdmissionInvoker:
                         tables.turn.c.workspace_id == self.workspace_id,
                         tables.agent.c.archived_at.is_(None),
                         tables.conversation.c.surface.in_(tuple(self.admission.durable_surfaces)),
-                        tables.conversation.c.audience == str(conversation_audience(member_id)),
+                        tables.conversation.c.audience.in_(readable_audiences(member_id)),
                         tables.turn.c.speaker_member_id == member_id,
                     )
                     .group_by(

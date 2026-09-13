@@ -1225,7 +1225,7 @@ def _directive_wire_failures(trees: dict[Path, ast.Module]) -> list[str]:
     terminal_verbs = (WORKSPACE_WIRE | ONBOARD_WIRE) - TERMINAL_DROPPED_VERBS
     rust_source = _required_text(RUST_WIRE_MODULE, failures)
     if rust_source is not None:
-        rust_verbs = set(re.findall(r'"([a-z]+)"(?:\s+if .*?)?\s*=>', rust_source))
+        rust_verbs = set(re.findall(r'"([a-z_]+)"(?:\s+if .*?)?\s*=>', rust_source))
         failures.extend(
             f"wire: client/src/wire.rs does not parse verb {verb!r}"
             for verb in sorted(terminal_verbs - rust_verbs)

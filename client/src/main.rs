@@ -871,12 +871,18 @@ enum LoopEvent {
 #[derive(Default)]
 struct Gate {
     prompt: String,
-    questions: VecDeque<(String, Vec<String>)>,
+    questions: VecDeque<GateQuestion>,
     answers: Vec<String>,
     many: bool,
     secrets: VecDeque<(String, String, String)>,
     asked: bool,
     exit: Option<i32>,
+}
+
+struct GateQuestion {
+    prompt: String,
+    options: Vec<String>,
+    multiple: bool,
 }
 
 fn attach_dropped(app: &mut App, source: &std::path::Path, home: &std::path::Path, channel: &str) {
@@ -1152,6 +1158,18 @@ fn run_tty(
                             });
                         }
                     }
+                    Reply::Send(text)
+                        if live
+                            .gate
+                            .questions
+                            .front()
+                            .is_some_and(|question| question.options.is_empty()) =>
+                    {
+                        if let Some(reply) = collect_answer(&mut app, &mut live.gate, text) {
+                            app.begin_turn();
+                            let _ = live.cmd.send(WireCmd::Say(reply));
+                        }
+                    }
                     Reply::Send(text) => {
                         if app.is_working() {
                             app.push_queued(&text);
@@ -1180,23 +1198,7 @@ fn run_tty(
                         }
                     }
                     Reply::Choice(choice) => {
-                        let Some((prompt, _)) = live.gate.questions.pop_front() else {
-                            continue;
-                        };
-                        live.gate.answers.push(if live.gate.many {
-                            format!("{prompt}: {choice}")
-                        } else {
-                            choice
-                        });
-                        if let Some((next_prompt, options)) = live.gate.questions.front() {
-                            if options.is_empty() {
-                                app.ask_prompt(&next_prompt.clone());
-                            } else {
-                                app.choose(&next_prompt.clone(), &options.clone());
-                            }
-                        } else {
-                            let reply = live.gate.answers.join("\n");
-                            live.gate.answers.clear();
+                        if let Some(reply) = collect_answer(&mut app, &mut live.gate, choice) {
                             app.begin_turn();
                             let _ = live.cmd.send(WireCmd::Say(reply));
                         }
@@ -1476,12 +1478,12 @@ fn run_tty(
 }
 
 fn settle(app: &mut App, gate: &mut Gate) -> bool {
-    if let Some((prompt, options)) = gate.questions.front() {
+    if let Some(question) = gate.questions.front() {
         app.end_turn(true);
-        if options.is_empty() {
-            app.ask_prompt(&prompt.clone());
+        if question.options.is_empty() {
+            app.ask_prompt(&question.prompt);
         } else {
-            app.choose(&prompt.clone(), &options.clone());
+            app.choose(&question.prompt, &question.options, question.multiple);
         }
         return true;
     }
@@ -1508,6 +1510,28 @@ fn wakes_display(directive: &Directive) -> bool {
     )
 }
 
+fn collect_answer<W: std::io::Write>(
+    app: &mut App<W>,
+    gate: &mut Gate,
+    answer: String,
+) -> Option<String> {
+    let question = gate.questions.pop_front()?;
+    gate.answers.push(if gate.many {
+        format!("{}: {answer}", question.prompt)
+    } else {
+        answer
+    });
+    if let Some(next) = gate.questions.front() {
+        if next.options.is_empty() {
+            app.ask_prompt(&next.prompt);
+        } else {
+            app.choose(&next.prompt, &next.options, next.multiple);
+        }
+        return None;
+    }
+    Some(std::mem::take(&mut gate.answers).join("\n"))
+}
+
 fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
     match directive {
         Directive::Say(text) => app.say(&text),
@@ -1522,8 +1546,16 @@ fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
             gate.asked = true;
             gate.prompt = prompt;
         }
-        Directive::Choose { prompt, options } => {
-            gate.questions.push_back((prompt, options));
+        Directive::Choose {
+            prompt,
+            options,
+            multiple,
+        } => {
+            gate.questions.push_back(GateQuestion {
+                prompt,
+                options,
+                multiple,
+            });
             gate.many = gate.questions.len() > 1;
         }
         Directive::Secret {
@@ -1602,8 +1634,16 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                     gate.asked = true;
                     gate.prompt = prompt;
                 }
-                Directive::Choose { prompt, options } => {
-                    gate.questions.push_back((prompt, options));
+                Directive::Choose {
+                    prompt,
+                    options,
+                    multiple,
+                } => {
+                    gate.questions.push_back(GateQuestion {
+                        prompt,
+                        options,
+                        multiple,
+                    });
                     gate.many = gate.questions.len() > 1;
                 }
                 Directive::Secret {
@@ -1643,18 +1683,20 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                 if !gate.questions.is_empty() {
                     let mut collected = Vec::new();
                     let mut cancelled = false;
-                    while let Some((prompt, options)) = gate.questions.pop_front() {
-                        let answer = if options.is_empty() {
-                            out.ask(&prompt)
+                    while let Some(question) = gate.questions.pop_front() {
+                        let answer = if question.options.is_empty() {
+                            out.ask(&question.prompt)
+                        } else if question.multiple {
+                            out.menu_many(&question.prompt, &question.options)
                         } else {
-                            out.menu(&prompt, &options)
+                            out.menu(&question.prompt, &question.options)
                         };
                         let Some(answer) = answer else {
                             cancelled = true;
                             break;
                         };
                         collected.push(if gate.many {
-                            format!("{prompt}: {answer}")
+                            format!("{}: {answer}", question.prompt)
                         } else {
                             answer
                         });
@@ -1859,6 +1901,22 @@ fn emit_json(event: &jsonio::Event) {
 mod tests {
     use super::*;
 
+    fn question_app() -> (App<Vec<u8>>, std::path::PathBuf) {
+        let home = env::temp_dir().join(format!("ufo-question-test-{}", process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let app = App::new(
+            Vec::new(),
+            &home,
+            "question-test",
+            ui::theme::Theme::for_mode(ui::theme::ColorMode::Plain, ui::theme::Scheme::Dark),
+            "ufo.test".into(),
+            "question-test".into(),
+            home.clone(),
+        );
+        (app, home)
+    }
+
     #[test]
     fn gateway_resolution_prefers_env_then_stored_then_default() {
         let env = Some("https://testing.example".to_string());
@@ -1869,6 +1927,38 @@ mod tests {
         );
         assert_eq!(resolve_gateway(None, stored), "https://stored.example");
         assert_eq!(resolve_gateway(None, None), GATEWAY_URL_DEFAULT);
+    }
+
+    #[test]
+    fn free_text_advances_a_multi_question_gate_before_submission() {
+        let (mut app, home) = question_app();
+        let mut gate = Gate {
+            questions: VecDeque::from([
+                GateQuestion {
+                    prompt: "Explain access".into(),
+                    options: Vec::new(),
+                    multiple: false,
+                },
+                GateQuestion {
+                    prompt: "Select services".into(),
+                    options: vec!["Mail".into(), "Calendar".into()],
+                    multiple: true,
+                },
+            ]),
+            many: true,
+            ..Gate::default()
+        };
+
+        assert_eq!(collect_answer(&mut app, &mut gate, "because".into()), None);
+        assert_eq!(gate.questions.len(), 1);
+        assert_eq!(
+            collect_answer(&mut app, &mut gate, "Mail, Calendar".into()),
+            Some("Explain access: because\nSelect services: Mail, Calendar".into())
+        );
+        assert!(gate.questions.is_empty());
+        assert!(gate.answers.is_empty());
+        app.close();
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

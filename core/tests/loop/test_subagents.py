@@ -1174,7 +1174,8 @@ async def test_spawn_model_pins_the_child_turn_under_an_unpinned_tree(
     parent turn carries ride along unchanged. A spawn that names none inherits the parent's config
     whole."""
     workspace_id, agent_id = await _workspace_agent()
-    inherited = TurnRuntimeConfig(internet_access=False)
+    connection_id = uuid4()
+    inherited = TurnRuntimeConfig(internet_access=False, connections=(connection_id,))
     parent = (await _parent(workspace_id, agent_id)).model_copy(
         update={"runtime_config": inherited}
     )
@@ -1193,7 +1194,9 @@ async def test_spawn_model_pins_the_child_turn_under_an_unpinned_tree(
     inheriting = await subagents.spawn("research", {"task": "beta"}, background=True)
 
     child, _, _ = await _load_turn(pinned.turn_id)
-    assert child.runtime_config == TurnRuntimeConfig(model="gpt-5.6-sol", internet_access=False)
+    assert child.runtime_config == TurnRuntimeConfig(
+        model="gpt-5.6-sol", internet_access=False, connections=(connection_id,)
+    )
     sibling, _, _ = await _load_turn(inheriting.turn_id)
     assert sibling.runtime_config == inherited
 

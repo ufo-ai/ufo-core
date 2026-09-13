@@ -127,6 +127,7 @@ def _row(
         produced_by_agent_name=PRODUCER,
         produced_by_turn_id=uuid5(NOTIFY_TRIAGE_NAMESPACE, f"turn:{subject}:{body}"),
         produced_in_conversation_id=uuid5(NOTIFY_TRIAGE_NAMESPACE, f"conversation:{subject}"),
+        runtime_config=None,
         triaged_turn_id=None,
         triaged_at=None,
         delivered_turn_id=None,

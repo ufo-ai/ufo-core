@@ -40,7 +40,6 @@ from ufo_ext_context_rollover.manifest import manifest as rollover_manifest
 from ufo_ext_context_rollover.rollover import ROLLOVER_PREFIX
 from ufo_ext_imessage.manifest import manifest as imessage_manifest
 from ufo_ext_index_default import DefaultIndex
-from ufo_ext_memory.store import recall_subjects
 from ufo_ext_report_digest.manifest import manifest as report_digest_manifest
 from ufo_ext_report_digest.writer import report_digest_entry
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
@@ -244,7 +243,6 @@ from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.surfaces.artifacts import router as artifacts_router
 from ufo.runtime.transcript import Transcript
-from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.turns.transcript import (
     Conversation,
     RecoveryRecord,
@@ -271,6 +269,7 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.sdk.context import CONNECTION_SCOPE_MAX
 from ufo.sdk.jobs import unseeded_agent_workspaces
 from ufo.sdk.manifest import (
     SCHEDULE_KIND,
@@ -1757,12 +1756,13 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
                 updated_at=sa.func.now(),
             )
         )
-    _member_id, token = await _seed_member(workspace_id, "outsider@example.com")
+    member_id, token = await _seed_member(workspace_id, "outsider@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert index.status_code == 200
     assert index.json() == {
         "member": {
+            "id": str(member_id),
             "email": "outsider@example.com",
             "admin": False,
             "workspace_id": str(workspace_id),
@@ -1847,7 +1847,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
                 updated_at=sa.func.now(),
             )
         )
-    _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
+    admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     member_id, member_token = await _seed_member(workspace_id, "member@example.com")
     await _grant_web_access(workspace_id, second_agent, "member@example.com")
     async with workspace_tx() as connection:
@@ -1860,6 +1860,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={admin_token}"}
     )
     assert admin_view.json()["member"] == {
+        "id": str(admin_id),
         "email": "admin@example.com",
         "admin": True,
         "workspace_id": str(workspace_id),
@@ -1904,6 +1905,7 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         "/surface/web/api/agents", headers={"cookie": f"{SESSION_COOKIE}={member_token}"}
     )
     assert member_view.json()["member"] == {
+        "id": str(member_id),
         "email": "member@example.com",
         "admin": False,
         "workspace_id": str(workspace_id),
@@ -2283,11 +2285,15 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
     _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    await _seed_connection(workspace_id, agent_id, member_m, "github", shared=False)
-    await _seed_connection(workspace_id, agent_id, member_n, "slack", shared=True)
+    private_id = await _seed_connection(workspace_id, agent_id, member_m, "github", shared=False)
+    shared_id = await _seed_connection(workspace_id, agent_id, member_n, "slack", shared=True)
     await _seed_connection(workspace_id, second_agent, member_m, "asana", shared=True)
     path = f"/surface/web/agents/{agent_id}/connections"
     m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
+    assert m_view.json()["connection_scope"] == [
+        str(connection_id)
+        for connection_id in sorted((private_id, shared_id), key=str)[:CONNECTION_SCOPE_MAX]
+    ]
     assert [
         (c["provider"], c["shared"], c["owner_email"], c["own"])
         for c in m_view.json()["connections"]
@@ -2301,6 +2307,7 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
         ("github", "m@example.com"),
         ("slack", "n@example.com"),
     ]
+    assert admin_view.json()["connection_scope"] == [str(shared_id)]
     other = await client.get(
         f"/surface/web/agents/{second_agent}/connections",
         headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
@@ -2349,12 +2356,11 @@ async def test_connection_pool_names_no_agent_outside_the_web_audience(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_connection_pool_hides_another_members_private_connection_from_an_admin(
+async def test_connection_pool_reads_own_shared_and_admin_metadata(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The connectors page lists a private account to its owner alone. A workspace admin reads
-    their own private account and every shared one, and never another member's private account:
-    admin authority governs acts on a connection, not the sight of one."""
+    """A member lists their own and shared connections, while an admin also lists another member's
+    private metadata so the owner-or-admin management gate has one matching read shape."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     admin_member, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
@@ -2369,6 +2375,7 @@ async def test_connection_pool_hides_another_members_private_connection_from_an_
         for c in admin_pool.json()["connections"]
     ] == [
         ("asana", "boss@example.com", True, False),
+        ("github", "m@example.com", True, False),
         ("slack", "m@example.com", True, True),
     ]
     member_pool = await client.get(
@@ -2773,6 +2780,7 @@ async def _seed_priced_turn(workspace_id: UUID, agent_id: UUID, member_id: UUID)
                 seq=1,
                 status="done",
                 inbound="x",
+                speaker_member_id=member_id,
                 terminal=TerminalFrame(status="done").model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -3522,12 +3530,11 @@ async def test_one_member_holds_a_conversation_per_agent(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
+async def test_the_rail_lists_private_conversations_only_to_their_members(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """`api/chats` is the member's own rail: their conversations across reachable agents, newest
-    activity first, titled from their first message — and never another member's. A conversation
-    caught between creation and its chat row's write is absent until the row lands."""
+    """The rail carries each member's private conversations newest first. Another member's
+    conversation and a row caught between creation and its first member turn stay absent."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _other_id, other_token = await _seed_member(workspace_id, "peer@example.com")
@@ -3565,6 +3572,12 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
         headers=cookie,
     )
     await _consume(client, token, opened.json()["turn_id"])
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == UUID(opened.json()["turn_id"]))
+            .values(updated_at=datetime.now(UTC) - timedelta(minutes=30))
+        )
     STREAM_GATE.arm()
     theirs = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation=new",
@@ -3577,12 +3590,14 @@ async def test_the_rail_lists_own_conversations_newest_first_and_only_own(
         opened.json()["conversation_id"],
         str(seeded_id),
     ]
+    assert [row["mine"] for row in rows] == [True, True]
     assert rows[0]["title"] == "Summarize the incident review"
     assert rows[0]["agent_name"] == "assistant"
     assert rows[0]["last_at"] is not None
     assert rows[1]["title"] == "An earlier exchange"
     peer_rows = await _rail_rows(client, {"cookie": f"{SESSION_COOKIE}={other_token}"})
     assert [row["name"] for row in peer_rows] == [theirs.json()["conversation_id"]]
+    assert [row["mine"] for row in peer_rows] == [True]
 
 
 @pytest.mark.usefixtures("database_url")
@@ -4338,45 +4353,47 @@ async def test_a_conversation_is_walled_to_its_member_and_its_agent(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_two_web_members_get_isolated_subjects_and_cannot_cross(
+async def test_two_web_members_open_distinct_private_conversations(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     client, workspace_id, agent_id = web
     member_a, token_a = await _seed_member(workspace_id, "a@example.com")
     member_b, token_b = await _seed_member(workspace_id, "b@example.com")
-    turn_a = (
+    opened_a = (
         await client.post(
             f"/surface/web/agents/{agent_id}/chat?conversation=new",
             content=b"hi",
             headers={"cookie": f"{SESSION_COOKIE}={token_a}"},
         )
-    ).json()["turn_id"]
-    turn_b = (
+    ).json()
+    opened_b = (
         await client.post(
             f"/surface/web/agents/{agent_id}/chat?conversation=new",
             content=b"hi",
             headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
         )
-    ).json()["turn_id"]
+    ).json()
+    turn_a = opened_a["turn_id"]
+    turn_b = opened_b["turn_id"]
     await _consume(client, token_a, turn_a)
     await _consume(client, token_b, turn_b)
     async with workspace_tx() as connection:
-        owners = (
-            (
-                await connection.execute(
-                    sa.select(tables.conversation.c.member_id).where(
-                        tables.conversation.c.surface == "web"
-                    )
+        audiences = (
+            await connection.execute(
+                sa.select(tables.conversation.c.audience, tables.conversation.c.member_id).where(
+                    tables.conversation.c.surface == "web"
                 )
             )
-            .scalars()
-            .all()
-        )
-    assert set(owners) == {member_a, member_b}
-    assert recall_subjects(conversation_audience(member_a)) & recall_subjects(
-        conversation_audience(member_b)
-    ) == frozenset({SHARED_SUBJECT})
-    assert member_subject(member_a) not in recall_subjects(conversation_audience(member_b))
+        ).all()
+    assert set(audiences) == {
+        (str(conversation_audience(member_a)), member_a),
+        (str(conversation_audience(member_b)), member_b),
+    }
+    transcript = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{opened_a['conversation_id']}/transcript",
+        headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
+    )
+    assert transcript.status_code == 404
     crossed = await client.get(
         f"/surface/web/turns/{turn_a}/stream",
         headers={"cookie": f"{SESSION_COOKIE}={token_b}"},
@@ -5019,7 +5036,7 @@ async def test_the_portal_publishes_its_assets_at_boot_and_not_on_a_page(
     monkeypatch.setattr(web_surface, "APPS", bundle)
     blob = FleetBlobStore(backend=FilesystemBlobStore(root=tmp_path))
     boot = next(
-        spec.boot for spec in web_manifest().surfaces if spec.name == web_surface.SURFACE_WEB
+        spec.boot for spec in web_manifest().surfaces if spec.name == web_surface.PORTAL_SURFACE
     )
     assert boot is not None
 
@@ -5319,6 +5336,70 @@ QUESTION = AskUserInput(
         ),
     ),
 )
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_only_a_target_member_can_submit_a_structured_question(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    target_id, target_token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
+    targeted = QUESTION.model_copy(update={"target_member_id": target_id})
+    conversation_id, asked_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        target_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Permission required.", question=targeted),
+        audience="shared",
+        surface="ufo",
+    )
+    headers = {
+        "x-ufo-answer-turn": str(asked_turn),
+        "x-ufo-answer-question": "0",
+    }
+
+    refused = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"Allow",
+        headers={**headers, "cookie": f"{SESSION_COOKIE}={peer_token}"},
+    )
+
+    assert refused.status_code == 403
+    assert refused.text == "This question is not available to you."
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(sa.func.count())
+                .select_from(tables.turn)
+                .where(
+                    tables.turn.c.workspace_id == workspace_id,
+                    tables.turn.c.conversation_id == conversation_id,
+                )
+            )
+        ).scalar_one() == 1
+
+    admitted = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"Allow",
+        headers={**headers, "cookie": f"{SESSION_COOKIE}={target_token}"},
+    )
+
+    assert admitted.status_code == 200
+    assert admitted.json()["body"] == "Allow"
+    async with workspace_tx() as connection:
+        answer = (
+            await connection.execute(
+                sa.select(tables.turn.c.speaker_member_id, tables.turn.c.inbound).where(
+                    tables.turn.c.id == UUID(admitted.json()["turn_id"]),
+                    tables.turn.c.workspace_id == workspace_id,
+                )
+            )
+        ).one()
+    assert answer.speaker_member_id == target_id
+    assert answer.inbound == "Allow"
 
 
 @pytest.mark.usefixtures("database_url")
@@ -6480,7 +6561,7 @@ async def test_an_attached_file_is_an_artifact_of_the_turn_that_carried_it(
     route. It is drawn on the member's own bubble and never on the reply, because the row says who
     put it there."""
     client, workspace_id, agent_id = web
-    _member_id, token = await _seed_member(workspace_id, "owner@example.com")
+    member_id, token = await _seed_member(workspace_id, "owner@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     STREAM_GATE.arm()
     admitted = await client.post(
@@ -6510,6 +6591,16 @@ async def test_an_attached_file_is_an_artifact_of_the_turn_that_carried_it(
     fetched = await client.get(str(drawn["url"]), headers=cookie)
     assert fetched.status_code == 200
     assert fetched.content == _png()
+    async with workspace_tx() as connection:
+        owner = (
+            await connection.execute(
+                sa.select(tables.shared_artifact.c.member_id).where(
+                    tables.shared_artifact.c.turn_id == UUID(admitted.json()["turn_id"]),
+                    tables.shared_artifact.c.attached_by_member,
+                )
+            )
+        ).scalar_one()
+    assert owner == member_id
     await _consume(client, token, admitted.json()["turn_id"])
 
 
@@ -7336,7 +7427,11 @@ async def test_a_task_intent_creates_pauses_resumes_and_deletes(
             "verb": "apply",
             "kind": "scheduled_task",
             "name": "daily-brief",
-            "spec": {"schedule": "0 9 * * *", "prompt": "write the daily brief"},
+            "spec": {
+                "schedule": "0 9 * * *",
+                "prompt": "write the daily brief",
+                "connections": [],
+            },
         },
         headers=cookie,
     )
@@ -7346,6 +7441,7 @@ async def test_a_task_intent_creates_pauses_resumes_and_deletes(
     assert row is not None
     assert row.schedule == "0 9 * * *"
     assert row.prompt == "write the daily brief"
+    assert row.connections == []
     assert row.created_by_member_id == member_id
     assert row.paused is False
 
@@ -7414,7 +7510,11 @@ async def test_anothers_task_content_refuses_but_its_cadence_is_the_admins(
             "verb": "apply",
             "kind": "scheduled_task",
             "name": "digest",
-            "spec": {"schedule": "0 7 * * *", "prompt": "assemble the digest"},
+            "spec": {
+                "schedule": "0 7 * * *",
+                "prompt": "assemble the digest",
+                "connections": [],
+            },
         },
         headers={"cookie": f"{SESSION_COOKIE}={creator_token}"},
     )
@@ -8335,7 +8435,7 @@ async def test_grant_intents_flip_and_revoke_under_the_owner_gate(
     )
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
-    assert "no connection object named" in refused.json()["message"]
+    assert "only the connection owner may share" in refused.json()["message"]
     async with workspace_tx() as connection:
         still_shared = (
             await connection.execute(sa.select(tables.connection.c.shared))
@@ -8373,9 +8473,8 @@ async def test_a_connection_intent_disconnects_one_account_under_the_owner_gate(
 ) -> None:
     """The connect screen's per-account remove rides the intent lane against the `connection` kind,
     named by the account's stable object name: a member who neither owns the account nor
-    administers the workspace is refused — the kind holds a connection private to its owner however
-    the connection itself is shared, so the account is not even theirs to name — and the owner's
-    remove ends that one connection and its grant while every other connected account stays."""
+    administers the workspace reads the shared metadata but cannot mutate it, and the owner's remove
+    ends that one connection and its grant while every other connected account stays."""
     client, workspace_id, agent_id = web
     owner_id, owner_token = await _seed_member(workspace_id, "owner@example.com")
     _other_id, other_token = await _seed_member(workspace_id, "other@example.com")
@@ -8393,7 +8492,7 @@ async def test_a_connection_intent_disconnects_one_account_under_the_owner_gate(
     )
     assert refused.status_code == 200
     assert refused.json()["applied"] is False
-    assert "no connection object named" in refused.json()["message"]
+    assert "only the connection owner or a workspace admin" in refused.json()["message"]
     async with workspace_tx() as connection:
         held = (await connection.execute(sa.select(tables.connection.c.provider))).scalars().all()
     assert sorted(held) == ["github", "notion"]
@@ -10434,9 +10533,11 @@ async def test_conversations_list_by_audience_and_the_agent_wall(
     assert all(entry["readable"] for entry in rows)
     by_id = {entry["id"]: entry for entry in rows}
     assert by_id[str(mine)]["member_email"] == "m@example.com"
+    assert by_id[str(mine)]["mine"] is True
     assert by_id[str(shared)]["surface"] == "slack"
     assert "queue_key" not in by_id[str(shared)]
     assert by_id[str(shared)]["member_email"] is None
+    assert by_id[str(shared)]["mine"] is False
 
     admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
     admin_rows = admin_view.json()["conversations"]
@@ -10908,12 +11009,92 @@ async def test_the_transcript_states_when_each_message_landed(
 async def _acknowledge(
     client: AsyncClient, agent_id: UUID, conversation_id: UUID, token: str
 ) -> Response:
+    return await _conversation_action(
+        client, agent_id, conversation_id, token, "read_private_transcript"
+    )
+
+
+async def _conversation_action(
+    client: AsyncClient, agent_id: UUID, conversation_id: UUID, token: str, action: str
+) -> Response:
     return await client.post(
-        f"/surface/web/agents/{agent_id}/actions/conversation/{conversation_id}"
-        "/read_private_transcript",
+        f"/surface/web/agents/{agent_id}/actions/conversation/{conversation_id}/{action}",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
         json={},
     )
+
+
+async def _audience_columns(conversation_id: UUID) -> tuple[str, UUID | None]:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.conversation.c.audience, tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).one()
+    return row.audience, row.member_id
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_portal_chat_is_private_until_its_member_shares_it(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The chat transport end to end: a first message mints a member-private conversation, a
+    second message leaves it private, and the title control's two acts ride the intent lane — the
+    member shares their own chat and makes it private again, both columns moving together each
+    time, while an admin's attempt on another member's private chat is refused with the tool's own
+    words and moves nothing."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    _admin_id, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    STREAM_GATE.arm()
+    opened = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new", content=b"hello", headers=cookie
+    )
+    assert opened.status_code == 200
+    conversation_id = UUID(opened.json()["conversation_id"])
+    await _consume(client, token, opened.json()["turn_id"])
+    assert await _audience_columns(conversation_id) == (f"member:{member_id}", member_id)
+
+    STREAM_GATE.arm()
+    again = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"and again",
+        headers=cookie,
+    )
+    assert again.status_code == 200
+    await _consume(client, token, again.json()["turn_id"])
+    assert await _audience_columns(conversation_id) == (f"member:{member_id}", member_id)
+
+    refused = await _conversation_action(
+        client, agent_id, conversation_id, token_admin, "share_conversation"
+    )
+    assert refused.status_code == 200
+    assert refused.json()["applied"] is False
+    assert "Only your own private conversation" in refused.json()["message"]
+    assert await _audience_columns(conversation_id) == (f"member:{member_id}", member_id)
+
+    widened = await _conversation_action(
+        client, agent_id, conversation_id, token, "share_conversation"
+    )
+    assert widened.status_code == 200
+    assert widened.json()["applied"] is True
+    assert widened.json()["message"].startswith(
+        "Every member of the workspace can read this conversation, including its past messages."
+    )
+    assert await _audience_columns(conversation_id) == ("shared", None)
+
+    narrowed = await _conversation_action(
+        client, agent_id, conversation_id, token, "make_conversation_private"
+    )
+    assert narrowed.status_code == 200
+    assert narrowed.json()["applied"] is True
+    assert narrowed.json()["message"].startswith("Only you read this conversation from now on.")
+    assert await _audience_columns(conversation_id) == (f"member:{member_id}", member_id)
 
 
 @pytest.mark.usefixtures("database_url")

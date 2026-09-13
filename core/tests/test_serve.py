@@ -266,13 +266,15 @@ def test_launch_jobs_reuses_the_boot_runtime(monkeypatch: pytest.MonkeyPatch) ->
         serve, "model_registry", lambda *args: pytest.fail("model registry built twice")
     )
 
-    serve._launch_jobs(runtime, object(), object(), object())
+    probes = object()
+    serve._launch_jobs(runtime, object(), object(), object(), probes)
 
     assert captured["page"]["manifests"] is manifests
     assert captured["page"]["registry"] is registry
     assert captured["jobs"]["registry"] is registry
     assert captured["launched"] is True
-    assert captured["page"]["probes"] is captured["jobs"]["probes"]
+    assert captured["page"]["probes"] is probes
+    assert captured["jobs"]["probes"] is probes
     assert captured["disabled"] == frozenset()
 
 
@@ -313,11 +315,14 @@ def test_launch_jobs_hands_both_runners_the_background_jobs_model(
     monkeypatch.setattr(serve, "bindings_from", lambda *args, disabled: ("bindings",))
     monkeypatch.setattr(serve, "JobRunner", Runner)
 
-    serve._launch_jobs(runtime, object(), object(), object())
+    probes = object()
+    serve._launch_jobs(runtime, object(), object(), object(), probes)
 
     assert captured["page"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["background_model"] == DEFAULT_BACKGROUND_JOBS_MODEL
     assert captured["jobs"]["registry"] is registry
+    assert captured["page"]["probes"] is probes
+    assert captured["jobs"]["probes"] is probes
 
 
 async def test_serve_lifespan_waits_for_background_shutdown(

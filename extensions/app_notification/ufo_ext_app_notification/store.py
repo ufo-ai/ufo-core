@@ -9,13 +9,20 @@ reads it, which `triaged_turn_id` records; the next post on the same subject reo
 row is the subject's running record: first and last raised, times raised, the latest body and its
 producer, and where the current cycle stands.
 
-A **lane** is one inbox for one member: the `(to_agent_id, member_id)` pair the drain folds into one
-turn. The per-minute drain claims a lane's open rows under a lease, so an overlapping tick never
-hands the same rows to two turns, and a lease that lapses is the retry.
+A **lane** is one inbox for one member under one exact runtime config: the
+`(to_agent_id, member_id, runtime_config)` triple the drain folds into one turn. The per-minute
+drain claims a lane's open rows under a lease, so an overlapping tick never hands the same rows to
+two turns, and a lease that lapses is the retry.
 
-The table is the extension's own, with its own migrations, and every statement filters
+Each row carries the exact runtime config of the turn that last raised its current body. The
+occurrence count binds the two, so a writer that changes the body without carrying its config makes
+the row unable to reach connections or the internet rather than leaving an older grant beside
+newer content.
+
+The tables are the extension's own, with their own migrations, and every statement filters
 `workspace_id` itself because `ExtensionContext.transaction` yields an unscoped connection."""
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -24,7 +31,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import ExtensionContext, TurnRuntimeConfig
 from ufo.sdk.jobs import WorkspaceCandidates, agent_is_live, owner_candidates
 
 EXTENSION_NAME = "app_notification"
@@ -33,6 +40,23 @@ NOTIFICATION_KIND = "notification"
 NOTIFY_SUBJECTS_PER_TURN = 8
 SUBJECT_MAX = 120
 BODY_MAX = 1000
+
+
+def _encoded_runtime_config(runtime_config: TurnRuntimeConfig | None) -> str:
+    return json.dumps(
+        None if runtime_config is None else runtime_config.model_dump(mode="json"),
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _parsed_runtime_config(encoded: str) -> TurnRuntimeConfig | None:
+    decoded = json.loads(encoded)
+    return None if decoded is None else TurnRuntimeConfig.model_validate(decoded)
+
+
+FAIL_CLOSED_RUNTIME_CONFIG = TurnRuntimeConfig(internet_access=False, connections=())
+ENCODED_FAIL_CLOSED_RUNTIME_CONFIG = _encoded_runtime_config(FAIL_CLOSED_RUNTIME_CONFIG)
 
 _metadata = sa.MetaData()
 notification = sa.Table(
@@ -49,6 +73,8 @@ notification = sa.Table(
     sa.Column("produced_by_agent_name", sa.Text, nullable=False),
     sa.Column("produced_by_turn_id", sa.Uuid, nullable=False),
     sa.Column("produced_in_conversation_id", sa.Uuid, nullable=False),
+    sa.Column("runtime_config", sa.Text, nullable=True),
+    sa.Column("scope_occurrences", sa.Integer, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("triaged_turn_id", sa.Uuid, nullable=True),
     sa.Column("triaged_at", sa.DateTime(timezone=True), nullable=True),
@@ -62,18 +88,56 @@ notification = sa.Table(
     ),
     sa.Index("notification_delivered_turn", "workspace_id", "delivered_turn_id"),
 )
+notification_delivery = sa.Table(
+    "notification_delivery",
+    _metadata,
+    sa.Column("workspace_id", sa.Uuid, primary_key=True),
+    sa.Column("delivery_key", sa.Text, primary_key=True),
+    sa.Column("request_digest", sa.Text, nullable=True),
+    sa.Column("conversation_id", sa.Uuid, nullable=True),
+    sa.Column("agent_id", sa.Uuid, nullable=True),
+    sa.Column("surface", sa.Text, nullable=True),
+    sa.Column("relay_turn_id", sa.Uuid, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint("workspace_id", "relay_turn_id", name="notification_delivery_relay_turn"),
+)
 
 _COLUMNS = tuple(notification.c)
 _OPEN = notification.c.triaged_turn_id.is_(None)
 _TRIAGED = notification.c.triaged_turn_id.is_not(None)
 
 
+def _effective_runtime_config() -> sa.ColumnElement[str]:
+    return sa.case(
+        (
+            sa.and_(
+                notification.c.runtime_config.is_not(None),
+                notification.c.scope_occurrences == notification.c.occurrences,
+            ),
+            notification.c.runtime_config,
+        ),
+        else_=ENCODED_FAIL_CLOSED_RUNTIME_CONFIG,
+    )
+
+
 @dataclass(frozen=True)
 class Lane:
-    """One inbox for one member: what the drain folds into one turn."""
+    """One inbox for one member under one exact runtime config."""
 
     agent_id: UUID
     member_id: UUID
+    runtime_config: TurnRuntimeConfig | None
+
+
+@dataclass(frozen=True)
+class DeliveryDestination:
+    conversation_id: UUID
+    agent_id: UUID
+    surface: str
+
+
+class DeliveryRequestConflict(ValueError):
+    """A delivery key already reserves another request or an incomplete historical request."""
 
 
 @dataclass(frozen=True)
@@ -91,6 +155,7 @@ class Notification:
     produced_by_agent_name: str
     produced_by_turn_id: UUID
     produced_in_conversation_id: UUID
+    runtime_config: TurnRuntimeConfig | None
     triaged_turn_id: UUID | None
     triaged_at: datetime | None
     delivered_turn_id: UUID | None
@@ -105,7 +170,11 @@ class Notification:
 
     @property
     def lane(self) -> Lane:
-        return Lane(agent_id=self.to_agent_id, member_id=self.member_id)
+        return Lane(
+            agent_id=self.to_agent_id,
+            member_id=self.member_id,
+            runtime_config=self.runtime_config,
+        )
 
 
 @dataclass(frozen=True)
@@ -134,6 +203,11 @@ def _row(row: sa.RowMapping) -> Notification:
         produced_by_agent_name=row["produced_by_agent_name"],
         produced_by_turn_id=row["produced_by_turn_id"],
         produced_in_conversation_id=row["produced_in_conversation_id"],
+        runtime_config=(
+            FAIL_CLOSED_RUNTIME_CONFIG
+            if row["runtime_config"] is None or row["scope_occurrences"] != row["occurrences"]
+            else _parsed_runtime_config(row["runtime_config"])
+        ),
         triaged_turn_id=row["triaged_turn_id"],
         triaged_at=None if row["triaged_at"] is None else _aware(row["triaged_at"]),
         delivered_turn_id=row["delivered_turn_id"],
@@ -200,6 +274,7 @@ class NotificationStore:
         agent_name: str,
         turn_id: UUID,
         conversation_id: UUID,
+        runtime_config: TurnRuntimeConfig | None,
     ) -> Posted | Refused:
         """One upsert over one row per subject per lane: a new subject is a row, an open subject
         takes the new body and counts, a triaged subject reopens — counted on, producer replaced,
@@ -235,6 +310,7 @@ class NotificationStore:
                     "left into one of them or leave it"
                 )
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            encoded_runtime_config = _encoded_runtime_config(runtime_config)
             occurrences = (
                 await connection.execute(
                     insert(notification)
@@ -250,6 +326,8 @@ class NotificationStore:
                         produced_by_agent_name=agent_name,
                         produced_by_turn_id=turn_id,
                         produced_in_conversation_id=conversation_id,
+                        runtime_config=encoded_runtime_config,
+                        scope_occurrences=1,
                         claim_expires_at=None,
                         triaged_turn_id=None,
                         triaged_at=None,
@@ -269,20 +347,12 @@ class NotificationStore:
                         set_={
                             "body": body,
                             "occurrences": notification.c.occurrences + 1,
-                            "produced_by_agent_id": sa.case(
-                                (_TRIAGED, agent_id), else_=notification.c.produced_by_agent_id
-                            ),
-                            "produced_by_agent_name": sa.case(
-                                (_TRIAGED, agent_name),
-                                else_=notification.c.produced_by_agent_name,
-                            ),
-                            "produced_by_turn_id": sa.case(
-                                (_TRIAGED, turn_id), else_=notification.c.produced_by_turn_id
-                            ),
-                            "produced_in_conversation_id": sa.case(
-                                (_TRIAGED, conversation_id),
-                                else_=notification.c.produced_in_conversation_id,
-                            ),
+                            "produced_by_agent_id": agent_id,
+                            "produced_by_agent_name": agent_name,
+                            "produced_by_turn_id": turn_id,
+                            "produced_in_conversation_id": conversation_id,
+                            "runtime_config": encoded_runtime_config,
+                            "scope_occurrences": notification.c.occurrences + 1,
                             "claim_expires_at": sa.case(
                                 (_TRIAGED, sa.null()), else_=notification.c.claim_expires_at
                             ),
@@ -329,7 +399,8 @@ class NotificationStore:
         is the read's clock and outlives a reopen, so a subject raised again right after its turn
         waits the same cooldown a fresh one does."""
         now = datetime.now(UTC)
-        lane_columns = (notification.c.to_agent_id, notification.c.member_id)
+        scope = _effective_runtime_config().label("runtime_config")
+        lane_columns = (notification.c.to_agent_id, notification.c.member_id, scope)
         async with self.ctx.transaction() as connection:
             open_lanes = (
                 await connection.execute(
@@ -340,7 +411,7 @@ class NotificationStore:
                         _claim_available(now),
                     )
                     .distinct()
-                    .order_by(*lane_columns)
+                    .order_by(notification.c.to_agent_id, notification.c.member_id, scope)
                 )
             ).all()
             recent = (
@@ -353,11 +424,15 @@ class NotificationStore:
                     .distinct()
                 )
             ).all()
-        cooling = {(row.to_agent_id, row.member_id) for row in recent}
+        cooling = {(row.to_agent_id, row.member_id, row.runtime_config) for row in recent}
         return tuple(
-            Lane(agent_id=row.to_agent_id, member_id=row.member_id)
+            Lane(
+                agent_id=row.to_agent_id,
+                member_id=row.member_id,
+                runtime_config=_parsed_runtime_config(row.runtime_config),
+            )
             for row in open_lanes
-            if (row.to_agent_id, row.member_id) not in cooling
+            if (row.to_agent_id, row.member_id, row.runtime_config) not in cooling
         )
 
     async def claim(self, lane: Lane, limit: int, lease_seconds: int) -> tuple[Notification, ...]:
@@ -368,6 +443,7 @@ class NotificationStore:
             notification.c.workspace_id == self.ctx.workspace_id,
             notification.c.to_agent_id == lane.agent_id,
             notification.c.member_id == lane.member_id,
+            _effective_runtime_config() == _encoded_runtime_config(lane.runtime_config),
         )
         selected = (
             sa.select(notification.c.id)
@@ -429,20 +505,169 @@ class NotificationStore:
                 )
             )
 
-    async def is_delivery_turn(self, turn_id: UUID) -> bool:
-        """Whether `turn_id` is a relay turn a delivery founded — the loop fence `notify` reads."""
+    async def prepare_delivery(
+        self,
+        delivery_key: str,
+        request_digest: str,
+        destination: DeliveryDestination,
+    ) -> DeliveryDestination:
+        """Reserve one exact delivery request and destination before its relay can start."""
+        async with self.ctx.transaction() as connection:
+            insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(notification_delivery)
+                .values(
+                    workspace_id=self.ctx.workspace_id,
+                    delivery_key=delivery_key,
+                    request_digest=request_digest,
+                    conversation_id=destination.conversation_id,
+                    agent_id=destination.agent_id,
+                    surface=destination.surface,
+                    relay_turn_id=None,
+                    created_at=sa.func.now(),
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        notification_delivery.c.workspace_id,
+                        notification_delivery.c.delivery_key,
+                    ]
+                )
+            )
+        stored = await self.delivery_destination(delivery_key, request_digest)
+        if stored is None:
+            raise RuntimeError("a prepared notification delivery is missing")
+        return stored
+
+    async def delivery_destination(
+        self, delivery_key: str, request_digest: str
+    ) -> DeliveryDestination | None:
+        """The destination already reserved for this exact request, if one exists."""
+        async with self.ctx.transaction() as connection:
+            stored = (
+                await connection.execute(
+                    sa.select(
+                        notification_delivery.c.request_digest,
+                        notification_delivery.c.conversation_id,
+                        notification_delivery.c.agent_id,
+                        notification_delivery.c.surface,
+                    ).where(
+                        notification_delivery.c.workspace_id == self.ctx.workspace_id,
+                        notification_delivery.c.delivery_key == delivery_key,
+                    )
+                )
+            ).one_or_none()
+        if stored is None:
+            return None
+        if (
+            stored.request_digest != request_digest
+            or stored.conversation_id is None
+            or stored.agent_id is None
+            or stored.surface is None
+        ):
+            raise DeliveryRequestConflict(delivery_key)
+        return DeliveryDestination(
+            conversation_id=stored.conversation_id,
+            agent_id=stored.agent_id,
+            surface=stored.surface,
+        )
+
+    async def bind_delivery_turn(self, delivery_key: str, turn_id: UUID) -> None:
+        """Bind the admitted relay to its pre-reserved delivery identity."""
+        async with self.ctx.transaction() as connection:
+            await connection.execute(
+                sa.update(notification_delivery)
+                .where(
+                    notification_delivery.c.workspace_id == self.ctx.workspace_id,
+                    notification_delivery.c.delivery_key == delivery_key,
+                    notification_delivery.c.relay_turn_id.is_(None),
+                )
+                .values(relay_turn_id=turn_id)
+            )
+            stored = (
+                await connection.execute(
+                    sa.select(notification_delivery.c.relay_turn_id).where(
+                        notification_delivery.c.workspace_id == self.ctx.workspace_id,
+                        notification_delivery.c.delivery_key == delivery_key,
+                    )
+                )
+            ).scalar_one()
+        if stored != turn_id:
+            raise RuntimeError("a notification delivery key resolved to another relay turn")
+
+    async def move_delivery_destination(
+        self,
+        delivery_key: str,
+        current: DeliveryDestination,
+        replacement: DeliveryDestination,
+    ) -> DeliveryDestination | None:
+        """Move an unadmitted delivery off a destination admission found archived."""
+        async with self.ctx.transaction() as connection:
+            await connection.execute(
+                sa.update(notification_delivery)
+                .where(
+                    notification_delivery.c.workspace_id == self.ctx.workspace_id,
+                    notification_delivery.c.delivery_key == delivery_key,
+                    notification_delivery.c.conversation_id == current.conversation_id,
+                    notification_delivery.c.agent_id == current.agent_id,
+                    notification_delivery.c.surface == current.surface,
+                    notification_delivery.c.relay_turn_id.is_(None),
+                )
+                .values(
+                    conversation_id=replacement.conversation_id,
+                    agent_id=replacement.agent_id,
+                    surface=replacement.surface,
+                )
+            )
+            stored = (
+                await connection.execute(
+                    sa.select(
+                        notification_delivery.c.conversation_id,
+                        notification_delivery.c.agent_id,
+                        notification_delivery.c.surface,
+                    ).where(
+                        notification_delivery.c.workspace_id == self.ctx.workspace_id,
+                        notification_delivery.c.delivery_key == delivery_key,
+                    )
+                )
+            ).one()
+        if stored.conversation_id is None or stored.agent_id is None or stored.surface is None:
+            return None
+        return DeliveryDestination(
+            conversation_id=stored.conversation_id,
+            agent_id=stored.agent_id,
+            surface=stored.surface,
+        )
+
+    async def is_delivery_turn(self, turn_id: UUID, idempotency_key: str | None) -> bool:
+        """Whether this turn is a reserved relay, including before its id is bound."""
+        delivery_identity = notification_delivery.c.relay_turn_id == turn_id
+        if idempotency_key is not None:
+            delivery_identity = sa.or_(
+                delivery_identity,
+                notification_delivery.c.delivery_key == idempotency_key,
+            )
         async with self.ctx.transaction() as connection:
             found = (
                 await connection.execute(
-                    sa.select(notification.c.id)
-                    .where(
-                        notification.c.workspace_id == self.ctx.workspace_id,
-                        notification.c.delivered_turn_id == turn_id,
+                    sa.select(
+                        sa.or_(
+                            sa.exists(
+                                sa.select(notification_delivery.c.delivery_key).where(
+                                    notification_delivery.c.workspace_id == self.ctx.workspace_id,
+                                    delivery_identity,
+                                )
+                            ),
+                            sa.exists(
+                                sa.select(notification.c.id).where(
+                                    notification.c.workspace_id == self.ctx.workspace_id,
+                                    notification.c.delivered_turn_id == turn_id,
+                                )
+                            ),
+                        )
                     )
-                    .limit(1)
                 )
-            ).scalar_one_or_none()
-        return found is not None
+            ).scalar_one()
+        return bool(found)
 
     async def deliverable(
         self, member_id: UUID, names: tuple[str, ...]
@@ -464,7 +689,15 @@ class NotificationStore:
                 sa.update(notification)
                 .where(
                     notification.c.workspace_id == self.ctx.workspace_id,
-                    notification.c.id.in_([row.id for row in rows]),
+                    sa.or_(
+                        *(
+                            sa.and_(
+                                notification.c.id == row.id,
+                                notification.c.occurrences == row.occurrences,
+                            )
+                            for row in rows
+                        )
+                    ),
                 )
                 .values(
                     delivered_turn_id=turn_id, delivered_surface=surface, updated_at=sa.func.now()

@@ -1,18 +1,18 @@
 """The `monitor` action on the monitor kind: arm a durable watch and end the turn.
 
-The probe runs once here, inline in the arming turn — the turn is live, so the sandbox and its
-egress are the `bash` tool's own machinery. A command that fails fails this tool call rather than
-dying unattended in a job an hour later, and the stdout it captured both seeds the baseline and
-returns in the result, so the agent sees the state it is watching from. Only then does the row
-persist; a refused arm leaves nothing behind."""
+The probe runs once here under the monitor's connection scope. A command that fails fails this
+tool call rather than dying unattended in a job an hour later, and the stdout it captured both
+seeds the baseline and returns in the result, so the agent sees the state it is watching from.
+Only then does the row persist; a refused arm leaves nothing behind."""
 
 import json
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from ufo.sdk.authority import authority_member_id
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import CONNECTION_SCOPE_MAX, ExtensionContext
 from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_monitors.monitors import (
     ARMED_MAX,
@@ -72,6 +72,16 @@ class MonitorInput(BaseModel):
     metadata: dict[str, JsonValue] | None = Field(
         default=None, description="State the fired turn needs."
     )
+    connections: tuple[UUID, ...] = Field(
+        max_length=CONNECTION_SCOPE_MAX,
+    )
+
+    @field_validator("connections")
+    @classmethod
+    def canonical_connections(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("connections cannot contain duplicate ids")
+        return tuple(sorted(value, key=str))
 
 
 def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
@@ -85,7 +95,8 @@ def _refusal(text: str) -> ToolResult:
 
 
 async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
-    store = MonitorStore(_require_ext(ctx.ext))
+    ext = _require_ext(ctx.ext)
+    store = MonitorStore(ext)
     armed = await store.armed(ctx.turn.conversation_id)
     if len(armed) >= ARMED_MAX:
         return _refusal(
@@ -98,7 +109,28 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
             f"a monitor named {args.slug!r} is already armed in this conversation; delete it or "
             "choose another name"
         )
-    probe = await ctx.sandbox.bash(args.command, timeout_s=PROBE_TIMEOUT_SECONDS)
+    available = frozenset(await ctx.connector_connection_ids())
+    unavailable = tuple(
+        connection_id for connection_id in args.connections if connection_id not in available
+    )
+    if unavailable:
+        return _refusal(
+            "connections are outside this turn's scope: "
+            + ", ".join(str(connection_id) for connection_id in unavailable)
+        )
+    if ext.probes is None:
+        raise RuntimeError("the monitor action requires the probes capability; none is wired")
+    internet_access = (
+        None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.internet_access
+    )
+    probe = await ext.probes.run(
+        ctx.turn.conversation_id,
+        args.command,
+        PROBE_TIMEOUT_SECONDS,
+        authority=ctx.authority,
+        connections=args.connections,
+        internet_access=internet_access,
+    )
     if probe.exit_code != 0:
         tail = stderr_tail(probe.stderr)
         return _refusal(
@@ -111,7 +143,6 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
         conversation_id=ctx.turn.conversation_id,
         agent_id=ctx.turn.agent_id,
         name=name,
-        audience=str(ctx.audience),
         command=args.command,
         interval_minutes=args.interval_minutes,
         deadline_at=now + timedelta(minutes=args.deadline_minutes),
@@ -121,6 +152,8 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
         created_by_member_id=authority_member_id(ctx.authority),
         baseline=baseline,
         next_probe_at=now + timedelta(minutes=args.interval_minutes),
+        connections=args.connections,
+        internet_access=internet_access,
     )
     payload: dict[str, JsonValue] = {
         "armed": row.name,
@@ -143,10 +176,8 @@ MONITOR_TOOL = ToolDef(
         "and `metadata`. Quiet intervals cost nothing and post nothing. Use it for a CI run, a "
         "deploy, a build log, or an inbox; use `pause_and_wait` instead when the thing you are "
         "waiting for is a member's reply. The command runs once now, so a broken probe fails here "
-        "and the result shows the output the watch starts from. Later probes reach your connected "
-        "accounts as you reach them now, but never a model: a probe command that calls one "
-        "succeeds in this turn and then fails every probe after it. At most 5 monitors per "
-        "conversation."
+        "and the result shows the output the watch starts from. A probe cannot call a model. At "
+        "most 5 monitors per conversation."
     ),
     input_model=MonitorInput,
     handler=monitor,

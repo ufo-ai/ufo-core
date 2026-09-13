@@ -153,7 +153,6 @@ class _DispatchTurn:
     workspace_id: UUID
     conversation_id: UUID
     agent_id: UUID
-    member_id: UUID | None
     speaker_member_id: UUID | None
     on_behalf_of_member_id: UUID | None
     admission_source: TurnAdmissionSource
@@ -220,7 +219,7 @@ class TurnDispatcher:
                         connection, [member for member in members if member is not None]
                     )
                     decision = await SpendEvaluator(
-                        turn.workspace_id, turn.member_id, turn.agent_id
+                        turn.workspace_id, member_id, turn.agent_id
                     ).decide(connection, 0)
                     balance = await BalanceGate(turn.workspace_id).admits(
                         connection, turn.agent_id, self.key_slot_for, turn.id
@@ -249,14 +248,12 @@ class TurnDispatcher:
                         tables.turn.c.workspace_id,
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
-                        tables.conversation.c.member_id,
                         tables.turn.c.speaker_member_id,
                         tables.turn.c.on_behalf_of_member_id,
                         tables.turn.c.admission_source,
                         tables.turn.c.status,
                         tables.turn.c.parent_turn_id,
                     )
-                    .select_from(tables.turn.join(tables.conversation))
                     .where(self._eligible(now))
                     .order_by(
                         sa.case((tables.turn.c.status == QUEUED, 0), else_=1),
@@ -272,7 +269,6 @@ class TurnDispatcher:
                 r.workspace_id,
                 r.conversation_id,
                 r.agent_id,
-                r.member_id,
                 r.speaker_member_id,
                 r.on_behalf_of_member_id,
                 r.admission_source,

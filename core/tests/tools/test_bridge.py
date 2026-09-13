@@ -24,7 +24,7 @@ from ufo.runtime.tools.bridge import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import CANCELLED, EXPRESS_QUEUE_NAME, TerminalFrame
+from ufo.schema.records import CANCELLED, EXPRESS_QUEUE_NAME, TerminalFrame, TurnRuntimeConfig
 
 
 @dataclass
@@ -259,3 +259,50 @@ async def test_a_parked_bridge_child_is_cancelled_before_the_caller_returns(db: 
     assert dbos.cancelled == [str(child_id)]
     assert child.status == CANCELLED
     assert TerminalFrame.model_validate(child.terminal).status == CANCELLED
+
+
+async def test_a_bridge_child_inherits_its_parent_connection_scope(db: None) -> None:
+    run, _, _ = await _seed()
+    config = TurnRuntimeConfig(connections=(uuid4(),))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == run.turn_id)
+            .values(runtime_config=config.model_dump(mode="json"))
+        )
+    dbos = _DBOS()
+    hub = InProcessHub()
+    with ws(run.workspace_id):
+        waiting = asyncio.create_task(
+            _bridge(dbos, hub).request(
+                run,
+                ToolBridgeRequest(
+                    request_id=uuid4(),
+                    action="execute",
+                    tool_name="object_list",
+                    arguments={"kind": "agent"},
+                ),
+            )
+        )
+        await dbos.enqueued.wait()
+        assert dbos.args is not None
+        child_id = UUID(dbos.args[1])
+        async with workspace_tx() as connection:
+            stored = (
+                await connection.execute(
+                    sa.select(tables.turn.c.runtime_config).where(tables.turn.c.id == child_id)
+                )
+            ).scalar_one()
+            terminal = TerminalFrame(status="done", text="{}")
+            await connection.execute(
+                sa.update(tables.turn)
+                .values(
+                    status="done",
+                    terminal=terminal.model_dump(mode="json"),
+                    updated_at=sa.func.now(),
+                )
+                .where(tables.turn.c.id == child_id)
+            )
+        await hub.publish(child_id, Terminal(frame=terminal))
+        await waiting
+    assert TurnRuntimeConfig.model_validate(stored) == config

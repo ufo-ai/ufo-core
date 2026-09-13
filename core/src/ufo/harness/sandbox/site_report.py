@@ -11,8 +11,7 @@ The waiting page a stopped site answers with reloads on a fixed interval, so a s
 reports itself again on every reload. `REPORT_BUCKET_SECONDS` is what makes that one turn rather
 than dozens: the bucket in the report's idempotency key advances on that period and on nothing
 else, so admission's own idempotency check is the whole of this report's memory. The invocation is
-not standalone, so a report landing while the agent is already repairing folds into that turn
-instead of founding a second one beside it."""
+standalone, so its connection and internet boundary never folds into a broader live turn."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -21,10 +20,13 @@ from typing import Annotated
 from uuid import UUID
 
 import httpx
+import sqlalchemy as sa
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import Response
 
+from ufo.db import workspace_tx
 from ufo.harness.o11y import warn
+from ufo.harness.sandbox.ingress_host import HOSTED_SITE
 from ufo.harness.sandbox.ingress_token import (
     SITE_REPORT_KIND,
     IngressClaims,
@@ -35,6 +37,7 @@ from ufo.harness.sandbox.ingress_token import (
 from ufo.runtime.authority import authority_from_member_id
 from ufo.runtime.ext.context import AgentArchived, TurnInvoker, conversation_agent_id
 from ufo.runtime.workspace import ws
+from ufo.schema.records import TurnRuntimeConfig
 
 SITE_REPORT_PATH = "/internal/site-not-answering"
 SITE_REPORT_TTL_SECONDS = 60
@@ -112,11 +115,12 @@ class SiteReports:
     session for, signed with the deploy secret this process holds too, under a kind neither hop of
     a visit accepts — so a session cookie cannot be posted here and this token opens no site.
 
-    The conversation names its own agent, and the authority is the workspace's: a site going down
-    is nobody's delegated act, and the member whose browser met it may not be the one who built the
-    page. A conversation this workspace does not hold answers 404 rather than founding anything —
-    a shipped app page's origin is a synthetic anchor with no conversation behind it, so there is no
-    agent to tell."""
+    The conversation names its own agent, and the site's creator is the exact authority that may
+    restart its sandbox server; the member whose browser met the failure may be someone else. The
+    recovery turn is standalone with no connection or public-internet access, so it keeps only the
+    model and sandbox it needs even beside a broader live turn. A missing site row founds nothing.
+    A conversation this workspace does not hold answers 404 — a shipped app page's origin is a
+    synthetic anchor with no conversation behind it, so there is no agent to tell."""
 
     invoker_for: Callable[[UUID], TurnInvoker]
     """One invoker per workspace, the factory `serve` already holds. Named by the protocol it calls
@@ -139,6 +143,9 @@ class SiteReports:
             agent_id = await conversation_agent_id(claims.workspace_id, claims.conversation_id)
             if agent_id is None:
                 return Response(status_code=404)
+            creator_member_id = await self._creator(claims)
+            if creator_member_id is None:
+                return Response(status_code=204)
             bucket = int(now.timestamp()) // REPORT_BUCKET_SECONDS
             try:
                 await self.invoker_for(claims.workspace_id).invoke(
@@ -146,9 +153,26 @@ class SiteReports:
                     agent_id,
                     SITE_NOT_ANSWERING_FIRE.format(port=claims.port),
                     f"site-down:{claims.conversation_id.hex}:{claims.port}:{bucket}",
-                    authority=authority_from_member_id(None),
+                    authority=authority_from_member_id(creator_member_id),
                     holds_work_already_done=True,
+                    standalone=True,
+                    runtime_config=TurnRuntimeConfig(connections=(), internet_access=False),
                 )
             except AgentArchived:
                 return Response(status_code=204)
         return Response(status_code=204)
+
+    async def _creator(self, claims: IngressClaims) -> UUID | None:
+        async with workspace_tx() as connection:
+            return (
+                await connection.execute(
+                    sa.select(HOSTED_SITE.c.creator_member_id)
+                    .where(
+                        HOSTED_SITE.c.workspace_id == claims.workspace_id,
+                        HOSTED_SITE.c.conversation_id == claims.conversation_id,
+                        HOSTED_SITE.c.port == claims.port,
+                        HOSTED_SITE.c.source_manifest.is_(None),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()

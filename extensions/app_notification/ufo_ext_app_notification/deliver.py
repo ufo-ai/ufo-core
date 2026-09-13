@@ -19,12 +19,15 @@ what it already said to them, so the instruction gives it the silence sentinel a
 the surface posts nothing. The rows still count as delivered, because the app spent the batch on
 them and the portal keeps them readable.
 
-Two bounds hold the push rate by structure. The relay's idempotency key is the delivering turn, so a
-second `deliver` in one turn admits nothing new: admission answers the relay the first call founded,
-the handler finds that turn already recorded on rows and refuses, and the second call's rows stay
-undelivered. And the relay turn is recorded on every row it carried, which is the loop fence:
-`notify` refuses inside any turn found there, so a delivery cannot raise a notification about
-itself."""
+Two bounds hold the push rate by structure. An append-only delivery row reserves one exact request
+and destination under the delivering turn's idempotency key before relay admission: a different
+second request is refused, and a matching replay uses that destination and resolves the same relay.
+The relay id is bound there independently of the folded inbox rows, while those rows are marked only
+at the occurrences the request read. `notify` refuses inside a turn whose key or id is that delivery
+identity, so a fold cannot erase the loop fence and the relay cannot race ahead of it."""
+
+import hashlib
+import json
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,6 +40,9 @@ from ufo_ext_app_notification.drain import DRAIN_BATCH
 from ufo_ext_app_notification.store import (
     NOTIFICATION_FLAG,
     NOTIFICATION_KIND,
+    DeliveryDestination,
+    DeliveryRequestConflict,
+    Notification,
     NotificationStore,
     inbox_agent_id,
 )
@@ -124,6 +130,19 @@ def _names(refs: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(ref.removeprefix(prefix) for ref in refs)
 
 
+def _delivery_request_digest(rows: tuple[Notification, ...], text: str) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "rows": sorted((row.id.hex, row.occurrences) for row in rows),
+                "text": text,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
 async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult:
     ext = _require_ext(ctx.ext)
     await _require_notification_agent(ext, ctx)
@@ -132,27 +151,81 @@ async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult:
         return _refusal(NOTHING_TO_DELIVER)
     store = NotificationStore(ext)
     rows = await store.deliverable(member_id, _names(args.refs))
+    rows = tuple(row for row in rows if row.runtime_config == ctx.turn.runtime_config)
     if not rows:
         return _refusal(NOTHING_TO_DELIVER)
-    for chosen in await ext.member_reach(member_id):
+    delivery_key = RELAY_KEY.format(turn=ctx.turn.id.hex)
+    request_digest = _delivery_request_digest(rows, args.text)
+    try:
+        destination = await store.delivery_destination(delivery_key, request_digest)
+    except DeliveryRequestConflict:
+        return _refusal(ONE_DELIVERY_PER_TURN)
+    if destination is None:
+        reaches = await ext.member_reach(member_id)
+        if not reaches:
+            await store.mark_delivered(rows, turn_id=None, surface=PORTAL_ONLY)
+            return ToolResult(content=(TextContent(text=DELIVERED_TO_PORTAL_ONLY),))
+        selected = reaches[0]
+        try:
+            destination = await store.prepare_delivery(
+                delivery_key,
+                request_digest,
+                DeliveryDestination(
+                    conversation_id=selected.conversation_id,
+                    agent_id=selected.agent_id,
+                    surface=selected.surface,
+                ),
+            )
+        except DeliveryRequestConflict:
+            return _refusal(ONE_DELIVERY_PER_TURN)
+    attempted: set[DeliveryDestination] = set()
+    while destination not in attempted:
+        attempted.add(destination)
         try:
             turn_id = await ext.invoke(
-                chosen.conversation_id,
-                chosen.agent_id,
+                destination.conversation_id,
+                destination.agent_id,
                 wall(RELAY_SOURCE, args.text) + RELAY_INSTRUCTION,
-                RELAY_KEY.format(turn=ctx.turn.id.hex),
+                delivery_key,
                 authority=MemberAuthority(member_id),
                 holds_work_already_done=True,
                 as_scheduled=True,
+                runtime_config=ctx.turn.runtime_config,
             )
         except AgentArchived:
+            remaining = tuple(
+                reach
+                for reach in await ext.member_reach(member_id)
+                if DeliveryDestination(
+                    conversation_id=reach.conversation_id,
+                    agent_id=reach.agent_id,
+                    surface=reach.surface,
+                )
+                not in attempted
+            )
+            if not remaining:
+                break
+            replacement = remaining[0]
+            moved = await store.move_delivery_destination(
+                delivery_key,
+                destination,
+                DeliveryDestination(
+                    conversation_id=replacement.conversation_id,
+                    agent_id=replacement.agent_id,
+                    surface=replacement.surface,
+                ),
+            )
+            if moved is None:
+                return _refusal(NOT_DELIVERED)
+            destination = moved
             continue
         if turn_id is None:
             return _refusal(NOT_DELIVERED)
-        if await store.is_delivery_turn(turn_id):
-            return _refusal(ONE_DELIVERY_PER_TURN)
-        await store.mark_delivered(rows, turn_id=turn_id, surface=chosen.surface)
-        return ToolResult(content=(TextContent(text=DELIVERED.format(surface=chosen.surface)),))
+        await store.bind_delivery_turn(delivery_key, turn_id)
+        await store.mark_delivered(rows, turn_id=turn_id, surface=destination.surface)
+        return ToolResult(
+            content=(TextContent(text=DELIVERED.format(surface=destination.surface)),)
+        )
     await store.mark_delivered(rows, turn_id=None, surface=PORTAL_ONLY)
     return ToolResult(content=(TextContent(text=DELIVERED_TO_PORTAL_ONLY),))
 

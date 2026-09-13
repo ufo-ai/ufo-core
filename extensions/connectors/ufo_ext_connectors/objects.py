@@ -12,9 +12,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.context import ExtensionContext, JsonValue
 from ufo.sdk.grants import (
     MAX_BACKFILL_DAYS,
+    GrantSummary,
     account_object_name,
     connection_summaries,
     grant_summaries,
@@ -111,6 +113,10 @@ def _summary(row: _AccountSummary) -> str:
 
 @dataclass(frozen=True)
 class ConnectionObjects(MemberReadableObjects[ConnectionSpec, GeneratedObjectOwner]):
+    """The `connection` kind. A row is read as far as the connection is shared: a shared one by
+    every member, a private one by its owner and an admin. Mutation remains its owner's or an
+    admin's; visibility grants no edit or connector-use authority."""
+
     kind_name: ClassVar[str] = CONNECTION_KIND
     mutate_gate: ClassVar[str] = SHARE_GATE
     delete_gate: ClassVar[str] = DISCONNECT_GATE
@@ -124,6 +130,14 @@ class ConnectionObjects(MemberReadableObjects[ConnectionSpec, GeneratedObjectOwn
         identical = (spec.provider, spec.account_id) == (old.provider, old.account_id)
         return identical and (not spec.shared or spec.shared == old.shared)
 
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        rows = await super()._owned_rows(ctx)
+        scope = ctx.connection_scope
+        if scope is None:
+            return rows
+        allowed = frozenset(scope)
+        return tuple(row for row in rows if row.owner.generation in allowed)
+
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
@@ -133,7 +147,11 @@ class ConnectionObjects(MemberReadableObjects[ConnectionSpec, GeneratedObjectOwn
                 summary=_summary(row),
                 owner=GeneratedObjectOwner(
                     member_id=row.owner_member_id,
-                    shared=False,
+                    audience=(
+                        SHARED_AUDIENCE
+                        if row.shared
+                        else conversation_audience(row.owner_member_id)
+                    ),
                     generation=row.id,
                 ),
             )
@@ -272,8 +290,21 @@ class ConnectorGrantObjects(MemberReadableObjects[ConnectorGrantSpec, GeneratedO
     mutate_requires_speaker: ClassVar[bool] = True
     delete_requires_speaker: ClassVar[bool] = True
 
+    async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        summaries = await grant_summaries()
+        scope = ctx.connection_scope
+        if scope is not None:
+            allowed = frozenset(scope)
+            summaries = tuple(row for row in summaries if row.connection_id in allowed)
+        return self._rows(summaries)
+
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
+    ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
+        return self._rows(await grant_summaries())
+
+    def _rows(
+        self, summaries: tuple[GrantSummary, ...]
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         return tuple(
             OwnedRow(
@@ -281,11 +312,15 @@ class ConnectorGrantObjects(MemberReadableObjects[ConnectorGrantSpec, GeneratedO
                 summary=_summary(row),
                 owner=GeneratedObjectOwner(
                     member_id=row.owner_member_id,
-                    shared=row.shared,
+                    audience=(
+                        SHARED_AUDIENCE
+                        if row.shared
+                        else conversation_audience(row.owner_member_id)
+                    ),
                     generation=row.id,
                 ),
             )
-            for name, row in _named(await grant_summaries()).items()
+            for name, row in _named(summaries).items()
         )
 
     async def _member_object(

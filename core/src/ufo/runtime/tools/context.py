@@ -85,10 +85,8 @@ from ufo.runtime.seats import member_is_admin
 from ufo.runtime.skills.runtime import CORE_SKILL_REGISTRY, LoadedSkills, SkillRegistry
 from ufo.runtime.turns.audience import (
     FOREIGN_AUDIENCE_PREFIX,
-    SHARED_AUDIENCE,
     Audience,
     audience_subjects,
-    conversation_audience,
 )
 from ufo.runtime.turns.contracts import ValidatedJson
 from ufo.runtime.turns.subjects import member_subject
@@ -364,9 +362,7 @@ class ToolFailure(BaseModel):
 
 
 class SpeakerRequired(ValueError):
-    """A handler refused because no member is bound to the call. The engine reads the type: where
-    the round offered `requested_by`, the tool error names the active member messages so the model
-    can retry with the ref; elsewhere there is nothing to correct and the message stands alone."""
+    """A handler refused because no member is bound to the call."""
 
 
 ADMIN_GATE_NEEDS_A_SPEAKER = (
@@ -519,6 +515,15 @@ class ConnectorConnection:
     owner_member_id: UUID | None
 
 
+@dataclass(frozen=True)
+class ConnectorAccount:
+    connection_id: UUID
+    provider: str
+    account_id: str
+    owner_email: str | None
+    shared: bool
+
+
 def _speaker_required(
     subject: str, withheld: Sequence[Grant], audience: Audience
 ) -> SpeakerRequired:
@@ -615,6 +620,11 @@ class ToolContext:
     speaker_member_id: UUID | None
     audience: Audience
     artifact_token_secret: str
+    other_members_active: bool = False
+    """Whether more than one member holds an active message this round — the one fact that says a
+    miss on a private account could be corrected by naming another member."""
+    member_messages_active: bool = False
+    """Whether a member-admitted message is active, including one with no workspace identity."""
     grants: GrantStore | None = None
     subagents: SubagentControl | None = None
     touched_paths: set[str] = field(default_factory=set)
@@ -659,16 +669,12 @@ class ToolContext:
 
     @property
     def effective_audience(self) -> Audience:
-        """The exact audience a write belongs to: the conversation's own, taking the requester's
-        private subject only in a workspace-shared conversation. A private room and a Slack Connect
-        channel are memory spaces in their own right — what is said there belongs to that space, so
-        stamping it with the requester would carry it into every other conversation that member
-        speaks in, leaking a private room's fact to the next room and another org's to the
-        workspace. A member who wants a private note makes it in their own conversation."""
-        acting = authority_member_id(self.authority)
-        if acting is None or self.audience != SHARED_AUDIENCE:
-            return self.audience
-        return conversation_audience(acting)
+        """The exact audience a write belongs to: the conversation's own. What is said in a
+        conversation is that conversation's to remember — a workspace conversation remembers for
+        the workspace, a private room or Slack Connect channel for itself — and stamping a write
+        with the member who happened to be bound would carry it into every other conversation they
+        speak in. A member who wants a private note makes it in their own conversation."""
+        return self.audience
 
     @property
     def read_subjects(self) -> frozenset[str]:
@@ -749,7 +755,13 @@ class ToolContext:
             agent_id=self.turn.agent_id,
             requesting_member_id=self.speaker_member_id,
             subjects=self.read_subjects,
+            connections=self.connection_scope,
         )
+
+    @property
+    def connection_scope(self) -> tuple[UUID, ...] | None:
+        """This turn's exact connection allowlist; None leaves an ordinary turn unrestricted."""
+        return None if self.turn.runtime_config is None else self.turn.runtime_config.connections
 
     async def meter_images(self, model: str, images: int, micro_usd: int) -> None:
         """Book a generated image's provider charge onto this turn under the ledger's `images`
@@ -822,6 +834,7 @@ class ToolContext:
                     .values(
                         id=uuid5(NAMESPACE_URL, key),
                         turn_id=self.turn.id,
+                        member_id=authority_member_id(self.authority),
                         blob_key=key,
                         workspace_id=self.turn.workspace_id,
                         filename=filename,
@@ -1033,8 +1046,60 @@ class ToolContext:
         that member's own grants plus grants shared with the agent; `WorkspaceAuthority` admits
         shared grants only. A member's scheduled job and delegated subagents therefore keep their
         private connections without turning workspace work into member work."""
-        private, shared, _ = await self._connector_account_tiers(provider)
-        return tuple(sorted({grant.account_id for grant in (*private, *shared)}))
+        return tuple(
+            account.account_id
+            for account in await self.usable_connector_accounts()
+            if account.provider == provider
+        )
+
+    async def usable_connector_accounts(self) -> tuple[ConnectorAccount, ...]:
+        """Every connected account this call may discover or select, after its authority and any
+        automatic-turn allowlist are applied. Owner and sharing metadata describe only those usable
+        accounts; an empty tuple discloses none."""
+        if self.grants is None:
+            return ()
+        acting = authority_member_id(self.authority)
+        connections = self.connection_scope
+        granted = [
+            grant
+            for grant in await self.grants.active_grants()
+            if connections is None or grant.connection_id in connections
+        ]
+        if (
+            acting is not None
+            or self.agent.is_main
+            or self.other_members_active
+            or self.member_messages_active
+        ):
+            granted = [
+                grant
+                for grant in granted
+                if grant.connection_shared or grant.owner_member_id == acting
+            ]
+        return tuple(
+            ConnectorAccount(
+                connection_id=grant.connection_id,
+                provider=grant.provider,
+                account_id=grant.account_id,
+                owner_email=grant.owner_email,
+                shared=grant.connection_shared,
+            )
+            for grant in sorted(
+                granted,
+                key=lambda grant: (grant.provider, grant.account_id, str(grant.connection_id)),
+            )
+        )
+
+    async def connector_connection_ids(self) -> tuple[UUID, ...]:
+        """Every connection this call may select, after its authority and any automatic-turn
+        allowlist are applied. The ordered ids are a total scope an automatic child may persist;
+        an empty tuple reaches no account."""
+        return tuple(
+            sorted(
+                {account.connection_id for account in await self.usable_connector_accounts()},
+                key=str,
+            )
+        )
 
     async def _connector_account_tiers(
         self, provider: str
@@ -1042,7 +1107,7 @@ class ToolContext:
         """The provider's grants this call may use, private then shared, and third the private
         grants this call cannot use — the ones a member ref would have unlocked.
 
-        A non-main agent acting with no member in the turn reads its own attachments first: the
+        A non-main agent acting with no member-admitted message reads its own attachments first: the
         member who attached a connector to a shipped agent attached it for the work that agent does
         on its own initiative, and there is no speaker whose ladder could name it. The main agent is
         not that case — it holds every member's connections at once, so it must spend the speaker's.
@@ -1052,17 +1117,27 @@ class ToolContext:
         another member's request.
 
         The third tier is what a miss is answered with, so it is decided by whether another member
-        can still be named, never by whether one is bound already: a shared-audience conversation
-        carries every member speaking there, so another member's private account is a miss
-        `requested_by` corrects. A member's own conversation names nobody else, so a call bound
-        there withholds nothing and its miss stays the plain refusal."""
+        can still be named, never by whether one is bound already: while another member holds an
+        active message, their private account is a miss `requested_by` corrects. A member acting
+        alone — in their own conversation or a workspace one nobody else is speaking in — can name
+        nobody else, so their call withholds nothing and its miss stays the plain refusal."""
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
         acting = authority_member_id(self.authority)
+        connections = self.connection_scope
         granted = [
-            grant for grant in await self.grants.active_grants() if grant.provider == provider
+            grant
+            for grant in await self.grants.active_grants()
+            if grant.provider == provider
+            and (connections is None or grant.connection_id in connections)
         ]
-        if granted and acting is None and not self.agent.is_main:
+        if (
+            granted
+            and acting is None
+            and not self.agent.is_main
+            and not self.other_members_active
+            and not self.member_messages_active
+        ):
             return (
                 sorted(
                     (grant for grant in granted if not grant.connection_shared),
@@ -1086,7 +1161,7 @@ class ToolContext:
             (grant for grant in granted if grant.connection_shared),
             key=lambda grant: grant.account_id,
         )
-        if acting is not None and self.audience != SHARED_AUDIENCE:
+        if acting is not None and not self.other_members_active:
             return private, shared, []
         return (
             private,

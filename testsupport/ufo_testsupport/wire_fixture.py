@@ -28,6 +28,8 @@ WORKSPACE_WIRE = frozenset(
         "sent",
         "absorbed",
         "ask",
+        "choose",
+        "choose_many",
         "exit",
         "file",
         "runtime",
@@ -54,6 +56,8 @@ WORKSPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "sent": ("turn-1", "1", "arr-1"),
     "absorbed": ("arr-1", "arr-2"),
     "ask": (">",),
+    "choose": ("Allow this request?", "Allow", "Deny", "Always Allow"),
+    "choose_many": ("Select services", "Mail", "Calendar"),
     "exit": ("0",),
     "file": ("quarterly report.pdf", "2048", "https://ws.example/artifacts/a?exp=1&sig=2"),
     "runtime": (

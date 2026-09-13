@@ -13,6 +13,7 @@ import yaml
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, ConfigDict
 from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
+from ufo_testsupport.member_authorization import PermitMemberAuthorization
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
@@ -42,7 +43,6 @@ from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.engine import (
     BARE_RAISE_NOTICE,
     MAX_PARALLEL_TOOL_CALLS,
-    REQUESTED_BY_HINT,
     ActiveMessage,
     TurnEngine,
     _RejectedToolCall,
@@ -331,6 +331,7 @@ def _engine(
         audience=conversation_audience(None),
         artifact_token_secret="",
         grants=None,
+        member_authorization=PermitMemberAuthorization(),
         verbs=verbs,
         granted_actions=granted_actions,
     )
@@ -559,13 +560,18 @@ async def test_an_interrupted_self_mutating_action_resumes_with_its_first_target
         replayed = False
 
         async def replay_then_retry(
-            dispatching: TurnEngine, retry_bound: object, target: object = None
+            dispatching: TurnEngine,
+            retry_bound: object,
+            target: object = None,
+            authorization_attempt: object = None,
         ) -> object:
             nonlocal replayed
             if not replayed:
                 replayed = True
                 return interrupted
-            return await original_dispatch_step(dispatching, retry_bound, target)
+            return await original_dispatch_step(
+                dispatching, retry_bound, target, authorization_attempt
+            )
 
         monkeypatch.setattr(TurnEngine, "_dispatch_step", replay_then_retry)
         result = await replace(engine)._dispatch_step_recovering(bound, [])
@@ -710,21 +716,21 @@ async def test_the_cross_agent_gate_refuses_every_lane_but_the_main_agents_live_
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_the_pre_handler_target_gate_carries_the_refs_a_retry_can_name(
+async def test_the_pre_handler_target_gate_formats_refusals(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The cross-agent gate refuses before any handler runs, and it refuses for want of a member —
-    the one refusal a `requested_by` ref repairs. The gate is a `ValueError` catch one frame
-    earlier than the handler's, so its answer must carry the same active member refs the handler's
-    refusal carries, and a gate that raised bare must read as bare rather than as a class name over
-    a trailing colon."""
     turn = await _seed_turn()
     with ws(turn.workspace_id):
         await _seed_agent(turn.workspace_id, "helper", visibility="workspace")
         await _seed_widget()
         engine = _engine(turn, _CallsModel(()), tmp_path)
         member = await _seed_member(turn.workspace_id, admin=True)
-        requesters = {turn.id: ActiveMessage(member_id=member, rendered="polish it")}
+        other_member = await _seed_member(turn.workspace_id, admin=False)
+        other_ref = uuid4()
+        requesters = {
+            turn.id: ActiveMessage(member_id=member, rendered="polish it"),
+            other_ref: ActiveMessage(member_id=other_member, rendered="show it to me"),
+        }
         call = ToolUseBlock(
             id="gate",
             name="object_action",
@@ -741,7 +747,6 @@ async def test_the_pre_handler_target_gate_carries_the_refs_a_retry_can_name(
         assert refused.is_error
         assert refused.content == (
             "SpeakerRequired: targeting another agent requires an exact live member-requested call"
-            + REQUESTED_BY_HINT.format(refs=str(turn.id))
         )
 
         async def raise_bare(*args: object, **kwargs: object) -> ObjectActionTarget:
@@ -885,7 +890,7 @@ async def test_hooks_match_canonical_ids_and_keep_modify_semantics(
 ) -> None:
     turn = await _seed_turn()
     with ws(turn.workspace_id):
-        generation = await _seed_widget()
+        await _seed_widget()
         engine = _engine(
             turn,
             _action_model(sample.BLESS_ACTION, name="anvil", input={"phrase": "per aspera"}),
@@ -905,7 +910,7 @@ async def test_hooks_match_canonical_ids_and_keep_modify_semantics(
                 "kind": sample.WIDGET_KIND,
                 "name": "anvil",
                 "agent": None,
-                "generation": str(generation),
+                "generation": None,
                 "expected_generation": None,
             },
         }

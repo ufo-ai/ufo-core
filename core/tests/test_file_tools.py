@@ -26,6 +26,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel
 from ufo_ext_context_rollover.rollover import ContextRollover, SandboxJournal
 from ufo_ext_docker import DockerCarrier
+from ufo_testsupport.member_authorization import PermitMemberAuthorization
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore, S3BlobStore, WorkspaceBlobStore
@@ -956,6 +957,7 @@ def _dispatch_engine(ctx: ToolContext, tools: ToolRegistry) -> TurnEngine:
         audience=ctx.audience,
         artifact_token_secret=ctx.artifact_token_secret,
         grants=None,
+        member_authorization=PermitMemberAuthorization(),
     )
 
 

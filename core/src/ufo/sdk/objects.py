@@ -38,6 +38,9 @@ from ufo.runtime.object_name import (
     ObjectRef as ObjectRef,
 )
 from ufo.runtime.object_scope import (
+    ObjectActionRequestTarget as ObjectActionRequestTarget,
+)
+from ufo.runtime.object_scope import (
     ObjectActionTarget as ObjectActionTarget,
 )
 from ufo.runtime.object_scope import (
@@ -111,6 +114,9 @@ from ufo.runtime.objects import (
 )
 from ufo.runtime.objects import (
     owner_emails as owner_emails,
+)
+from ufo.runtime.objects import (
+    readable as readable,
 )
 from ufo.schema.records import (
     AGENT_ICONS as AGENT_ICONS,

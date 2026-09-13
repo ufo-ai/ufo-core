@@ -53,7 +53,7 @@ from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
-from ufo.runtime.ext.context import ExtensionContext, TurnInvoker
+from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.ext.surface import TurnTailer
@@ -129,6 +129,7 @@ class HostEnvironment:
     jobs role and the delivery sweep hold, bound to the turn's workspace at assembly. A tool that
     admits a turn elsewhere (a notification delivered into a member's own conversation) needs it;
     a deploy that wires none leaves every tool context without one, and such a tool fails loud."""
+    probes: ConversationProbes | None = None
 
     async def assemble(self, request: AssembleRequest) -> AssembledTurn:
         turn, agent, profile = request.turn, request.agent, request.profile
@@ -266,6 +267,7 @@ class HostEnvironment:
             invoker=(
                 None if self.invoker_for is None else self.invoker_for(ws_current().workspace_id)
             ),
+            probes=self.probes,
         )
 
     def hooks(self, *, audience: Audience) -> HookChain:

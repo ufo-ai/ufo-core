@@ -26,16 +26,41 @@ from ufo.harness.sandbox.ingress_token import (
     IngressTokenKind,
     mint_ingress_token,
 )
+from ufo.harness.sandbox.session import RunToken
 from ufo.harness.sandbox.site_report import (
     SITE_REPORT_PATH,
     SITE_REPORT_TTL_SECONDS,
     SiteReports,
 )
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import InternetRule, ServiceRule
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import MemberAuthority
+from ufo.runtime.ext.context import TurnInvoker
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.tools.bridge import TOOL_BRIDGE_HOST
+from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.records import TurnRuntimeConfig
 
 SECRET = "s3cret"
 SERVE_BASE_URL = "https://app.example.test"
 PORT = 8000
+HOSTED_SITE_ROW = sa.table(
+    "hosted_site",
+    sa.column("workspace_id", sa.Uuid()),
+    sa.column("conversation_id", sa.Uuid()),
+    sa.column("name", sa.Text()),
+    sa.column("port", sa.Integer()),
+    sa.column("visibility", sa.Text()),
+    sa.column("creator_member_id", sa.Uuid()),
+    sa.column("generation", sa.Uuid()),
+    sa.column("deploy_generation", sa.BigInteger()),
+    sa.column("source_manifest", sa.Text()),
+    sa.column("created_at", sa.DateTime(timezone=True)),
+    sa.column("updated_at", sa.DateTime(timezone=True)),
+)
 pytestmark = pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 
 
@@ -51,12 +76,27 @@ def report_token(workspace_id: UUID, conversation_id: UUID, kind: IngressTokenKi
     )
 
 
-async def seed_conversation() -> tuple[UUID, UUID, UUID]:
-    workspace_id, agent_id, conversation_id = uuid4(), uuid4(), uuid4()
+async def seed_conversation() -> tuple[UUID, UUID, UUID, UUID]:
+    workspace_id, agent_id, conversation_id, creator_member_id = (
+        uuid4(),
+        uuid4(),
+        uuid4(),
+        uuid4(),
+    )
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.workspace).values(
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=creator_member_id,
+                workspace_id=workspace_id,
+                email="site-owner@example.test",
+                seated_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
             )
         )
         await connection.execute(
@@ -83,10 +123,25 @@ async def seed_conversation() -> tuple[UUID, UUID, UUID]:
                 updated_at=sa.func.now(),
             )
         )
-    return workspace_id, agent_id, conversation_id
+        await connection.execute(
+            sa.insert(HOSTED_SITE_ROW).values(
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                name="status",
+                port=PORT,
+                visibility="private",
+                creator_member_id=creator_member_id,
+                generation=uuid4(),
+                deploy_generation=1,
+                source_manifest=None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return workspace_id, agent_id, conversation_id, creator_member_id
 
 
-async def _post(invoker: RecordingInvoker, bearer: str) -> httpx.Response:
+async def _post(invoker: TurnInvoker, bearer: str) -> httpx.Response:
     app = FastAPI()
     app.include_router(SiteReports(invoker_for=lambda _workspace_id: invoker).router())
     async with httpx.AsyncClient(
@@ -95,14 +150,19 @@ async def _post(invoker: RecordingInvoker, bearer: str) -> httpx.Response:
         return await client.post(SITE_REPORT_PATH, headers={"authorization": bearer})
 
 
+class _Queued:
+    async def enqueue_async(self, options: dict[str, str], workspace_id: str, turn_id: str) -> None:
+        pass
+
+
 async def test_a_signed_report_founds_a_turn_in_the_conversation_it_names(
     db, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The conversation names its own agent, so the report carries no agent of its own and cannot
-    fire into another one. The turn is not standalone, so a report arriving while the agent is
-    already repairing folds into that turn instead of founding a second beside it."""
+    fire into another one. The turn is standalone so its narrower authority cannot fold into a
+    broader live turn."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
-    workspace_id, agent_id, conversation_id = await seed_conversation()
+    workspace_id, agent_id, conversation_id, creator_member_id = await seed_conversation()
     invoker = RecordingInvoker()
 
     posted = await _post(
@@ -113,7 +173,11 @@ async def test_a_signed_report_founds_a_turn_in_the_conversation_it_names(
     assert [(turn.conversation_id, turn.agent_id) for turn in invoker.turns] == [
         (conversation_id, agent_id)
     ]
-    assert invoker.turns[0].standalone is False
+    assert invoker.turns[0].standalone is True
+    assert invoker.turns[0].runtime_config == TurnRuntimeConfig(
+        connections=(), internet_access=False
+    )
+    assert invoker.turns[0].authority == MemberAuthority(creator_member_id)
 
 
 @pytest.mark.parametrize("kind", [INGRESS_VIEW_KIND, INGRESS_SESSION_KIND])
@@ -124,7 +188,7 @@ async def test_a_visits_own_token_posted_as_a_report_founds_nothing(
     session cookie a site read off its own request log posts nothing, and a view link pasted here
     opens nothing. Both are refused exactly as an unsigned bearer is."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
-    workspace_id, _agent_id, conversation_id = await seed_conversation()
+    workspace_id, _agent_id, conversation_id, _creator_member_id = await seed_conversation()
     invoker = RecordingInvoker()
 
     posted = await _post(invoker, f"Bearer {report_token(workspace_id, conversation_id, kind)}")
@@ -156,10 +220,140 @@ async def test_a_report_naming_no_conversation_of_its_workspace_founds_nothing(
     synthetic per-workspace anchor with no conversation row behind it — so there is no agent to
     tell, and the report is dropped on this side too."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
-    workspace_id, _agent_id, _conversation_id = await seed_conversation()
+    workspace_id, _agent_id, _conversation_id, _creator_member_id = await seed_conversation()
     invoker = RecordingInvoker()
 
     posted = await _post(invoker, f"Bearer {report_token(workspace_id, uuid4(), SITE_REPORT_KIND)}")
 
     assert posted.status_code == 404
     assert invoker.turns == []
+
+
+async def test_a_report_cannot_take_a_site_creator_from_another_workspace(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, _agent_id, conversation_id, _creator_member_id = await seed_conversation()
+    other_workspace_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=other_workspace_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.update(HOSTED_SITE_ROW)
+            .where(
+                HOSTED_SITE_ROW.c.workspace_id == workspace_id,
+                HOSTED_SITE_ROW.c.conversation_id == conversation_id,
+            )
+            .values(workspace_id=other_workspace_id)
+        )
+    invoker = RecordingInvoker()
+
+    posted = await _post(
+        invoker, f"Bearer {report_token(workspace_id, conversation_id, SITE_REPORT_KIND)}"
+    )
+
+    assert posted.status_code == 204
+    assert invoker.turns == []
+
+
+async def test_a_static_site_report_founds_no_recovery_turn(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, _agent_id, conversation_id, _creator_member_id = await seed_conversation()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(HOSTED_SITE_ROW)
+            .where(
+                HOSTED_SITE_ROW.c.workspace_id == workspace_id,
+                HOSTED_SITE_ROW.c.conversation_id == conversation_id,
+            )
+            .values(source_manifest='{"root":"sites/status/","files":{}}')
+        )
+    invoker = RecordingInvoker()
+
+    posted = await _post(
+        invoker, f"Bearer {report_token(workspace_id, conversation_id, SITE_REPORT_KIND)}"
+    )
+
+    assert posted.status_code == 204
+    assert invoker.turns == []
+
+
+async def test_a_report_persists_a_turn_that_reaches_no_ambient_egress(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
+    workspace_id, agent_id, conversation_id, member_id = await seed_conversation()
+    with ws(workspace_id), agent(agent_id):
+        await GrantStore().record(
+            provider="sample",
+            account_id="ambient-account",
+            host="api.sample.test",
+            grantor_member_id=member_id,
+            shared=False,
+        )
+    ambient_turn_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=ambient_turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="running",
+                inbound="ambient work",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=_Queued(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+
+    posted = await _post(
+        invoker, f"Bearer {report_token(workspace_id, conversation_id, SITE_REPORT_KIND)}"
+    )
+
+    assert posted.status_code == 204
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.id,
+                    tables.turn.c.on_behalf_of_member_id,
+                    tables.turn.c.runtime_config,
+                )
+                .where(tables.turn.c.conversation_id == conversation_id)
+                .order_by(tables.turn.c.seq)
+            )
+        ).all()
+        assert len(turns) == 2
+        assert turns[0].id == ambient_turn_id
+        assert turns[0].on_behalf_of_member_id is None
+        assert turns[0].runtime_config is None
+        turn = turns[1]
+        assert turn.on_behalf_of_member_id == member_id
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == ambient_turn_id)
+            .values(status="done", terminal={"status": "done"})
+        )
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == turn.id).values(status="running")
+        )
+    assert TurnRuntimeConfig.model_validate(turn.runtime_config) == TurnRuntimeConfig(
+        connections=(), internet_access=False
+    )
+    rules = await PerAgentRules(base=(), grants=GrantStore(), internet=(InternetRule(),)).resolve(
+        RunToken(workspace_id, turn.id, MemberAuthority(member_id))
+    )
+    assert rules == (ServiceRule(host=TOOL_BRIDGE_HOST),)

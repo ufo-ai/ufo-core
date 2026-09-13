@@ -885,6 +885,37 @@ fn plain_session_round_trips_ask_and_exit() {
 }
 
 #[test]
+fn plain_session_preserves_free_text_and_multi_select_questions() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "choose\tExplain access",
+                "choose_many\tSelect services\tMail\tCalendar\tDrive",
+                "ask\t>",
+            ],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tdone", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("plain-question-modes");
+    let (stdout, code) = run_client(&served.url, &["go"], "because\n3,1\n", &home);
+    let requests = served.gateway.requests();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(stdout.contains("done"), "stdout: {stdout}");
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(
+        requests[1].body,
+        "Explain access: because\nSelect services: Mail, Drive"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
 fn an_abandoned_connection_is_no_exchange() {
     let served = serve(vec![Exchange {
         delay_ms: 0,

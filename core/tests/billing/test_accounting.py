@@ -186,12 +186,95 @@ async def _seed_turn(connection: AsyncConnection) -> tuple[UUID, UUID]:
             seq=1,
             status="queued",
             inbound="hi",
+            speaker_member_id=member_id,
             terminal=None,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
     )
     return workspace_id, turn_id
+
+
+async def _seed_workspace_turn(
+    connection: AsyncConnection, *, spoken: bool
+) -> tuple[UUID, UUID, UUID]:
+    """A turn in a workspace-shared conversation bound to no member: spoken by the one member when
+    `spoken`, speakerless otherwise."""
+    workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
+    await connection.execute(
+        sa.insert(tables.workspace).values(
+            id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+        )
+    )
+    await connection.execute(
+        sa.insert(tables.member).values(
+            id=member_id,
+            workspace_id=workspace_id,
+            email="a@b.c",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    await connection.execute(
+        sa.insert(tables.agent).values(
+            id=agent_id,
+            workspace_id=workspace_id,
+            name="assistant",
+            prompt="p",
+            model="claude-opus-4-8",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    await connection.execute(
+        sa.insert(tables.conversation).values(
+            id=conversation_id,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            surface="web",
+            queue_key="chat",
+            member_id=None,
+            audience="shared",
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    await connection.execute(
+        sa.insert(tables.turn).values(
+            id=turn_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            seq=1,
+            status="queued",
+            inbound="hi",
+            speaker_member_id=member_id if spoken else None,
+            terminal=None,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    return workspace_id, member_id, turn_id
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+@pytest.mark.parametrize("spoken", [True, False])
+async def test_member_usage_follows_the_turns_member_not_the_conversations(
+    db: None, spoken: bool
+) -> None:
+    """A member's turn in a workspace conversation is their usage — in the workspace rollup's
+    per-member line and in their own window — while a speakerless turn there is nobody's."""
+    async with workspace_tx() as connection:
+        workspace_id, member_id, turn_id = await _seed_workspace_turn(connection, spoken=spoken)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+        own = await SpendRollup(workspace_id).read_member(connection, member_id, 3600)
+    assert report.total_micro_usd == 96_500
+    assert [(s.label, s.priced_micro_usd) for s in report.by_member] == (
+        [("a@b.c", 96_500)] if spoken else []
+    )
+    assert own.total_micro_usd == (96_500 if spoken else 0)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

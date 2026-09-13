@@ -15,7 +15,7 @@ pub mod theme;
 pub mod toolrender;
 mod wrap;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -55,6 +55,7 @@ const READ_ONLY_MESSAGE: &str =
 const QUEUE_SHOWN: usize = 3;
 const ENTRY_ROWS_MAX: usize = 8;
 const PICKER_ROWS: usize = 8;
+const MULTI_SELECT_HINT: &str = "Space selects. Enter submits.";
 const ECHO_INDENT: &str = "  ";
 const IMAGE_COLS_MAX: u16 = 60;
 const IMAGE_BYTES_MAX: usize = 2 * 1024 * 1024;
@@ -166,6 +167,8 @@ enum Focus {
 struct Chooser {
     prompt: String,
     picker: Picker,
+    multiple: bool,
+    selected: BTreeSet<usize>,
 }
 
 struct SecretEntry {
@@ -768,12 +771,14 @@ impl<W: Write> App<W> {
         self.take_focus(Focus::Compose);
     }
 
-    pub fn choose(&mut self, prompt: &str, options: &[String]) {
+    pub fn choose(&mut self, prompt: &str, options: &[String], multiple: bool) {
         let mut picker = Picker::new(options.to_vec());
         picker.set_page(PICKER_ROWS);
         self.chooser = Some(Chooser {
             prompt: prompt.to_string(),
             picker,
+            multiple,
+            selected: BTreeSet::new(),
         });
         self.take_focus(Focus::Choose);
     }
@@ -1071,6 +1076,28 @@ impl<W: Write> App<W> {
             self.focus = Focus::Compose;
             return Reply::None;
         };
+        if chooser.multiple && key.code == KeyCode::Char(' ') && key.modifiers.is_empty() {
+            if let Some(index) = chooser.picker.current_index() {
+                if !chooser.selected.insert(index) {
+                    chooser.selected.remove(&index);
+                }
+            }
+            return Reply::None;
+        }
+        if chooser.multiple && key.code == KeyCode::Enter {
+            if chooser.selected.is_empty() {
+                return Reply::None;
+            }
+            let choice = chooser
+                .selected
+                .iter()
+                .filter_map(|index| chooser.picker.item(*index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.chooser = None;
+            self.focus = Focus::Compose;
+            return Reply::Choice(choice);
+        }
         let Some(pick) = pick_key(key) else {
             return Reply::None;
         };
@@ -1600,17 +1627,39 @@ impl<W: Write> App<W> {
             wrap::clip(&chooser.prompt, width).to_string(),
             self.theme.heading,
         )];
+        if chooser.multiple {
+            rows.push(Line::styled(MULTI_SELECT_HINT, self.theme.muted));
+        }
         if chooser.picker.visible_len() == 0 && !chooser.picker.filter.is_empty() {
             rows.push(Line::styled(
                 "Nothing matches.".to_string(),
                 self.theme.muted,
             ));
         } else {
-            rows.extend(
+            let mut choices =
                 chooser
                     .picker
-                    .render(&self.theme, width as u16, PICKER_ROWS),
-            );
+                    .render(&self.theme, width.saturating_sub(4) as u16, PICKER_ROWS);
+            if chooser.multiple {
+                for (offset, row) in choices.iter_mut().enumerate() {
+                    let Some(index) = chooser.picker.index_at(offset, PICKER_ROWS) else {
+                        continue;
+                    };
+                    let checked = chooser.selected.contains(&index);
+                    row.spans.insert(
+                        1,
+                        Span::styled(
+                            if checked { "[x] " } else { "[ ] " },
+                            if checked {
+                                self.theme.accent
+                            } else {
+                                self.theme.muted
+                            },
+                        ),
+                    );
+                }
+            }
+            rows.extend(choices);
         }
         rows
     }
@@ -2020,18 +2069,52 @@ mod tests {
     #[test]
     fn a_chooser_answers_a_pick_and_a_cancel() {
         let mut app = app_on_memory();
-        app.choose("which?", &["first".to_string(), "second".to_string()]);
+        app.choose(
+            "which?",
+            &["first".to_string(), "second".to_string()],
+            false,
+        );
         app.on_key(key(KeyCode::Down));
         let reply = app.on_key(key(KeyCode::Enter));
         assert!(matches!(&reply, Reply::Choice(choice) if choice == "second"));
         assert!(app.chooser.is_none());
         assert!(matches!(app.focus, Focus::Compose));
-        app.choose("again?", &["only".to_string()]);
+        app.choose("again?", &["only".to_string()], false);
         assert!(matches!(
             app.on_key(key(KeyCode::Esc)),
             Reply::ChoiceCancelled
         ));
         assert!(app.chooser.is_none());
+    }
+
+    #[test]
+    fn a_multi_chooser_toggles_and_submits_in_list_order() {
+        let mut app = app_on_memory();
+        app.choose(
+            "Select services",
+            &["Mail".to_string(), "Calendar".to_string()],
+            true,
+        );
+        assert!(matches!(app.on_key(key(KeyCode::Enter)), Reply::None));
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char(' ')));
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Char(' ')));
+        let rendered = app
+            .choose_rows(80)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains(MULTI_SELECT_HINT), "{rendered}");
+        assert!(rendered.contains("[x] Mail"), "{rendered}");
+        assert!(rendered.contains("[x] Calendar"), "{rendered}");
+        assert!(matches!(
+            app.on_key(key(KeyCode::Enter)),
+            Reply::Choice(choice) if choice == "Mail, Calendar"
+        ));
+        assert!(app.chooser.is_none());
+        assert!(matches!(app.focus, Focus::Compose));
     }
 
     #[test]
@@ -2294,7 +2377,11 @@ mod tests {
     #[test]
     fn a_prompt_a_choice_and_a_secret_each_take_the_focus() {
         let mut app = app_on_memory();
-        app.choose("which one?", &["first".to_string(), "second".to_string()]);
+        app.choose(
+            "which one?",
+            &["first".to_string(), "second".to_string()],
+            false,
+        );
         assert!(matches!(app.focus, Focus::Choose));
         assert!(app.chooser.is_some());
         app.secret_begin("paste the key");
@@ -2588,7 +2675,7 @@ mod tests {
         );
 
         app.open_conversations(true);
-        app.choose("Pick one", &["a".to_string(), "b".to_string()]);
+        app.choose("Pick one", &["a".to_string(), "b".to_string()], false);
         assert_eq!(app.focus, Focus::Conversations);
         app.close_conversations();
         assert_eq!(app.focus, Focus::Choose);

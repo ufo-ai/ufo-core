@@ -384,7 +384,45 @@ class ArtifactObjects:
             except ValueError:
                 narrowed = narrowed.where(sa.false())
         if query.filters.get("mine") is True and viewer is not None:
-            narrowed = narrowed.where(tables.conversation.c.member_id == viewer)
+            current = (
+                sa.select(
+                    tables.turn.c.conversation_id,
+                    tables.shared_artifact.c.filename,
+                    tables.shared_artifact.c.member_id,
+                    sa.func.row_number()
+                    .over(
+                        partition_by=(
+                            tables.turn.c.conversation_id,
+                            tables.shared_artifact.c.filename,
+                        ),
+                        order_by=(
+                            tables.shared_artifact.c.created_at.desc(),
+                            tables.shared_artifact.c.blob_key.desc(),
+                        ),
+                    )
+                    .label("version"),
+                )
+                .select_from(
+                    tables.shared_artifact.join(
+                        tables.turn, tables.shared_artifact.c.turn_id == tables.turn.c.id
+                    )
+                )
+                .where(
+                    tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
+                    tables.shared_artifact.c.role == "file",
+                    tables.turn.c.agent_id == object_agent_id(),
+                )
+                .subquery("current_artifact")
+            )
+            narrowed = narrowed.join(
+                current,
+                sa.and_(
+                    current.c.version == 1,
+                    current.c.member_id == viewer,
+                    current.c.conversation_id == tables.turn.c.conversation_id,
+                    current.c.filename == tables.shared_artifact.c.filename,
+                ),
+            )
         if query.filters.get("attachment") is True:
             narrowed = narrowed.where(tables.shared_artifact.c.attached_by_member)
         surface = query.filters.get("surface")
@@ -472,7 +510,7 @@ class ArtifactObjects:
                 tables.conversation.c.audience,
                 tables.conversation.c.surface,
                 tables.conversation.c.surface_label,
-                tables.conversation.c.member_id.label("owner_member_id"),
+                tables.shared_artifact.c.member_id.label("owner_member_id"),
                 tables.member.c.email.label("owner_email"),
             )
             .select_from(
@@ -483,7 +521,7 @@ class ArtifactObjects:
                     tables.conversation,
                     tables.turn.c.conversation_id == tables.conversation.c.id,
                 )
-                .outerjoin(tables.member, tables.conversation.c.member_id == tables.member.c.id)
+                .outerjoin(tables.member, tables.shared_artifact.c.member_id == tables.member.c.id)
             )
             .where(
                 tables.shared_artifact.c.workspace_id == ws_current().workspace_id,
@@ -653,8 +691,8 @@ def artifact_object(
             "`filename`, `subject`, `conversation`, `shared_at`, `media` (image, document, or "
             "other), `media_type`, `size_bytes`, `owner_email`, `origin`, `surface`, `source`, "
             "and `mine` — filter on a conversation id for that "
-            "session's files, media=image for pictures, mine=true for files from your own "
-            "conversations, or order by `shared_at` desc for the most recent; each row also "
+            "session's files, media=image for pictures, mine=true for files whose current "
+            "version you shared, or order by `shared_at` desc for the most recent; each row also "
             "carries signed `url` and `preview_url` links when the deploy mints them. "
             "object_get copies the latest bytes back into the conversation workspace at "
             "artifacts/<name>/<filename> — the way to reuse a file an earlier turn produced — its "

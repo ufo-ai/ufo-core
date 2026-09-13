@@ -287,6 +287,8 @@ def directives_for(
     exits: bool = True,
     runtime: RuntimeIdentity | None = None,
     comments: bool = True,
+    *,
+    viewer_member_id: UUID | None = None,
 ) -> tuple[bytes, ...]:
     """The directive lines one live frame renders to. Token deltas stream as `txt`; tool-run
     activity is a retained `note` carrying its activity kind, while the running cost meter is a
@@ -298,7 +300,8 @@ def directives_for(
     itself (`say`): the member has been sent those words, and they never rode the token stream. The
     same frame carries a linked notice when a member comments from the portal — said unless
     `comments` is off, which is how the stream that admitted a comment keeps from reading the
-    member their own words back. A turn the fleet
+    member their own words back. A targeted question renders only for `viewer_member_id`. A turn
+    the fleet
     resumed after the process running it died narrates that as a `note`, on the frame — a client's
     notes already carry every other thing the turn is doing, so this one needs no grace to keep it
     clear of the answer."""
@@ -315,7 +318,16 @@ def directives_for(
             cost = frame.cost_micro_usd / MICRO_USD_PER_USD
             return (directive("status", f"{frame.tokens} tok - ${cost:.6f}"),)
         case Terminal():
-            return _answer(frame, streamed, collect, connect_message, files, exits, runtime)
+            return _answer(
+                frame,
+                streamed,
+                collect,
+                connect_message,
+                files,
+                exits,
+                runtime,
+                viewer_member_id,
+            )
         case Parked():
             attestation = (
                 ()
@@ -356,6 +368,7 @@ def _answer(
     files: tuple[SharedFile, ...] = (),
     exits: bool = True,
     runtime: RuntimeIdentity | None = None,
+    viewer_member_id: UUID | None = None,
 ) -> tuple[bytes, ...]:
     """Cap a turn. A done turn prompts (`ask`) after its answer — already streamed as `txt`, else
     said now, followed by one `file` line per file the turn shared and one `secret` line per
@@ -392,6 +405,20 @@ def _answer(
     shared = tuple(
         directive("file", file.filename, str(file.size_bytes), file.url) for file in files
     )
+    question: tuple[bytes, ...] = ()
+    if frame.question is not None and frame.question.target_member_id in (
+        None,
+        viewer_member_id,
+    ):
+        choices = tuple(
+            directive(
+                "choose_many" if ask.multi_select and not ask.free_text_only else "choose",
+                f"{ask.header}: {ask.question}" if ask.header else ask.question,
+                *(option.label for option in (() if ask.free_text_only else ask.options or ())),
+            )
+            for ask in frame.question.questions
+        )
+        question = (directive("say", frame.question.title), *choices)
     match frame.status:
         case "done":
             said = () if streamed else (directive("say", frame.text),)
@@ -400,7 +427,15 @@ def _answer(
                 directive("secret", sealed, prompt.slot, prompt.prompt) for prompt in collect
             )
             connect = () if connect_message is None else (directive("say", connect_message),)
-            return (*attestation, *said, *shared, *secrets, *connect, directive("ask", PROMPT))
+            return (
+                *attestation,
+                *said,
+                *shared,
+                *secrets,
+                *connect,
+                *question,
+                directive("ask", PROMPT),
+            )
         case "failed":
             safe_error = (
                 frame.error_message
@@ -438,6 +473,7 @@ async def _render_stream_frame(
     exits: bool,
     runtime: RuntimeIdentity | None,
     comments: bool,
+    viewer_member_id: UUID | None,
 ) -> _RenderedFrame:
     collect: tuple[CredentialPrompt, ...] = ()
     if (
@@ -472,6 +508,7 @@ async def _render_stream_frame(
         exits=exits,
         runtime=runtime,
         comments=comments,
+        viewer_member_id=viewer_member_id,
     )
     streamed = streamed or bool(lines and isinstance(frame, TextDelta))
     terminated = isinstance(frame, Terminal | Parked)
@@ -531,6 +568,7 @@ async def stream_directives(
     exits: bool = True,
     runtime: RuntimeIdentity | None = None,
     comments: bool = True,
+    viewer_member_id: UUID | None = None,
 ) -> AsyncIterator[bytes]:
     """Render a turn's live frames as directives, holding at most `hold_seconds`. A terminal or
     parked frame closes the stream on its own cap; if the hold elapses first the stream ends with
@@ -538,8 +576,9 @@ async def stream_directives(
     terminal frame's credential request, so a fulfilled or expired prompt never re-renders on
     reconnect while an unanswered sibling keeps asking. `files` reads what the turn shared, once the
     turn has ended and only then — the rows land during the turn, so reading earlier would report a
-    partial set. The tail's scope is entered here because the route returns its response before a
-    single frame is read.
+    partial set. `viewer_member_id` routes a targeted question to the authenticated terminal that
+    owns it. The tail's scope is entered here because the route returns its response before a single
+    frame is read.
 
     `ops` is the terminal rendezvous: each op the turn asks of the member's machine is raced
     against the turn's own frames, rendered as one `run` directive, and ends the stream — the
@@ -629,6 +668,7 @@ async def stream_directives(
                     exits,
                     runtime,
                     comments,
+                    viewer_member_id,
                 )
                 streamed = rendered.streamed
                 for line in rendered.lines:
@@ -928,6 +968,7 @@ class _ChannelStream:
             exits=not self.marked,
             runtime=self.ctx.runtime,
             comments=not self.turn.commented,
+            viewer_member_id=self.member_id,
         )
         return StreamingResponse(
             self._bound(history, directives),

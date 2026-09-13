@@ -1,9 +1,9 @@
 """The scheduled-task table and the scoped store that owns it.
 
 A scheduled task is a durable row — the conversation and agent a fire re-enters, its cron schedule,
-prompt, and due marker. Object-scoped calls create, update, cancel, and read recurring tasks; the
-runner leases due records workspace-wide and advances their exact versions, because each record
-carries the agent it re-enters.
+prompt, connection scope, and due marker. Object-scoped calls create, update, cancel, and read
+recurring tasks; the runner leases due records workspace-wide and advances their exact versions,
+because each record carries the agent it re-enters.
 
 Core migrations up to and including `0085` created this table, and the extension owns it from here:
 the declaration below adopts it in place rather than copying it, so no row moves and no migration
@@ -15,13 +15,14 @@ which defaults to the turn's agent."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from ufo.sdk.audience import Audience
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import WorkspaceCandidates, owner_candidates
 from ufo.sdk.objects import object_agent_id
@@ -48,6 +49,8 @@ scheduled_task = sa.Table(
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("paused", sa.Boolean, nullable=False, server_default=sa.false()),
+    sa.Column("connections", sa.JSON(none_as_null=True), nullable=True),
+    sa.Column("internet_access", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "agent_id", "name", name="scheduled_task_name"),
@@ -75,6 +78,8 @@ class ScheduledTask:
     created_at: datetime
     updated_at: datetime
     created_by_member_id: UUID | None = None
+    connections: tuple[UUID, ...] = ()
+    internet_access: Literal[False] | None = None
 
 
 @dataclass(frozen=True)
@@ -85,7 +90,7 @@ class ListedTask:
     where the answer is needed."""
 
     task: ScheduledTask
-    audience: str
+    audience: Audience
     surface_label: str | None
 
 
@@ -116,6 +121,8 @@ _COLUMNS = (
     scheduled_task.c.expires_at,
     scheduled_task.c.claimed_by,
     scheduled_task.c.paused,
+    scheduled_task.c.connections,
+    scheduled_task.c.internet_access,
     scheduled_task.c.created_at,
     scheduled_task.c.updated_at,
 )
@@ -160,6 +167,8 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         expires_at=_utc_opt(row["expires_at"]),
         claim_id=row["claimed_by"],
         paused=row["paused"],
+        connections=tuple(UUID(item) for item in (row["connections"] or ())),
+        internet_access=None if row["internet_access"] else False,
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
     )
@@ -213,6 +222,8 @@ class ScheduleStore:
         prompt: str,
         description: str,
         next_run_at: datetime,
+        connections: tuple[UUID, ...] = (),
+        internet_access: Literal[False] | None = None,
         created_by_member_id: UUID | None = None,
         expires_at: datetime | None = None,
         paused: bool = False,
@@ -246,6 +257,8 @@ class ScheduleStore:
                             claimed_by=None,
                             claim_expires_at=None,
                             paused=paused,
+                            connections=[str(connection_id) for connection_id in connections],
+                            internet_access=internet_access is not False,
                             created_at=sa.func.now(),
                             updated_at=sa.func.now(),
                         )
@@ -276,6 +289,7 @@ class ScheduleStore:
         expires_at: datetime | None = None,
         *,
         paused: bool,
+        connections: tuple[UUID, ...] = (),
     ) -> ScheduledTask:
         """Update one exact recurring task without changing its immutable identity — `paused` has
         no preserving default, so every caller states whether the task keeps firing.
@@ -310,6 +324,7 @@ class ScheduleStore:
                             claimed_by=None,
                             claim_expires_at=None,
                             paused=paused,
+                            connections=[str(connection_id) for connection_id in connections],
                             updated_at=sa.func.now(),
                         )
                         .returning(*_COLUMNS)

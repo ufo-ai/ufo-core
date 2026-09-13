@@ -23,9 +23,13 @@ CASES = (
         "The deploy writes its progress to deploy.log in my workspace, one line per step, and the "
         "last line is the current step. Keep watching that file and tell me the moment its last "
         "line changes. If nothing has changed after two hours, stop watching and say so.",
-        combine(required_tools_scorer((MONITOR_ACTION,)), restraint_scorer((WAIT_TOOL,))),
+        combine(
+            required_tools_scorer((MONITOR_ACTION,)),
+            attempted_tools_scorer(((MONITOR_ACTION, {"connections": []}),), (), ()),
+            restraint_scorer((WAIT_TOOL,)),
+        ),
         workspace_files=(DEPLOY_LOG,),
-        digest_tag="monitor-arm:watch-deploy-log:authored",
+        digest_tag="monitor-arm:watch-deploy-log:connection-scope",
     ),
     CapabilityCase(
         "wait-for-my-numbers",

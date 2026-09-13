@@ -308,15 +308,13 @@ async def list_external_tools(ctx: ToolContext, args: ListExternalToolsInput) ->
 async def _connected_accounts(ctx: ToolContext) -> dict[str, list[JsonValue]]:
     """Each provider's accounts this agent can already use — owner and sharing included, so a
     listing answers what is connected and whose it is without further lookups."""
-    if ctx.grants is None:
-        return {}
     accounts: dict[str, list[JsonValue]] = {}
-    for grant in await ctx.grants.active_grants():
-        accounts.setdefault(grant.provider, []).append(
+    for account in await ctx.usable_connector_accounts():
+        accounts.setdefault(account.provider, []).append(
             {
-                "account_id": grant.account_id,
-                "owner": grant.owner_email,
-                "shared": grant.connection_shared,
+                "account_id": account.account_id,
+                "owner": account.owner_email,
+                "shared": account.shared,
             }
         )
     return accounts

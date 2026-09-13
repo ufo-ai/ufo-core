@@ -15,9 +15,9 @@ import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import TextDelta
-from ufo.runtime.hub import ArrivalQueued, HubFrame, InProcessHub, LiveFrame, Terminal
+from ufo.runtime.hub import ArrivalQueued, HubFrame, InProcessHub, LiveFrame, Parked, Terminal
 from ufo.runtime.surfaces import hub_tail
-from ufo.runtime.surfaces.hub_tail import tail_frames
+from ufo.runtime.surfaces.hub_tail import tail_frames, turn_status_frame
 from ufo.schema import tables
 from ufo.schema.records import TerminalFrame
 
@@ -31,6 +31,114 @@ async def _keepalive(hub: InProcessHub, turn_id: UUID) -> asyncio.Task[None]:
     task = asyncio.create_task(_drain(hub.subscribe(turn_id)))
     await asyncio.sleep(0)
     return task
+
+
+async def _parked_member_turn(*, spoken: bool) -> UUID:
+    """A parked turn in a workspace conversation whose one member is over their member cap —
+    spoken by that member when `spoken`, speakerless otherwise."""
+    workspace_id, member_id, agent_id, conversation_id, spent, parked = (uuid4() for _ in range(6))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="a@b.c",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="web",
+                queue_key="chat",
+                member_id=None,
+                audience="shared",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        for turn_id, seq, status in ((spent, 1, "done"), (parked, 2, "parked")):
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=turn_id,
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=seq,
+                    status=status,
+                    inbound="hi",
+                    admission_source="member",
+                    speaker_member_id=member_id if spoken else None,
+                    terminal=(
+                        TerminalFrame(status="done").model_dump(mode="json")
+                        if status == "done"
+                        else None
+                    ),
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await connection.execute(
+            sa.insert(tables.ledger).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                turn_id=spent,
+                dimension="tokens",
+                amount=10,
+                prompt_tokens=10,
+                input_tokens=10,
+                priced_micro_usd=100,
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.spend_cap).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                scope="member",
+                subject_id=member_id,
+                window_seconds=3600,
+                limit_micro_usd=50,
+                on_breach="park",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return parked
+
+
+async def test_a_parked_turn_names_the_cap_of_the_member_who_spoke_it(db: None) -> None:
+    """The hold a poll reads for a parked turn is decided against the turn's own member, not the
+    conversation's: the member's turn in a workspace conversation reads their member cap, and a
+    speakerless turn there reads the plain park notice."""
+    held = await turn_status_frame(await _parked_member_turn(spoken=True))
+    assert isinstance(held, Parked)
+    assert "member spend cap" in held.message
+
+    plain = await turn_status_frame(await _parked_member_turn(spoken=False))
+    assert isinstance(plain, Parked)
+    assert "spend cap" not in plain.message
 
 
 async def test_tail_streams_live_frames_until_a_terminal(db: None) -> None:

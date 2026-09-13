@@ -319,3 +319,29 @@ def test_transfer_hosts_fail_loud_on_two_open_namespaces() -> None:
     b = Manifest(name="b", version="0", connector_resolver=_Namespace(("cdn.b.test",)))
     with pytest.raises(RuntimeError, match="two extensions register an open connector namespace"):
         connector_transfer_hosts((a, b))
+
+
+async def test_connector_egress_stops_at_the_turn_connection_scope() -> None:
+    listed = _grant()
+    unlisted = _grant(account="acct-2", grantor=OTHER, shared=True)
+    connections = (listed.connection_id,)
+    restricted_hosts = derive_grant_rules((listed, unlisted), connections=connections)
+    restricted_cli = await derive_cli_rules(
+        (listed, unlisted),
+        MemberAuthority(ACTING),
+        {"hub": _cli(_Tokens())},
+        WORKSPACE,
+        connections,
+    )
+    unrestricted_cli = await derive_cli_rules(
+        (listed, unlisted), MemberAuthority(ACTING), {"hub": _cli(_Tokens())}, WORKSPACE
+    )
+    assert ScopeRule(allowed_hosts=frozenset({listed.host})) in restricted_hosts
+    assert len([rule for rule in restricted_hosts if isinstance(rule, MeterRule)]) == 1
+    assert [rule.sentinel for rule in restricted_cli if isinstance(rule, InjectionRule)] == [
+        grant_sentinel("acct-1")
+    ]
+    assert [rule.sentinel for rule in unrestricted_cli if isinstance(rule, InjectionRule)] == [
+        grant_sentinel("acct-1"),
+        grant_sentinel("acct-2"),
+    ]

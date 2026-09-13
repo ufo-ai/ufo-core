@@ -46,7 +46,7 @@ from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.agent_setup import AgentSetup
 from ufo.runtime.kinds.agents import AgentSpec
 from ufo.runtime.memory import MemorySearchProvider
-from ufo.runtime.object_scope import ObjectActionTarget
+from ufo.runtime.object_scope import ObjectActionRequestTarget, ObjectActionTarget
 from ufo.runtime.objects import ObjectKind
 from ufo.runtime.search import SearchProvider
 from ufo.runtime.skills.runtime import RuntimeSkill, SkillCard
@@ -469,13 +469,13 @@ class PreToolUse:
     """A tool call about to dispatch. `tool_input` is the validated argument model; a hook may Deny
     the call (it never dispatches) or ModifyInput (fold the args the handler receives). `call` is
     the semantic identity selectors match — the canonical action id for an object action riding
-    the `object_action` wire tool, the tool name itself otherwise — and `target` is the resolved
-    object an instance action acts on."""
+    the `object_action` wire tool, the tool name itself otherwise — and `target` is its validated,
+    unresolved wire target."""
 
     tool_name: str
     tool_input: BaseModel
     call: str = ""
-    target: ObjectActionTarget | None = None
+    target: ObjectActionRequestTarget | None = None
 
     def __post_init__(self) -> None:
         if not self.call:
@@ -486,8 +486,8 @@ class PreToolUse:
 class PostToolUse:
     """A tool call that dispatched successfully. A hook may ModifyOutput (replace the result the
     model sees) or InjectContext (append guidance to it). A call that errored fires
-    post_tool_use_failure instead, never this. `call` and `target` carry the semantic identity
-    exactly as on PreToolUse."""
+    post_tool_use_failure instead, never this. `call` carries the semantic identity and `target`
+    is the resolved object the handler acted on."""
 
     tool_name: str
     tool_input: BaseModel
@@ -506,8 +506,8 @@ class PostToolUseFailure:
     a tool that actually ran and errored (its handler raised, or returned an error result); a bad
     tool name or an argument-validation failure is caught before dispatch and becomes an is_error
     result with no hook, so this never fires for a call that never ran. `output` is the error
-    content the model will see; the event takes no outcome, it only notifies. `call` and `target`
-    carry the semantic identity exactly as on PreToolUse."""
+    content the model will see; the event takes no outcome, it only notifies. `call` carries the
+    semantic identity and `target` is the resolved object the handler acted on."""
 
     tool_name: str
     tool_input: BaseModel

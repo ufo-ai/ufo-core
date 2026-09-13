@@ -38,6 +38,7 @@ from ufo.config import load_config
 from ufo.db import init_db, verify_db_reachable, workspace_tx
 from ufo.harness.o11y import init_o11y, log, log_error, warn
 from ufo.harness.sandbox.ingress_host import (
+    HOSTED_SITE,
     SiteLabelError,
     parse_site_label,
     serve_port,
@@ -339,19 +340,6 @@ class SiteRefusal:
     status: int
     message: str
     media_type: str = "text/plain"
-
-
-HOSTED_SITE = sa.table(
-    "hosted_site",
-    sa.column("workspace_id", sa.Uuid()),
-    sa.column("conversation_id", sa.Uuid()),
-    sa.column("port", sa.Integer()),
-    sa.column("source_manifest", sa.Text()),
-)
-"""The sites extension's registry, read by name the way extension tables are read elsewhere in
-core, always under an explicit workspace filter because this process runs on the owner DSN.
-`source_manifest` is the serving mode: a row carrying one is a stored site whose bytes come from
-the blob store, a row without one — and a label with no row at all — is dialed."""
 
 
 @dataclass(frozen=True)

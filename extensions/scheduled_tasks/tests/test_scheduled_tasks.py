@@ -44,7 +44,6 @@ from ufo_ext_scheduled_tasks.tools import (
     ScheduledTaskObjects,
     ScheduledTaskSpec,
 )
-from ufo_ext_scheduled_tasks.visibility import task_content_visible
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
 from evals.suites.object_tools import (
@@ -60,6 +59,7 @@ from evals.suites.object_tools import (
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.conversation_slots import ConversationSlotContext, ConversationSlotItem
@@ -71,7 +71,7 @@ from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, TerminalFrame, Turn
+from ufo.schema.records import CONNECTION_SCOPE_MAX, Agent, TerminalFrame, Turn, TurnRuntimeConfig
 from ufo.sdk.audience import (
     conversation_audience,
 )
@@ -115,6 +115,7 @@ def _task_manifest(
                 "prompt": prompt,
                 "description": description,
                 "expires_at": expires_at,
+                "connections": [],
                 **({} if run_now is None else {"run_now": run_now}),
             },
         }
@@ -278,8 +279,8 @@ async def test_list_reported_carries_audience_and_surface_label(db: None) -> Non
     assert by_name["shared"].audience == "shared"
     assert by_name["shared"].surface_label == "#general"
     assert by_name["private"].surface_label is None
-    assert task_content_visible(by_name["shared"], other_member)
-    assert not task_content_visible(by_name["private"], other_member)
+    assert scheduled_tools._content_readable(by_name["shared"], other_member)
+    assert not scheduled_tools._content_readable(by_name["private"], other_member)
 
 
 async def test_a_creatorless_task_follows_the_conversation_it_reports_into(db: None) -> None:
@@ -332,10 +333,10 @@ async def test_a_creatorless_task_follows_the_conversation_it_reports_into(db: N
 
     by_name = {row.task.name: row for row in listed}
     assert by_name["orphan-private"].task.created_by_member_id is None
-    assert not task_content_visible(by_name["orphan-private"], other_member)
-    assert not task_content_visible(by_name["orphan-private"], None)
-    assert task_content_visible(by_name["orphan-private"], conversation_member)
-    assert task_content_visible(by_name["orphan-shared"], other_member)
+    assert not scheduled_tools._content_readable(by_name["orphan-private"], other_member)
+    assert not scheduled_tools._content_readable(by_name["orphan-private"], None)
+    assert scheduled_tools._content_readable(by_name["orphan-private"], conversation_member)
+    assert scheduled_tools._content_readable(by_name["orphan-shared"], other_member)
 
 
 async def _second_agent(workspace_id: UUID) -> tuple[UUID, UUID]:
@@ -1414,6 +1415,7 @@ async def test_update_preserves_the_original_creator(db: None) -> None:
             "v1",
             "v1",
             when,
+            internet_access=False,
             created_by_member_id=creator,
         )
         second = await store.update(
@@ -1427,7 +1429,9 @@ async def test_update_preserves_the_original_creator(db: None) -> None:
         tasks = await store.list()
     assert first.id == second.id
     assert second.created_by_member_id == creator
+    assert second.internet_access is False
     assert tasks[0].created_by_member_id == creator
+    assert tasks[0].internet_access is False
     assert tasks[0].schedule == "0 17 * * 1"
 
 
@@ -1491,6 +1495,7 @@ async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
         description: str,
         next_run_at: datetime,
         expires_at: datetime | None = None,
+        connections: tuple[UUID, ...] = (),
         *,
         paused: bool,
     ) -> ScheduledTask:
@@ -1505,6 +1510,7 @@ async def test_update_cannot_overwrite_a_task_recreated_after_authorization(
             next_run_at,
             expires_at,
             paused=paused,
+            connections=connections,
         )
 
     monkeypatch.setattr(ScheduleStore, "update", blocked_update)
@@ -1794,7 +1800,7 @@ async def test_task_create_refuses_a_row_created_after_absence_check(
             await ScheduledTaskObjects().apply(
                 ctx,
                 "digest",
-                ScheduledTaskSpec(schedule=DAILY_9AM, prompt="new task"),
+                ScheduledTaskSpec(schedule=DAILY_9AM, prompt="new task", connections=()),
                 None,
                 expected_generation=None,
             )
@@ -2755,3 +2761,421 @@ async def test_a_fire_names_the_task_that_fired_it(db: None) -> None:
     assert turn["fired_by_kind"] == SCHEDULED_TASK_KIND
     assert turn["fired_by_name"] == "nightly-digest"
     assert turn["fired_by_title"] == "nightly-digest"
+
+
+async def _connection(
+    workspace_id: UUID, agent_id: UUID, owner: UUID, account: str, *, shared: bool
+) -> UUID:
+    with ws(workspace_id), agent(agent_id):
+        return await GrantStore().record(
+            provider="hub",
+            account_id=account,
+            host="api.hub.test",
+            grantor_member_id=owner,
+            shared=shared,
+        )
+
+
+def _program_manifest(name: str, **spec: object) -> str:
+    return yaml.safe_dump({"kind": SCHEDULED_TASK_KIND, "name": name, "spec": spec})
+
+
+async def test_task_connections_are_total_and_within_the_creating_turn_scope(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _speaker(workspace_id)
+    other = await _member(workspace_id)
+    own = await _connection(workspace_id, agent_id, creator, "acct-own", shared=False)
+    shared = await _connection(workspace_id, agent_id, other, "acct-shared", shared=True)
+    private = await _connection(workspace_id, agent_id, other, "acct-private", shared=False)
+    store = GrantStore()
+    base = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id),
+        speaker_member_id=creator,
+        grants=store,
+    )
+    restricted = replace(
+        base,
+        turn=base.turn.model_copy(update={"runtime_config": TurnRuntimeConfig(connections=(own,))}),
+    )
+    apply = _object_tool("object_apply")
+    with ws(workspace_id), agent(agent_id):
+        with pytest.raises(ValueError, match="requires schedule, prompt, and connections"):
+            await _dispatch(
+                apply,
+                base,
+                manifest=_program_manifest("missing", schedule=DAILY_9AM, prompt="run"),
+            )
+        for refused in (private, uuid4()):
+            with pytest.raises(ValueError, match=str(refused)):
+                await _dispatch(
+                    apply,
+                    base,
+                    manifest=_program_manifest(
+                        "refused",
+                        schedule=DAILY_9AM,
+                        prompt="run",
+                        connections=[str(refused)],
+                    ),
+                )
+        with pytest.raises(ValueError, match=str(shared)):
+            await _dispatch(
+                apply,
+                restricted,
+                manifest=_program_manifest(
+                    "parent-leak",
+                    schedule=DAILY_9AM,
+                    prompt="run",
+                    connections=[str(shared)],
+                ),
+            )
+        with pytest.raises(ValueError, match="duplicate"):
+            await _dispatch(
+                apply,
+                base,
+                manifest=_program_manifest(
+                    "duplicate",
+                    schedule=DAILY_9AM,
+                    prompt="run",
+                    connections=[str(own), str(own)],
+                ),
+            )
+        with pytest.raises(ValueError, match="50"):
+            await _dispatch(
+                apply,
+                base,
+                manifest=_program_manifest(
+                    "too-many",
+                    schedule=DAILY_9AM,
+                    prompt="run",
+                    connections=[str(uuid4()) for _ in range(CONNECTION_SCOPE_MAX + 1)],
+                ),
+            )
+        canonical = tuple(sorted((own, shared), key=str))
+        await _dispatch(
+            apply,
+            base,
+            manifest=_program_manifest(
+                "scoped",
+                schedule=DAILY_9AM,
+                prompt="run",
+                connections=[str(connection_id) for connection_id in reversed(canonical)],
+            ),
+        )
+        await _dispatch(
+            apply,
+            base,
+            manifest=_program_manifest("closed", schedule=DAILY_9AM, prompt="run", connections=[]),
+        )
+        tasks = {task.name: task for task in await _store().list()}
+    assert tasks["scoped"].connections == canonical
+    assert tasks["closed"].connections == ()
+
+
+async def test_a_scoped_turn_cannot_run_or_resume_a_wider_task(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _speaker(workspace_id)
+    own = await _connection(workspace_id, agent_id, creator, "acct-own", shared=False)
+    shared = await _connection(workspace_id, agent_id, creator, "acct-shared", shared=True)
+    base = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id),
+        speaker_member_id=creator,
+        grants=GrantStore(),
+    )
+    scoped = replace(
+        base,
+        turn=base.turn.model_copy(update={"runtime_config": TurnRuntimeConfig(connections=(own,))}),
+    )
+    closed = replace(
+        base,
+        turn=base.turn.model_copy(update={"runtime_config": TurnRuntimeConfig(connections=())}),
+    )
+    apply = _object_tool("object_apply")
+    listing = _object_tool("object_list")
+    get = _object_tool("object_get")
+    delete = _object_tool("object_delete")
+    with ws(workspace_id), agent(agent_id):
+        for name, connections, paused in (
+            ("closed", (), False),
+            ("narrow", (own,), False),
+            ("wide", (own, shared), True),
+        ):
+            await _dispatch(
+                apply,
+                base,
+                manifest=_program_manifest(
+                    name,
+                    schedule=DAILY_9AM,
+                    prompt="run",
+                    connections=[str(connection_id) for connection_id in connections],
+                    paused=paused,
+                ),
+            )
+        before = {task.name: task for task in await _store().list()}["wide"]
+        ordinary_rows = json.loads(await _dispatch(listing, base, kind=SCHEDULED_TASK_KIND))[
+            "objects"
+        ]
+        scoped_rows = json.loads(await _dispatch(listing, scoped, kind=SCHEDULED_TASK_KIND))[
+            "objects"
+        ]
+        closed_rows = json.loads(await _dispatch(listing, closed, kind=SCHEDULED_TASK_KIND))[
+            "objects"
+        ]
+        with pytest.raises(UnknownObject):
+            await get.handler(
+                scoped,
+                get.input_model.model_validate({"ref": f"{SCHEDULED_TASK_KIND}/wide"}),
+            )
+        with pytest.raises(UnknownObject):
+            await apply.handler(
+                scoped,
+                apply.input_model.model_validate(
+                    {
+                        "manifest": _program_manifest(
+                            "wide",
+                            paused=False,
+                            run_now=True,
+                        )
+                    }
+                ),
+            )
+        assert await GrantStore().disconnect(own, actor_member_id=creator) is True
+        assert "connections:" in await _dispatch(
+            get,
+            scoped,
+            ref=f"{SCHEDULED_TASK_KIND}/narrow",
+        )
+        await _dispatch(
+            delete,
+            scoped,
+            kind=SCHEDULED_TASK_KIND,
+            name="narrow",
+        )
+        after = {task.name: task for task in await _store().list()}["wide"]
+
+    assert {row["name"] for row in ordinary_rows} == {"closed", "narrow", "wide"}
+    assert {row["name"] for row in scoped_rows} == {"closed", "narrow"}
+    assert [row["name"] for row in closed_rows] == ["closed"]
+    assert after.paused is True
+    assert after.next_run_at == before.next_run_at
+    assert after.last_run_at is None
+
+
+async def test_an_internet_scoped_turn_cannot_manage_an_inheriting_task(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _speaker(workspace_id)
+    base = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id),
+        speaker_member_id=creator,
+    )
+    restricted = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={"runtime_config": TurnRuntimeConfig(internet_access=False)}
+        ),
+    )
+    apply = _object_tool("object_apply")
+    listing = _object_tool("object_list")
+    get = _object_tool("object_get")
+    delete = _object_tool("object_delete")
+    with ws(workspace_id), agent(agent_id):
+        for ctx, name in ((base, "inheriting"), (restricted, "closed")):
+            await _dispatch(
+                apply,
+                ctx,
+                manifest=_program_manifest(
+                    name,
+                    schedule=DAILY_9AM,
+                    prompt="run",
+                    connections=[],
+                    paused=True,
+                ),
+            )
+        ordinary = json.loads(await _dispatch(listing, base, kind=SCHEDULED_TASK_KIND))["objects"]
+        narrowed = json.loads(await _dispatch(listing, restricted, kind=SCHEDULED_TASK_KIND))[
+            "objects"
+        ]
+        before = {task.name: task for task in await _store().list()}["inheriting"]
+        with pytest.raises(UnknownObject):
+            await get.handler(
+                restricted,
+                get.input_model.model_validate({"ref": f"{SCHEDULED_TASK_KIND}/inheriting"}),
+            )
+        with pytest.raises(UnknownObject):
+            await apply.handler(
+                restricted,
+                apply.input_model.model_validate(
+                    {
+                        "manifest": _program_manifest(
+                            "inheriting",
+                            paused=False,
+                            run_now=True,
+                        )
+                    }
+                ),
+            )
+        with pytest.raises(UnknownObject):
+            await delete.handler(
+                restricted,
+                delete.input_model.model_validate(
+                    {"kind": SCHEDULED_TASK_KIND, "name": "inheriting"}
+                ),
+            )
+        after = {task.name: task for task in await _store().list()}["inheriting"]
+
+    assert {row["name"] for row in ordinary} == {"closed", "inheriting"}
+    assert [row["name"] for row in narrowed] == ["closed"]
+    assert before.internet_access is None
+    assert after.paused is True
+    assert after.next_run_at == before.next_run_at
+
+
+async def test_a_fire_carries_the_creating_turn_runtime_scope(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _speaker(workspace_id)
+    connection_id = await _connection(workspace_id, agent_id, creator, "acct-own", shared=False)
+    connection_scope = (connection_id,)
+    base = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id),
+        speaker_member_id=creator,
+        grants=GrantStore(),
+    )
+    ctx = replace(
+        base,
+        turn=base.turn.model_copy(
+            update={
+                "runtime_config": TurnRuntimeConfig(
+                    connections=connection_scope,
+                    internet_access=False,
+                )
+            }
+        ),
+    )
+    invoker = AdmissionInvoker(
+        admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
+        workspace_id=workspace_id,
+    )
+    with ws(workspace_id), agent(agent_id):
+        await _dispatch(
+            _object_tool("object_apply"),
+            ctx,
+            manifest=_program_manifest(
+                "scoped",
+                schedule=DAILY_9AM,
+                prompt="run",
+                connections=[str(connection_id) for connection_id in connection_scope],
+                run_now=True,
+            ),
+        )
+        [stored] = await _store().list()
+        await ScheduledTaskRunner(ctx=_runner_ctx(invoker)).run()
+        [turn] = await _turns(conversation_id)
+    assert stored.internet_access is False
+    assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
+        connections=connection_scope,
+        internet_access=False,
+    )
+
+
+async def test_a_task_row_without_a_scope_reads_as_no_connections(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        task = await _store().create(
+            conversation_id,
+            "outgoing",
+            DAILY_9AM,
+            "run",
+            "",
+            datetime.now(UTC),
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(schedule_table)
+                .where(schedule_table.c.id == task.id)
+                .values(connections=None)
+            )
+        [stored] = await _store().list()
+    assert stored.connections == ()
+
+
+async def test_a_task_with_inherited_internet_scope_uses_the_agent_policy(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _speaker(workspace_id)
+    with ws(workspace_id), agent(agent_id):
+        task = await _store().create(
+            conversation_id,
+            "outgoing",
+            DAILY_9AM,
+            "run",
+            "",
+            datetime.now(UTC) - timedelta(minutes=1),
+            created_by_member_id=creator,
+        )
+        async with workspace_tx() as connection:
+            assert (
+                await connection.execute(
+                    sa.select(schedule_table.c.internet_access).where(
+                        schedule_table.c.id == task.id
+                    )
+                )
+            ).scalar_one() is True
+        await ScheduledTaskRunner(
+            ctx=_runner_ctx(
+                AdmissionInvoker(
+                    admission=Admission(dbos=StubDbos(), durable_surfaces=frozenset()),
+                    workspace_id=workspace_id,
+                )
+            )
+        ).run()
+        [turn] = await _turns(conversation_id)
+    assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
+        connections=(), internet_access=None
+    )
+
+
+async def test_a_workspace_authority_task_fires_with_its_runtime_scope(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    with ws(workspace_id), agent(agent_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(schedule_table).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    name="workspace-task",
+                    created_by_member_id=None,
+                    schedule=DAILY_9AM,
+                    prompt="run",
+                    description="",
+                    next_run_at=datetime.now(UTC) - timedelta(minutes=1),
+                    last_run_at=None,
+                    expires_at=None,
+                    last_turn_id=None,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    paused=False,
+                    connections=[],
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await ScheduledTaskRunner(
+            ctx=_runner_ctx(
+                AdmissionInvoker(
+                    admission=Admission(dbos=dbos, durable_surfaces=frozenset()),
+                    workspace_id=workspace_id,
+                )
+            )
+        ).run()
+        [remaining] = await _store().list()
+        [turn] = await _turns(conversation_id)
+
+    assert remaining.created_by_member_id is None
+    assert remaining.last_run_at is not None
+    assert turn["speaker_member_id"] is None
+    assert turn["on_behalf_of_member_id"] is None
+    assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
+        connections=(), internet_access=False
+    )
+    assert dbos.enqueued == [str(turn["id"])]

@@ -81,8 +81,11 @@ from ufo.runtime.surfaces import hub_tail
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
+    AskQuestion,
+    AskUserInput,
     CredentialPrompt,
     CredentialRequest,
+    QuestionOption,
     TerminalFrame,
     Usage,
 )
@@ -216,6 +219,79 @@ def test_pending_credential_prompts_render_individually() -> None:
         b"ask\t>\n",
     )
     assert directives_for(done, streamed=True) == (b"ask\t>\n",)
+
+
+def test_a_terminal_renders_a_structured_permission_question_for_its_target() -> None:
+    target_member_id = uuid4()
+    question = AskUserInput(
+        title="Permission required",
+        questions=(
+            AskQuestion(
+                question="Allow this request?",
+                options=(
+                    QuestionOption(label="Allow"),
+                    QuestionOption(label="Deny"),
+                    QuestionOption(label="Always Allow"),
+                ),
+            ),
+        ),
+        target_member_id=target_member_id,
+    )
+
+    assert directives_for(
+        Terminal(frame=TerminalFrame(status="done", question=question)),
+        streamed=True,
+        viewer_member_id=target_member_id,
+    ) == (
+        b"say\tPermission required\n",
+        b"choose\tAllow this request?\tAllow\tDeny\tAlways Allow\n",
+        b"ask\t>\n",
+    )
+
+
+def test_a_terminal_hides_a_structured_permission_question_from_another_member() -> None:
+    question = AskUserInput(
+        title="Permission required",
+        questions=(AskQuestion(question="Allow this request?"),),
+        target_member_id=uuid4(),
+    )
+
+    assert directives_for(
+        Terminal(frame=TerminalFrame(status="done", question=question)),
+        streamed=True,
+        viewer_member_id=uuid4(),
+    ) == (b"ask\t>\n",)
+
+
+def test_a_terminal_preserves_structured_question_answer_modes() -> None:
+    question = AskUserInput(
+        title="Access details",
+        questions=(
+            AskQuestion(
+                question="Explain access",
+                options=(QuestionOption(label="A suggestion"),),
+                multi_select=True,
+                free_text_only=True,
+            ),
+            AskQuestion(
+                question="Select services",
+                options=(
+                    QuestionOption(label="Mail"),
+                    QuestionOption(label="Calendar"),
+                ),
+                multi_select=True,
+            ),
+        ),
+    )
+
+    assert directives_for(
+        Terminal(frame=TerminalFrame(status="done", question=question)), streamed=True
+    ) == (
+        b"say\tAccess details\n",
+        b"choose\tExplain access\n",
+        b"choose_many\tSelect services\tMail\tCalendar\n",
+        b"ask\t>\n",
+    )
 
 
 async def test_stream_gates_each_secret_prompt_on_the_pending_check() -> None:
@@ -2140,6 +2216,7 @@ async def _seed_done_turn(
     sender: str | None = None,
     seq: int = 1,
     reply: str = "ok",
+    question: AskUserInput | None = None,
 ) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
@@ -2155,12 +2232,72 @@ async def _seed_done_turn(
                 admission_source=admission_source,
                 speaker_member_id=speaker_member_id,
                 context=None if sender is None else {"sender": sender},
-                terminal=TerminalFrame(status="done", text=reply).model_dump(mode="json"),
+                terminal=TerminalFrame(status="done", text=reply, question=question).model_dump(
+                    mode="json"
+                ),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
     return turn_id
+
+
+async def test_a_joined_terminal_routes_a_targeted_question_to_its_member(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    owner = await _seed_member(workspace_id, "owner@example.com")
+    await _seed_member(workspace_id, "peer@example.com")
+    main = await _main_agent_id(workspace_id)
+    shared = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="slack",
+        queue_key="C1:1.0",
+        audience="shared",
+        member_id=None,
+        title="Deploy approval",
+        surface_label="#eng",
+    )
+    question = AskUserInput(
+        title="Permission required",
+        questions=(
+            AskQuestion(
+                question="Allow this request?",
+                options=(QuestionOption(label="Allow"), QuestionOption(label="Deny")),
+            ),
+        ),
+        target_member_id=owner,
+    )
+    await _seed_done_turn(
+        workspace_id,
+        shared,
+        main,
+        inbound="Deploy it",
+        speaker_member_id=owner,
+        reply="Waiting for a decision.",
+        question=question,
+    )
+
+    async def open_as(email: str) -> list[list[str]]:
+        token = _mint(SECRET, workspace_id, email, _future())
+        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+            response = await client.post(
+                f"/surface/ufo/conversation/{shared}",
+                content=b"",
+                headers={"authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 200
+        return _lines(response.content)
+
+    target_lines = await open_as("owner@example.com")
+    peer_lines = await open_as("peer@example.com")
+
+    assert ["say", "Permission required"] in target_lines
+    assert ["choose", "Allow this request?", "Allow", "Deny"] in target_lines
+    assert ["say", "Permission required"] not in peer_lines
+    assert not any(line[0] in {"choose", "choose_many"} for line in peer_lines)
+    assert ["say", "Waiting for a decision."] in peer_lines
 
 
 async def _seed_agent(

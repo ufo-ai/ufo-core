@@ -1375,6 +1375,11 @@ def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] |
                     "type": "button",
                     "text": {"type": "plain_text", "text": ASK_SUBMIT_TEXT},
                     "action_id": ASK_SUBMIT_ACTION_ID,
+                    **(
+                        {"value": str(question.target_member_id)}
+                        if question.target_member_id is not None
+                        else {}
+                    ),
                 }
             ],
         },
@@ -1804,7 +1809,7 @@ async def _admit_inbound(
         context=_turn_context(sender, source),
         speaker_member_id=member_id,
     )
-    await ctx.attach_member_files(admitted.turn_id, downloaded.keys)
+    await ctx.attach_member_files(admitted.turn_id, downloaded.keys, member_id=member_id)
     if inbound.is_dm:
         await _anchor_dm_thread(admitted, inbound.reply_root)
     if admitted.opened_run:
@@ -3629,6 +3634,7 @@ class AnswerSubmit:
     Slack takes a thread's parent rather than a reply's timestamp."""
 
     slack_user_id: str
+    target_member_id: UUID | None
     channel: str
     queue_key: str
     is_dm: bool
@@ -3677,6 +3683,12 @@ async def _handle_answer_submit(
     conversation_id = await ctx.find_conversation(interaction.queue_key)
     if conversation_id is None:
         return JSONResponse({"ok": True, "ignored": True})
+    if (
+        interaction.target_member_id is not None
+        and member_id is not None
+        and interaction.target_member_id != member_id
+    ):
+        return JSONResponse({"ok": True, "ignored": True})
     answered = tuple(answer for answer in interaction.answers if answer.answer)
     if not answered:
         _ephemeral_in_background(
@@ -3693,6 +3705,8 @@ async def _handle_answer_submit(
     )
     if member_id is None:
         member_id = await _resolve_member(ctx, interaction.slack_user_id, interaction.is_dm, sender)
+    if interaction.target_member_id is not None and interaction.target_member_id != member_id:
+        return JSONResponse({"ok": True, "ignored": True})
     if interaction.is_dm and member_id is not None:
         conversation_id = await ctx.conversation_for(
             interaction.queue_key, conversation_audience(member_id)
@@ -3864,6 +3878,11 @@ def _to_interaction(raw: bytes, identity: SlackIdentity) -> AnswerSubmit | Conne
         )
     if action_id != ASK_SUBMIT_ACTION_ID:
         return None
+    raw_target = action.get("value")
+    try:
+        target_member_id = UUID(raw_target) if isinstance(raw_target, str) else None
+    except ValueError:
+        return None
     raw_blocks = message.get("blocks")
     blocks = tuple(
         block
@@ -3877,6 +3896,7 @@ def _to_interaction(raw: bytes, identity: SlackIdentity) -> AnswerSubmit | Conne
     is_dm = channel_id.startswith("D")
     return AnswerSubmit(
         slack_user_id=user_id,
+        target_member_id=target_member_id,
         channel=channel_id,
         queue_key=slack_thread_key(channel_id, thread_ts or message_ts, is_dm),
         is_dm=is_dm,

@@ -2,9 +2,10 @@
 member's newest durable conversation through the real admission seam — which registers the writeback
 the poller posts — records that turn on the rows, refuses a second message in the same triage turn,
 falls back to the portal for a member with no durable conversation, and is held to the app's own
-provision. The relay turn is the loop fence: `notify` inside it refuses, and the next drain tick
-founds nothing."""
+provision. The append-only delivery identity is the loop fence: `notify` inside its relay refuses,
+and the next drain tick founds nothing."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -22,7 +23,11 @@ from ufo_ext_app_notification.deliver import (
     ONE_DELIVERY_PER_TURN,
     PORTAL_ONLY,
     RELAY_INSTRUCTION,
+    RELAY_KEY,
+    RELAY_SOURCE,
     DeliverInput,
+    _delivery_request_digest,
+    _names,
     deliver,
 )
 from ufo_ext_app_notification.drain import DRAIN_COOLDOWN_SECONDS, InboxDrain
@@ -38,24 +43,32 @@ from ufo_ext_app_notification.notify_tool import (
 from ufo_ext_app_notification.store import (
     NOTIFICATION_FLAG,
     NOTIFICATION_KIND,
+    DeliveryDestination,
     NotificationStore,
     Posted,
 )
 from ufo_ext_app_notification.store import notification as notification_table
+from ufo_ext_app_notification.store import notification_delivery as notification_delivery_table
 
 from ufo.db import workspace_tx
+from ufo.harness.sandbox.session import RunToken
 from ufo.harness.untrusted import UNTRUSTED_CLOSE
 from ufo.host.ext.loader import turn_tools
+from ufo.runtime.access.egress_resolver import PerAgentRules
+from ufo.runtime.access.egress_rules import InternetRule
+from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.ext.context import ExtensionContext, context_for
-from ufo.runtime.queue import _agent_actions, _agent_tools
+from ufo.runtime.queue import _agent_actions, _agent_tools, _load_turn
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
-from ufo.runtime.tools.context import SpawnResult, ToolContext
+from ufo.runtime.tools.context import SpawnResult, ToolContext, ToolResult
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn
+from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn, TurnRuntimeConfig
 from ufo.sdk.surfaces import SILENCE_SENTINEL, is_silence_sentinel
+from ufo.sdk.untrusted import wall
 
 pytestmark = pytest.mark.usefixtures("database_url")
 
@@ -65,9 +78,12 @@ DURABLE = frozenset({"slack"})
 @dataclass
 class StubDbos:
     enqueued: list[str] = field(default_factory=list)
+    on_enqueue: Callable[[str], Awaitable[None]] | None = None
 
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
         self.enqueued.append(turn_id)
+        if self.on_enqueue is not None:
+            await self.on_enqueue(turn_id)
 
 
 async def _unavailable_spawn(
@@ -90,6 +106,7 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
                 id=member_id,
                 workspace_id=workspace_id,
                 email="who@example.com",
+                seated_at=sa.func.now(),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -172,6 +189,17 @@ def _ext(workspace_id: UUID, dbos: StubDbos) -> ExtensionContext:
     return context_for(NAME, frozenset(), invoker=invoker, member_context_read=True)
 
 
+async def _connection(workspace_id: UUID, agent_id: UUID, member_id: UUID, account: str) -> UUID:
+    with ws(workspace_id), agent(agent_id):
+        return await GrantStore().record(
+            provider="hub",
+            account_id=account,
+            host="api.hub.test",
+            grantor_member_id=member_id,
+            shared=False,
+        )
+
+
 def _tool_ctx(
     ext: ExtensionContext,
     workspace_id: UUID,
@@ -180,6 +208,7 @@ def _tool_ctx(
     *,
     turn_id: UUID | None = None,
     conversation_id: UUID | None = None,
+    runtime_config: TurnRuntimeConfig | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=None,  # type: ignore[arg-type]
@@ -194,6 +223,7 @@ def _tool_ctx(
             inbound="triage",
             created_at=datetime(2026, 9, 4, tzinfo=UTC),
             on_behalf_of_member_id=member_id,
+            runtime_config=runtime_config,
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
@@ -205,7 +235,12 @@ def _tool_ctx(
 
 
 async def _raise_and_drain(
-    ext: ExtensionContext, inbox_id: UUID, member_id: UUID, main_id: UUID, *subjects: str
+    ext: ExtensionContext,
+    inbox_id: UUID,
+    member_id: UUID,
+    main_id: UUID,
+    *subjects: str,
+    runtime_config: TurnRuntimeConfig | None = None,
 ) -> tuple[UUID, tuple[str, ...]]:
     """Rows raised for the member and read by one drain turn; returns that turn and the refs."""
     store = NotificationStore(ext)
@@ -219,6 +254,7 @@ async def _raise_and_drain(
             agent_name="assistant",
             turn_id=uuid4(),
             conversation_id=uuid4(),
+            runtime_config=runtime_config,
         )
         assert isinstance(posted, Posted)
     await InboxDrain(ctx=ext).run()
@@ -247,6 +283,15 @@ async def _turns(workspace_id: UUID, conversation_id: UUID) -> list[sa.RowMappin
         )
 
 
+async def _turn(turn_id: UUID) -> sa.RowMapping:
+    async with workspace_tx() as connection:
+        return (
+            (await connection.execute(sa.select(tables.turn).where(tables.turn.c.id == turn_id)))
+            .mappings()
+            .one()
+        )
+
+
 async def _writebacks(turn_id: UUID) -> list[sa.RowMapping]:
     async with workspace_tx() as connection:
         return list(
@@ -267,6 +312,21 @@ async def _rows(workspace_id: UUID) -> list[sa.RowMapping]:
                 await connection.execute(
                     sa.select(notification_table).where(
                         notification_table.c.workspace_id == workspace_id
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+
+async def _deliveries(workspace_id: UUID) -> list[sa.RowMapping]:
+    async with workspace_tx() as connection:
+        return list(
+            (
+                await connection.execute(
+                    sa.select(notification_delivery_table).where(
+                        notification_delivery_table.c.workspace_id == workspace_id
                     )
                 )
             )
@@ -321,6 +381,112 @@ async def test_deliver_founds_one_relay_turn_in_the_members_newest_durable_conve
     assert second.content[0].text == ONE_DELIVERY_PER_TURN
 
 
+async def test_scoped_notifications_keep_exact_authority_through_triage_and_delivery(
+    db: None,
+) -> None:
+    workspace_id, member_id, main_id, inbox_id = await _seed()
+    allowed = await _connection(workspace_id, main_id, member_id, "allowed")
+    outside = await _connection(workspace_id, main_id, member_id, "outside")
+    dm = await _spoke_on(workspace_id, main_id, member_id, "slack")
+    dbos = StubDbos()
+    ext = _ext(workspace_id, dbos)
+    allowed_config = TurnRuntimeConfig(internet_access=False, connections=(allowed,))
+    outside_config = TurnRuntimeConfig(connections=(outside,))
+    with ws(workspace_id), agent(main_id):
+        await notify(
+            _tool_ctx(
+                ext,
+                workspace_id,
+                main_id,
+                member_id,
+                runtime_config=allowed_config,
+            ),
+            NotifyInput(subject="source/allowed", body="allowed changed"),
+        )
+        await notify(
+            _tool_ctx(
+                ext,
+                workspace_id,
+                main_id,
+                member_id,
+                runtime_config=outside_config,
+            ),
+            NotifyInput(subject="source/outside", body="outside changed"),
+        )
+    with ws(workspace_id), agent(inbox_id):
+        await InboxDrain(ctx=ext).run()
+        rows = {row.subject: row for row in await NotificationStore(ext).rows()}
+        allowed_row = rows["source/allowed"]
+        outside_row = rows["source/outside"]
+        assert allowed_row.triaged_turn_id is not None
+        triage = await _turn(allowed_row.triaged_turn_id)
+        triage_config = TurnRuntimeConfig.model_validate(triage["runtime_config"])
+        unrestricted = await deliver(
+            _tool_ctx(ext, workspace_id, inbox_id, member_id),
+            DeliverInput(refs=(f"{NOTIFICATION_KIND}/{allowed_row.name}",), text="allowed changed"),
+        )
+        refused = await deliver(
+            _tool_ctx(
+                ext,
+                workspace_id,
+                inbox_id,
+                member_id,
+                turn_id=allowed_row.triaged_turn_id,
+                runtime_config=triage_config,
+            ),
+            DeliverInput(refs=(f"{NOTIFICATION_KIND}/{outside_row.name}",), text="outside changed"),
+        )
+        delivered = await deliver(
+            _tool_ctx(
+                ext,
+                workspace_id,
+                inbox_id,
+                member_id,
+                turn_id=allowed_row.triaged_turn_id,
+                runtime_config=triage_config,
+            ),
+            DeliverInput(refs=(f"{NOTIFICATION_KIND}/{allowed_row.name}",), text="allowed changed"),
+        )
+        [_hello, relay] = await _turns(workspace_id, dm)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == relay["id"])
+                .values(status="running", updated_at=sa.func.now())
+            )
+        settled = {row.subject: row for row in await NotificationStore(ext).rows()}
+
+    relay_config = TurnRuntimeConfig.model_validate(relay["runtime_config"])
+    relay_ctx = replace(
+        _tool_ctx(
+            ext,
+            workspace_id,
+            main_id,
+            member_id,
+            turn_id=relay["id"],
+            conversation_id=dm,
+            runtime_config=relay_config,
+        ),
+        grants=GrantStore(),
+    )
+    with ws(workspace_id), agent(main_id):
+        accounts = await relay_ctx.connector_accounts("hub")
+    rules = await PerAgentRules(base=(), grants=GrantStore(), internet=(InternetRule(),)).resolve(
+        RunToken(workspace_id, relay["id"], MemberAuthority(member_id))
+    )
+
+    assert triage_config == allowed_config
+    assert unrestricted.is_error is True
+    assert unrestricted.content[0].text == NOTHING_TO_DELIVER
+    assert refused.is_error is True
+    assert refused.content[0].text == NOTHING_TO_DELIVER
+    assert delivered.is_error is False
+    assert relay_config == allowed_config
+    assert accounts == ("allowed",)
+    assert InternetRule() not in rules
+    assert settled["source/outside"].delivered_turn_id is None
+
+
 async def test_the_relay_turn_cannot_notify_and_the_next_tick_founds_nothing(db: None) -> None:
     """The loop fence: a delivery cannot raise a notification about itself, and with every row
     read the drain has nothing to wake."""
@@ -352,10 +518,233 @@ async def test_the_relay_turn_cannot_notify_and_the_next_tick_founds_nothing(db:
     assert len(rows) == 1
 
 
+async def test_a_fold_during_relay_admission_keeps_the_new_occurrence_and_the_loop_fence(
+    db: None,
+) -> None:
+    workspace_id, member_id, main_id, inbox_id = await _seed()
+    dm = await _spoke_on(workspace_id, main_id, member_id, "slack")
+    first_connection, second_connection = uuid4(), uuid4()
+    first_config = TurnRuntimeConfig(internet_access=False, connections=(first_connection,))
+    second_config = TurnRuntimeConfig(internet_access=False, connections=(second_connection,))
+    dbos = StubDbos()
+    ext = _ext(workspace_id, dbos)
+    store = NotificationStore(ext)
+    refused_in_relay: list[ToolResult] = []
+    with ws(workspace_id):
+        with agent(inbox_id):
+            triage_turn, refs = await _raise_and_drain(
+                ext,
+                inbox_id,
+                member_id,
+                main_id,
+                "source/crm",
+                runtime_config=first_config,
+            )
+
+        async def fold_while_enqueuing(relay_turn_id: str) -> None:
+            loaded, loaded_agent, loaded_audience = await _load_turn(UUID(relay_turn_id))
+            relay_ctx = replace(
+                _tool_ctx(
+                    ext,
+                    workspace_id,
+                    main_id,
+                    member_id,
+                    turn_id=loaded.id,
+                    conversation_id=dm,
+                    runtime_config=loaded.runtime_config,
+                ),
+                turn=loaded,
+                agent=loaded_agent,
+                audience=loaded_audience,
+            )
+            with agent(main_id):
+                refused_in_relay.append(
+                    await notify(
+                        relay_ctx,
+                        NotifyInput(subject="relay/loop", body="delivery started"),
+                    )
+                )
+            await store.post(
+                to_agent_id=inbox_id,
+                member_id=member_id,
+                subject="source/crm",
+                body="new occurrence",
+                agent_id=main_id,
+                agent_name="assistant",
+                turn_id=uuid4(),
+                conversation_id=dm,
+                runtime_config=second_config,
+            )
+
+        dbos.on_enqueue = fold_while_enqueuing
+        first = await deliver(
+            _tool_ctx(
+                ext,
+                workspace_id,
+                inbox_id,
+                member_id,
+                turn_id=triage_turn,
+                runtime_config=first_config,
+            ),
+            DeliverInput(refs=refs, text="first occurrence"),
+        )
+        dbos.on_enqueue = None
+        [folded] = await store.rows()
+        [first_delivery] = await _deliveries(workspace_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(notification_table)
+                .where(notification_table.c.id == folded.id)
+                .values(
+                    triaged_at=datetime.now(UTC) - timedelta(seconds=DRAIN_COOLDOWN_SECONDS + 1)
+                )
+            )
+        await InboxDrain(ctx=ext).run()
+        [retried] = await store.rows()
+        assert retried.triaged_turn_id is not None
+        second = await deliver(
+            _tool_ctx(
+                ext,
+                workspace_id,
+                inbox_id,
+                member_id,
+                turn_id=retried.triaged_turn_id,
+                runtime_config=second_config,
+            ),
+            DeliverInput(refs=refs, text="new occurrence"),
+        )
+        [settled] = await store.rows()
+
+    [refused] = refused_in_relay
+    assert refused.is_error is True
+    assert refused.content[0].text == NOTIFY_INSIDE_A_DELIVERY
+    assert first.is_error is False
+    assert folded.occurrences == 2
+    assert folded.body == "new occurrence"
+    assert folded.runtime_config == second_config
+    assert folded.delivered_turn_id is None
+    assert first_delivery["relay_turn_id"] is not None
+    assert second.is_error is False
+    assert settled.delivered_turn_id not in (None, first_delivery["relay_turn_id"])
+
+
+async def test_an_exact_delivery_replay_reuses_the_relay_and_finishes_the_mark(db: None) -> None:
+    workspace_id, member_id, main_id, inbox_id = await _seed()
+    dm = await _spoke_on(workspace_id, main_id, member_id, "slack")
+    dbos = StubDbos()
+    ext = _ext(workspace_id, dbos)
+    with ws(workspace_id), agent(inbox_id):
+        triage_turn, refs = await _raise_and_drain(ext, inbox_id, member_id, main_id, "source/crm")
+        ctx = _tool_ctx(ext, workspace_id, inbox_id, member_id, turn_id=triage_turn)
+        request = DeliverInput(refs=refs, text="Acme CRM changed")
+        first = await deliver(ctx, request)
+        [_hello, relay] = await _turns(workspace_id, dm)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(notification_table)
+                .where(notification_table.c.workspace_id == workspace_id)
+                .values(delivered_turn_id=None, delivered_surface=None)
+            )
+        replay = await deliver(ctx, request)
+        turns = await _turns(workspace_id, dm)
+        [row] = await _rows(workspace_id)
+        [delivery] = await _deliveries(workspace_id)
+
+    assert first.is_error is False
+    assert replay.is_error is False
+    assert len(turns) == 2
+    assert delivery["relay_turn_id"] == relay["id"]
+    assert row["delivered_turn_id"] == relay["id"]
+
+
+@pytest.mark.parametrize(
+    "archive_destination", [False, True], ids=["newer-reach", "archived-destination"]
+)
+async def test_a_crash_replay_uses_the_reserved_destination_after_reach_changes(
+    db: None, archive_destination: bool
+) -> None:
+    workspace_id, member_id, main_id, inbox_id = await _seed()
+    original_conversation = await _spoke_on(
+        workspace_id,
+        main_id,
+        member_id,
+        "slack",
+        spoke_at=datetime.now(UTC) - timedelta(days=1),
+    )
+    dbos = StubDbos()
+    ext = _ext(workspace_id, dbos)
+    store = NotificationStore(ext)
+    with ws(workspace_id), agent(inbox_id):
+        triage_turn, refs = await _raise_and_drain(ext, inbox_id, member_id, main_id, "source/crm")
+        ctx = _tool_ctx(ext, workspace_id, inbox_id, member_id, turn_id=triage_turn)
+        request = DeliverInput(refs=refs, text="Acme CRM changed")
+        rows = await store.deliverable(member_id, _names(refs))
+        [reach] = await ext.member_reach(member_id)
+        delivery_key = RELAY_KEY.format(turn=triage_turn.hex)
+        destination = await store.prepare_delivery(
+            delivery_key,
+            _delivery_request_digest(rows, request.text),
+            DeliveryDestination(
+                conversation_id=reach.conversation_id,
+                agent_id=reach.agent_id,
+                surface=reach.surface,
+            ),
+        )
+        assert destination is not None
+        original_relay = await ext.invoke(
+            destination.conversation_id,
+            destination.agent_id,
+            wall(RELAY_SOURCE, request.text) + RELAY_INSTRUCTION,
+            delivery_key,
+            authority=MemberAuthority(member_id),
+            holds_work_already_done=True,
+            as_scheduled=True,
+            runtime_config=ctx.turn.runtime_config,
+        )
+        assert original_relay is not None
+        [unbound] = await _deliveries(workspace_id)
+        newer_conversation: UUID | None = None
+        if archive_destination:
+            async with workspace_tx() as connection:
+                await connection.execute(
+                    sa.update(tables.agent)
+                    .where(tables.agent.c.id == main_id)
+                    .values(
+                        name=f"~archived-{main_id}",
+                        archived_name="assistant",
+                        archived_at=sa.func.now(),
+                        is_main=False,
+                    )
+                )
+        else:
+            newer_conversation = await _spoke_on(workspace_id, main_id, member_id, "slack")
+        current_reaches = await ext.member_reach(member_id)
+        result = await deliver(ctx, request)
+        original_turns = await _turns(workspace_id, original_conversation)
+        newer_turns = (
+            [] if newer_conversation is None else await _turns(workspace_id, newer_conversation)
+        )
+        [bound] = await _deliveries(workspace_id)
+        [row] = await _rows(workspace_id)
+
+    assert str(original_relay) in dbos.enqueued
+    assert unbound["relay_turn_id"] is None
+    assert result.is_error is False
+    assert len(original_turns) == 2
+    if archive_destination:
+        assert current_reaches == ()
+    else:
+        assert len(newer_turns) == 1
+        assert current_reaches[0].conversation_id == newer_conversation
+    assert bound["conversation_id"] == original_conversation
+    assert bound["surface"] == "slack"
+    assert bound["relay_turn_id"] == original_relay
+    assert row["delivered_turn_id"] == original_relay
+
+
 async def test_a_second_deliver_in_any_turn_founds_nothing_and_marks_nothing(db: None) -> None:
-    """The fence is the relay turn itself, not the triage stamp: a turn that triaged nothing — the
-    agent answering a member in its own conversation — delivers once, and its second call meets the
-    relay the first founded, refuses, and leaves its rows undelivered."""
+    """The delivery identity is the calling turn, not the triage stamp: a turn that triaged
+    nothing delivers once, and a different second request is refused."""
     workspace_id, member_id, main_id, inbox_id = await _seed()
     dm = await _spoke_on(workspace_id, main_id, member_id, "slack")
     dbos = StubDbos()
@@ -425,6 +814,7 @@ async def test_a_subject_raised_again_after_delivery_is_delivered_again(db: None
             agent_name="assistant",
             turn_id=uuid4(),
             conversation_id=uuid4(),
+            runtime_config=None,
         )
         [reopened] = await _rows(workspace_id)
         async with workspace_tx() as connection:

@@ -57,7 +57,13 @@ from ufo.sdk.authority import MemberAuthority
 from ufo.sdk.balance import read_headroom
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
-from ufo.sdk.context import ExtensionContext, ScopedStore, SourceReader, WorkspaceAgent
+from ufo.sdk.context import (
+    CONNECTION_SCOPE_MAX,
+    ExtensionContext,
+    ScopedStore,
+    SourceReader,
+    WorkspaceAgent,
+)
 from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.flags import flag_enabled
 from ufo.sdk.http import (
@@ -133,6 +139,7 @@ from ufo.sdk.objects import (
 from ufo.sdk.sandbox import shipped_app_slug
 from ufo.sdk.surfaces import (
     MEMBER_ADMISSION,
+    PORTAL_SURFACE,
     WORKSPACE_WRITE_MAX_BYTES,
     AgentSummary,
     BlobStore,
@@ -191,7 +198,12 @@ from ufo_ext_web.anthropic_login import (
 from ufo_ext_web.anthropic_login import (
     verified_key as anthropic_verified_key,
 )
-from ufo_ext_web.audience import WebAudience, granted_emails, web_audience, web_extension
+from ufo_ext_web.audience import (
+    WebAudience,
+    granted_emails,
+    web_audience,
+    web_extension,
+)
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
 from ufo_ext_web.openai_login import (
     DEVICE_COOKIE,
@@ -222,7 +234,6 @@ from ufo_ext_web.starters import (
     StarterCache,
 )
 
-SURFACE_WEB = "web"
 SOURCE = "ufo web"
 TOKEN_FIELD = "token"
 MAX_INBOUND_CHARS = 200_000
@@ -1157,7 +1168,11 @@ async def _open_conversation(
     """Open a conversation under `queue_key`, its chat row written first, keyed by the id the
     conversation is then created with — a crash between the two leaves an inert row, never a
     conversation the rail must carry rowless. A lost creation race on the queue key lands on the
-    surviving conversation, whose winner wrote its row and named it.
+    surviving conversation, whose winner wrote its row and named it, with the audience the winner
+    left it: asking for the member's audience does not narrow a conversation already shared.
+
+    A portal chat is its member's at birth. Its member can share it with the workspace from the
+    title's visibility control (`share_conversation`), which is a turn like any other act.
 
     What the conversation is called is core's, so the opening turn names it and the rail, the index
     and this reply all read the one string. The chat row is the (agent, member) binding this
@@ -1169,7 +1184,11 @@ async def _open_conversation(
         ChatRecord(agent_id=agent_id, email=email).model_dump(mode="json"),
     )
     conversation_id = await ctx.conversation_for(
-        queue_key, conversation_audience(member_id), agent_id=agent_id, conversation_id=minted
+        queue_key,
+        conversation_audience(member_id),
+        agent_id=agent_id,
+        conversation_id=minted,
+        preserve_existing_audience=True,
     )
     if conversation_id != minted:
         await store.delete(_chat_row_key(minted))
@@ -1244,7 +1263,7 @@ async def _member_chat(
     if (
         own
         and agent_visible
-        and conversation.summary.surface == SURFACE_WEB
+        and conversation.summary.surface == PORTAL_SURFACE
         and conversation.summary.queue_key.startswith(SPOKEN_ROOM_PREFIXES)
     ):
         return conversation
@@ -1482,6 +1501,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(
         {
             "member": {
+                "id": str(member_id),
                 "email": email,
                 "admin": audience.admin,
                 "workspace_id": str(ctx.workspace_id),
@@ -2012,7 +2032,7 @@ async def _admit_chat(
         comment=target.comment,
         runtime_config=inbound.runtime_config,
     )
-    await ctx.attach_member_files(admitted.turn_id, blob_keys)
+    await ctx.attach_member_files(admitted.turn_id, blob_keys, member_id=member_id)
     payload: dict[str, str | bool | None] = {
         "turn_id": str(admitted.turn_id),
         "conversation_id": str(target.conversation_id),
@@ -2064,6 +2084,13 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         return target
     if inbound.stop is not None:
         return await _stop_chat(ctx, request, target.conversation_id, inbound.stop)
+    if inbound.answer is not None and not await ctx.question_answerable_by(
+        target.conversation_id,
+        inbound.answer[0],
+        inbound.answer[1],
+        member_id,
+    ):
+        return Response("This question is not available to you.", status_code=403)
     return await _admit_chat(ctx, request, target, inbound, member_id, email)
 
 
@@ -3522,9 +3549,17 @@ async def connections(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, _email, audience, agent_id = gated
+    member_id, email, audience, agent_id = gated
     listed = await ctx.list_agent_connections(agent_id, member_id, admin=audience.admin)
-    return JSONResponse({"connections": [entry.model_dump(mode="json") for entry in listed]})
+    connection_scope = sorted(
+        (entry.id for entry in listed if entry.shared or entry.owner_email == email), key=str
+    )[:CONNECTION_SCOPE_MAX]
+    return JSONResponse(
+        {
+            "connections": [entry.model_dump(mode="json") for entry in listed],
+            "connection_scope": [str(connection_id) for connection_id in connection_scope],
+        }
+    )
 
 
 async def connection_pool(ctx: SurfaceContext, request: Request) -> Response:
@@ -3610,7 +3645,10 @@ def _conversation_row(
     permalink of a Slack thread's first message, so a row leads back out to the thread as well as
     into the transcript, and the transcript itself states the one way back. Every surface defines
     its own, and a portal chat's names the portal, so the row states it and the screen decides which
-    surface's is a link worth drawing."""
+    surface's is a link worth drawing.
+
+    `mine` is whether the viewer is in the conversation — founded it or spoke in it — which is what
+    a screen sorts their own threads by, never whose audience it carries."""
     return {
         "id": str(entry.summary.id),
         "agent": agent,
@@ -3618,6 +3656,7 @@ def _conversation_row(
         "surface_label": entry.surface_label,
         "audience": entry.audience,
         "member_email": entry.summary.member_email,
+        "mine": entry.mine,
         "description": entry.title,
         "source": entry.source,
         "speakers": [who.sender or who.email for who in entry.speakers],

@@ -553,6 +553,39 @@ async def test_conversation_for_takes_a_caller_named_id_only_at_creation(
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_conversation_for_can_preserve_an_existing_audience(db: None, tmp_path) -> None:
+    workspace_id, _, member_id = await _seed(member_email="bee@example.com")
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    shared = await context.conversation_for("C1:1.0", SHARED_AUDIENCE)
+
+    assert (
+        await context.conversation_for(
+            "C1:1.0",
+            conversation_audience(member_id),
+            preserve_existing_audience=True,
+        )
+        == shared
+    )
+    private = await context.conversation_for(
+        "D1", conversation_audience(member_id), preserve_existing_audience=True
+    )
+    async with workspace_tx() as connection:
+        audiences = (
+            await connection.execute(
+                sa.select(
+                    tables.conversation.c.id,
+                    tables.conversation.c.audience,
+                    tables.conversation.c.member_id,
+                ).where(tables.conversation.c.id.in_((shared, private)))
+            )
+        ).all()
+    assert {(row.id, row.audience, row.member_id) for row in audiences} == {
+        (shared, str(SHARED_AUDIENCE), None),
+        (private, str(conversation_audience(member_id)), member_id),
+    }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_admit_queues_a_turn_and_registers_a_writeback(db: None, tmp_path) -> None:
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     dbos = StubDbos()
@@ -3350,16 +3383,31 @@ async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path)
         audience=str(SHARED_AUDIENCE),
         member_id=None,
     )
+    founded = await _seed_conversation(
+        workspace_id, agent_id, queue_key="founded", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    await _seed_conversation_turn(
+        workspace_id, founded, agent_id, seq=1, inbound="mine to start", speaker_member_id=member_id
+    )
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
 
     listed = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
-    assert {entry.summary.id for entry in listed} == {mine, shared}
+    assert {entry.summary.id for entry in listed} == {mine, shared, founded}
     assert all(entry.readable for entry in listed)
     assert {entry.summary.member_email for entry in listed} == {"m@example.com", None}
+    assert {entry.summary.id for entry in listed if entry.mine} == {mine, founded}
 
     as_admin = await context.list_agent_conversations(agent_id, member_id, admin=True, limit=50)
-    assert {entry.summary.id for entry in as_admin} == {mine, shared, theirs, room, foreign}
+    assert {entry.summary.id for entry in as_admin} == {
+        mine,
+        shared,
+        founded,
+        theirs,
+        room,
+        foreign,
+    }
     assert {entry.summary.id for entry in as_admin if not entry.readable} == {theirs, room, foreign}
+    assert {entry.summary.id for entry in as_admin if entry.mine} == {mine, founded}
     assert {entry.summary.id for entry in as_admin if entry.disclosable} == {theirs}
     by_id = {entry.summary.id: entry for entry in as_admin}
     assert by_id[mine].audience == str(conversation_audience(member_id))
@@ -3378,14 +3426,14 @@ async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path)
     lanes = await context.list_agent_conversations(
         agent_id, member_id, admin=False, limit=50, member_admitted=True
     )
-    assert lanes == ()
+    assert [entry.summary.id for entry in lanes] == [founded]
     await _seed_conversation_turn(
         workspace_id, mine, agent_id, seq=1, inbound="hello", speaker_member_id=member_id
     )
     spoken = await context.list_agent_conversations(
         agent_id, member_id, admin=False, limit=50, member_admitted=True
     )
-    assert [entry.summary.id for entry in spoken] == [mine]
+    assert {entry.summary.id for entry in spoken} == {mine, founded}
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

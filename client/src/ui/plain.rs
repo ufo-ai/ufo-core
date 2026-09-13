@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::{self, BufRead, Write};
 
 use crate::ui::retained::rollup_line;
@@ -123,6 +123,43 @@ impl Plain {
                 Some(options[number - 1].clone())
             }
             _ => Some(answer),
+        }
+    }
+
+    pub fn menu_many(&mut self, prompt: &str, options: &[String]) -> Option<String> {
+        self.line_break();
+        println!("{prompt}");
+        for (index, option) in options.iter().enumerate() {
+            println!("  {}) {option}", index + 1);
+        }
+        loop {
+            let answer = self.ask("Select numbers, separated by commas:")?;
+            if answer.is_empty() {
+                return None;
+            }
+            let selected = answer
+                .split(',')
+                .map(str::trim)
+                .map(|token| {
+                    token
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|number| number.checked_sub(1))
+                        .filter(|index| *index < options.len())
+                })
+                .collect::<Option<BTreeSet<_>>>();
+            let Some(selected) = selected else {
+                continue;
+            };
+            return Some(
+                options
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| selected.contains(index))
+                    .map(|(_, option)| option.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
         }
     }
 

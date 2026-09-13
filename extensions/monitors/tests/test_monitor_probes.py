@@ -10,6 +10,7 @@ is a counted skip, and an overdue monitor probes once instead of replaying a bac
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,6 +32,8 @@ from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import SANDBOX_HANDLE_SEP, ProbeTokenCodec, ProxyEndpoint
 from ufo.harness.sandbox.terminal import CLIENT_BACKEND
 from ufo.harness.untrusted import UNTRUSTED_OPEN
+from ufo.runtime.access.connectors import CliCredential
+from ufo.runtime.access.grants import GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import ExecutionAuthority, authority_from_member_id
 from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, context_for
@@ -47,6 +50,12 @@ pytestmark = [
 TOOL_NARRATION = "watching the run"
 MARKER = "probe-state.txt"
 PROBE = f"cat {MARKER}"
+
+
+@dataclass(frozen=True)
+class _NeverSecret:
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        raise AssertionError("the probe environment exports a sentinel, not the account token")
 
 
 @dataclass
@@ -156,13 +165,14 @@ async def _arm(
     command: str = PROBE,
     interval_minutes: int = 5,
     due: bool = True,
+    connections: tuple[UUID, ...] = (),
+    internet_access: Literal[False] | None = None,
 ) -> Monitor:
     now = datetime.now(UTC)
     row = await MonitorStore(ext).arm(
         conversation_id=conversation_id,
         agent_id=agent_id,
         name="ci-run",
-        audience=str(SHARED_AUDIENCE),
         command=command,
         interval_minutes=interval_minutes,
         deadline_at=now + timedelta(minutes=600),
@@ -172,6 +182,8 @@ async def _arm(
         created_by_member_id=member_id,
         baseline=baseline,
         next_probe_at=now - timedelta(seconds=1) if due else now + timedelta(minutes=5),
+        connections=connections,
+        internet_access=internet_access,
     )
     return row
 
@@ -237,13 +249,16 @@ async def test_a_probe_acts_as_the_member_who_armed_the_watch(
     await _probe_state(tmp_path, conversation_id, "queued\n")
     creator = member_id if armed_by_a_member else None
     env = ProbeEnv()
-    authorities: list[ExecutionAuthority] = []
+    asked: list[tuple[ExecutionAuthority, tuple[UUID, ...]]] = []
 
     async def recording(
-        conversation: UUID, probe_id: UUID, authority: ExecutionAuthority
+        conversation: UUID,
+        probe_id: UUID,
+        authority: ExecutionAuthority,
+        connections: tuple[UUID, ...],
     ) -> dict[str, str]:
-        authorities.append(authority)
-        return await env.exports(conversation, probe_id, authority)
+        asked.append((authority, connections))
+        return await env.exports(conversation, probe_id, authority, connections)
 
     sandboxes = _sandboxes(tmp_path)
     ext = context_for(
@@ -256,13 +271,23 @@ async def test_a_probe_acts_as_the_member_who_armed_the_watch(
         ),
     )
     with ws(workspace_id), agent(agent_id):
-        armed = await _arm(ext, conversation_id, agent_id, creator, baseline="queued\n")
+        scope = tuple(sorted((uuid4(), uuid4()), key=str))
+        armed = await _arm(
+            ext,
+            conversation_id,
+            agent_id,
+            creator,
+            baseline="queued\n",
+            connections=scope,
+            internet_access=False,
+        )
         await MonitorRunner(ctx=ext).run()
         row = await _row(armed.id)
 
-    assert authorities == [authority_from_member_id(creator)]
+    assert asked == [(authority_from_member_id(creator), scope)]
     assert row is not None
     assert row["probes_run"] == 1
+    assert row["internet_access"] is False
 
 
 async def test_a_quiet_tick_posts_nothing_and_counts_the_probe(db: None, tmp_path: Path) -> None:
@@ -289,6 +314,66 @@ async def test_a_quiet_tick_posts_nothing_and_counts_the_probe(db: None, tmp_pat
     assert row["claimed_by"] is None
     assert row["last_probe_at"] is not None
     assert row["next_probe_at"].replace(tzinfo=UTC) - tick_at > timedelta(minutes=4)
+
+
+async def test_a_probe_keeps_its_arming_scope_when_an_account_is_connected_later(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id, agent_id, conversation_id, member_id = await _seed()
+    store = GrantStore()
+    with ws(workspace_id), agent(agent_id):
+        listed = await store.record(
+            provider="hub",
+            account_id="acct-listed",
+            host="api.hub.test",
+            grantor_member_id=member_id,
+            shared=False,
+        )
+    expected = grant_sentinel("acct-listed")
+    sandboxes = _sandboxes(tmp_path)
+    ext = context_for(
+        NAME,
+        frozenset(),
+        invoker=_invoker(workspace_id, StubDbos()),
+        sandboxes=sandboxes,
+        probes=ConversationProbes(
+            sandboxes,
+            ProbeTokenCodec(secret=b"probe-test-secret"),
+            ProbeEnv(
+                grants=store,
+                clis={
+                    "hub": CliCredential(
+                        env="HUB_TOKEN", header="authorization", secret=_NeverSecret()
+                    )
+                },
+            ).exports,
+        ),
+    )
+    with ws(workspace_id), agent(agent_id):
+        armed = await _arm(
+            ext,
+            conversation_id,
+            agent_id,
+            member_id,
+            baseline=expected,
+            command='printf "$HUB_TOKEN"',
+            connections=(listed,),
+        )
+        await store.record(
+            provider="hub",
+            account_id="acct-later",
+            host="api.hub.test",
+            grantor_member_id=member_id,
+            shared=False,
+        )
+        await MonitorRunner(ctx=ext).run()
+        row = await _row(armed.id)
+        turns = await _turns(conversation_id)
+
+    assert row is not None
+    assert row["probes_run"] == 1
+    assert row["quiet_streak"] == 1
+    assert turns == []
 
 
 async def test_changed_output_founds_one_turn_and_retires_the_monitor(

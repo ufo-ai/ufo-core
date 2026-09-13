@@ -39,6 +39,7 @@ export type Conversation = {
   surface_label: string | null;
   audience: string;
   member_email: string | null;
+  mine: boolean;
   description: string;
   source: string | null;
   speakers: string[];

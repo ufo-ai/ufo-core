@@ -42,6 +42,7 @@ const FOUND_CONVERSATION = {
   surface_label: null,
   audience: "shared",
   member_email: null,
+  mine: false,
   description: "Rename the deploy job",
   source: null,
   speakers: [],
@@ -58,6 +59,7 @@ const FOUND_OWN_CONVERSATION = {
   id: OWN_ID,
   audience: "member:" + MEMBER.id,
   member_email: MEMBER.email,
+  mine: true,
   description: "Roll the release back",
 };
 

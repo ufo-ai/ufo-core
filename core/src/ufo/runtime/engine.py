@@ -137,11 +137,15 @@ from ufo.harness.untrusted import wall
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialRequests
 from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.access.member_authorization import (
+    AuthorizationAttempt,
+    AuthorizationEffect,
+    AuthorizationGate,
+    AuthorizationRequest,
+)
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.authority import (
     ExecutionAuthority,
-    MemberAuthority,
-    authority_from_member_id,
     authority_member_id,
 )
 from ufo.runtime.billing.accounting import (
@@ -184,7 +188,7 @@ from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_t
 from ufo.runtime.media.site_previewer import SitePreviewer
 from ufo.runtime.memory import MemorySearch
 from ufo.runtime.object_name import ObjectRef
-from ufo.runtime.object_scope import ObjectActionTarget
+from ufo.runtime.object_scope import ObjectActionRequestTarget, ObjectActionTarget
 from ufo.runtime.objects import ObjectActionInput, ObjectVerbs
 from ufo.runtime.prompts.render import RenderedPrompt
 from ufo.runtime.search import SearchProvider
@@ -205,6 +209,7 @@ from ufo.runtime.tools.context import (
     measure_file,
     store_artifact,
 )
+from ufo.runtime.tools.question import question_result_text
 from ufo.runtime.tools.registry import (
     OBJECT_ACTION_TOOL,
     OBJECT_GET_TOOL,
@@ -219,7 +224,7 @@ from ufo.runtime.turns.activity import (
     SKILL_LOAD_TOOL,
     ActivitySummarizer,
 )
-from ufo.runtime.turns.audience import Audience, audience_member, audience_subjects
+from ufo.runtime.turns.audience import Audience, audience_subjects
 from ufo.runtime.turns.contracts import Contract, freeform_result_contract
 from ufo.runtime.turns.delivery_register import DIRECT_PROSE_RESULT_MAX_CHARS
 from ufo.runtime.turns.transcript import (
@@ -286,18 +291,10 @@ TRUNCATION_SALVAGE_NOTICE = (
     "read it and salvage what it already contains instead of regenerating it."
 )
 DENIED_INBOUND_NOTICE = "<denied_member_message>{reason}</denied_member_message>"
-REQUESTED_BY_HINT = (
-    " Set requested_by to the message_ref of the member who asked; active member messages: {refs}."
-)
 NO_REQUESTER_HINT = (
     " No member message is active in this turn, so there is no message_ref to name and this call "
     "cannot carry member authority now. Do the part of the work that needs no member, and report "
     "what a member must ask for."
-)
-BOUND_MEMBER_HINT = (
-    " This member's own message is already bound as the speaker, so no message_ref names it and "
-    "requested_by belongs nowhere in this call. Name the account owner the act needs, or drop "
-    "requested_by, and retry."
 )
 SCHEMA_HINT = (
     " {model} takes these fields at the top level of the input: {fields}. Pass each one there, "
@@ -474,6 +471,7 @@ class Arrival(BaseModel):
 class ActiveMessage:
     member_id: UUID | None
     rendered: str
+    admission_source: TurnAdmissionSource = MEMBER_ADMISSION
 
 
 @dataclass(frozen=True)
@@ -565,6 +563,9 @@ class EffectiveCall:
             "contributor": "core" if self.ext is None else self.ext.store.extension,
         }
 
+    def dispatch_key(self, turn_id: UUID) -> str:
+        return f"{turn_id}/{self.call_id}/{self.call.id}"
+
     def __repr__(self) -> str:
         return f"EffectiveCall(call={self.call_id}, call_id={self.call.id})"
 
@@ -574,7 +575,10 @@ class _BoundToolCall:
     context: ToolContext
     effective: EffectiveCall
     member_refs: tuple[UUID, ...] = ()
-    member_bound: bool = False
+    selected_message_ref: UUID | None = None
+    selected_message: str = ""
+    selected_from_multiple: bool = False
+    authorization_pending: bool = False
 
     @property
     def call(self) -> ToolUseBlock:
@@ -731,6 +735,7 @@ class DispatchResult(BaseModel):
     usages: tuple[Usage, ...] = ()
     interrupted: bool = False
     resume_target: ObjectActionTarget | None = None
+    question: AskUserInput | None = None
 
     @model_validator(mode="after")
     def _errors_say_something(self) -> "DispatchResult":
@@ -856,20 +861,10 @@ def _bounded(content: str) -> str:
     return clipped(content, MAX_TOOL_RESULT_CHARS)
 
 
-def _speaker_hint(error: Exception, member_refs: Sequence[UUID], member_bound: bool = False) -> str:
-    """What a refusal for want of a member carries beyond its own text: the active member refs a
-    retry may name. One refusal class earns it wherever the round can name a ref, so a handler's
-    refusal and a `requested_by` that names no active message are answered alike. Where no ref can
-    be named the refusal says so instead — the gate is a security rule and stands, but a round with
-    nothing to name cannot read a bare refusal as a ref it spelled wrong. No ref is two different
-    rounds: the member's own conversation binds their live message as the speaker and offers no ref
-    for it, so the retry there names an account owner or drops `requested_by`, while a round with no
-    member message at all can carry no member authority at all. Empty for every other error."""
+def _speaker_hint(error: Exception, member_refs: Sequence[UUID]) -> str:
     if not isinstance(error, SpeakerRequired):
         return ""
-    if not member_refs:
-        return BOUND_MEMBER_HINT if member_bound else NO_REQUESTER_HINT
-    return REQUESTED_BY_HINT.format(refs=", ".join(str(ref) for ref in member_refs))
+    return "" if member_refs else NO_REQUESTER_HINT
 
 
 def _schema_hint(error: Exception, input_model: type[BaseModel] | None) -> str:
@@ -894,7 +889,6 @@ def _error_text(
     error: Exception,
     member_refs: Sequence[UUID] = (),
     input_model: type[BaseModel] | None = None,
-    member_bound: bool = False,
 ) -> str:
     """What a failed call tells the model, on every path that turns an exception into tool text:
     a raising handler, a rejected call, and the gates that refuse before the handler runs. An
@@ -902,8 +896,8 @@ def _error_text(
     `str()` is "" and the class name alone lands as a trailing colon over nothing. The model cannot
     tell that from a message truncated to nothing, so a bare raise says it is bare — the class
     stays, because which exception it was is the one fact still available, and the notice says
-    there is nothing further to read. A refusal for want of a member then carries the refs a retry
-    can name, and a payload the tool's input model rejected carries that model's own field names,
+    there is nothing further to read. A refusal with no active member message explains why no ref
+    can repair it; a payload the tool's input model rejected carries that model's own field names,
     so one builder answers every one of those questions on every path."""
     detail = str(error).strip()
     text = (
@@ -911,7 +905,7 @@ def _error_text(
         if detail
         else BARE_RAISE_NOTICE.format(cls=type(error).__name__, tool=tool_name)
     )
-    return text + _speaker_hint(error, member_refs, member_bound) + _schema_hint(error, input_model)
+    return text + _speaker_hint(error, member_refs) + _schema_hint(error, input_model)
 
 
 def _meter_dispatch(
@@ -1257,7 +1251,10 @@ class _RuntimeToolState:
     acts: _OpenActs = field(default_factory=_OpenActs)
     resolutions: dict[str, _Resolution] = field(default_factory=dict)
     bindings: dict[str, _DispatchInput] = field(default_factory=dict)
+    authorization_attempts: dict[str, AuthorizationAttempt] = field(default_factory=dict)
     parked: TurnParked | None = None
+    authorization_question: AskUserInput | None = None
+    authorization_pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -1395,14 +1392,23 @@ class _RuntimeTools:
         )
 
     def parallel_safe(self, call: HarnessToolCall) -> bool:
-        return self._resolve(call).parallel_safe
+        return (
+            self._resolve(call).parallel_safe
+            and not self.state.authorization_pending
+            and REQUESTED_BY not in call.input
+        )
 
-    async def prepare(self, calls: tuple[HarnessToolCall, ...]) -> None:
+    async def preflight(self, calls: tuple[HarnessToolCall, ...]) -> None:
         if self.state.parked is not None:
             return
         bound_items = await asyncio.gather(
             *(
-                self.engine._bind_or_error(self.context, self._resolve(call), self.requesters)
+                self.engine._bind_or_error(
+                    self.context,
+                    self._resolve(call),
+                    self.requesters,
+                    authorization_pending=self.state.authorization_pending,
+                )
                 for call in calls
             ),
             return_exceptions=True,
@@ -1411,6 +1417,27 @@ class _RuntimeTools:
             if isinstance(bound, BaseException):
                 raise bound
             self.state.bindings[call.id] = bound
+        selected = tuple(
+            (call, bound)
+            for call, bound in zip(calls, bound_items, strict=True)
+            if isinstance(bound, _BoundToolCall)
+            and bound.selected_message_ref is not None
+            and (bound.selected_from_multiple or bound.authorization_pending)
+        )
+        if selected:
+            attempts = await self.engine._preflight_member_authorizations(
+                tuple(bound for _, bound in selected)
+            )
+            self.state.authorization_attempts.update(
+                (call.id, attempt)
+                for (call, _), attempt in zip(selected, attempts, strict=True)
+                if attempt is not None
+            )
+
+    async def prepare(self, calls: tuple[HarnessToolCall, ...]) -> None:
+        if self.state.parked is not None:
+            return
+        bound_items = tuple(self.state.bindings[call.id] for call in calls)
         for bound in bound_items:
             if isinstance(bound, _BoundToolCall):
                 self.engine._start_activity(
@@ -1422,7 +1449,15 @@ class _RuntimeTools:
             return HarnessToolResult(call.id, self.state.parked.message, is_error=True)
         bound = self.state.bindings[call.id]
         try:
-            return _to_harness_result(await self.engine._dispatch(bound, self.usage_events))
+            dispatched = await self.engine._dispatch_step_recovering(
+                bound,
+                self.usage_events,
+                self.state.authorization_attempts.get(call.id),
+            )
+            if dispatched.question is not None:
+                self.state.authorization_question = dispatched.question
+            result = _to_harness_result(await self.engine._dispatch_result(dispatched))
+            return replace(result, ends_turn=dispatched.question is not None)
         except TurnParked as parked:
             self.state.parked = parked
             return HarnessToolResult(call.id, parked.message, is_error=True)
@@ -1442,7 +1477,9 @@ class _RuntimeTools:
             resolved = tuple(self._resolve(call) for call in calls)
             acts = _round_acts(resolved, runtime_results)
             self.state.acts = _OpenActs(
-                question=_act(acts, "question", AskUserInput),
+                question=(
+                    self.state.authorization_question or _act(acts, "question", AskUserInput)
+                ),
                 credential_request=(
                     _act(acts, "credential_request", CredentialRequest)
                     or self.state.acts.credential_request
@@ -1454,6 +1491,7 @@ class _RuntimeTools:
         finally:
             self.state.resolutions.clear()
             self.state.bindings.clear()
+            self.state.authorization_attempts.clear()
 
     async def after_checkpoint(self) -> None:
         parked = self.state.parked
@@ -1577,7 +1615,10 @@ class TranscriptRepair:
                 absorbed=absorbed,
                 requesters=tuple(
                     ParkedRequester(
-                        id=id_, member_id=requester.member_id, rendered=requester.rendered
+                        id=id_,
+                        member_id=requester.member_id,
+                        rendered=requester.rendered,
+                        admission_source=requester.admission_source,
                     )
                     for id_, requester in requesters.items()
                 ),
@@ -1781,6 +1822,7 @@ class TurnEngine:
     audience: Audience
     artifact_token_secret: str
     grants: GrantStore | None
+    member_authorization: AuthorizationGate
     connector_read_only: bool = False
     site_previewer: SitePreviewer | None = None
     previous_turn_ended_at: datetime | None = None
@@ -2060,6 +2102,7 @@ class TurnEngine:
                     requester.id: ActiveMessage(
                         member_id=requester.member_id,
                         rendered=requester.rendered,
+                        admission_source=requester.admission_source,
                     )
                     for requester in parked.requesters
                 }
@@ -2114,7 +2157,8 @@ class TurnEngine:
         if not self.turn.spawned:
             requesters[self.turn.id] = ActiveMessage(
                 member_id=self.turn.speaker_member_id,
-                rendered=founding,
+                rendered=member_message_text(founding),
+                admission_source=self.turn.admission_source,
             )
         injected = "\n\n".join(part for part in (injected, self.member_skill_block) if part)
         if injected:
@@ -2191,7 +2235,9 @@ class TurnEngine:
                 )
                 requesters = {
                     self.turn.id: ActiveMessage(
-                        member_id=self.turn.speaker_member_id, rendered=self.turn.inbound
+                        member_id=self.turn.speaker_member_id,
+                        rendered=self.turn.inbound,
+                        admission_source=self.turn.admission_source,
                     )
                 }
             await self._enforce_seats(requesters)
@@ -2275,6 +2321,11 @@ class TurnEngine:
                         agent_id=self.turn.agent_id,
                         requesting_member_id=None,
                         subjects=audience_subjects(self.audience),
+                        connections=(
+                            None
+                            if self.turn.runtime_config is None
+                            else self.turn.runtime_config.connections
+                        ),
                     ),
                     (self.turn.inbound,),
                 )
@@ -2337,7 +2388,12 @@ class TurnEngine:
         CredentialRequest | None,
         ConnectRequest | None,
     ]:
-        state = _RuntimeToolState()
+        member_ids = frozenset(
+            message.member_id for message in requesters.values() if message.member_id is not None
+        )
+        state = _RuntimeToolState(
+            authorization_pending=await self._member_authorization_pending(member_ids)
+        )
         tools = _RuntimeTools(
             self,
             context,
@@ -2407,6 +2463,12 @@ class TurnEngine:
             None if finished.exhausted or finished.structured else acts.question,
             acts.credential_request,
             acts.connect_request,
+        )
+
+    @DBOS.step(preemptible=True)
+    async def _member_authorization_pending(self, member_ids: frozenset[UUID]) -> bool:
+        return await self.member_authorization.has_pending(
+            self.turn.workspace_id, self.turn.conversation_id, member_ids
         )
 
     async def _fold_created(
@@ -2486,7 +2548,8 @@ class TurnEngine:
             if requesters is not None:
                 requesters[arrival.id] = ActiveMessage(
                     member_id=arrival.speaker_member_id,
-                    rendered=arrival.rendered,
+                    rendered=member_message_text(arrival.rendered),
+                    admission_source=arrival.admission_source,
                 )
             message = Message(role="user", content=arrival.rendered)
             arrival_log.append(message)
@@ -2948,7 +3011,7 @@ class TurnEngine:
         Holding a BYOK turn against a balance it never debits would park it, leave the balance
         untouched, let the dispatcher resume it, and park it again at the same point forever."""
         await self._enforce_seats(requesters)
-        member_id = audience_member(self.audience)
+        member_id = authority_member_id(self.turn.authority)
         pending = 0 if self.byok else self._priced(usage_events)
         if not balance_absent(self.turn.workspace_id):
             async with workspace_tx() as connection:
@@ -3308,11 +3371,10 @@ class TurnEngine:
         dimensions: Mapping[str, str] | None = None,
         member_refs: tuple[UUID, ...] = (),
         input_model: type[BaseModel] | None = None,
-        member_bound: bool = False,
     ) -> _RejectedToolCall:
         return _RejectedToolCall(
             call=call,
-            text=_error_text(call.name, error, member_refs, input_model, member_bound),
+            text=_error_text(call.name, error, member_refs, input_model),
             outcome="invalid_call" if isinstance(error, (ValueError, KeyError)) else "step_failed",
             error_class=type(error).__name__,
             dimensions={} if dimensions is None else dimensions,
@@ -3323,17 +3385,18 @@ class TurnEngine:
         context: ToolContext,
         item: _Resolution,
         requesters: dict[UUID, ActiveMessage],
+        *,
+        authorization_pending: bool = False,
     ) -> _DispatchInput:
         if isinstance(item, _RejectedToolCall):
             return item
         started = time.monotonic()
         try:
-            bound_context, call = await self._bind_requester(context, item, requesters)
-            return _BoundToolCall(
-                context=bound_context,
-                effective=replace(item, call=call),
-                member_refs=self._member_refs(requesters),
-                member_bound=self._own_member(requesters) is not None,
+            return self._bind_requester(
+                context,
+                item,
+                requesters,
+                authorization_pending=authorization_pending,
             )
         except asyncio.CancelledError as error:
             _meter_dispatch(
@@ -3363,7 +3426,6 @@ class TurnEngine:
                 error,
                 dimensions=item.meter_dimensions(),
                 member_refs=self._member_refs(requesters),
-                member_bound=self._own_member(requesters) is not None,
             )
 
     async def _dispatch(
@@ -3412,10 +3474,11 @@ class TurnEngine:
         self,
         bound: _DispatchInput,
         usage_events: list[Usage] | None,
+        authorization_attempt: AuthorizationAttempt | None = None,
     ) -> DispatchResult:
         target: ObjectActionTarget | None = None
         while True:
-            result = await self._dispatch_step(bound, target)
+            result = await self._dispatch_step(bound, target, authorization_attempt)
             target = result.resume_target
             if self._accept_dispatch_result(result, usage_events):
                 return result
@@ -3433,26 +3496,29 @@ class TurnEngine:
             raise asyncio.CancelledError
         return not result.interrupted
 
-    async def _bind_requester(
+    def _bind_requester(
         self,
         context: ToolContext,
         item: EffectiveCall,
         requesters: dict[UUID, ActiveMessage],
-    ) -> tuple[ToolContext, ToolUseBlock]:
+        *,
+        authorization_pending: bool,
+    ) -> _BoundToolCall:
         """Bind the member this call acts for. A `requested_by` ref names one of the turn's active
-        messages and binds its author. Without the ref, a call in a member's own conversation — the
-        audience is that member's — binds that member while one of their messages is active, because
-        nobody else can be asking there; the ref carries information only where more than one member
-        could be, and there its omission means conversation-common work. Both routes read the same
-        active messages, so a message a hook denied — absorbed without ever entering them —
-        withholds its author's authority whichever route the model takes.
+        messages and binds its author. Without the ref, exactly one active authenticated member
+        binds automatically; with several, omission means conversation-common work. Both routes
+        read the same active messages, so a message a hook denied — absorbed without ever entering
+        them — withholds its author's authority whichever route the model takes.
 
         A ref that names no active member message is refused as `SpeakerRequired`, the same class
-        a handler refusing for want of a member raises, so the refusal carries the refs the retry
-        can name instead of leaving the model to guess a second time."""
+        a handler refusing for want of a member raises."""
         call = item.call
         tool_input = dict(call.input)
         requester: UUID | None = None
+        selected_ref: UUID | None = None
+        selected_message = ""
+        active_members = self._active_member_ids(requesters)
+        sole_member = self._sole_active_member(requesters)
         profile_only = item.tool.profile_only
         if self.turn.subagent_profile is not None and profile_only:
             tool_input.pop(REQUESTED_BY, None)
@@ -3466,49 +3532,52 @@ class TurnEngine:
                 raise SpeakerRequired(f"{REQUESTED_BY} must be a message ref") from error
             if message_id not in requesters:
                 raise SpeakerRequired(f"{REQUESTED_BY} does not name an active inbound message")
-            requester = requesters[message_id].member_id
+            selected = requesters[message_id]
+            requester = selected.member_id
             if requester is None:
                 raise SpeakerRequired(f"{REQUESTED_BY} message has no member requester")
-        elif (member := self._own_member(requesters)) is not None:
-            requester = member
-        authority = (
-            MemberAuthority(requester)
-            if requester is not None
-            else authority_from_member_id(self.turn.on_behalf_of_member_id)
-        )
-        sandbox = self.sandbox if self.sandbox_for is None else await self.sandbox_for(authority)
-        spawn, subagents = (
-            (context.spawn, context.subagents)
-            if self.subagents_for is None
-            else self.subagents_for(authority)
-        )
-        return (
-            replace(
-                context,
-                sandbox=sandbox,
-                spawn=spawn,
-                subagents=subagents,
-                speaker_member_id=requester,
+            selected_ref = message_id
+            selected_message = selected.rendered
+        elif sole_member is not None:
+            requester = sole_member
+            selected_ref, selected = next(
+                (ref, message)
+                for ref, message in reversed(tuple(requesters.items()))
+                if message.member_id == requester
+            )
+            selected_message = selected.rendered
+        bound_context = replace(
+            context,
+            speaker_member_id=requester,
+            other_members_active=len(active_members) > 1,
+            member_messages_active=any(
+                message.admission_source == MEMBER_ADMISSION for message in requesters.values()
             ),
-            call.model_copy(update={"input": tool_input}),
+        )
+        return _BoundToolCall(
+            context=bound_context,
+            effective=replace(item, call=call.model_copy(update={"input": tool_input})),
+            member_refs=self._member_refs(requesters),
+            selected_message_ref=selected_ref,
+            selected_message=selected_message,
+            selected_from_multiple=selected_ref is not None and sole_member is None,
+            authorization_pending=authorization_pending and requester is not None,
         )
 
-    def _own_member(self, requesters: Mapping[UUID, ActiveMessage]) -> UUID | None:
-        """The member whose conversation this is, while one of their messages is active — the one
-        member who can be asking here, so an omitted `requested_by` binds them. Read off the active
-        messages, never the turn row: a message a hook denied never enters them, so the denial
-        withholds authority on this route exactly as it does for a named ref."""
-        member = audience_member(self.audience)
-        if member is None or all(message.member_id != member for message in requesters.values()):
+    def _active_member_ids(self, requesters: Mapping[UUID, ActiveMessage]) -> frozenset[UUID]:
+        return frozenset(
+            message.member_id for message in requesters.values() if message.member_id is not None
+        )
+
+    def _sole_active_member(self, requesters: Mapping[UUID, ActiveMessage]) -> UUID | None:
+        active_members = self._active_member_ids(requesters)
+        if len(active_members) != 1 or any(
+            message.member_id is None for message in requesters.values()
+        ):
             return None
-        return member
+        return next(iter(active_members))
 
     def _member_refs(self, requesters: Mapping[UUID, ActiveMessage]) -> tuple[UUID, ...]:
-        """The message refs `requested_by` may name this round: the active member messages, where
-        more than one member could be asking. In the member's own conversation the ref says nothing
-        the binding does not already know, so none are offered and the schema omits the field."""
-        if self._own_member(requesters) is not None:
-            return ()
         return tuple(ref for ref, message in requesters.items() if message.member_id is not None)
 
     async def _offload(self, name: str, content: str) -> str | None:
@@ -3575,6 +3644,7 @@ class TurnEngine:
         self,
         bound: _DispatchInput,
         resume_target: ObjectActionTarget | None = None,
+        authorization_attempt: AuthorizationAttempt | None = None,
     ) -> DispatchResult:
         """Run one resolved binding in the DBOS step claimed for it in model order. A rejected bind
         claims the same step and records its error, so bind latency or outcome cannot change step
@@ -3582,15 +3652,16 @@ class TurnEngine:
         re-invoking the handler. An interrupted result checkpoints partial find usage; recovery
         consumes it and advances to a fresh step whose identical idempotency key deduplicates any
         side effect the interrupted handler applied. A bad requester, name, or arguments becomes an
-        is_error result before any hook fires (there is no validated input to police). Then
-        pre_tool_use may Deny
-        (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the sandbox
-        with the folded args (a raising handler is an is_error result unless no terminal returned
-        within its reconnect grace, which ends the turn). A bound action's target is read under
-        the kind owner's context before the pre hook: a missing or refused object is an is_error
-        result (`invalid_call`, no hook fires), while a kind store that faults on the read is the
-        engine's failure, not the model's, and raises out of the step as `step_failed`. A
-        non-error result over
+        is_error result before any hook fires (there is no validated input to police). An object
+        action's structural wire target is validated without member access, then pre_tool_use may
+        Deny (the tool never dispatches) or ModifyInput (fold the args); the handler runs in the
+        sandbox with the folded args (a raising handler is an is_error result unless no terminal
+        returned within its reconnect grace, which ends the turn). A selected member's exact
+        policy-rewritten
+        effect is admitted before the bound action's target is read under the kind owner's context.
+        A missing or refused object is an is_error result, while a kind store that faults on the
+        read is the engine's failure, not the model's, and raises out of the step as `step_failed`.
+        A non-error result over
         MAX_TOOL_RESULT_CHARS is offloaded — its full text written to the run's `tool-output`
         file and only a TOOL_RESULT_PREVIEW_CHARS preview plus that path kept in context, so no
         single result is re-ingested whole on every later round of the turn. The cap is a context
@@ -3651,7 +3722,7 @@ class TurnEngine:
                     outcome, error_class = bound.outcome, bound.error_class
                     result = DispatchResult(tool_use_id=call.id, text=bound.text, is_error=True)
                     return result
-                gate = await self._prepare_dispatch(bound, target)
+                gate = await self._prepare_dispatch(bound, target, authorization_attempt)
                 target = gate.target
                 if gate.result is not None:
                     outcome, error_class = gate.outcome, gate.error_class
@@ -3694,8 +3765,39 @@ class TurnEngine:
                         error_text=result.text if result is not None and result.is_error else None,
                     )
 
+    @DBOS.step(preemptible=True)
+    async def _preflight_member_authorizations(
+        self, bounds: tuple[_BoundToolCall, ...]
+    ) -> tuple[AuthorizationAttempt | None, ...]:
+        async def preflight(bound: _BoundToolCall) -> AuthorizationAttempt | None:
+            effective = bound.effective
+            if effective.action_args is not None:
+                args: BaseModel = effective.action_args
+            else:
+                try:
+                    args = effective.tool.input_model.model_validate(bound.call.input)
+                except ValidationError:
+                    return None
+            request_target: ObjectActionRequestTarget | None = None
+            if effective.action is not None:
+                try:
+                    request_target = self.verbs.action_request_target(
+                        effective.tool, effective.action
+                    )
+                except ValueError:
+                    return None
+            request = self._member_authorization_request(bound, args, request_target)
+            if request is None:
+                raise RuntimeError("selected member call has no authorization request")
+            return await self.member_authorization.preflight(request)
+
+        return tuple(await asyncio.gather(*(preflight(bound) for bound in bounds)))
+
     async def _prepare_dispatch(
-        self, bound: _BoundToolCall, target: ObjectActionTarget | None
+        self,
+        bound: _BoundToolCall,
+        target: ObjectActionTarget | None,
+        authorization_attempt: AuthorizationAttempt | None,
     ) -> _DispatchGate:
         call = bound.call
         effective = bound.effective
@@ -3736,7 +3838,6 @@ class TurnEngine:
                             error,
                             bound.member_refs,
                             tool.input_model,
-                            bound.member_bound,
                         ),
                         is_error=True,
                         activity=True,
@@ -3744,17 +3845,16 @@ class TurnEngine:
                     outcome="invalid_call",
                     error_class=type(error).__name__,
                 )
-        if effective.action is not None and target is None:
+        request_target: ObjectActionRequestTarget | None = None
+        if effective.action is not None:
             try:
-                target = await self.verbs.action_target(bound.context, tool, effective.action)
+                request_target = self.verbs.action_request_target(tool, effective.action)
             except ValueError as error:
                 return _DispatchGate(
                     target,
                     result=DispatchResult(
                         tool_use_id=call.id,
-                        text=_error_text(
-                            call.name, error, bound.member_refs, member_bound=bound.member_bound
-                        ),
+                        text=_error_text(call.name, error, bound.member_refs),
                         is_error=True,
                         activity=True,
                     ),
@@ -3767,11 +3867,15 @@ class TurnEngine:
                 tool_name=call.name,
                 tool_input=args,
                 call=effective.call_id,
-                target=target,
+                target=request_target,
             ),
             self.turn,
             self.agent,
-            bound.context.speaker_member_id,
+            (
+                None
+                if bound.selected_from_multiple or bound.authorization_pending
+                else bound.context.speaker_member_id
+            ),
             self.sandbox,
         )
         if pre.denied is not None:
@@ -3791,15 +3895,119 @@ class TurnEngine:
                 outcome=outcome,
                 error_class=error_class,
             )
+        final_args = pre.tool_input if pre.tool_input is not None else args
+        context = bound.context
+        authorization_request = self._member_authorization_request(
+            bound, final_args, request_target
+        )
+        if authorization_request is not None:
+            authorization = await self.member_authorization.authorize(
+                authorization_request,
+                authorization_attempt,
+            )
+            if authorization.decision == "ask":
+                assert authorization.question is not None
+                return _DispatchGate(
+                    target,
+                    result=DispatchResult(
+                        tool_use_id=call.id,
+                        text=question_result_text(authorization.question),
+                        is_error=True,
+                        activity=True,
+                        question=authorization.question,
+                    ),
+                    outcome="member_authorization_required",
+                )
+            if authorization.decision == "deny":
+                return _DispatchGate(
+                    target,
+                    result=DispatchResult(
+                        tool_use_id=call.id,
+                        text="The selected member did not authorize this request.",
+                        is_error=True,
+                        activity=True,
+                    ),
+                    outcome="member_authorization_denied",
+                )
+        try:
+            context = await self._authorize_context(context)
+        except TerminalAbsent as error:
+            raise TerminalGone(str(error)) from error
+        except Exception as error:
+            return _DispatchGate(
+                target,
+                result=DispatchResult(
+                    tool_use_id=call.id,
+                    text=_error_text(call.name, error, bound.member_refs),
+                    is_error=True,
+                    activity=True,
+                ),
+                outcome="authority_failed",
+                error_class=type(error).__name__,
+            )
+        if effective.action is not None and target is None:
+            try:
+                target = await self.verbs.action_target(context, tool, effective.action)
+            except ValueError as error:
+                return _DispatchGate(
+                    target,
+                    result=DispatchResult(
+                        tool_use_id=call.id,
+                        text=_error_text(call.name, error, bound.member_refs),
+                        is_error=True,
+                        activity=True,
+                    ),
+                    outcome="invalid_call",
+                    error_class=type(error).__name__,
+                )
         return _DispatchGate(
             target,
             ready=_DispatchReady(
-                bound.context,
+                context,
                 effective,
-                pre.tool_input if pre.tool_input is not None else args,
+                final_args,
                 target,
             ),
         )
+
+    def _member_authorization_request(
+        self,
+        bound: _BoundToolCall,
+        args: BaseModel,
+        target: ObjectActionRequestTarget | None,
+    ) -> AuthorizationRequest | None:
+        if bound.selected_message_ref is None or not (
+            bound.selected_from_multiple or bound.authorization_pending
+        ):
+            return None
+        member_id = bound.context.speaker_member_id
+        assert member_id is not None
+        return AuthorizationRequest(
+            workspace_id=self.turn.workspace_id,
+            conversation_id=self.turn.conversation_id,
+            agent_id=self.turn.agent_id,
+            agent_name=self.agent.name,
+            member_id=member_id,
+            dispatch_key=bound.effective.dispatch_key(self.turn.id),
+            message_ref=bound.selected_message_ref,
+            message=bound.selected_message,
+            effect=AuthorizationEffect(
+                call=bound.effective.call_id,
+                arguments=args.model_dump(mode="json"),
+                target=None if target is None else target.model_dump(mode="json"),
+            ),
+            selected_from_multiple=bound.selected_from_multiple,
+        )
+
+    async def _authorize_context(self, context: ToolContext) -> ToolContext:
+        authority = context.authority
+        sandbox = self.sandbox if self.sandbox_for is None else await self.sandbox_for(authority)
+        spawn, subagents = (
+            (context.spawn, context.subagents)
+            if self.subagents_for is None
+            else self.subagents_for(authority)
+        )
+        return replace(context, sandbox=sandbox, spawn=spawn, subagents=subagents)
 
     async def _invoke_dispatch(
         self,
@@ -3809,11 +4017,7 @@ class TurnEngine:
     ) -> _HandlerOutput:
         await self._enforce_authority_seat(ready.context.authority)
         tool = ready.effective.tool
-        key = (
-            f"{self.turn.id}/{ready.effective.call_id}/{bound.call.id}"
-            if tool.side_effecting
-            else None
-        )
+        key = ready.effective.dispatch_key(self.turn.id) if tool.side_effecting else None
         try:
             handler_context = replace(
                 ready.context,
@@ -3852,9 +4056,7 @@ class TurnEngine:
             raise parked from error
         except Exception as error:
             return _HandlerOutput(
-                _error_text(
-                    bound.call.name, error, bound.member_refs, member_bound=bound.member_bound
-                ),
+                _error_text(bound.call.name, error, bound.member_refs),
                 True,
                 tool.untrusted or isinstance(error, UntrustedContentError),
                 (),
@@ -3895,7 +4097,7 @@ class TurnEngine:
                 self.turn,
                 self.agent,
                 ready.context.speaker_member_id,
-                self.sandbox,
+                ready.context.sandbox,
             )
         else:
             post = await self.hooks.fire(
@@ -3910,7 +4112,7 @@ class TurnEngine:
                 self.turn,
                 self.agent,
                 ready.context.speaker_member_id,
-                self.sandbox,
+                ready.context.sandbox,
             )
             if post.output is not None:
                 content = post.output

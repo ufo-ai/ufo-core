@@ -135,7 +135,11 @@ async def _seed_billable(connection: AsyncConnection) -> tuple[UUID, UUID, UUID,
 
 
 async def _seed_running_turn(
-    connection: AsyncConnection, workspace_id: UUID, conversation_id: UUID, agent_id: UUID
+    connection: AsyncConnection,
+    workspace_id: UUID,
+    conversation_id: UUID,
+    agent_id: UUID,
+    speaker_member_id: UUID,
 ) -> UUID:
     turn_id = uuid4()
     await connection.execute(
@@ -147,6 +151,7 @@ async def _seed_running_turn(
             seq=1,
             status="running",
             inbound="hi",
+            speaker_member_id=speaker_member_id,
             terminal=None,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
@@ -305,8 +310,9 @@ async def test_member_fact_recall_is_isolated_from_other_members(db: None) -> No
 async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> None:
     """The billing-bug fix's output flows into enforcement: a `sandbox_tokens` ledger row written by
     `record_sandbox_tokens` (an in-sandbox model call metered through the proxy) counts toward the
-    member's spend, so once it crosses a park cap the evaluator parks — proven against the real
-    ledger and the real evaluator, no dimension allow-list."""
+    spend of the member whose turn it is — the speaker, not the conversation's owner — so once it
+    crosses their park cap the evaluator parks — proven against the real ledger and the real
+    evaluator, no dimension allow-list."""
     async with workspace_tx() as connection:
         workspace_id, member_id, agent_id, conversation_id = await _seed_billable(connection)
         await _set_member_cap(
@@ -315,7 +321,9 @@ async def test_metered_sandbox_tokens_breach_a_member_cap_and_park(db: None) -> 
         evaluator = SpendEvaluator(workspace_id, member_id, agent_id)
         assert (await evaluator.decide(connection, 0)).outcome == "allow"
 
-        turn_id = await _seed_running_turn(connection, workspace_id, conversation_id, agent_id)
+        turn_id = await _seed_running_turn(
+            connection, workspace_id, conversation_id, agent_id, speaker_member_id=member_id
+        )
         await record_sandbox_tokens(
             connection, workspace_id, turn_id, "claude-opus-4-8", HEAVY_USAGE
         )

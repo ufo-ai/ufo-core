@@ -18,6 +18,7 @@ const LINKED: OwnedConversation = {
   surface_label: null,
   audience: "room:slack:C2",
   member_email: "owner@example.com",
+  mine: false,
   description: "Ship the release",
   source: null,
   speakers: [],

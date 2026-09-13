@@ -46,6 +46,7 @@ pause = sa.Table(
     sa.Column("prompt", sa.Text, nullable=False),
     sa.Column("user_description", sa.Text, nullable=False),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
+    sa.Column("connections", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -71,6 +72,7 @@ class Pause:
     claim_id: str | None
     created_at: datetime
     updated_at: datetime
+    connections: tuple[UUID, ...] = ()
 
 
 def _aware(when: datetime) -> datetime:
@@ -92,6 +94,7 @@ def _row(row: sa.RowMapping) -> Pause:
         claim_id=row["claimed_by"],
         created_at=_aware(row["created_at"]),
         updated_at=_aware(row["updated_at"]),
+        connections=tuple(UUID(item) for item in (row["connections"] or ())),
     )
 
 
@@ -134,6 +137,7 @@ class PauseStore:
         origin_arrival_seq: int,
         prompt: str,
         created_by_member_id: UUID | None,
+        connections: tuple[UUID, ...] = (),
     ) -> Pause:
         """Arm the conversation's pause, overwriting whatever it was waiting on before. A workflow
         waits for one thing at a time, so re-arming is an upsert rather than a second row, and it
@@ -154,6 +158,7 @@ class PauseStore:
             "prompt": prompt,
             "user_description": prompt,
             "created_by_member_id": created_by_member_id,
+            "connections": [str(connection_id) for connection_id in connections],
             "claimed_by": None,
             "claim_expires_at": None,
             "updated_at": sa.func.now(),

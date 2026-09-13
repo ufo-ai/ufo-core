@@ -24,6 +24,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.context import ExtensionContext, JsonValue
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
@@ -182,7 +183,11 @@ class SiteObjects(MemberReadableObjects[SiteSpec, GeneratedObjectOwner]):
                 summary=_summary(site, (effective := effective_visibility(site, agents))),
                 owner=GeneratedObjectOwner(
                     member_id=site.creator_member_id,
-                    shared=effective != "private",
+                    audience=(
+                        conversation_audience(site.creator_member_id)
+                        if effective == "private"
+                        else SHARED_AUDIENCE
+                    ),
                     generation=site.generation,
                 ),
                 fields={

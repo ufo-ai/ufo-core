@@ -78,7 +78,11 @@ Capability bindings do not replace:
   disclosure subjects.
 - **Ownership:** `owner_member_id` decides who controls a resource. It does not make that resource
   available to every agent the owner invokes.
-- **Approval:** sharing, granting, and revocation require a live speaker. `on_behalf_of` preserves
+- **Approval:** sharing, granting, and revocation require a live speaker. One active member speaking
+  alone binds automatically. With another member or an unattributed active message, `requested_by`
+  selects an authenticated message. A side Luna decision admits only consent grounded in that
+  member's words, the matching pending answer, or an exact standing permission; ambiguity asks
+  `Allow`, `Deny`, or `Always Allow` in chat before member authority opens. `on_behalf_of` preserves
   use authority but cannot perform a granting act.
 - **Policy:** tool allowlists, profile-only tools, public-internet ceilings, seats, and admin roles
   constrain execution; they are not resource grants.
@@ -112,6 +116,11 @@ Each authoritative store projects its rows into `AccessPath`. One matcher consum
 tool dispatch, connector selection, sandbox environment construction, egress resolution, source
 reads, and web admission. Database queries use the same workspace, agent, and acting-member inputs
 without copying resource facts into a generic table.
+
+`member_permission` is not a resource grant. It records one member's standing approval for one exact
+agent/call/effect so a later multi-speaker selection can bind that member automatically. It neither
+creates an `AccessPath` nor changes what that path can reach; connector, source, credential, object,
+and policy gates still decide the effect. The member-private `permission` object revokes it.
 
 ## Required proof
 

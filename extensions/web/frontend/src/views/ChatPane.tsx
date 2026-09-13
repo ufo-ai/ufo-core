@@ -1,17 +1,37 @@
-import { IconTerminal2 } from "@tabler/icons-react";
+import { IconLock, IconTerminal2, IconUsers } from "@tabler/icons-react";
 import { Suspense, lazy, useCallback, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Sheet } from "@/components/ui/sheet";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Chat, type ChatProps } from "@/views/Chat";
 import { ConversationDetail, Disclose } from "@/views/Conversations";
 import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { Loading, usePanelRead } from "@/kernel/panel";
-import { shellPath } from "@/lib/api";
-import { subject, surfaceWord, useViewer, type AudienceEntry } from "@/lib/audience";
+import { postObjectAction, shellPath } from "@/lib/api";
+import {
+  MEMBER_SUBJECT,
+  SHARED_SUBJECT,
+  WEB_SURFACE,
+  audienceDetail,
+  audienceLabel,
+  isMemberAudience,
+  subject,
+  surfaceWord,
+  useViewer,
+} from "@/lib/audience";
 import { AudienceMark } from "@/lib/audienceMark";
 import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
+import type { ChatRow } from "@/lib/rail";
+import { changeRailVisibility, settleRailVisibility } from "@/lib/railStore";
 import { SurfaceMark } from "@/lib/surfaceMark";
 import type { Crumb } from "@/lib/title";
 import type { Agent, ConversationAgent, Member, OwnedConversation } from "@/lib/types";
@@ -30,15 +50,101 @@ const ShellPane = lazy(() =>
 );
 
 export type ChatPaneProps = ChatProps & {
-  /** Who reads the open conversation, as the row that named it carries it. A conversation the
+  /** Who reads the open conversation, as the rail row that named it carries it. A conversation the
    *  member has not founded yet has no audience to state, and the title line states none. */
-  audience?: AudienceEntry;
+  audience?: ChatRow;
   title?: string;
   conversationOnly?: boolean;
   slot?: string;
   onSelectSlot?: (slot: string | null) => void;
   crumb?: Crumb;
 };
+
+const WORKSPACE = "Workspace";
+const PRIVATE = "Private";
+type Visibility = typeof WORKSPACE | typeof PRIVATE;
+const VISIBILITY_LABEL = "Visibility: ";
+/** The action each choice dispatches, by name, off the conversation's own action projection. */
+const VISIBILITY_ACTIONS: Record<Visibility, string> = {
+  [WORKSPACE]: "share_conversation",
+  [PRIVATE]: "make_conversation_private",
+};
+
+function visibilityOwned(row: ChatRow, member: Member): boolean {
+  return (
+    member.id !== undefined &&
+    row.surface === WEB_SURFACE &&
+    row.mine &&
+    (row.audience === SHARED_SUBJECT || row.audience === MEMBER_SUBJECT + member.id)
+  );
+}
+
+/** The audience glyph as an act: choosing the other side posts the conversation's own action as a
+ *  prepared intent — the dispatch `DiscloseBand` makes — and the rail re-reads once it applied. */
+function VisibilityControl({
+  agentId,
+  conversationId,
+  row,
+  member,
+}: {
+  agentId: string;
+  conversationId: string;
+  row: ChatRow;
+  member: Member;
+}) {
+  const viewer = useViewer();
+  const current: Visibility = isMemberAudience(row.audience) ? PRIVATE : WORKSPACE;
+  const [changing, setChanging] = useState(false);
+
+  async function change(next: Visibility) {
+    if (changing || next === current || member.id === undefined) return;
+    const audience = next === PRIVATE ? MEMBER_SUBJECT + member.id : SHARED_SUBJECT;
+    const memberEmail = next === PRIVATE ? member.email : null;
+    if (!changeRailVisibility(conversationId, audience, memberEmail)) return;
+    setChanging(true);
+    const outcome = await postObjectAction(
+      agentId,
+      {
+        kind: "conversation",
+        name: conversationId,
+        action: VISIBILITY_ACTIONS[next],
+      },
+      {},
+    );
+    settleRailVisibility(conversationId, outcome);
+    setChanging(false);
+  }
+
+  return (
+    <DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="quiet"
+              size="icon"
+              busy={changing}
+              aria-label={VISIBILITY_LABEL + current}
+              title={audienceDetail(row, viewer)}
+            >
+              {current === PRIVATE ? <IconLock aria-hidden /> : <IconUsers aria-hidden />}
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{audienceLabel(row, viewer)}</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="start">
+        <DropdownMenuRadioGroup
+          value={current}
+          onValueChange={(next) => void change(next as Visibility)}
+        >
+          <DropdownMenuRadioItem value={WORKSPACE}>{WORKSPACE}</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value={PRIVATE}>{PRIVATE}</DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 export function ConversationSlot({
   agent,
@@ -183,7 +289,20 @@ export function ChatPane({
       <Header
         crumb={crumb}
         title={title ?? agentName(agent.name)}
-        note={audience ? <AudienceMark entry={audience} /> : null}
+        note={
+          audience && conversationId ? (
+            visibilityOwned(audience, member) ? (
+              <VisibilityControl
+                agentId={agent.id}
+                conversationId={conversationId}
+                row={audience}
+                member={member}
+              />
+            ) : (
+              <AudienceMark entry={audience} />
+            )
+          ) : null
+        }
         acts={acts}
         pinned
       />

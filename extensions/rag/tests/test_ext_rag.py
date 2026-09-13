@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -12,7 +12,7 @@ from ufo_ext_rag.route import route
 from ufo.runtime.ext.context import ExtensionContext, PageState, ScopedStore, SourceReader
 from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, Hit, IndexScope, TextChunker
 from ufo.runtime.workspace import ws
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
 from ufo.sdk.context import CredentialAccess
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
 from ufo.sdk.search import FetchedPage, FetchRequest, SearchHit, SearchQuery, SearchResults
@@ -440,6 +440,36 @@ async def test_the_hook_drops_its_injection_when_every_leg_fails() -> None:
         outcome = await rag.prefetch_hook(_hook_ctx(ext, "What does Northwind charge per seat?"))
 
     assert outcome is None
+
+
+async def test_the_hook_carries_the_turn_connection_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: tuple[UUID, ...] | None = None
+
+    @dataclass(frozen=True)
+    class RecordingPrefetch:
+        search: object
+        pages: object
+
+        async def passages(self, queries: tuple[str, ...], reader: SourceReader) -> str:
+            nonlocal seen
+            seen = reader.connections
+            return ""
+
+    monkeypatch.setattr(rag, "Prefetch", RecordingPrefetch)
+    connection_scope = (uuid4(),)
+    ctx = _hook_ctx(_ext(RecordingSearch()), "What does Northwind charge per seat?")
+    assert ctx.turn is not None
+    ctx = replace(
+        ctx,
+        turn=ctx.turn.model_copy(
+            update={"runtime_config": TurnRuntimeConfig(connections=connection_scope)}
+        ),
+    )
+    with ws(WORKSPACE):
+        await rag.prefetch_hook(ctx)
+    assert seen == connection_scope
 
 
 def test_the_manifest_declares_one_best_effort_prompt_hook() -> None:

@@ -40,6 +40,7 @@ from ufo.runtime.objects import (
 )
 from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
+from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.runtime.turns.contracts import check_declared_schema
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
@@ -199,6 +200,14 @@ def _agent_summary(ctx: ToolContext, row: sa.Row) -> str:
     return f"{'main agent' if row.is_main else 'agent'}, on {model}, public internet {internet}"
 
 
+def _audience(row: sa.Row, turn_agent_id: UUID) -> Audience | None:
+    if row.visibility == "workspace" or row.id == turn_agent_id:
+        return SHARED_AUDIENCE
+    if row.owner_member_id is None:
+        return None
+    return conversation_audience(row.owner_member_id)
+
+
 @dataclass(frozen=True)
 class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
     """The complete agent row behind the shared member-ownership gate. An agent's own row reads as
@@ -242,7 +251,7 @@ class AgentObjects(MemberOwnedObjects[AgentSpec, ObjectOwner]):
                 summary=_agent_summary(ctx, row),
                 owner=ObjectOwner(
                     member_id=row.owner_member_id,
-                    shared=row.visibility == "workspace" or row.id == ctx.turn.agent_id,
+                    audience=_audience(row, ctx.turn.agent_id),
                 ),
                 fields={
                     "id": str(row.id),

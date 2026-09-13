@@ -3,16 +3,16 @@
 Arming needs a live turn — the baseline is seeded by a probe run inside it — so `apply` refuses and
 names the tool. What the kind supplies is the register: every armed watch, its probe and deadline,
 the counters the runner keeps, and the delete that disarms one. A monitor is seen by whoever reads
-the conversation it watches, the `scheduled_task` kind's rule, decided from the audience snapshot
-taken when it armed."""
+the conversation it watches, the `scheduled_task` kind's rule, read live off that conversation."""
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import ClassVar
+from typing import ClassVar, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from ufo.sdk.audience import Audience
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
@@ -26,7 +26,6 @@ from ufo.sdk.objects import (
     VerbNotSupported,
     owner_emails,
 )
-from ufo.sdk.subjects import subject_shared
 from ufo.sdk.tools import ToolContext
 from ufo_ext_monitors.monitors import MONITOR_KIND, Monitor, MonitorStore
 
@@ -48,12 +47,14 @@ class MonitorSpec(BaseModel):
     interval_minutes: int = Field(title="Interval", description="Minimum minutes between probes.")
     deadline_at: datetime = Field(description="UTC instant the monitor fires at whatever happened.")
     reason: str = Field(title="Reason", description="What is being watched and why.")
+    connections: tuple[UUID, ...]
+    internet_access: Literal[False] | None
 
 
-def _owner(row: Monitor) -> GeneratedObjectOwner:
+def _owner(row: Monitor, audience: Audience) -> GeneratedObjectOwner:
     return GeneratedObjectOwner(
         member_id=row.created_by_member_id,
-        shared=subject_shared(row.audience),
+        audience=audience,
         generation=row.id,
     )
 
@@ -68,8 +69,9 @@ def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
 class MonitorObjects(MemberReadableObjects[MonitorSpec, GeneratedObjectOwner]):
     """The kind's handlers over `MonitorStore`. A monitor is seen by whoever reads the conversation
     it watches, plus its creator and a workspace admin — the gate is the base's, and this kind
-    supplies only the `shared` fact it decides from. Deleting disarms, and stays the creator's and
-    an admin's."""
+    supplies only the audience it decides from, read off the conversation on every listing so a
+    conversation shared after the arm shares its monitors. Deleting disarms, and stays the
+    creator's and an admin's."""
 
     kind_name: ClassVar[str] = MONITOR_KIND
     mutate_gate: ClassVar[str] = ARM_REFUSAL
@@ -78,13 +80,15 @@ class MonitorObjects(MemberReadableObjects[MonitorSpec, GeneratedObjectOwner]):
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
-        rows = await MonitorStore(_require_ext(ext)).armed()
+        context = _require_ext(ext)
+        rows = await MonitorStore(context).armed()
+        facts = await context.conversation_facts(tuple({row.conversation_id for row in rows}))
         emails = await owner_emails(row.created_by_member_id for row in rows)
         return tuple(
             OwnedRow(
                 name=row.name,
                 summary=f"{row.command} — {row.reason}"[:SUMMARY_MAX],
-                owner=_owner(row),
+                owner=_owner(row, facts[row.conversation_id].audience),
                 fields={
                     "conversation": str(row.conversation_id),
                     "next_probe_at": row.next_probe_at.isoformat(),
@@ -94,6 +98,7 @@ class MonitorObjects(MemberReadableObjects[MonitorSpec, GeneratedObjectOwner]):
                 },
             )
             for row in rows
+            if row.conversation_id in facts
         )
 
     async def _member_object(
@@ -113,6 +118,8 @@ class MonitorObjects(MemberReadableObjects[MonitorSpec, GeneratedObjectOwner]):
                 interval_minutes=row.interval_minutes,
                 deadline_at=row.deadline_at,
                 reason=row.reason,
+                connections=row.connections,
+                internet_access=row.internet_access,
             ),
             created_at=row.created_at,
             updated_at=row.updated_at,

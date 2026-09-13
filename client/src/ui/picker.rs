@@ -150,6 +150,10 @@ impl Picker {
         self.visible.get(self.selected).copied()
     }
 
+    pub fn item(&self, index: usize) -> Option<&str> {
+        self.items.get(index).map(String::as_str)
+    }
+
     pub fn select_index(&mut self, index: usize) -> bool {
         match self.visible.iter().position(|&at| at == index) {
             Some(row) => {

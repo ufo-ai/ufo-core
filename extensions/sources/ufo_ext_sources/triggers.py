@@ -29,6 +29,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from ufo.sdk.audience import Audience
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import object_agent_id
 
@@ -46,6 +47,7 @@ source_trigger = sa.Table(
     sa.Column("delivery", sa.Text, nullable=False),
     sa.Column("paused", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
+    sa.Column("internet_access", sa.Boolean, nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint(
@@ -67,6 +69,7 @@ _COLUMNS = (
     source_trigger.c.streams,
     source_trigger.c.paused,
     source_trigger.c.created_by_member_id,
+    source_trigger.c.internet_access,
     source_trigger.c.created_at,
     source_trigger.c.updated_at,
 )
@@ -89,6 +92,7 @@ class SourceTrigger:
     delivery: SourceTriggerDelivery
     paused: bool
     created_by_member_id: UUID | None
+    internet_access: Literal[False] | None
     created_at: datetime
     updated_at: datetime
 
@@ -101,7 +105,7 @@ class ListedTrigger:
     must answer for a member pays for the lookup."""
 
     trigger: SourceTrigger
-    audience: str
+    audience: Audience
     surface_label: str | None
 
 
@@ -112,6 +116,9 @@ def _utc(value: datetime) -> datetime:
 def _trigger(row: sa.RowMapping) -> SourceTrigger:
     """One row as a handler reads it. An empty `resource` or `streams` narrows nothing. The
     column holds the sorted names joined by commas, which is what the unique key compares."""
+    internet_access = row["internet_access"]
+    if internet_access is True:
+        raise ValueError("a source trigger internet scope can only narrow access")
     return SourceTrigger(
         id=row["id"],
         conversation_id=row["conversation_id"],
@@ -122,6 +129,7 @@ def _trigger(row: sa.RowMapping) -> SourceTrigger:
         delivery="current",
         paused=bool(row["paused"]),
         created_by_member_id=row["created_by_member_id"],
+        internet_access=False if internet_access is False else None,
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
     )
@@ -142,7 +150,8 @@ class SourceTriggerStore:
         conversation_id: UUID,
         connection_id: UUID,
         delivery: SourceTriggerDelivery,
-        created_by_member_id: UUID | None = None,
+        created_by_member_id: UUID,
+        internet_access: Literal[False] | None = None,
         resource: str = "",
         streams: tuple[str, ...] = (),
     ) -> SourceTrigger:
@@ -168,6 +177,7 @@ class SourceTriggerStore:
             "delivery": delivery,
             "paused": False,
             "created_by_member_id": created_by_member_id,
+            "internet_access": internet_access,
             "created_at": sa.func.now(),
             "updated_at": sa.func.now(),
         }
@@ -239,6 +249,19 @@ class SourceTriggerStore:
             )
         if deleted.rowcount == 0:
             raise ValueError(f"source trigger {expected.id} changed while removing")
+
+    async def retire_unattributed(self, expected: SourceTrigger) -> None:
+        """Delete a trigger that has no member authority to fire under."""
+        if expected.created_by_member_id is not None:
+            raise ValueError("only an unattributed source trigger may be retired here")
+        async with self.ctx.transaction() as connection:
+            await connection.execute(
+                sa.delete(source_trigger).where(
+                    source_trigger.c.workspace_id == self.workspace_id,
+                    source_trigger.c.id == expected.id,
+                    source_trigger.c.created_by_member_id.is_(None),
+                )
+            )
 
     async def watched(self, conversation_id: UUID) -> frozenset[tuple[UUID, str]]:
         """The (connection, resource) pairs one conversation's narrowed triggers watch — what an

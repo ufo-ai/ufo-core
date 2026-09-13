@@ -11,6 +11,7 @@ import sqlalchemy as sa
 from ufo_ext_web.audience import (
     AUDIENCE_PREFIX,
     WEB_ACCESS_TOOLS,
+    ConversationVisibilityInput,
     PrivateTranscriptInput,
     WebAccessInput,
     granted_emails,
@@ -18,7 +19,7 @@ from ufo_ext_web.audience import (
     web_extension,
 )
 from ufo_ext_web.manifest import NAME
-from ufo_ext_web.surface import SURFACE_WEB, _open_conversation
+from ufo_ext_web.surface import _open_conversation
 from ufo_testsupport.surfaces import (
     EMPTY_SKILL_REGISTRY,
     EMPTY_TURN_STEPS,
@@ -45,7 +46,9 @@ from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
-from ufo.sdk.audience import conversation_audience, foreign_room_audience
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience, foreign_room_audience
+from ufo.sdk.surfaces import PORTAL_SURFACE
+from ufo.sdk.tools import ObjectBinding
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -55,6 +58,8 @@ pytestmark = [
 GRANT = WEB_ACCESS_TOOLS[0]
 REVOKE = WEB_ACCESS_TOOLS[1]
 TRANSCRIPT = WEB_ACCESS_TOOLS[2]
+MAKE_PRIVATE = WEB_ACCESS_TOOLS[3]
+SHARE = WEB_ACCESS_TOOLS[4]
 ADMIN_EMAIL = "alice@example.com"
 MEMBER_EMAIL = "bob@example.com"
 
@@ -147,7 +152,7 @@ def _tool_ctx(workspace_id: UUID, agent_id: UUID, speaker: UUID | None) -> ToolC
 def _surface(workspace_id: UUID, tmp_path) -> SurfaceContext:
     return SurfaceContext(
         workspace_id=workspace_id,
-        surface=SURFACE_WEB,
+        surface=PORTAL_SURFACE,
         blob=FilesystemBlobStore(root=tmp_path),
         _sandboxes=ConversationSandbox(
             carrier=LocalCarrier(),
@@ -532,12 +537,42 @@ def test_the_disclosure_tool_promises_a_record_it_does_not_promise_a_reader() ->
     assert "can read that record" not in described
 
 
+async def _audience_row(conversation_id: UUID) -> tuple[str, UUID | None]:
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.conversation.c.audience, tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == conversation_id
+                )
+            )
+        ).one()
+    return row.audience, row.member_id
+
+
+async def test_open_conversation_mints_the_members_audience(db: None, tmp_path) -> None:
+    """A portal chat is private to its member at birth, in both coupled columns."""
+    workspace_id, main_agent, _second = await _seed()
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
+    with ws(workspace_id):
+        surface = _surface(workspace_id, tmp_path)
+        store = context_for(NAME, frozenset()).store
+        opened, _title = await _open_conversation(
+            surface, store, main_agent, member_id, MEMBER_EMAIL, "agent/bob/1", "first words", ()
+        )
+        assert await _audience_row(opened) == (str(conversation_audience(member_id)), member_id)
+        assert await store.get(f"chat/{opened}") == {
+            "agent_id": str(main_agent),
+            "email": MEMBER_EMAIL,
+        }
+
+
 async def test_open_conversation_lands_a_lost_race_on_the_winner_and_its_row(
     db: None, tmp_path
 ) -> None:
     """Two first messages racing one queue key converge: the loser's pre-written chat row is
     deleted, the winner's conversation and row stand, and the loser's caller receives the
-    winner's identity and title."""
+    winner's identity and title. The winner's audience stands too, whichever it is by then — an
+    existing workspace chat is not narrowed."""
     workspace_id, main_agent, _second = await _seed()
     member_id = await _member(workspace_id, MEMBER_EMAIL)
     with ws(workspace_id):
@@ -554,3 +589,218 @@ async def test_open_conversation_lands_a_lost_race_on_the_winner_and_its_row(
         assert winner_title == "first words"
         rows = await store.list("chat/")
         assert [key for key, _ in rows] == [f"chat/{winner}"]
+        assert await _audience_row(winner) == (str(conversation_audience(member_id)), member_id)
+
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.conversation)
+                .where(tables.conversation.c.id == winner)
+                .values(audience=str(SHARED_AUDIENCE), member_id=None)
+            )
+        late, _late_title = await _open_conversation(
+            surface, store, main_agent, member_id, MEMBER_EMAIL, key, "third words", ()
+        )
+        assert late == winner
+        assert await _audience_row(winner) == (str(SHARED_AUDIENCE), None)
+
+
+async def _portal_conversation(
+    workspace_id: UUID,
+    agent_id: UUID,
+    audience: str,
+    member_id: UUID | None,
+    *,
+    surface: str = PORTAL_SURFACE,
+    spoken_by: tuple[UUID, ...] = (),
+) -> UUID:
+    conversation_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=conversation_id,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface=surface,
+                queue_key=conversation_id.hex,
+                member_id=member_id,
+                audience=audience,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        for seq, speaker in enumerate(spoken_by, start=1):
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=seq,
+                    status="done",
+                    terminal={"status": "done", "text": "ok"},
+                    inbound="said",
+                    speaker_member_id=speaker,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    return conversation_id
+
+
+async def test_make_private_narrows_the_sole_speakers_workspace_chat(db: None, tmp_path) -> None:
+    """The narrowing tool: the member who alone has spoken in their workspace chat takes it
+    private, both columns moving together, and the reply says only they read it. Every other
+    shape refuses and writes nothing — a chat another member spoke in, one already private, a
+    room, a Slack conversation, another agent's, a speakerless turn — and an admin narrowing a
+    chat they never spoke in is refused like anyone else."""
+    workspace_id, main_agent, second_agent = await _seed()
+    admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
+    alone = await _portal_conversation(
+        workspace_id, main_agent, str(SHARED_AUDIENCE), None, spoken_by=(member_id,)
+    )
+    joined = await _portal_conversation(
+        workspace_id, main_agent, str(SHARED_AUDIENCE), None, spoken_by=(member_id, admin_id)
+    )
+    private = await _portal_conversation(
+        workspace_id,
+        main_agent,
+        str(conversation_audience(member_id)),
+        member_id,
+        spoken_by=(member_id,),
+    )
+    room = await _portal_conversation(
+        workspace_id, main_agent, "room:slack:C1", None, surface="slack", spoken_by=(member_id,)
+    )
+    slack = await _portal_conversation(
+        workspace_id,
+        main_agent,
+        str(SHARED_AUDIENCE),
+        None,
+        surface="slack",
+        spoken_by=(member_id,),
+    )
+    args = ConversationVisibilityInput()
+
+    def acting(
+        speaker: UUID | None, conversation: UUID, agent_id: UUID = main_agent
+    ) -> ToolContext:
+        return _targeting(
+            _tool_ctx(workspace_id, agent_id, speaker), CONVERSATION_KIND, conversation
+        )
+
+    with ws(workspace_id):
+        refusals = {
+            "joined": await MAKE_PRIVATE.handler(acting(member_id, joined), args),
+            "private": await MAKE_PRIVATE.handler(acting(member_id, private), args),
+            "room": await MAKE_PRIVATE.handler(acting(member_id, room), args),
+            "slack": await MAKE_PRIVATE.handler(acting(member_id, slack), args),
+            "walled": await MAKE_PRIVATE.handler(acting(member_id, alone, second_agent), args),
+            "speakerless": await MAKE_PRIVATE.handler(acting(None, alone), args),
+            "admin": await MAKE_PRIVATE.handler(acting(admin_id, alone), args),
+        }
+        assert all(refused.is_error for refused in refusals.values())
+        assert "Another member has spoken" in refusals["joined"].content[0].text
+        assert "Only a workspace conversation" in refusals["private"].content[0].text
+        assert "Only a portal conversation" in refusals["room"].content[0].text
+        assert "Only a portal conversation" in refusals["slack"].content[0].text
+        assert "on this agent" in refusals["walled"].content[0].text
+        assert "speaking member" in refusals["speakerless"].content[0].text
+        assert "Another member has spoken" in refusals["admin"].content[0].text
+        for untouched, expected in (
+            (alone, (str(SHARED_AUDIENCE), None)),
+            (joined, (str(SHARED_AUDIENCE), None)),
+            (private, (str(conversation_audience(member_id)), member_id)),
+        ):
+            assert await _audience_row(untouched) == expected
+
+        narrowed = await MAKE_PRIVATE.handler(acting(member_id, alone), args)
+        assert not narrowed.is_error
+        assert narrowed.content[0].text == (
+            "Only you read this conversation from now on. Notes made here are yours by default."
+        )
+        assert MAKE_PRIVATE.presentation is not None
+        assert MAKE_PRIVATE.presentation.confirm == narrowed.content[0].text
+        assert await _audience_row(alone) == (str(conversation_audience(member_id)), member_id)
+
+
+async def test_share_widens_exactly_the_speakers_own_chat(db: None, tmp_path) -> None:
+    """The widening tool: a member shares their own private chat and both columns move back to
+    the workspace's; the confirm names who reads it from now on and whose accounts its automations
+    run with. Another member's private chat — an admin's included — a workspace chat, a room and
+    a terminal session all refuse."""
+    workspace_id, main_agent, _second = await _seed()
+    admin_id = await _member(workspace_id, ADMIN_EMAIL, admin=True)
+    member_id = await _member(workspace_id, MEMBER_EMAIL)
+    own = await _portal_conversation(
+        workspace_id,
+        main_agent,
+        str(conversation_audience(member_id)),
+        member_id,
+        spoken_by=(member_id,),
+    )
+    theirs = await _portal_conversation(
+        workspace_id,
+        main_agent,
+        str(conversation_audience(member_id)),
+        member_id,
+        spoken_by=(member_id,),
+    )
+    shared = await _portal_conversation(
+        workspace_id, main_agent, str(SHARED_AUDIENCE), None, spoken_by=(member_id,)
+    )
+    foreign = await _portal_conversation(
+        workspace_id, main_agent, str(foreign_room_audience("slack", "C2")), None, surface="slack"
+    )
+    terminal = await _portal_conversation(
+        workspace_id,
+        main_agent,
+        str(conversation_audience(member_id)),
+        member_id,
+        surface="ufo",
+        spoken_by=(member_id,),
+    )
+    args = ConversationVisibilityInput()
+
+    def acting(speaker: UUID | None, conversation: UUID) -> ToolContext:
+        return _targeting(
+            _tool_ctx(workspace_id, main_agent, speaker), CONVERSATION_KIND, conversation
+        )
+
+    with ws(workspace_id):
+        refusals = {
+            "admin": await SHARE.handler(acting(admin_id, theirs), args),
+            "shared": await SHARE.handler(acting(member_id, shared), args),
+            "foreign": await SHARE.handler(acting(member_id, foreign), args),
+            "terminal": await SHARE.handler(acting(member_id, terminal), args),
+            "speakerless": await SHARE.handler(acting(None, own), args),
+        }
+        assert all(refused.is_error for refused in refusals.values())
+        assert "Only your own private conversation" in refusals["admin"].content[0].text
+        assert "Only your own private conversation" in refusals["shared"].content[0].text
+        assert "Only a portal conversation" in refusals["foreign"].content[0].text
+        assert "Only a portal conversation" in refusals["terminal"].content[0].text
+        assert "speaking member" in refusals["speakerless"].content[0].text
+        assert await _audience_row(theirs) == (str(conversation_audience(member_id)), member_id)
+        assert await _audience_row(shared) == (str(SHARED_AUDIENCE), None)
+
+        widened = await SHARE.handler(acting(member_id, own), args)
+        assert not widened.is_error
+        assert widened.content[0].text == (
+            "Every member of the workspace can read this conversation, including its past "
+            "messages. Notes made here are the workspace's by default."
+        )
+        assert SHARE.presentation is not None
+        assert SHARE.presentation.confirm == widened.content[0].text
+        assert await _audience_row(own) == (str(SHARED_AUDIENCE), None)
+
+
+def test_the_visibility_tools_bind_the_conversation_and_present_a_confirm() -> None:
+    for tool in (MAKE_PRIVATE, SHARE):
+        assert tool.bound == ObjectBinding(kind=CONVERSATION_KIND, binding="instance")
+        assert tool.side_effecting and tool.agent_targetable
+        assert tool.presentation is not None and tool.presentation.confirm
+    assert MAKE_PRIVATE.presentation is not None
+    assert MAKE_PRIVATE.presentation.label == "Make private"
+    assert SHARE.presentation is not None
+    assert SHARE.presentation.label == "Share with workspace"

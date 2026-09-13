@@ -48,7 +48,7 @@ from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
 from ufo.sdk.audience import conversation_audience
 
 pytestmark = [
@@ -163,6 +163,7 @@ def _tool_context(
     agent_id: UUID,
     speaker_member_id: UUID | None = None,
     conversation_id: UUID | None = None,
+    connections: tuple[UUID, ...] | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
@@ -179,6 +180,9 @@ def _tool_context(
             status="running",
             inbound="hi",
             created_at=datetime(2026, 7, 16, tzinfo=UTC),
+            runtime_config=(
+                None if connections is None else TurnRuntimeConfig(connections=connections)
+            ),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
@@ -241,6 +245,49 @@ async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> Non
         assert datetime.fromisoformat(fetched["updated_at"]).replace(tzinfo=UTC) == datetime(
             2026, 7, 11, tzinfo=UTC
         )
+
+
+async def test_turn_connection_scope_filters_connection_and_grant_objects(db: None) -> None:
+    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
+    with ws(workspace_id), agent(agent_id):
+        await _grant(workspace_id, agent_id, conversation_id, grantor_id, "gmail", "allowed")
+        await _grant(workspace_id, agent_id, conversation_id, grantor_id, "gmail", "withheld")
+        summaries = {row.account_id: row for row in await connection_summaries()}
+        names = {
+            account: account_object_name("gmail", account) for account in ("allowed", "withheld")
+        }
+        ordinary = _tool_context(workspace_id, agent_id, grantor_id)
+        scoped = _tool_context(
+            workspace_id,
+            agent_id,
+            grantor_id,
+            connections=(summaries["allowed"].id,),
+        )
+        closed = _tool_context(workspace_id, agent_id, grantor_id, connections=())
+        for kind in (CONNECTION_KIND, CONNECTOR_GRANT_KIND):
+            ordinary_list = json.loads(
+                await _text(_object_tool("object_list"), ordinary, kind=kind)
+            )
+            scoped_list = json.loads(await _text(_object_tool("object_list"), scoped, kind=kind))
+            closed_list = json.loads(await _text(_object_tool("object_list"), closed, kind=kind))
+            assert {row["name"] for row in ordinary_list["objects"]} == set(names.values())
+            assert [row["name"] for row in scoped_list["objects"]] == [names["allowed"]]
+            assert closed_list["objects"] == []
+            allowed = yaml.safe_load(
+                await _text(
+                    _object_tool("object_get"),
+                    scoped,
+                    ref=f"{kind}/{names['allowed']}",
+                )
+            )
+            assert allowed["spec"]["account_id"] == "allowed"
+            with pytest.raises(UnknownObject):
+                await _object_tool("object_get").handler(
+                    scoped,
+                    _object_tool("object_get").input_model.model_validate(
+                        {"ref": f"{kind}/{names['withheld']}"}
+                    ),
+                )
 
 
 async def test_a_grant_links_to_its_agent_and_the_connection_it_opens(db: None) -> None:
@@ -1341,7 +1388,7 @@ async def test_only_the_grantor_may_widen_and_an_admin_may_narrow(db: None) -> N
                 "manifest": _share_manifest("alice@example.com", False),
             }
         )
-        with pytest.raises(UnknownObject):
+        with pytest.raises(AdminRequired, match="only the connection owner may share"):
             await apply_tool.handler(_tool_context(workspace_id, agent_id, other_id), args)
 
         await _text(
@@ -1433,17 +1480,33 @@ async def test_read_verbs_hide_other_members_private_connectors(db: None) -> Non
         get_tool = _object_tool("object_get")
 
         stranger_ctx = _tool_context(workspace_id, agent_id, other_id)
-        listing = json.loads(
-            await _text(_object_tool("object_list"), stranger_ctx, kind=CONNECTOR_GRANT_KIND)
+        for kind in (CONNECTION_KIND, CONNECTOR_GRANT_KIND):
+            listing = json.loads(await _text(_object_tool("object_list"), stranger_ctx, kind=kind))
+            assert [row["name"] for row in listing["objects"]] == [shared_name]
+            with pytest.raises(UnknownObject):
+                await get_tool.handler(
+                    stranger_ctx,
+                    get_tool.input_model.model_validate({"ref": f"{kind}/{private_name}"}),
+                )
+
+        shared = yaml.safe_load(
+            await _text(get_tool, stranger_ctx, ref=f"{CONNECTION_KIND}/{shared_name}")
         )
-        assert [row["name"] for row in listing["objects"]] == [shared_name]
-        with pytest.raises(UnknownObject):
-            await get_tool.handler(
-                stranger_ctx,
-                get_tool.input_model.model_validate(
-                    {"ref": f"{CONNECTOR_GRANT_KIND}/{private_name}"}
-                ),
-            )
+        assert shared["spec"] == {
+            "provider": "asana",
+            "account_id": "bob@example.com",
+            "shared": True,
+            "base_url": "",
+            "backfill_days": None,
+        }
+        assert set(shared["status"]) == {
+            "owner_member_id",
+            "owner",
+            "shared",
+            "host",
+            "agents",
+            "streams",
+        }
 
         for ctx in (
             _tool_context(workspace_id, agent_id, grantor_id),
@@ -1462,8 +1525,8 @@ async def test_read_verbs_hide_other_members_private_connectors(db: None) -> Non
 
 async def test_portal_reads_hide_other_members_private_connectors(db: None) -> None:
     """The portal answers connections and grants through the same owner gate the verbs do: another
-    member's index carries only the shared grant and their detail read of the private one and of
-    its connection answers nothing, while the grantor and a workspace admin read both."""
+    member's index carries the shared grant and connection, while their detail read of either
+    private row answers nothing; the grantor and a workspace admin read both."""
     workspace_id, agent_id, conversation_id, admin_id, grantor_id, other_id = await _seed()
     with ws(workspace_id), agent(agent_id):
         await _grant(
@@ -1501,7 +1564,12 @@ async def test_portal_reads_hide_other_members_private_connectors(db: None) -> N
                     None, member_id=other_id, admin=False, query=ObjectListQuery()
                 )
             ).rows
-        ] == []
+        ] == [ASANA_BOB_NAME]
+        shared = await connections.member_detail(
+            None, ASANA_BOB_NAME, member_id=other_id, admin=False
+        )
+        assert shared is not None
+        assert shared.detail.spec.shared is True
         for member_id, admin in ((grantor_id, False), (admin_id, True)):
             listed = await grants.member_page(
                 None, member_id=member_id, admin=admin, query=ObjectListQuery()

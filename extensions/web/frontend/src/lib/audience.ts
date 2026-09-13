@@ -63,11 +63,11 @@ export function slackLink(
   return source || null;
 }
 
+/** The workspace's audience. */
 export const SHARED_SUBJECT = "shared";
 
-/** What a wire audience naming one member opens with. A chat the portal founds is private to the
- *  member who founded it, and the row standing in the rail before the listing read answers is the
- *  prefix alone: it is that member, and every reading of it says so. */
+/** What a wire audience naming one member opens with. A portal chat starts with its founding
+ *  member's subject. */
 export const MEMBER_SUBJECT = "member:";
 
 /** Whether a wire audience names one member rather than a room, the workspace, or another org. */

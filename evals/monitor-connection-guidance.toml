@@ -1,0 +1,71 @@
+name = "monitor-connection-guidance"
+base = "HEAD"
+suites = ["monitor_arm"]
+cases = ["watch-deploy-log"]
+repeats = 2
+concurrency = 3
+max_stacks = 2
+budget_usd = 12.0
+est_usd_per_case = 1.20
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+pack = { name = "assistant_eval" }
+sandbox = { backend = "docker" }
+research = { search_provider = "perplexity" }
+
+[[arm]]
+name = "field-guidance"
+
+[[arm.replacements]]
+path = "extensions/monitors/ufo_ext_monitors/monitor_tool.py"
+old = '''        max_length=CONNECTION_SCOPE_MAX,
+    )'''
+new = '''        max_length=CONNECTION_SCOPE_MAX,
+        description=(
+            "Connection ids the monitor's probes and fired turn may use. State every id; [] "
+            "allows none. object_list connection returns the ids."
+        ),
+    )'''
+
+[[arm]]
+name = "tool-guidance"
+
+[[arm.replacements]]
+path = "extensions/monitors/ufo_ext_monitors/monitor_tool.py"
+old = '''        "and the result shows the output the watch starts from. A probe cannot call a model. At "'''
+new = '''        "and the result shows the output the watch starts from. Later probes reach your connected "
+        "accounts only through the connection ids listed in `connections`, but never a model. At "'''
+
+[[arm]]
+name = "all-guidance"
+
+[[arm.replacements]]
+path = "extensions/monitors/ufo_ext_monitors/monitor_tool.py"
+old = '''        max_length=CONNECTION_SCOPE_MAX,
+    )'''
+new = '''        max_length=CONNECTION_SCOPE_MAX,
+        description=(
+            "Connection ids the monitor's probes and fired turn may use. State every id; [] "
+            "allows none. object_list connection returns the ids."
+        ),
+    )'''
+
+[[arm.replacements]]
+path = "extensions/monitors/ufo_ext_monitors/monitor_tool.py"
+old = '''        "and the result shows the output the watch starts from. A probe cannot call a model. At "'''
+new = '''        "and the result shows the output the watch starts from. Later probes reach your connected "
+        "accounts only through the connection ids listed in `connections`, but never a model. At "'''
+
+[[arm]]
+name = "split-model-access"
+
+[[arm.replacements]]
+path = "extensions/monitors/ufo_ext_monitors/monitor_tool.py"
+old = '''        "and the result shows the output the watch starts from. A probe cannot call a model. At "
+        "most 5 monitors per conversation."'''
+new = '''        "and the result shows the output the watch starts from. Later probes never reach a model: "
+        "a probe command that calls one succeeds in this turn and then fails every probe after "
+        "it. At most 5 monitors per conversation."'''

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from ufo.sdk.authority import authority_from_member_id
-from ufo.sdk.context import AgentArchived, ExtensionContext
+from ufo.sdk.context import AgentArchived, ExtensionContext, TurnRuntimeConfig
 from ufo_ext_scheduled_tasks.pauses import Pause, PauseStore
 
 CLAIM_LEASE_SECONDS = 300
@@ -55,6 +55,7 @@ class PauseRunner:
                 as_scheduled=True,
                 unless_member_since=row.origin_seq,
                 unless_member_arrival_since=row.origin_arrival_seq,
+                runtime_config=TurnRuntimeConfig(connections=row.connections),
             )
         except AgentArchived:
             return

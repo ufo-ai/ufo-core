@@ -130,30 +130,27 @@ test("an empty conversation states it, and the composer sends a message and stre
   expect(StreamFake.last().closed).toBe(true);
 });
 
-test("the open chat states who reads it on its title line, as the glyph alone", async () => {
+test("the open chat states who reads it on its title line, as the member's own control", async () => {
   wire(transcript());
   open();
 
   await screen.findByText("No messages in this conversation yet.");
   const detail = "Only you read this conversation. " + ADMIN_DISCLOSURE;
-  const mark = audienceMark();
+  const control = screen.getByRole("button", { name: "Visibility: Private" });
   const name = screen.getByText(CHAT_ROW.title);
-  expect(mark.parentElement!.contains(name)).toBe(true);
-  expect(document.body.querySelector("[data-slot=header]")!.contains(mark)).toBe(true);
-  const glyph = mark.querySelector("svg")!;
-  expect(glyph.getAttribute("class")).toContain("size-(--size-glyph)");
-  expect(glyph.getAttribute("class")).toContain("-top-px");
-  expect(mark.textContent).toBe(detail);
-  expect(mark.querySelector(".sr-only")!.textContent).toBe(detail);
-  expect(mark.getAttribute("title")).toBe(detail);
+  expect(control.parentElement!.contains(name)).toBe(true);
+  expect(document.body.querySelector("[data-slot=header]")!.contains(control)).toBe(true);
+  expect(control.querySelector("svg")).toBeTruthy();
+  expect(control.getAttribute("title")).toBe(detail);
+  expect(document.body.querySelector("[data-slot=audience]")).toBeNull();
 });
 
-test("the marker names the audience in a tooltip on focus", async () => {
+test("the control names the audience in a tooltip on focus", async () => {
   wire(transcript());
   open();
 
   await screen.findByText("No messages in this conversation yet.");
-  fireEvent.focus(audienceMark());
+  fireEvent.focus(screen.getByRole("button", { name: "Visibility: Private" }));
   expect((await screen.findByRole("tooltip")).textContent).toBe("Only you");
 });
 

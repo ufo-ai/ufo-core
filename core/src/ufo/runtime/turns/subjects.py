@@ -19,11 +19,3 @@ def connection_subject(shared: bool, owner_member_id: UUID | None) -> str:
     if owner_member_id is None:
         raise RuntimeError("a private connection with no owner discloses nothing")
     return member_subject(owner_member_id)
-
-
-def subject_shared(subject: str) -> bool:
-    """Whether content disclosed to this subject is readable by every member of the workspace —
-    the `shared` half of an object row's visibility, where a member-scoped row's own reader is
-    answered by ownership instead. A room and an externally-shared channel are false for the same
-    reason they are absent from `readable_audiences`: no membership fact exists for either."""
-    return subject == SHARED_SUBJECT

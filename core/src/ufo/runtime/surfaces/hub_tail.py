@@ -20,7 +20,7 @@ import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.harness.o11y import log
-from ufo.runtime.authority import turn_authority
+from ufo.runtime.authority import authority_member_id, turn_authority
 from ufo.runtime.billing.accounting import (
     ALLOW,
     BalanceGate,
@@ -177,13 +177,7 @@ async def turn_status_frame(
         )
         if balance.outcome != ALLOW:
             return Parked(message=balance_park_message(billing_url))
-        member_id = (
-            await connection.execute(
-                sa.select(tables.conversation.c.member_id).where(
-                    tables.conversation.c.id == row.conversation_id
-                )
-            )
-        ).scalar_one_or_none()
+        member_id = authority_member_id(authority)
         if not applicable_caps_absent(row.workspace_id, member_id, row.agent_id):
             decision = await SpendEvaluator(row.workspace_id, member_id, row.agent_id).decide(
                 connection, 0

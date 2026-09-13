@@ -27,6 +27,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.grants import feed_connections
@@ -296,7 +297,11 @@ class GbrainObjects(MemberReadableObjects[GbrainSpec, ObjectOwner]):
                 summary=registered.summary(),
                 owner=ObjectOwner(
                     member_id=registered.owner_member_id,
-                    shared=registered.shared,
+                    audience=(
+                        SHARED_AUDIENCE
+                        if registered.shared
+                        else conversation_audience(registered.owner_member_id)
+                    ),
                 ),
             )
             for registered in await _registered_from_ext(_require_ext(ext))

@@ -1,6 +1,6 @@
 [package]
 name = "ufo"
-version = "0.1.68"
+version = "0.1.70"
 edition = "2021"
 
 [[bin]]

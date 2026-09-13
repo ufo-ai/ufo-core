@@ -93,9 +93,10 @@ from ufo.harness.sandbox.site_report import (
     SiteReporter,
     SiteReports,
 )
-from ufo.runtime.authority import WORKSPACE_AUTHORITY
+from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.ext.manifest import CarrierSpec
 from ufo.schema import tables
+from ufo.schema.records import TurnRuntimeConfig
 
 BACKEND = "stub"
 BASE_HOST = "sites.example.test"
@@ -305,7 +306,7 @@ async def _seed_conversation(handle: str | None) -> tuple[UUID, UUID]:
 
 async def _seed_hosted_site(
     workspace_id: UUID, conversation_id: UUID, port: int, source_manifest: str | None = None
-) -> None:
+) -> UUID:
     hosted_site = sa.table(
         "hosted_site",
         sa.column("workspace_id", sa.Uuid()),
@@ -319,6 +320,7 @@ async def _seed_hosted_site(
         sa.column("created_at", sa.DateTime(timezone=True)),
         sa.column("updated_at", sa.DateTime(timezone=True)),
     )
+    creator_member_id = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(hosted_site).values(
@@ -327,13 +329,14 @@ async def _seed_hosted_site(
                 name=f"site-{conversation_id.hex[:8]}",
                 port=port,
                 visibility="workspace",
-                creator_member_id=uuid4(),
+                creator_member_id=creator_member_id,
                 generation=uuid4(),
                 source_manifest=source_manifest,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
         )
+    return creator_member_id
 
 
 async def _seed_shipped_app(workspace_id: UUID, extension: str, name: str) -> None:
@@ -1341,10 +1344,11 @@ async def test_a_page_read_from_a_site_that_stopped_tells_the_conversation_that_
     """The whole hop, end to end: a member opens a site whose server has stopped, and the
     conversation that built it is told inside the same request that answers the member. The fire
     restates the port and what was observed, so a report landing after a rollover needs no earlier
-    transcript to act on, and the authority is the workspace's — a site going down is nobody's
-    delegated act."""
+    transcript to act on. Its standalone creator-authority turn reaches neither connections nor
+    public internet."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    creator_member_id = await _seed_hosted_site(workspace_id, conversation_id, 8000)
     async with _reporting(_DeadPortCarrier(port=0)) as reported:
         await _open(reported.client, workspace_id, conversation_id)
         got = await _read(reported.client, conversation_id, "/", "iframe")
@@ -1352,7 +1356,10 @@ async def test_a_page_read_from_a_site_that_stopped_tells_the_conversation_that_
     assert got.status_code == 503
     assert [turn.conversation_id for turn in reported.turns] == [conversation_id]
     assert reported.turns[0].message == SITE_NOT_ANSWERING_FIRE.format(port=8000)
-    assert reported.turns[0].authority == WORKSPACE_AUTHORITY
+    assert reported.turns[0].authority == MemberAuthority(creator_member_id)
+    assert reported.turns[0].runtime_config == TurnRuntimeConfig(
+        connections=(), internet_access=False
+    )
 
 
 async def test_reloads_of_the_waiting_page_carry_one_idempotency_key(
@@ -1364,6 +1371,7 @@ async def test_reloads_of_the_waiting_page_carry_one_idempotency_key(
     collapses them into one turn — the whole of this report's memory, with no row of ours."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
+    await _seed_hosted_site(workspace_id, conversation_id, 8000)
     async with _reporting(_DeadPortCarrier(port=0)) as reported:
         await _open(reported.client, workspace_id, conversation_id)
         for _ in range(3):

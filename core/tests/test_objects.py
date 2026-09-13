@@ -134,7 +134,14 @@ from ufo.runtime.turns.audience import (
 from ufo.runtime.turns.transcript import Conversation, transcript_key
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import MAIN_AGENT_ICON, SCHEDULED_ADMISSION, Agent, Turn, TurnContext
+from ufo.schema.records import (
+    MAIN_AGENT_ICON,
+    MEMBER_ADMISSION,
+    SCHEDULED_ADMISSION,
+    Agent,
+    Turn,
+    TurnContext,
+)
 from ufo.sdk.objects import AgentTargetVerb
 
 SANDBOX_UNTOUCHED = "object verbs run against stores and must not reach the sandbox"
@@ -1993,6 +2000,195 @@ async def test_the_artifact_kind_filters_and_orders_on_its_declared_fields(
     assert [row["name"] for row in others["objects"]] == [blob]
 
 
+async def test_a_shared_artifact_belongs_to_the_member_bound_to_the_call(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        agent_id = await _agent_row(workspace_id, name="assistant", is_main=True)
+        founder = await _member(workspace_id, ADMIN_CREATED_AT)
+        sharer = await _member(workspace_id, JOINER_CREATED_AT)
+        turn = await _turn_row(workspace_id, agent_id=agent_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == turn.id)
+                .values(admission_source=MEMBER_ADMISSION, speaker_member_id=founder)
+            )
+        ctx, _ = await _workspace_context(turn, tmp_path, speaker_member_id=sharer)
+        await ctx.sandbox.bash("printf 'plan' > plan.md")
+        await _text(tools, "share_file", ctx, files=[{"file_path": "plan.md"}])
+        async with workspace_tx() as connection:
+            stored_member = (
+                await connection.execute(
+                    sa.select(tables.shared_artifact.c.member_id).where(
+                        tables.shared_artifact.c.turn_id == turn.id
+                    )
+                )
+            ).scalar_one()
+        store = artifact_object().store
+        assert isinstance(store, MemberListable)
+        every = ObjectListQuery(supported_fields=artifact_object().list_fields)
+        mine = replace(every, filters={"mine": True})
+        with agent(agent_id):
+            sharer_page = await store.member_page(None, member_id=sharer, admin=False, query=every)
+            founder_page = await store.member_page(
+                None, member_id=founder, admin=False, query=every
+            )
+            sharer_mine = await store.member_page(None, member_id=sharer, admin=False, query=mine)
+            founder_mine = await store.member_page(None, member_id=founder, admin=False, query=mine)
+
+    assert stored_member == sharer
+    (sharer_row,) = sharer_page.rows
+    (founder_row,) = founder_page.rows
+    assert sharer_row.name == founder_row.name == f"{turn.conversation_id.hex[:8]}-plan-md"
+    assert sharer_row.fields["mine"] is True
+    assert sharer_row.fields["owner_email"] == f"{sharer.hex[:8]}@x.test"
+    assert founder_row.fields["mine"] is False
+    assert founder_row.fields["owner_email"] == f"{sharer.hex[:8]}@x.test"
+    assert [row.name for row in sharer_mine.rows] == [sharer_row.name]
+    assert founder_mine.rows == ()
+
+
+async def test_a_delegated_share_file_belongs_to_the_bound_member(db: None, tmp_path: Path) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        agent_id = await _agent_row(workspace_id, name="assistant", is_main=True)
+        member_id = await _member(workspace_id, ADMIN_CREATED_AT)
+        turn = await _turn_row(workspace_id, agent_id=agent_id, member_id=member_id)
+        delegated = turn.model_copy(update={"seq": 2, "on_behalf_of_member_id": member_id})
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == turn.id)
+                .values(
+                    seq=2,
+                    admission_source=SCHEDULED_ADMISSION,
+                    on_behalf_of_member_id=member_id,
+                )
+            )
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=turn.conversation_id,
+                    agent_id=agent_id,
+                    seq=1,
+                    status="done",
+                    inbound="prepare the report",
+                    admission_source=MEMBER_ADMISSION,
+                    speaker_member_id=member_id,
+                    terminal={"status": "done", "text": "queued"},
+                    created_at=ADMIN_CREATED_AT,
+                    updated_at=ADMIN_CREATED_AT,
+                )
+            )
+        ctx, _ = await _workspace_context(delegated, tmp_path)
+        await ctx.sandbox.bash("printf 'report' > report.txt")
+        await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+        async with workspace_tx() as connection:
+            stored_member = (
+                await connection.execute(
+                    sa.select(tables.shared_artifact.c.member_id).where(
+                        tables.shared_artifact.c.turn_id == turn.id
+                    )
+                )
+            ).scalar_one()
+        store = artifact_object().store
+        assert isinstance(store, MemberListable)
+        mine = ObjectListQuery(
+            filters={"mine": True}, supported_fields=artifact_object().list_fields
+        )
+        with agent(agent_id):
+            page = await store.member_page(None, member_id=member_id, admin=False, query=mine)
+
+    assert stored_member == member_id
+    (row,) = page.rows
+    assert row.fields["mine"] is True
+    assert row.fields["owner_email"] == f"{member_id.hex[:8]}@x.test"
+
+
+async def test_mine_filters_an_artifact_by_its_current_versions_sharer(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    tools = _object_tools()
+    with ws(workspace_id):
+        agent_id = await _agent_row(workspace_id, name="assistant", is_main=True)
+        first_sharer = await _member(workspace_id, ADMIN_CREATED_AT)
+        current_sharer = await _member(workspace_id, JOINER_CREATED_AT)
+        turn = await _turn_row(workspace_id, agent_id=agent_id)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == turn.id)
+                .values(admission_source=MEMBER_ADMISSION, speaker_member_id=first_sharer)
+            )
+        ctx, _ = await _workspace_context(turn, tmp_path, speaker_member_id=first_sharer)
+        await ctx.sandbox.bash("printf 'first' > plan.md")
+        await _text(tools, "share_file", ctx, files=[{"file_path": "plan.md"}])
+        await ctx.sandbox.bash("printf 'current' > plan.md")
+        await _text(
+            tools,
+            "share_file",
+            replace(ctx, speaker_member_id=current_sharer),
+            files=[{"file_path": "plan.md"}],
+        )
+        async with workspace_tx() as connection:
+            shares = (
+                await connection.execute(
+                    sa.select(
+                        tables.shared_artifact.c.turn_id,
+                        tables.shared_artifact.c.blob_key,
+                    ).where(tables.shared_artifact.c.turn_id == turn.id)
+                )
+            ).all()
+            first, current = sorted(shares, key=lambda row: row.blob_key)
+            await connection.execute(
+                sa.update(tables.shared_artifact)
+                .where(
+                    tables.shared_artifact.c.turn_id == first.turn_id,
+                    tables.shared_artifact.c.blob_key == first.blob_key,
+                )
+                .values(
+                    id=UUID(int=2),
+                    member_id=first_sharer,
+                    created_at=ADMIN_CREATED_AT,
+                )
+            )
+            await connection.execute(
+                sa.update(tables.shared_artifact)
+                .where(
+                    tables.shared_artifact.c.turn_id == current.turn_id,
+                    tables.shared_artifact.c.blob_key == current.blob_key,
+                )
+                .values(
+                    id=UUID(int=1),
+                    member_id=current_sharer,
+                    created_at=ADMIN_CREATED_AT,
+                )
+            )
+        store = artifact_object().store
+        assert isinstance(store, MemberListable)
+        mine = ObjectListQuery(
+            filters={"mine": True}, supported_fields=artifact_object().list_fields
+        )
+        with agent(agent_id):
+            first_page = await store.member_page(
+                None, member_id=first_sharer, admin=False, query=mine
+            )
+            current_page = await store.member_page(
+                None, member_id=current_sharer, admin=False, query=mine
+            )
+
+    assert first_page.rows == ()
+    (current,) = current_page.rows
+    assert current.fields["mine"] is True
+    assert current.fields["owner_email"] == f"{current_sharer.hex[:8]}@x.test"
+
+
 async def test_a_file_a_reply_carried_is_no_artifact_object(db: None, tmp_path: Path) -> None:
     """A `details` row is the write-up a closing reply delivered beside itself: the kind lists no
     object for it, names none for it, and a get by the name it would have had finds nothing — while
@@ -2231,8 +2427,10 @@ async def test_a_replayed_share_file_call_reuses_its_blob_and_row(db: None, tmp_
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
+        first_sharer = await _member(workspace_id, ADMIN_CREATED_AT)
+        replaying_member = await _member(workspace_id, JOINER_CREATED_AT)
         turn = await _turn_row(workspace_id)
-        ctx, _ = await _workspace_context(turn, tmp_path)
+        ctx, _ = await _workspace_context(turn, tmp_path, speaker_member_id=first_sharer)
         ctx = replace(ctx, idempotency_key=f"{turn.id}/share_file/call-1")
         await ctx.sandbox.bash("printf 'stable' > report.txt")
 
@@ -2241,31 +2439,33 @@ async def test_a_replayed_share_file_call_reuses_its_blob_and_row(db: None, tmp_
         )[0]
         await ctx.sandbox.bash("printf 'changed after the recorded share' > report.txt")
         second = json.loads(
-            await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
+            await _text(
+                tools,
+                "share_file",
+                replace(ctx, speaker_member_id=replaying_member),
+                files=[{"file_path": "report.txt"}],
+            )
         )[0]
 
         async with workspace_tx() as connection:
             rows = (
-                (
-                    await connection.execute(
-                        sa.select(tables.shared_artifact.c.blob_key).where(
-                            tables.shared_artifact.c.turn_id == turn.id
-                        )
-                    )
+                await connection.execute(
+                    sa.select(
+                        tables.shared_artifact.c.blob_key,
+                        tables.shared_artifact.c.member_id,
+                    ).where(tables.shared_artifact.c.turn_id == turn.id)
                 )
-                .scalars()
-                .all()
-            )
+            ).all()
         assert first["url"] == second["url"]
         assert first == second
-        assert rows == [urlsplit(first["url"]).path.removeprefix("/")]
+        assert rows == [(urlsplit(first["url"]).path.removeprefix("/"), first_sharer)]
         assert len(await ctx.blob.list("artifacts/")) == 1
-        assert await ctx.blob.get(rows[0]) == b"stable"
+        assert await ctx.blob.get(rows[0].blob_key) == b"stable"
 
         await ctx.sandbox.bash("printf 'different' > other.txt")
         with pytest.raises(ValueError, match="idempotency key belongs to a different file request"):
             await _text(tools, "share_file", ctx, files=[{"file_path": "other.txt"}])
-        assert await ctx.blob.get(rows[0]) == b"stable"
+        assert await ctx.blob.get(rows[0].blob_key) == b"stable"
 
 
 async def test_a_cancelled_share_file_commit_keeps_the_blob_its_row_names(
@@ -3730,7 +3930,13 @@ class _AdminOnlyStore(MemberOwnedObjects[_BootSpec, ObjectOwner]):
     delete_gate = "delete refused"
 
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[ObjectOwner], ...]:
-        return (OwnedRow(name="boot", summary="s", owner=ObjectOwner(member_id=None, shared=True)),)
+        return (
+            OwnedRow(
+                name="boot",
+                summary="s",
+                owner=ObjectOwner(member_id=None, audience=SHARED_AUDIENCE),
+            ),
+        )
 
     async def _detail(
         self, ctx: ToolContext, name: str, owner: ObjectOwner
@@ -3844,7 +4050,7 @@ async def test_an_unfenced_kind_edits_through_a_row_created_or_removed_while_edi
     workspace_id = await _workspace()
     member = await _member(workspace_id, JOINER_CREATED_AT)
     ctx = _tool_context(workspace_id, speaker_member_id=member)
-    owner = ObjectOwner(member_id=member, shared=False)
+    owner = ObjectOwner(member_id=member, audience=conversation_audience(member))
 
     with ws(workspace_id):
         created = _RaceStore(race=_RaceRows(reads=[owner]))
@@ -3883,7 +4089,9 @@ async def test_a_generated_kind_fences_every_verb_on_the_row_its_read_saw(
     owner = (
         None
         if found is None
-        else GeneratedObjectOwner(member_id=member, shared=False, generation=generations[found])
+        else GeneratedObjectOwner(
+            member_id=member, audience=conversation_audience(member), generation=generations[found]
+        )
     )
     generation = None if expected is None else generations[expected]
     old = None if expected is None else _BootSpec()
@@ -3920,8 +4128,12 @@ async def test_a_status_read_rechecks_visibility_and_reports_a_removed_row_as_ab
     member = await _member(workspace_id, JOINER_CREATED_AT)
     other = await _member(workspace_id, JOINER_CREATED_AT)
     ctx = _tool_context(workspace_id, speaker_member_id=member)
-    owner = ObjectOwner(member_id=member, shared=True)
-    landed = None if after == "removed" else ObjectOwner(member_id=other, shared=False)
+    owner = ObjectOwner(member_id=member, audience=SHARED_AUDIENCE)
+    landed = (
+        None
+        if after == "removed"
+        else ObjectOwner(member_id=other, audience=conversation_audience(other))
+    )
     store = _RaceStore(race=_RaceRows(reads=[owner, landed]))
 
     with ws(workspace_id):
@@ -4451,6 +4663,12 @@ async def test_a_speaking_admin_reads_another_members_private_conversation_as_me
         bob = await _member(workspace_id, JOINER_CREATED_AT)
         private = await _turn_row(workspace_id, member_id=bob)
         reader = await _turn_row(workspace_id, agent_id=private.agent_id, member_id=admin)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.conversation)
+                .where(tables.conversation.c.id == private.conversation_id)
+                .values(title="Bob's salary review")
+            )
         ctx, workspace_dir = await _workspace_context(
             reader,
             tmp_path,
@@ -4486,6 +4704,8 @@ async def test_a_speaking_admin_reads_another_members_private_conversation_as_me
     assert not (workspace_dir / "transcripts").exists()
     assert [row["name"] for row in listed["objects"]] == [str(private.conversation_id)]
     assert listed["objects"][0]["private"] is True
+    assert "title" not in listed["objects"][0]
+    assert "salary" not in listed["objects"][0]["summary"]
     assert str(private.conversation_id) not in {row["name"] for row in unfiltered["objects"]}
 
 

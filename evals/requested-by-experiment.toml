@@ -1,10 +1,10 @@
 name = "requested-by-hint"
-base = "HEAD"
+base = "d2a819bf9eeafb4e6fd796f254c7c191cdf4949a"
 suites = ["object_tools", "new_application"]
 cases = ["O11-archive-in-a-shared-conversation", "A02-stated-up-front"]
 repeats = 4
 concurrency = 2
-max_stacks = 1
+max_stacks = 2
 budget_usd = 60.0
 est_usd_per_case = 1.20
 
@@ -32,7 +32,7 @@ name = "offer-ref-always"
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/engine.py"
-old = """        if self._own_member(requesters) is not None:
+old = """        if self._sole_active_member(requesters) is not None:
             return ()
         return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""
 new = """        return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""
@@ -42,14 +42,20 @@ name = "no-own-binding"
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/engine.py"
-old = """        elif (member := self._own_member(requesters)) is not None:
-            requester = member
+old = """        elif sole_member is not None:
+            requester = sole_member
+            selected_ref, selected = next(
+                (ref, message)
+                for ref, message in reversed(tuple(requesters.items()))
+                if message.member_id == requester
+            )
+            selected_message = selected.rendered
 """
 new = ""
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/engine.py"
-old = """        if self._own_member(requesters) is not None:
+old = """        if self._sole_active_member(requesters) is not None:
             return ()
         return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""
 new = """        return tuple(ref for ref, message in requesters.items() if message.member_id is not None)"""

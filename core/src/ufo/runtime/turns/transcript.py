@@ -19,15 +19,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.harness.models.interface import Message
+from ufo.schema.records import MEMBER_ADMISSION, TurnAdmissionSource
 
 
 class ParkedRequester(BaseModel):
-    """One active message whose member identity and rendered content survive a turn park."""
+    """One active message whose admission, member identity, and content survive a turn park."""
 
     model_config = ConfigDict(strict=True)
     id: UUID
     member_id: UUID | None
     rendered: str
+    admission_source: TurnAdmissionSource = MEMBER_ADMISSION
 
 
 class ParkedTurn(BaseModel):

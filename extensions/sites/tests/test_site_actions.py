@@ -12,6 +12,7 @@ from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
 from ufo_ext_sites.store import HostedSites, hosted_site
 from ufo_ext_sites.subagent import WEBSITE_BUILDING_PROFILE
+from ufo_testsupport.member_authorization import PermitMemberAuthorization
 from ufo_testsupport.models import serving_model
 
 from ufo.blob import FilesystemBlobStore
@@ -318,6 +319,7 @@ def _engine(turn: Turn, model: object, tmp_path: Path, spawn=_unavailable_spawn)
         audience=conversation_audience(None),
         artifact_token_secret="",
         grants=None,
+        member_authorization=PermitMemberAuthorization(),
         memory=_NoRecall(),
         public_base_url=PUBLIC_BASE_URL,
         verbs=verbs,

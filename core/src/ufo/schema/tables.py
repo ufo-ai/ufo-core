@@ -228,6 +228,122 @@ conversation = sa.Table(
     ),
 )
 
+member_authorization = sa.Table(
+    "member_authorization",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, nullable=False),
+    sa.Column("member_id", sa.Uuid, nullable=False),
+    sa.Column("agent_id", sa.Uuid, nullable=False),
+    sa.Column("conversation_id", sa.Uuid, nullable=False),
+    sa.Column("call", sa.Text, nullable=False),
+    sa.Column("effect_digest", sa.Text, nullable=False),
+    sa.Column("effect", sa.JSON, nullable=False),
+    sa.Column("request_key", sa.Text, nullable=False),
+    sa.Column("decision_key", sa.Text, nullable=True),
+    sa.Column("requested_by", sa.Uuid, nullable=False),
+    sa.Column("decided_by", sa.Uuid, nullable=True),
+    sa.Column("decision", sa.Text, nullable=True),
+    sa.Column("basis", sa.Text, nullable=True),
+    sa.Column("evidence", sa.Text, nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "member_id"],
+        ["member.workspace_id", "member.id"],
+        ondelete="CASCADE",
+        name="member_authorization_member_fkey",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "agent_id"],
+        ["agent.workspace_id", "agent.id"],
+        ondelete="CASCADE",
+        name="member_authorization_agent_fkey",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "conversation_id"],
+        ["conversation.workspace_id", "conversation.id"],
+        ondelete="CASCADE",
+        name="member_authorization_conversation_fkey",
+    ),
+    sa.UniqueConstraint(
+        "workspace_id",
+        "request_key",
+        name="member_authorization_request_key",
+    ),
+    sa.UniqueConstraint(
+        "workspace_id",
+        "decision_key",
+        name="member_authorization_decision_key",
+    ),
+    sa.CheckConstraint("call <> ''", name="member_authorization_call_nonempty"),
+    sa.CheckConstraint("request_key <> ''", name="member_authorization_request_key_nonempty"),
+    sa.CheckConstraint("effect_digest <> ''", name="member_authorization_digest_nonempty"),
+    sa.CheckConstraint(
+        "decision is null or decision in ('allow', 'always', 'deny', 'revoke', 'superseded')",
+        name="member_authorization_decision",
+    ),
+    sa.CheckConstraint(
+        "(decision is null) = (decided_by is null) and "
+        "(decision is null) = (decision_key is null) and "
+        "(decision is null) = (basis is null) and "
+        "(decision is null) = (evidence is null)",
+        name="member_authorization_decided",
+    ),
+    sa.CheckConstraint(
+        "basis is null or basis in ('selected_message', 'pending_answer', 'standing')",
+        name="member_authorization_basis",
+    ),
+    sa.Index(
+        "member_authorization_pending",
+        "workspace_id",
+        "conversation_id",
+        "member_id",
+        unique=True,
+        postgresql_where=sa.text("decision is null"),
+        sqlite_where=sa.text("decision is null"),
+    ),
+)
+
+member_permission = sa.Table(
+    "member_permission",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, nullable=False),
+    sa.Column("member_id", sa.Uuid, nullable=False),
+    sa.Column("agent_id", sa.Uuid, nullable=False),
+    sa.Column("call", sa.Text, nullable=False),
+    sa.Column("effect_digest", sa.Text, nullable=False),
+    sa.Column("effect", sa.JSON, nullable=False),
+    sa.Column("granted_by", sa.Uuid, nullable=False),
+    sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "member_id"],
+        ["member.workspace_id", "member.id"],
+        ondelete="CASCADE",
+        name="member_permission_member_fkey",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "agent_id"],
+        ["agent.workspace_id", "agent.id"],
+        ondelete="CASCADE",
+        name="member_permission_agent_fkey",
+    ),
+    sa.UniqueConstraint(
+        "workspace_id",
+        "member_id",
+        "agent_id",
+        "call",
+        "effect_digest",
+        name="member_permission_identity",
+    ),
+    sa.CheckConstraint("call <> ''", name="member_permission_call_nonempty"),
+    sa.CheckConstraint("effect_digest <> ''", name="member_permission_digest_nonempty"),
+    sa.Index("member_permission_member", "workspace_id", "member_id"),
+)
+
 turn = sa.Table(
     "turn",
     metadata,
@@ -683,6 +799,7 @@ shared_artifact = sa.Table(
     sa.Column("blob_key", sa.Text, primary_key=True),
     sa.Column("id", sa.Uuid, nullable=False, unique=True, default=uuid4),
     sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
     sa.Column("filename", sa.Text, nullable=False),
     sa.Column("subject", sa.Text, nullable=True),
     sa.Column("media_type", sa.Text, nullable=False),
@@ -709,6 +826,15 @@ shared_artifact = sa.Table(
         "AND (preview_blob_key IS NULL) = (preview_size_bytes IS NULL) "
         "AND (preview_size_bytes IS NULL OR preview_size_bytes >= 0)",
         name="shared_artifact_preview",
+    ),
+    sa.Index(
+        "shared_artifact_files",
+        "workspace_id",
+        "filename",
+        "created_at",
+        "blob_key",
+        postgresql_where=sa.text("role = 'file'"),
+        sqlite_where=sa.text("role = 'file'"),
     ),
 )
 

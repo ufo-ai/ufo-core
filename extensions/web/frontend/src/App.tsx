@@ -391,7 +391,8 @@ export function App({
   );
 }
 
-function founded(agent: Agent, conversationId: string, title: string): void {
+function founded(agent: Agent, member: Member, conversationId: string, title: string): void {
+  if (member.id === undefined) throw new Error("member id missing");
   railFounded({
     conversation_id: conversationId,
     agent_id: agent.id,
@@ -400,8 +401,8 @@ function founded(agent: Agent, conversationId: string, title: string): void {
     last_at: stampIso(new Date()),
     surface: WEB_SURFACE,
     surface_label: null,
-    audience: MEMBER_SUBJECT,
-    member_email: null,
+    audience: MEMBER_SUBJECT + member.id,
+    member_email: member.email,
     mine: true,
     speaker: null,
   });
@@ -917,7 +918,9 @@ function RoutedPane({
             member={member}
             selected={selected}
             chats={rail.phase === "ready" ? rail.rows : null}
-            onCreated={founded}
+            onCreated={(agent, conversationId, title) =>
+              founded(agent, member, conversationId, title)
+            }
             place={route.place}
             onPlace={placeAgent}
             onAgents={onAgents}
@@ -1011,7 +1014,9 @@ function RoutedPane({
           mainAgent={mainAgent}
           seeking={seeking}
           onActive={onActive}
-          onFounded={founded}
+          onFounded={(agent, conversationId, title) =>
+            founded(agent, member, conversationId, title)
+          }
           onActivity={railActivity}
           onAgents={onAgents}
         />
@@ -1031,7 +1036,7 @@ function RoutedPane({
           agent={agent}
           member={member}
           conversationId={null}
-          onCreated={(conversationId, title) => founded(agent, conversationId, title)}
+          onCreated={(conversationId, title) => founded(agent, member, conversationId, title)}
           onActivity={railActivity}
         />
       );

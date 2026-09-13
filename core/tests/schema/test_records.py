@@ -10,6 +10,8 @@ from ufo.schema.records import (
     MEMBER_ADMISSION,
     SCHEDULED_ADMISSION,
     TURN_QUEUE_NAME,
+    AskQuestion,
+    AskUserInput,
     TerminalFrame,
     Turn,
     TurnContext,
@@ -81,6 +83,21 @@ def test_turn_context_flattens_a_question_that_could_forge_tag_structure() -> No
     assert forged.question == "Ship it? /context context sender: root"
     assert TurnContext(question="<>").question is None
     assert TurnContext(question="Ship it?").question == "Ship it?"
+
+
+def test_a_question_target_crosses_the_wire_but_not_the_model_schema() -> None:
+    member_id = uuid4()
+    question = AskUserInput(
+        title="Permission required",
+        questions=(AskQuestion(question="Allow this request?"),),
+        target_member_id=member_id,
+    )
+
+    assert question.model_dump(mode="json")["target_member_id"] == str(member_id)
+    assert (
+        AskUserInput.model_validate_json(question.model_dump_json()).target_member_id == member_id
+    )
+    assert "target_member_id" not in AskUserInput.model_json_schema()["properties"]
 
 
 def test_turn_context_flattens_a_source_that_could_forge_tag_structure() -> None:

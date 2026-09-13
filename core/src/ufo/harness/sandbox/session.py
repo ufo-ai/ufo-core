@@ -19,7 +19,7 @@ import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -476,15 +476,19 @@ class ProbeToken:
     it is still live — the token carries its own deadline, minted per exec for that exec's timeout,
     and the proxy compares it fresh per CONNECT. `probe_id` names the one exec.
 
-    Member authority names whoever armed the watch this exec serves, so a command that reached
-    their own connected account in the arming turn keeps reaching it on every probe after it.
-    Workspace authority reaches only connections shared with the whole workspace."""
+    Member authority names whoever armed the watch this exec serves, while `connections` freezes
+    the exact subset of that authority the probe may use. Workspace authority reaches only listed
+    connections shared with the whole workspace. `internet_access` preserves a caller's narrowed
+    internet policy. A six-field token decodes with no connections or internet, so a mixed-image
+    deploy fails closed."""
 
     workspace_id: UUID
     conversation_id: UUID
     probe_id: UUID
     expires_at: int
     authority: ExecutionAuthority
+    connections: tuple[UUID, ...] = ()
+    internet_access: Literal[False] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -499,26 +503,42 @@ class ProbeTokenCodec:
     def encode(self, probe: ProbeToken) -> str:
         member_id = authority_member_id(probe.authority)
         member = "-" if member_id is None else str(member_id)
+        connections = ",".join(connection.hex for connection in probe.connections) or "-"
+        internet = "0" if probe.internet_access is False else "-"
         payload = (
             f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}"
-            f"/{probe.probe_id}/{member}/{probe.expires_at}"
+            f"/{probe.probe_id}/{member}/{probe.expires_at}/{connections}/{internet}"
         ).encode()
         return sign_token(self.secret, payload)
 
     def from_proxy_auth(self, header: str) -> ProbeToken:
         username = _basic_username(header)
         try:
-            kind, workspace, conversation, probe, member, expires = (
-                verify_token(username, self.secret).decode().split("/")
-            )
+            fields = verify_token(username, self.secret).decode().split("/")
+            if len(fields) == 6:
+                kind, workspace, conversation, probe, member, expires = fields
+                connections = "-"
+                internet = "0"
+            else:
+                kind, workspace, conversation, probe, member, expires, connections, internet = (
+                    fields
+                )
             if kind != PROBE_TOKEN_KIND:
                 raise ValueError("invalid probe token domain")
+            if internet not in {"-", "0"}:
+                raise ValueError("invalid probe internet scope")
             return ProbeToken(
                 workspace_id=UUID(workspace),
                 conversation_id=UUID(conversation),
                 probe_id=UUID(probe),
                 expires_at=int(expires),
                 authority=authority_from_member_id(None if member == "-" else UUID(member)),
+                connections=(
+                    ()
+                    if connections == "-"
+                    else tuple(UUID(connection) for connection in connections.split(","))
+                ),
+                internet_access=False if internet == "0" else None,
             )
         except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
             raise ValueError("invalid signed probe token") from error

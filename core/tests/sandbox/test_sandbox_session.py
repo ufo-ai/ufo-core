@@ -8,12 +8,14 @@ import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
 
 import ufo.runtime.tools.tasks as tasks_module
 from ufo.blob import FilesystemBlobStore
+from ufo.harness.auth.token_signing import sign_token
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
@@ -21,6 +23,7 @@ from ufo.harness.sandbox.session import (
     DEFAULT_EXEC_TIMEOUT_SECONDS,
     DOCUMENT_READ_EXEC_TIMEOUT_SECONDS,
     NO_PROXY_HOSTS,
+    PROBE_TOKEN_KIND,
     PROXY_ENV_NAMES,
     PROXY_PASSWORD,
     SANDBOX_MODULE_BOOTSTRAP,
@@ -53,6 +56,7 @@ from ufo.runtime.authority import (
     WORKSPACE_AUTHORITY,
     MemberAuthority,
     authority_from_member_id,
+    authority_member_id,
 )
 from ufo.runtime.skills.runtime import RuntimeSkill, SystemSkillBundle
 from ufo.runtime.tools.context import SpawnResult, ToolContext
@@ -140,19 +144,43 @@ def _check_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> Non
         RUN_TOKENS.from_proxy_auth(_basic(forged))
 
 
-def _probe(expires_at: int = 1_800_000_000, member: UUID | None = None) -> ProbeToken:
+def _probe(
+    expires_at: int = 1_800_000_000,
+    member: UUID | None = None,
+    connections: tuple[UUID, ...] = (),
+    internet_access: Literal[False] | None = None,
+) -> ProbeToken:
     return ProbeToken(
         workspace_id=uuid4(),
         conversation_id=uuid4(),
         probe_id=uuid4(),
         expires_at=expires_at,
         authority=authority_from_member_id(member),
+        connections=connections,
+        internet_access=internet_access,
     )
 
 
 def _check_probe_token_round_trips_encode_then_proxy_auth() -> None:
-    probe = _probe()
+    probe = _probe(connections=(uuid4(), uuid4()), internet_access=False)
     assert PROBE_TOKENS.from_proxy_auth(_basic(PROBE_TOKENS.encode(probe))) == probe
+
+
+def _check_six_field_probe_token_decodes_to_no_connections_or_internet() -> None:
+    probe = _probe(member=uuid4())
+    member = authority_member_id(probe.authority)
+    payload = (
+        f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}/"
+        f"{probe.probe_id}/{member}/{probe.expires_at}"
+    ).encode()
+    decoded = PROBE_TOKENS.from_proxy_auth(_basic(sign_token(PROBE_TOKENS.secret, payload)))
+    assert decoded.workspace_id == probe.workspace_id
+    assert decoded.conversation_id == probe.conversation_id
+    assert decoded.probe_id == probe.probe_id
+    assert decoded.expires_at == probe.expires_at
+    assert decoded.authority == probe.authority
+    assert decoded.connections == ()
+    assert decoded.internet_access is False
 
 
 def _check_probe_token_round_trips_its_member_authority() -> None:
@@ -1422,6 +1450,7 @@ def test_sandbox_session_sync_contract() -> None:
         _check_from_proxy_auth_rejects_a_malformed_run_token,
         _check_run_token_rejects_a_valid_shape_signed_by_another_deployment,
         _check_probe_token_round_trips_encode_then_proxy_auth,
+        _check_six_field_probe_token_decodes_to_no_connections_or_internet,
         _check_probe_token_round_trips_its_member_authority,
         _check_encoded_probe_token_is_url_safe_userinfo,
         _check_probe_from_proxy_auth_rejects_non_basic_scheme,

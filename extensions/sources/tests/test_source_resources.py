@@ -55,6 +55,7 @@ def _trigger(resource: str) -> SourceTrigger:
         delivery="current",
         paused=False,
         created_by_member_id=None,
+        internet_access=None,
         created_at=now,
         updated_at=now,
     )
@@ -304,7 +305,9 @@ async def test_one_conversation_holds_a_whole_feed_and_a_narrowed_trigger(db: No
     feed = seeded.connection_id
     with ws(seeded.workspace_id), agent(seeded.agent_id):
         store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
-        whole = await store.create(seeded.conversation_id, feed, "current")
+        whole = await store.create(
+            seeded.conversation_id, feed, "current", created_by_member_id=seeded.member_id
+        )
         narrowed = await store.create(
             seeded.conversation_id,
             feed,
@@ -325,7 +328,13 @@ async def test_one_conversation_holds_a_whole_feed_and_a_narrowed_trigger(db: No
 
         for resource in ("", PR):
             with pytest.raises(ValueError, match="already watches"):
-                await store.create(seeded.conversation_id, feed, "current", resource=resource)
+                await store.create(
+                    seeded.conversation_id,
+                    feed,
+                    "current",
+                    created_by_member_id=seeded.member_id,
+                    resource=resource,
+                )
 
         await store.remove(narrowed)
         assert await store.waking(feed) == (whole,)
@@ -356,9 +365,25 @@ async def test_disconnecting_the_account_takes_every_trigger_on_it(db: None) -> 
     seeded = await _seed()
     with ws(seeded.workspace_id), agent(seeded.agent_id):
         store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
-        await store.create(seeded.conversation_id, seeded.connection_id, "current")
-        await store.create(seeded.conversation_id, seeded.connection_id, "current", resource=PR)
-        kept = await store.create(seeded.conversation_id, seeded.later_connection_id, "current")
+        await store.create(
+            seeded.conversation_id,
+            seeded.connection_id,
+            "current",
+            created_by_member_id=seeded.member_id,
+        )
+        await store.create(
+            seeded.conversation_id,
+            seeded.connection_id,
+            "current",
+            created_by_member_id=seeded.member_id,
+            resource=PR,
+        )
+        kept = await store.create(
+            seeded.conversation_id,
+            seeded.later_connection_id,
+            "current",
+            created_by_member_id=seeded.member_id,
+        )
 
         async with workspace_tx() as connection:
             await connection.execute(
@@ -383,15 +408,32 @@ async def test_the_alert_sweep_reads_a_feeds_triggers_oldest_first(db: None) -> 
     with ws(seeded.workspace_id), agent(seeded.agent_id):
         store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
         newest = await _stamp(
-            await store.create(seeded.conversation_id, feed, "current", resource=PR),
+            await store.create(
+                seeded.conversation_id,
+                feed,
+                "current",
+                created_by_member_id=seeded.member_id,
+                resource=PR,
+            ),
             datetime(2026, 7, 20, 14, tzinfo=UTC),
         )
         oldest = await _stamp(
-            await store.create(seeded.conversation_id, feed, "current"),
+            await store.create(
+                seeded.conversation_id,
+                feed,
+                "current",
+                created_by_member_id=seeded.member_id,
+            ),
             datetime(2026, 7, 20, 12, tzinfo=UTC),
         )
         middle = await _stamp(
-            await store.create(seeded.conversation_id, feed, "current", resource=ISSUE),
+            await store.create(
+                seeded.conversation_id,
+                feed,
+                "current",
+                created_by_member_id=seeded.member_id,
+                resource=ISSUE,
+            ),
             datetime(2026, 7, 20, 13, tzinfo=UTC),
         )
         assert await store.waking(feed) == (oldest, middle, newest)
@@ -405,9 +447,31 @@ async def test_a_listing_heads_each_feed_with_its_whole_feed(db: None) -> None:
     first, second = sorted((seeded.connection_id, seeded.later_connection_id))
     with ws(seeded.workspace_id), agent(seeded.agent_id):
         store = SourceTriggerStore(context_for(NAME, frozenset(CONNECTORS)))
-        later_feed = await store.create(seeded.conversation_id, second, "current")
-        pull_request = await store.create(seeded.conversation_id, first, "current", resource=PR)
-        whole = await store.create(seeded.conversation_id, first, "current")
-        issue = await store.create(seeded.conversation_id, first, "current", resource=ISSUE)
+        later_feed = await store.create(
+            seeded.conversation_id,
+            second,
+            "current",
+            created_by_member_id=seeded.member_id,
+        )
+        pull_request = await store.create(
+            seeded.conversation_id,
+            first,
+            "current",
+            created_by_member_id=seeded.member_id,
+            resource=PR,
+        )
+        whole = await store.create(
+            seeded.conversation_id,
+            first,
+            "current",
+            created_by_member_id=seeded.member_id,
+        )
+        issue = await store.create(
+            seeded.conversation_id,
+            first,
+            "current",
+            created_by_member_id=seeded.member_id,
+            resource=ISSUE,
+        )
         listed = await store.list_reported()
         assert [row.trigger for row in listed] == [whole, issue, pull_request, later_feed]

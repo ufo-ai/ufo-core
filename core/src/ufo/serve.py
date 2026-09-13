@@ -410,30 +410,41 @@ def run(fleet: Fleet) -> None:
         subagent_grants=subagent_grants,
         actions=deploy_actions,
     )
+    sandboxes = ConversationSandbox(
+        carrier=carrier,
+        backend=config.sandbox.backend,
+        off_cluster=carrier_spec.off_cluster,
+        resume_carriers=carriers.resume,
+        image_ref=config.sandbox.image_ref,
+        proxy=_proxy_endpoint(
+            app,
+            config,
+            manifests,
+            credentials,
+            registry.pricing,
+            run_tokens,
+            blob_backend,
+            tool_bridge,
+        ),
+        workspace_root=config.sandbox.workspace_root,
+        terminals=_select_terminal_transport(config, manifests, fleet_blob),
+        document_renderer=document_renderer,
+        system_skill_archive=system_skill_bundle.archive,
+    )
+    probes = ConversationProbes(
+        sandboxes,
+        ProbeTokenCodec(secret=run_tokens.secret),
+        ProbeEnv(
+            grants=GrantStore() if credentials is not None else None,
+            clis=connector_clis(manifests),
+            credentials=credentials,
+            slots=workspace_slot_source(manifests),
+        ).exports,
+    )
     runtime = Runtime(
         config=config,
         blob=blob,
-        sandboxes=ConversationSandbox(
-            carrier=carrier,
-            backend=config.sandbox.backend,
-            off_cluster=carrier_spec.off_cluster,
-            resume_carriers=carriers.resume,
-            image_ref=config.sandbox.image_ref,
-            proxy=_proxy_endpoint(
-                app,
-                config,
-                manifests,
-                credentials,
-                registry.pricing,
-                run_tokens,
-                blob_backend,
-                tool_bridge,
-            ),
-            workspace_root=config.sandbox.workspace_root,
-            terminals=_select_terminal_transport(config, manifests, fleet_blob),
-            document_renderer=document_renderer,
-            system_skill_archive=system_skill_bundle.archive,
-        ),
+        sandboxes=sandboxes,
         hub=hub,
         cdp_provider=_select_cdp_provider(config, manifests, credentials),
         search_provider=search,
@@ -456,6 +467,7 @@ def run(fleet: Fleet) -> None:
             home_surface=browser_home,
             artifact_token_secret=artifact_secret,
             invoker_for=invoker_for,
+            probes=probes,
         ),
         registry=registry,
         skills=skills,
@@ -529,18 +541,8 @@ def run(fleet: Fleet) -> None:
         raise RuntimeError(f"[[sources]] names unknown backends: {', '.join(unknown_backends)}")
     app.state.configured_sources = config.sources
     page_feed = CorePageFeed(blob=blob)
-    _launch_jobs(runtime, invoker_for, sync_driver, page_feed)
+    _launch_jobs(runtime, invoker_for, sync_driver, page_feed, probes)
     _mount_ext_routes(app, manifests, credentials, index, embed, config.connect.public_base_url)
-    surface_probes = ConversationProbes(
-        runtime.sandboxes,
-        ProbeTokenCodec(secret=runtime.run_tokens.secret),
-        ProbeEnv(
-            grants=GrantStore() if runtime.credentials is not None else None,
-            clis=connector_clis(runtime.manifests),
-            credentials=runtime.credentials,
-            slots=workspace_slot_source(runtime.manifests),
-        ).exports,
-    )
     _mount_shared_surfaces(
         app,
         manifests,
@@ -553,7 +555,7 @@ def run(fleet: Fleet) -> None:
         config.connect.public_base_url,
         config.sandbox.ingress_public_url,
         (AUTO_MODEL, *sorted(registry.specs)),
-        probes=surface_probes,
+        probes=probes,
         runtime_identity=runtime_identity,
         connectors=connectors,
         key_slot_for=registry.key_slot_for,
@@ -654,6 +656,7 @@ def _launch_jobs(
     invoker_for: InvokerFactory,
     sync_driver: SyncDriver,
     page_feed: CorePageFeed,
+    probes: ConversationProbes,
 ) -> None:
     """Register this workspace's jobs — core's own (the source sync driver, the turn dispatcher
     that recovers queued turns and re-admits parked turns, and the delivery sweep that hands back
@@ -665,16 +668,6 @@ def _launch_jobs(
     page feed, so once any job is registered the credential key must be set. Both runners carry
     `models.background_jobs_model`, so a handler's own metered call runs on the deploy's cheap
     background model rather than the model a member's turn runs on."""
-    probes = ConversationProbes(
-        runtime.sandboxes,
-        ProbeTokenCodec(secret=runtime.run_tokens.secret),
-        ProbeEnv(
-            grants=GrantStore() if runtime.credentials is not None else None,
-            clis=connector_clis(runtime.manifests),
-            credentials=runtime.credentials,
-            slots=workspace_slot_source(runtime.manifests),
-        ).exports,
-    )
     page_change_runner = PageChangeRunner(
         manifests=runtime.manifests,
         pages=page_feed,

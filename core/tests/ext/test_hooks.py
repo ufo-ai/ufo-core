@@ -30,6 +30,7 @@ from ufo_ext_context_rollover.rollover import (
     ROLLOVER_PREFIX,
     ContextRollover,
 )
+from ufo_testsupport.member_authorization import PermitMemberAuthorization
 from ufo_testsupport.models import serving_model
 
 import ufo.runtime.ext.hooks as hooks_module
@@ -565,6 +566,7 @@ def _engine(
         audience=conversation_audience(None),
         artifact_token_secret="",
         grants=None,
+        member_authorization=PermitMemberAuthorization(),
     )
 
 

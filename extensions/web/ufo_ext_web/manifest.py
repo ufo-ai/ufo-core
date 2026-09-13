@@ -12,7 +12,7 @@ portal."""
 
 from ufo.sdk.jobs import JobSpec, unseeded_agent_workspaces, untitled_conversation_workspaces
 from ufo.sdk.manifest import FlagSpec, Manifest
-from ufo.sdk.surfaces import SurfaceSpec
+from ufo.sdk.surfaces import PORTAL_SURFACE, SurfaceSpec
 from ufo_ext_web.audience import EXTENSION_WEB, WEB_ACCESS_TOOLS
 from ufo_ext_web.panels import DEEPSEEK_FLASH_FLAG
 from ufo_ext_web.surface import (
@@ -27,7 +27,6 @@ from ufo_ext_web.surface import (
     SEED_JOB_NAME,
     SEED_JOB_SCHEDULE,
     SOCKETS,
-    SURFACE_WEB,
     TITLE_JOB_NAME,
     TITLE_JOB_SCHEDULE,
     resolve_workspace,
@@ -84,7 +83,7 @@ def manifest() -> Manifest:
         conversation_slots=(CHANGES_SLOT, ARTIFACTS_SLOT),
         surfaces=(
             SurfaceSpec(
-                name=SURFACE_WEB,
+                name=PORTAL_SURFACE,
                 routes=ROUTES,
                 sockets=SOCKETS,
                 identify=resolve_workspace,

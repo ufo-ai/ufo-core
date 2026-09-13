@@ -12,16 +12,16 @@ object surface. It converges member ingress and timer expiry on one resume turn 
 the arbitration simply moved to where the race is, into the fire's `unless_member_since` guard."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Container, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import ClassVar
+from typing import ClassVar, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from ufo.sdk.authority import authority_member_id
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import CONNECTION_SCOPE_MAX, ExtensionContext
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
@@ -38,15 +38,15 @@ from ufo.sdk.objects import (
     ObjectRef,
     ObjectRow,
     OwnedRow,
+    UnknownObject,
     object_page,
     owner_emails,
+    readable,
 )
-from ufo.sdk.subjects import subject_shared
 from ufo.sdk.tools import SpeakerRequired, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_scheduled_tasks.cron import next_fire, validate_cron
 from ufo_ext_scheduled_tasks.pauses import PauseStore
 from ufo_ext_scheduled_tasks.schedules import ListedTask, ScheduledTask, ScheduleStore
-from ufo_ext_scheduled_tasks.visibility import task_content_visible
 
 SCHEDULED_TASK_KIND = "scheduled_task"
 SUMMARY_MAX = 120
@@ -110,6 +110,15 @@ class ScheduledTaskSpec(BaseModel):
             "stored, and an apply that omits it leaves the next fire where the schedule puts it."
         ),
     )
+    connections: tuple[UUID, ...] | None = Field(
+        default=None,
+        max_length=CONNECTION_SCOPE_MAX,
+        title="Connections",
+        description=(
+            "Connection ids the task may use. Required on create; [] allows none; omitted on an "
+            "update preserves the list. object_list connection returns the ids."
+        ),
+    )
 
     @field_validator("expires_at")
     @classmethod
@@ -117,6 +126,15 @@ class ScheduledTaskSpec(BaseModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() != timedelta(0)):
             raise ValueError("expires_at must be a UTC timestamp")
         return value
+
+    @field_validator("connections")
+    @classmethod
+    def validate_distinct_connections(
+        cls, value: tuple[UUID, ...] | None
+    ) -> tuple[UUID, ...] | None:
+        if value is not None and len(set(value)) != len(value):
+            raise ValueError("connections cannot contain duplicate ids")
+        return None if value is None else tuple(sorted(value, key=str))
 
 
 class PauseAndWaitInput(BaseModel):
@@ -155,21 +173,40 @@ def _validate_future_fire(
 
 
 def _owner(listed: ListedTask) -> GeneratedObjectOwner:
-    """Who a task belongs to and who else may see it. A task is shared exactly as far as the
+    """Who a task belongs to and who else may see it. A task is read exactly as far as the
     conversation it reports into is, so every surface listing the kind — the index, the section,
     and a conversation's own slot — answers one question the same way."""
     return GeneratedObjectOwner(
         member_id=listed.task.created_by_member_id,
-        shared=subject_shared(listed.audience),
+        audience=listed.audience,
         generation=listed.task.id,
     )
+
+
+def _content_readable(
+    listed: ListedTask, member_id: UUID | None, disclosed: Container[UUID] = ()
+) -> bool:
+    return readable(
+        _owner(listed),
+        member_id,
+        admin=False,
+        disclosed=listed.task.conversation_id in disclosed,
+    )
+
+
+def _connections_in_scope(stored: tuple[UUID, ...], scope: tuple[UUID, ...] | None) -> bool:
+    return scope is None or frozenset(stored) <= frozenset(scope)
+
+
+def _internet_in_scope(stored: Literal[False] | None, scope: Literal[False] | None) -> bool:
+    return scope is None or stored is False
 
 
 @dataclass(frozen=True)
 class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObjectOwner]):
     """The kind's handlers over `ScheduleStore`: a task is seen by whoever reads the conversation it
     reports into, plus its creator and a workspace admin — the gate is the base's, and this kind
-    supplies only the `shared` fact it decides from. Deleting stays the creator's and an admin's,
+    supplies only the audience it decides from. Deleting stays the creator's and an admin's,
     so a member reading a shared task is never a member who can change it. This kind supplies the
     task rows, their specs and status, and the create/update/cancel domain acts. Creation binds the
     applying turn's conversation and agent; updates preserve both, so a later fire re-enters that
@@ -188,7 +225,9 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         """Cadence management — schedule, expiry, pause — is an admin's; content is the
         creator's. `run_now` counts as content: it fires the prompt at once under the creator's
         authority, which is the creator's own act to ask for."""
-        return not {"prompt", "description", "run_now"}.intersection(spec.model_fields_set)
+        return not {"prompt", "description", "run_now", "connections"}.intersection(
+            spec.model_fields_set
+        )
 
     async def member_page(
         self,
@@ -258,7 +297,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             ConversationObjectGrant(
                 name=listed.task.name,
                 generation=listed.task.id,
-                content_visible=task_content_visible(listed, member_id, disclosed),
+                content_visible=_content_readable(listed, member_id, disclosed),
             )
             for listed in tasks
             if self._visible(_owner(listed), member_id, admin)
@@ -289,7 +328,13 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         excerpt. The member's own read carries it whole: a cut arrives at a reader
         indistinguishable from a prompt that ended, and the screen that draws it cannot undo it."""
         return await self._rows(
-            ctx.ext, member_id=authority_member_id(ctx.authority), prompt_max=PROMPT_EXCERPT_MAX
+            ctx.ext,
+            member_id=authority_member_id(ctx.authority),
+            prompt_max=PROMPT_EXCERPT_MAX,
+            connections=ctx.connection_scope,
+            internet_access=(
+                None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.internet_access
+            ),
         )
 
     async def _rows(
@@ -300,22 +345,30 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         prompt_max: int | None,
         conversation_id: UUID | None = None,
         admin: bool = False,
+        connections: tuple[UUID, ...] | None = None,
+        internet_access: Literal[False] | None = None,
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         scheduler = _require_scheduler(ext)
         listed_rows = await scheduler.list_reported(conversation_id=conversation_id)
+        listed_rows = tuple(
+            listed
+            for listed in listed_rows
+            if _connections_in_scope(listed.task.connections, connections)
+            and _internet_in_scope(listed.task.internet_access, internet_access)
+        )
         disclosed = await self._disclosed(ext, listed_rows, member_id=member_id, admin=admin)
         emails = await owner_emails(row.task.created_by_member_id for row in listed_rows)
         inspections = await scheduler.inspect_many(tuple(listed.task for listed in listed_rows))
         endings = {task_id: found.last_turn_status for task_id, found in inspections.items()}
         rows: list[OwnedRow[GeneratedObjectOwner]] = []
         for listed in listed_rows:
-            readable = task_content_visible(listed, member_id, disclosed)
+            content_readable = _content_readable(listed, member_id, disclosed)
             rows.append(
                 OwnedRow(
                     name=listed.task.name,
                     summary=(
                         _summary(listed.task)
-                        if readable
+                        if content_readable
                         else f"{listed.task.schedule} — {PRIVATE_PROMPT}"
                     ),
                     owner=_owner(listed),
@@ -323,7 +376,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                         "id": str(listed.task.id),
                         "conversation": str(listed.task.conversation_id),
                         "schedule": listed.task.schedule,
-                        "description": listed.task.description if readable else "",
+                        "description": listed.task.description if content_readable else "",
                         "next_run_at": listed.task.next_run_at.isoformat(),
                         "last_run_at": (
                             None
@@ -335,8 +388,15 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                         "owner_email": emails.get(listed.task.created_by_member_id),
                         "origin": listed.surface_label or "Portal",
                         "mine": listed.task.created_by_member_id == member_id,
-                        "readable": readable,
-                        "prompt": (listed.task.prompt[:prompt_max] if readable else PRIVATE_PROMPT),
+                        "readable": content_readable,
+                        "prompt": (
+                            listed.task.prompt[:prompt_max] if content_readable else PRIVATE_PROMPT
+                        ),
+                        "connections": (
+                            [str(connection_id) for connection_id in listed.task.connections]
+                            if content_readable
+                            else None
+                        ),
                     },
                 )
             )
@@ -362,6 +422,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 description=task.description,
                 expires_at=task.expires_at,
                 paused=task.paused,
+                connections=task.connections,
             ),
             created_at=task.created_at,
             updated_at=task.updated_at,
@@ -371,7 +432,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                     target=ObjectRef(kind=CONVERSATION_KIND, name=str(task.conversation_id)),
                 ),
             ),
-            spec_visible=task_content_visible(
+            spec_visible=_content_readable(
                 listed,
                 member_id,
                 await self._disclosed(ext, (listed,), member_id=member_id, admin=admin),
@@ -394,7 +455,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 "turn_id": str(inspection.last_turn_id),
                 "turn_status": inspection.last_turn_status,
             }
-            if task_content_visible(listed, authority_member_id(ctx.authority)):
+            if _content_readable(listed, authority_member_id(ctx.authority)):
                 last_run["response"] = (
                     None
                     if inspection.last_response is None
@@ -430,11 +491,35 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         now = datetime.now(UTC)
         if owner is None:
             if existing is not None:
+                if not _connections_in_scope(
+                    existing.connections, ctx.connection_scope
+                ) or not _internet_in_scope(
+                    existing.internet_access,
+                    (
+                        None
+                        if ctx.turn.runtime_config is None
+                        else ctx.turn.runtime_config.internet_access
+                    ),
+                ):
+                    raise UnknownObject(f"no {SCHEDULED_TASK_KIND} object named {name!r}")
                 raise ValueError(f"scheduled task {name!r} changed while editing")
             if old is not None:
                 raise ValueError(f"scheduled task {name!r} changed while editing")
-            if validated_schedule is None or spec.prompt is None:
-                raise ValueError("creating a scheduled task requires schedule and prompt")
+            if validated_schedule is None or spec.prompt is None or spec.connections is None:
+                raise ValueError(
+                    "creating a scheduled task requires schedule, prompt, and connections"
+                )
+            available = frozenset(await ctx.connector_connection_ids())
+            unavailable = tuple(
+                connection_id
+                for connection_id in spec.connections
+                if connection_id not in available
+            )
+            if unavailable:
+                raise ValueError(
+                    f"connections are outside this turn's scope: "
+                    f"{', '.join(str(connection_id) for connection_id in unavailable)}"
+                )
             next_run_at = now if spec.run_now else next_fire(validated_schedule, now)
             paused = bool(spec.paused)
             _validate_future_fire(next_run_at, spec.expires_at, paused=paused)
@@ -448,6 +533,12 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 created_by_member_id=acting_member,
                 expires_at=spec.expires_at,
                 paused=paused,
+                connections=spec.connections,
+                internet_access=(
+                    None
+                    if ctx.turn.runtime_config is None
+                    else ctx.turn.runtime_config.internet_access
+                ),
             )
             return
         if existing is None or existing.id != owner.generation or old is None:
@@ -473,6 +564,17 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             spec.expires_at if "expires_at" in spec.model_fields_set else existing.expires_at
         )
         paused = existing.paused if spec.paused is None else spec.paused
+        connections = existing.connections if spec.connections is None else spec.connections
+        if spec.connections is not None:
+            available = frozenset(await ctx.connector_connection_ids())
+            unavailable = tuple(
+                connection_id for connection_id in connections if connection_id not in available
+            )
+            if unavailable:
+                raise ValueError(
+                    f"connections are outside this turn's scope: "
+                    f"{', '.join(str(connection_id) for connection_id in unavailable)}"
+                )
         _validate_future_fire(next_run_at, expires_at, paused=paused)
         await scheduler.update(
             expected=existing,
@@ -482,6 +584,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             next_run_at=next_run_at,
             expires_at=expires_at,
             paused=paused,
+            connections=connections,
         )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
@@ -523,7 +626,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "member's cadence, expiry, or pause, or delete it, but cannot alter its prompt or "
         "description. The main agent may name another agent only when updating that agent's "
         "existing task; creation requires the executor's own conversation. A fire acts as the "
-        "creator and uses the creator's private connections, but "
+        "creator, but "
         "recalls only the memory its reporting conversation can see (shared-only in a channel). "
         "Listing returns each task's name, schedule, `description`, creator (`owner_email`), and "
         "`origin` — the surface label of the conversation it reports into, else `Portal` — "
@@ -556,6 +659,7 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
             "mine",
             "readable",
             "prompt",
+            "connections",
         }
     ),
     agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
@@ -582,6 +686,12 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
         "metadata": args.metadata,
     }
     ext = _require_ext(ctx.ext)
+    runtime_connections = ctx.connection_scope
+    connections = (
+        runtime_connections
+        if runtime_connections is not None
+        else (await ctx.connector_connection_ids())[:CONNECTION_SCOPE_MAX]
+    )
     await PauseStore(ext).arm(
         conversation_id=ctx.turn.conversation_id,
         agent_id=ctx.turn.agent_id,
@@ -590,6 +700,7 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
         origin_arrival_seq=await ext.conversation_arrival_seq(ctx.turn.conversation_id),
         prompt="Resume the paused workflow.\n" + json.dumps(wakeup),
         created_by_member_id=authority_member_id(ctx.authority),
+        connections=connections,
     )
     payload = {
         "awaiting": "timer",

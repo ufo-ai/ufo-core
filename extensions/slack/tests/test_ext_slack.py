@@ -4491,7 +4491,9 @@ async def test_writeback_persists_slack_retry_after(
     )
     turn_id = await _seed_done_turn(workspace_id, "C429:200.0", "hi", blob, artifact=False)
 
+    before = datetime.now(UTC)
     await app.state.writeback_poller.drain()
+    after = datetime.now(UTC)
 
     async with workspace_tx() as connection:
         writeback = (
@@ -4506,7 +4508,8 @@ async def test_writeback_persists_slack_retry_after(
     assert writeback.status == WRITEBACK_PENDING
     assert writeback.last_error == "chat.postMessage HTTP 429: ratelimited; retry_after_seconds=23"
     due = writeback.claim_expires_at.replace(tzinfo=UTC)
-    assert 22 <= (due - datetime.now(UTC)).total_seconds() <= 23
+    delay = timedelta(seconds=23)
+    assert before + delay <= due <= after + delay
 
 
 async def test_writeback_ignores_an_oversize_slack_retry_after(
@@ -5021,7 +5024,8 @@ async def test_a_captionless_file_share_keeps_its_note_in_the_attachments_elemen
     mention to be addressed by. Their element is empty because they said nothing, and the note the
     model works from is its own element rather than prose trailing outside the fence: the shape that
     left a bare attachment reading as a message with more to come."""
-    workspace_id, _ = await _seed()
+    workspace_id, member_id = await _seed()
+    assert member_id is not None
     recorder: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -5034,7 +5038,11 @@ async def test_a_captionless_file_share_keeps_its_note_in_the_attachments_elemen
                 200,
                 json={
                     "ok": True,
-                    "user": {"id": "U1", "profile": {"email": "u1@example.com"}},
+                    "user": {
+                        "id": "U1",
+                        "is_email_confirmed": True,
+                        "profile": {"email": DEFAULT_MEMBER_EMAIL},
+                    },
                 },
             )
         return httpx.Response(404, json={"ok": False, "error": "not_mocked"})
@@ -5075,10 +5083,13 @@ async def test_a_captionless_file_share_keeps_its_note_in_the_attachments_elemen
                 sa.select(
                     tables.shared_artifact.c.filename,
                     tables.shared_artifact.c.attached_by_member,
+                    tables.shared_artifact.c.member_id,
                 )
             )
         ).all()
-    assert [(row.filename, row.attached_by_member) for row in shared] == [("errors.txt", True)]
+    assert [(row.filename, row.attached_by_member, row.member_id) for row in shared] == [
+        ("errors.txt", True, member_id)
+    ]
 
 
 async def test_a_slack_supplied_filename_is_never_a_path(db: None, tmp_path, monkeypatch) -> None:
@@ -7314,9 +7325,11 @@ def _submit_body(
     channel: str = "C5",
     thread: str | None = "200.0",
     blocks: list[dict[str, object]] | None = None,
+    target_member_id: UUID | None = None,
 ) -> bytes:
     return _click_body(
         action_id=slack.ASK_SUBMIT_ACTION_ID,
+        value=None if target_member_id is None else str(target_member_id),
         user=user,
         channel=channel,
         thread=thread,
@@ -7411,6 +7424,96 @@ async def test_a_submit_whose_member_is_linked_names_its_sender_and_sources_its_
     assert context["question"] == "Ship it?"
     assert len(_fetches(recorder, slack.SLACK_USERS_INFO_URL)) == 1
     assert len(_fetches(recorder, slack.SLACK_GET_PERMALINK_URL)) == 1
+
+
+async def test_only_a_target_member_can_submit_a_structured_question(
+    db: None, tmp_path, monkeypatch
+) -> None:
+    workspace_id, target_id = await _seed(member_email="target@example.com")
+    assert target_id is not None
+    peer_id = uuid4()
+    await _seed_answer_conversation(workspace_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=peer_id,
+                workspace_id=workspace_id,
+                email="peer@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.surface_identity),
+            [
+                {
+                    "workspace_id": workspace_id,
+                    "member_id": target_id,
+                    "surface": slack.SURFACE_SLACK,
+                    "external_id": "U1",
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                },
+                {
+                    "workspace_id": workspace_id,
+                    "member_id": peer_id,
+                    "surface": slack.SURFACE_SLACK,
+                    "external_id": "U8",
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                },
+            ],
+        )
+    targeted = ASK_QUESTION.model_copy(update={"target_member_id": target_id})
+    blocks = _form_blocks(targeted)
+    assert blocks[-1]["elements"] == [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": slack.ASK_SUBMIT_TEXT},
+            "action_id": slack.ASK_SUBMIT_ACTION_ID,
+            "value": str(target_id),
+        }
+    ]
+    recorder: list[httpx.Request] = []
+    _, client, _ = await _mount(
+        monkeypatch,
+        workspace_id,
+        tmp_path,
+        recorder,
+        users={"U1": "target@example.com", "U8": "peer@example.com"},
+    )
+
+    wrong = _submit_body(user="U8", blocks=blocks, target_member_id=target_id)
+    right = _submit_body(user="U1", blocks=blocks, target_member_id=target_id)
+    async with client:
+        ignored = await client.post(INTERACTIVE_PATH, content=wrong, headers=_signed_form(wrong))
+        assert ignored.json() == {"ok": True, "ignored": True}
+        assert not _requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)
+        assert not _fetches(recorder, slack.SLACK_USERS_INFO_URL)
+        assert not _fetches(recorder, slack.SLACK_GET_PERMALINK_URL)
+        async with workspace_tx() as connection:
+            assert (
+                await connection.execute(
+                    sa.select(sa.func.count())
+                    .select_from(tables.turn)
+                    .where(tables.turn.c.workspace_id == workspace_id)
+                )
+            ).scalar_one() == 0
+
+        admitted = await client.post(INTERACTIVE_PATH, content=right, headers=_signed_form(right))
+        assert admitted.json() == {"ok": True}
+        await asyncio.gather(*slack._REWRITE_TASKS)
+
+    async with workspace_tx() as connection:
+        speaker = (
+            await connection.execute(
+                sa.select(tables.turn.c.speaker_member_id).where(
+                    tables.turn.c.workspace_id == workspace_id
+                )
+            )
+        ).scalar_one()
+    assert speaker == target_id
+    assert len(_requests_to(recorder, slack.SLACK_CHAT_UPDATE_URL)) == 1
 
 
 async def test_dm_answer_submit_claims_the_conversation_for_its_resolved_member(

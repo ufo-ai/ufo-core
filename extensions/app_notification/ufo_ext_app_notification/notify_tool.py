@@ -132,7 +132,7 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
         return _refusal(NOTIFY_UNSTABLE_SUBJECT.format(found=minted.group(0)))
     ext = _require_ext(ctx.ext)
     store = NotificationStore(ext)
-    if await store.is_delivery_turn(ctx.turn.id):
+    if await store.is_delivery_turn(ctx.turn.id, ctx.turn.idempotency_key):
         return _refusal(NOTIFY_INSIDE_A_DELIVERY)
     inbox = await inbox_agent_id(ext)
     if inbox is None:
@@ -148,6 +148,7 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
         agent_name=await ext.agent_name(),
         turn_id=ctx.turn.id,
         conversation_id=ctx.turn.conversation_id,
+        runtime_config=ctx.turn.runtime_config,
     )
     match posted:
         case Refused(reason=reason):

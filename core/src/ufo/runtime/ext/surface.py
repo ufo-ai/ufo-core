@@ -96,7 +96,12 @@ from ufo.runtime.access.grants import (
     installed_connect_flow,
 )
 from ufo.runtime.agent_scope import agent as bind_agent
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
+from ufo.runtime.authority import (
+    WORKSPACE_AUTHORITY,
+    MemberAuthority,
+    authority_member_id,
+    turn_authority,
+)
 from ufo.runtime.billing.accounting import (
     ALLOW,
     PARK,
@@ -1385,6 +1390,11 @@ class ListedConversation(BaseModel):
 
     `speakers` runs in order of first appearance and stops at `MAX_CONVERSATION_SPEAKERS`.
 
+    `mine` is whether this viewer is in the conversation — bound to it, or a speaker of a turn of
+    it — the one participation fact a screen sorts a member's own work by, and never the audience:
+    a workspace conversation the member opened is theirs, and a colleague's they answered in is
+    too. Like `turn` it is the shape of the work rather than a word of its content.
+
     All are content of the conversation and all answer empty unless `readable`: a row listed to
     an admin as administration metadata states whose it is and how busy, never a word of it and
     never who else is in it. Reading it is the acknowledgement's act, and the acknowledgement is
@@ -1401,6 +1411,7 @@ class ListedConversation(BaseModel):
     title: str
     source: str | None
     speakers: tuple[ConversationSpeaker, ...]
+    mine: bool
 
 
 @dataclass(frozen=True)
@@ -1476,6 +1487,7 @@ class ConversationDirectory:
                 tables.conversation.c.audience,
                 tables.conversation.c.surface_label,
                 tables.conversation.c.title,
+                tables.conversation.c.member_id,
                 tables.member.c.email,
                 tables.conversation.c.created_at,
                 self._turn_count().label("turn_count"),
@@ -1554,6 +1566,7 @@ class ConversationDirectory:
                 title=row.title or "" if row.audience in readable else "",
                 source=openings.get(row.id, NO_OPENING).source,
                 speakers=speakers.get(row.id, ()),
+                mine=row.member_id == member_id or row.spoke_at is not None,
             )
             for row in rows
         )
@@ -2778,6 +2791,8 @@ class SurfaceContext:
         agent_id: UUID | None = None,
         conversation_id: UUID | None = None,
         label: str | None = None,
+        *,
+        preserve_existing_audience: bool = False,
     ) -> UUID:
         """Get-or-create the conversation this surface keys by `queue_key`, outside any admission
         transaction; a lost creation race re-reads the surviving row. A caller may name the new
@@ -2791,6 +2806,11 @@ class SurfaceContext:
         surface learns its exact member or room; an audience is never widened, and a room becoming
         externally shared seals as foreign.
 
+        A caller whose audience is chosen by a member rather than discovered from the surface sets
+        `preserve_existing_audience`; the requested audience then applies only at creation. Core
+        owns that distinction because it alone resolves the create collision and writes the coupled
+        audience columns.
+
         `label` is what a member calls this conversation's origin — the channel a Slack thread runs
         in — in the surface's own grammar, which core stores and renders but never reads. It is
         rewritten whenever the surface names a different one, so a renamed origin corrects itself
@@ -2801,7 +2821,11 @@ class SurfaceContext:
         async with workspace_tx() as connection:
             found = (await connection.execute(self._conversation_lookup(queue_key))).one_or_none()
         if found is not None:
-            narrowed = narrow_audience(parse_audience(found.audience), audience)
+            narrowed = (
+                parse_audience(found.audience)
+                if preserve_existing_audience
+                else narrow_audience(parse_audience(found.audience), audience)
+            )
             if narrowed != found.audience:
                 async with workspace_tx() as connection:
                     await connection.execute(
@@ -2816,7 +2840,12 @@ class SurfaceContext:
                             updated_at=sa.func.now(),
                         )
                     )
-                return await self.conversation_for(queue_key, audience, label=label)
+                return await self.conversation_for(
+                    queue_key,
+                    audience,
+                    label=label,
+                    preserve_existing_audience=preserve_existing_audience,
+                )
             if label is not None and label != found.surface_label:
                 async with workspace_tx() as connection:
                     await connection.execute(
@@ -2864,7 +2893,12 @@ class SurfaceContext:
                 ).one_or_none()
             if found is None:
                 raise
-            return await self.conversation_for(queue_key, audience, label=label)
+            return await self.conversation_for(
+                queue_key,
+                audience,
+                label=label,
+                preserve_existing_audience=preserve_existing_audience,
+            )
         return conversation_id
 
     async def _surface_agent(self) -> UUID:
@@ -3066,6 +3100,33 @@ class SurfaceContext:
             ).one_or_none()
         return None if message_row is None else message_row.body
 
+    async def question_answerable_by(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+        question_index: int,
+        member_id: UUID,
+    ) -> bool:
+        """Whether this turn asked the named question in this conversation and its structured
+        answer is open to this member. An untargeted question is open to every member the surface
+        already admitted to the conversation."""
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(tables.turn.c.terminal).where(
+                        tables.turn.c.workspace_id == self.workspace_id,
+                        tables.turn.c.conversation_id == conversation_id,
+                        tables.turn.c.id == turn_id,
+                    )
+                )
+            ).one_or_none()
+        if row is None or row.terminal is None:
+            return False
+        question = TerminalFrame.model_validate(row.terminal).question
+        if question is None or not 0 <= question_index < len(question.questions):
+            return False
+        return question.target_member_id in (None, member_id)
+
     async def turn_owner(self, turn_id: UUID) -> UUID | None:
         """The member whose conversation owns a turn, or None when no such turn exists — the check a
         live surface gates its per-turn tail on, so a member cannot tail another member's turn."""
@@ -3173,9 +3234,9 @@ class SurfaceContext:
                         tables.turn.c.id,
                         tables.turn.c.status,
                         tables.turn.c.agent_id,
-                        tables.conversation.c.member_id,
+                        tables.turn.c.speaker_member_id,
+                        tables.turn.c.on_behalf_of_member_id,
                     )
-                    .select_from(tables.turn.join(tables.conversation))
                     .where(
                         tables.turn.c.workspace_id == self.workspace_id,
                         tables.turn.c.conversation_id == conversation_id,
@@ -3187,7 +3248,10 @@ class SurfaceContext:
             ).one_or_none()
             if row is None:
                 return None
-            decision = await SpendEvaluator(self.workspace_id, row.member_id, row.agent_id).decide(
+            member_id = authority_member_id(
+                turn_authority(row.speaker_member_id, row.on_behalf_of_member_id)
+            )
+            decision = await SpendEvaluator(self.workspace_id, member_id, row.agent_id).decide(
                 connection, 0
             )
             balance = await BalanceGate(self.workspace_id).admits(
@@ -3327,9 +3391,11 @@ class SurfaceContext:
                 stream = self.blob.get_stream(blob_key)
                 await self.write_workspace_file(conversation_id, rel, stream)
 
-    async def attach_member_files(self, turn_id: UUID, blob_keys: tuple[str, ...]) -> None:
-        """Record each file a member attached as a shared artifact of the turn that carried it, and
-        draw the cover of every document among them.
+    async def attach_member_files(
+        self, turn_id: UUID, blob_keys: tuple[str, ...], *, member_id: UUID | None
+    ) -> None:
+        """Record each file a member attached as a shared artifact of the turn that carried it,
+        attributed to the authenticated `member_id`, and draw every document's cover.
 
         These are the rows `share_file` writes, so the file a member sent and the file an agent
         produced are one kind of thing everywhere downstream: listed by the artifacts shelf, opened
@@ -3351,10 +3417,12 @@ class SurfaceContext:
         file's picture and never their message, which is already admitted."""
         deadline = monotonic() + ATTACHED_COVER_BUDGET_SECONDS
         for blob_key in blob_keys:
-            await self._record_attachment(turn_id, blob_key)
+            await self._record_attachment(turn_id, blob_key, member_id)
             await self._draw_attachment_cover(blob_key, deadline)
 
-    async def _record_attachment(self, turn_id: UUID, blob_key: str) -> None:
+    async def _record_attachment(
+        self, turn_id: UUID, blob_key: str, member_id: UUID | None
+    ) -> None:
         filename = PurePosixPath(blob_key).name
         listed = await self.blob.list(blob_key)
         size_bytes = next((entry.size_bytes for entry in listed if entry.key == blob_key), 0)
@@ -3366,6 +3434,7 @@ class SurfaceContext:
                 .values(
                     id=uuid4(),
                     turn_id=turn_id,
+                    member_id=member_id,
                     blob_key=blob_key,
                     workspace_id=self.workspace_id,
                     filename=filename,
@@ -3831,12 +3900,11 @@ class SurfaceContext:
         self, member_id: UUID, *, admin: bool
     ) -> tuple[ConnectionPoolView, ...]:
         """The connections this member may see, with the live apps each is attached to — their own
-        plus the workspace-shared ones. A workspace admin reads the same set: an account is private
-        to its owner until it is shared (#327), and admin authority governs acts on a connection,
-        never the sight of one. An archived holder is not a live app: the panel's Revoke posts a
-        detach on every holder it lists, and an archived app refuses the turn that would carry it,
-        which stops the revoke before the live holders after it. The filter rides the join, so a
-        connection whose only holder is archived still lists — held by nobody until a restore.
+        plus the workspace-shared ones, or all connections for an admin. An archived holder is not
+        a live app: the panel's Revoke posts a detach on every holder it lists, and an archived app
+        refuses the turn that would carry it, which stops the revoke before the live holders after
+        it. The filter rides the join, so a connection whose only holder is archived still lists —
+        held by nobody until a restore.
 
         The workspace's own connections list beside the members' — a keyed provider, a configured
         folder, an extension's feed. Each is shared by construction and owned by nobody, so the
@@ -3880,13 +3948,14 @@ class SurfaceContext:
                 tables.connection.c.account_id,
                 member_name,
             )
-            .where(
+        )
+        if not admin:
+            query = query.where(
                 sa.or_(
                     tables.connection.c.shared,
                     tables.connection.c.owner_member_id == member_id,
                 )
             )
-        )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         grouped: dict[UUID, list[AttachedAgentView]] = {}
@@ -4032,7 +4101,7 @@ class SurfaceContext:
                     tables.conversation,
                     tables.turn.c.conversation_id == tables.conversation.c.id,
                 )
-                .outerjoin(tables.member, tables.conversation.c.member_id == tables.member.c.id)
+                .outerjoin(tables.member, tables.shared_artifact.c.member_id == tables.member.c.id)
             )
             .where(
                 tables.shared_artifact.c.workspace_id == self.workspace_id,

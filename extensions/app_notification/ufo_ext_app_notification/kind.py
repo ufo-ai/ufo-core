@@ -22,6 +22,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import (
     AGENT_KIND,
@@ -64,7 +65,7 @@ def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
 
 
 def _owner(row: Notification) -> ObjectOwner:
-    return ObjectOwner(member_id=row.member_id, shared=False)
+    return ObjectOwner(member_id=row.member_id, audience=conversation_audience(row.member_id))
 
 
 @dataclass(frozen=True)

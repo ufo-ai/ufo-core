@@ -55,6 +55,7 @@ from ufo.sdk.index import (
     chunk_embed_upsert,
 )
 from ufo.sdk.sources import PageChange
+from ufo.sdk.subjects import member_subject
 
 RRF_K = 60
 RRF_WEIGHT = 0.7
@@ -206,8 +207,11 @@ mem_page = sa.Table(
 )
 
 
-def recall_subjects(audience: Audience) -> frozenset[str]:
-    return audience_subjects(audience)
+def recall_subjects(audience: Audience, member_id: UUID | None = None) -> frozenset[str]:
+    subjects = audience_subjects(audience)
+    if member_id is None:
+        return subjects
+    return subjects | {member_subject(member_id)}
 
 
 def clip_to_word(text: str, limit: int) -> str:

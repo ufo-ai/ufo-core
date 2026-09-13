@@ -22,6 +22,7 @@ from evals.suites import (
     ab_reversal,
     app_builder,
     app_home_change,
+    artifact_ownership,
     authority_handoff,
     bash_waiting,
     basics,
@@ -48,6 +49,7 @@ from evals.suites import (
     language_drift,
     low_stakes_default,
     member_add_notify,
+    member_authorization,
     memory_staleness,
     monitor_arm,
     new_application,
@@ -132,6 +134,9 @@ DEFAULT_TASKS: tuple[EvalTask, ...] = (
         authority_handoff.CASES,
         judge_model=SEMANTIC_JUDGE_MODEL,
     ),
+    capability_task(
+        "artifact_ownership", artifact_ownership.CASES, judge_model=SEMANTIC_JUDGE_MODEL
+    ),
     capability_task("object_tools", object_tools.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     scenario_task(
         "object_tools_flows",
@@ -176,6 +181,7 @@ TASKS: tuple[EvalTask, ...] = (
         nightly=False,
     ),
     tool_activity.tool_activity_task(),
+    member_authorization.member_authorization_task(),
     capability_task(
         "code_review",
         code_review.CASES,

@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 
-from ufo.db import MIGRATIONS_DIR, core_migration_head
+from ufo.db import MIGRATIONS_DIR
 
 BEFORE = "20260913044546"
 REVISION = "20260913055555"
@@ -41,4 +41,3 @@ def test_a_child_can_distinguish_an_empty_parent_from_one_that_has_not_synced(
     assert _source_columns(engine) == {**before, "synced_at": False}
     command.downgrade(config, BEFORE)
     assert _source_columns(engine) == before
-    assert core_migration_head() == REVISION

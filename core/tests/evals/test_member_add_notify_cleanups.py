@@ -1,6 +1,7 @@
 from evals.suites.member_add_notify import (
     CASES,
     _cleanup_partner_grant,
+    _cleanup_portal_chat,
     _cleanup_transcript_access,
     _seed_archived_app,
     _seed_plain_colleague,
@@ -10,6 +11,9 @@ CLEANED = {
     "authored-role-change-is-not-an-add": _seed_plain_colleague,
     "authored-web-grant": _cleanup_partner_grant,
     "authored-transcript-acknowledgement": _cleanup_transcript_access,
+    "authored-portal-chat-made-private": _cleanup_portal_chat,
+    "authored-portal-chat-shared": _cleanup_portal_chat,
+    "authored-private-portal-chat-stays-put": _cleanup_portal_chat,
     "authored-app-restore": _seed_archived_app,
 }
 

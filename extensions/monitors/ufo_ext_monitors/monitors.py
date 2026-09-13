@@ -13,6 +13,7 @@ says stop watching."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -44,7 +45,6 @@ monitor = sa.Table(
     sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("agent_id", sa.Uuid, nullable=False),
     sa.Column("name", sa.Text, nullable=False),
-    sa.Column("audience", sa.Text, nullable=False),
     sa.Column("command", sa.Text, nullable=False),
     sa.Column("interval_minutes", sa.Integer, nullable=False),
     sa.Column("deadline_at", sa.DateTime(timezone=True), nullable=False),
@@ -53,6 +53,8 @@ monitor = sa.Table(
     sa.Column("metadata", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("user_description", sa.Text, nullable=False),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
+    sa.Column("connections", sa.JSON(none_as_null=True), nullable=True),
+    sa.Column("internet_access", sa.Boolean, nullable=True),
     sa.Column("baseline", sa.Text, nullable=False),
     sa.Column("probes_run", sa.Integer, nullable=False, server_default=sa.text("0")),
     sa.Column("quiet_streak", sa.Integer, nullable=False, server_default=sa.text("0")),
@@ -114,7 +116,6 @@ class Monitor:
     conversation_id: UUID
     agent_id: UUID
     name: str
-    audience: str
     command: str
     interval_minutes: int
     deadline_at: datetime
@@ -132,6 +133,8 @@ class Monitor:
     claim_id: str | None
     created_at: datetime
     updated_at: datetime
+    connections: tuple[UUID, ...] = ()
+    internet_access: Literal[False] | None = None
 
 
 def _aware(when: datetime) -> datetime:
@@ -142,12 +145,13 @@ def _row(row: sa.RowMapping) -> Monitor:
     """The one builder every read funnels through — SQLite hands naive datetimes back, so every
     timing mark leaves here aware UTC and no consumer re-normalizes."""
     probed_at = row["last_probe_at"]
+    if row["internet_access"] is True:
+        raise ValueError("a monitor internet scope can only narrow access")
     return Monitor(
         id=row["id"],
         conversation_id=row["conversation_id"],
         agent_id=row["agent_id"],
         name=row["name"],
-        audience=row["audience"],
         command=row["command"],
         interval_minutes=row["interval_minutes"],
         deadline_at=_aware(row["deadline_at"]),
@@ -165,6 +169,8 @@ def _row(row: sa.RowMapping) -> Monitor:
         claim_id=row["claimed_by"],
         created_at=_aware(row["created_at"]),
         updated_at=_aware(row["updated_at"]),
+        connections=tuple(UUID(item) for item in (row["connections"] or ())),
+        internet_access=False if row["internet_access"] is False else None,
     )
 
 
@@ -216,7 +222,6 @@ class MonitorStore:
         conversation_id: UUID,
         agent_id: UUID,
         name: str,
-        audience: str,
         command: str,
         interval_minutes: int,
         deadline_at: datetime,
@@ -226,6 +231,8 @@ class MonitorStore:
         created_by_member_id: UUID | None,
         baseline: str,
         next_probe_at: datetime,
+        connections: tuple[UUID, ...],
+        internet_access: Literal[False] | None,
     ) -> Monitor:
         async with self.ctx.transaction() as connection:
             row = (
@@ -238,7 +245,6 @@ class MonitorStore:
                             conversation_id=conversation_id,
                             agent_id=agent_id,
                             name=name,
-                            audience=audience,
                             command=command,
                             interval_minutes=interval_minutes,
                             deadline_at=deadline_at,
@@ -247,6 +253,8 @@ class MonitorStore:
                             metadata=metadata,
                             user_description=reason,
                             created_by_member_id=created_by_member_id,
+                            connections=[str(connection_id) for connection_id in connections],
+                            internet_access=internet_access,
                             baseline=baseline,
                             probes_run=0,
                             quiet_streak=0,
