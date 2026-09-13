@@ -3,7 +3,9 @@
 Each tool validates its arguments, calls the turn's selected `SearchProvider` (host-side, so the
 backend reads its key in the serve process and the sandbox never sees it), and serializes the
 seam's `SearchResults`/`FetchedPage` back to the model. `search_web` runs one provider search per
-query and merges; `search_vertical` folds its content type into the query's `vertical`; `fetch_url`
+query and merges; `search_vertical` folds its content type into the query's `vertical`, except the
+`internal` vertical, which answers from the workspace's own synced pages over the memory
+extension's page index and never reaches the provider; `fetch_url`
 gates on the provider's `supports_fetch` so a backend that only answers (never fetches) tells the
 agent to reach for the browser or bash instead, and walls every page it returns with crawler
 provenance — the backend fetches through its own crawler session, so identity or session context
@@ -15,6 +17,7 @@ from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, Field
+from ufo_ext_memory.manifest import MemorySearchService, match_line
 
 from ufo.sdk.search import FetchRequest, SearchHit, SearchProvider, SearchQuery
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
@@ -23,6 +26,8 @@ from ufo_ext_research.observations import record_fetched_page, record_search_hit
 SEARCH_WEB_TOOL = "search_web"
 FETCH_URL_TOOL = "fetch_url"
 SEARCH_VERTICAL_TOOL = "search_vertical"
+INTERNAL_VERTICAL = "internal"
+NO_INTERNAL_MATCHES_MESSAGE = "No matching pages."
 MAX_SEARCH_QUERIES = 5
 DEFAULT_SEARCH_RESULTS = 5
 MAX_SEARCH_RESULTS = 25
@@ -55,7 +60,8 @@ FETCH_URL_DESCRIPTION = (
 )
 SEARCH_VERTICAL_DESCRIPTION = (
     "Search specialized content verticals. Use instead of search_web when you need a specific "
-    "content type: images, professional profiles, academic papers, videos, or product listings."
+    "content type: images, professional profiles, academic papers, videos, product listings, or "
+    "the documents synced into this workspace."
 )
 
 
@@ -117,11 +123,13 @@ class FetchUrlInput(BaseModel):
 
 
 class SearchVerticalInput(BaseModel):
-    vertical: Literal["image", "people", "academic", "video", "shopping"] = Field(
+    vertical: Literal["image", "people", "academic", "video", "shopping", "internal"] = Field(
         description="'image' for photos/illustrations, 'people' for finding professionals by "
         "name/role/company/location (NOT for company lookups), 'academic' for research "
         "papers/publications, 'video' for video content, 'shopping' for product listings with "
-        "prices."
+        "prices, 'internal' for the documents a connected account, folder, or site syncs into this "
+        "workspace — searched over the shared audience plus the exact member making this request, "
+        "answering each hit with its object ref (page/<id>) to pass unchanged to object_get."
     )
     query: str = Field(
         description="A natural-language phrase for what you want, not a keyword list. E.g. "
@@ -198,7 +206,24 @@ async def _fetch_url(ctx: ToolContext, args: FetchUrlInput) -> ToolResult:
     return ToolResult(content=(TextContent(text=json.dumps(reply)),))
 
 
+async def _search_internal(ctx: ToolContext, query: str) -> ToolResult:
+    """The internal vertical: the synced page store over the memory extension's page index, on the
+    subject and source-reach fences `memory_search` reads its page hits under. An explicit member
+    request may search that member's private sources even in a shared conversation; that access is
+    never ambient for other members."""
+    if ctx.ext is None:
+        raise RuntimeError("search_vertical dispatched without its ExtensionContext")
+    matches = await MemorySearchService(ctx.ext).search_pages((query,), ctx.source_reader())
+    if not matches:
+        return ToolResult(content=(TextContent(text=NO_INTERNAL_MATCHES_MESSAGE),))
+    return ToolResult(
+        content=(TextContent(text="\n".join(match_line(match) for match in matches)),)
+    )
+
+
 async def _search_vertical(ctx: ToolContext, args: SearchVerticalInput) -> ToolResult:
+    if args.vertical == INTERNAL_VERTICAL:
+        return await _search_internal(ctx, args.query)
     provider = _provider(ctx)
     results = await provider.search(
         SearchQuery(query=args.query, num_results=DEFAULT_SEARCH_RESULTS, vertical=args.vertical)

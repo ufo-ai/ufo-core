@@ -2,8 +2,10 @@
 
 `memory_update`/`memory_search` are the extension's tools and `recall_hook` its `user_prompt_submit`
 hook; each is driven here over an `ExtensionContext` carrying the deploy index/embed backends,
-exactly as core threads them onto a turn. The headline: a fact committed in one context is recalled
-in a fresh one — both by the search tool and, unprompted, by the user_prompt_submit hook."""
+exactly as core threads them onto a turn. The page store this extension indexes is read by the
+research extension's `page` search vertical, driven here over the same seeded pages. The headline:
+a fact committed in one context is recalled in a fresh one — both by the search tool and,
+unprompted, by the user_prompt_submit hook."""
 
 import asyncio
 import gc
@@ -15,6 +17,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_memory.manifest as memory
+import ufo_ext_research.tools as research_tools
 from pydantic import ValidationError
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
@@ -29,6 +32,7 @@ from ufo_ext_memory.store import (
     Recalled,
     SourceMatch,
     body_digest,
+    mem_page,
     memory_item,
     store_for,
 )
@@ -36,7 +40,7 @@ from ufo_ext_memory.store import (
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.ext.context import ExtensionContext, context_for
-from ufo.runtime.indexing import TextChunker
+from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.runtime.objects import (
     ObjectListQuery,
 )
@@ -63,6 +67,11 @@ pytestmark = [
 
 TOOL_NARRATION = "remembering what they told me"
 MEMORY_TOOLS = {tool.name: tool for tool in memory.manifest().tools}
+INTERNAL_VERTICAL_TOOL = next(
+    tool
+    for tool in research_tools.RESEARCH_TOOLS
+    if tool.name == research_tools.SEARCH_VERTICAL_TOOL
+)
 MEMORY_ACTION_IDS = frozenset(
     {
         f"action:memory:{memory.RECORD_CORRECTION_ACTION}",
@@ -124,8 +133,13 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
-def _ext(index: object, embed: object, audience: Audience = SHARED_AUDIENCE) -> ExtensionContext:
-    return context_for("memory", frozenset(), index=index, embed=embed, audience=audience)
+def _ext(
+    index: object,
+    embed: object,
+    audience: Audience = SHARED_AUDIENCE,
+    name: str = "memory",
+) -> ExtensionContext:
+    return context_for(name, frozenset(), index=index, embed=embed, audience=audience)
 
 
 def _indexer(embed: object) -> MemoryIndexer:
@@ -1063,3 +1077,251 @@ async def test_a_page_derived_memory_object_is_fenced_on_the_connector_grant(
     assert str(item_id) in granted_names
     assert ungranted_get is None
     assert granted_get is not None
+
+
+async def _seed_page_chunk(
+    workspace_id: UUID,
+    subject: str,
+    body: str,
+    vector: tuple[float, ...],
+    owner_member_id: UUID | None = None,
+) -> tuple[UUID, UUID]:
+    """One synced page under its own source and connection, its mirror row, and the chunk the page
+    index job would have derived — the page store a search reads, seeded without the sync driver.
+    A connection nobody owns is the workspace's shared feed; one an owner names is that member's."""
+    connection_id, source_id, page_id = uuid4(), uuid7(), uuid7()
+    now = datetime(2026, 7, 9, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.connection).values(
+                id=connection_id,
+                workspace_id=workspace_id,
+                provider="folder",
+                account_id=connection_id.hex,
+                host="",
+                owner_member_id=owner_member_id,
+                shared=owner_member_id is None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.source).values(
+                uid=source_id,
+                workspace_id=workspace_id,
+                backend="folder",
+                config={},
+                feed_handle=feed_handle_for({}, frozenset()),
+                connection_id=connection_id,
+                next_sync_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.page).values(
+                uid=page_id,
+                workspace_id=workspace_id,
+                source_uid=source_id,
+                digest=f"sha256:{page_id.hex}",
+                body_ref=f"pages/{page_id}",
+                stream="notes",
+                title="Page",
+                subject=subject,
+                tombstone=False,
+                indexed=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        revision = (
+            await connection.execute(
+                sa.select(tables.page.c.revision).where(tables.page.c.uid == page_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(mem_page).values(
+                page_uid=page_id,
+                workspace_id=workspace_id,
+                subject=subject,
+                revision=revision,
+                created_at=now,
+            )
+        )
+    with ws(workspace_id):
+        await DefaultIndex(transaction=workspace_tx).upsert(
+            (Chunk("p-" + page_id.hex, OWNER_KIND_PAGE, str(page_id), subject, 0, body, vector),)
+        )
+    return connection_id, page_id
+
+
+async def _member(workspace_id: UUID, email: str) -> UUID:
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=email,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
+
+
+async def _reading_agent(
+    workspace_id: UUID, agent_id: UUID, connection_id: UUID | None = None
+) -> None:
+    """The agent a page search runs under: the workspace's main agent, which reaches every feed,
+    or a specialist holding a grant on one connection. A page reaches neither without it."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name=f"agent-{agent_id.hex[:8]}",
+                prompt="p",
+                model="m",
+                is_main=connection_id is None,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        if connection_id is not None:
+            await connection.execute(
+                sa.insert(tables.connector_grant).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    connection_id=connection_id,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+
+
+def _research_ctx(
+    workspace_id: UUID, member: UUID | None, probe: tuple[float, ...], tmp_path: Path
+) -> ToolContext:
+    """The turn an `internal` vertical search runs on: the research extension's own scoped
+    context over the deploy index, which is what reaches this extension's page store."""
+    ext = _ext(
+        DefaultIndex(transaction=workspace_tx),
+        StubEmbed(probe),
+        conversation_audience(member),
+        name="research",
+    )
+    return _tool_ctx(ext, member, tmp_path, workspace_id=workspace_id)
+
+
+async def _search_internal(ctx: ToolContext, query: str) -> ToolResult:
+    tool = INTERNAL_VERTICAL_TOOL
+    args = {"vertical": research_tools.INTERNAL_VERTICAL, "query": query}
+    return await tool.handler(ctx, tool.input_model.model_validate(args))
+
+
+async def test_the_internal_vertical_reports_no_match_on_an_empty_page_store(
+    db: None, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    member = uuid4()
+    ctx = _research_ctx(workspace_id, member, vec((0, 1.0)), tmp_path)
+    await _reading_agent(workspace_id, ctx.turn.agent_id)
+    with ws(workspace_id):
+        result = await _search_internal(ctx, "anything")
+    assert result.content[0].text == research_tools.NO_INTERNAL_MATCHES_MESSAGE
+
+
+async def test_the_internal_vertical_serves_the_page_store_alone(db: None, tmp_path: Path) -> None:
+    """The vertical's whole point: the same index legs memory_search reads its page hits from, with
+    no recall leg — a fact stating the term is memory_search's row and never this vertical's."""
+    workspace_id = await _workspace()
+    member = uuid4()
+    probe = vec((0, 1.0))
+    ext = _ext(
+        DefaultIndex(transaction=workspace_tx), StubEmbed(probe), conversation_audience(member)
+    )
+    ctx = _tool_ctx(ext, member, tmp_path, workspace_id=workspace_id)
+    await _reading_agent(workspace_id, ctx.turn.agent_id)
+    connection_id, page_id = await _seed_page_chunk(
+        workspace_id, SHARED_SUBJECT, "the expense policy pays mileage at 45p", probe
+    )
+    pages_ctx = _research_ctx(workspace_id, member, probe, tmp_path)
+    await _reading_agent(workspace_id, pages_ctx.turn.agent_id, connection_id)
+    with ws(workspace_id):
+        await _run("memory_update", ctx, body="the expense policy is owned by finance")
+        await _indexer(StubEmbed(probe)).run()
+        pages = await _search_internal(pages_ctx, "expense policy")
+        both = await _run("memory_search", ctx, queries=["expense policy"])
+    page_text = pages.content[0].text
+    assert f"page/{page_id}" in page_text
+    assert "the expense policy pays mileage at 45p" in page_text
+    assert "owned by finance" not in page_text
+    assert "owned by finance" in both.content[0].text
+
+
+async def test_the_internal_vertical_seals_another_members_private_page(
+    db: None, tmp_path: Path
+) -> None:
+    """A page synced under one member's own subject is theirs: their turn reads it, and another
+    member's turn is answered nothing even though that member's agent holds the grant on the
+    connection behind it — the subject fence, not the grant, is what seals the page."""
+    workspace_id = await _workspace()
+    alice = await _member(workspace_id, "alice@example.com")
+    bob = await _member(workspace_id, "bob@example.com")
+    probe = vec((0, 1.0))
+    connection_id, page_id = await _seed_page_chunk(
+        workspace_id,
+        member_subject(alice),
+        "alices private onboarding checklist",
+        probe,
+        owner_member_id=alice,
+    )
+    contexts = {}
+    for member, grant in ((alice, None), (bob, connection_id)):
+        contexts[member] = _research_ctx(workspace_id, member, probe, tmp_path)
+        await _reading_agent(workspace_id, contexts[member].turn.agent_id, grant)
+    with ws(workspace_id):
+        mine = await _search_internal(contexts[alice], "onboarding checklist")
+        theirs = await _search_internal(contexts[bob], "onboarding checklist")
+    assert f"page/{page_id}" in mine.content[0].text
+    assert theirs.content[0].text == research_tools.NO_INTERNAL_MATCHES_MESSAGE
+
+
+async def test_search_internal_keeps_each_legs_passage_and_never_recalls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each query's passage of one document survives the merge, an identical passage collapses, and
+    the recall leg is never asked — a page search costs a page search and nothing else."""
+    page = uuid4()
+
+    def _match(text: str) -> SourceMatch:
+        return SourceMatch(
+            page_id=page, subject="shared", text=text, score=0.5, created_at=datetime.now(UTC)
+        )
+
+    legs = {
+        "putaway": (_match("13.4 Putaway authorisation"),),
+        "template": (_match("Template 24 — the post format"),),
+        "formats": (_match("Template 24 — the post format"),),
+    }
+
+    class _Store:
+        async def recall(self, query, subjects, limit, start, end, *, source_reader):
+            raise AssertionError("a page search must not recall memory items")
+
+        async def search_sources(self, query, subjects, limit, start, end, *, source_reader):
+            return legs[query]
+
+    monkeypatch.setattr(memory, "store_for", lambda ext: _Store())
+    ctx = _tool_ctx(_ext(object(), object()), None, tmp_path)
+    with ws(uuid4()):
+        matches = await memory.MemorySearchService(ctx.ext).search_pages(
+            ("putaway", "template", "formats"), ctx.source_reader()
+        )
+        found = await _search_internal(ctx, "putaway")
+    text = "\n".join(memory.match_line(match) for match in matches)
+    assert "13.4 Putaway authorisation" in text
+    assert text.count("Template 24 — the post format") == 1
+    assert "13.4 Putaway authorisation" in found.content[0].text

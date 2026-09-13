@@ -266,7 +266,7 @@ question is asked (`audience_subjects`, `ToolContext.read_subjects`):
 | Path | Subjects |
 |---|---|
 | Automatic recall (per-turn hook) | the conversation audience's subjects only — no acting member, so room/shared recall can never inject a member's private memory |
-| Explicit `memory_search` / opened result objects | conversation subjects **plus** the acting member's own subject — never the shared atom their private audience would also read |
+| Explicit `memory_search` or `search_vertical` on `internal` / opened result objects | conversation subjects **plus** the acting member's own subject — never the shared atom their private audience would also read |
 | Memory writes | a workspace-shared conversation writes to the requester's private subject; a room or foreign conversation is its own memory space and writes stay keyed to it |
 | Foreign (`foreign:*`) anywhere | never reads `shared`; automatic recall reads only the sealed subject itself |
 

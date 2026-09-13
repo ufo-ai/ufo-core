@@ -326,11 +326,6 @@ class MemorySearchService:
                 )
             ),
         )
-        sources: dict[tuple[UUID, str], SourceMatch] = {}
-        for source_tier in zip_longest(*source_legs):
-            for match in source_tier:
-                if match is not None and (match.page_id, match.text) not in sources:
-                    sources[(match.page_id, match.text)] = match
         matches = tuple(
             MemoryMatch(
                 kind=item.item_class,
@@ -341,7 +336,19 @@ class MemorySearchService:
             )
             for item in self._merged(recalled_legs)
         )
-        return matches + tuple(
+        return matches + self._pages(source_legs)
+
+    def _pages(self, legs: list[tuple[SourceMatch, ...]]) -> tuple[MemoryMatch, ...]:
+        """Every query's page hits interleaved round-robin, one row per passage of a page and
+        bounded to MEMORY_SEARCH_LIMIT. A page answering two queries with two passages is two rows:
+        a manual's sections are what the agent came for, and keying the merge by page alone would
+        hand back only the first of them."""
+        sources: dict[tuple[UUID, str], SourceMatch] = {}
+        for tier in zip_longest(*legs):
+            for match in tier:
+                if match is not None and (match.page_id, match.text) not in sources:
+                    sources[(match.page_id, match.text)] = match
+        return tuple(
             MemoryMatch(
                 kind="source",
                 text=match.text,
@@ -370,6 +377,34 @@ class MemorySearchService:
         for item in by_id.values():
             statements.setdefault((item.subject, body_digest(item.body)), item)
         return tuple(statements.values())[:MEMORY_SEARCH_LIMIT]
+
+    async def search_pages(
+        self,
+        queries: tuple[str, ...],
+        reader: SourceReader,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> tuple[MemoryMatch, ...]:
+        """The source half of `search` on its own: every query's page leg over the same index,
+        merged the same way, with no recall leg — what the research extension's `page` search
+        vertical answers from."""
+        if not 1 <= len(queries) <= MAX_MEMORY_QUERIES:
+            raise ValueError(f"page search requires 1-{MAX_MEMORY_QUERIES} queries")
+        store = store_for(self.ctx)
+        legs = await asyncio.gather(
+            *(
+                store.search_sources(
+                    query,
+                    reader.subjects,
+                    MEMORY_SEARCH_LIMIT,
+                    start,
+                    end,
+                    source_reader=reader,
+                )
+                for query in queries
+            )
+        )
+        return self._pages(list(legs))
 
     def listable_kinds(self) -> tuple[str, ...]:
         """The item classes this store writes, read off `ItemClass` itself so a class added there

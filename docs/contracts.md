@@ -169,7 +169,8 @@ backends are extensions. Config `[[sources]]` blocks are folder roots, each a so
 workspace-owned `folder` connection, registered at boot. The sync driver is a core job — claim
 (dialect-native lock) → fetch → store bodies + upsert pages (skip unchanged by digest, tombstone
 removed) → advance cursor; it writes no chunks. The page index job derives chunks (owner_kind
-`page`), and `memory_search` recalls them via `search_sources`.
+`page`), `memory_search` recalls them via `search_sources`, and `search_vertical`'s `internal`
+vertical answers from that leg alone.
 
 ## surfaces/ (U6 remainder)
 

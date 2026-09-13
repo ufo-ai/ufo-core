@@ -224,6 +224,21 @@ async def test_fetch_url_walls_every_page_with_crawler_provenance() -> None:
     assert "crawler's own session" in reply["provenance"]
 
 
+async def test_the_internal_vertical_never_reaches_the_search_provider() -> None:
+    """The internal vertical is answered from the workspace's own page store, so it asks the web
+    backend nothing — and a turn holding no extension context fails loud rather than reporting an
+    empty page store."""
+    provider = _FakeSearchProvider()
+    with pytest.raises(RuntimeError, match="without its ExtensionContext"):
+        await _run(
+            "search_vertical",
+            provider,
+            vertical=research_tools.INTERNAL_VERTICAL,
+            query="the expense policy",
+        )
+    assert provider.queries == []
+
+
 async def test_web_tools_fail_loud_without_a_search_provider() -> None:
     with pytest.raises(RuntimeError, match="no search provider is configured"):
         await _run("search_web", None, queries=["x"])
