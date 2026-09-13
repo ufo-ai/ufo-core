@@ -28,7 +28,6 @@ from ufo.onboard.onboard_control import (
 )
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
 from ufo.runtime.access.credentials import CredentialStore, member_slot
-from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.balance import read_balance
 from ufo.runtime.seats import Seats, create_member, signup_workspace_id
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
@@ -154,8 +153,8 @@ async def test_seat_stores_a_member_model_key_where_the_connect_flow_does(
     onboard_client: AsyncClient,
 ) -> None:
     """The seed lands in `member_slot(slot, member_id)` — the exact row the browser connect flow
-    writes — so `member_holds_own_model_key`, the predicate the coding subagent's spawn gate reads,
-    holds for the seated member. A provider no member slot serves is refused before any write."""
+    writes — so `member_model_accounts` returns the exact account capability. A provider no member
+    slot serves is refused before any write."""
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
     try:
@@ -194,7 +193,9 @@ async def test_seat_stores_a_member_model_key_where_the_connect_flow_does(
                 ).scalar_one()
             stored = await store.get(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id))
             assert stored == "sk-ant-seeded"
-            assert await ws_current().member_holds_own_model_key(MemberAuthority(member_id))
+            assert await ws_current().member_model_accounts(member_id) == (
+                ("anthropic", member_slot(ANTHROPIC_KEY_SLOT, member_id)),
+            )
     finally:
         init_workspace_credentials(None)
 

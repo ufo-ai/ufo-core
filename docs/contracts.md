@@ -93,7 +93,7 @@ class ToolContext(Protocol):    # capability-scoped view a handler gets
     sandbox: SandboxSession; memory: MemoryService; blob: BlobStore
     turn: Turn; agent: AgentRuntime
     speaker_member_id: UUID | None; audience: Audience
-    acting_member_id: UUID | None; effective_audience: Audience
+    speaker_member_id: UUID | None; effective_audience: Audience
     async def ask_user(self, question: Question) -> Answer: ...
     async def spawn(self, profile: str, input: BaseModel, background: bool = False) -> SpawnResult: ...
 class ToolResult(BaseModel):    content: tuple[ContentBlock, ...]; is_error: bool = False
@@ -102,8 +102,9 @@ Builtins: `bash read write edit glob grep share_file spawn cancel_spawn message_
 load_skill connect_account`, plus the six `object_*` verbs the loader builds over the registered kinds.
 Registry rejects a second registration of an existing name.
 Every tool schema also accepts optional `requested_by`: a visible active inbound message ref.
-Dispatch strips it before validating the declared input and binds that message's member to the
-context; omission is common authority unless the turn carries `on_behalf_of_member_id`.
+Dispatch strips it before validating the declared input and binds that message's member after
+consent. Omission in a multi-speaker round leaves the call in conversation-common scope. Automatic
+turns carry only their exact persisted runtime capabilities.
 
 ## sandbox/
 
@@ -261,12 +262,12 @@ it answers when its input is empty and when it faults.
 - `ToolContext._connector_account_tiers` and `connector_connection` in `tools/context.py` raise on
   an empty or ambiguous tier and on a named account this turn may not use; an account that resolves
   to nothing is never an unscoped one.
-- `derive_cli_rules` gates on the acting member: a foreign private grant derives no ForwardRule, and
-  a memberless turn forwards only shared grants.
+- `derive_cli_rules` admits only the turn's exact connection capabilities. An ordinary selected
+  speaker may use their own private grants and shared grants; an automatic turn infers neither.
 - `HookChain.fire` in `ext/loader.py` turns a gating hook that raises or exceeds its timeout into a
   `Deny` carrying `failed_closed`; only a non-gating hook's fault is swallowed.
 - `_subagent_tools` in `loop/queue.py` intersects a strict allowlist, so an empty `tool_names`
   selects only the subagent-default tools (plus the profile's grants unless it is isolated), never
   every tool.
-- `gate_member` in `seats.py` returns None for a scheduled fire that carries no
-  `on_behalf_of_member_id`, so that turn is gated on no member — the one known gap in this list.
+- Admission and every round gate a live speaker's seat. Automatic work has no speaker and retains
+  only its exact persisted capabilities.

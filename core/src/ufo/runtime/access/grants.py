@@ -55,34 +55,21 @@ def grant_sentinel(account_id: str) -> str:
     return f"{GRANT_SENTINEL_PREFIX}{account_id}"
 
 
-def usable_cli_accounts(
+def scoped_cli_accounts(
     grants: "tuple[Grant, ...]",
     provider: str,
-    member_id: UUID | None,
-    connections: tuple[UUID, ...] | None = None,
+    connections: tuple[UUID, ...],
 ) -> tuple[str, ...]:
-    """The connected accounts one provider's CLI may act as under an authority: the member's own
-    private grants, else the grants shared with the agent's audience — sorted, so two accounts in
-    the winning tier read the same everywhere. A static env var names no account, so a caller
-    handed more than one exports nothing rather than silently picking; the egress rules still
-    carry every usable account, since each rides its own sentinel. A connection allowlist removes
-    every account outside it before the winning tier is chosen."""
-    private = sorted(
-        grant.account_id
+    """The preferred account tier one provider's CLI may use from an exact capability set. A
+    private capability outranks every shared capability regardless of its owner; within the
+    winning tier every consumer sees the same sorted ambiguity."""
+    scoped = tuple(
+        grant
         for grant in grants
-        if grant.provider == provider
-        and (connections is None or grant.connection_id in connections)
-        and not grant.connection_shared
-        and grant.owner_member_id == member_id
+        if grant.provider == provider and grant.connection_id in connections
     )
-    shared = sorted(
-        grant.account_id
-        for grant in grants
-        if grant.provider == provider
-        and (connections is None or grant.connection_id in connections)
-        and grant.connection_shared
-    )
-    return tuple(private or shared)
+    private = tuple(grant for grant in scoped if not grant.connection_shared)
+    return tuple(sorted(grant.account_id for grant in (private or scoped)))
 
 
 class UnknownProvider(LookupError):

@@ -33,7 +33,6 @@ from ufo.runtime import jobs
 from ufo.runtime.access.connectors import Credential
 from ufo.runtime.access.grants import INDEX_REAP_KEY_PREFIX, GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import authority_member_id
 from ufo.runtime.billing.balance import credit, set_reserve
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import (
@@ -2068,37 +2067,31 @@ async def test_making_a_connection_private_takes_its_streams_off_the_main_agent(
 
 
 async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db: None) -> None:
-    """A scheduled run and a subagent both act with their initiator's authority and neither has a
-    speaker, so both reach `source_reader` as one shape: member authority names the owner while
-    `requesting_member_id` is None. The exception is the live speaker's alone, so the main agent
-    reaches the owner's private source on neither — only the shared source, which it reads
-    regardless of who is speaking."""
+    """The owner exception is the live speaker's alone. A scheduled run or subagent carries no
+    member identity, so the main agent reaches only the shared source."""
     state = await _authority()
-    for on_behalf_of_member_id in (state.owner_id, state.stranger_id):
-        ctx = ToolContext(
-            sandbox=None,
-            blob=None,
-            turn=Turn(
-                id=uuid4(),
-                workspace_id=state.workspace_id,
-                conversation_id=uuid4(),
-                agent_id=state.main_agent_id,
-                seq=1,
-                status="running",
-                inbound="summarise what changed",
-                created_at=datetime(2026, 7, 27, tzinfo=UTC),
-                on_behalf_of_member_id=on_behalf_of_member_id,
-            ),
-            agent=Agent(prompt="p", model="claude-opus-4-8"),
-            spawn=_unavailable_spawn,
-            speaker_member_id=None,
-            audience=conversation_audience(None),
-            artifact_token_secret="",
-        )
-        assert authority_member_id(ctx.authority) == on_behalf_of_member_id
-        assert member_subject(on_behalf_of_member_id) in ctx.read_subjects
-        assert ctx.source_reader().requesting_member_id is None
-        assert await _reachable(state, ctx.source_reader()) == {state.unowned_source_id}
+    ctx = ToolContext(
+        sandbox=None,
+        blob=None,
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=state.workspace_id,
+            conversation_id=uuid4(),
+            agent_id=state.main_agent_id,
+            seq=1,
+            status="running",
+            inbound="summarise what changed",
+            created_at=datetime(2026, 7, 27, tzinfo=UTC),
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
+        speaker_member_id=None,
+        audience=conversation_audience(None),
+        artifact_token_secret="",
+    )
+    assert ctx.read_subjects == frozenset({SHARED_SUBJECT})
+    assert ctx.source_reader().requesting_member_id is None
+    assert await _reachable(state, ctx.source_reader()) == {state.unowned_source_id}
 
 
 async def test_a_turn_connection_scope_is_an_exact_source_read_allowlist(db: None) -> None:
@@ -2168,6 +2161,33 @@ async def test_a_turn_connection_scope_is_an_exact_source_read_allowlist(db: Non
                 set(await ext.readable_page_states((owned_page_id, shared_page_id), reader))
                 == expected_pages
             )
+
+    automatic = ToolContext(
+        sandbox=None,
+        blob=None,
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=state.workspace_id,
+            conversation_id=uuid4(),
+            agent_id=state.granted_agent_id,
+            seq=1,
+            status="running",
+            inbound="summarise what changed",
+            created_at=datetime(2026, 7, 27, tzinfo=UTC),
+            runtime_config=TurnRuntimeConfig(connections=(state.owned_connection_id,)),
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
+        speaker_member_id=None,
+        audience=conversation_audience(None),
+        artifact_token_secret="",
+    )
+    with ws(state.workspace_id):
+        ext = context_for("probe", frozenset())
+        assert await ext.readable_source_ids(automatic.source_reader()) == {state.owned_source_id}
+        assert {page.id for page in await ext.source_pages(automatic.source_reader())} == {
+            owned_page_id
+        }
 
 
 async def test_a_failing_source_is_isolated_and_released(

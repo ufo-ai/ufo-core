@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, Queue
@@ -65,11 +65,6 @@ from ufo.runtime.access.member_authorization import (
 )
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import (
-    WORKSPACE_AUTHORITY,
-    ExecutionAuthority,
-    turn_authority,
-)
 from ufo.runtime.context_boundary import (
     BoundaryInputs,
     context_boundary_tools,
@@ -80,6 +75,7 @@ from ufo.runtime.engine import (
     MAIN_ROUND_LIMIT,
     AdoptionReplay,
     RunLineage,
+    SandboxAccess,
     TranscriptRepair,
     TurnEngine,
     TurnParked,
@@ -137,9 +133,8 @@ from ufo.runtime.workspace import (
     Funding,
     ModelFundingChanged,
     ResolvedModelClient,
-    model_authority,
+    model_credentials,
     ws,
-    ws_current,
 )
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -150,7 +145,10 @@ from ufo.schema.records import (
     TERMINAL_ERROR_MESSAGE_MAX_CHARS,
     TURN_QUEUE_NAME,
     TURN_WORKFLOW_NAME,
+    UNSCOPED_EXPRESS_QUEUE_NAME,
+    UNSCOPED_TURN_QUEUE_NAME,
     Agent,
+    ModelAccountCapability,
     TerminalFrame,
     Turn,
     TurnAdmissionSource,
@@ -519,6 +517,20 @@ def _own_account_alternates(
     return tuple(model for model in own if model != chosen)
 
 
+def _model_routes(
+    profile: SubagentProfile | None,
+    accounts: tuple[ModelAccountCapability, ...],
+    runtime: "Runtime",
+) -> Mapping[str, str]:
+    if profile is None:
+        return {}
+    return {
+        runtime.registry.resolve(model): account.slot
+        for account in accounts
+        if (model := profile.own_key_models.get(account.provider)) is not None
+    }
+
+
 def _subagent_actions(
     actions: Mapping[str, Mapping[str, BoundAction]],
     profile: SubagentProfile,
@@ -586,9 +598,9 @@ def _agent_tools(
 
     An allowlist governs what a model may call, so it does not reach a speaking prepared intent,
     which takes no model round: the panel's verb dispatches verbatim under the submitting member's
-    authority, admitted through the panel's own gate. A speakerless intent comes from the sandbox
-    tool bridge and remains inside the agent's allowlist because the model reaches it through
-    `bash`."""
+    live requester, admitted through the panel's own gate. A speakerless intent comes from the
+    sandbox tool bridge and remains inside the agent's allowlist because the model reaches it
+    through `bash`."""
     if allowed is None or (admission == INTENT_ADMISSION and speaker_member_id is not None):
         return tuple(tool for tool in all_tools if not tool.profile_only)
     names = with_implied_grants(set(allowed))
@@ -650,6 +662,15 @@ TURN_QUEUE = Queue(
 )
 EXPRESS_QUEUE = Queue(
     EXPRESS_QUEUE_NAME,
+    polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
+)
+UNSCOPED_TURN_QUEUE = Queue(
+    UNSCOPED_TURN_QUEUE_NAME,
+    worker_concurrency=TURN_WORKER_CONCURRENCY,
+    polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
+)
+UNSCOPED_EXPRESS_QUEUE = Queue(
+    UNSCOPED_EXPRESS_QUEUE_NAME,
     polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
 )
 
@@ -789,9 +810,8 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
     argument for the whole body via `with ws(...)`: every query, credential read, and model call
     inside runs under it — the RLS scope on the shared RLS-subject role, the workspace's BYOK keys,
     and the ledger it bills. One fleet serves many workspaces from one pool; a single-workspace
-    deploy binds its sole one. The speaker is bound only for a profile that runs on the member's
-    own provider account, so an ordinary turn spends the workspace's key and not the account a
-    member connected for coding."""
+    deploy binds its sole one. A profile that runs on a connected provider account binds only the
+    exact credential slots persisted on its turn."""
     runtime = _runtime
     if runtime is None:
         raise RuntimeError("runtime not initialized (init_runtime runs in serve)")
@@ -810,9 +830,8 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                             tables.turn.c.traceparent,
                             tables.turn.c.subagent_profile,
                             tables.turn.c.parent_turn_id,
-                            tables.turn.c.speaker_member_id,
-                            tables.turn.c.on_behalf_of_member_id,
                             tables.turn.c.admission_source,
+                            tables.turn.c.model_accounts,
                         ).where(
                             tables.turn.c.id == turn_uuid,
                             tables.turn.c.workspace_id == workspace_uuid,
@@ -825,13 +844,6 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                 if row.subagent_profile is not None
                 else None
             )
-            authority = turn_authority(
-                row.speaker_member_id,
-                row.on_behalf_of_member_id,
-            )
-            own_account_models = (
-                frozenset() if profile is None else frozenset(profile.own_key_models.values())
-            )
             gates = _turn_gates(row.parent_turn_id, row.admission_source)
             queued = time.monotonic()
             async with AsyncExitStack() as held:
@@ -842,7 +854,16 @@ async def _execute_turn(workspace_id: str, turn_id: str) -> str:
                 await _apply_provisions(runtime, workspace_uuid)
                 with (
                     agent(row.agent_id),
-                    model_authority(authority, own_account_models),
+                    model_credentials(
+                        _model_routes(
+                            profile,
+                            tuple(
+                                ModelAccountCapability.model_validate(account)
+                                for account in row.model_accounts
+                            ),
+                            runtime,
+                        )
+                    ),
                     turn_span(
                         turn_uuid,
                         row.conversation_id,
@@ -1028,7 +1049,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             registry=runtime.subagents,
             parent=turn,
             audience=audience,
-            authority=turn.authority,
             hub=runtime.hub,
             invoker=runtime.invoker_for(turn.workspace_id),
             key_slot_for=runtime.registry.key_slot_for,
@@ -1038,9 +1058,11 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             member_accounts_connectable=_member_accounts_connectable(runtime),
         )
 
-        def subagents_for(authority: ExecutionAuthority) -> tuple[Spawn, Subagents]:
-            authorized = subagents.authorize(authority)
-            return authorized.spawn, authorized
+        def subagents_for(
+            connections: tuple[UUID, ...],
+        ) -> tuple[Spawn, Subagents]:
+            scoped = replace(subagents, connection_scope=connections)
+            return scoped.spawn, scoped
 
         payload: dict[str, Any] = (
             json.loads(turn.inbound) if turn.subagent_profile is not None and turn.seq == 1 else {}
@@ -1060,13 +1082,12 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             if document_model is not None:
                 runtime.registry.spec(document_model)
                 pinned_model = document_model
-        connected: tuple[str, ...] = ()
         if profile is None:
             resolved_model = (
                 pinned_model if pinned_model is not None else runtime.registry.resolve(agent.model)
             )
         else:
-            connected = await ws_current().member_model_providers(turn.authority)
+            connected = tuple(account.provider for account in turn.model_accounts)
             resolved_model = _subagent_model(
                 profile,
                 connected[0] if connected else None,
@@ -1176,7 +1197,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 runtime.sandboxes,
                 runtime.run_tokens,
                 turn,
-                grants,
                 clis,
                 runtime.credentials,
                 runtime.environment.slots(),
@@ -1268,7 +1288,8 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 ModelAccess(
                     replace(runtime.registry, auto_model=MEMBER_AUTHORIZATION_MODEL),
                     MEMBER_AUTHORIZATION_JOB,
-                )
+                ),
+                runtime.run_tokens.secret,
             ),
             previous_turn_ended_at=previous_turn_ended_at,
             pricing=billing.pricing(),
@@ -1394,7 +1415,6 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.admission_source,
                     tables.turn.c.idempotency_key,
                     tables.turn.c.speaker_member_id,
-                    tables.turn.c.on_behalf_of_member_id,
                     tables.turn.c.created_at,
                     tables.turn.c.updated_at,
                     tables.turn.c.context,
@@ -1407,6 +1427,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.external_retry_count,
                     tables.conversation.c.sandbox_conversation_id,
                     tables.turn.c.runtime_config,
+                    tables.turn.c.model_accounts,
                     tables.turn.c.traceparent,
                     tables.agent.c.prompt,
                     tables.agent.c.model,
@@ -1441,7 +1462,6 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         admission_source=row.admission_source,
         idempotency_key=row.idempotency_key,
         speaker_member_id=row.speaker_member_id,
-        on_behalf_of_member_id=row.on_behalf_of_member_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
         context=None if row.context is None else TurnContext.model_validate(row.context),
@@ -1458,6 +1478,9 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
             None
             if row.runtime_config is None
             else TurnRuntimeConfig.model_validate(row.runtime_config)
+        ),
+        model_accounts=tuple(
+            ModelAccountCapability.model_validate(account) for account in row.model_accounts
         ),
     )
     return (
@@ -1620,7 +1643,6 @@ async def _open_sandbox(
     sandboxes: ConversationSandbox,
     run_tokens: RunTokenCodec,
     turn: Turn,
-    grants: GrantStore | None,
     clis: Mapping[str, CliCredential],
     credentials: CredentialStore | None,
     slots: WorkspaceSlots,
@@ -1641,9 +1663,9 @@ async def _open_sandbox(
     whether or not it holds a grant or a key. Each connector git host's credential helper rides the
     same config, so `git clone` and `git push` authenticate off the CLI sentinel the proxy swaps.
 
-    The run token names the turn to the proxy, and carries the workspace, the turn and the acting
-    member but no conversation id, so a process in the container cannot recover the conversation
-    from it. `CONVERSATION_ID_ENV` states the conversation in plain text, which is what lets work a
+    The run token names the turn to the proxy and carries no conversation id, so a process in the
+    container cannot recover the conversation from it. `CONVERSATION_ID_ENV` states the
+    conversation in plain text, which is what lets work a
     turn leaves outside the workspace — a branch, a commit, a pull request — be joined back to the
     record that produced it. The conversation is the id worth stating rather than the turn: this
     opener runs every turn but keys the container on the conversation, so a follow-up turn resumes
@@ -1661,7 +1683,6 @@ async def _open_sandbox(
     run = RunToken(
         workspace_id=turn.workspace_id,
         turn_id=turn.id,
-        authority=WORKSPACE_AUTHORITY,
     )
     cache_config = cache_git_config() if cache_rewrite else ()
     with span("sandbox.open"):
@@ -1673,13 +1694,6 @@ async def _open_sandbox(
                 CONVERSATION_ID_ENV: str(turn.conversation_id),
                 TOOL_BRIDGE_URL_ENV: TOOL_BRIDGE_URL,
                 **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cache_config, *cli_git_config(clis))),
-                **await _grant_cli_env(
-                    grants,
-                    clis,
-                    WORKSPACE_AUTHORITY,
-                    turn.id,
-                    None if turn.runtime_config is None else turn.runtime_config.connections,
-                ),
                 **await _keyed_provider_env(credentials, slots, turn.workspace_id),
             },
         )
@@ -1693,26 +1707,60 @@ class SandboxAuthorizer:
     clis: Mapping[str, CliCredential]
     turn: Turn
 
-    async def authorize(self, authority: ExecutionAuthority) -> Sandbox:
-        run_token = self.run_tokens.encode(
-            RunToken(
-                workspace_id=self.turn.workspace_id,
-                turn_id=self.turn.id,
-                authority=authority,
+    async def authorize(
+        self,
+        connections: tuple[UUID, ...],
+        call: str,
+    ) -> SandboxAccess:
+        env = await _grant_cli_env(
+            self.grants,
+            self.clis,
+            self.turn.id,
+            connections,
+        )
+        runtime_connections = (
+            ()
+            if self.turn.runtime_config is None or self.turn.runtime_config.connections is None
+            else self.turn.runtime_config.connections
+        )
+        capability_id = uuid4() if connections != runtime_connections else None
+        run = RunToken(
+            workspace_id=self.turn.workspace_id,
+            turn_id=self.turn.id,
+            capability_id=capability_id,
+        )
+        run_token = self.run_tokens.encode(run)
+        sandbox = self.sandbox.authorize(
+            run_token, frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV, env
+        )
+        if capability_id is None:
+            return SandboxAccess(sandbox)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.sandbox_call_capability).where(
+                    tables.sandbox_call_capability.c.workspace_id == self.turn.workspace_id,
+                    tables.sandbox_call_capability.c.turn_id == self.turn.id,
+                    tables.sandbox_call_capability.c.call == call,
+                )
             )
-        )
-        return self.sandbox.authorize(
-            run_token,
-            frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV,
-            await _grant_cli_env(
-                self.grants,
-                self.clis,
-                authority,
-                self.turn.id,
-                (
-                    None
-                    if self.turn.runtime_config is None
-                    else self.turn.runtime_config.connections
-                ),
-            ),
-        )
+            await connection.execute(
+                sa.insert(tables.sandbox_call_capability).values(
+                    id=capability_id,
+                    workspace_id=self.turn.workspace_id,
+                    turn_id=self.turn.id,
+                    call=call,
+                    connections=[str(connection) for connection in connections],
+                    created_at=datetime.now(UTC),
+                )
+            )
+        return SandboxAccess(sandbox, partial(self._revoke, capability_id))
+
+    async def _revoke(self, capability_id: UUID) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.delete(tables.sandbox_call_capability).where(
+                    tables.sandbox_call_capability.c.id == capability_id,
+                    tables.sandbox_call_capability.c.workspace_id == self.turn.workspace_id,
+                    tables.sandbox_call_capability.c.turn_id == self.turn.id,
+                )
+            )

@@ -94,10 +94,10 @@ An agent child never shares the spawning turn's sandbox: the target's `sandbox_s
 `internet_access_allowed` are its own settings, and a shared filesystem under a different egress
 policy is a bypass. Files cross as typed output and `share_file`.
 
-Authority is unchanged in both directions. `on_behalf_of_member_id` carries the acting member
-through the hop, so member gates — connector use, credential access — hold inside the child. The
-agent wall moves to the target: its source grants, its memory, its allowlist. The child
-conversation copies the parent's audience, so recall stays audience-scoped.
+The child persists the exact connection and model-account capabilities granted at spawn. It never
+reconstructs access from the requester or creator. The agent wall moves to the target: its source
+grants, memory, and allowlist. The child conversation copies the parent's audience, so recall stays
+audience-scoped.
 
 ### Fully async peers
 
@@ -139,20 +139,18 @@ is what "the main agent is owned by the admin" means in rows. The prior special 
 admin-gated on the main agent, chat edits restricted to the main agent changing prompts,
 settings changes intent-only) dissolve into that one rule. Delete stays refused.
 
-Ownership also gates the spawn, and it mirrors the portal's reach. A turn spawns the agents its
-acting member owns; a workspace admin spawns any, the ownerless rows (main, provisioned)
+Ownership also gates the spawn, and it mirrors the portal's reach. A live selected speaker spawns
+the agents they own; a workspace admin spawns any, the ownerless rows (main, provisioned)
 included — they are the admins'. A non-admin never reaches an agent they do not own, exactly as
 the portal gives them only the main agent, their grants, and their own rows — an owner's agent
 joins their web audience without a grant, so the member who created an agent can always open it.
-What the gate buys is authority, not content trust: no prompt you did not write or vet runs under
-your member gates, while the child's answer still walls as data (its tool set reads the open
-web). The catalog lists exactly the spawnable set, and the activity tree names an agent run by
-its qualified target, showing its work inline — profile runs alone link out to their own
-conversation page. The acting member is one fold everywhere
-the spawn machinery reads it — the bound `requested_by` requester, else the turn's founding
-speaker, else the initiator a speakerless turn acts on behalf of — so a member's plain chat
-request spawns their own agent without ceremony, and the child is stamped with that same member's
-authority.
+The gate grants access, not content trust: no prompt you did not write or vet runs from your
+message, while the child's answer still walls as data (its tool set reads the open web). The
+catalog lists exactly the spawnable set, and the activity tree names an agent run by its qualified
+target, showing its work inline — profile runs alone link out to their own conversation page. A
+bound `requested_by` message selects the live speaker for the ownership check; otherwise the
+founding speaker applies. A speakerless turn cannot acquire a member identity. The child itself
+has no speaker and persists only the exact runtime capabilities admitted at spawn.
 
 A spawned agent that itself spawns keeps the chain whole: a turn founded by an arrival on a
 spawned conversation — a grandchild's result waking its parent after that parent's turn ended —

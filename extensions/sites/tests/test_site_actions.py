@@ -202,7 +202,6 @@ async def _seed_turn(
                 inbound="build your homepage",
                 admission_source=MEMBER_ADMISSION if speaker else SCHEDULED_ADMISSION,
                 speaker_member_id=member_id if speaker else None,
-                on_behalf_of_member_id=None if speaker else member_id,
                 terminal=None,
                 created_at=created_at,
                 updated_at=created_at,
@@ -219,7 +218,6 @@ async def _seed_turn(
             inbound="build your homepage",
             admission_source=MEMBER_ADMISSION if speaker else SCHEDULED_ADMISSION,
             speaker_member_id=member_id if speaker else None,
-            on_behalf_of_member_id=None if speaker else member_id,
             created_at=created_at,
             terminal=None,
         ),
@@ -362,7 +360,7 @@ def test_the_site_family_registers_only_as_canonical_actions() -> None:
     )
 
 
-async def test_a_speakerless_turn_binds_its_own_agents_homepage(
+async def test_a_speakerless_turn_cannot_bind_its_own_agents_homepage(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("UFO_TOKEN_SECRET", "sites-test-secret")
@@ -391,10 +389,9 @@ async def test_a_speakerless_turn_binds_its_own_agents_homepage(
         frame = await engine.run()
         assert frame is not None and frame.status == "done"
         result = await _tool_result(engine)
-    assert result.is_error is False
-    payload = json.loads(str(result.content))
-    assert payload["homepage_agent"] == str(turn.agent_id)
-    assert payload["visibility"] == "private"
+    assert result.is_error is True
+    assert str(result.content).startswith("SpeakerRequired: a homepage")
+    assert "cannot carry member authority now" in str(result.content)
     async with workspace_tx() as connection:
         bound = (
             await connection.execute(
@@ -403,7 +400,7 @@ async def test_a_speakerless_turn_binds_its_own_agents_homepage(
                 )
             )
         ).scalar_one()
-    assert bound == turn.agent_id
+    assert bound is None
 
 
 async def test_reading_an_agent_can_not_rewrite_its_page(
@@ -445,14 +442,23 @@ async def test_an_admin_binds_another_agents_page(
     assert json.loads(str(result.content))["homepage_agent"] == str(other)
 
 
-async def test_a_speakerless_turn_binds_only_its_own_agent_even_for_the_owner(
+async def test_a_speakerless_turn_cannot_bind_another_agent_even_for_its_owner(
     db: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     turn, member_id = await _seed_turn(admin=False)
     await _seed_agent(turn.workspace_id, OTHER_AGENT, owner_member_id=member_id)
     result = await _bind_other(turn, member_id, tmp_path, monkeypatch)
     assert result.is_error is True
-    assert "needs its creator speaking" in str(result.content)
+    assert "not yours to direct" in str(result.content)
+    async with workspace_tx() as connection:
+        bound = (
+            await connection.execute(
+                sa.select(hosted_site.c.homepage_agent_id).where(
+                    hosted_site.c.workspace_id == turn.workspace_id
+                )
+            )
+        ).scalar_one()
+    assert bound is None
 
 
 async def test_a_speakerless_turn_cannot_bind_a_standing_site(
@@ -478,4 +484,14 @@ async def test_a_speakerless_turn_cannot_bind_a_standing_site(
         assert frame is not None and frame.status == "done"
         result = await _tool_result(engine)
     assert result.is_error is True
-    assert "needs its creator speaking" in str(result.content)
+    assert str(result.content).startswith("SpeakerRequired: a homepage")
+    assert "cannot carry member authority now" in str(result.content)
+    async with workspace_tx() as connection:
+        bound = (
+            await connection.execute(
+                sa.select(hosted_site.c.homepage_agent_id).where(
+                    hosted_site.c.workspace_id == turn.workspace_id
+                )
+            )
+        ).scalar_one()
+    assert bound is None

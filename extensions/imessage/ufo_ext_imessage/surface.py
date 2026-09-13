@@ -42,6 +42,7 @@ CLAIM_PREFIX = "phone-claim:"
 RECONNECT_SECONDS = 2.0
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 DETAILS_LINK_TEXT = "Open detailed report"
+APPROVAL_PORTAL_TEXT = "Open the member portal to review this approval"
 LIVE_BUFFER_FRAMES = 1_000
 CONNECTED_TEXT = "Connected. Send your request."
 CODE_UNKNOWN_TEXT = "That code does not match. Check the chat and send the code again."
@@ -475,7 +476,12 @@ class ImessageSurface:
     async def _terminal_text(
         self, ctx: SurfaceContext, writeback: Writeback, *, direct: bool
     ) -> str:
-        parts = [writeback.terminal.text, self._question_text(writeback)]
+        question = writeback.terminal.question
+        if question is not None and question.authorization_id is not None:
+            portal = ctx.home_url(f"#/c/{writeback.conversation_id}")
+            parts = [f"{APPROVAL_PORTAL_TEXT}: {portal}" if portal else APPROVAL_PORTAL_TEXT + "."]
+        else:
+            parts = [writeback.terminal.text, self._question_text(writeback)]
         if writeback.terminal.connect_request is not None:
             if direct:
                 parts.append(

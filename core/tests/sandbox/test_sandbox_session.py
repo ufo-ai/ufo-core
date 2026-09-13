@@ -52,12 +52,6 @@ from ufo.harness.sandbox.session import (
     workspace_path,
 )
 from ufo.host.tools.builtins import BashInput, bash_handler
-from ufo.runtime.authority import (
-    WORKSPACE_AUTHORITY,
-    MemberAuthority,
-    authority_from_member_id,
-    authority_member_id,
-)
 from ufo.runtime.skills.runtime import RuntimeSkill, SystemSkillBundle
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.tools.tasks import (
@@ -109,22 +103,30 @@ def _basic(username: str) -> str:
 
 
 def _check_run_token_round_trips_encode_then_proxy_auth() -> None:
-    token = RunToken(workspace_id=uuid4(), turn_id=uuid4(), authority=MemberAuthority(uuid4()))
+    token = RunToken(workspace_id=uuid4(), turn_id=uuid4(), capability_id=uuid4())
     assert RUN_TOKENS.from_proxy_auth(_basic(RUN_TOKENS.encode(token))) == token
 
 
+def _check_run_token_wire_recovers_an_opaque_capability() -> None:
+    workspace_id, turn_id, capability_id = uuid4(), uuid4(), uuid4()
+    payload = f"ufo-run/{workspace_id}/{turn_id}/{capability_id}".encode()
+    decoded = RUN_TOKENS.from_proxy_auth(_basic(sign_token(RUN_TOKENS.secret, payload)))
+    assert decoded == RunToken(workspace_id, turn_id, capability_id=capability_id)
+
+
+def _check_run_token_capability_is_keyword_only() -> None:
+    with pytest.raises(TypeError):
+        RunToken(uuid4(), uuid4(), uuid4())
+
+
 def _check_encoded_token_is_url_safe_userinfo() -> None:
-    encoded = RUN_TOKENS.encode(
-        RunToken(workspace_id=uuid4(), turn_id=uuid4(), authority=WORKSPACE_AUTHORITY)
-    )
+    encoded = RUN_TOKENS.encode(RunToken(workspace_id=uuid4(), turn_id=uuid4()))
     assert all(char.isalnum() or char in "-_." for char in encoded)
 
 
 def _check_from_proxy_auth_rejects_non_basic_scheme() -> None:
     with pytest.raises(ValueError, match="basic"):
-        RUN_TOKENS.from_proxy_auth(
-            "Bearer " + RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), WORKSPACE_AUTHORITY))
-        )
+        RUN_TOKENS.from_proxy_auth("Bearer " + RUN_TOKENS.encode(RunToken(uuid4(), uuid4())))
 
 
 def _check_from_proxy_auth_rejects_missing_header() -> None:
@@ -138,7 +140,7 @@ def _check_from_proxy_auth_rejects_a_malformed_run_token() -> None:
 
 
 def _check_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> None:
-    run = RunToken(uuid4(), uuid4(), WORKSPACE_AUTHORITY)
+    run = RunToken(uuid4(), uuid4())
     forged = RunTokenCodec(b"other-deployment").encode(run)
     with pytest.raises(ValueError, match="signed"):
         RUN_TOKENS.from_proxy_auth(_basic(forged))
@@ -146,7 +148,6 @@ def _check_run_token_rejects_a_valid_shape_signed_by_another_deployment() -> Non
 
 def _probe(
     expires_at: int = 1_800_000_000,
-    member: UUID | None = None,
     connections: tuple[UUID, ...] = (),
     internet_access: Literal[False] | None = None,
 ) -> ProbeToken:
@@ -155,7 +156,6 @@ def _probe(
         conversation_id=uuid4(),
         probe_id=uuid4(),
         expires_at=expires_at,
-        authority=authority_from_member_id(member),
         connections=connections,
         internet_access=internet_access,
     )
@@ -167,8 +167,8 @@ def _check_probe_token_round_trips_encode_then_proxy_auth() -> None:
 
 
 def _check_six_field_probe_token_decodes_to_no_connections_or_internet() -> None:
-    probe = _probe(member=uuid4())
-    member = authority_member_id(probe.authority)
+    probe = _probe()
+    member = uuid4()
     payload = (
         f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}/"
         f"{probe.probe_id}/{member}/{probe.expires_at}"
@@ -178,21 +178,19 @@ def _check_six_field_probe_token_decodes_to_no_connections_or_internet() -> None
     assert decoded.conversation_id == probe.conversation_id
     assert decoded.probe_id == probe.probe_id
     assert decoded.expires_at == probe.expires_at
-    assert decoded.authority == probe.authority
     assert decoded.connections == ()
     assert decoded.internet_access is False
 
 
-def _check_probe_token_round_trips_its_member_authority() -> None:
-    """The member a probe acts as is signed with it, so the proxy reads an authority this deployment
-    granted rather than one the sandbox could name for itself. Absent is a distinct value, not a
-    zero: it means nobody, and the wire keeps the two apart."""
-    acting = _probe(member=uuid4())
-    assert PROBE_TOKENS.from_proxy_auth(_basic(PROBE_TOKENS.encode(acting))) == acting
-    assert (
-        PROBE_TOKENS.from_proxy_auth(_basic(PROBE_TOKENS.encode(_probe()))).authority
-        == WORKSPACE_AUTHORITY
-    )
+def _check_member_probe_token_keeps_only_its_connection_capabilities() -> None:
+    probe = _probe(connections=(uuid4(), uuid4()))
+    connections = ",".join(connection.hex for connection in probe.connections)
+    payload = (
+        f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}/"
+        f"{probe.probe_id}/{uuid4()}/{probe.expires_at}/{connections}/-"
+    ).encode()
+    decoded = PROBE_TOKENS.from_proxy_auth(_basic(sign_token(PROBE_TOKENS.secret, payload)))
+    assert decoded == probe
 
 
 def _check_encoded_probe_token_is_url_safe_userinfo() -> None:
@@ -220,7 +218,7 @@ def _check_neither_codec_reads_the_other_domain_under_one_secret() -> None:
     """Both classes are signed with the one deploy secret, so only the domain inside the payload
     keeps them apart: a run token presented where a probe token is expected must be refused as
     firmly as a forgery, else a turn's token would authorize egress with no turn read behind it."""
-    run = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), WORKSPACE_AUTHORITY))
+    run = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
     probe = PROBE_TOKENS.encode(_probe())
     with pytest.raises(ValueError, match="probe token"):
         PROBE_TOKENS.from_proxy_auth(_basic(run))
@@ -230,8 +228,8 @@ def _check_neither_codec_reads_the_other_domain_under_one_secret() -> None:
 
 def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_base() -> None:
     conversation_id = uuid4()
-    common = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), WORKSPACE_AUTHORITY))
-    member = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), MemberAuthority(uuid4())))
+    common = RUN_TOKENS.encode(RunToken(uuid4(), uuid4()))
+    scoped = RUN_TOKENS.encode(RunToken(uuid4(), uuid4(), capability_id=uuid4()))
     proxy = f"http://{common}:{PROXY_PASSWORD}@proxy:9000"
     base = SandboxSession(
         carrier=_RecordingCarrier(),
@@ -252,15 +250,15 @@ def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_
     )
 
     authorized = base.authorize(
-        member,
+        scoped,
         frozenset(("ALICE_KEY", "BOB_KEY")),
         {"BOB_KEY": "bob"},
     )
 
-    assert authorized.handle.run_token == member
+    assert authorized.handle.run_token == scoped
     assert authorized.system_skill_archive == b"bundle"
     assert all(
-        member in authorized.handle.egress_env[name]
+        scoped in authorized.handle.egress_env[name]
         for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
     )
     assert authorized.handle.egress_env["UNRELATED"] == common
@@ -271,13 +269,11 @@ def _check_authorized_session_scopes_proxy_and_cli_environment_without_mutating_
 
 
 def _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
-    """A tool runs its commands through a session re-authorized for the acting member, while the
-    cancel path stops through the turn's own base session. Both name the same turn, so the stop
-    reaches exactly the groups the turn's commands left running — in a container its sibling turns
-    are still running commands in."""
+    """A tool runs commands through a capability-scoped session while cancel uses the base one.
+    Both name the same turn, so the stop reaches its command groups alone."""
     turn_id = uuid4()
-    common = RUN_TOKENS.encode(RunToken(uuid4(), turn_id, WORKSPACE_AUTHORITY))
-    member = RUN_TOKENS.encode(RunToken(uuid4(), turn_id, MemberAuthority(uuid4())))
+    common = RUN_TOKENS.encode(RunToken(uuid4(), turn_id))
+    scoped = RUN_TOKENS.encode(RunToken(uuid4(), turn_id, capability_id=uuid4()))
     proxy = f"http://{common}:{PROXY_PASSWORD}@proxy:9000"
     base = SandboxSession(
         carrier=_RecordingCarrier(),
@@ -290,7 +286,7 @@ def _check_an_authorized_session_keeps_the_turn_a_stop_is_scoped_to() -> None:
         ),
     )
 
-    authorized = base.authorize(member, frozenset(), {})
+    authorized = base.authorize(scoped, frozenset(), {})
 
     assert authorized.handle.turn_id == turn_id
 
@@ -1444,6 +1440,8 @@ def test_sandbox_session_sync_contract() -> None:
         _check_egress_proxy_env_embeds_run_token_and_sentinels,
         _check_egress_proxy_env_refuses_missing_or_http_url,
         _check_run_token_round_trips_encode_then_proxy_auth,
+        _check_run_token_wire_recovers_an_opaque_capability,
+        _check_run_token_capability_is_keyword_only,
         _check_encoded_token_is_url_safe_userinfo,
         _check_from_proxy_auth_rejects_non_basic_scheme,
         _check_from_proxy_auth_rejects_missing_header,
@@ -1451,7 +1449,7 @@ def test_sandbox_session_sync_contract() -> None:
         _check_run_token_rejects_a_valid_shape_signed_by_another_deployment,
         _check_probe_token_round_trips_encode_then_proxy_auth,
         _check_six_field_probe_token_decodes_to_no_connections_or_internet,
-        _check_probe_token_round_trips_its_member_authority,
+        _check_member_probe_token_keeps_only_its_connection_capabilities,
         _check_encoded_probe_token_is_url_safe_userinfo,
         _check_probe_from_proxy_auth_rejects_non_basic_scheme,
         _check_probe_from_proxy_auth_rejects_a_malformed_probe_token,

@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine.default import DefaultExecutionContext
 
 from ufo.runtime.turns.audience import conversation_audience
@@ -239,6 +240,11 @@ member_authorization = sa.Table(
     sa.Column("call", sa.Text, nullable=False),
     sa.Column("effect_digest", sa.Text, nullable=False),
     sa.Column("effect", sa.JSON, nullable=False),
+    sa.Column("scope_digest", sa.Text, nullable=True),
+    sa.Column("scope", sa.JSON(none_as_null=True), nullable=True),
+    sa.Column("binding_digest", sa.Text, nullable=True),
+    sa.Column("request_summary", sa.Text, nullable=True),
+    sa.Column("scope_summary", sa.Text, nullable=True),
     sa.Column("request_key", sa.Text, nullable=False),
     sa.Column("decision_key", sa.Text, nullable=True),
     sa.Column("requested_by", sa.Uuid, nullable=False),
@@ -280,6 +286,14 @@ member_authorization = sa.Table(
     sa.CheckConstraint("request_key <> ''", name="member_authorization_request_key_nonempty"),
     sa.CheckConstraint("effect_digest <> ''", name="member_authorization_digest_nonempty"),
     sa.CheckConstraint(
+        "(scope_digest is null) = (scope is null)",
+        name="member_authorization_scope_pair",
+    ),
+    sa.CheckConstraint(
+        "(binding_digest is null) = (scope_digest is null)",
+        name="member_authorization_binding_scope_pair",
+    ),
+    sa.CheckConstraint(
         "decision is null or decision in ('allow', 'always', 'deny', 'revoke', 'superseded')",
         name="member_authorization_decision",
     ),
@@ -315,6 +329,8 @@ member_permission = sa.Table(
     sa.Column("call", sa.Text, nullable=False),
     sa.Column("effect_digest", sa.Text, nullable=False),
     sa.Column("effect", sa.JSON, nullable=False),
+    sa.Column("scope_digest", sa.Text, nullable=True),
+    sa.Column("scope", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("granted_by", sa.Uuid, nullable=False),
     sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -341,7 +357,20 @@ member_permission = sa.Table(
     ),
     sa.CheckConstraint("call <> ''", name="member_permission_call_nonempty"),
     sa.CheckConstraint("effect_digest <> ''", name="member_permission_digest_nonempty"),
+    sa.CheckConstraint(
+        "(scope_digest is null) = (scope is null)",
+        name="member_permission_scope_pair",
+    ),
     sa.Index("member_permission_member", "workspace_id", "member_id"),
+    sa.Index(
+        "member_permission_scope_identity",
+        "workspace_id",
+        "member_id",
+        "agent_id",
+        "call",
+        "scope_digest",
+        unique=True,
+    ),
 )
 
 turn = sa.Table(
@@ -377,6 +406,12 @@ turn = sa.Table(
     sa.Column("spawn_request_fingerprint", sa.Text, nullable=True),
     sa.Column("traceparent", sa.Text, nullable=True),
     sa.Column("runtime_config", sa.JSON, nullable=True),
+    sa.Column(
+        "model_accounts",
+        sa.JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+        server_default=sa.text("'[]'"),
+    ),
     sa.Column("idempotency_key", sa.Text, nullable=True),
     sa.Column("running_attempt", sa.Text, nullable=True),
     sa.Column("dispatch_enqueued_at", sa.DateTime(timezone=True), nullable=True),
@@ -393,10 +428,6 @@ turn = sa.Table(
     sa.CheckConstraint(
         "admission_source in ('member', 'internal', 'scheduled', 'intent')",
         name="turn_admission_source",
-    ),
-    sa.CheckConstraint(
-        "speaker_member_id is null or on_behalf_of_member_id is null",
-        name="turn_authority",
     ),
     sa.CheckConstraint(
         "(status in ('queued', 'running', 'parked')) = (terminal is null)", name="turn_terminal"
@@ -466,6 +497,19 @@ turn = sa.Table(
         sqlite_where=sa.text("terminal is null"),
     ),
     sa.Index("turn_agent_activity", "agent_id", "updated_at", "id"),
+)
+
+sandbox_call_capability = sa.Table(
+    "sandbox_call_capability",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("call", sa.Text, nullable=False),
+    sa.Column("connections", sa.JSON, nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint("workspace_id", "turn_id", "call"),
+    sa.CheckConstraint("call <> ''", name="sandbox_call_capability_call_nonempty"),
 )
 
 inbound_message = sa.Table(

@@ -44,7 +44,6 @@ from ufo.runtime.access.egress_rules import (
     derive_credential_rules,
 )
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.accounting import workspace_owns_the_key
 from ufo.runtime.ext.manifest import (
     CredentialSlot,
@@ -56,7 +55,7 @@ from ufo.runtime.workspace import (
     PLAN_FUNDED,
     ModelFundingChanged,
     init_workspace_credentials,
-    model_authority,
+    model_credentials,
     ws,
     ws_current,
 )
@@ -233,10 +232,7 @@ async def test_a_stored_slot_is_told_apart_from_the_platform_default(
 async def test_a_member_key_serves_only_a_turn_bound_to_that_member(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A member connects a provider account for the work that requires it, so their key resolves
-    only while a turn is bound to them. Every other turn binds nobody and reads the workspace row,
-    then the platform default: no member's account pays for a call that was not theirs, and an
-    admin's is a member's."""
+    """An admitted model capability resolves only its exact credential slot."""
     workspace_id = await _workspace()
     store = _store()
     init_workspace_credentials(store)
@@ -247,27 +243,22 @@ async def test_a_member_key_serves_only_a_turn_bound_to_that_member(
         keyless = await create_member(connection, workspace_id, "keyless@work.com")
     await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, admin), "admin-key")
     await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, teammate), "teammate-key")
-    served = frozenset({OWN_ACCOUNT_MODEL})
     with ws(workspace_id):
         assert await ws_current().credential(OPENAI_KEY_SLOT) == "platform-default"
         assert not await ws_current().credential_is_stored(OPENAI_KEY_SLOT)
-        with model_authority(MemberAuthority(teammate), served):
+        with model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, teammate)}):
             assert (
                 await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
                 == "teammate-key"
             )
             assert await ws_current().credential_is_stored(OPENAI_KEY_SLOT, OWN_ACCOUNT_MODEL)
-        with model_authority(MemberAuthority(keyless), served):
-            assert (
+        with model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, keyless)}):
+            with pytest.raises(CredentialSlotUnset):
                 await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
-                == "platform-default"
-            )
         await store.put(workspace_id, OPENAI_KEY_SLOT, "workspace-key")
-        with model_authority(MemberAuthority(keyless), served):
-            assert (
+        with model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, keyless)}):
+            with pytest.raises(CredentialSlotUnset):
                 await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
-                == "workspace-key"
-            )
         assert await ws_current().credential(OPENAI_KEY_SLOT) == "workspace-key"
 
 
@@ -289,16 +280,15 @@ async def test_model_resolution_tells_a_plan_apart_from_a_metered_key(
     grant = Grant(access="oat-token", refresh="refresh", expires_at=time.time() + 3600)
     await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, planned), grant.stored())
     await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, keyed), "sk-ant-api-pasted")
-    served = frozenset({OWN_ACCOUNT_MODEL})
     with ws(workspace_id):
         assert (
             await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
         ).funding == "platform"
-        with model_authority(MemberAuthority(planned), served):
+        with model_credentials({OWN_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, planned)}):
             assert (
                 await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
             ).funding == "plan"
-        with model_authority(MemberAuthority(keyed), served):
+        with model_credentials({OWN_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, keyed)}):
             assert (
                 await ws_current().model_credential(ANTHROPIC_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
             ).funding == "key"
@@ -322,7 +312,10 @@ async def test_a_members_key_never_serves_a_slot_that_is_not_member_routed(
     async with workspace_tx() as connection:
         member = await create_member(connection, workspace_id, "member@work.com", is_admin=True)
     await store.put(workspace_id, member_slot("sample_api", member), "member-key")
-    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
+    with (
+        ws(workspace_id),
+        model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
+    ):
         assert await ws_current().credential("sample_api", None, OWN_ACCOUNT_MODEL) == (
             "platform-default"
         )
@@ -659,10 +652,7 @@ def _connector_grant(
     )
 
 
-def test_usable_cli_accounts_prefer_the_members_own_grants_over_shared_ones() -> None:
-    """The account a provider's CLI acts as, chosen once for the sandbox's env export and the cache
-    daemon's git fetch alike: a member's private grants win, shared grants answer a member with none
-    of their own and a memberless authority, and another provider's grants never count."""
+def test_scoped_cli_accounts_use_only_exact_connection_capabilities() -> None:
     mine, theirs = uuid4(), uuid4()
     grants = (
         _connector_grant("acct-shared", theirs, shared=True),
@@ -670,23 +660,28 @@ def test_usable_cli_accounts_prefer_the_members_own_grants_over_shared_ones() ->
         _connector_grant("acct-theirs", theirs, shared=False),
         _connector_grant("acct-other-provider", mine, shared=False, provider="gitlab"),
     )
-    assert grants_module.usable_cli_accounts(grants, "github", mine) == ("acct-mine",)
-    assert grants_module.usable_cli_accounts(grants, "github", uuid4()) == ("acct-shared",)
-    assert grants_module.usable_cli_accounts(grants, "github", None) == ("acct-shared",)
-    assert grants_module.usable_cli_accounts(grants, "gitlab", None) == ()
+    assert grants_module.scoped_cli_accounts(
+        grants, "github", (grants[1].connection_id, grants[2].connection_id)
+    ) == ("acct-mine", "acct-theirs")
+    assert grants_module.scoped_cli_accounts(grants, "github", ()) == ()
+    assert grants_module.scoped_cli_accounts(grants, "gitlab", (grants[3].connection_id,)) == (
+        "acct-other-provider",
+    )
 
 
-def test_usable_cli_accounts_return_every_account_in_the_winning_tier_sorted() -> None:
-    """Two accounts in the winning tier both return, sorted, so the caller sees the ambiguity and
-    refuses it rather than this choosing silently."""
+def test_scoped_cli_accounts_prefer_private_capabilities_independent_of_owner() -> None:
     mine = uuid4()
     grants = (
         _connector_grant("acct-b", mine, shared=False),
-        _connector_grant("acct-a", mine, shared=False),
+        _connector_grant("acct-a", uuid4(), shared=False),
         _connector_grant("acct-shared", uuid4(), shared=True),
     )
-    assert grants_module.usable_cli_accounts(grants, "github", mine) == ("acct-a", "acct-b")
-    assert grants_module.usable_cli_accounts(grants, "github", None) == ("acct-shared",)
+    assert grants_module.scoped_cli_accounts(
+        grants, "github", tuple(grant.connection_id for grant in grants)
+    ) == ("acct-a", "acct-b")
+    assert grants_module.scoped_cli_accounts(grants, "github", (grants[2].connection_id,)) == (
+        "acct-shared",
+    )
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -815,7 +810,10 @@ async def test_a_bound_account_serves_its_own_models_and_no_other_call_in_the_tu
         member = await create_member(connection, workspace_id, "coder@work.com")
     await store.put(workspace_id, member_slot(OPENAI_KEY_SLOT, member), "member-account")
 
-    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
+    with (
+        ws(workspace_id),
+        model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
+    ):
         assert (
             await ws_current().credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
             == "member-account"
@@ -847,7 +845,10 @@ async def test_a_spent_grant_is_refreshed_in_place_before_a_call_gets_it(
         return Grant(access="fresh-access", refresh="refresh-2", expires_at=time.time() + 3600)
 
     monkeypatch.setattr(workspace_module, "refreshed", buys)
-    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
+    with (
+        ws(workspace_id),
+        model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
+    ):
         assert (
             await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
         ).value == "fresh-access"
@@ -875,7 +876,10 @@ async def test_a_live_grant_is_spent_as_it_stands(
         raise AssertionError("a live grant must not be refreshed")
 
     monkeypatch.setattr(workspace_module, "refreshed", never)
-    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
+    with (
+        ws(workspace_id),
+        model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
+    ):
         assert (
             await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
         ).value == "live-access"
@@ -913,7 +917,7 @@ async def test_two_turns_finding_one_grant_spent_exchange_its_token_once(
     async def turn() -> str:
         with (
             ws(workspace_id),
-            model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})),
+            model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
         ):
             return (
                 await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
@@ -960,7 +964,10 @@ async def test_no_transaction_is_held_open_across_the_provider_refresh(
         return Grant(access="fresh", refresh="refresh-2", expires_at=time.time() + 3600)
 
     monkeypatch.setattr(workspace_module, "refreshed", buys)
-    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
+    with (
+        ws(workspace_id),
+        model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
+    ):
         assert (
             await ws_current().model_credential(OPENAI_KEY_SLOT, None, OWN_ACCOUNT_MODEL)
         ).value == "fresh"
@@ -1041,7 +1048,10 @@ async def test_a_token_rejected_mid_turn_is_refreshed_and_the_round_carries_on(
         auto_model=OWN_ACCOUNT_MODEL,
     )
 
-    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
+    with (
+        ws(workspace_id),
+        model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
+    ):
         client = await registry.client_for(OWN_ACCOUNT_MODEL)
         assert [event async for event in client.complete(object())] == ["round"]
 
@@ -1086,9 +1096,12 @@ async def test_a_rejected_member_token_cannot_retry_on_another_payer(db: None) -
         auto_model=OWN_ACCOUNT_MODEL,
     )
 
-    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
+    with (
+        ws(workspace_id),
+        model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
+    ):
         client = await registry.client_for(OWN_ACCOUNT_MODEL)
-        with pytest.raises(RuntimeError, match="payer changed"):
+        with pytest.raises(RuntimeError, match="exact account credential"):
             [event async for event in client.complete(object())]
 
     assert served == ["member-key"]
@@ -1161,9 +1174,12 @@ async def test_a_rate_limited_turn_moves_onto_the_members_other_connected_accoun
         )
     served: list[str] = []
     registry = _two_account_registry(served)
-    both = frozenset({OWN_ACCOUNT_MODEL, OTHER_ACCOUNT_MODEL})
+    routes = {
+        OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member),
+        OTHER_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, member),
+    }
 
-    with ws(workspace_id), model_authority(MemberAuthority(member), both):
+    with ws(workspace_id), model_credentials(routes):
         serving = await _serving_on_own_account(registry, OTHER_ACCOUNT_MODEL)
         assert await serving.move() is True
         assert (serving.model, serving.spec) == (
@@ -1179,10 +1195,7 @@ async def test_a_rate_limited_turn_moves_onto_the_members_other_connected_accoun
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_move_never_lands_on_the_workspaces_row_or_the_deploys_key(db: None) -> None:
-    """The member's other slot is unset, so resolving the other model falls through to the
-    workspace's own row — a grant here, so the funding class even matches. The payer is not the
-    member's, and that spend is what a profile on the member's account exists to prevent, so the
-    move is refused rather than billed as the member's."""
+    """A missing exact account credential cannot fall through to workspace funding."""
     workspace_id = await _workspace()
     store = _store()
     init_workspace_credentials(store)
@@ -1197,12 +1210,15 @@ async def test_a_move_never_lands_on_the_workspaces_row_or_the_deploys_key(db: N
     )
     served: list[str] = []
     registry = _two_account_registry(served)
-    both = frozenset({OWN_ACCOUNT_MODEL, OTHER_ACCOUNT_MODEL})
+    routes = {
+        OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member),
+        OTHER_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, member),
+    }
 
-    with ws(workspace_id), model_authority(MemberAuthority(member), both):
+    with ws(workspace_id), model_credentials(routes):
         serving = await _serving_on_own_account(registry, OTHER_ACCOUNT_MODEL)
         assert serving.accounts is not None and serving.accounts.funding == PLAN_FUNDED
-        with pytest.raises(ModelFundingChanged, match="payer changed during account failover"):
+        with pytest.raises(RuntimeError, match="exact account credential"):
             await serving.move()
 
     assert (serving.model, served) == (OWN_ACCOUNT_MODEL, [])
@@ -1223,9 +1239,12 @@ async def test_a_move_holds_the_funding_class_the_attempt_froze(db: None) -> Non
     await store.put(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member), "sk-ant-member")
     served: list[str] = []
     registry = _two_account_registry(served)
-    both = frozenset({OWN_ACCOUNT_MODEL, OTHER_ACCOUNT_MODEL})
+    routes = {
+        OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member),
+        OTHER_ACCOUNT_MODEL: member_slot(ANTHROPIC_KEY_SLOT, member),
+    }
 
-    with ws(workspace_id), model_authority(MemberAuthority(member), both):
+    with ws(workspace_id), model_credentials(routes):
         serving = await _serving_on_own_account(registry, OTHER_ACCOUNT_MODEL)
         with pytest.raises(ModelFundingChanged, match="payer changed during account failover"):
             await serving.move()
@@ -1268,7 +1287,10 @@ async def test_a_rejection_the_rebuild_cannot_fix_is_raised_after_one_retry(
         auto_model=OWN_ACCOUNT_MODEL,
     )
 
-    with ws(workspace_id), model_authority(MemberAuthority(member), frozenset({OWN_ACCOUNT_MODEL})):
+    with (
+        ws(workspace_id),
+        model_credentials({OWN_ACCOUNT_MODEL: member_slot(OPENAI_KEY_SLOT, member)}),
+    ):
         client = await registry.client_for(OWN_ACCOUNT_MODEL)
         with pytest.raises(CredentialValueInvalid):
             [event async for event in client.complete(object())]

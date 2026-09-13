@@ -1269,6 +1269,7 @@ GENERATE_IMAGE_TOOL = ToolDef(
     handler=_generate_image,
     side_effecting=True,
     bound=ObjectBinding(kind=ARTIFACT_KIND, binding="collection"),
+    binds_member_authority=False,
 )
 
 
@@ -1540,6 +1541,7 @@ GENERATE_VIDEO_TOOL = ToolDef(
     handler=_generate_video,
     side_effecting=True,
     bound=ObjectBinding(kind=ARTIFACT_KIND, binding="collection"),
+    binds_member_authority=False,
 )
 
 

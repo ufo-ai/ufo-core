@@ -46,7 +46,14 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID, UUID]:
     workspace_id, agent_id, alice_id, bob_id, permission_id = (uuid4() for _ in range(5))
     conversation_id, granted_by = uuid4(), uuid4()
     permission_digest = uuid4().hex
-    permission_effect = {
+    permission_scope_digest = uuid4().hex
+    permission_scope = {
+        "provider": "gmail",
+        "account_id": "alice@example.com",
+        "operation": "GMAIL_SEND_EMAIL",
+        "access": "write",
+    }
+    granting_effect = {
         "call": "send_email",
         "arguments": {"to": "team@example.com"},
         "target": None,
@@ -103,7 +110,10 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID, UUID]:
                 conversation_id=conversation_id,
                 call="send_email",
                 effect_digest=permission_digest,
-                effect=permission_effect,
+                effect=granting_effect,
+                scope_digest=permission_scope_digest,
+                scope=permission_scope,
+                binding_digest=uuid4().hex,
                 request_key="grant-request",
                 decision_key="grant-request",
                 requested_by=granted_by,
@@ -119,51 +129,79 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID, UUID]:
             sa.insert(tables.member_permission),
             [
                 {
-                    "id": row_id,
+                    "id": permission_id,
                     "workspace_id": workspace_id,
-                    "member_id": member_id,
+                    "member_id": alice_id,
                     "agent_id": agent_id,
-                    "call": call,
-                    "effect_digest": effect_digest,
-                    "effect": effect,
-                    "granted_by": row_granted_by,
-                    "revoked_at": revoked_at,
+                    "call": "send_email",
+                    "effect_digest": permission_digest,
+                    "effect": granting_effect,
+                    "scope_digest": permission_scope_digest,
+                    "scope": permission_scope,
+                    "granted_by": granted_by,
+                    "revoked_at": None,
                     "created_at": now,
                     "updated_at": now,
-                }
-                for row_id, member_id, call, effect_digest, effect, row_granted_by, revoked_at in (
-                    (
-                        permission_id,
-                        alice_id,
-                        "send_email",
-                        permission_digest,
-                        permission_effect,
-                        granted_by,
-                        None,
-                    ),
-                    (
-                        uuid4(),
-                        bob_id,
-                        "send_email",
-                        uuid4().hex,
-                        {
-                            "call": "send_email",
-                            "arguments": {"to": "private@example.com"},
-                            "target": None,
-                        },
-                        uuid4(),
-                        None,
-                    ),
-                    (
-                        uuid4(),
-                        alice_id,
-                        "publish",
-                        uuid4().hex,
-                        {"call": "publish", "arguments": {"path": "/old"}, "target": None},
-                        uuid4(),
-                        now,
-                    ),
-                )
+                },
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "member_id": bob_id,
+                    "agent_id": agent_id,
+                    "call": "send_email",
+                    "effect_digest": uuid4().hex,
+                    "effect": {"call": "send_email", "arguments": {}},
+                    "scope_digest": uuid4().hex,
+                    "scope": {
+                        "provider": "gmail",
+                        "account_id": "bob@example.com",
+                        "operation": "GMAIL_SEND_EMAIL",
+                        "access": "write",
+                    },
+                    "granted_by": uuid4(),
+                    "revoked_at": None,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "member_id": alice_id,
+                    "agent_id": agent_id,
+                    "call": "publish",
+                    "effect_digest": uuid4().hex,
+                    "effect": {"call": "publish", "arguments": {}},
+                    "scope_digest": uuid4().hex,
+                    "scope": {
+                        "provider": "web",
+                        "account_id": "example.com",
+                        "operation": "publish",
+                        "access": "write",
+                    },
+                    "granted_by": uuid4(),
+                    "revoked_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "member_id": alice_id,
+                    "agent_id": agent_id,
+                    "call": "send_email",
+                    "effect_digest": uuid4().hex,
+                    "effect": {
+                        "call": "send_email",
+                        "arguments": {"to": "old@example.com"},
+                        "target": None,
+                    },
+                    "scope_digest": None,
+                    "scope": None,
+                    "granted_by": uuid4(),
+                    "revoked_at": None,
+                    "created_at": now,
+                    "updated_at": now,
+                },
             ],
         )
     return workspace_id, agent_id, alice_id, bob_id, permission_id
@@ -205,7 +243,7 @@ async def _text(tool: ToolDef, ctx: ToolContext, **args: object) -> str:
     return result.content[0].text
 
 
-async def test_member_reads_only_their_active_exact_permissions(db: None) -> None:
+async def test_member_reads_only_their_active_account_permissions(db: None) -> None:
     workspace_id, agent_id, alice_id, bob_id, permission_id = await _seed()
     with ws(workspace_id):
         alice = _context(workspace_id, agent_id, alice_id)
@@ -230,10 +268,11 @@ async def test_member_reads_only_their_active_exact_permissions(db: None) -> Non
         assert detail["spec"] == {
             "agent": "Operator",
             "call": "send_email",
-            "request": {
-                "call": "send_email",
-                "arguments": {"to": "team@example.com"},
-                "target": None,
+            "scope": {
+                "provider": "gmail",
+                "account_id": "alice@example.com",
+                "operation": "GMAIL_SEND_EMAIL",
+                "access": "write",
             },
             "basis": "selected_message",
             "evidence": "Always send this email",
@@ -268,13 +307,35 @@ async def test_member_reads_only_their_active_exact_permissions(db: None) -> Non
         assert bob_listing["objects"][0]["name"] != str(permission_id)
 
 
-async def test_member_reads_a_permission_last_used_by_standing_authority(db: None) -> None:
+async def test_member_reads_the_decision_that_granted_a_permission(db: None) -> None:
     workspace_id, agent_id, alice_id, _, permission_id = await _seed()
     async with workspace_tx() as connection:
         await connection.execute(
-            sa.update(tables.member_authorization)
-            .where(tables.member_authorization.c.member_id == alice_id)
-            .values(basis="standing", evidence="")
+            sa.insert(tables.member_authorization).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                member_id=alice_id,
+                agent_id=agent_id,
+                conversation_id=(
+                    await connection.execute(
+                        sa.select(tables.conversation.c.id).where(
+                            tables.conversation.c.workspace_id == workspace_id
+                        )
+                    )
+                ).scalar_one(),
+                call="send_email",
+                effect_digest=uuid4().hex,
+                effect={"call": "send_email", "arguments": {"to": "new@example.com"}},
+                request_key="standing-use",
+                decision_key="standing-use",
+                requested_by=uuid4(),
+                decided_by=uuid4(),
+                decision="allow",
+                basis="standing",
+                evidence="",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
         )
     with ws(workspace_id):
         detail = yaml.safe_load(
@@ -284,8 +345,8 @@ async def test_member_reads_a_permission_last_used_by_standing_authority(db: Non
                 ref=f"{MEMBER_PERMISSION_KIND}/{permission_id}",
             )
         )
-    assert detail["spec"]["basis"] == "standing"
-    assert detail["spec"]["evidence"] == ""
+    assert detail["spec"]["basis"] == "selected_message"
+    assert detail["spec"]["evidence"] == "Always send this email"
 
 
 async def test_member_revokes_but_cannot_create_a_permission(db: None) -> None:
@@ -307,10 +368,11 @@ async def test_member_revokes_but_cannot_create_a_permission(db: None) -> None:
             "spec": {
                 "agent": "Operator",
                 "call": "send_email",
-                "request": {
-                    "call": "send_email",
-                    "arguments": {"to": "team@example.com"},
-                    "target": None,
+                "scope": {
+                    "provider": "gmail",
+                    "account_id": "alice@example.com",
+                    "operation": "GMAIL_SEND_EMAIL",
+                    "access": "write",
                 },
                 "basis": "selected_message",
                 "evidence": "Always send this email",
@@ -328,7 +390,12 @@ async def test_member_revokes_but_cannot_create_a_permission(db: None) -> None:
                 "spec": {
                     "agent": "Operator",
                     "call": "send_email",
-                    "request": {},
+                    "scope": {
+                        "provider": "gmail",
+                        "account_id": "alice@example.com",
+                        "operation": "GMAIL_SEND_EMAIL",
+                        "access": "write",
+                    },
                     "basis": "selected_message",
                     "evidence": "Always send this email",
                 },

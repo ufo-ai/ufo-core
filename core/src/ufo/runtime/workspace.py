@@ -43,7 +43,6 @@ from ufo.runtime.access.credentials import (
     deploy_env,
     member_slot,
 )
-from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, authority_member_id
 from ufo.runtime.billing.accounting import record_workspace_usage
 from ufo.schema.records import Usage
 
@@ -62,26 +61,19 @@ KEY_FUNDED: Funding = "key"
 PLAN_FUNDED: Funding = "plan"
 PLATFORM_PAYER = "platform"
 
-_current_model_authority: ContextVar[tuple[ExecutionAuthority, frozenset[str]] | None] = ContextVar(
-    "ufo_model_authority", default=None
+_current_model_credentials: ContextVar[Mapping[str, str]] = ContextVar(
+    "ufo_model_credentials", default=MappingProxyType({})
 )
 
 
 @contextmanager
-def model_authority(
-    authority: ExecutionAuthority, models: frozenset[str] = frozenset()
-) -> Iterator[None]:
-    """Bind the member whose own provider account serves `models`, so those models resolve the key
-    they connected. The binding names the models and not the provider, because the member's account
-    and the deploy's own background work can want the same slot inside one turn — a coding turn
-    summarizing its tool calls asks for an OpenAI key twice, and only one of those two calls is the
-    member's to pay for. Every other turn binds workspace authority and spends the workspace's key,
-    because a member connects an account for coding and not for normal operation."""
-    token = _current_model_authority.set((authority, models))
+def model_credentials(routes: Mapping[str, str]) -> Iterator[None]:
+    """Bind exact stored credential slots to the models one turn may use."""
+    token = _current_model_credentials.set(MappingProxyType(dict(routes)))
     try:
         yield
     finally:
-        _current_model_authority.reset(token)
+        _current_model_credentials.reset(token)
 
 
 _store: CredentialStore | None = None
@@ -166,17 +158,19 @@ class WorkspaceScope:
         Missing or empty raises `CredentialSlotUnset`, so an unconfigured key fails the call
         needing it, never silently.
 
-        A member-routed slot resolves the bound speaker's own key before the workspace row, and
-        only for the models that speaker's account was bound to serve: `model` names the call
-        asking. A read that names no model, and every call the binding does not cover, reads the
-        workspace row exactly as an unrouted slot does — nobody's personal account pays for someone
-        else's call."""
+        An exact model credential capability resolves only its named stored slot, and only for the
+        model it was bound to serve. A read that names no model, and every call the binding does not
+        cover, reads the workspace row exactly as an unrouted slot does. A missing bound slot fails
+        closed instead of falling through to workspace or platform funding."""
+        routed = self._routed_slot(slot, model)
         if _store is not None:
-            for candidate in self._slot_order(slot, model):
+            for candidate in (slot,) if routed is None else (routed,):
                 try:
                     return await _store.get(self.workspace_id, candidate)
                 except CredentialSlotUnset:
                     pass
+        if routed is not None:
+            raise CredentialSlotUnset(routed)
         value = deploy_env(env or slot.upper())
         if not value:
             raise CredentialSlotUnset(slot)
@@ -187,8 +181,9 @@ class WorkspaceScope:
         is plan-funded, a stored API key is paid directly by its holder, and the deploy environment
         is platform-funded. `payer` names the exact stored slot or the platform, so a retry cannot
         move the same attempt onto a different account while retaining its first billing verdict."""
+        routed = self._routed_slot(slot, model)
         if _store is not None:
-            for candidate in self._slot_order(slot, model):
+            for candidate in (slot,) if routed is None else (routed,):
                 try:
                     stored = await _store.get(self.workspace_id, candidate)
                 except CredentialSlotUnset:
@@ -199,6 +194,8 @@ class WorkspaceScope:
                 if not grant.spent:
                     return ModelCredential(grant.access, PLAN_FUNDED, candidate)
                 return await self._refreshed_credential(_store, candidate, slot, stored, grant)
+        if routed is not None:
+            raise CredentialSlotUnset(routed)
         value = deploy_env(env or slot.upper())
         if not value:
             raise CredentialSlotUnset(slot)
@@ -235,59 +232,33 @@ class WorkspaceScope:
             grant = held
         raise GrantRefusedRefresh(slot)
 
-    def member_routed_call(self, slot: str, model: str) -> bool:
-        """Whether this call resolves the speaking member's own slot — which is the only slot that
-        can hold a grant, and so the only one whose credential a refresh can replace."""
-        return len(self._slot_order(slot, model)) > 1
+    def routed_model_call(self, model: str) -> bool:
+        return model in _current_model_credentials.get()
 
-    def member_payer(self, slot: str, model: str) -> str | None:
-        """The payer a call on `model` bills when the speaking member's own account serves it —
-        their own row under `slot`, the first `model_credential` reads — or None when the call is
-        not routed through the member at all. A resolved payer that differs is the workspace's row
-        or the deploy's key, reached by falling through a member slot that is unset."""
-        order = self._slot_order(slot, model)
-        return order[0] if len(order) > 1 else None
+    def routed_model_payer(self, model: str) -> str | None:
+        return _current_model_credentials.get().get(model)
 
-    def _slot_order(self, slot: str, model: str | None) -> list[str]:
-        bound = _current_model_authority.get()
-        if slot not in MEMBER_ROUTED_SLOTS or bound is None:
-            return [slot]
-        authority, models = bound
-        if model is None or model not in models:
-            return [slot]
-        match authority:
-            case MemberAuthority(member_id):
-                return [member_slot(slot, member_id), slot]
-            case _:
-                return [slot]
+    def _slot_order(self, slot: str, model: str | None) -> tuple[str, ...]:
+        routed = self._routed_slot(slot, model)
+        return (slot,) if routed is None else (routed,)
 
-    async def member_holds_own_model_key(self, authority: ExecutionAuthority) -> bool:
-        """Whether the authority's member signed in with a provider account of their own — either
-        one, since the coding subagent runs on whichever they connected."""
-        return await self.member_model_provider(authority) is not None
+    def _routed_slot(self, slot: str, model: str | None) -> str | None:
+        routed = None if model is None else _current_model_credentials.get().get(model)
+        if routed is None or not routed.startswith(f"{slot}:member:"):
+            return None
+        return routed
 
-    async def member_model_provider(self, authority: ExecutionAuthority) -> str | None:
-        """The provider the authority's member signed in with, or None if they connected neither.
-        A member who skipped that step in onboarding holds no key of their own, and the workspace's
-        own is not theirs: this asks about the person, not the deploy, so it never reads the admin
-        or platform fallbacks. Declaration order decides for a member who connected both."""
-        connected = await self.member_model_providers(authority)
-        return connected[0] if connected else None
-
-    async def member_model_providers(self, authority: ExecutionAuthority) -> tuple[str, ...]:
-        """Every provider the authority's member signed in with, in declaration order — the first
-        is the account their coding work runs on, and the rest are what that work moves to when the
-        provider rate-limits the first. Empty when they connected none."""
-        member_id = authority_member_id(authority)
+    async def member_model_accounts(self, member_id: UUID | None) -> tuple[tuple[str, str], ...]:
         if _store is None or member_id is None:
             return ()
-        connected: list[str] = []
+        connected: list[tuple[str, str]] = []
         for slot, provider in MEMBER_ROUTED_SLOTS.items():
+            exact = member_slot(slot, member_id)
             try:
-                await _store.get(self.workspace_id, member_slot(slot, member_id))
+                await _store.get(self.workspace_id, exact)
             except CredentialSlotUnset:
                 continue
-            connected.append(provider)
+            connected.append((provider, exact))
         return tuple(connected)
 
     async def stored_credential_slots(self) -> frozenset[str]:

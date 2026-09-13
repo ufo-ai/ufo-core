@@ -9,6 +9,10 @@ use crate::types::{MeterRecord, Rule, ToolBridgeResponse};
 
 const MAX_TOOL_BRIDGE_RESPONSE_BYTES: usize = 2 * 1_048_576;
 
+fn proxy_capabilities() -> serde_json::Value {
+    serde_json::json!({ "call_liveness": true })
+}
+
 #[derive(Clone)]
 pub struct Control {
     base: String,
@@ -45,7 +49,10 @@ impl Control {
         let response: AuthorizeResponse = self
             .post(
                 "/internal/egress/authorize",
-                &serde_json::json!({ "proxy_auth": proxy_auth }),
+                &serde_json::json!({
+                    "proxy_auth": proxy_auth,
+                    "capabilities": proxy_capabilities(),
+                }),
             )
             .await?;
         Ok(if response.authorized {
@@ -61,7 +68,10 @@ impl Control {
         let response: ResolveResponse = self
             .post(
                 "/internal/egress/resolve",
-                &serde_json::json!({ "proxy_auth": proxy_auth }),
+                &serde_json::json!({
+                    "proxy_auth": proxy_auth,
+                    "capabilities": proxy_capabilities(),
+                }),
             )
             .await?;
         Ok(response.rules)
@@ -80,6 +90,7 @@ impl Control {
             .bearer_auth(&self.token)
             .json(&serde_json::json!({
                 "proxy_auth": proxy_auth,
+                "capabilities": proxy_capabilities(),
                 "request": request,
             }))
             .send()

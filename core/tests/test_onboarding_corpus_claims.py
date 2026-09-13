@@ -323,7 +323,10 @@ CLAIMS = (
         phrase="An agent the member built themselves needs\nthe source granted to it separately,"
         " shared or not",
         source=RUNTIME_CONTEXT,
-        pattern=r"A\s+specialist agent reads only what it is granted, shared or not",
+        pattern=(
+            r"through its grant, or as the workspace's main agent reading a\s+"
+            r"shared connection.*A specialist reads only what it is granted"
+        ),
     ),
     Claim(
         claim="an externally shared channel reads and writes only itself",

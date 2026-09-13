@@ -129,7 +129,7 @@ class NotifyInput(BaseModel):
 
 
 async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
-    member_id = authority_member_id(ctx.authority)
+    member_id = ctx.speaker_member_id
     if member_id is None:
         return _error(NOTIFY_NEEDS_A_MEMBER)          # a notification with no recipient is not one
     ext = _require_ext(ctx)
@@ -245,8 +245,8 @@ class InboxDrain:
                 turn_id = await self.ctx.invoke(
                     conversation_id, lane.agent_id, _drain_message(batch),
                     idempotency_key=f"notify-drain:{lane.agent_id.hex}:{lane.member_id.hex}:{batch[-1].id.hex}",
-                    authority=MemberAuthority(lane.member_id),
                     holds_work_already_done=True, standalone=True,
+                    runtime_config=lane.runtime_config,
                 )
             if turn_id is not None:
                 await store.mark_triaged(batch, turn_id)
@@ -263,7 +263,7 @@ with its ref, subject, occurrences, producing agent, and body, walled as data.
 | cooldown | a lane that had a turn inside `DRAIN_COOLDOWN_SECONDS` is skipped (the `DeliverySweep` bound) |
 | cannot fire on what it caused | cron, never event-fired; `notify` refuses inside a relay turn and refuses a row for the producer's own inbox |
 | parks on spend refusal | `holds_work_already_done=True`, as `_fire_trigger` does |
-| unseated member | `invoke` seat-gates on the on-behalf member; rows stay claimed and lapse back |
+| exact capabilities | the lane's persisted runtime config reaches triage and relay unchanged |
 
 **The delivery action.**
 
@@ -297,7 +297,8 @@ async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult:
     turn_id = await ext.invoke(
         chosen.conversation_id, chosen.agent_id, wall("notification", args.text) + RELAY_INSTRUCTION,
         idempotency_key=f"notify-deliver:{rows[0].id.hex}",
-        authority=MemberAuthority(member_id), as_scheduled=True, holds_work_already_done=True,
+        as_scheduled=True, holds_work_already_done=True,
+        runtime_config=ctx.turn.runtime_config,
     )
     if turn_id is None:
         return _error(NOT_DELIVERED)

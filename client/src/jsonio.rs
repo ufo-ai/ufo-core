@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::ui::toolrender::OpView;
-use crate::wire::{Directive, OpRequest, RuntimeAttestation};
+use crate::wire::{
+    AuthorizationAnswer, AuthorizationChoice, AuthorizationOption, Directive, OpRequest,
+    RuntimeAttestation,
+};
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -62,6 +65,11 @@ pub enum Event {
         #[serde(skip_serializing_if = "is_false")]
         multi_select: bool,
     },
+    AuthorizationRequest {
+        id: u64,
+        prompt: String,
+        options: Vec<AuthorizationOption>,
+    },
     SecretRequest {
         id: u64,
         slot: String,
@@ -92,9 +100,21 @@ pub enum Event {
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    Send { text: String },
-    Answer { id: u64, text: String },
-    Secret { id: u64, value: String },
+    Send {
+        text: String,
+    },
+    Answer {
+        id: u64,
+        text: String,
+    },
+    Authorize {
+        id: u64,
+        choice: AuthorizationChoice,
+    },
+    Secret {
+        id: u64,
+        value: String,
+    },
     Detach,
     Shutdown,
 }
@@ -102,6 +122,7 @@ pub enum Command {
 #[derive(Debug, PartialEq)]
 pub enum AnswerRouting {
     Post(String),
+    Authorization(AuthorizationAnswer),
     Secret {
         sealed: String,
         slot: String,
@@ -116,10 +137,16 @@ struct PendingSecret {
     slot: String,
 }
 
+struct PendingAuthorization {
+    authorization_id: String,
+    options: Vec<AuthorizationOption>,
+}
+
 #[derive(Default)]
 pub struct Driver {
     next_id: u64,
     asks: HashSet<u64>,
+    authorizations: HashMap<u64, PendingAuthorization>,
     secrets: HashMap<u64, PendingSecret>,
 }
 
@@ -165,6 +192,15 @@ impl Driver {
             } => {
                 vec![self.raise_input(prompt.clone(), options.clone(), *multiple)]
             }
+            Directive::Authorize {
+                authorization_id,
+                prompt,
+                options,
+            } => vec![self.raise_authorization(
+                authorization_id.clone(),
+                prompt.clone(),
+                options.clone(),
+            )],
             Directive::Secret {
                 sealed,
                 slot,
@@ -218,6 +254,27 @@ impl Driver {
             id,
             slot: slot.to_string(),
             prompt: prompt.to_string(),
+        }
+    }
+
+    fn raise_authorization(
+        &mut self,
+        authorization_id: String,
+        prompt: String,
+        options: Vec<AuthorizationOption>,
+    ) -> Event {
+        let id = self.mint();
+        self.authorizations.insert(
+            id,
+            PendingAuthorization {
+                authorization_id,
+                options: options.clone(),
+            },
+        );
+        Event::AuthorizationRequest {
+            id,
+            prompt,
+            options,
         }
     }
 
@@ -280,6 +337,25 @@ impl Driver {
                     Err(refused(format!("no input request {id} is outstanding")))
                 }
             }
+            Command::Authorize { id, choice } => match self.authorizations.remove(&id) {
+                Some(pending) => match pending
+                    .options
+                    .into_iter()
+                    .find(|option| option.choice == choice)
+                {
+                    Some(option) => Ok(AnswerRouting::Authorization(AuthorizationAnswer {
+                        authorization_id: pending.authorization_id,
+                        choice,
+                        text: option.label,
+                    })),
+                    None => Err(refused(format!(
+                        "authorization request {id} has no such choice"
+                    ))),
+                },
+                None => Err(refused(format!(
+                    "no authorization request {id} is outstanding"
+                ))),
+            },
             Command::Secret { id, value } => match self.secrets.remove(&id) {
                 Some(pending) => Ok(AnswerRouting::Secret {
                     sealed: pending.sealed,
@@ -538,6 +614,89 @@ mod tests {
     }
 
     #[test]
+    fn authorization_answers_route_by_code_and_keep_labels_display_only() {
+        let mut driver = Driver::new();
+        let options = vec![
+            AuthorizationOption {
+                label: "Allow once".into(),
+                description: "This action only.".into(),
+                choice: AuthorizationChoice::Allow,
+            },
+            AuthorizationOption {
+                label: "Deny".into(),
+                description: "Do not allow this action.".into(),
+                choice: AuthorizationChoice::Deny,
+            },
+            AuthorizationOption {
+                label: "Always allow for GitHub".into(),
+                description: "Future repository reads from this account.".into(),
+                choice: AuthorizationChoice::Always,
+            },
+        ];
+        assert_eq!(
+            driver.on_directive(&Directive::Authorize {
+                authorization_id: "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6".into(),
+                prompt: "Proceed?".into(),
+                options: options.clone(),
+            }),
+            vec![Event::AuthorizationRequest {
+                id: 1,
+                prompt: "Proceed?".into(),
+                options,
+            }]
+        );
+        assert_eq!(
+            driver
+                .answer_body(Command::Authorize {
+                    id: 1,
+                    choice: AuthorizationChoice::Always,
+                })
+                .unwrap(),
+            AnswerRouting::Authorization(AuthorizationAnswer {
+                authorization_id: "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6".into(),
+                choice: AuthorizationChoice::Always,
+                text: "Always allow for GitHub".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn ordinary_text_cannot_answer_an_authorization_request() {
+        let mut driver = Driver::new();
+        driver.on_directive(&Directive::Authorize {
+            authorization_id: "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6".into(),
+            prompt: "Proceed?".into(),
+            options: vec![AuthorizationOption {
+                label: "Proceed once".into(),
+                description: String::new(),
+                choice: AuthorizationChoice::Allow,
+            }],
+        });
+        assert_eq!(
+            driver.answer_body(Command::Answer {
+                id: 1,
+                text: "Proceed once".into(),
+            }),
+            Err(Event::Error {
+                message: "no input request 1 is outstanding".into(),
+                fatal: false,
+            })
+        );
+        assert_eq!(
+            driver.answer_body(Command::Send {
+                text: "Proceed once".into(),
+            }),
+            Ok(AnswerRouting::Post("Proceed once".into()))
+        );
+        assert!(driver
+            .answer_body(Command::Authorize {
+                id: 1,
+                choice: AuthorizationChoice::Allow,
+            })
+            .is_ok());
+    }
+
+    #[test]
     fn secret_answers_carry_the_sealed_slot() {
         let mut driver = Driver::new();
         driver.on_directive(&Directive::Secret {
@@ -670,6 +829,13 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_command("{\"type\":\"authorize\",\"id\":3,\"choice\":\"deny\"}").unwrap(),
+            Command::Authorize {
+                id: 3,
+                choice: AuthorizationChoice::Deny,
+            }
+        );
+        assert_eq!(
             parse_command("{\"type\":\"detach\"}").unwrap(),
             Command::Detach
         );
@@ -709,7 +875,14 @@ mod tests {
         let Err(Event::Error { message, .. }) = parse_command("{\"type\":\"bogus\"}") else {
             panic!("an unknown command is refused");
         };
-        for known in ["send", "answer", "secret", "detach", "shutdown"] {
+        for known in [
+            "send",
+            "answer",
+            "authorize",
+            "secret",
+            "detach",
+            "shutdown",
+        ] {
             assert!(message.contains(known), "{message}");
         }
     }
@@ -775,6 +948,18 @@ mod tests {
                 prompt: "Paste".into(),
             }),
             "{\"type\":\"secret_request\",\"id\":3,\"slot\":\"SLOT\",\"prompt\":\"Paste\"}\n"
+        );
+        assert_eq!(
+            emit(&Event::AuthorizationRequest {
+                id: 4,
+                prompt: "Proceed?".into(),
+                options: vec![AuthorizationOption {
+                    label: "Proceed once".into(),
+                    description: "This action only.".into(),
+                    choice: AuthorizationChoice::Allow,
+                }],
+            }),
+            "{\"type\":\"authorization_request\",\"id\":4,\"prompt\":\"Proceed?\",\"options\":[{\"label\":\"Proceed once\",\"description\":\"This action only.\",\"choice\":\"allow\"}]}\n"
         );
         assert_eq!(emit(&driver.on_turn_end()), "{\"type\":\"turn_end\"}\n");
         assert_eq!(

@@ -28,11 +28,7 @@ from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.auth.token_signing import SignedTokenError, sign_token, verify_token
 from ufo.harness.containment import ContainmentError, contained_relative
 from ufo.harness.sandbox.protocol import SandboxCommands, SandboxFileOperations
-from ufo.runtime.authority import (
-    ExecutionAuthority,
-    authority_from_member_id,
-    authority_member_id,
-)
+from ufo.schema.records import CONNECTION_SCOPE_MAX
 
 WORKSPACE_DIR = "/workspace"
 WORKSPACE_SCOPE_HINT = (
@@ -425,11 +421,11 @@ def _basic_username(header: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class RunToken:
-    """The turn and member authority attributed to one sandbox process tree."""
+    """A turn's signed sandbox egress identity and optional live-call capability."""
 
     workspace_id: UUID
     turn_id: UUID
-    authority: ExecutionAuthority
+    capability_id: UUID | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,21 +442,21 @@ class RunTokenCodec:
         return cls(secret=value.encode())
 
     def encode(self, run: RunToken) -> str:
-        member_id = authority_member_id(run.authority)
-        member = "-" if member_id is None else str(member_id)
-        payload = f"ufo-run/{run.workspace_id}/{run.turn_id}/{member}".encode()
+        capability = "-" if run.capability_id is None else str(run.capability_id)
+        payload = f"ufo-run/{run.workspace_id}/{run.turn_id}/{capability}".encode()
         return sign_token(self.secret, payload)
 
     def from_proxy_auth(self, header: str) -> RunToken:
         username = _basic_username(header)
         try:
-            kind, workspace, turn, member = verify_token(username, self.secret).decode().split("/")
+            fields = verify_token(username, self.secret).decode().split("/")
+            kind, workspace, turn, nonce = fields
             if kind != "ufo-run":
                 raise ValueError("invalid run token domain")
             return RunToken(
                 workspace_id=UUID(workspace),
                 turn_id=UUID(turn),
-                authority=authority_from_member_id(None if member == "-" else UUID(member)),
+                capability_id=None if nonce == "-" else UUID(nonce),
             )
         except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
             raise ValueError("invalid signed run token") from error
@@ -468,27 +464,27 @@ class RunTokenCodec:
 
 @dataclass(frozen=True, slots=True)
 class ProbeToken:
-    """The conversation and member authority attributed to one off-turn sandbox exec, until it
-    expires.
+    """The conversation and exact connector capabilities attributed to one off-turn sandbox exec,
+    until it expires.
 
     A turn's egress is authorized by the turn: the proxy admits a CONNECT while the DB still reports
     that turn running. A probe runs off every turn, so there is no row whose status answers whether
     it is still live — the token carries its own deadline, minted per exec for that exec's timeout,
     and the proxy compares it fresh per CONNECT. `probe_id` names the one exec.
 
-    Member authority names whoever armed the watch this exec serves, while `connections` freezes
-    the exact subset of that authority the probe may use. Workspace authority reaches only listed
-    connections shared with the whole workspace. `internet_access` preserves a caller's narrowed
-    internet policy. A six-field token decodes with no connections or internet, so a mixed-image
-    deploy fails closed."""
+    `connections` freezes the exact subset the arming call admitted. `internet_access` preserves a
+    caller's narrowed internet policy. A six-field token decodes with no connections or internet,
+    so a mixed-image deploy fails closed."""
 
     workspace_id: UUID
     conversation_id: UUID
     probe_id: UUID
     expires_at: int
-    authority: ExecutionAuthority
     connections: tuple[UUID, ...] = ()
     internet_access: Literal[False] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "connections", _canonical_connections(self.connections))
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,13 +497,11 @@ class ProbeTokenCodec:
     secret: bytes
 
     def encode(self, probe: ProbeToken) -> str:
-        member_id = authority_member_id(probe.authority)
-        member = "-" if member_id is None else str(member_id)
         connections = ",".join(connection.hex for connection in probe.connections) or "-"
         internet = "0" if probe.internet_access is False else "-"
         payload = (
             f"{PROBE_TOKEN_KIND}/{probe.workspace_id}/{probe.conversation_id}"
-            f"/{probe.probe_id}/{member}/{probe.expires_at}/{connections}/{internet}"
+            f"/{probe.probe_id}/connections/{probe.expires_at}/{connections}/{internet}"
         ).encode()
         return sign_token(self.secret, payload)
 
@@ -516,13 +510,23 @@ class ProbeTokenCodec:
         try:
             fields = verify_token(username, self.secret).decode().split("/")
             if len(fields) == 6:
-                kind, workspace, conversation, probe, member, expires = fields
+                kind, workspace, conversation, probe, discarded_member, expires = fields
+                _validate_discarded_member(discarded_member)
                 connections = "-"
                 internet = "0"
             else:
-                kind, workspace, conversation, probe, member, expires, connections, internet = (
-                    fields
-                )
+                (
+                    kind,
+                    workspace,
+                    conversation,
+                    probe,
+                    capability,
+                    expires,
+                    connections,
+                    internet,
+                ) = fields
+                if capability != "connections":
+                    _validate_discarded_member(capability)
             if kind != PROBE_TOKEN_KIND:
                 raise ValueError("invalid probe token domain")
             if internet not in {"-", "0"}:
@@ -532,7 +536,6 @@ class ProbeTokenCodec:
                 conversation_id=UUID(conversation),
                 probe_id=UUID(probe),
                 expires_at=int(expires),
-                authority=authority_from_member_id(None if member == "-" else UUID(member)),
                 connections=(
                     ()
                     if connections == "-"
@@ -542,6 +545,19 @@ class ProbeTokenCodec:
             )
         except (UnicodeDecodeError, SignedTokenError, ValueError) as error:
             raise ValueError("invalid signed probe token") from error
+
+
+def _canonical_connections(connections: tuple[UUID, ...]) -> tuple[UUID, ...]:
+    if len(connections) > CONNECTION_SCOPE_MAX:
+        raise ValueError(f"connection scope exceeds {CONNECTION_SCOPE_MAX} connections")
+    if len(set(connections)) != len(connections):
+        raise ValueError("connection scope cannot contain duplicate ids")
+    return tuple(sorted(connections, key=str))
+
+
+def _validate_discarded_member(member: str) -> None:
+    if member != "-":
+        UUID(member)
 
 
 EGRESS_CA_CERT_ENV = "UFO_EGRESS_CA_CERT"
@@ -610,7 +626,7 @@ class SandboxHandle:
     """An opaque reference to a created-or-attached container; the carrier reads it, not tools. It
     carries `workspace_host_path` so a host-path carrier can rewrite a logical `/workspace` path to
     where it actually serves it, and the base `run_token` plus `egress_env` a scoped session
-    rewrites for each exec. A container shared across turns never pins either one's authority.
+    rewrites for each exec. A container shared across turns never pins either one's capabilities.
     Whatever a public per-port host requires on the wire is not here: `dial` reads it off the live
     container, so a handle rebuilt from the durable row alone (the ingress) reaches a port exactly
     as the process that created it does. `turn_id` names the turn this reference was opened for —
@@ -987,7 +1003,7 @@ class Sandbox:
 
     @property
     def turn_id(self) -> UUID | None:
-        """The durable turn whose authority this sandbox reference carries, when it is turn-bound.
+        """The durable turn this sandbox reference carries, when it is turn-bound.
         Recovery rebuilds a reference with the same id, so a sandbox-local resource can use it as
         stable ownership without conflating sibling turns sharing the conversation container."""
         raise NotImplementedError
@@ -1003,8 +1019,9 @@ class Sandbox:
         cleared_env: frozenset[str],
         env: Mapping[str, str],
     ) -> "Sandbox":
-        """The same sandbox under one exact authority: its run token on the proxy environment,
-        connector variables outside that authority dropped, and its admitted variables exported."""
+        """The same sandbox under exact connection capabilities: its run token on the proxy
+        environment, connector variables outside that scope dropped, and its admitted variables
+        exported."""
         raise NotImplementedError
 
     async def _bound(self) -> "SandboxSession":

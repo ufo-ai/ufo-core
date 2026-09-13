@@ -8,8 +8,6 @@ from pydantic import ValidationError
 from pytest import raises
 
 from ufo.db import workspace_tx
-from ufo.harness.sandbox.session import RunToken
-from ufo.runtime.authority import MemberAuthority, authority_member_id
 from ufo.runtime.hub import InProcessHub, Parked, Terminal
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces.hub_tail import HubTailer
@@ -17,6 +15,7 @@ from ufo.runtime.tool_bridge import ToolBridge
 from ufo.runtime.tools.bridge import (
     ToolBridgeFailure,
     ToolBridgeIntent,
+    ToolBridgePrincipal,
     ToolBridgeRequest,
     ToolBridgeSuccess,
     ToolBridgeToolList,
@@ -24,7 +23,13 @@ from ufo.runtime.tools.bridge import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import CANCELLED, EXPRESS_QUEUE_NAME, TerminalFrame, TurnRuntimeConfig
+from ufo.schema.records import (
+    CANCELLED,
+    EXPRESS_QUEUE_NAME,
+    ModelAccountCapability,
+    TerminalFrame,
+    TurnRuntimeConfig,
+)
 
 
 @dataclass
@@ -43,9 +48,11 @@ class _DBOS:
         self.cancelled.append(workflow_id)
 
 
-async def _seed(tools: tuple[str, ...] | None = None) -> tuple[RunToken, UUID, UUID]:
-    workspace_id, member_id, agent_id, conversation_id, sandbox_id, turn_id = (
-        uuid4() for _ in range(6)
+async def _seed(
+    tools: tuple[str, ...] | None = None,
+) -> tuple[ToolBridgePrincipal, UUID, UUID, UUID]:
+    workspace_id, member_id, agent_id, conversation_id, sandbox_id, turn_id, connection_id = (
+        uuid4() for _ in range(7)
     )
     async with workspace_tx() as connection:
         await connection.execute(
@@ -102,7 +109,12 @@ async def _seed(tools: tuple[str, ...] | None = None) -> tuple[RunToken, UUID, U
                 updated_at=sa.func.now(),
             )
         )
-    return RunToken(workspace_id, turn_id, MemberAuthority(member_id)), conversation_id, sandbox_id
+    return (
+        ToolBridgePrincipal(workspace_id, turn_id, (connection_id,)),
+        conversation_id,
+        sandbox_id,
+        member_id,
+    )
 
 
 def _bridge(dbos: _DBOS, hub: InProcessHub) -> ToolBridge:
@@ -125,7 +137,7 @@ def test_bridge_request_action_controls_the_tool_name() -> None:
 
 
 async def test_list_returns_only_live_allowed_tools_with_descriptions(db: None) -> None:
-    run, _, _ = await _seed(("object_list",))
+    run, _, _, _ = await _seed(("object_list",))
     bridge = _bridge(_DBOS(), InProcessHub())
     with ws(run.workspace_id):
         response = await bridge.request(
@@ -139,7 +151,7 @@ async def test_list_returns_only_live_allowed_tools_with_descriptions(db: None) 
 
 
 async def test_describe_returns_the_bridge_input_schema_for_a_live_allowed_turn(db: None) -> None:
-    run, _, _ = await _seed()
+    run, _, _, _ = await _seed()
     bridge = _bridge(_DBOS(), InProcessHub())
     with ws(run.workspace_id):
         response = await bridge.request(
@@ -153,7 +165,7 @@ async def test_describe_returns_the_bridge_input_schema_for_a_live_allowed_turn(
 
 
 async def test_describe_refuses_a_tool_outside_the_agents_allowlist(db: None) -> None:
-    run, _, _ = await _seed(("object_list",))
+    run, _, _, _ = await _seed(("object_list",))
     bridge = _bridge(_DBOS(), InProcessHub())
     with ws(run.workspace_id):
         response = await bridge.request(
@@ -164,7 +176,7 @@ async def test_describe_refuses_a_tool_outside_the_agents_allowlist(db: None) ->
 
 
 async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: None) -> None:
-    run, _, sandbox_id = await _seed()
+    run, _, sandbox_id, _ = await _seed()
     dbos = _DBOS()
     hub = InProcessHub()
     bridge = _bridge(dbos, hub)
@@ -186,8 +198,9 @@ async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: 
                     sa.select(
                         tables.turn.c.inbound,
                         tables.turn.c.parent_turn_id,
-                        tables.turn.c.on_behalf_of_member_id,
+                        tables.turn.c.speaker_member_id,
                         tables.turn.c.admission_source,
+                        tables.turn.c.runtime_config,
                         tables.conversation.c.sandbox_conversation_id,
                     )
                     .select_from(
@@ -216,7 +229,8 @@ async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: 
     assert intent.tool == "object_list"
     assert intent.input == {"kind": "agent"}
     assert child.parent_turn_id == run.turn_id
-    assert child.on_behalf_of_member_id == authority_member_id(run.authority)
+    assert child.speaker_member_id is None
+    assert TurnRuntimeConfig.model_validate(child.runtime_config).connections == run.connections
     assert child.admission_source == "intent"
     assert child.sandbox_conversation_id == sandbox_id
     assert dbos.options["queue_name"] == EXPRESS_QUEUE_NAME
@@ -224,7 +238,7 @@ async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: 
 
 
 async def test_a_parked_bridge_child_is_cancelled_before_the_caller_returns(db: None) -> None:
-    run, _, _ = await _seed()
+    run, _, _, _ = await _seed()
     dbos = _DBOS()
     hub = InProcessHub()
     request = ToolBridgeRequest(
@@ -262,13 +276,17 @@ async def test_a_parked_bridge_child_is_cancelled_before_the_caller_returns(db: 
 
 
 async def test_a_bridge_child_inherits_its_parent_connection_scope(db: None) -> None:
-    run, _, _ = await _seed()
-    config = TurnRuntimeConfig(connections=(uuid4(),))
+    run, _, _, _ = await _seed()
+    config = TurnRuntimeConfig(connections=run.connections)
+    account = ModelAccountCapability(provider="openai", slot=f"openai_api_key:member:{uuid4()}")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
             .where(tables.turn.c.id == run.turn_id)
-            .values(runtime_config=config.model_dump(mode="json"))
+            .values(
+                runtime_config=config.model_dump(mode="json"),
+                model_accounts=[account.model_dump(mode="json")],
+            )
         )
     dbos = _DBOS()
     hub = InProcessHub()
@@ -290,9 +308,11 @@ async def test_a_bridge_child_inherits_its_parent_connection_scope(db: None) -> 
         async with workspace_tx() as connection:
             stored = (
                 await connection.execute(
-                    sa.select(tables.turn.c.runtime_config).where(tables.turn.c.id == child_id)
+                    sa.select(tables.turn.c.runtime_config, tables.turn.c.model_accounts).where(
+                        tables.turn.c.id == child_id
+                    )
                 )
-            ).scalar_one()
+            ).one()
             terminal = TerminalFrame(status="done", text="{}")
             await connection.execute(
                 sa.update(tables.turn)
@@ -305,4 +325,7 @@ async def test_a_bridge_child_inherits_its_parent_connection_scope(db: None) -> 
             )
         await hub.publish(child_id, Terminal(frame=terminal))
         await waiting
-    assert TurnRuntimeConfig.model_validate(stored) == config
+    assert TurnRuntimeConfig.model_validate(stored.runtime_config) == config
+    assert tuple(
+        ModelAccountCapability.model_validate(value) for value in stored.model_accounts
+    ) == (account,)

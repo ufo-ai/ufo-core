@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.blob import BlobNotFound, BlobStore
 from ufo.harness.models.interface import Message
-from ufo.schema.records import MEMBER_ADMISSION, TurnAdmissionSource
+from ufo.schema.records import MEMBER_ADMISSION, AuthorizationChoice, TurnAdmissionSource
 
 
 class ParkedRequester(BaseModel):
@@ -30,6 +30,10 @@ class ParkedRequester(BaseModel):
     member_id: UUID | None
     rendered: str
     admission_source: TurnAdmissionSource = MEMBER_ADMISSION
+    authorization_id: UUID | None = None
+    authorization_choice: AuthorizationChoice | None = None
+    reply_to_ref: str | None = None
+    reply_to_text: str | None = None
 
 
 class ParkedTurn(BaseModel):

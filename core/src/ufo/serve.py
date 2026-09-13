@@ -221,6 +221,8 @@ from ufo.schema.records import (
     DBOS_SYSTEM_DATABASE_POOL_SIZE,
     EXPRESS_QUEUE_NAME,
     TURN_QUEUE_NAME,
+    UNSCOPED_EXPRESS_QUEUE_NAME,
+    UNSCOPED_TURN_QUEUE_NAME,
     RuntimeIdentity,
 )
 from ufo.sdk.http import same_origin_handshake
@@ -265,7 +267,16 @@ class Fleet:
     surfaces: bool
 
 
-TURNS_FLEET = Fleet(name="turns", queues=(TURN_QUEUE_NAME, EXPRESS_QUEUE_NAME), surfaces=True)
+TURNS_FLEET = Fleet(
+    name="turns",
+    queues=(
+        TURN_QUEUE_NAME,
+        EXPRESS_QUEUE_NAME,
+        UNSCOPED_TURN_QUEUE_NAME,
+        UNSCOPED_EXPRESS_QUEUE_NAME,
+    ),
+    surfaces=True,
+)
 JOBS_FLEET = Fleet(name="jobs", queues=(JOB_QUEUE_NAME,), surfaces=False)
 WHOLE_FLEET = Fleet(name="all", queues=TURNS_FLEET.queues + JOBS_FLEET.queues, surfaces=True)
 FLEETS = {fleet.name: fleet for fleet in (WHOLE_FLEET, TURNS_FLEET, JOBS_FLEET)}

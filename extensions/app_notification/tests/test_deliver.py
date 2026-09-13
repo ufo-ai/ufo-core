@@ -58,7 +58,6 @@ from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import InternetRule
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.queue import _agent_actions, _agent_tools, _load_turn
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
@@ -208,6 +207,7 @@ def _tool_ctx(
     *,
     turn_id: UUID | None = None,
     conversation_id: UUID | None = None,
+    speaker_member_id: UUID | None = None,
     runtime_config: TurnRuntimeConfig | None = None,
 ) -> ToolContext:
     return ToolContext(
@@ -222,12 +222,11 @@ def _tool_ctx(
             status="running",
             inbound="triage",
             created_at=datetime(2026, 9, 4, tzinfo=UTC),
-            on_behalf_of_member_id=member_id,
             runtime_config=runtime_config,
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
-        speaker_member_id=None,
+        speaker_member_id=speaker_member_id,
         audience=conversation_audience(member_id),
         artifact_token_secret="",
         ext=ext,
@@ -365,7 +364,6 @@ async def test_deliver_founds_one_relay_turn_in_the_members_newest_durable_conve
     assert result.content[0].text == DELIVERED.format(surface="slack")
     [_hello, relay] = relay_turns
     assert relay["agent_id"] == main_id
-    assert relay["on_behalf_of_member_id"] == member_id
     assert relay["speaker_member_id"] is None
     assert relay["admission_source"] == "scheduled"
     assert "Acme CRM: 14 deals closed" in relay["inbound"]
@@ -381,7 +379,7 @@ async def test_deliver_founds_one_relay_turn_in_the_members_newest_durable_conve
     assert second.content[0].text == ONE_DELIVERY_PER_TURN
 
 
-async def test_scoped_notifications_keep_exact_authority_through_triage_and_delivery(
+async def test_scoped_notifications_keep_exact_capabilities_through_triage_and_delivery(
     db: None,
 ) -> None:
     workspace_id, member_id, main_id, inbox_id = await _seed()
@@ -394,22 +392,30 @@ async def test_scoped_notifications_keep_exact_authority_through_triage_and_deli
     outside_config = TurnRuntimeConfig(connections=(outside,))
     with ws(workspace_id), agent(main_id):
         await notify(
-            _tool_ctx(
-                ext,
-                workspace_id,
-                main_id,
-                member_id,
-                runtime_config=allowed_config,
+            replace(
+                _tool_ctx(
+                    ext,
+                    workspace_id,
+                    main_id,
+                    member_id,
+                    speaker_member_id=member_id,
+                    runtime_config=allowed_config,
+                ),
+                grants=GrantStore(),
             ),
             NotifyInput(subject="source/allowed", body="allowed changed"),
         )
         await notify(
-            _tool_ctx(
-                ext,
-                workspace_id,
-                main_id,
-                member_id,
-                runtime_config=outside_config,
+            replace(
+                _tool_ctx(
+                    ext,
+                    workspace_id,
+                    main_id,
+                    member_id,
+                    speaker_member_id=member_id,
+                    runtime_config=outside_config,
+                ),
+                grants=GrantStore(),
             ),
             NotifyInput(subject="source/outside", body="outside changed"),
         )
@@ -472,7 +478,7 @@ async def test_scoped_notifications_keep_exact_authority_through_triage_and_deli
     with ws(workspace_id), agent(main_id):
         accounts = await relay_ctx.connector_accounts("hub")
     rules = await PerAgentRules(base=(), grants=GrantStore(), internet=(InternetRule(),)).resolve(
-        RunToken(workspace_id, relay["id"], MemberAuthority(member_id))
+        RunToken(workspace_id, relay["id"])
     )
 
     assert triage_config == allowed_config
@@ -504,7 +510,13 @@ async def test_the_relay_turn_cannot_notify_and_the_next_tick_founds_nothing(db:
     with ws(workspace_id), agent(main_id):
         refused = await notify(
             _tool_ctx(
-                ext, workspace_id, main_id, member_id, turn_id=relay["id"], conversation_id=dm
+                ext,
+                workspace_id,
+                main_id,
+                member_id,
+                turn_id=relay["id"],
+                conversation_id=dm,
+                speaker_member_id=member_id,
             ),
             NotifyInput(subject="source/crm", body="I told them"),
         )
@@ -551,6 +563,7 @@ async def test_a_fold_during_relay_admission_keeps_the_new_occurrence_and_the_lo
                     member_id,
                     turn_id=loaded.id,
                     conversation_id=dm,
+                    speaker_member_id=member_id,
                     runtime_config=loaded.runtime_config,
                 ),
                 turn=loaded,
@@ -696,7 +709,6 @@ async def test_a_crash_replay_uses_the_reserved_destination_after_reach_changes(
             destination.agent_id,
             wall(RELAY_SOURCE, request.text) + RELAY_INSTRUCTION,
             delivery_key,
-            authority=MemberAuthority(member_id),
             holds_work_already_done=True,
             as_scheduled=True,
             runtime_config=ctx.turn.runtime_config,
@@ -946,7 +958,7 @@ async def test_a_spawned_turn_does_not_raise_notifications(db: None) -> None:
     workspace_id, member_id, main_id, _inbox_id = await _seed()
     ext = _ext(workspace_id, StubDbos())
     with ws(workspace_id), agent(main_id):
-        woken = _tool_ctx(ext, workspace_id, main_id, member_id)
+        woken = _tool_ctx(ext, workspace_id, main_id, member_id, speaker_member_id=member_id)
         refused = await notify(
             replace(woken, turn=woken.turn.model_copy(update={"parent_turn_id": uuid4()})),
             NotifyInput(subject="source/crm", body="still churning"),

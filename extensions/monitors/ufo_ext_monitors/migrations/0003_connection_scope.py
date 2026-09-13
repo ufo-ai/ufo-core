@@ -11,6 +11,8 @@ branch_labels: tuple[str, ...] | None = None
 depends_on: str | None = "0085"
 
 CONNECTIONS_MAX = 50
+POSTGRES_FUNCTION = "monitor_internet_scope"
+POSTGRES_TRIGGER = "monitor_internet_scope"
 
 monitor = sa.table(
     "monitor",
@@ -39,6 +41,41 @@ def upgrade() -> None:
     with op.batch_alter_table("monitor") as batch:
         batch.add_column(sa.Column("connections", sa.JSON(none_as_null=True), nullable=True))
         batch.add_column(sa.Column("internet_access", sa.Boolean(), nullable=True))
+
+    op.execute(sa.text("UPDATE monitor SET internet_access = true"))
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(
+            f"""
+            CREATE FUNCTION {POSTGRES_FUNCTION}()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.internet_access IS NULL THEN
+                    SELECT COALESCE(
+                        bool_and(
+                            COALESCE((runtime_config ->> 'internet_access')::boolean, true)
+                        ),
+                        false
+                    )
+                    INTO NEW.internet_access
+                    FROM turn
+                    WHERE workspace_id = NEW.workspace_id
+                      AND conversation_id = NEW.conversation_id
+                      AND status = 'running';
+                END IF;
+                RETURN NEW;
+            END;
+            $$
+            """
+        )
+        op.execute(
+            f"""
+            CREATE TRIGGER {POSTGRES_TRIGGER}
+            BEFORE INSERT ON monitor
+            FOR EACH ROW EXECUTE FUNCTION {POSTGRES_FUNCTION}()
+            """
+        )
+    with op.batch_alter_table("monitor") as batch:
+        batch.alter_column("internet_access", nullable=False)
 
     joined = monitor.outerjoin(
         grant,
@@ -79,6 +116,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(f"DROP TRIGGER {POSTGRES_TRIGGER} ON monitor")
+        op.execute(f"DROP FUNCTION {POSTGRES_FUNCTION}()")
     with op.batch_alter_table("monitor") as batch:
         batch.drop_column("internet_access")
         batch.drop_column("connections")

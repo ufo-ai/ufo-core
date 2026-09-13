@@ -82,11 +82,10 @@ ADMISSION_FACTORY = CORE_SRC / "serve.py"
 ADMISSION_FACTORY_NAME = "_admission"
 ADMISSION_HARNESS_ROOT = "evals"
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
+TRIGGER_INPUT_COLUMNS = {("turn", "on_behalf_of_member_id")}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
 AMBIENT_SCHEDULE_METHODS = frozenset({"create", "update", "cancel", "list", "inspect"})
-RAW_EXECUTION_AUTHORITY_NAME = "acting_member_id"
-CORE_AUTHORITY_METHOD = "admits"
 PORTAL_SOURCE = Path("extensions/web/frontend/src")
 APP_PAGE_GLOB = "extensions/app_*/ufo_ext_*/skills/*/**/*.tsx"
 APP_EXTENSION = re.compile(r"app_(?P<slug>[a-z0-9]+)$")
@@ -783,38 +782,6 @@ def _schedule_authority_failures(trees: dict[Path, ast.Module]) -> list[str]:
     return failures
 
 
-def _execution_authority_failures(trees: dict[Path, ast.Module]) -> list[str]:
-    """Executable work carries the authority value; nullable member ids are storage and wire
-    encodings only. Core owns authority liveness, so extensions cannot fork that policy."""
-    failures = []
-    for rel, tree in trees.items():
-        if "tests" in rel.parts:
-            continue
-        if any(
-            (isinstance(node, ast.Name) and node.id == RAW_EXECUTION_AUTHORITY_NAME)
-            or (isinstance(node, ast.arg) and node.arg == RAW_EXECUTION_AUTHORITY_NAME)
-            or (isinstance(node, ast.keyword) and node.arg == RAW_EXECUTION_AUTHORITY_NAME)
-            for node in ast.walk(tree)
-        ):
-            failures.append(
-                f"{rel}: {RAW_EXECUTION_AUTHORITY_NAME} is a nullable identity, not an execution "
-                "capability — carry ExecutionAuthority"
-            )
-        if rel.parts[0] not in (EXTENSIONS_ROOT, PACKS_ROOT) or _is_ext_scaffold(rel):
-            continue
-        if any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == CORE_AUTHORITY_METHOD
-            for node in ast.walk(tree)
-        ):
-            failures.append(
-                f"{rel}: extensions do not enforce authority liveness — invoke the core "
-                "capability with its immutable authority"
-            )
-    return failures
-
-
 def _schema_columns(trees: dict[Path, ast.Module]) -> tuple[list[tuple[str, str]], set[str]]:
     tree = trees.get(SCHEMA_TABLES)
     if tree is None:
@@ -846,9 +813,17 @@ def _database_program_wiring(tree: ast.Module) -> tuple[set[str], set[str]]:
     writes: set[str] = set()
     reads: set[str] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-            continue
-        sql = node.value
+        match node:
+            case ast.Constant(value=str() as sql):
+                pass
+            case ast.JoinedStr(values=values):
+                sql = "".join(
+                    value.value
+                    for value in values
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                )
+            case _:
+                continue
         if re.search(r"\bcreate\s+(?:function|trigger)\b", sql, re.IGNORECASE) is None:
             continue
         writes.update(re.findall(r"\bset\s+([a-z_][a-z0-9_]*)\s*=", sql, re.IGNORECASE))
@@ -856,6 +831,7 @@ def _database_program_wiring(tree: ast.Module) -> tuple[set[str], set[str]]:
         reads.update(
             re.findall(r"\b(?:select|returning)\s+([a-z_][a-z0-9_]*)\b", sql, re.IGNORECASE)
         )
+        reads.update(re.findall(r"\bnew\.([a-z_][a-z0-9_]*)\b", sql, re.IGNORECASE))
     return writes, reads
 
 
@@ -886,7 +862,7 @@ def _wiring_failures(trees: dict[Path, ast.Module]) -> list[str]:
     for table, column in columns:
         if column in ENVELOPE_COLUMNS:
             continue
-        if column not in write_columns:
+        if column not in write_columns and (table, column) not in TRIGGER_INPUT_COLUMNS:
             failures.append(f"schema: {table}.{column} has no write site")
         if column not in read_columns:
             failures.append(f"schema: {table}.{column} has no read site")
@@ -2747,7 +2723,6 @@ def main() -> int:
     failures.extend(_silence_consumer_failures(trees))
     failures.extend(_job_selector_failures(trees))
     failures.extend(_schedule_authority_failures(trees))
-    failures.extend(_execution_authority_failures(trees))
     failures.extend(_wiring_failures(trees))
     failures.extend(_live_frame_failures(trees))
     failures.extend(_live_frame_consumer_failures(trees))

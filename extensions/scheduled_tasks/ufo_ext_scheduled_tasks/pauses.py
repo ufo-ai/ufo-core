@@ -21,16 +21,17 @@ core's schema, and every statement filters `workspace_id` itself because
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import WorkspaceCandidates, owner_candidates
 
 CLAIM_BATCH_MAX_PAUSES = 50
+PAUSE_LOCK_MODULUS = 1 << 63
+PAUSE_CLAIM_GUC = "app.scope_preserving_pause_claim"
 
 _metadata = sa.MetaData()
 pause = sa.Table(
@@ -45,8 +46,8 @@ pause = sa.Table(
     sa.Column("origin_arrival_seq", sa.Integer, nullable=False),
     sa.Column("prompt", sa.Text, nullable=False),
     sa.Column("user_description", sa.Text, nullable=False),
-    sa.Column("created_by_member_id", sa.Uuid, nullable=True),
     sa.Column("connections", sa.JSON(none_as_null=True), nullable=True),
+    sa.Column("internet_access", sa.Boolean, nullable=False),
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -68,11 +69,10 @@ class Pause:
     origin_seq: int
     origin_arrival_seq: int
     prompt: str
-    created_by_member_id: UUID | None
     claim_id: str | None
     created_at: datetime
     updated_at: datetime
-    connections: tuple[UUID, ...] = ()
+    internet_access: Literal[False] | None = None
 
 
 def _aware(when: datetime) -> datetime:
@@ -90,11 +90,10 @@ def _row(row: sa.RowMapping) -> Pause:
         origin_seq=row["origin_seq"],
         origin_arrival_seq=row["origin_arrival_seq"],
         prompt=row["prompt"],
-        created_by_member_id=row["created_by_member_id"],
         claim_id=row["claimed_by"],
         created_at=_aware(row["created_at"]),
         updated_at=_aware(row["updated_at"]),
-        connections=tuple(UUID(item) for item in (row["connections"] or ())),
+        internet_access=None if row["internet_access"] else False,
     )
 
 
@@ -136,12 +135,11 @@ class PauseStore:
         origin_seq: int,
         origin_arrival_seq: int,
         prompt: str,
-        created_by_member_id: UUID | None,
-        connections: tuple[UUID, ...] = (),
+        internet_access: Literal[False] | None,
     ) -> Pause:
-        """Arm the conversation's pause, overwriting whatever it was waiting on before. A workflow
-        waits for one thing at a time, so re-arming is an upsert rather than a second row, and it
-        releases any live claim: the new wait is not the one an in-flight tick leased.
+        """Arm the conversation's pause, replacing whatever it was waiting on before. A workflow
+        waits for one thing at a time, and replacement releases any live claim: the new wait is not
+        the one an in-flight tick leased.
 
         Every arm mints a fresh id, including the one that overwrites. The fire key names the row,
         so a re-armed wait that kept its predecessor's id would present a key that predecessor's
@@ -157,27 +155,36 @@ class PauseStore:
             "origin_arrival_seq": origin_arrival_seq,
             "prompt": prompt,
             "user_description": prompt,
-            "created_by_member_id": created_by_member_id,
-            "connections": [str(connection_id) for connection_id in connections],
+            "connections": [],
+            "internet_access": internet_access is not False,
             "claimed_by": None,
             "claim_expires_at": None,
             "updated_at": sa.func.now(),
         }
         async with self.ctx.transaction() as connection:
-            statement = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            if connection.dialect.name == "postgresql":
+                await connection.execute(
+                    sa.select(
+                        sa.func.pg_advisory_xact_lock(
+                            sa.cast(conversation_id.int % PAUSE_LOCK_MODULUS, sa.BigInteger)
+                        )
+                    )
+                )
+            await connection.execute(
+                sa.delete(pause).where(
+                    pause.c.workspace_id == self.ctx.workspace_id,
+                    pause.c.conversation_id == conversation_id,
+                )
+            )
             row = (
                 (
                     await connection.execute(
-                        statement(pause)
+                        sa.insert(pause)
                         .values(
                             workspace_id=self.ctx.workspace_id,
                             conversation_id=conversation_id,
                             created_at=sa.func.now(),
                             **armed,
-                        )
-                        .on_conflict_do_update(
-                            index_elements=[pause.c.workspace_id, pause.c.conversation_id],
-                            set_=armed,
                         )
                         .returning(*_COLUMNS)
                     )
@@ -215,6 +222,11 @@ class PauseStore:
             .cte("due_pause")
         )
         async with self.ctx.transaction() as connection:
+            if connection.dialect.name == "postgresql":
+                await connection.execute(
+                    sa.text("select set_config(:guc, 'true', true)"),
+                    {"guc": PAUSE_CLAIM_GUC},
+                )
             rows = (
                 (
                     await connection.execute(

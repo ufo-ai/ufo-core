@@ -232,6 +232,9 @@ from ufo.schema.records import (
     AskUserInput as AskUserInput,
 )
 from ufo.schema.records import (
+    AuthorizationChoice as AuthorizationChoice,
+)
+from ufo.schema.records import (
     ConnectRequest as ConnectRequest,
 )
 from ufo.schema.records import (

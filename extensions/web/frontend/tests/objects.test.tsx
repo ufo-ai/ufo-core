@@ -88,7 +88,17 @@ const TASK_DETAIL = {
   name: "daily-brief",
   summary: "0 9 * * * — daily brief",
   spec: { schedule: "0 9 * * *", prompt: "write the daily brief", paused: false },
-  status: { next_run_at: IN_THREE_HOURS, paused: false, owner_email: "mel@example.com" },
+  status: {
+    next_run_at: IN_THREE_HOURS,
+    paused: false,
+    owner_email: "mel@example.com",
+    content_editable: true,
+    schedule_editable: true,
+    pausable: true,
+    resumable: false,
+    runnable: true,
+    deletable: true,
+  },
   links: [{ relation: "reports_to", kind: "conversation", name: CONVO_ID, opens: true }],
   created_at: "2026-07-01T09:00:00Z",
   updated_at: "2026-07-02T09:00:00Z",
@@ -1030,6 +1040,41 @@ test("a record is deleted from the record's own page, and a refusal says so ther
   await waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toMatchObject({ verb: "delete", kind: "scheduled_task", name: "daily-brief" });
   await refusedNotice("The workspace refuses it.");
+});
+
+test("a record renders only the actions its member projection grants", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({
+        ...TASK_DETAIL,
+        status: {
+          ...TASK_DETAIL.status,
+          content_editable: false,
+          schedule_editable: true,
+          runnable: false,
+          deletable: true,
+        },
+      }),
+  });
+  render(
+    <MainAgentProvider agents={[AGENT]}>
+      <Pane>
+        <ObjectDetail
+          agentId={AGENT_ID}
+          kind="scheduled_task"
+          name="daily-brief"
+          onOpen={() => {}}
+          onBack={() => {}}
+        />
+      </Pane>
+    </MainAgentProvider>,
+  );
+
+  expect((await screen.findByLabelText("Prompt")).hasAttribute("readonly")).toBe(true);
+  expect(screen.getByRole("button", { name: "Schedule" }).hasAttribute("disabled")).toBe(false);
+  expect(screen.getByRole("button", { name: "Run now" }).hasAttribute("disabled")).toBe(true);
+  expect(screen.getByRole("button", { name: "Pause" }).hasAttribute("disabled")).toBe(false);
+  expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
 });
 
 test("a record is deleted through the lane of the agent that owns it", async () => {

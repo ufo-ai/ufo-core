@@ -41,7 +41,7 @@ name = "no_evidence"
 
 [[arm.replacements]]
 path = "core/src/ufo/runtime/prompts/member_authorization.md"
-old = '''For `selected_message` or `pending_answer`,
-copy the shortest exact substring of the current selected message that proves the decision into
-`evidence`. Use an empty `evidence` only for `standing` or `ask`.'''
+old = '''For `selected_message` or `pending_answer`, copy the shortest exact
+substring of `context.selected.text` that proves the decision into `evidence`. Use empty `evidence`
+only for `standing` or `ask`.'''
 new = '''Set `evidence` to a brief explanation for the decision.'''

@@ -3,9 +3,9 @@ an admin revokes it to remove that person's access, which is the only way to rem
 `member` kind refuses delete, because the row is an identity and a memory subject that outlives
 the access. Nothing bounds how many members hold one: the workspace pays one flat fee and the
 count is an outreach figure, never a gate. Core owns seating, the last seated admin's irrevocable
-seat, member creation, and liveness enforcement at each capability boundary. An extension carries
-the immutable authority into core and cannot change or enforce it. An unseated member still exists:
-the gate answers their turn with the refusal, and seating them again simply lets them speak."""
+seat, member creation, and liveness enforcement at each speaking boundary. An unseated member still
+exists: the gate answers their turn with the refusal, and seating them again simply lets them
+speak."""
 
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -17,7 +17,6 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, WorkspaceAuthority
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
 from ufo.schema import tables
 
@@ -67,31 +66,12 @@ class Seats:
 
     workspace_id: UUID
 
-    async def admits(self, connection: AsyncConnection, authority: ExecutionAuthority) -> bool:
-        """Whether this immutable execution authority is live in the workspace."""
-        match authority:
-            case WorkspaceAuthority():
-                return True
-            case MemberAuthority(member_id):
-                pass
-            case _:
-                raise TypeError("execution authority must be MemberAuthority or WorkspaceAuthority")
-        row = (
-            await connection.execute(
-                sa.select(tables.member.c.seated_at).where(
-                    tables.member.c.id == member_id,
-                    tables.member.c.workspace_id == self.workspace_id,
-                )
-            )
-        ).one_or_none()
-        return row is not None and row.seated_at is not None
-
     async def all_seated(self, connection: AsyncConnection, member_ids: Collection[UUID]) -> bool:
         """Whether every one of these members still holds a seat. One indexed read for the whole
         set, so a turn that absorbed six speakers costs the same round-trip as one — this is the
         question the per-round check, the parked-fold check, and the dispatch sweep all ask, and
         each of them asks it about a set. An id that is not a member of this workspace is not
-        seated, exactly as `admits` answers it."""
+        seated."""
         wanted = set(member_ids)
         if not wanted:
             return True

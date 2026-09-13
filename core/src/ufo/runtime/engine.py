@@ -138,16 +138,22 @@ from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialRequests
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.access.member_authorization import (
+    MEMBER_AUTHORIZATION_ACTIVE_MESSAGES,
+    MEMBER_AUTHORIZATION_CONTEXT_CHARS,
+    MEMBER_AUTHORIZATION_CONTEXT_MESSAGE_CHARS,
+    MEMBER_AUTHORIZATION_MESSAGE_CHARS,
+    MEMBER_AUTHORIZATION_RECENT_MESSAGES,
+    AuthorizationAnswer,
     AuthorizationAttempt,
+    AuthorizationBinding,
+    AuthorizationContext,
+    AuthorizationContextMessage,
     AuthorizationEffect,
     AuthorizationGate,
     AuthorizationRequest,
+    AuthorizationScope,
 )
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.authority import (
-    ExecutionAuthority,
-    authority_member_id,
-)
 from ufo.runtime.billing.accounting import (
     ALLOW,
     TOKENS_DIMENSION,
@@ -170,7 +176,7 @@ from ufo.runtime.ext.manifest import (
     Stop,
     UserPromptSubmit,
 )
-from ufo.runtime.ext.surface import member_message_text
+from ufo.runtime.ext.surface import member_message_ref, member_message_text
 from ufo.runtime.hub import (
     Absorbed,
     Activity,
@@ -252,6 +258,7 @@ from ufo.schema.records import (
     WRITEBACK_PENDING,
     Agent,
     AskUserInput,
+    AuthorizationChoice,
     ConnectRequest,
     CredentialRequest,
     IncompleteReason,
@@ -335,8 +342,15 @@ FINISH_SCHEMA_ERROR = (
     "finish failed the output schema — fix the payload and call it again:\n{error}"
 )
 
-SandboxFor = Callable[[ExecutionAuthority], Awaitable[Sandbox]]
-SubagentsFor = Callable[[ExecutionAuthority], tuple[Spawn, SubagentControl | None]]
+
+@dataclass(frozen=True)
+class SandboxAccess:
+    sandbox: Sandbox
+    revoke: Callable[[], Awaitable[None]] | None = None
+
+
+SandboxFor = Callable[[tuple[UUID, ...], str], Awaitable[SandboxAccess]]
+SubagentsFor = Callable[[tuple[UUID, ...]], tuple[Spawn, SubagentControl | None]]
 SCHEDULED_MEMORY_CONTEXT = "<recalled_memory>\n{recalled}\n</recalled_memory>"
 SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
 _NOTHING_SPENT = TurnCost(tokens=0, micro_usd=0, model="", cache_percent=0)
@@ -465,6 +479,7 @@ class Arrival(BaseModel):
     admission_source: TurnAdmissionSource = MEMBER_ADMISSION
     rendered: str | None = None
     denial: str | None = None
+    authorization_answer: AuthorizationAnswer | None = None
 
 
 @dataclass(frozen=True)
@@ -472,6 +487,31 @@ class ActiveMessage:
     member_id: UUID | None
     rendered: str
     admission_source: TurnAdmissionSource = MEMBER_ADMISSION
+    authorization_answer: AuthorizationAnswer | None = None
+    reply_to_ref: str | None = None
+    reply_to_text: str | None = None
+
+
+def _authorization_message_text(message: Message) -> str:
+    if isinstance(message.content, str):
+        return member_message_text(message.content) if message.role == "user" else message.content
+    return "".join(block.text for block in message.content if isinstance(block, TextBlock))
+
+
+def _authorization_assistant(
+    turn_id: UUID, index: int, message: Message
+) -> AuthorizationContextMessage | None:
+    if message.role != "assistant":
+        return None
+    text = _authorization_message_text(message).strip()
+    if not text:
+        return None
+    return AuthorizationContextMessage(
+        ref=str(uuid5(NAMESPACE_URL, f"{turn_id}/authorization-context/{index}/{text}")),
+        role="assistant",
+        member_id=None,
+        text=text[:MEMBER_AUTHORIZATION_CONTEXT_MESSAGE_CHARS],
+    )
 
 
 @dataclass(frozen=True)
@@ -501,7 +541,6 @@ class _RoundInput:
     force_finish: bool
     first_round: bool
     round_index: int
-    include_requested_by: bool = True
     tool_schemas: tuple[ToolSchema, ...] | None = None
     tool_choice: str | None = None
 
@@ -579,6 +618,9 @@ class _BoundToolCall:
     selected_message: str = ""
     selected_from_multiple: bool = False
     authorization_pending: bool = False
+    authorization_answer: AuthorizationAnswer | None = None
+    authorization_context: AuthorizationContext | None = None
+    selected_message_complete: bool = True
 
     @property
     def call(self) -> ToolUseBlock:
@@ -613,12 +655,45 @@ type _DispatchInput = _BoundToolCall | _RejectedToolCall
 type _Resolution = EffectiveCall | _RejectedToolCall
 
 
+def _selected_member_authorization(bound: _BoundToolCall) -> bool:
+    return bound.selected_message_ref is not None and (
+        bound.selected_from_multiple or bound.authorization_pending
+    )
+
+
 @dataclass(frozen=True)
 class _DispatchReady:
     context: ToolContext
     effective: EffectiveCall
     args: BaseModel
     target: ObjectActionTarget | None
+    sandbox_access: SandboxAccess
+
+
+@dataclass(frozen=True)
+class _AuthorizationPreflight:
+    args: BaseModel
+    request_target: ObjectActionRequestTarget | None
+    context: ToolContext
+    scope: AuthorizationScope | None = None
+    binding: AuthorizationBinding | None = None
+    attempt: AuthorizationAttempt | None = None
+    denied: str | None = None
+    failed_closed: str | None = None
+    authority_error: str | None = None
+    authority_error_class: str | None = None
+
+
+@dataclass(frozen=True)
+class _ValidatedDispatch:
+    args: BaseModel
+    request_target: ObjectActionRequestTarget | None
+
+
+@dataclass(frozen=True)
+class _AuthorizedDispatch:
+    context: ToolContext
+    args: BaseModel
 
 
 @dataclass(frozen=True)
@@ -855,6 +930,28 @@ def _context_tag(message_id: UUID, context: TurnContext | None, admitted_at: dat
     if context is not None and context.reply_reaches:
         lines.append(f"reply_reaches: {context.reply_reaches}")
     return MEMBER_CONTEXT_OPENING + "\n".join(lines) + "\n</context>\n"
+
+
+def _authorization_answer_values(
+    authorization_id: UUID | None,
+    choice: AuthorizationChoice | None,
+) -> AuthorizationAnswer | None:
+    if authorization_id is None:
+        if choice is not None:
+            raise RuntimeError("authorization choice has no authorization id")
+        return None
+    if choice is None:
+        raise RuntimeError("authorization id has no authorization choice")
+    return AuthorizationAnswer(
+        authorization_id=authorization_id,
+        choice=choice,
+    )
+
+
+def _authorization_answer(context: TurnContext | None) -> AuthorizationAnswer | None:
+    if context is None:
+        return None
+    return _authorization_answer_values(context.authorization_id, context.authorization_choice)
 
 
 def _bounded(content: str) -> str:
@@ -1251,7 +1348,7 @@ class _RuntimeToolState:
     acts: _OpenActs = field(default_factory=_OpenActs)
     resolutions: dict[str, _Resolution] = field(default_factory=dict)
     bindings: dict[str, _DispatchInput] = field(default_factory=dict)
-    authorization_attempts: dict[str, AuthorizationAttempt] = field(default_factory=dict)
+    authorization_preflights: dict[str, _AuthorizationPreflight] = field(default_factory=dict)
     parked: TurnParked | None = None
     authorization_question: AskUserInput | None = None
     authorization_pending: bool = False
@@ -1337,7 +1434,6 @@ class _RuntimeModel:
                 force_finish=request.mode is HarnessRoundMode.FORCE_FINISH,
                 active_requests=active_requests,
                 first_round=request.first_round,
-                include_requested_by=bool(self.engine._member_refs(self.requesters)),
             )
         except ModelStreamError as error:
             if error.model_error_class != MODEL_TRUNCATED_ERROR_CLASS:
@@ -1380,7 +1476,6 @@ class _RuntimeTools:
     state: _RuntimeToolState
 
     def definitions(self) -> tuple[HarnessToolDefinition, ...]:
-        include_requested_by = bool(self.engine._member_refs(self.requesters))
         return tuple(
             HarnessToolDefinition(
                 name=schema.name,
@@ -1388,7 +1483,7 @@ class _RuntimeTools:
                 input_schema=dict(schema.input_schema),
             )
             for tool in self.engine.tools.tools
-            for schema in (tool.schema(include_requested_by=include_requested_by),)
+            for schema in (tool.schema(),)
         )
 
     def parallel_safe(self, call: HarnessToolCall) -> bool:
@@ -1425,13 +1520,13 @@ class _RuntimeTools:
             and (bound.selected_from_multiple or bound.authorization_pending)
         )
         if selected:
-            attempts = await self.engine._preflight_member_authorizations(
+            preflights = await self.engine._preflight_member_authorizations(
                 tuple(bound for _, bound in selected)
             )
-            self.state.authorization_attempts.update(
-                (call.id, attempt)
-                for (call, _), attempt in zip(selected, attempts, strict=True)
-                if attempt is not None
+            self.state.authorization_preflights.update(
+                (call.id, preflight)
+                for (call, _), preflight in zip(selected, preflights, strict=True)
+                if preflight is not None
             )
 
     async def prepare(self, calls: tuple[HarnessToolCall, ...]) -> None:
@@ -1452,7 +1547,7 @@ class _RuntimeTools:
             dispatched = await self.engine._dispatch_step_recovering(
                 bound,
                 self.usage_events,
-                self.state.authorization_attempts.get(call.id),
+                self.state.authorization_preflights.get(call.id),
             )
             if dispatched.question is not None:
                 self.state.authorization_question = dispatched.question
@@ -1491,7 +1586,7 @@ class _RuntimeTools:
         finally:
             self.state.resolutions.clear()
             self.state.bindings.clear()
-            self.state.authorization_attempts.clear()
+            self.state.authorization_preflights.clear()
 
     async def after_checkpoint(self) -> None:
         parked = self.state.parked
@@ -1619,6 +1714,18 @@ class TranscriptRepair:
                         member_id=requester.member_id,
                         rendered=requester.rendered,
                         admission_source=requester.admission_source,
+                        authorization_id=(
+                            None
+                            if requester.authorization_answer is None
+                            else requester.authorization_answer.authorization_id
+                        ),
+                        authorization_choice=(
+                            None
+                            if requester.authorization_answer is None
+                            else requester.authorization_answer.choice
+                        ),
+                        reply_to_ref=requester.reply_to_ref,
+                        reply_to_text=requester.reply_to_text,
                     )
                     for id_, requester in requesters.items()
                 ),
@@ -2103,6 +2210,14 @@ class TurnEngine:
                         member_id=requester.member_id,
                         rendered=requester.rendered,
                         admission_source=requester.admission_source,
+                        authorization_answer=(
+                            _authorization_answer_values(
+                                requester.authorization_id,
+                                requester.authorization_choice,
+                            )
+                        ),
+                        reply_to_ref=requester.reply_to_ref,
+                        reply_to_text=requester.reply_to_text,
                     )
                     for requester in parked.requesters
                 }
@@ -2155,10 +2270,18 @@ class TurnEngine:
         if not isinstance(founding, str):
             raise RuntimeError("founding inbound did not render as text")
         if not self.turn.spawned:
+            parent = (
+                _authorization_assistant(self.turn.id, len(messages) - 2, messages[-2])
+                if len(messages) > 1
+                else None
+            )
             requesters[self.turn.id] = ActiveMessage(
                 member_id=self.turn.speaker_member_id,
                 rendered=member_message_text(founding),
                 admission_source=self.turn.admission_source,
+                authorization_answer=_authorization_answer(self.turn.context),
+                reply_to_ref=None if parent is None else parent.ref,
+                reply_to_text=None if parent is None else parent.text,
             )
         injected = "\n\n".join(part for part in (injected, self.member_skill_block) if part)
         if injected:
@@ -2169,13 +2292,12 @@ class TurnEngine:
     async def run_intent(self) -> TerminalFrame | None:
         """Run an intent turn: dispatch its one typed tool call verbatim and commit the result.
 
-        A speaking intent is a prepared panel mutation and binds authority through its founding
+        A speaking intent is a prepared panel mutation and binds its requester through its founding
         member message. A speaking `object_action` intent reaches only an action that declares a
         `presentation` — the one dispatch-point fence on the prepared-intent lane — while a
-        speakerless intent is a sandbox bridge call, carries the authority of the live parent run
-        on `on_behalf_of_member_id`, and is gated by the turn's granted actions instead. Both take
-        the same guarded, memoized dispatch as a model call, with no model round or turn-shaped
-        prompt hooks."""
+        speakerless intent is a sandbox bridge call gated by the parent turn's granted actions.
+        Both take the same guarded, memoized dispatch as a model call, with no model round or
+        turn-shaped prompt hooks."""
         meter = _TurnMeter(started=time.monotonic(), profile=self.profile)
         emit_metric("turn_started_total", profile=self.profile)
         log(
@@ -2546,10 +2668,18 @@ class TurnEngine:
             if arrival.rendered is None:
                 raise RuntimeError("arrival has neither rendered content nor a denial")
             if requesters is not None:
+                parent = (
+                    _authorization_assistant(self.turn.id, len(messages) - 1, messages[-1])
+                    if messages
+                    else None
+                )
                 requesters[arrival.id] = ActiveMessage(
                     member_id=arrival.speaker_member_id,
                     rendered=member_message_text(arrival.rendered),
                     admission_source=arrival.admission_source,
+                    authorization_answer=arrival.authorization_answer,
+                    reply_to_ref=None if parent is None else parent.ref,
+                    reply_to_text=None if parent is None else parent.text,
                 )
             message = Message(role="user", content=arrival.rendered)
             arrival_log.append(message)
@@ -2800,10 +2930,11 @@ class TurnEngine:
             ).all()
         arrivals: list[Arrival] = []
         for row in sorted(rows, key=lambda row: row.seq):
+            context = None if row.context is None else TurnContext.model_validate(row.context)
             rendered, denial = await self._render_arrival(
                 row.id,
                 row.body,
-                None if row.context is None else TurnContext.model_validate(row.context),
+                context,
                 row.speaker_member_id,
                 row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
             )
@@ -2814,6 +2945,7 @@ class TurnEngine:
                     admission_source=row.admission_source,
                     rendered=rendered,
                     denial=denial,
+                    authorization_answer=_authorization_answer(context),
                 )
             )
         if arrivals:
@@ -2858,7 +2990,6 @@ class TurnEngine:
         force_finish: bool = False,
         active_requests: tuple[str, ...] = (),
         first_round: bool = False,
-        include_requested_by: bool = True,
     ) -> tuple[tuple[Message, ...], StreamResult]:
         """Run one model round, recovering from a provider context-overflow: the proactive
         boundary already ran, so an overflow here means the window is still too large — force the
@@ -2875,7 +3006,6 @@ class TurnEngine:
                     force_finish=force_finish,
                     first_round=first_round,
                     round_index=round_index,
-                    include_requested_by=include_requested_by,
                     tool_schemas=tool_schemas,
                     tool_choice=tool_choice,
                 ),
@@ -2909,7 +3039,6 @@ class TurnEngine:
                     force_finish=force_finish,
                     first_round=first_round,
                     round_index=round_index,
-                    include_requested_by=include_requested_by,
                     tool_schemas=tool_schemas,
                     tool_choice=tool_choice,
                 ),
@@ -2963,16 +3092,12 @@ class TurnEngine:
             )
 
     async def _move_account(self, usage_events: list[Usage]) -> bool:
-        """Move the turn onto the member's next account after the provider rate-limited the one
-        serving it, closing that account's share of the burn where its rounds stopped. The round
-        re-runs on the new account. False when this turn holds no account to move to, so the
-        rate-limited round fails the way any provider fault does."""
         left = self.serving.model
         if not await self.serving.move():
             return False
         self._burn.left.append((left, len(usage_events)))
         log(
-            "model.member_account_failover",
+            "model.account_failover",
             turn_id=str(self.turn.id),
             model=left,
             moved_to=self.serving.model,
@@ -3011,7 +3136,7 @@ class TurnEngine:
         Holding a BYOK turn against a balance it never debits would park it, leave the balance
         untouched, let the dispatcher resume it, and park it again at the same point forever."""
         await self._enforce_seats(requesters)
-        member_id = authority_member_id(self.turn.authority)
+        member_id = self.turn.speaker_member_id
         pending = 0 if self.byok else self._priced(usage_events)
         if not balance_absent(self.turn.workspace_id):
             async with workspace_tx() as connection:
@@ -3033,15 +3158,12 @@ class TurnEngine:
         members = {
             message.member_id for message in requesters.values() if message.member_id is not None
         }
-        if self.turn.on_behalf_of_member_id is not None:
-            members.add(self.turn.on_behalf_of_member_id)
         if members:
             async with workspace_tx() as connection:
                 if not await Seats(self.turn.workspace_id).all_seated(connection, members):
                     raise TurnParked(SEAT_REVOKED_MESSAGE)
 
-    async def _enforce_authority_seat(self, authority: ExecutionAuthority) -> None:
-        member_id = authority_member_id(authority)
+    async def _enforce_requester_seat(self, member_id: UUID | None) -> None:
         if member_id is None:
             return
         async with workspace_tx() as connection:
@@ -3080,7 +3202,7 @@ class TurnEngine:
                 tool_schemas = (finish,)
                 tool_choice = FINISH_TOOL
             elif round_input.offer_tools:
-                offered = self.tools.schemas(include_requested_by=round_input.include_requested_by)
+                offered = self.tools.schemas()
                 tool_schemas = offered if finish is None else (*offered, finish)
             else:
                 tool_schemas = ()
@@ -3474,11 +3596,11 @@ class TurnEngine:
         self,
         bound: _DispatchInput,
         usage_events: list[Usage] | None,
-        authorization_attempt: AuthorizationAttempt | None = None,
+        authorization_preflight: _AuthorizationPreflight | None = None,
     ) -> DispatchResult:
         target: ObjectActionTarget | None = None
         while True:
-            result = await self._dispatch_step(bound, target, authorization_attempt)
+            result = await self._dispatch_step(bound, target, authorization_preflight)
             target = result.resume_target
             if self._accept_dispatch_result(result, usage_events):
                 return result
@@ -3506,12 +3628,14 @@ class TurnEngine:
     ) -> _BoundToolCall:
         """Bind the member this call acts for. A `requested_by` ref names one of the turn's active
         messages and binds its author. Without the ref, exactly one active authenticated member
-        binds automatically; with several, omission means conversation-common work. Both routes
-        read the same active messages, so a message a hook denied — absorbed without ever entering
-        them — withholds its author's authority whichever route the model takes.
+        binds automatically on a tool that declares member authority; with several, omission means
+        conversation-common work. A tool that does not declare member authority never binds one.
+        Both routes read the same active messages, so a message a hook denied — absorbed without
+        ever entering them — withholds its author as a requester whichever route the model takes.
 
-        A ref that names no active member message is refused as `SpeakerRequired`, the same class
-        a handler refusing for want of a member raises."""
+        A ref may name only that member's newest active message, so a later correction supersedes
+        the authority of their earlier words. An invalid or superseded ref is refused as
+        `SpeakerRequired`, the same class a handler refusing for want of a member raises."""
         call = item.call
         tool_input = dict(call.input)
         requester: UUID | None = None
@@ -3522,6 +3646,10 @@ class TurnEngine:
         profile_only = item.tool.profile_only
         if self.turn.subagent_profile is not None and profile_only:
             tool_input.pop(REQUESTED_BY, None)
+        elif REQUESTED_BY in tool_input and not item.tool.binds_member_authority:
+            if item.action is None:
+                raise ValueError(f"{REQUESTED_BY} is not accepted by {call.name}")
+            tool_input.pop(REQUESTED_BY)
         elif REQUESTED_BY in tool_input:
             raw = tool_input.pop(REQUESTED_BY)
             if not isinstance(raw, str):
@@ -3538,7 +3666,17 @@ class TurnEngine:
                 raise SpeakerRequired(f"{REQUESTED_BY} message has no member requester")
             selected_ref = message_id
             selected_message = selected.rendered
-        elif sole_member is not None:
+            newest_ref = next(
+                ref
+                for ref, message in reversed(tuple(requesters.items()))
+                if message.member_id == requester
+            )
+            if selected_ref != newest_ref:
+                raise SpeakerRequired(
+                    f"{REQUESTED_BY} must name this member's newest active inbound message: "
+                    f"{newest_ref}"
+                )
+        elif item.tool.binds_member_authority and sole_member is not None:
             requester = sole_member
             selected_ref, selected = next(
                 (ref, message)
@@ -3554,6 +3692,12 @@ class TurnEngine:
                 message.admission_source == MEMBER_ADMISSION for message in requesters.values()
             ),
         )
+        authorization_context = None
+        selected_message_complete = True
+        if selected_ref is not None:
+            authorization_context, selected_message, selected_message_complete = (
+                self._authorization_context(requesters, selected_ref)
+            )
         return _BoundToolCall(
             context=bound_context,
             effective=replace(item, call=call.model_copy(update={"input": tool_input})),
@@ -3562,6 +3706,112 @@ class TurnEngine:
             selected_message=selected_message,
             selected_from_multiple=selected_ref is not None and sole_member is None,
             authorization_pending=authorization_pending and requester is not None,
+            authorization_answer=(
+                None if selected_ref is None else requesters[selected_ref].authorization_answer
+            ),
+            authorization_context=authorization_context,
+            selected_message_complete=selected_message_complete,
+        )
+
+    def _authorization_context(
+        self, requesters: Mapping[UUID, ActiveMessage], selected_ref: UUID
+    ) -> tuple[AuthorizationContext, str, bool]:
+        selected_message = requesters[selected_ref]
+        complete = len(selected_message.rendered) <= MEMBER_AUTHORIZATION_MESSAGE_CHARS
+        selected_text = selected_message.rendered[:MEMBER_AUTHORIZATION_MESSAGE_CHARS]
+        selected = AuthorizationContextMessage(
+            ref=str(selected_ref),
+            role="user",
+            member_id=selected_message.member_id,
+            reply_to=selected_message.reply_to_ref,
+            text=selected_text,
+        )
+        parent = (
+            None
+            if selected_message.reply_to_ref is None or selected_message.reply_to_text is None
+            else AuthorizationContextMessage(
+                ref=selected_message.reply_to_ref,
+                role="assistant",
+                member_id=None,
+                text=selected_message.reply_to_text,
+            )
+        )
+        budget = (
+            MEMBER_AUTHORIZATION_CONTEXT_CHARS
+            - len(selected.text)
+            - (0 if parent is None else len(parent.text))
+        )
+        active: list[AuthorizationContextMessage] = []
+        for active_ref, active_message in tuple(requesters.items())[
+            -MEMBER_AUTHORIZATION_ACTIVE_MESSAGES:
+        ]:
+            if active_ref == selected_ref or budget <= 0:
+                continue
+            text = active_message.rendered[
+                : min(MEMBER_AUTHORIZATION_CONTEXT_MESSAGE_CHARS, budget)
+            ]
+            if not text:
+                continue
+            active.append(
+                AuthorizationContextMessage(
+                    ref=str(active_ref),
+                    role="user",
+                    member_id=active_message.member_id,
+                    reply_to=active_message.reply_to_ref,
+                    text=text,
+                )
+            )
+            budget -= len(text)
+        excluded = {selected.ref, *(message.ref for message in active)}
+        if parent is not None:
+            excluded.add(parent.ref)
+        recent: list[AuthorizationContextMessage] = []
+        for index, message in reversed(tuple(enumerate(self._window.messages))):
+            if len(recent) == MEMBER_AUTHORIZATION_RECENT_MESSAGES or budget <= 0:
+                break
+            if message.role == "assistant":
+                item = _authorization_assistant(self.turn.id, index, message)
+            elif message.role == "user" and isinstance(message.content, str):
+                user_ref = member_message_ref(message.content)
+                if user_ref is None:
+                    continue
+                requester = None
+                try:
+                    requester = requesters.get(UUID(user_ref))
+                except ValueError:
+                    pass
+                text = _authorization_message_text(message).strip()
+                item = (
+                    None
+                    if not text
+                    else AuthorizationContextMessage(
+                        ref=user_ref,
+                        role="user",
+                        member_id=None if requester is None else requester.member_id,
+                        reply_to=None if requester is None else requester.reply_to_ref,
+                        text=text[:MEMBER_AUTHORIZATION_CONTEXT_MESSAGE_CHARS],
+                    )
+                )
+            else:
+                item = None
+            if item is None or item.ref in excluded:
+                continue
+            text = item.text[:budget]
+            if not text:
+                continue
+            recent.append(item.model_copy(update={"text": text}))
+            excluded.add(item.ref)
+            budget -= len(text)
+        return (
+            AuthorizationContext(
+                selected=selected,
+                direct_reply_parent=parent,
+                assistant_proposal=parent,
+                active_messages=tuple(active),
+                recent_messages=tuple(reversed(recent)),
+            ),
+            selected_text,
+            complete,
         )
 
     def _active_member_ids(self, requesters: Mapping[UUID, ActiveMessage]) -> frozenset[UUID]:
@@ -3644,7 +3894,7 @@ class TurnEngine:
         self,
         bound: _DispatchInput,
         resume_target: ObjectActionTarget | None = None,
-        authorization_attempt: AuthorizationAttempt | None = None,
+        authorization_preflight: _AuthorizationPreflight | None = None,
     ) -> DispatchResult:
         """Run one resolved binding in the DBOS step claimed for it in model order. A rejected bind
         claims the same step and records its error, so bind latency or outcome cannot change step
@@ -3716,13 +3966,14 @@ class TurnEngine:
             else bound.effective.meter_dimensions()
         )
         target = resume_target
+        sandbox_access: SandboxAccess | None = None
         with span("tool.dispatch", tool=call.name, call=semantic.get("call", call.name)):
             try:
                 if isinstance(bound, _RejectedToolCall):
                     outcome, error_class = bound.outcome, bound.error_class
                     result = DispatchResult(tool_use_id=call.id, text=bound.text, is_error=True)
                     return result
-                gate = await self._prepare_dispatch(bound, target, authorization_attempt)
+                gate = await self._prepare_dispatch(bound, target, authorization_preflight)
                 target = gate.target
                 if gate.result is not None:
                     outcome, error_class = gate.outcome, gate.error_class
@@ -3731,9 +3982,17 @@ class TurnEngine:
                 ready = gate.ready
                 if ready is None:
                     raise RuntimeError("dispatch gate returned no result or ready call")
+                sandbox_access = ready.sandbox_access
                 handled = await self._invoke_dispatch(bound, ready, find_usages)
                 outcome, error_class = handled.outcome, handled.error_class
                 result = await self._finish_dispatch(ready, handled, find_usages)
+                if (
+                    not result.is_error
+                    and ready.effective.tool.retains_sandbox_authority
+                    and sandbox_access.revoke is not None
+                ):
+                    ready.context.cleanup.register(sandbox_access.revoke)
+                    sandbox_access = None
                 return result
             except asyncio.CancelledError:
                 outcome, error_class = "step_failed", "CancelledError"
@@ -3750,6 +4009,8 @@ class TurnEngine:
                 outcome, error_class = "step_failed", type(error).__name__
                 raise
             finally:
+                if sandbox_access is not None and sandbox_access.revoke is not None:
+                    await sandbox_access.revoke()
                 _meter_dispatch(
                     self.tools, call, started, outcome, error_class, self.profile, semantic
                 )
@@ -3768,36 +4029,89 @@ class TurnEngine:
     @DBOS.step(preemptible=True)
     async def _preflight_member_authorizations(
         self, bounds: tuple[_BoundToolCall, ...]
-    ) -> tuple[AuthorizationAttempt | None, ...]:
-        async def preflight(bound: _BoundToolCall) -> AuthorizationAttempt | None:
-            effective = bound.effective
-            if effective.action_args is not None:
-                args: BaseModel = effective.action_args
-            else:
-                try:
-                    args = effective.tool.input_model.model_validate(bound.call.input)
-                except ValidationError:
-                    return None
-            request_target: ObjectActionRequestTarget | None = None
-            if effective.action is not None:
-                try:
-                    request_target = self.verbs.action_request_target(
-                        effective.tool, effective.action
-                    )
-                except ValueError:
-                    return None
-            request = self._member_authorization_request(bound, args, request_target)
-            if request is None:
-                raise RuntimeError("selected member call has no authorization request")
-            return await self.member_authorization.preflight(request)
+    ) -> tuple[_AuthorizationPreflight | None, ...]:
+        return tuple(
+            await asyncio.gather(*(self._preflight_member_authorization(bound) for bound in bounds))
+        )
 
-        return tuple(await asyncio.gather(*(preflight(bound) for bound in bounds)))
+    async def _preflight_member_authorization(
+        self, bound: _BoundToolCall
+    ) -> _AuthorizationPreflight | None:
+        effective = bound.effective
+        if effective.action_args is not None:
+            args: BaseModel = effective.action_args
+        else:
+            try:
+                args = effective.tool.input_model.model_validate(bound.call.input)
+            except ValidationError:
+                return None
+        request_target: ObjectActionRequestTarget | None = None
+        if effective.action is not None:
+            try:
+                request_target = self.verbs.action_request_target(effective.tool, effective.action)
+            except ValueError:
+                return None
+        prepared = await self._pre_tool_use(bound, args, request_target, None)
+        if prepared.denied is not None:
+            return prepared
+        try:
+            context, final_args, scope, binding = await self._standing_authorization(
+                bound, prepared.context, prepared.args
+            )
+        except Exception as error:
+            return replace(
+                prepared,
+                authority_error=_error_text(bound.call.name, error, bound.member_refs),
+                authority_error_class=type(error).__name__,
+            )
+        request = self._member_authorization_request(
+            bound, final_args, request_target, scope, binding
+        )
+        if request is None:
+            raise RuntimeError("selected member call has no authorization request")
+        attempt = await self.member_authorization.preflight(request)
+        return replace(
+            prepared,
+            context=context,
+            args=final_args,
+            scope=scope,
+            binding=binding,
+            attempt=attempt,
+        )
+
+    async def _pre_tool_use(
+        self,
+        bound: _BoundToolCall,
+        args: BaseModel,
+        request_target: ObjectActionRequestTarget | None,
+        speaker_member_id: UUID | None,
+    ) -> _AuthorizationPreflight:
+        resolved = await self.hooks.fire(
+            "pre_tool_use",
+            PreToolUse(
+                tool_name=bound.call.name,
+                tool_input=args,
+                call=bound.effective.call_id,
+                target=request_target,
+            ),
+            self.turn,
+            self.agent,
+            speaker_member_id,
+            self.sandbox,
+        )
+        return _AuthorizationPreflight(
+            args=resolved.tool_input if resolved.tool_input is not None else args,
+            request_target=request_target,
+            context=bound.context,
+            denied=resolved.denied,
+            failed_closed=resolved.failed_closed,
+        )
 
     async def _prepare_dispatch(
         self,
         bound: _BoundToolCall,
         target: ObjectActionTarget | None,
-        authorization_attempt: AuthorizationAttempt | None,
+        authorization_preflight: _AuthorizationPreflight | None,
     ) -> _DispatchGate:
         call = bound.call
         effective = bound.effective
@@ -3823,6 +4137,195 @@ class TurnEngine:
                 ),
                 outcome="guidance_preempted",
             )
+        if authorization_preflight is None:
+            validated = self._validate_dispatch(bound, target)
+            if isinstance(validated, _DispatchGate):
+                return validated
+            args = validated.args
+            request_target = validated.request_target
+        else:
+            args = authorization_preflight.args
+            request_target = authorization_preflight.request_target
+        pre = authorization_preflight
+        if pre is None:
+            pre = await self._pre_tool_use(
+                bound,
+                args,
+                request_target,
+                None
+                if bound.selected_from_multiple or bound.authorization_pending
+                else bound.context.speaker_member_id,
+            )
+        if pre.denied is not None:
+            outcome, error_class = (
+                ("hook_denied", None)
+                if pre.failed_closed is None
+                else ("hook_failed", pre.failed_closed)
+            )
+            return _DispatchGate(
+                target,
+                result=DispatchResult(
+                    tool_use_id=call.id,
+                    text=pre.denied,
+                    is_error=True,
+                    activity=True,
+                ),
+                outcome=outcome,
+                error_class=error_class,
+            )
+        authorized = await self._authorize_member_dispatch(
+            bound,
+            pre,
+            request_target,
+            target,
+            resolve_standing=authorization_preflight is None,
+        )
+        if isinstance(authorized, _DispatchGate):
+            return authorized
+        context = authorized.context
+        final_args = authorized.args
+        try:
+            context, sandbox_access = await self._authorize_context(
+                context,
+                effective.dispatch_key(self.turn.id),
+            )
+        except TerminalAbsent as error:
+            raise TerminalGone(str(error)) from error
+        except Exception as error:
+            return _DispatchGate(
+                target,
+                result=DispatchResult(
+                    tool_use_id=call.id,
+                    text=_error_text(call.name, error, bound.member_refs),
+                    is_error=True,
+                    activity=True,
+                ),
+                outcome="authority_failed",
+                error_class=type(error).__name__,
+            )
+        handed_off = False
+        try:
+            if effective.action is not None and target is None:
+                try:
+                    target = await self.verbs.action_target(context, tool, effective.action)
+                except ValueError as error:
+                    return _DispatchGate(
+                        target,
+                        result=DispatchResult(
+                            tool_use_id=call.id,
+                            text=_error_text(call.name, error, bound.member_refs),
+                            is_error=True,
+                            activity=True,
+                        ),
+                        outcome="invalid_call",
+                        error_class=type(error).__name__,
+                    )
+            ready = _DispatchReady(
+                context,
+                effective,
+                final_args,
+                target,
+                sandbox_access,
+            )
+            handed_off = True
+            return _DispatchGate(target, ready=ready)
+        finally:
+            if not handed_off and sandbox_access.revoke is not None:
+                await sandbox_access.revoke()
+
+    async def _authorize_member_dispatch(
+        self,
+        bound: _BoundToolCall,
+        pre: _AuthorizationPreflight,
+        request_target: ObjectActionRequestTarget | None,
+        target: ObjectActionTarget | None,
+        *,
+        resolve_standing: bool,
+    ) -> _AuthorizedDispatch | _DispatchGate:
+        call = bound.call
+        if pre.authority_error is not None:
+            return _DispatchGate(
+                target,
+                result=DispatchResult(
+                    tool_use_id=call.id,
+                    text=pre.authority_error,
+                    is_error=True,
+                    activity=True,
+                ),
+                outcome="authority_failed",
+                error_class=pre.authority_error_class,
+            )
+        context, args, scope, binding = pre.context, pre.args, pre.scope, pre.binding
+        if resolve_standing:
+            try:
+                context, args, scope, binding = await self._standing_authorization(
+                    bound, context, args
+                )
+            except Exception as error:
+                return _DispatchGate(
+                    target,
+                    result=DispatchResult(
+                        tool_use_id=call.id,
+                        text=_error_text(call.name, error, bound.member_refs),
+                        is_error=True,
+                        activity=True,
+                    ),
+                    outcome="authority_failed",
+                    error_class=type(error).__name__,
+                )
+        request = self._member_authorization_request(bound, args, request_target, scope, binding)
+        if request is None:
+            return _AuthorizedDispatch(context, args)
+        authorization = await self.member_authorization.authorize(request, pre.attempt)
+        if authorization.decision == "ask":
+            assert authorization.question is not None
+            return _DispatchGate(
+                target,
+                result=DispatchResult(
+                    tool_use_id=call.id,
+                    text=question_result_text(authorization.question),
+                    is_error=True,
+                    activity=True,
+                    question=authorization.question,
+                ),
+                outcome="member_authorization_required",
+            )
+        if authorization.decision == "deny":
+            return _DispatchGate(
+                target,
+                result=DispatchResult(
+                    tool_use_id=call.id,
+                    text=(
+                        authorization.refusal
+                        or "The selected member did not authorize this request."
+                    ),
+                    is_error=True,
+                    activity=True,
+                ),
+                outcome="member_authorization_denied",
+            )
+        return _AuthorizedDispatch(context, args)
+
+    async def _standing_authorization(
+        self, bound: _BoundToolCall, context: ToolContext, args: BaseModel
+    ) -> tuple[
+        ToolContext,
+        BaseModel,
+        AuthorizationScope | None,
+        AuthorizationBinding | None,
+    ]:
+        resolver = bound.effective.tool.standing_authorization
+        if not _selected_member_authorization(bound) or resolver is None:
+            return context, args, None, None
+        standing = await resolver(context, args)
+        return standing.context, standing.input, standing.scope, standing.binding
+
+    def _validate_dispatch(
+        self, bound: _BoundToolCall, target: ObjectActionTarget | None
+    ) -> _ValidatedDispatch | _DispatchGate:
+        call = bound.call
+        effective = bound.effective
+        tool = effective.tool
         if effective.action_args is not None:
             args: BaseModel = effective.action_args
         else:
@@ -3861,127 +4364,24 @@ class TurnEngine:
                     outcome="invalid_call",
                     error_class=type(error).__name__,
                 )
-        pre = await self.hooks.fire(
-            "pre_tool_use",
-            PreToolUse(
-                tool_name=call.name,
-                tool_input=args,
-                call=effective.call_id,
-                target=request_target,
-            ),
-            self.turn,
-            self.agent,
-            (
-                None
-                if bound.selected_from_multiple or bound.authorization_pending
-                else bound.context.speaker_member_id
-            ),
-            self.sandbox,
-        )
-        if pre.denied is not None:
-            outcome, error_class = (
-                ("hook_denied", None)
-                if pre.failed_closed is None
-                else ("hook_failed", pre.failed_closed)
-            )
-            return _DispatchGate(
-                target,
-                result=DispatchResult(
-                    tool_use_id=call.id,
-                    text=pre.denied,
-                    is_error=True,
-                    activity=True,
-                ),
-                outcome=outcome,
-                error_class=error_class,
-            )
-        final_args = pre.tool_input if pre.tool_input is not None else args
-        context = bound.context
-        authorization_request = self._member_authorization_request(
-            bound, final_args, request_target
-        )
-        if authorization_request is not None:
-            authorization = await self.member_authorization.authorize(
-                authorization_request,
-                authorization_attempt,
-            )
-            if authorization.decision == "ask":
-                assert authorization.question is not None
-                return _DispatchGate(
-                    target,
-                    result=DispatchResult(
-                        tool_use_id=call.id,
-                        text=question_result_text(authorization.question),
-                        is_error=True,
-                        activity=True,
-                        question=authorization.question,
-                    ),
-                    outcome="member_authorization_required",
-                )
-            if authorization.decision == "deny":
-                return _DispatchGate(
-                    target,
-                    result=DispatchResult(
-                        tool_use_id=call.id,
-                        text="The selected member did not authorize this request.",
-                        is_error=True,
-                        activity=True,
-                    ),
-                    outcome="member_authorization_denied",
-                )
-        try:
-            context = await self._authorize_context(context)
-        except TerminalAbsent as error:
-            raise TerminalGone(str(error)) from error
-        except Exception as error:
-            return _DispatchGate(
-                target,
-                result=DispatchResult(
-                    tool_use_id=call.id,
-                    text=_error_text(call.name, error, bound.member_refs),
-                    is_error=True,
-                    activity=True,
-                ),
-                outcome="authority_failed",
-                error_class=type(error).__name__,
-            )
-        if effective.action is not None and target is None:
-            try:
-                target = await self.verbs.action_target(context, tool, effective.action)
-            except ValueError as error:
-                return _DispatchGate(
-                    target,
-                    result=DispatchResult(
-                        tool_use_id=call.id,
-                        text=_error_text(call.name, error, bound.member_refs),
-                        is_error=True,
-                        activity=True,
-                    ),
-                    outcome="invalid_call",
-                    error_class=type(error).__name__,
-                )
-        return _DispatchGate(
-            target,
-            ready=_DispatchReady(
-                context,
-                effective,
-                final_args,
-                target,
-            ),
-        )
+        return _ValidatedDispatch(args, request_target)
 
     def _member_authorization_request(
         self,
         bound: _BoundToolCall,
         args: BaseModel,
         target: ObjectActionRequestTarget | None,
+        scope: AuthorizationScope | None,
+        binding: AuthorizationBinding | None,
     ) -> AuthorizationRequest | None:
-        if bound.selected_message_ref is None or not (
-            bound.selected_from_multiple or bound.authorization_pending
-        ):
+        if not _selected_member_authorization(bound):
             return None
+        message_ref = bound.selected_message_ref
+        assert message_ref is not None
         member_id = bound.context.speaker_member_id
         assert member_id is not None
+        context = bound.authorization_context
+        assert context is not None
         return AuthorizationRequest(
             workspace_id=self.turn.workspace_id,
             conversation_id=self.turn.conversation_id,
@@ -3989,25 +4389,47 @@ class TurnEngine:
             agent_name=self.agent.name,
             member_id=member_id,
             dispatch_key=bound.effective.dispatch_key(self.turn.id),
-            message_ref=bound.selected_message_ref,
+            message_ref=message_ref,
             message=bound.selected_message,
+            message_complete=bound.selected_message_complete,
+            context=context,
             effect=AuthorizationEffect(
                 call=bound.effective.call_id,
                 arguments=args.model_dump(mode="json"),
                 target=None if target is None else target.model_dump(mode="json"),
             ),
+            scope=scope,
+            binding=binding,
             selected_from_multiple=bound.selected_from_multiple,
+            answer=bound.authorization_answer,
         )
 
-    async def _authorize_context(self, context: ToolContext) -> ToolContext:
-        authority = context.authority
-        sandbox = self.sandbox if self.sandbox_for is None else await self.sandbox_for(authority)
+    async def _authorize_context(
+        self, context: ToolContext, call: str
+    ) -> tuple[ToolContext, SandboxAccess]:
+        connections = await context.connector_connection_ids()
         spawn, subagents = (
             (context.spawn, context.subagents)
             if self.subagents_for is None
-            else self.subagents_for(authority)
+            else self.subagents_for(connections)
         )
-        return replace(context, sandbox=sandbox, spawn=spawn, subagents=subagents)
+        sandbox_access = (
+            SandboxAccess(self.sandbox)
+            if self.sandbox_for is None
+            else await self.sandbox_for(connections, call)
+        )
+        try:
+            authorized = replace(
+                context,
+                sandbox=sandbox_access.sandbox,
+                spawn=spawn,
+                subagents=subagents,
+            )
+        except BaseException:
+            if sandbox_access.revoke is not None:
+                await sandbox_access.revoke()
+            raise
+        return authorized, sandbox_access
 
     async def _invoke_dispatch(
         self,
@@ -4015,13 +4437,21 @@ class TurnEngine:
         ready: _DispatchReady,
         find_usages: list[Usage],
     ) -> _HandlerOutput:
-        await self._enforce_authority_seat(ready.context.authority)
+        await self._enforce_requester_seat(ready.context.speaker_member_id)
         tool = ready.effective.tool
         key = ready.effective.dispatch_key(self.turn.id) if tool.side_effecting else None
         try:
+            ext = (
+                None
+                if ready.effective.ext is None
+                else replace(
+                    ready.effective.ext,
+                    member_context_member_id=ready.context.speaker_member_id,
+                )
+            )
             handler_context = replace(
                 ready.context,
-                ext=ready.effective.ext,
+                ext=ext,
                 idempotency_key=key,
                 target=ready.target,
             )

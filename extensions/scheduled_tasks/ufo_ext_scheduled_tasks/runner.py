@@ -11,7 +11,7 @@ failures raises their names. An archived app is neither a fire nor a failure: it
 its tasks keep the occurrence they hold and run again when it is restored.
 
 The fire body is composed here. It is a scheduled turn — `as_scheduled=True` gives it the meaning
-core keys every scheduled behaviour on (its own turn, never folded, seat-gated on the creator) —
+core keys every scheduled behaviour on (its own turn, never folded) —
 and its idempotency key is the task and the exact occurrence, so a redelivery across a deploy roll
 settles on the turn already admitted rather than firing twice."""
 
@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from ufo.sdk.authority import authority_from_member_id
 from ufo.sdk.context import AgentArchived, ExtensionContext, FiredBy, TurnRuntimeConfig
 from ufo.sdk.scheduled_fire import scheduled_fire_key
 from ufo_ext_scheduled_tasks.cron import next_fire
@@ -105,7 +104,6 @@ class ScheduledTaskRunner:
                 task.agent_id,
                 inbound,
                 key,
-                authority=authority_from_member_id(task.created_by_member_id),
                 as_scheduled=True,
                 fired_by=FiredBy(kind=SCHEDULED_TASK_KIND, name=task.name, title=task.name),
                 runtime_config=TurnRuntimeConfig(

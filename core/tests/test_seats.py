@@ -1,7 +1,7 @@
-"""Seat rules proven against the real schema: creation seats the member it
-writes, the last seated admin is irrevocable, member authority requires a live seat,
-the parked-resume sweep holds a revoked speaker's turn, and the migration seats every existing
-member and takes the seat bounds off the workspace."""
+"""Seat rules proven against the real schema: creation seats the member it writes, the last seated
+admin is irrevocable, speaker checks require live workspace members, the parked-resume sweep holds
+a revoked speaker's turn, and the migration seats every existing member and takes the seat bounds
+off the workspace."""
 
 import os
 from dataclasses import dataclass, field
@@ -17,7 +17,6 @@ from dbos import EnqueueOptions
 
 from ufo.db import MIGRATIONS_DIR, owner_tx, workspace_tx
 from ufo.host.ext.loader import migration_locations
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.hub import Parked
 from ufo.runtime.jobs import TurnDispatcher
 from ufo.runtime.seats import (
@@ -134,17 +133,17 @@ async def test_create_member_seats_every_member_it_writes(db: None) -> None:
         assert await _seated_at(member_id) is not None
 
 
-async def test_admits_only_a_seated_member_of_this_workspace(db: None) -> None:
+async def test_all_seated_requires_every_member_in_this_workspace(db: None) -> None:
     workspace_id = await _workspace()
     seated = await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
     unseated = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     elsewhere = await _member(await _workspace(), ADMIN_EMAIL)
     async with workspace_tx() as connection:
-        assert await Seats(workspace_id).admits(connection, WORKSPACE_AUTHORITY)
-        assert await Seats(workspace_id).admits(connection, MemberAuthority(seated))
-        assert not await Seats(workspace_id).admits(connection, MemberAuthority(unseated))
-        assert not await Seats(workspace_id).admits(connection, MemberAuthority(elsewhere))
-        assert not await Seats(workspace_id).admits(connection, MemberAuthority(uuid4()))
+        assert await Seats(workspace_id).all_seated(connection, ())
+        assert await Seats(workspace_id).all_seated(connection, (seated,))
+        assert not await Seats(workspace_id).all_seated(connection, (seated, unseated))
+        assert not await Seats(workspace_id).all_seated(connection, (elsewhere,))
+        assert not await Seats(workspace_id).all_seated(connection, (uuid4(),))
 
 
 async def test_snapshot_orders_members_and_flags_admin(db: None) -> None:
@@ -173,7 +172,6 @@ async def _parked_turn(
     speaker_member_id: UUID | None,
     conversation_member_id: UUID | None = None,
     admission_source: str = INTERNAL_ADMISSION,
-    on_behalf_of_member_id: UUID | None = None,
 ) -> UUID:
     agent_id, conversation_id, turn_id = uuid4(), uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -214,7 +212,6 @@ async def _parked_turn(
                 status="parked",
                 inbound="hello",
                 speaker_member_id=speaker_member_id,
-                on_behalf_of_member_id=on_behalf_of_member_id,
                 admission_source=admission_source,
                 created_at=sa.func.now() - timedelta(hours=1),
                 updated_at=sa.func.now() - timedelta(hours=1),
@@ -339,23 +336,17 @@ def test_migration_seats_every_member_and_drops_the_seat_bounds(
     assert "included_seats" not in columns
 
 
-async def test_sweep_holds_a_scheduled_turn_for_an_unseated_creator(db: None) -> None:
+async def test_sweep_dispatches_a_scheduled_turn_without_binding_its_creator(db: None) -> None:
     workspace_id = await _workspace()
     await _member(workspace_id, ADMIN_EMAIL, offset_seconds=0)
-    member = await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
+    await _member(workspace_id, TEAMMATE_EMAIL, seated=False, offset_seconds=1)
     turn_id = await _parked_turn(
         workspace_id,
         None,
         conversation_member_id=None,
         admission_source=SCHEDULED_ADMISSION,
-        on_behalf_of_member_id=member,
     )
     dbos = _StubDbos()
-    with ws(workspace_id):
-        await TurnDispatcher(client=dbos).run()
-    assert dbos.enqueued == []
-    async with workspace_tx() as connection:
-        await Seats(workspace_id).grant(connection, TEAMMATE_EMAIL)
     with ws(workspace_id):
         await TurnDispatcher(client=dbos).run()
     assert dbos.enqueued == [str(turn_id)]

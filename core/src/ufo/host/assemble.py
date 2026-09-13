@@ -52,7 +52,6 @@ from ufo.host.tools.builtins import SPAWN_TOOL
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
 from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import Manifest
@@ -97,7 +96,6 @@ from ufo.runtime.tools.registry import ToolDef, ToolRegistry
 from ufo.runtime.tools.tasks import run_task
 from ufo.runtime.turns.audience import Audience
 from ufo.runtime.workspace import ws_current
-from ufo.schema.records import SCHEDULED_ADMISSION
 
 RUN_INPUT_TYPES: dict[str, type] = {
     "string": str,
@@ -136,14 +134,7 @@ class HostEnvironment:
         document: EnvironmentDocument | None = None
         if request.environment is not None:
             document = await load_environment_document(self._document_blob(), request.environment)
-        all_tools, tool_ext, verbs = self.tools(
-            audience=request.audience,
-            member_context_authority=(
-                turn.authority
-                if turn.admission_source == SCHEDULED_ADMISSION
-                else WORKSPACE_AUTHORITY
-            ),
-        )
+        all_tools, tool_ext, verbs = self.tools(audience=request.audience)
         withheld = await flags_reading_off(all_tools, verbs.actions)
         all_tools = tuple(tool for tool in all_tools if tool.flag not in withheld)
         hooks = self.hooks(audience=request.audience)
@@ -151,7 +142,7 @@ class HostEnvironment:
         materialize_member: SkillMaterializer = _without_workspace_skills
         if agent.use_workspace_skills:
             member_cards, materialize_member = await self.member_skills(agent_name=agent.name)
-        targets = await spawn_targets(request.subagents, turn.authority)
+        targets = await spawn_targets(request.subagents, request.audience)
         skills = request.skills.merged_with((spawn_catalog_skill(targets),)).with_member(
             member_cards, materialize_member
         )
@@ -251,7 +242,7 @@ class HostEnvironment:
         )
 
     def tools(
-        self, *, audience: Audience, member_context_authority: ExecutionAuthority
+        self, *, audience: Audience
     ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]:
         return turn_tools(
             self.manifests,
@@ -262,7 +253,6 @@ class HostEnvironment:
             public_base_url=self.public_base_url,
             home_surface=self.home_surface,
             artifact_token_secret=self.artifact_token_secret,
-            member_context_authority=member_context_authority,
             member_context_blob=self.blob,
             invoker=(
                 None if self.invoker_for is None else self.invoker_for(ws_current().workspace_id)

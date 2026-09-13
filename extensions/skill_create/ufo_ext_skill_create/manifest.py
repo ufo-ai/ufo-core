@@ -398,6 +398,7 @@ SKILL_SEARCH_TOOL = ToolDef(
     handler=skill_search,
     bound=ObjectBinding(kind=SKILL_KIND, binding="collection"),
     parallel_safe=True,
+    binds_member_authority=False,
 )
 
 

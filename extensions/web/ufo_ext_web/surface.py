@@ -53,7 +53,6 @@ from ufo_ext_ufo.surface import SURFACE_UFO
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import SHARED_AUDIENCE, audience_subjects, conversation_audience
-from ufo.sdk.authority import MemberAuthority
 from ufo.sdk.balance import read_headroom
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
@@ -1047,10 +1046,8 @@ class HomepageSeed:
     fourth identical attempt is not new information. Attempts are counted under their own prefix,
     which the candidate query does not count, so a workspace holding a half-tried agent stays due.
 
-    The turn rides on behalf of the agent's
-    owner — the earliest-seated admin for an ownerless row — because a deploy needs an acting
-    member, and it runs in that member's own room, the shape every on-behalf invocation takes, so
-    the authority it carries stays inside a room its member already reads. The homepage answers
+    The turn runs automatically in the agent owner's room, or the earliest-seated admin's room for
+    an ownerless row, so its result lands where one member already reads it. The homepage answers
     the agent's audience from birth: the frame gates a bound site on the agent's visibility, so a
     workspace-visible agent's homepage (main is born one) reaches every member at once, a private
     agent's reaches its owner and admins, and flipping the agent object's visibility is what
@@ -1109,7 +1106,7 @@ class HomepageSeed:
             return "bound"
         return None
 
-    async def _acting(self, agent: WorkspaceAgent) -> UUID | None:
+    async def _recipient(self, agent: WorkspaceAgent) -> UUID | None:
         if agent.owner_member_id is not None:
             return agent.owner_member_id
         return await self.ctx.earliest_seated_admin()
@@ -1117,19 +1114,19 @@ class HomepageSeed:
     async def _fire(
         self, agent: WorkspaceAgent, key: str, attempt_key: str, attempt: HomepageSeedAttempt
     ) -> None:
-        acting = await self._acting(agent)
-        if acting is None:
+        recipient = await self._recipient(agent)
+        if recipient is None:
             return
         conversation_id = await self.ctx.open_conversation(
-            agent.id, f"homepage/{agent.id}/{acting}", member_id=acting
+            agent.id, f"homepage/{agent.id}/{recipient}", member_id=recipient
         )
         turn_id = await self.ctx.invoke(
             conversation_id,
             agent.id,
             SEED_PROMPT,
             f"homepage-seed:{agent.id}:{self.bucket}",
-            authority=MemberAuthority(acting),
             as_scheduled=True,
+            runtime_config=TurnRuntimeConfig(connections=(), internet_access=False),
         )
         if turn_id is None:
             raise RuntimeError(f"homepage seed for agent {agent.id} answered no turn")
@@ -2007,7 +2004,7 @@ async def _admit_chat(
     target: _ChatTarget,
     inbound: _ChatInbound,
     member_id: UUID,
-    email: str,
+    context: TurnContext,
 ) -> Response:
     key = (
         None
@@ -2024,9 +2021,7 @@ async def _admit_chat(
     admitted = await ctx.admit(
         target.conversation_id,
         inbound.body,
-        context=_turn_context(
-            email, request, _chat_source(ctx.public_base_url, target.conversation_id, email)
-        ),
+        context=context,
         idempotency_key=key,
         speaker_member_id=member_id,
         comment=target.comment,
@@ -2084,14 +2079,36 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
         return target
     if inbound.stop is not None:
         return await _stop_chat(ctx, request, target.conversation_id, inbound.stop)
-    if inbound.answer is not None and not await ctx.question_answerable_by(
-        target.conversation_id,
-        inbound.answer[0],
-        inbound.answer[1],
-        member_id,
-    ):
-        return Response("This question is not available to you.", status_code=403)
-    return await _admit_chat(ctx, request, target, inbound, member_id, email)
+    context = _turn_context(
+        email, request, _chat_source(ctx.public_base_url, target.conversation_id, email)
+    )
+    if inbound.answer is not None:
+        answer_turn, answer_index = inbound.answer
+        question = await ctx.answerable_question(
+            target.conversation_id,
+            answer_turn,
+            answer_index,
+            member_id,
+        )
+        if question is None:
+            return Response("This question is not available to you.", status_code=403)
+        if question.authorization_id is not None:
+            if inbound.uploads or inbound.presigned_keys:
+                return Response("An authorization answer cannot include files.", status_code=400)
+            selected = tuple(
+                option
+                for option in question.questions[answer_index].options or ()
+                if option.label == inbound.text.strip()
+            )
+            if len(selected) != 1 or selected[0].authorization_choice is None:
+                return Response("This authorization choice is not available.", status_code=400)
+            context = context.model_copy(
+                update={
+                    "authorization_id": question.authorization_id,
+                    "authorization_choice": selected[0].authorization_choice,
+                }
+            )
+    return await _admit_chat(ctx, request, target, inbound, member_id, context)
 
 
 def _rendered_text(message: Message) -> str:
@@ -2554,7 +2571,10 @@ class _Asks:
 
 
 def _asks(
-    conversation_id: UUID, turns: tuple[Turn, ...], admitted: tuple[KeyedAdmission, ...]
+    conversation_id: UUID,
+    turns: tuple[Turn, ...],
+    admitted: tuple[KeyedAdmission, ...],
+    viewer: UUID,
 ) -> _Asks:
     """Every question the conversation's turns asked, with the answers that landed against each of
     them. An answer is recognized by the key it admitted under — `_answer_key` names the turn that
@@ -2566,7 +2586,7 @@ def _asks(
     stated: set[str] = set()
     for turn in turns:
         question = None if turn.terminal is None else turn.terminal.question
-        if question is None:
+        if question is None or question.target_member_id not in (None, viewer):
             continue
         answered: dict[str, str] = {}
         refs: list[str] = []
@@ -2576,7 +2596,7 @@ def _asks(
                 continue
             answered[str(index)] = member_message_text(row.inbound)
             refs.append(str(row.ref))
-        if turn.id != newest and not answered:
+        if turn.id != newest and not answered and question.target_member_id is None:
             continue
         card: dict[str, object] = {"turn_id": str(turn.id), **question.model_dump(mode="json")}
         if turn.id != newest:
@@ -2701,7 +2721,7 @@ async def _transcript_aids(
             for turn in turns
             if turn.context is not None and turn.context.question is not None
         },
-        asks=_asks(conversation_id, turns, admitted),
+        asks=_asks(conversation_id, turns, admitted, viewer),
         spoken_at={str(turn.id): turn.created_at.isoformat() for turn in turns},
         answered_at={
             str(turn.id): (turn.updated_at or turn.created_at).isoformat() for turn in turns
@@ -4780,11 +4800,7 @@ async def _member_turn(
     detail = await ctx.turn_detail(turn_id)
     if detail is None:
         return absent
-    owner = (
-        detail.turn.speaker_member_id
-        or detail.turn.on_behalf_of_member_id
-        or await ctx.turn_owner(turn_id)
-    )
+    owner = detail.turn.speaker_member_id or await ctx.turn_owner(turn_id)
     agent_visible = audience.allows(detail.turn.agent_id)
     conversation = (
         await _member_chat(
@@ -4973,6 +4989,9 @@ async def _events(
                     )
                     if apps:
                         yield _event("apps", {"apps": apps[str(turn_id)]})
+                question = frame.frame.question
+                if question is not None and question.target_member_id not in (None, member_id):
+                    frame = Terminal(frame=frame.frame.model_copy(update={"question": None}))
             yield _sse(cursor, frame)
 
 

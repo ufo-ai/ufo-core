@@ -36,7 +36,6 @@ from ufo.runtime.access.egress_resolver import PerAgentRules
 from ufo.runtime.access.egress_rules import InternetRule, ServiceRule
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.ext.context import TurnInvoker
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_HOST
@@ -162,7 +161,7 @@ async def test_a_signed_report_founds_a_turn_in_the_conversation_it_names(
     fire into another one. The turn is standalone so its narrower authority cannot fold into a
     broader live turn."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
-    workspace_id, agent_id, conversation_id, creator_member_id = await seed_conversation()
+    workspace_id, agent_id, conversation_id, _creator_member_id = await seed_conversation()
     invoker = RecordingInvoker()
 
     posted = await _post(
@@ -177,7 +176,6 @@ async def test_a_signed_report_founds_a_turn_in_the_conversation_it_names(
     assert invoker.turns[0].runtime_config == TurnRuntimeConfig(
         connections=(), internet_access=False
     )
-    assert invoker.turns[0].authority == MemberAuthority(creator_member_id)
 
 
 @pytest.mark.parametrize("kind", [INGRESS_VIEW_KIND, INGRESS_SESSION_KIND])
@@ -327,21 +325,15 @@ async def test_a_report_persists_a_turn_that_reaches_no_ambient_egress(
     async with workspace_tx() as connection:
         turns = (
             await connection.execute(
-                sa.select(
-                    tables.turn.c.id,
-                    tables.turn.c.on_behalf_of_member_id,
-                    tables.turn.c.runtime_config,
-                )
+                sa.select(tables.turn.c.id, tables.turn.c.runtime_config)
                 .where(tables.turn.c.conversation_id == conversation_id)
                 .order_by(tables.turn.c.seq)
             )
         ).all()
         assert len(turns) == 2
         assert turns[0].id == ambient_turn_id
-        assert turns[0].on_behalf_of_member_id is None
         assert turns[0].runtime_config is None
         turn = turns[1]
-        assert turn.on_behalf_of_member_id == member_id
         await connection.execute(
             sa.update(tables.turn)
             .where(tables.turn.c.id == ambient_turn_id)
@@ -354,6 +346,6 @@ async def test_a_report_persists_a_turn_that_reaches_no_ambient_egress(
         connections=(), internet_access=False
     )
     rules = await PerAgentRules(base=(), grants=GrantStore(), internet=(InternetRule(),)).resolve(
-        RunToken(workspace_id, turn.id, MemberAuthority(member_id))
+        RunToken(workspace_id, turn.id)
     )
     assert rules == (ServiceRule(host=TOOL_BRIDGE_HOST),)

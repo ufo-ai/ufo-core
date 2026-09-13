@@ -183,6 +183,7 @@ def manifest() -> Manifest:
                 input_model=UpdateTodoListInput,
                 handler=update_todo_list,
                 side_effecting=True,
+                binds_member_authority=False,
             ),
             ToolDef(
                 name=UPDATE_TODO_STATUS_TOOL,
@@ -190,6 +191,7 @@ def manifest() -> Manifest:
                 input_model=UpdateTodoStatusInput,
                 handler=update_todo_status,
                 side_effecting=True,
+                binds_member_authority=False,
             ),
         ),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),

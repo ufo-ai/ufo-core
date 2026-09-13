@@ -1,7 +1,6 @@
 """Connection and connector-grant objects through the real object verbs."""
 
 import json
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -1587,10 +1586,10 @@ async def test_portal_reads_hide_other_members_private_connectors(db: None) -> N
             assert opened.detail.spec.provider == "gmail"
 
 
-async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
-    """Resharing (disclosure) and revoking (destructive) a connector are grant acts: a speakerless
-    scheduled/subagent turn acting on behalf of the grantor cannot perform them, even though it may
-    USE the grantor's private connections. Granting stays speaker-only (RFC 0012)."""
+async def test_sharing_changes_and_revoke_need_a_live_speaker(db: None) -> None:
+    """Changing sharing and revoking a connector are grant acts: a speakerless
+    scheduled/subagent turn cannot perform them, even when its exact capabilities admit the
+    grantor's private connections. Granting stays speaker-only (RFC 0012)."""
     workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
     apply_tool = _object_tool("object_apply")
     delete_tool = _object_tool("object_delete")
@@ -1598,18 +1597,20 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
         await _grant(
             workspace_id, agent_id, conversation_id, grantor_id, "gmail", "alice@example.com"
         )
-        speakerless = replace(
-            _tool_context(workspace_id, agent_id),
-            turn=_tool_context(workspace_id, agent_id).turn.model_copy(
-                update={"on_behalf_of_member_id": grantor_id}
-            ),
-        )
+        (grant,) = await grant_summaries()
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.connection)
+                .where(tables.connection.c.id == grant.connection_id)
+                .values(shared=True)
+            )
+        speakerless = _tool_context(workspace_id, agent_id, connections=(grant.connection_id,))
         with pytest.raises(SpeakerRequired):
             await apply_tool.handler(
                 speakerless,
                 apply_tool.input_model.model_validate(
                     {
-                        "manifest": _share_manifest("alice@example.com", True),
+                        "manifest": _share_manifest("alice@example.com", False),
                     }
                 ),
             )
@@ -1625,7 +1626,7 @@ async def test_reshare_and_revoke_need_a_live_speaker(db: None) -> None:
             )
         summaries = await grant_summaries()
     assert len(summaries) == 1
-    assert summaries[0].shared is False
+    assert summaries[0].shared is True
 
 
 async def test_the_workspaces_own_connection_is_not_deleted_here(db: None) -> None:

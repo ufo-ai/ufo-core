@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,14 +16,18 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 import ufo.runtime.subagents as subagents_module
+from ufo.blob import WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
 from ufo.harness.durability import replay_safe_client
-from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, OPENAI_KEY_SLOT
+from ufo.harness.models.interface import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
 from ufo.harness.o11y import current_traceparent
+from ufo.harness.sandbox.session import Sandbox
 from ufo.host.tools.builtins import BUILTIN_TOOLS, SPAWN_BACKGROUND_DIRECTIVE, _spawn_handles
 from ufo.runtime.access.credentials import CredentialStore, member_slot
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
+from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.agent_scope import agent as bind_agent
 from ufo.runtime.billing.balance import BalanceExhausted, credit, set_reserve
 from ufo.runtime.ext.manifest import SubagentProfile
 from ufo.runtime.ext.surface import conversation_name
@@ -47,6 +51,7 @@ from ufo.runtime.tools.context import (
     SpawnModelRejected,
     SpawnNeedsOwnModelKey,
     SpawnPayloadRejected,
+    ToolContext,
     UnknownSpawnTarget,
     UnknownSubagentProfile,
     UntrustedContentError,
@@ -62,8 +67,10 @@ from ufo.runtime.turns.delivery_register import DELIVERY_REGISTER_BLOCK, SUBAGEN
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import (
+    Agent,
     AskQuestion,
     AskUserInput,
+    ModelAccountCapability,
     TerminalFrame,
     Turn,
     TurnRuntimeConfig,
@@ -336,7 +343,6 @@ async def _running_child(
     workspace_id: UUID,
     agent_id: UUID,
     parent_id: UUID,
-    on_behalf_of_member_id: UUID | None = None,
     runtime_config: TurnRuntimeConfig | None = None,
 ) -> tuple[UUID, UUID]:
     conversation_id = uuid4()
@@ -365,7 +371,6 @@ async def _running_child(
                 inbound="do the task",
                 terminal=None,
                 parent_turn_id=parent_id,
-                on_behalf_of_member_id=on_behalf_of_member_id,
                 subagent_profile=GENERAL_PURPOSE,
                 runtime_config=(
                     None if runtime_config is None else runtime_config.model_dump(mode="json")
@@ -393,7 +398,6 @@ def _messaging(
         client=client,
         registry=SubagentRegistry(CORE_SUBAGENT_PROFILES),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(parent.speaker_member_id),
         invoker=_invoker(client, parent.workspace_id, hub),
     )
@@ -473,7 +477,6 @@ async def test_message_to_a_running_child_folds_into_its_live_turn(
         workspace_id,
         agent_id,
         parent.id,
-        on_behalf_of_member_id=member_id,
         runtime_config=runtime_config,
     )
     client = _RecordingClient()
@@ -566,7 +569,6 @@ async def test_message_refuses_a_turn_this_parent_did_not_spawn(
         client=_RecordingClient(),
         registry=SubagentRegistry(()),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(ValueError, match="not a spawn of this conversation"):
@@ -588,7 +590,6 @@ async def test_message_refuses_a_followup_whose_profile_is_no_longer_registered(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(UnknownSubagentProfile) as caught:
@@ -626,7 +627,6 @@ async def test_a_child_that_dies_in_setup_ends_its_foreground_parents_wait(
         client=_RecordingClient(workflow_finished=workflow_finished),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn(
@@ -831,9 +831,7 @@ async def test_spawn_inherits_a_private_audience_from_a_speakerless_parent(
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
     member_id = uuid4()
-    parent = (await _parent(workspace_id, agent_id)).model_copy(
-        update={"on_behalf_of_member_id": member_id}
-    )
+    parent = await _parent(workspace_id, agent_id)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.member).values(
@@ -856,13 +854,11 @@ async def test_spawn_inherits_a_private_audience_from_a_speakerless_parent(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(member_id),
     ).spawn("research", {"task": "acme"}, background=True)
 
     child, _, child_audience = await _load_turn(spawned.turn_id)
     assert child.speaker_member_id is None
-    assert child.on_behalf_of_member_id == member_id
 
     assert child_audience == conversation_audience(member_id)
     async with workspace_tx() as connection:
@@ -876,7 +872,7 @@ async def test_spawn_inherits_a_private_audience_from_a_speakerless_parent(
     assert child_member_id == member_id
 
 
-async def test_message_bound_spawn_keeps_shared_audience_and_member_authority(
+async def test_profile_spawn_has_no_durable_requester_identity(
     db: None, dbos_launched: Config
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
@@ -906,47 +902,43 @@ async def test_message_bound_spawn_keeps_shared_audience_and_member_authority(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
 
-    spawned = await common.authorize(MemberAuthority(requester)).spawn(
-        "research", {"task": "acme"}, background=True, dedup_key="acme"
+    spawned = await common.spawn(
+        "research",
+        {"task": "acme"},
+        background=True,
+        dedup_key="acme",
+        requester_member_id=requester,
     )
     child, _, child_audience = await _load_turn(spawned.turn_id)
     assert child_audience == conversation_audience(None)
     assert child.speaker_member_id is None
-    assert child.on_behalf_of_member_id == requester
+    replay = await common.spawn(
+        "research",
+        {"task": "acme"},
+        background=True,
+        dedup_key="acme",
+        requester_member_id=other,
+    )
+    assert replay.turn_id == spawned.turn_id
 
-    with pytest.raises(ValueError, match="belongs to another member request"):
-        await common.authorize(MemberAuthority(other)).spawn(
-            "research", {"task": "acme"}, background=True, dedup_key="acme"
-        )
-    with pytest.raises(ValueError, match="not a spawn of this conversation"):
-        await common.authorize(MemberAuthority(other)).cancel(spawned.turn_id)
 
-
-async def test_an_unattributed_call_spawns_under_the_founding_speaker(
+async def test_an_unattributed_call_cannot_spawn_the_founders_private_agent(
     db: None, dbos_launched: Config
 ) -> None:
-    """A call that names no requester carries workspace authority, but the spawn it makes is still
-    the speaker's: their own agent admits it and the child is stamped for them, so the catalog that
-    offered the target and the gate that admits it read the same member."""
     workspace_id, agent_id = await _workspace_agent()
     speaker = await _seeded_member(workspace_id)
-    specialist_id = await _specialist(workspace_id, name="private-triage", owner_member_id=speaker)
+    await _specialist(workspace_id, name="private-triage", owner_member_id=speaker)
     parent = (await _parent(workspace_id, agent_id)).model_copy(
         update={"speaker_member_id": speaker}
     )
 
-    spawned = await (
-        _spawner(workspace_id, parent, "research").authorize(WORKSPACE_AUTHORITY)
-    ).spawn("private-triage", {"task": "acme"}, background=True, dedup_key="unattributed")
-
-    child, _, _ = await _load_turn(spawned.turn_id)
-    assert child.agent_id == specialist_id
-    assert child.speaker_member_id is None
-    assert child.on_behalf_of_member_id == speaker
+    with pytest.raises(ValueError, match="not yours to spawn"):
+        await _spawner(workspace_id, parent, "research").spawn(
+            "private-triage", {"task": "acme"}, background=True, dedup_key="unattributed"
+        )
 
 
 @pytest.mark.parametrize(
@@ -962,7 +954,6 @@ async def test_subagent_inherits_room_audience(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=audience,
     )
 
@@ -1008,9 +999,8 @@ async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_res
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(speaker),
-    ).authorize(MemberAuthority(speaker))
+    )
 
     first = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
     loaded, _, child_audience = await _load_turn(first.turn_id)
@@ -1044,17 +1034,12 @@ async def test_spawn_with_a_dedup_key_reconnects_to_a_finished_child_without_res
     async with workspace_tx() as connection:
         child = (
             await connection.execute(
-                sa.select(
-                    tables.turn.c.speaker_member_id,
-                    tables.turn.c.on_behalf_of_member_id,
-                    sa.func.count().label("count"),
-                )
+                sa.select(tables.turn.c.speaker_member_id, sa.func.count().label("count"))
                 .where(tables.turn.c.parent_turn_id == parent.id)
-                .group_by(tables.turn.c.speaker_member_id, tables.turn.c.on_behalf_of_member_id)
+                .group_by(tables.turn.c.speaker_member_id)
             )
         ).one()
     assert child.speaker_member_id is None
-    assert child.on_behalf_of_member_id == speaker
     assert child.count == 1
 
 
@@ -1069,7 +1054,6 @@ async def test_spawn_distinct_dedup_keys_admit_distinct_children(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     a = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="a")
@@ -1095,7 +1079,6 @@ async def test_spawn_enqueue_failure_leaves_the_child_in_the_outbox(
         client=_FailingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     ).spawn("research", {"task": "acme"}, background=True)
     async with workspace_tx() as connection:
@@ -1119,7 +1102,6 @@ async def test_spawn_without_a_dedup_key_mints_a_fresh_child_each_call(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     first = await subagents.spawn("research", {"task": "x"}, background=True)
@@ -1153,7 +1135,6 @@ async def test_spawn_stamps_the_spawning_spans_traceparent_on_the_child_turn(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with trace.use_span(_spawning_span()):
@@ -1183,7 +1164,6 @@ async def test_spawn_model_pins_the_child_turn_under_an_unpinned_tree(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
         models=("claude-opus-4-8", "gpt-5.6-sol"),
     )
@@ -1216,7 +1196,6 @@ async def test_spawn_cannot_move_a_pinned_turn_tree_onto_another_model(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
         models=("claude-opus-4-8", "gpt-5.6-sol"),
     )
@@ -1241,7 +1220,6 @@ async def test_spawn_refuses_a_model_the_registry_does_not_serve(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
         models=("claude-opus-4-8",),
     )
@@ -1267,7 +1245,6 @@ async def test_spawn_refuses_a_model_pin_on_a_target_that_runs_on_the_members_ac
         client=client,
         registry=SubagentRegistry((replace(_profile("coding"), needs_own_model_key=True),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
         models=("claude-opus-4-8",),
     )
@@ -1321,7 +1298,6 @@ async def test_wait_reports_every_already_finished_childs_status(
         client=client,
         registry=SubagentRegistry(()),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     statuses = await subagents.wait((first, second))
@@ -1351,7 +1327,6 @@ async def test_spawn_and_wait_carry_the_profiles_untrusted_output_declaration(
         client=_RecordingClient(),
         registry=registry,
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
 
@@ -1409,7 +1384,6 @@ async def test_result_returns_the_exact_child_terminal(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("review"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("review", {"task": "acme"}, background=True, dedup_key="review")
@@ -1454,7 +1428,6 @@ async def test_untrusted_profile_validation_failure_raises_a_walled_error(
         client=_RecordingClient(),
         registry=registry,
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     for profile, expected in (("webby", UntrustedContentError), ("plain", ValidationError)):
@@ -1486,7 +1459,6 @@ async def test_spawn_raises_loud_on_a_prose_terminal(db: None, dbos_launched: Co
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("plain"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     text = "I could not complete this task in full, so here is what I found instead."
@@ -1514,7 +1486,6 @@ async def test_spawn_surfaces_a_failed_childs_diagnostic(db: None, dbos_launched
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="boom")
@@ -1560,7 +1531,6 @@ async def test_wait_refuses_a_turn_this_parent_did_not_spawn(
         client=client,
         registry=SubagentRegistry(()),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(ValueError, match="not a spawn of this conversation"):
@@ -1588,7 +1558,6 @@ async def test_cancel_cancels_the_childs_workflow_and_commits_its_terminal(db: N
         client=client,
         registry=SubagentRegistry(()),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     status = await subagents.cancel(child)
@@ -1605,7 +1574,6 @@ async def test_cancel_refuses_a_turn_this_parent_did_not_spawn(db: None) -> None
         client=_RecordingClient(),
         registry=SubagentRegistry(()),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(ValueError, match="not a spawn of this conversation"):
@@ -1613,7 +1581,12 @@ async def test_cancel_refuses_a_turn_this_parent_did_not_spawn(db: None) -> None
     assert await _turn_status(stranger) == "running"
 
 
-async def _parent_turn(workspace_id: UUID, agent_id: UUID, status: str) -> Turn:
+async def _parent_turn(
+    workspace_id: UUID,
+    agent_id: UUID,
+    status: str,
+    runtime_config: TurnRuntimeConfig | None = None,
+) -> Turn:
     conversation_id, turn_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1642,6 +1615,9 @@ async def _parent_turn(workspace_id: UUID, agent_id: UUID, status: str) -> Turn:
                     if status != "done"
                     else TerminalFrame(status="done", text="parent done").model_dump(mode="json")
                 ),
+                runtime_config=(
+                    None if runtime_config is None else runtime_config.model_dump(mode="json")
+                ),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1662,6 +1638,7 @@ async def _delivered_child(
     profile: str,
     registry: SubagentRegistry,
     runtime_config: TurnRuntimeConfig | None = None,
+    model_accounts: tuple[ModelAccountCapability, ...] = (),
 ) -> UUID:
     child_id, conversation_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -1693,6 +1670,7 @@ async def _delivered_child(
                 runtime_config=(
                     None if runtime_config is None else runtime_config.model_dump(mode="json")
                 ),
+                model_accounts=[account.model_dump(mode="json") for account in model_accounts],
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1755,20 +1733,28 @@ async def test_a_finished_child_delivers_validated_output_as_the_parents_next_tu
     assert await _arrival_bodies(parent.conversation_id) == []
 
 
-async def test_a_delivery_leaves_the_parents_own_runtime_config_on_its_next_turn(
+async def test_a_delivery_returns_connection_scope_without_child_model_capabilities(
     db: None,
 ) -> None:
-    """A child pinned to its own model delivers onto a parent whose turn has ended, so the arrival
-    founds the parent's next turn. That turn runs the parent's own config: the child's pin is the
-    caller's choice for the child alone, and carrying it here would run the parent — and any member
-    message folding into it — on a model nobody selected for the parent."""
     workspace_id, agent_id = await _workspace_agent()
     parent = await _parent_turn(workspace_id, agent_id, "done")
-    parent_config = TurnRuntimeConfig(internet_access=False)
+    parent_account = ModelAccountCapability(
+        provider=PROVIDER_ANTHROPIC,
+        slot=member_slot(ANTHROPIC_KEY_SLOT, uuid4()),
+    )
+    parent_environment = "sha256:" + "0" * 64
+    parent_config = TurnRuntimeConfig(
+        internet_access=False,
+        environment=parent_environment,
+    )
+    child_connection = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
-            .values(runtime_config=parent_config.model_dump(mode="json"))
+            .values(
+                runtime_config=parent_config.model_dump(mode="json"),
+                model_accounts=[parent_account.model_dump(mode="json")],
+            )
             .where(tables.turn.c.id == parent.id)
         )
     await _delivered_child(
@@ -1778,20 +1764,38 @@ async def test_a_delivery_leaves_the_parents_own_runtime_config_on_its_next_turn
         TerminalFrame(status="done", text='{"finding": "acme ships"}'),
         "plain",
         SubagentRegistry((_profile("plain"),)),
-        runtime_config=TurnRuntimeConfig(model="gpt-5.6-sol", internet_access=False),
+        runtime_config=TurnRuntimeConfig(
+            model="gpt-5.6-sol",
+            environment="sha256:" + "1" * 64,
+            connections=(child_connection,),
+        ),
+        model_accounts=(
+            ModelAccountCapability(
+                provider=PROVIDER_ANTHROPIC,
+                slot=member_slot(ANTHROPIC_KEY_SLOT, uuid4()),
+            ),
+        ),
     )
 
     async with workspace_tx() as connection:
         rows = (
             await connection.execute(
-                sa.select(tables.turn.c.runtime_config)
+                sa.select(tables.turn.c.runtime_config, tables.turn.c.model_accounts)
                 .where(tables.turn.c.conversation_id == parent.conversation_id)
                 .order_by(tables.turn.c.seq)
             )
         ).all()
     assert [row.runtime_config for row in rows] == [
         parent_config.model_dump(mode="json"),
-        parent_config.model_dump(mode="json"),
+        TurnRuntimeConfig(
+            internet_access=False,
+            environment=parent_environment,
+            connections=(child_connection,),
+        ).model_dump(mode="json"),
+    ]
+    assert [row.model_accounts for row in rows] == [
+        [parent_account.model_dump(mode="json")],
+        [parent_account.model_dump(mode="json")],
     ]
 
 
@@ -1812,6 +1816,56 @@ async def test_a_finished_child_folds_into_the_parents_live_turn_as_an_arrival(d
     assert [seq for seq, _ in await _conversation_turns(parent.conversation_id)] == [1]
     (arrival,) = await _arrival_bodies(parent.conversation_id)
     assert '{"finding":"acme ships"}' in arrival
+
+
+async def test_a_finished_child_cannot_spend_a_live_siblings_private_connection(db: None) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    child_config = TurnRuntimeConfig(connections=(uuid4(),))
+    live_config = TurnRuntimeConfig(connections=(uuid4(),))
+    parent = await _parent_turn(
+        workspace_id,
+        agent_id,
+        "done",
+        runtime_config=child_config,
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=parent.conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound="automatic work under another member's account",
+                runtime_config=live_config.model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _delivered_child(
+        workspace_id,
+        agent_id,
+        parent,
+        TerminalFrame(status="done", text='{"finding": "acme ships"}'),
+        "plain",
+        SubagentRegistry((_profile("plain"),)),
+        runtime_config=child_config,
+    )
+
+    assert [seq for seq, _ in await _conversation_turns(parent.conversation_id)] == [1, 2, 3]
+    assert await _arrival_bodies(parent.conversation_id) == []
+    async with workspace_tx() as connection:
+        queued = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.runtime_config).where(
+                    tables.turn.c.conversation_id == parent.conversation_id,
+                    tables.turn.c.seq == 3,
+                )
+            )
+        ).one()
+    assert queued.status == "queued"
+    assert TurnRuntimeConfig.model_validate(queued.runtime_config) == child_config
 
 
 async def test_a_failed_child_delivers_its_diagnostic_rather_than_an_answer(db: None) -> None:
@@ -1904,10 +1958,7 @@ async def test_delivery_is_keyed_on_the_child_so_a_replay_posts_one_arrival(db: 
     assert await _arrival_bodies(parent.conversation_id) == []
 
 
-async def test_the_woken_turn_holds_the_authority_its_child_carried(db: None) -> None:
-    """A child runs on behalf of the member who delegated it, and the turn woken to read its result
-    must be able to do what that turn could. Dropped, the shortfall surfaces much later as a
-    refusal on some member-scoped read, nowhere near the delegation that caused it."""
+async def test_the_woken_turn_has_no_speaker(db: None) -> None:
     workspace_id, agent_id = await _workspace_agent()
     member_id = uuid4()
     async with workspace_tx() as connection:
@@ -1950,7 +2001,6 @@ async def test_the_woken_turn_holds_the_authority_its_child_carried(db: None) ->
                 ),
                 parent_turn_id=parent.id,
                 result_delivery="pending",
-                on_behalf_of_member_id=member_id,
                 subagent_profile="plain",
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -1961,13 +2011,13 @@ async def test_the_woken_turn_holds_the_authority_its_child_carried(db: None) ->
     async with workspace_tx() as connection:
         woken = (
             await connection.execute(
-                sa.select(tables.turn.c.on_behalf_of_member_id).where(
+                sa.select(tables.turn.c.speaker_member_id).where(
                     tables.turn.c.conversation_id == parent.conversation_id,
                     tables.turn.c.seq == 2,
                 )
             )
         ).scalar_one()
-    assert woken == member_id
+    assert woken is None
 
 
 async def test_a_turn_that_is_nobodys_child_delivers_nothing(db: None) -> None:
@@ -2007,7 +2057,6 @@ async def test_the_woken_turn_can_address_the_child_that_woke_it(db: None) -> No
         client=_RecordingClient(),
         registry=registry,
         parent=woken,
-        authority=woken.authority,
         audience=conversation_audience(None),
     )
     assert await from_woken._require_child(child_id) == "plain"
@@ -2017,7 +2066,6 @@ async def test_the_woken_turn_can_address_the_child_that_woke_it(db: None) -> No
         client=_RecordingClient(),
         registry=registry,
         parent=stranger,
-        authority=stranger.authority,
         audience=conversation_audience(None),
     )
     with pytest.raises(ValueError, match="not a spawn of this conversation"):
@@ -2141,7 +2189,6 @@ async def test_a_spawned_run_is_called_the_words_it_was_spawned_with(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=SHARED_AUDIENCE,
     ).spawn("research", {"task": "chase the warehouse rollout"}, background=True)
 
@@ -2165,6 +2212,7 @@ async def _specialist(
     input_schema: dict[str, object] | None = None,
     output_schema: dict[str, object] | None = None,
     owner_member_id: UUID | None = None,
+    visibility: str | None = None,
 ) -> UUID:
     specialist_id = uuid4()
     async with workspace_tx() as connection:
@@ -2178,6 +2226,8 @@ async def _specialist(
                 input_schema=input_schema,
                 output_schema=output_schema,
                 owner_member_id=owner_member_id,
+                visibility=visibility
+                or ("private" if owner_member_id is not None else "workspace"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -2206,7 +2256,6 @@ def _spawner(workspace_id: UUID, parent: Turn, *profiles: str) -> Subagents:
         client=_RecordingClient(),
         registry=SubagentRegistry(tuple(_profile(name) for name in profiles)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
 
@@ -2222,7 +2271,10 @@ async def test_spawn_agent_target_runs_as_that_agent_in_its_own_sandbox(
     )
 
     spawned = await _spawner(workspace_id, parent, "research").spawn(
-        "support", {"task": "triage the outage"}, dedup_key="triage"
+        "support",
+        {"task": "triage the outage"},
+        dedup_key="triage",
+        requester_member_id=member,
     )
     assert spawned.output is None
     assert spawned.terminal is None
@@ -2244,6 +2296,23 @@ async def test_spawn_agent_target_runs_as_that_agent_in_its_own_sandbox(
         ).one()
     assert conversation.agent_id == specialist_id
     assert conversation.sandbox_conversation_id is None
+
+
+async def test_workspace_agent_spawn_needs_no_requester(db: None, dbos_launched: Config) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    owner = await _seeded_member(workspace_id)
+    specialist_id = await _specialist(
+        workspace_id,
+        owner_member_id=owner,
+        visibility="workspace",
+    )
+    spawned = await _spawner(workspace_id, await _parent(workspace_id, agent_id), "research").spawn(
+        "support", {"task": "triage the outage"}, background=True
+    )
+
+    child, _, _ = await _load_turn(spawned.turn_id)
+    assert child.agent_id == specialist_id
+    assert child.speaker_member_id is None
 
 
 async def test_spawn_refuses_an_archived_agent_target(db: None) -> None:
@@ -2316,7 +2385,11 @@ async def test_qualified_targets_resolve_past_a_shadowed_name(
         "profile:research", {"task": "acme"}, background=True, dedup_key="p"
     )
     as_agent = await spawner.spawn(
-        "agent:research", {"task": "acme"}, background=True, dedup_key="a"
+        "agent:research",
+        {"task": "acme"},
+        background=True,
+        dedup_key="a",
+        requester_member_id=member,
     )
 
     profile_child, _, _ = await _load_turn(as_profile.turn_id)
@@ -2338,7 +2411,7 @@ async def test_unknown_target_names_both_namespaces(db: None) -> None:
     assert "assistant" in message
     assert "research" in message
     assert "support" in message
-    assert "parent" in message
+    assert "parent" not in message
 
 
 async def test_spawn_refuses_another_members_agent(db: None, dbos_launched: Config) -> None:
@@ -2359,27 +2432,28 @@ async def test_spawn_refuses_another_members_agent(db: None, dbos_launched: Conf
             ],
         )
     await _specialist(workspace_id, name="private-triage", owner_member_id=owner)
-    parent = (await _parent(workspace_id, agent_id)).model_copy(
-        update={"on_behalf_of_member_id": spawner_member}
-    )
+    parent = await _parent(workspace_id, agent_id)
     spawner = _spawner(workspace_id, parent, "research")
 
     with pytest.raises(ValueError, match="not yours to spawn"):
-        await spawner.spawn("private-triage", {"task": "acme"})
+        await spawner.spawn("private-triage", {"task": "acme"}, requester_member_id=spawner_member)
 
     owned = _spawner(
         workspace_id,
-        (await _parent(workspace_id, agent_id)).model_copy(
-            update={"on_behalf_of_member_id": owner}
-        ),
+        await _parent(workspace_id, agent_id),
         "research",
     )
-    spawned = await owned.spawn("private-triage", {"task": "acme"}, dedup_key="own")
+    spawned = await owned.spawn(
+        "private-triage",
+        {"task": "acme"},
+        dedup_key="own",
+        requester_member_id=owner,
+    )
     child, _, _ = await _load_turn(spawned.turn_id)
-    assert child.on_behalf_of_member_id == owner
+    assert child.speaker_member_id is None
 
 
-async def test_agent_spawn_rechecks_admin_authority_inside_child_admission(
+async def test_agent_spawn_rechecks_admin_access_inside_child_admission(
     db: None,
     dbos_launched: Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -2404,7 +2478,11 @@ async def test_agent_spawn_rechecks_admin_authority_inside_child_admission(
 
     with pytest.raises(ValueError, match="not yours to spawn"):
         await _spawner(workspace_id, parent, "research").spawn(
-            "private-triage", {"task": "acme"}, background=True, dedup_key="demoted"
+            "private-triage",
+            {"task": "acme"},
+            background=True,
+            dedup_key="demoted",
+            requester_member_id=admin,
         )
 
     async with workspace_tx() as connection:
@@ -2445,7 +2523,11 @@ async def test_agent_spawn_rechecks_target_liveness_inside_child_admission(
 
     with pytest.raises(UnknownSpawnTarget):
         await _spawner(workspace_id, parent, "research").spawn(
-            "private-triage", {"task": "acme"}, background=True, dedup_key="archived"
+            "private-triage",
+            {"task": "acme"},
+            background=True,
+            dedup_key="archived",
+            requester_member_id=owner,
         )
 
     async with workspace_tx() as connection:
@@ -2457,7 +2539,7 @@ async def test_agent_spawn_rechecks_target_liveness_inside_child_admission(
     assert children == 0
 
 
-async def test_agent_spawn_replay_keeps_its_admitted_authority_and_target(
+async def test_agent_spawn_replay_keeps_its_admitted_target(
     db: None, dbos_launched: Config
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
@@ -2468,7 +2550,11 @@ async def test_agent_spawn_replay_keeps_its_admitted_authority_and_target(
     spawner = _spawner(workspace_id, parent, "research")
 
     first = await spawner.spawn(
-        "private-triage", {"task": "acme"}, background=True, dedup_key="replay"
+        "private-triage",
+        {"task": "acme"},
+        background=True,
+        dedup_key="replay",
+        requester_member_id=admin,
     )
     async with workspace_tx() as connection:
         await connection.execute(
@@ -2485,7 +2571,11 @@ async def test_agent_spawn_replay_keeps_its_admitted_authority_and_target(
         )
 
     replay = await spawner.spawn(
-        "private-triage", {"task": "acme"}, background=True, dedup_key="replay"
+        "private-triage",
+        {"task": "acme"},
+        background=True,
+        dedup_key="replay",
+        requester_member_id=admin,
     )
 
     assert replay.turn_id == first.turn_id
@@ -2506,11 +2596,21 @@ async def test_agent_spawn_dedup_key_refuses_a_different_request(
     await _specialist(workspace_id, name="private-triage", owner_member_id=owner)
     parent = (await _parent(workspace_id, agent_id)).model_copy(update={"speaker_member_id": owner})
     spawner = _spawner(workspace_id, parent, "research")
-    await spawner.spawn("private-triage", {"task": "acme"}, background=True, dedup_key="shared")
+    await spawner.spawn(
+        "private-triage",
+        {"task": "acme"},
+        background=True,
+        dedup_key="shared",
+        requester_member_id=owner,
+    )
 
     with pytest.raises(ValueError, match="belongs to another request"):
         await spawner.spawn(
-            "private-triage", {"task": "different"}, background=True, dedup_key="shared"
+            "private-triage",
+            {"task": "different"},
+            background=True,
+            dedup_key="shared",
+            requester_member_id=owner,
         )
 
 
@@ -2524,8 +2624,20 @@ async def test_agent_spawn_replay_compares_the_raw_request_before_contract_norma
     spawner = _spawner(workspace_id, parent, "research")
     payload = {"task": "acme", "note": "contract drops this field"}
 
-    first = await spawner.spawn("private-triage", payload, background=True, dedup_key="normalized")
-    replay = await spawner.spawn("private-triage", payload, background=True, dedup_key="normalized")
+    first = await spawner.spawn(
+        "private-triage",
+        payload,
+        background=True,
+        dedup_key="normalized",
+        requester_member_id=owner,
+    )
+    replay = await spawner.spawn(
+        "private-triage",
+        payload,
+        background=True,
+        dedup_key="normalized",
+        requester_member_id=owner,
+    )
 
     assert replay.turn_id == first.turn_id
     child, _, _ = await _load_turn(first.turn_id)
@@ -2558,7 +2670,11 @@ async def test_agent_child_payload_validates_against_the_declared_input_schema(
     assert "takes `ticket`" in str(refusal.value)
     assert "required" in str(refusal.value)
     spawned = await spawner.spawn(
-        "support", {"ticket": "INC-42"}, background=True, dedup_key="ticket"
+        "support",
+        {"ticket": "INC-42"},
+        background=True,
+        dedup_key="ticket",
+        requester_member_id=member,
     )
     child, _, _ = await _load_turn(spawned.turn_id)
     assert child.inbound == '{"ticket": "INC-42"}'
@@ -2579,7 +2695,11 @@ async def test_default_agent_contract_is_task_in_result_out(
         await spawner.spawn("support", {"objective": "acme"}, background=True)
     assert "takes `task`" in str(refusal.value)
     spawned = await spawner.spawn(
-        "support", {"task": "triage the outage"}, background=True, dedup_key="default"
+        "support",
+        {"task": "triage the outage"},
+        background=True,
+        dedup_key="default",
+        requester_member_id=member,
     )
     child, _, _ = await _load_turn(spawned.turn_id)
     assert child.inbound == '{"task":"triage the outage"}'
@@ -2738,7 +2858,7 @@ async def test_a_followup_delivers_its_result_even_when_the_child_was_awaited(
     assert row.result_delivery == "pending"
 
 
-async def test_a_member_spoken_turn_spawns_their_own_agent_without_a_bound_requester(
+async def test_agent_spawn_uses_only_the_current_calls_requester(
     db: None, dbos_launched: Config
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
@@ -2760,22 +2880,23 @@ async def test_a_member_spoken_turn_spawns_their_own_agent_without_a_bound_reque
     )
     spawner = _spawner(workspace_id, parent, "research")
 
-    spawned = await spawner.spawn("my-triage", {"task": "acme"}, dedup_key="mine")
-    child, _, _ = await _load_turn(spawned.turn_id)
-    assert child.on_behalf_of_member_id == member
-
     with pytest.raises(ValueError, match="not yours to spawn"):
-        await spawner.spawn("support", {"task": "acme"})
+        await spawner.spawn("my-triage", {"task": "acme"}, dedup_key="unattributed")
 
-    admin = await _seeded_member(workspace_id, admin=True)
-    admin_spawner = _spawner(
-        workspace_id,
-        (await _parent(workspace_id, agent_id)).model_copy(update={"speaker_member_id": admin}),
-        "research",
+    spawned = await spawner.spawn(
+        "my-triage",
+        {"task": "acme"},
+        dedup_key="mine",
+        requester_member_id=member,
     )
-    ownerless = await admin_spawner.spawn("support", {"task": "acme"}, dedup_key="shared")
-    shared_child, _, _ = await _load_turn(ownerless.turn_id)
-    assert shared_child.on_behalf_of_member_id == admin
+    child, _, _ = await _load_turn(spawned.turn_id)
+    assert child.speaker_member_id is None
+
+    workspace_child = await spawner.spawn(
+        "support", {"task": "acme"}, background=True, dedup_key="workspace"
+    )
+    loaded_workspace_child, _, _ = await _load_turn(workspace_child.turn_id)
+    assert loaded_workspace_child.speaker_member_id is None
 
 
 async def _terminalize(turn_id: UUID) -> None:
@@ -2801,7 +2922,13 @@ async def test_an_arrival_founding_a_turn_on_a_spawned_conversation_inherits_its
         update={"speaker_member_id": member}
     )
     spawner = _spawner(workspace_id, parent, "research")
-    spawned = await spawner.spawn("support", {"task": "acme"}, dedup_key="peer", name="Peer triage")
+    spawned = await spawner.spawn(
+        "support",
+        {"task": "acme"},
+        dedup_key="peer",
+        name="Peer triage",
+        requester_member_id=member,
+    )
     await _terminalize(spawned.turn_id)
 
     invoker = AdmissionInvoker(
@@ -2814,7 +2941,6 @@ async def test_an_arrival_founding_a_turn_on_a_spawned_conversation_inherits_its
         spawned_turn.agent_id,
         "<spawn_result …>",
         "subagent-result:grandchild-1",
-        authority=spawned_turn.authority,
     )
     assert woken is not None
     continuation, _, _ = await _load_turn(woken)
@@ -2845,7 +2971,6 @@ async def test_a_profile_childs_continuation_keeps_its_profile_and_delivery(
         agent_id,
         "<spawn_result …>",
         "subagent-result:grandchild-2",
-        authority=parent.authority,
     )
     assert woken is not None
     continuation, _, _ = await _load_turn(woken)
@@ -2869,7 +2994,6 @@ async def test_a_fan_out_stops_at_the_first_child_an_exhausted_balance_cannot_co
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
         billing_url="https://ufo.example.com/surface/web#/workspace/billing",
     )
@@ -2920,7 +3044,6 @@ async def test_a_child_pinned_to_another_provider_is_not_exempted_by_its_agents_
         client=_RecordingClient(),
         registry=SubagentRegistry((own, other)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
         key_slot_for=lambda model: (
             "anthropic_api_key" if model == "anthropic-model" else "openai_api_key"
@@ -2944,7 +3067,6 @@ async def test_a_foreground_child_that_parks_does_not_hold_its_parent_open(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("research", {"task": "a"}, background=True)
@@ -2976,7 +3098,6 @@ async def test_a_foreground_wait_reads_the_terminal_only_after_workflow_completi
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="wait")
@@ -3036,10 +3157,9 @@ async def test_an_interruptible_foreground_wait_uses_the_workflow_until_completi
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(MemberAuthority(member_id))
+    )
     spawned = await subagents.spawn(
         "research", {"task": "acme"}, background=True, dedup_key="interruptible"
     )
@@ -3093,7 +3213,6 @@ async def test_a_committed_detach_wins_when_both_waits_are_ready(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
         hub=hub,
     )
@@ -3136,7 +3255,6 @@ async def test_a_hub_read_failure_leaves_the_foreground_child_wait_intact(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
         hub=InProcessHub(),
     )
@@ -3173,10 +3291,9 @@ async def test_a_consumed_replay_keeps_watching_for_a_fresh_arrival(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(MemberAuthority(member_id))
+    )
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn).values(status="running").where(tables.turn.c.id == parent.id)
@@ -3218,7 +3335,6 @@ async def test_a_foreground_wait_failure_cancels_its_child(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     waited: list[UUID] = []
@@ -3252,7 +3368,6 @@ async def test_a_foreground_wait_follows_the_workflow_that_resumes_its_child(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     spawned = await subagents.spawn("research", {"task": "a"}, background=True, dedup_key="resume")
@@ -3376,10 +3491,9 @@ async def test_a_foreground_spawn_answers_inline_while_no_member_speaks(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(MemberAuthority(member_id))
+    )
     child = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
     awaiting = asyncio.create_task(
         subagents.spawn("research", {"task": "acme"}, dedup_key="acme", detach_on_arrival=True)
@@ -3390,7 +3504,6 @@ async def test_a_foreground_spawn_answers_inline_while_no_member_speaks(
         agent_id,
         "a sibling finished",
         "internal:1",
-        authority=parent.authority,
     )
     await asyncio.sleep(0)
     assert not awaiting.done()
@@ -3420,10 +3533,9 @@ async def test_an_arriving_member_message_moves_the_wait_to_the_background(
         client=client,
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(MemberAuthority(member_id))
+    )
     child = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
     awaiting = asyncio.create_task(
         subagents.spawn("research", {"task": "acme"}, dedup_key="acme", detach_on_arrival=True)
@@ -3473,10 +3585,9 @@ async def test_a_child_that_finished_as_the_message_arrived_answers_inline(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(MemberAuthority(member_id))
+    )
     child = await subagents.spawn("research", {"task": "acme"}, background=True, dedup_key="acme")
     folded = await admission.admit_member(
         workspace_id, parent.conversation_id, "one more thing", member_id, "C:2"
@@ -3509,10 +3620,9 @@ async def test_a_background_spawn_is_unaffected_by_a_waiting_member_message(
         client=_RecordingClient(),
         registry=SubagentRegistry((_profile("research"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(member_id),
         hub=hub,
-    ).authorize(MemberAuthority(member_id))
+    )
     await admission.admit_member(
         workspace_id, parent.conversation_id, "and this too", member_id, "C:2"
     )
@@ -3552,18 +3662,12 @@ def test_a_moved_spawn_is_reported_as_any_background_one() -> None:
     assert "A message arrived on this conversation" not in asked
 
 
-async def test_a_speakerless_turn_spawns_on_the_account_the_member_it_acts_for_connected(
+async def test_model_account_capabilities_are_resolved_once_and_inherited(
     db: None, dbos_launched: Config
 ) -> None:
-    """A scheduled fire and every child turn are speakerless — they carry the member they act on
-    behalf of, not a speaker. The account is that member's, so the gate reads the same fold the
-    catalog and the child's own stamp read; reading the speaker alone refuses the coding agent to a
-    member who connected an account and offers them the screen they already used."""
     workspace_id, agent_id = await _workspace_agent()
     member_id = uuid4()
-    parent = (await _parent(workspace_id, agent_id)).model_copy(
-        update={"on_behalf_of_member_id": member_id}
-    )
+    parent = await _parent(workspace_id, agent_id)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.insert(tables.member).values(
@@ -3576,12 +3680,15 @@ async def test_a_speakerless_turn_spawns_on_the_account_the_member_it_acts_for_c
         )
     store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
     init_workspace_credentials(store)
-    own_account = replace(_profile("coding"), needs_own_model_key=True)
+    own_account = replace(
+        _profile("coding"),
+        needs_own_model_key=True,
+        own_key_models={PROVIDER_ANTHROPIC: "claude-opus-5"},
+    )
     subagents = Subagents(
         client=_RecordingClient(),
         registry=SubagentRegistry((own_account,)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(member_id),
     )
 
@@ -3592,11 +3699,281 @@ async def test_a_speakerless_turn_spawns_on_the_account_the_member_it_acts_for_c
         await store.put(
             workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-connected"
         )
-        spawned = await subagents.spawn("coding", {"task": "acme"}, background=True)
+        spawned = await subagents.spawn(
+            "coding",
+            {"task": "acme"},
+            background=True,
+            dedup_key="coding",
+            requester_member_id=member_id,
+        )
 
     child, _, _ = await _load_turn(spawned.turn_id)
     assert child.speaker_member_id is None
-    assert child.on_behalf_of_member_id == member_id
+    assert tuple(account.provider for account in child.model_accounts) == (PROVIDER_ANTHROPIC,)
+    assert child.model_accounts[0].slot == member_slot(ANTHROPIC_KEY_SLOT, member_id)
+
+    descendant = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((own_account,)),
+        parent=child,
+        audience=conversation_audience(member_id),
+    )
+    with ws(workspace_id):
+        grandchild = await descendant.spawn("coding", {"task": "nested"}, background=True)
+        await store.clear(workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id))
+        replay = await subagents.spawn(
+            "coding", {"task": "acme"}, background=True, dedup_key="coding"
+        )
+    inherited, _, _ = await _load_turn(grandchild.turn_id)
+    assert inherited.runtime_config == child.runtime_config
+    assert replay.turn_id == child.id
+
+
+async def test_an_own_account_spawn_persists_only_its_profiles_provider_slots(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    member_id = uuid4()
+    parent = await _parent(workspace_id, agent_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    anthropic = replace(
+        _profile("anthropic"),
+        needs_own_model_key=True,
+        own_key_models={PROVIDER_ANTHROPIC: "claude-opus-5"},
+    )
+    mixed = replace(
+        _profile("mixed"),
+        needs_own_model_key=True,
+        own_key_models={
+            PROVIDER_ANTHROPIC: "claude-opus-5",
+            PROVIDER_OPENAI: "gpt-5.6-sol",
+        },
+    )
+    registry = SubagentRegistry((anthropic, mixed))
+    spawner = Subagents(
+        client=_RecordingClient(),
+        registry=registry,
+        parent=parent,
+        audience=conversation_audience(member_id),
+    )
+
+    with ws(workspace_id):
+        await store.put(
+            workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-connected"
+        )
+        await store.put(
+            workspace_id, member_slot(OPENAI_KEY_SLOT, member_id), "sk-openai-connected"
+        )
+        spawned = await spawner.spawn(
+            "anthropic",
+            {"task": "acme"},
+            background=True,
+            requester_member_id=member_id,
+        )
+
+    child, _, child_audience = await _load_turn(spawned.turn_id)
+    expected = (
+        ModelAccountCapability(
+            provider=PROVIDER_ANTHROPIC,
+            slot=member_slot(ANTHROPIC_KEY_SLOT, member_id),
+        ),
+    )
+    assert child.model_accounts == expected
+
+    with ws(workspace_id):
+        descendant = await Subagents(
+            client=_RecordingClient(),
+            registry=registry,
+            parent=child,
+            audience=child_audience,
+        ).spawn("mixed", {"task": "nested"}, background=True)
+
+    grandchild, _, _ = await _load_turn(descendant.turn_id)
+    assert grandchild.model_accounts == expected
+
+
+async def test_spawn_persists_the_selected_speakers_exact_connections(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    first, second = uuid4(), uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member),
+            [
+                {
+                    "id": first,
+                    "workspace_id": workspace_id,
+                    "email": "first@example.com",
+                    "seated_at": datetime(2026, 7, 9, tzinfo=UTC),
+                    "created_at": datetime(2026, 7, 9, tzinfo=UTC),
+                    "updated_at": datetime(2026, 7, 9, tzinfo=UTC),
+                },
+                {
+                    "id": second,
+                    "workspace_id": workspace_id,
+                    "email": "second@example.com",
+                    "seated_at": datetime(2026, 7, 9, tzinfo=UTC),
+                    "created_at": datetime(2026, 7, 9, tzinfo=UTC),
+                    "updated_at": datetime(2026, 7, 9, tzinfo=UTC),
+                },
+            ],
+        )
+    grants = GrantStore()
+    with ws(workspace_id), bind_agent(agent_id):
+        first_connection = await grants.record(
+            provider="hub",
+            account_id="first-account",
+            host="api.hub.test",
+            grantor_member_id=first,
+            shared=False,
+        )
+        second_connection = await grants.record(
+            provider="hub",
+            account_id="second-account",
+            host="api.hub.test",
+            grantor_member_id=second,
+            shared=False,
+        )
+
+    parent = await _parent(workspace_id, agent_id)
+    spawner = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=SHARED_AUDIENCE,
+    )
+    context = ToolContext(
+        sandbox=cast(Sandbox, None),
+        blob=cast(WorkspaceBlobStore, None),
+        turn=parent,
+        agent=Agent(prompt="p", model="m"),
+        spawn=spawner.spawn,
+        speaker_member_id=first,
+        audience=SHARED_AUDIENCE,
+        artifact_token_secret="",
+        other_members_active=True,
+        member_messages_active=True,
+        grants=grants,
+    )
+    with ws(workspace_id), bind_agent(agent_id):
+        selected = await context.connector_connection_ids()
+        spawned = await replace(spawner, connection_scope=selected).spawn(
+            "research",
+            {"task": "acme"},
+            background=True,
+            requester_member_id=first,
+        )
+
+    assert selected == (first_connection,)
+    assert second_connection not in selected
+    child, child_agent, child_audience = await _load_turn(spawned.turn_id)
+    assert child.runtime_config == TurnRuntimeConfig(connections=(first_connection,))
+    child_context = ToolContext(
+        sandbox=cast(Sandbox, None),
+        blob=cast(WorkspaceBlobStore, None),
+        turn=child,
+        agent=child_agent,
+        spawn=spawner.spawn,
+        speaker_member_id=None,
+        audience=child_audience,
+        artifact_token_secret="",
+        grants=grants,
+    )
+    with ws(workspace_id), bind_agent(agent_id):
+        usable = await child_context.usable_connector_accounts()
+    assert {account.connection_id for account in usable} == {first_connection}
+
+
+async def test_spawn_inherits_an_automatic_parents_exact_connections(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    runtime_config = TurnRuntimeConfig(connections=(uuid4(),), internet_access=False)
+    parent = (await _parent(workspace_id, agent_id)).model_copy(
+        update={"runtime_config": runtime_config}
+    )
+    spawned = await Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=SHARED_AUDIENCE,
+    ).spawn("research", {"task": "acme"}, background=True)
+
+    child, _, _ = await _load_turn(spawned.turn_id)
+    assert child.speaker_member_id is None
+    assert child.runtime_config == runtime_config
+
+
+async def test_old_own_account_spawn_replay_does_not_mint_a_new_capability(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    member_id = uuid4()
+    parent = await _parent(workspace_id, agent_id)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="member@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+    own_account = replace(
+        _profile("coding"),
+        needs_own_model_key=True,
+        own_key_models={PROVIDER_ANTHROPIC: "claude-opus-5"},
+    )
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((own_account,)),
+        parent=parent,
+        audience=conversation_audience(member_id),
+    )
+
+    with ws(workspace_id):
+        await store.put(
+            workspace_id, member_slot(ANTHROPIC_KEY_SLOT, member_id), "sk-ant-connected"
+        )
+        spawned = await subagents.spawn(
+            "coding",
+            {"task": "acme"},
+            background=True,
+            dedup_key="coding",
+            requester_member_id=member_id,
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.id == spawned.turn_id)
+                .values(runtime_config=None)
+            )
+        replay = await subagents.spawn(
+            "coding",
+            {"task": "acme"},
+            background=True,
+            dedup_key="coding",
+            requester_member_id=member_id,
+        )
+
+    child, _, _ = await _load_turn(replay.turn_id)
+    assert replay.turn_id == spawned.turn_id
+    assert child.runtime_config is None
 
 
 def test_subagent_prompt_keeps_the_finish_contract_after_preloaded_skills() -> None:

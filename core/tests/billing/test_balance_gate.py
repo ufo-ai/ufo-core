@@ -14,7 +14,6 @@ from test_spend_caps import (
 )
 
 from ufo.db import workspace_tx
-from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.billing.accounting import ALLOW, BalanceGate, record_image_usage, record_turn_usage
 from ufo.runtime.billing.balance import (
     TOPUP_GRACE_MICRO_USD,
@@ -86,7 +85,7 @@ async def test_admission_rejects_at_the_reserve_with_a_reason(db: None) -> None:
         await _fund(connection, workspace_id, dollars=10, reserve_dollars=10)
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
+        workspace_id, conversation_id, agent_id, "hi"
     )
     assert dbos.enqueued == []
     assert await _status(turn_id) == "cancelled"
@@ -99,7 +98,7 @@ async def test_admission_above_the_reserve_enqueues(db: None) -> None:
         await _fund(connection, workspace_id, dollars=10, reserve_dollars=2)
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
+        workspace_id, conversation_id, agent_id, "hi"
     )
     assert dbos.enqueued == [str(turn_id)]
 
@@ -110,7 +109,7 @@ async def test_no_balance_row_allows_admission(db: None) -> None:
         workspace_id, _, agent_id, conversation_id = await _seed(connection)
     dbos = StubDbos()
     turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi", authority=WORKSPACE_AUTHORITY
+        workspace_id, conversation_id, agent_id, "hi"
     )
     assert dbos.enqueued == [str(turn_id)]
 
@@ -274,7 +273,6 @@ async def test_a_scheduled_fire_is_still_refused_by_a_spent_balance(db: None) ->
         conversation_id,
         agent_id,
         "fire",
-        authority=WORKSPACE_AUTHORITY,
         as_scheduled=True,
     )
     assert dbos.enqueued == []
@@ -370,7 +368,6 @@ async def test_a_workspace_serving_itself_is_never_locked_out(db: None) -> None:
         conversation_id,
         agent_id,
         "hi",
-        authority=WORKSPACE_AUTHORITY,
     )
     assert dbos.enqueued == [str(turn_id)]
 

@@ -9,10 +9,8 @@ a third consecutive failure fires, and an unreachable sandbox is a counted skip.
 always moves to one interval from this tick, so an overdue monitor — a deploy roll, a stalled
 runner — probes once instead of replaying a backlog.
 
-Each probe and fire carries the immutable authority of the work that armed the watch. A command
-under member authority reaches that member's private connections while their seat is live; an
-unseated member's probe is skipped and a deadline fire parks until the same authority is live.
-Workspace authority reaches only connections shared with the workspace.
+Each probe and fire carries only the immutable capabilities stored by the work that armed the
+watch. Its exact connection scope remains usable without carrying a member identity.
 
 A fire invokes first and retires second: a crash between the two re-posts under the same
 idempotency key, which admits nothing. A tick with failures raises their names."""
@@ -21,7 +19,6 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from ufo.sdk.authority import AuthorityUnavailable, authority_from_member_id
 from ufo.sdk.context import AgentArchived, ExtensionContext, TurnRuntimeConfig
 from ufo.sdk.terminal import TerminalGone
 from ufo.sdk.untrusted import wall
@@ -79,11 +76,10 @@ class MonitorRunner:
                 row.conversation_id,
                 row.command,
                 PROBE_TIMEOUT_SECONDS,
-                authority=authority_from_member_id(row.created_by_member_id),
                 connections=row.connections,
                 internet_access=row.internet_access,
             )
-        except (AuthorityUnavailable, TerminalGone):
+        except TerminalGone:
             await store.skipped_tick(row, datetime.now(UTC) + spacing)
             return
         probed_at = datetime.now(UTC)
@@ -126,8 +122,8 @@ class MonitorRunner:
                 row.agent_id,
                 await self._body(row, cause, payload, spill, probes_run),
                 f"{FIRE_KEY_PREFIX}{row.id}",
-                authority=authority_from_member_id(row.created_by_member_id),
                 holds_work_already_done=True,
+                standalone=True,
                 runtime_config=TurnRuntimeConfig(
                     connections=row.connections,
                     internet_access=row.internet_access,

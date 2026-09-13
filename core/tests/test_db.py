@@ -541,7 +541,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "objectives_0002",
         "memory_0026",
         "sample_ext_note_0001",
-        "scheduled_tasks_0003",
+        "scheduled_tasks_0004",
         "sources_0008",
         "monitors_0003",
         "skill_create_0004",
@@ -1127,28 +1127,24 @@ def test_the_trigger_tables_merge_onto_one_keyed_by_resource(tmp_path: Path) -> 
         paused = connection.execute("select paused from source_trigger").fetchall()
     assert {state for (state,) in paused} == {0}
     command.upgrade(config, "sources_0008")
-    outgoing_id = uuid4()
     with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "insert into source_trigger (id, workspace_id, conversation_id, agent_id, "
-            "connection_id, resource, created_by_member_id, created_at, updated_at) "
-            "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                outgoing_id.hex,
-                workspace_id.hex,
-                conversation_id.hex,
-                agent_id.hex,
-                connection_id.hex,
-                "https://github.com/metalcraftai/ufo/pull/3592",
-                member_id.hex,
-                now,
-                now,
-            ),
-        )
-        internet_scopes = connection.execute(
-            "select internet_access from source_trigger"
-        ).fetchall()
-    assert {scope for (scope,) in internet_scopes} == {None}
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "insert into source_trigger (id, workspace_id, conversation_id, agent_id, "
+                "connection_id, resource, created_by_member_id, created_at, updated_at) "
+                "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    uuid4().hex,
+                    workspace_id.hex,
+                    conversation_id.hex,
+                    agent_id.hex,
+                    connection_id.hex,
+                    "https://github.com/metalcraftai/ufo/pull/3592",
+                    member_id.hex,
+                    now,
+                    now,
+                ),
+            )
 
 
 SOURCE_AUTHORITY_REVISION = "20260907150257"

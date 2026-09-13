@@ -220,7 +220,7 @@ Semantics, fixed here so implementation doesn't relitigate them:
   declare none. Apply resolves create or update from the current object and requires that exact
   declaration. Omission uses the executing agent. A cross-agent target requires the configured
   main agent, a non-subagent turn, and an exact live requesting member message. The task-local
-  target changes only the audited store namespace: member authority, audience, and sandbox stay
+  target changes only the audited store namespace: the live speaker, audience, and sandbox stay
   on the call. Results and refs carry the stable agent name in their own `agent` field; object
   names are unchanged.
 
@@ -255,8 +255,8 @@ apply validates through the extension's existing
 the first `next_run_at`. Creation requires a conversation bound to the executing agent. An update
 keeps the stored executor, report conversation, creator, and name, so the main agent may inspect,
 edit, or cancel a creator's child-agent task from another conversation without reassigning it.
-An admin sees its schedule and run state, may change cadence or expiry, and may cancel it, but
-cannot read or change its prompt, description, or responses. Pause
+An admin sees its management metadata, may pause a running task or cancel it, but cannot resume or
+run it or read or change its cadence, expiry, prompt, description, or responses. Pause
 rows (`@pause:` / `@once`) are workflow internals and never surface as objects; `pause_and_wait`
 is untouched. Claims, leases, and the job runner do not change.
 

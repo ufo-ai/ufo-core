@@ -182,12 +182,10 @@ def _context(
     speaker_id: UUID | None = None,
     audience: Audience | None = None,
     agent_id: UUID | None = None,
-    on_behalf_id: UUID | None = None,
+    speakerless: bool = False,
 ) -> ToolContext:
     exact_audience = (
-        conversation_audience(speaker_id or on_behalf_id or state.owner_id)
-        if audience is None
-        else audience
+        conversation_audience(speaker_id or state.owner_id) if audience is None else audience
     )
     ext = context_for(NAME, DECLARED_PROVIDERS, audience=exact_audience)
     return ToolContext(
@@ -202,11 +200,10 @@ def _context(
             status="running",
             inbound="read pages",
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
-            on_behalf_of_member_id=on_behalf_id,
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
-        speaker_member_id=None if on_behalf_id is not None else (speaker_id or state.owner_id),
+        speaker_member_id=None if speakerless else (speaker_id or state.owner_id),
         audience=exact_audience,
         artifact_token_secret="",
         grants=None,
@@ -550,14 +547,11 @@ async def test_explicit_room_request_reads_shared_and_requester_private_pages(
     assert str(hidden) not in names
 
 
-async def test_a_scheduled_turn_reads_its_members_pages_and_no_other_members(
+async def test_a_scheduled_turn_reads_its_conversations_pages_and_no_other_members(
     db: None, tmp_path: Path
 ) -> None:
-    """The shape a sweep runs in: no speaker, an acting member the turn carries on behalf of, in
-    that member's own room. `source_reader` takes its requester from the live speaker, which such a
-    turn has none of, so the subject filter is the whole of what separates one member's pages from
-    another's here. A notification raised off such a listing is addressed to the turn's member, so a
-    page of someone else's reaching this list is that member's data in another member's inbox."""
+    """The shape a sweep runs in: no speaker, in one member's own room. The audience admits that
+    room's private pages and shared pages, but no other member's pages."""
     state = await _workspace()
     blob = FilesystemBlobStore(root=tmp_path)
     with ws(state.workspace_id):
@@ -569,14 +563,19 @@ async def test_a_scheduled_turn_reads_its_members_pages_and_no_other_members(
         theirs = await _seed_page(
             state, source_id, blob, title="Theirs", subject=member_subject(state.owner_id)
         )
-        ctx = _context(state, blob, on_behalf_id=state.member_id)
+        ctx = _context(
+            state,
+            blob,
+            audience=conversation_audience(state.member_id),
+            speakerless=True,
+        )
         assert ctx.speaker_member_id is None
 
         listing = json.loads(await _text(_TOOLS["object_list"], ctx, kind=PAGE_KIND))
 
     names = {row["name"] for row in listing["objects"]}
-    assert str(mine) in names
     assert str(shared) in names
+    assert str(mine) in names
     assert str(theirs) not in names
 
 

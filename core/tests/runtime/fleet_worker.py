@@ -18,7 +18,13 @@ from dbos import DBOS, DBOSClient, EnqueueOptions
 
 from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
 from ufo.runtime.jobs import JOB_QUEUE_NAME
-from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION, TURN_QUEUE_NAME
+from ufo.schema.records import (
+    DBOS_APP_NAME,
+    DBOS_APP_VERSION,
+    TURN_QUEUE_NAME,
+    UNSCOPED_EXPRESS_QUEUE_NAME,
+    UNSCOPED_TURN_QUEUE_NAME,
+)
 from ufo.serve import FLEETS
 
 FLEET_MARKER_WORKFLOW = "fleet_marker"
@@ -76,21 +82,42 @@ async def _await_success(client: DBOSClient, workflow_id: str) -> bool:
     return False
 
 
-async def _jobs_phase(system_url: str, job_id: str, turn_id: str) -> int:
+async def _jobs_phase(
+    system_url: str, job_id: str, turn_id: str, unscoped_turn_id: str, unscoped_express_id: str
+) -> int:
     """Claim the background execution queue, offer one marker to each side, and report both."""
     client = replay_safe_client(system_url)
     await _enqueue(client, JOB_QUEUE_NAME, job_id, "job")
     await _enqueue(client, TURN_QUEUE_NAME, turn_id, "turn")
+    await _enqueue(client, UNSCOPED_TURN_QUEUE_NAME, unscoped_turn_id, "unscoped-turn")
+    await _enqueue(client, UNSCOPED_EXPRESS_QUEUE_NAME, unscoped_express_id, "unscoped-express")
     ran = await _await_success(client, job_id)
-    print(json.dumps(await _statuses(client, [job_id, turn_id])))
+    print(
+        json.dumps(
+            await _statuses(client, [job_id, turn_id, unscoped_turn_id, unscoped_express_id])
+        )
+    )
     return 0 if ran else TIMEOUT_EXIT_CODE
 
 
-async def _turns_phase(system_url: str, job_id: str, turn_id: str) -> int:
+async def _turns_phase(
+    system_url: str, job_id: str, turn_id: str, unscoped_turn_id: str, unscoped_express_id: str
+) -> int:
     """Claim the member queues and finish the marker the jobs process could not reach."""
     client = replay_safe_client(system_url)
-    ran = await _await_success(client, turn_id)
-    print(json.dumps(await _statuses(client, [job_id, turn_id])))
+    ran = all(
+        await asyncio.gather(
+            *(
+                _await_success(client, workflow_id)
+                for workflow_id in (turn_id, unscoped_turn_id, unscoped_express_id)
+            )
+        )
+    )
+    print(
+        json.dumps(
+            await _statuses(client, [job_id, turn_id, unscoped_turn_id, unscoped_express_id])
+        )
+    )
     return 0 if ran else TIMEOUT_EXIT_CODE
 
 
@@ -99,11 +126,15 @@ def main() -> int:
     system_url = os.environ["FLEET_TEST_SYSTEM_URL"]
     job_id = os.environ["FLEET_TEST_JOB_ID"]
     turn_id = os.environ["FLEET_TEST_TURN_ID"]
+    unscoped_turn_id = os.environ["FLEET_TEST_UNSCOPED_TURN_ID"]
+    unscoped_express_id = os.environ["FLEET_TEST_UNSCOPED_EXPRESS_ID"]
     executor = _launch(fleet, system_url)
     print(json.dumps({"executor": executor}))
     phase = _jobs_phase if fleet == "jobs" else _turns_phase
     try:
-        return asyncio.run(phase(system_url, job_id, turn_id))
+        return asyncio.run(
+            phase(system_url, job_id, turn_id, unscoped_turn_id, unscoped_express_id)
+        )
     finally:
         DBOS.destroy()
 

@@ -241,7 +241,7 @@ async def _wait_for_download(ctx: ToolContext, args: WaitForDownloadInput) -> To
 
 
 BROWSER_TOOLS: tuple[ToolDef, ...] = tuple(
-    replace(tool, profile_only=True)
+    replace(tool, profile_only=True, binds_member_authority=False)
     for tool in (
         ToolDef(
             name="navigate",

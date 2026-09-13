@@ -31,7 +31,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
 from ufo.host.kinds.conversations import CONVERSATION_KIND
-from ufo.runtime.authority import authority_member_id
 from ufo.runtime.ext.context import ExtensionContext, JsonValue
 from ufo.runtime.media.artifact_url import (
     TEXT_APPLICATION_MEDIA_TYPES,
@@ -180,7 +179,7 @@ class ArtifactObjects:
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         rows = await self._rows(
             ctx.read_subjects,
-            authority_member_id(ctx.authority),
+            ctx.speaker_member_id,
             query,
             self._shares(ctx.read_subjects),
         )

@@ -308,7 +308,7 @@ a minimum spacing between probes, never a backlog to replay, so a restart cannot
 ### The fire
 
 A fire is `ExtensionContext.invoke(conversation_id, agent_id, body, "monitor-fired:{row_id}",
-on_behalf_of_member_id=…, holds_work_already_done=True)` — an internal arrival, so it folds into
+runtime_config=exact_capabilities, holds_work_already_done=True)` — an internal arrival, so it folds into
 a live turn at the next round boundary or founds the next turn, exactly like a background
 subagent result, and a spend breach parks it rather than discarding metered work. Invoke first,
 retire the row second, both guarded (the `SubagentResult.deliver` ordering): a crash between the
@@ -440,17 +440,15 @@ admission consumption and takeover blocks, the `_claim_turn` row deletion, and t
 Nothing left in core's scheduling surface is core-only. The `scheduled_task` table and
 `ScheduleStore` move into the extension (its migration carries the live rows), the runner claims
 over them through `owner_candidates`, and `invoke_scheduled` is deleted — a recurring fire is
-`invoke(..., as_scheduled=True, on_behalf_of_member_id=creator, idempotency_key=firing_key)` with
+`invoke(..., as_scheduled=True, runtime_config=exact_capabilities, idempotency_key=firing_key)` with
 the `<scheduled_task>` wrapper composed by the extension that already owns the prompt.
 `as_scheduled` (jobs-role only) stamps `admission_source='scheduled'`, which keeps every core
-behavior keyed on that label working unchanged: seat gating on the on-behalf member
-(`seats.py:50`), the scheduled system-prompt shaping (`engine.py:938`) and per-round seat check
-(`engine.py:1707`), never-fold, and the portal's machine-turn classification
-(`ext/surface.py:3075`). The schedule authority gate follows the store. Core keeps the *meanings*
+behavior keyed on that label working unchanged: scheduled system-prompt shaping, never-fold, and the portal's machine-turn classification
+(`ext/surface.py:3075`). The schedule management gate follows the store. Core keeps the *meanings*
 of a scheduled turn; it stops owning the storage and the fire loop.
 
-Fire stampings, uniform by shape: a pause or cron fire is `as_scheduled` — a prompt to run, its
-own turn, seat-gated on its creator. A monitor fire is internal with `on_behalf_of_member_id` and
+Fire stampings, uniform by shape: a pause or cron fire is `as_scheduled` — a prompt to run in its
+own turn with its persisted capabilities. A monitor fire is internal with exact capabilities and
 `holds_work_already_done` — work already performed and metered, delivered like a subagent result:
 it folds, and a spend breach parks it rather than discarding it.
 
@@ -464,9 +462,9 @@ Four independently reviewable units, in order; each brings the `invoke` paramete
 | Unit | Where | Ships | Proof |
 |---|---|---|---|
 | 1 | core | `ExtensionContext.probes.run` on the jobs-role context; a probe token minted per exec, TTL = timeout, same derived proxy rules minus the model key; a NULL-turn `egress` ledger row per batch | sample extension: a job's probe reads back what its own off-turn write left in the conversation sandbox; tool and hook contexts carry no `probes`; the proxy refuses an expired, forged or foreign-workspace probe token, and resolves it no model-key injection |
-| 2 | new `monitors` extension + `invoke` gains `on_behalf_of_member_id`, `holds_work_already_done` | `monitor` tool, monitor table + migration, runner job, `monitor` kind | end-to-end: arm seeds the baseline inline → quiet tick posts nothing → changed output fires, folding into a live turn and founding one when idle → row retired; failure and deadline fires; a member's "stop watching" deletes; a spend breach parks the fire |
+| 2 | new `monitors` extension + `invoke` gains `runtime_config`, `holds_work_already_done` | `monitor` tool, monitor table + migration, runner job, `monitor` kind | end-to-end: arm seeds the baseline inline → quiet tick posts nothing → changed output fires, folding into a live turn and founding one when idle → row retired; failure and deadline fires; a member's "stop watching" deletes; a spend breach parks the fire |
 | 3 | core + `scheduled_tasks`; `invoke` gains `unless_member_since`, `as_scheduled` | the pause row moves into the extension and `pause_and_wait` re-arms on it; core sheds `pause`/`_upsert_pause`, the name guards, admission consumption + takeover, the `_claim_turn` deletion, and the `origin_seq`/`resume_turn_id` columns | member-then-fire refuses `superseded`; fire-then-member folds to one turn; a crash between fire and retire admits once; the tool's behavioral assertions hold on the new substrate |
-| 4 | core → `scheduled_tasks` | `scheduled_task` table, store, and live rows migrate into the extension; `invoke_scheduled` and core `ScheduleStore` deleted; the authority gate follows the store | a recurring fire end-to-end: wrapper, on-behalf capabilities, unseated-creator refusal, expiry; the portal's machine-turn classification unchanged |
+| 4 | core → `scheduled_tasks` | `scheduled_task` table, store, and live rows migrate into the extension; `invoke_scheduled` and core `ScheduleStore` deleted; the ambient-agent gate follows the store | a recurring fire end-to-end: wrapper, exact capabilities, expiry; the portal's machine-turn classification unchanged |
 
 Wins over the current tools:
 
@@ -489,7 +487,7 @@ Costs, named:
   a change. One-shot bounds the damage to a single fire — the agent sees the noisy output and
   re-arms with a deterministic probe (sort, strip timestamps); the tool's guidance says so.
 - `invoke` becomes the one seam carrying admission semantics outward — four jobs-role-only
-  parameters (`as_scheduled`, `on_behalf_of_member_id`, `unless_member_since`,
+  parameters (`as_scheduled`, `runtime_config`, `unless_member_since`,
   `holds_work_already_done`); the price of core not owning the fire loops.
 - Unit 4 moves live `scheduled_task` rows in a data migration.
 

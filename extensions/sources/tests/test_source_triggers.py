@@ -34,6 +34,7 @@ from ufo_ext_sources.tools import (
     CHANGE_LOG_DIR,
     SOURCE_TRIGGER_KIND,
     WATCH_OFFER_MAX,
+    SourceTriggerObjects,
     SourceTriggerSpec,
     on_link_seen,
     on_page_change,
@@ -49,10 +50,9 @@ from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.object_name import validate_object_name
-from ufo.runtime.objects import UnknownObject
+from ufo.runtime.objects import ObjectListQuery, UnknownObject
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
@@ -669,6 +669,17 @@ async def test_an_admin_pauses_another_members_trigger_but_never_re_points_it(db
         )
         assert await _woken(state, feed) == {}
 
+        await _apply(
+            _context(state),
+            _trigger_manifest(feed, state.conversation_id, paused=False),
+        )
+        assert await _woken(state, feed) == {state.conversation_id: state.agent_id}
+
+        await _apply(
+            _context(state),
+            _trigger_manifest(feed, state.conversation_id, paused=True),
+        )
+
         with pytest.raises(ValueError, match="delete this one and apply another"):
             await tool.handler(
                 _context(state),
@@ -680,6 +691,63 @@ async def test_an_admin_pauses_another_members_trigger_but_never_re_points_it(db
                     }
                 ),
             )
+
+
+async def test_source_trigger_portal_actions_match_the_mutation_gate(db: None) -> None:
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state)
+    name = trigger_name(feed.name, state.conversation_id)
+    objects = SourceTriggerObjects()
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state, speaker_id=state.member_id),
+            _trigger_manifest(feed, state.conversation_id),
+        )
+        member = await objects.member_detail(
+            context_for(NAME, DECLARED_PROVIDERS),
+            name,
+            member_id=state.member_id,
+            admin=False,
+        )
+        admin = await objects.member_detail(
+            context_for(NAME, DECLARED_PROVIDERS),
+            name,
+            member_id=state.owner_id,
+            admin=True,
+        )
+        assert member is not None
+        assert admin is not None
+        assert member.row.fields["pausable"] is True
+        assert member.row.fields["resumable"] is False
+        assert member.row.fields["deletable"] is True
+        assert admin.row.fields["pausable"] is True
+        assert admin.row.fields["resumable"] is False
+        assert admin.row.fields["deletable"] is True
+
+        page = await objects.member_page(
+            context_for(NAME, DECLARED_PROVIDERS),
+            member_id=state.owner_id,
+            admin=True,
+            query=ObjectListQuery(supported_fields=manifest().objects[0].list_fields),
+        )
+        assert page.rows[0].fields["pausable"] is True
+        assert page.rows[0].fields["resumable"] is False
+        assert page.rows[0].fields["deletable"] is True
+
+        await _apply(
+            _context(state),
+            _trigger_manifest(feed, state.conversation_id, paused=True),
+        )
+        paused = await objects.member_detail(
+            context_for(NAME, DECLARED_PROVIDERS),
+            name,
+            member_id=state.owner_id,
+            admin=True,
+        )
+        assert paused is not None
+        assert paused.row.fields["pausable"] is False
+        assert paused.row.fields["resumable"] is True
+        assert paused.row.fields["deletable"] is True
 
 
 async def test_a_member_who_neither_created_nor_administers_cannot_pause(db: None) -> None:
@@ -714,6 +782,7 @@ async def test_stored_delivery_cannot_change_current_trigger_behavior(db: None) 
         sa.column("streams", sa.Text),
         sa.column("delivery", sa.Text),
         sa.column("created_by_member_id", sa.Uuid),
+        sa.column("internet_access", sa.Boolean),
         sa.column("created_at", sa.DateTime(timezone=True)),
         sa.column("updated_at", sa.DateTime(timezone=True)),
     )
@@ -729,6 +798,7 @@ async def test_stored_delivery_cannot_change_current_trigger_behavior(db: None) 
                 streams="",
                 delivery="per_page",
                 created_by_member_id=state.owner_id,
+                internet_access=True,
                 created_at=created_at,
                 updated_at=created_at,
             )
@@ -741,7 +811,7 @@ async def test_stored_delivery_cannot_change_current_trigger_behavior(db: None) 
     assert trigger.internet_access is None
 
 
-async def test_a_trigger_refuses_a_broadened_internet_scope(db: None) -> None:
+async def test_a_trigger_maps_stored_inheritance_to_no_runtime_ceiling(db: None) -> None:
     state = await _workspace()
     feed, _ = await _feed_with_stream(state)
     with ws(state.workspace_id), agent(state.agent_id):
@@ -753,8 +823,8 @@ async def test_a_trigger_refuses_a_broadened_internet_scope(db: None) -> None:
             .values(internet_access=True)
         )
     with ws(state.workspace_id):
-        with pytest.raises(ValueError, match="only narrow"):
-            await SourceTriggerStore(context_for(NAME, DECLARED_PROVIDERS)).waking(feed.id)
+        [trigger] = await SourceTriggerStore(context_for(NAME, DECLARED_PROVIDERS)).waking(feed.id)
+    assert trigger.internet_access is None
 
 
 async def test_a_trigger_requires_an_exact_member_requester(db: None) -> None:
@@ -868,7 +938,6 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
             state.agent_id,
             "Existing work.",
             "existing-work",
-            authority=MemberAuthority(state.owner_id),
         )
         shipped = _change(source_id, "# asana tasks: Ship the launch list")
         legal = _change(source_id, "# asana tasks: Follow up with legal")
@@ -879,7 +948,6 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
         assert len(turns) == 2
         turn = next(row for row in turns if feed.name in row["inbound"])
         assert turn["speaker_member_id"] is None
-        assert turn["on_behalf_of_member_id"] == state.owner_id
         assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
             connections=(feed.id,)
         )
@@ -1080,7 +1148,9 @@ async def test_a_stream_the_connection_does_not_sync_is_refused(db: None) -> Non
             )
 
 
-async def test_shared_trigger_carries_creator_authority_and_exact_connection(db: None) -> None:
+async def test_shared_trigger_carries_exact_capabilities_without_a_human_principal(
+    db: None,
+) -> None:
     state = await _workspace()
     feed, source_id = await _feed_with_stream(state)
     other, other_source_id = await _feed_with_stream(state, account="acct-two")
@@ -1113,7 +1183,6 @@ async def test_shared_trigger_carries_creator_authority_and_exact_connection(db:
 
     [turn] = await _turns(state.conversation_id)
     assert turn["speaker_member_id"] is None
-    assert turn["on_behalf_of_member_id"] == state.member_id
     runtime_config = TurnRuntimeConfig.model_validate(turn["runtime_config"])
     assert runtime_config == TurnRuntimeConfig(connections=(feed.id,), internet_access=False)
     assert other.id not in runtime_config.connections
@@ -1162,7 +1231,7 @@ async def test_an_unattributed_trigger_is_retired_without_blocking_valid_wakes(d
                 delivery="current",
                 paused=False,
                 created_by_member_id=None,
-                internet_access=None,
+                internet_access=True,
                 created_at=created_at,
                 updated_at=created_at,
             )
@@ -1179,12 +1248,11 @@ async def test_an_unattributed_trigger_is_retired_without_blocking_valid_wakes(d
         remaining = await SourceTriggerStore(ext).waking(feed.id)
 
     assert await _turns(invalid_conversation) == []
-    [turn] = await _turns(state.conversation_id)
-    assert turn["on_behalf_of_member_id"] == state.owner_id
+    assert len(await _turns(state.conversation_id)) == 1
     assert [trigger.created_by_member_id for trigger in remaining] == [state.owner_id]
 
 
-async def test_trigger_keeps_creator_authority_when_unseated(db: None) -> None:
+async def test_trigger_capabilities_do_not_depend_on_the_creators_seat(db: None) -> None:
     state = await _workspace()
     feed, source_id = await _feed_with_stream(state)
     with ws(state.workspace_id), agent(state.agent_id):
@@ -1205,8 +1273,7 @@ async def test_trigger_keeps_creator_authority_when_unseated(db: None) -> None:
         )
 
     [turn] = await _turns(state.conversation_id)
-    assert turn["status"] == "parked"
-    assert turn["on_behalf_of_member_id"] == state.owner_id
+    assert turn["status"] == "queued"
     assert "still delivered" in turn["inbound"]
 
 

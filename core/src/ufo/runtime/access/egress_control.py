@@ -10,7 +10,7 @@ The routes live under `/internal/egress/`, gated by `Authorization: Bearer <cont
 shared secret the proxy holds, refused before any work. The run or probe token rides each body as
 the raw `Proxy-Authorization` value; `EgressControl` verifies its signature with the deploy's token
 codec and scopes every read to its workspace under the normal RLS-scoped role. The tool bridge
-accepts run tokens only and reuses the same authority for its host-side dispatch."""
+accepts run tokens only and reuses the same capabilities for its host-side dispatch."""
 
 from dataclasses import dataclass
 from typing import Annotated, Literal
@@ -67,8 +67,13 @@ def rule_json(rule: Rule) -> dict[str, object]:
             return {"kind": "service", "host": host, "daemon_prefix": daemon_prefix or None}
 
 
+class ProxyCapabilities(BaseModel):
+    call_liveness: Literal[True]
+
+
 class AuthorizeRequest(BaseModel):
     proxy_auth: str
+    capabilities: ProxyCapabilities | None = None
 
 
 class AuthorizeResponse(BaseModel):
@@ -78,6 +83,7 @@ class AuthorizeResponse(BaseModel):
 
 class ResolveRequest(BaseModel):
     proxy_auth: str
+    capabilities: ProxyCapabilities | None = None
 
 
 class EgressMeterRecord(BaseModel):
@@ -111,6 +117,7 @@ class MeterRequest(BaseModel):
 
 class ToolBridgeControlRequest(BaseModel):
     proxy_auth: str
+    capabilities: ProxyCapabilities | None = None
     request: ToolBridgeRequest
 
 
@@ -165,7 +172,7 @@ class EgressControl:
             raise HTTPException(status_code=401, detail="unauthorized")
 
     async def _authorize(self, body: AuthorizeRequest) -> AuthorizeResponse:
-        principal = self._principal(body.proxy_auth)
+        principal = self._principal(body.proxy_auth, body.capabilities)
         generation = None if principal is None else await self._live_generation(principal)
         return AuthorizeResponse(authorized=generation is not None, generation=generation)
 
@@ -177,7 +184,7 @@ class EgressControl:
                 return await self.resolver.probe_live(probe)
 
     async def _resolve(self, body: ResolveRequest) -> dict[str, object]:
-        rules = await self.resolver.resolve(self._principal(body.proxy_auth))
+        rules = await self.resolver.resolve(self._principal(body.proxy_auth, body.capabilities))
         return {"rules": [rule_json(rule) for rule in rules]}
 
     async def _meter(self, body: MeterRequest) -> dict[str, object]:
@@ -253,19 +260,26 @@ class EgressControl:
         )
 
     async def _tool_bridge(self, body: ToolBridgeControlRequest) -> ToolBridgeResponse:
-        principal = self._principal(body.proxy_auth)
+        principal = self._principal(body.proxy_auth, body.capabilities)
         if not isinstance(principal, RunToken) or self.bridge is None:
             raise HTTPException(status_code=403, detail="forbidden")
-        with ws(principal.workspace_id):
-            return await self.bridge.request(principal, body.request)
+        live = await self.resolver.live_bridge_principal(principal)
+        if live is None:
+            raise HTTPException(status_code=403, detail="forbidden")
+        with ws(live.workspace_id):
+            return await self.bridge.request(live, body.request)
 
     async def _git_credential(self, body: GitCredentialRequest) -> dict[str, object]:
         """The cache daemon's git-credential callback, moved off the proxy pod onto core `serve`.
         The daemon holds no key; it presents the run or probe token the proxy stamped on the relay
         and asks for the credential the proxy would inject for that principal on `host`, so it can
-        never obtain another workspace's or another member's token. A principal with nothing usable
-        for the host fetches anonymously — never another account's identity."""
-        principal = None if not body.proxy_auth else self._principal(body.proxy_auth)
+        never obtain another workspace's or another connection's token. A principal with nothing
+        usable for the host fetches anonymously — never another account's identity."""
+        principal = (
+            None
+            if not body.proxy_auth
+            else self._principal(body.proxy_auth, ProxyCapabilities(call_liveness=True))
+        )
         if principal is None or body.host is None:
             return {"principal": "public"}
         resolved = await self.resolver.git_credential(principal, body.host)
@@ -278,11 +292,14 @@ class EgressControl:
             "principal": f"w{principal.workspace_id}-{account_id}",
         }
 
-    def _principal(self, proxy_auth: str) -> EgressPrincipal | None:
+    def _principal(
+        self, proxy_auth: str, capabilities: ProxyCapabilities | None = None
+    ) -> EgressPrincipal | None:
         if not proxy_auth:
             return None
         try:
-            return self.run_tokens.from_proxy_auth(proxy_auth)
+            run = self.run_tokens.from_proxy_auth(proxy_auth)
+            return None if run.capability_id is not None and capabilities is None else run
         except ValueError:
             pass
         try:

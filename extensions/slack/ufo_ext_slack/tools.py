@@ -373,6 +373,7 @@ TOOLS = (
         input_model=SlackManifestInput,
         handler=slack_manifest_handler,
         bound=ObjectBinding(kind=SURFACE_KIND, binding="instance", name=SURFACE_SLACK),
+        binds_member_authority=False,
     ),
     ToolDef(
         name=SLACK_CHANNELS_ACTION,
@@ -388,5 +389,6 @@ TOOLS = (
         handler=slack_channels_handler,
         bound=ObjectBinding(kind=SURFACE_KIND, binding="instance", name=SURFACE_SLACK),
         untrusted=True,
+        binds_member_authority=False,
     ),
 )

@@ -48,13 +48,8 @@ ALLOW: SpendOutcome = "allow"
 
 CAP_PRESENCE_TTL_SECONDS = 5.0
 CAP_PRESENCE_CACHE_MAX = 4096
-TURN_MEMBER_ID = sa.func.coalesce(
-    tables.turn.c.speaker_member_id, tables.turn.c.on_behalf_of_member_id
-)
-"""The member a turn's spend is attributed to, in SQL: the member `turn_authority` names — its
-speaker, else the member it acts for — so a member's turn in a workspace conversation counts as
-theirs. The one column form of that one definition; a caller holding the turn reads
-`authority_member_id(turn.authority)` instead."""
+TURN_MEMBER_ID = tables.turn.c.speaker_member_id
+"""The member a turn's spend is attributed to: its bound speaker, if it has one."""
 _no_applicable_caps: dict[tuple[UUID, UUID | None, UUID | None], float] = {}
 
 

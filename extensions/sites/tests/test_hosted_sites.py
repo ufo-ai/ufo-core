@@ -939,12 +939,7 @@ async def test_a_speakerless_turn_cannot_name_a_visibility(db: None) -> None:
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
     await _deploy(workspace, conversation_id, audience, creator_id)
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
-    scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None),
-        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
-            update={"on_behalf_of_member_id": creator_id}
-        ),
-    )
+    scheduled = _bind(ctx, workspace, conversation_id, None)
 
     with ws(workspace.id), pytest.raises(SpeakerRequired):
         await _dispatch(
@@ -960,24 +955,17 @@ async def test_a_speakerless_turn_cannot_name_a_visibility(db: None) -> None:
     assert row.visibility == "private"
 
 
-async def test_a_speakerless_turn_may_still_redeploy(db: None) -> None:
-    """The same turn without a visibility argument is not a granting act: it re-deploys and the
-    setting stands."""
+async def test_a_speakerless_turn_cannot_redeploy(db: None) -> None:
     workspace = await _seed_workspace()
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(creator_id)
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
     await _deploy(workspace, conversation_id, audience, creator_id)
     tool, ctx = _tool(DEPLOY_WEBSITE_TOOL, audience)
-    scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None),
-        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
-            update={"on_behalf_of_member_id": creator_id}
-        ),
-    )
+    scheduled = _bind(ctx, workspace, conversation_id, None)
 
-    with ws(workspace.id):
-        payload = await _dispatch(
+    with ws(workspace.id), pytest.raises(SpeakerRequired):
+        await _dispatch(
             tool,
             scheduled,
             project_path="/workspace/dist",
@@ -985,7 +973,6 @@ async def test_a_speakerless_turn_may_still_redeploy(db: None) -> None:
             entry_point="index.html",
         )
 
-    assert payload["visibility"] == "private"
     (row,) = await _stored(workspace)
     assert row.visibility == "private"
 
@@ -997,14 +984,19 @@ async def test_a_speakerless_turn_cannot_unhost_a_site(db: None) -> None:
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(creator_id)
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
-    name = str((await _deploy(workspace, conversation_id, audience, creator_id))["site"])
-    tool, ctx = _tool("object_delete", audience)
-    scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None),
-        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
-            update={"on_behalf_of_member_id": creator_id}
-        ),
+    name = str(
+        (
+            await _deploy(
+                workspace,
+                conversation_id,
+                audience,
+                creator_id,
+                visibility="workspace",
+            )
+        )["site"]
     )
+    tool, ctx = _tool("object_delete", audience)
+    scheduled = _bind(ctx, workspace, conversation_id, None)
 
     with ws(workspace.id), pytest.raises(SpeakerRequired):
         await _dispatch(tool, scheduled, kind=SITE_KIND, name=name)
@@ -1584,14 +1576,19 @@ async def test_a_speakerless_turn_cannot_change_who_can_open_a_site(db: None) ->
     creator_id, _token = await _seed_member(workspace, OWNER_EMAIL)
     audience = conversation_audience(creator_id)
     conversation_id = await _seed_conversation(workspace, audience, creator_id)
-    name = str((await _deploy(workspace, conversation_id, audience, creator_id))["site"])
-    tool, ctx = _tool("object_apply", audience)
-    scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None),
-        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
-            update={"on_behalf_of_member_id": creator_id}
-        ),
+    name = str(
+        (
+            await _deploy(
+                workspace,
+                conversation_id,
+                audience,
+                creator_id,
+                visibility="workspace",
+            )
+        )["site"]
     )
+    tool, ctx = _tool("object_apply", audience)
+    scheduled = _bind(ctx, workspace, conversation_id, None)
 
     with ws(workspace.id), pytest.raises(SpeakerRequired):
         await _dispatch(
@@ -1603,7 +1600,7 @@ async def test_a_speakerless_turn_cannot_change_who_can_open_a_site(db: None) ->
         )
 
     (row,) = await _stored(workspace)
-    assert row.visibility == "private"
+    assert row.visibility == "workspace"
 
 
 async def test_the_registry_is_scoped_to_its_own_workspace(db: None) -> None:
@@ -1675,9 +1672,6 @@ async def test_a_refused_deploy_never_touches_the_members_running_site(db: None)
         child = replace(
             _bind(ctx, workspace, conversation_id, None, subagent_profile="website_building"),
             sandbox=RefusingSandbox(),
-            turn=_bind(
-                ctx, workspace, conversation_id, None, subagent_profile="website_building"
-            ).turn.model_copy(update={"on_behalf_of_member_id": member_id}),
         )
         with ws(workspace.id), pytest.raises(SpeakerRequired):
             await _dispatch(
@@ -2082,41 +2076,6 @@ async def test_set_homepage_refuses_a_dangling_name(db: None) -> None:
     assert row.homepage_agent_id is None
 
 
-async def test_set_homepage_binds_speakerlessly_and_reports_the_agents_visibility(
-    db: None,
-) -> None:
-    """Binding runs on a scheduled turn with no live speaker, which seeding requires, and writes
-    nothing but the pointer: the row's own visibility and generation are untouched, and the
-    reported visibility is the agent's — the level the frame actually gates the homepage on."""
-    workspace = await _seed_workspace()
-    member_id, _token = await _seed_member(workspace, OWNER_EMAIL)
-    audience = conversation_audience(member_id)
-    conversation_id = await _seed_conversation(workspace, audience, member_id)
-    hosted = await _deploy(workspace, conversation_id, audience, member_id)
-    (before,) = await _stored(workspace)
-    tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
-    scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None),
-        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
-            update={"on_behalf_of_member_id": member_id}
-        ),
-    )
-
-    with ws(workspace.id):
-        payload = await _dispatch(tool, scheduled, site=str(hosted["site"]))
-
-    assert payload == {
-        "site": hosted["site"],
-        "site_url": hosted["site_url"],
-        "visibility": "workspace",
-        "homepage_agent": str(workspace.agent_id),
-    }
-    (row,) = await _stored(workspace)
-    assert row.homepage_agent_id == workspace.agent_id
-    assert row.visibility == "private"
-    assert row.generation == before.generation
-
-
 async def test_a_standing_site_binds_for_its_creator_speaking_and_refuses_speakerless(
     db: None,
 ) -> None:
@@ -2129,12 +2088,7 @@ async def test_a_standing_site_binds_for_its_creator_speaking_and_refuses_speake
     conversation_id = await _seed_conversation(workspace, audience, member_id)
     hosted = await _deploy(workspace, conversation_id, audience, member_id)
     tool, ctx = _tool(SET_HOMEPAGE_TOOL, audience)
-    scheduled = replace(
-        _bind(ctx, workspace, conversation_id, None),
-        turn=_bind(ctx, workspace, conversation_id, None).turn.model_copy(
-            update={"on_behalf_of_member_id": member_id}
-        ),
-    )
+    scheduled = _bind(ctx, workspace, conversation_id, None)
     later = replace(
         scheduled,
         turn=scheduled.turn.model_copy(update={"created_at": datetime(2027, 1, 1, tzinfo=UTC)}),

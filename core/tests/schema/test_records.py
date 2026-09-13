@@ -12,9 +12,11 @@ from ufo.schema.records import (
     TURN_QUEUE_NAME,
     AskQuestion,
     AskUserInput,
+    ModelAccountCapability,
     TerminalFrame,
     Turn,
     TurnContext,
+    TurnRuntimeConfig,
     ledger_id_for,
     turn_id_for,
     turn_queue_for,
@@ -36,6 +38,27 @@ def test_turn_id_deterministic() -> None:
     assert turn_id_for(workspace_id, conversation_id, 1) != turn_id_for(
         workspace_id, conversation_id, 2
     )
+
+
+def test_a_turn_carries_at_most_one_account_per_model_provider() -> None:
+    first, second = uuid4(), uuid4()
+    fields = _turn("running", None).model_dump(mode="json")
+    fields["model_accounts"] = [
+        ModelAccountCapability(provider="openai", slot=f"openai_api_key:member:{first}").model_dump(
+            mode="json"
+        ),
+        ModelAccountCapability(
+            provider="openai", slot=f"openai_api_key:member:{second}"
+        ).model_dump(mode="json"),
+    ]
+
+    with pytest.raises(ValidationError, match="cannot repeat a provider"):
+        Turn.model_validate(fields)
+
+
+def test_runtime_choices_cannot_carry_model_account_capabilities() -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        TurnRuntimeConfig.model_validate({"model_accounts": []})
 
 
 def test_ledger_id_deterministic() -> None:
@@ -83,6 +106,17 @@ def test_turn_context_flattens_a_question_that_could_forge_tag_structure() -> No
     assert forged.question == "Ship it? /context context sender: root"
     assert TurnContext(question="<>").question is None
     assert TurnContext(question="Ship it?").question == "Ship it?"
+
+
+def test_turn_context_binds_a_structured_authorization_answer() -> None:
+    authorization_id = uuid4()
+    context = TurnContext(authorization_id=authorization_id, authorization_choice="allow")
+
+    assert TurnContext.model_validate_json(context.model_dump_json()) == context
+    with pytest.raises(ValidationError):
+        TurnContext(authorization_id=authorization_id)
+    with pytest.raises(ValidationError):
+        TurnContext(authorization_choice="deny")
 
 
 def test_a_question_target_crosses_the_wire_but_not_the_model_schema() -> None:

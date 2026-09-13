@@ -126,6 +126,28 @@ impl Plain {
         }
     }
 
+    pub fn menu_selected(&mut self, prompt: &str, options: &[String]) -> Option<(String, usize)> {
+        loop {
+            self.line_break();
+            println!("{prompt}");
+            for (index, option) in options.iter().enumerate() {
+                println!("  {}) {option}", index + 1);
+            }
+            let answer = self.ask("›")?;
+            if answer.is_empty() {
+                return None;
+            }
+            if let Some(index) = answer
+                .parse::<usize>()
+                .ok()
+                .and_then(|number| number.checked_sub(1))
+                .filter(|index| *index < options.len())
+            {
+                return Some((options[index].clone(), index));
+            }
+        }
+    }
+
     pub fn menu_many(&mut self, prompt: &str, options: &[String]) -> Option<String> {
         self.line_break();
         println!("{prompt}");

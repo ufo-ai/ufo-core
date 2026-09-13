@@ -20,7 +20,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
-from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import CONNECTION_SCOPE_MAX, ExtensionContext
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import (
@@ -54,9 +53,7 @@ PRIVATE_PROMPT = "private member task"
 SCHEDULE_MAX = 100
 RESPONSE_EXCERPT_MAX = 400
 PROMPT_EXCERPT_MAX = 400
-SCHEDULE_GATE = (
-    "only the task's creator may change its content; an admin may change cadence, expiry, or pause"
-)
+SCHEDULE_GATE = "only the task's creator may change it; an admin may pause a running task"
 SCHEDULE_REQUESTER_GATE = "creating a scheduled task requires a member requester"
 DELETE_GATE = "only the task's creator or a workspace admin may delete a scheduled task"
 MAX_WAIT_MINUTES = 10_080
@@ -202,6 +199,25 @@ def _internet_in_scope(stored: Literal[False] | None, scope: Literal[False] | No
     return scope is None or stored is False
 
 
+def _portal_actions(
+    owner: GeneratedObjectOwner,
+    *,
+    paused: bool,
+    member_id: UUID,
+    admin: bool,
+) -> dict[str, bool]:
+    owned = owner.member_id is not None and owner.member_id == member_id
+    full = owned or (admin and owner.member_id is None)
+    return {
+        "content_editable": full,
+        "schedule_editable": full,
+        "pausable": not paused and (full or admin),
+        "resumable": paused and full,
+        "runnable": full,
+        "deletable": owned or admin,
+    }
+
+
 @dataclass(frozen=True)
 class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObjectOwner]):
     """The kind's handlers over `ScheduleStore`: a task is seen by whoever reads the conversation it
@@ -209,25 +225,18 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
     supplies only the audience it decides from. Deleting stays the creator's and an admin's,
     so a member reading a shared task is never a member who can change it. This kind supplies the
     task rows, their specs and status, and the create/update/cancel domain acts. Creation binds the
-    applying turn's conversation and agent; updates preserve both, so a later fire re-enters that
-    conversation as that agent, acting on behalf of the creator.
+    applying turn's conversation, agent, and exact runtime capabilities; updates preserve them, so
+    a later fire re-enters that conversation as that agent without inferring a member principal.
 
-    Content editing is narrower than cadence management: an update keeps the original creator, so
-    an admin may change schedule, expiry, or pause but never the prompt, the description, or a
-    `run_now` fire that runs as that member against their private capabilities. Every new task
-    requires an acting member."""
+    An admin may stop or cancel another member's task but cannot resume, run, or rewrite its
+    work."""
 
     kind_name: ClassVar[str] = SCHEDULED_TASK_KIND
     mutate_gate: ClassVar[str] = SCHEDULE_GATE
     delete_gate: ClassVar[str] = DELETE_GATE
 
-    def _admin_can_apply(self, _old: ScheduledTaskSpec, spec: ScheduledTaskSpec) -> bool:
-        """Cadence management — schedule, expiry, pause — is an admin's; content is the
-        creator's. `run_now` counts as content: it fires the prompt at once under the creator's
-        authority, which is the creator's own act to ask for."""
-        return not {"prompt", "description", "run_now", "connections"}.intersection(
-            spec.model_fields_set
-        )
+    def _admin_can_apply(self, old: ScheduledTaskSpec, spec: ScheduledTaskSpec) -> bool:
+        return spec.model_fields_set == {"paused"} and not old.paused and spec.paused is True
 
     async def member_page(
         self,
@@ -245,7 +254,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             except ValueError:
                 return object_page((), query)
         rows = tuple(
-            ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
+            row
             for row in await self._rows(
                 ext,
                 member_id=member_id,
@@ -255,7 +264,30 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             )
             if self._visible(row.owner, member_id, admin) and self._listed(row, query)
         )
-        return object_page(rows, query)
+        owners = {row.name: row.owner for row in rows}
+        page = object_page(
+            tuple(ObjectRow(name=row.name, summary=row.summary, fields=row.fields) for row in rows),
+            query,
+        )
+        return ObjectPage(
+            rows=tuple(
+                ObjectRow(
+                    name=row.name,
+                    summary=row.summary,
+                    fields={
+                        **row.fields,
+                        **_portal_actions(
+                            owners[row.name],
+                            paused=row.fields["paused"] is True,
+                            member_id=member_id,
+                            admin=admin,
+                        ),
+                    },
+                )
+                for row in page.rows
+            ),
+            next_cursor=page.next_cursor,
+        )
 
     async def member_detail(
         self,
@@ -276,7 +308,19 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         if detail is None:
             return None
         return MemberObject(
-            row=ObjectRow(name=found.name, summary=found.summary, fields=found.fields),
+            row=ObjectRow(
+                name=found.name,
+                summary=found.summary,
+                fields={
+                    **found.fields,
+                    **_portal_actions(
+                        found.owner,
+                        paused=found.fields["paused"] is True,
+                        member_id=member_id,
+                        admin=admin,
+                    ),
+                },
+            ),
             detail=detail,
         )
 
@@ -329,7 +373,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         indistinguishable from a prompt that ended, and the screen that draws it cannot undo it."""
         return await self._rows(
             ctx.ext,
-            member_id=authority_member_id(ctx.authority),
+            member_id=ctx.speaker_member_id,
             prompt_max=PROMPT_EXCERPT_MAX,
             connections=ctx.connection_scope,
             internet_access=(
@@ -387,7 +431,9 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                         "paused": listed.task.paused,
                         "owner_email": emails.get(listed.task.created_by_member_id),
                         "origin": listed.surface_label or "Portal",
-                        "mine": listed.task.created_by_member_id == member_id,
+                        "mine": (
+                            member_id is not None and listed.task.created_by_member_id == member_id
+                        ),
                         "readable": content_readable,
                         "prompt": (
                             listed.task.prompt[:prompt_max] if content_readable else PRIVATE_PROMPT
@@ -455,7 +501,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 "turn_id": str(inspection.last_turn_id),
                 "turn_status": inspection.last_turn_status,
             }
-            if _content_readable(listed, authority_member_id(ctx.authority)):
+            if _content_readable(listed, ctx.speaker_member_id):
                 last_run["response"] = (
                     None
                     if inspection.last_response is None
@@ -482,7 +528,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         owner: GeneratedObjectOwner | None,
     ) -> None:
         validated_schedule = None if spec.schedule is None else validate_cron(spec.schedule)
-        acting_member = authority_member_id(ctx.authority)
+        acting_member = ctx.speaker_member_id
         if acting_member is None:
             raise SpeakerRequired(SCHEDULE_REQUESTER_GATE)
         found = await self._find(ctx.ext, name)
@@ -621,13 +667,13 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
         "externally-shared channel's tasks by nobody else at all. An admin lists another member's "
         "private task as a management row and reads its content only after recording the "
         "`read_private_transcript` acknowledgement on the conversation it reports into; `readable` "
-        "says whether the reader sees that content. Seeing a task is not changing "
-        "it — only its creator may edit or delete it, and an admin may inspect or change another "
-        "member's cadence, expiry, or pause, or delete it, but cannot alter its prompt or "
-        "description. The main agent may name another agent only when updating that agent's "
-        "existing task; creation requires the executor's own conversation. A fire acts as the "
-        "creator, but "
-        "recalls only the memory its reporting conversation can see (shared-only in a channel). "
+        "says whether the reader sees that content. Seeing a task is not changing it: its creator "
+        "may edit, pause, resume, run, or delete it; an admin may inspect management metadata, "
+        "pause a running task, or delete it, but cannot resume or run it or read or change its "
+        "cadence, expiry, prompt, or description. The main agent may name another agent only when "
+        "updating that agent's existing task; creation requires the executor's own conversation. "
+        "A fire has no speaker and carries only the task's exact stored capabilities, and recalls "
+        "only the memory its reporting conversation can see (shared-only in a channel). "
         "Listing returns each task's name, schedule, `description`, creator (`owner_email`), and "
         "`origin` — the surface label of the conversation it reports into, else `Portal` — "
         "plus the latest fire as `last_run_at` and `last_run_status`, and filters and orders on "
@@ -686,12 +732,6 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
         "metadata": args.metadata,
     }
     ext = _require_ext(ctx.ext)
-    runtime_connections = ctx.connection_scope
-    connections = (
-        runtime_connections
-        if runtime_connections is not None
-        else (await ctx.connector_connection_ids())[:CONNECTION_SCOPE_MAX]
-    )
     await PauseStore(ext).arm(
         conversation_id=ctx.turn.conversation_id,
         agent_id=ctx.turn.agent_id,
@@ -699,8 +739,9 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
         origin_seq=ctx.turn.seq,
         origin_arrival_seq=await ext.conversation_arrival_seq(ctx.turn.conversation_id),
         prompt="Resume the paused workflow.\n" + json.dumps(wakeup),
-        created_by_member_id=authority_member_id(ctx.authority),
-        connections=connections,
+        internet_access=(
+            None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.internet_access
+        ),
     )
     payload = {
         "awaiting": "timer",
@@ -723,4 +764,5 @@ PAUSE_AND_WAIT_TOOL = ToolDef(
     input_model=PauseAndWaitInput,
     handler=pause_and_wait,
     side_effecting=True,
+    binds_member_authority=False,
 )

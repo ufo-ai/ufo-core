@@ -235,7 +235,6 @@ async def test_a_lanes_open_rows_become_one_turn_on_its_own_conversation(db: Non
     assert conversation["member_id"] == member_id
     assert conversation["audience"] == str(conversation_audience(member_id))
     assert turn["conversation_id"] == conversation["id"]
-    assert turn["on_behalf_of_member_id"] == member_id
     assert turn["speaker_member_id"] is None
     assert f'<notifications count="{DRAIN_BATCH}">' in turn["inbound"]
     assert all(f"subject: page/{index:02d}" in turn["inbound"] for index in range(DRAIN_BATCH))
@@ -335,21 +334,17 @@ async def test_two_members_are_two_lanes_and_a_cooling_lane_waits(db: None) -> N
         settled = await _turns(workspace_id)
         conversations = await _conversations(workspace_id)
 
-    assert {turn["on_behalf_of_member_id"] for turn in first} == {member_id, other}
+    assert len(first) == 2
     assert len(cooling) == 2
     assert [row["subject"] for row in open_rows] == ["source/ashby"]
     assert len(settled) == 3
     assert len(conversations) == 2
-    assert (
-        len(
-            {
-                turn["conversation_id"]
-                for turn in settled
-                if turn["on_behalf_of_member_id"] == member_id
-            }
-        )
-        == 1
+    member_conversation = next(
+        conversation["id"]
+        for conversation in conversations
+        if conversation["member_id"] == member_id
     )
+    assert sum(turn["conversation_id"] == member_conversation for turn in settled) == 2
 
 
 async def test_a_fold_during_the_claim_keeps_the_row_open_for_the_next_tick(db: None) -> None:

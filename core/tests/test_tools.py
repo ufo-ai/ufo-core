@@ -274,14 +274,18 @@ def _check_registry_schemas_cover_every_tool() -> None:
     }
     bash = next(schema for schema in schemas if schema.name == "bash")
     assert "command" in bash.input_schema["properties"]
-    assert all(REQUESTED_BY in schema.input_schema["properties"] for schema in schemas)
+    requester_tools = {
+        schema.name for schema in schemas if REQUESTED_BY in schema.input_schema["properties"]
+    }
+    assert requester_tools == {
+        "bash",
+        "spawn",
+        "connect_account",
+    }
     assert bash.input_schema["properties"][REQUESTED_BY]["description"] == (
         "Message ref that explicitly requested this call. Required for any member-specific "
         "authority or capability, including admin actions; omit only for conversation-common work."
     )
-
-    speakerless = REGISTRY.schemas(include_requested_by=False)
-    assert all(REQUESTED_BY not in schema.input_schema["properties"] for schema in speakerless)
 
 
 def _check_builtin_tool_schema_has_no_user_description() -> None:
@@ -960,6 +964,28 @@ async def test_load_skill_mounts_a_member_skill_from_its_materialized_row(tmp_pa
     assert sandbox.files["$UFO_HOME/skills/greet/notes.md"] == b"kept"
 
 
+async def test_load_skill_member_tier_does_not_vary_with_the_tool_speaker(tmp_path: Path) -> None:
+    saved = RuntimeSkill(
+        name="greet",
+        description="say hi",
+        instructions="GREET BODY",
+        raw_skill_md="---\nname: greet\ndescription: say hi\n---\nGREET BODY\n",
+    )
+    skills = _member_tier(saved)
+    outputs: list[str] = []
+    for speaker in (None, uuid4()):
+        ctx = replace(
+            make_context(FakeSandbox(), tmp_path),
+            skills=skills,
+            speaker_member_id=speaker,
+        )
+        outputs.append((await _load_skill(ctx, "greet")).content[0].text)
+
+    assert REGISTRY.get("load_skill").binds_member_authority is False
+    assert outputs[0] == outputs[1]
+    assert skills.closure("greet")[0].card == saved.card()
+
+
 async def test_member_skill_dependencies_use_the_local_system_bundle(tmp_path: Path) -> None:
     saved = RuntimeSkill(
         name="greet",
@@ -1085,7 +1111,6 @@ async def test_spawn_unknown_target_is_an_error_naming_the_valid_targets(
         client=_IdleSpawnClient(),
         registry=SubagentRegistry((_spawn_profile("research"), _spawn_profile("coding"))),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)
@@ -1124,7 +1149,6 @@ async def test_spawn_wrong_payload_is_an_error_naming_the_targets_keys(
         client=_IdleSpawnClient(),
         registry=SubagentRegistry((_spawn_profile("coding"),)),
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     ctx = make_context(FakeSandbox(), tmp_path, spawn=subagents.spawn)
@@ -1142,7 +1166,7 @@ async def test_spawn_wrong_payload_is_an_error_naming_the_targets_keys(
 
 
 async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path) -> None:
-    recorded: list[tuple[str | None, bool]] = []
+    recorded: list[tuple[str | None, bool, UUID | None]] = []
 
     async def _record(
         target: str,
@@ -1153,14 +1177,18 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         name: str = "",
         detach_on_arrival: bool = False,
         model: str | None = None,
+        *,
+        requester_member_id: UUID | None = None,
     ) -> SpawnResult:
-        recorded.append((dedup_key, delivers_result))
+        recorded.append((dedup_key, delivers_result, requester_member_id))
         return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)
 
     assert REGISTRY.get("spawn").side_effecting is True
+    speaker = uuid4()
     ctx = replace(
         make_context(FakeSandbox(), tmp_path, spawn=_record),
         idempotency_key="turn-1/spawn/call-1",
+        speaker_member_id=speaker,
     )
     result = await run(
         "spawn",
@@ -1169,7 +1197,7 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         payload={"task": "x"},
         background=True,
     )
-    assert recorded == [("turn-1/spawn/call-1", True)]
+    assert recorded == [("turn-1/spawn/call-1", True, speaker)]
     assert not result.is_error
 
     await run(
@@ -1178,7 +1206,7 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         target="research",
         payload={"task": "x"},
     )
-    assert recorded[1] == ("turn-1/spawn/call-1", False)
+    assert recorded[1] == ("turn-1/spawn/call-1", False, speaker)
 
 
 async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refusal(
@@ -1187,7 +1215,7 @@ async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refus
     """The tool hands the caller's model straight to the spawn, and a model the deploy does not
     serve comes back as a recoverable tool error naming what it serves — the same shape a bad
     target or payload takes, so the model repairs its own call."""
-    asked: list[str | None] = []
+    asked: list[tuple[str | None, UUID | None]] = []
 
     async def _record(
         target: str,
@@ -1198,13 +1226,19 @@ async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refus
         name: str = "",
         detach_on_arrival: bool = False,
         model: str | None = None,
+        *,
+        requester_member_id: UUID | None = None,
     ) -> SpawnResult:
-        asked.append(model)
+        asked.append((model, requester_member_id))
         if model == "gpt-5.6-sol":
             return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)
         raise SpawnModelRejected.unknown(model or "", ("gpt-5.6-sol",))
 
-    ctx = make_context(FakeSandbox(), tmp_path, spawn=_record)
+    speaker = uuid4()
+    ctx = replace(
+        make_context(FakeSandbox(), tmp_path, spawn=_record),
+        speaker_member_id=speaker,
+    )
 
     pinned = await run(
         "spawn",
@@ -1223,7 +1257,7 @@ async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refus
         model="gpt-9",
     )
 
-    assert asked == ["gpt-5.6-sol", "gpt-9"]
+    assert asked == [("gpt-5.6-sol", speaker), ("gpt-9", speaker)]
     assert not pinned.is_error
     assert refused.is_error
     assert "gpt-9" in refused.content[0].text
@@ -1378,7 +1412,7 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
                 seq=1,
                 status="running",
                 inbound="render it",
-                on_behalf_of_member_id=member_id,
+                speaker_member_id=member_id,
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -1394,12 +1428,12 @@ async def test_share_artifact_hands_the_member_bytes_a_tool_rendered(
             seq=1,
             status="running",
             inbound="render it",
-            on_behalf_of_member_id=member_id,
+            speaker_member_id=member_id,
             created_at=datetime(2026, 8, 20, tzinfo=UTC),
         ),
         agent=Agent(prompt="be terse", model="claude-opus-4-8"),
         spawn=None,
-        speaker_member_id=None,
+        speaker_member_id=member_id,
         audience=conversation_audience(None),
         artifact_token_secret="secret",
         publish_artifacts=publish_artifacts,

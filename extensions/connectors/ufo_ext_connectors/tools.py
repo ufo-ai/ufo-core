@@ -37,7 +37,7 @@ import re
 import shlex
 import string
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from urllib.parse import quote, unquote
 from uuid import UUID, uuid4
@@ -58,7 +58,10 @@ from ufo.sdk.context import JsonValue
 from ufo.sdk.o11y import log
 from ufo.sdk.sandbox import WORKSPACE_DIR, contained_leaf, workspace_path
 from ufo.sdk.tools import (
+    AuthorizationBinding,
+    AuthorizationScope,
     ConnectorConnection,
+    StandingAuthorization,
     TextContent,
     ToolContext,
     ToolDef,
@@ -522,6 +525,43 @@ async def call_external_tool(ctx: ToolContext, args: CallExternalToolInput) -> T
     return ToolResult(content=(TextContent(text=await call.run(arguments, connection)),))
 
 
+async def call_external_tool_standing_authorization(
+    ctx: ToolContext, args: CallExternalToolInput
+) -> StandingAuthorization[CallExternalToolInput]:
+    entry = _registry(ctx).entry(args.source_id)
+    described, connection = await asyncio.gather(
+        entry.broker.schema(ctx.turn.workspace_id, entry.provider, args.tool_name),
+        ctx.connector_connection(entry.provider, args.account_id),
+    )
+    scope = AuthorizationScope(
+        provider=entry.provider,
+        account_id=connection.account_id,
+        operation=described.slug,
+        access="read" if described.read_only else "write",
+    )
+    binding = AuthorizationBinding(
+        connection_id=connection.id,
+        grant_id=connection.grant_id,
+        **scope.model_dump(),
+    )
+    return StandingAuthorization(
+        context=replace(
+            ctx,
+            connector_selection=connection,
+            connector_binding=binding,
+        ),
+        input=args.model_copy(
+            update={
+                "source_id": entry.provider,
+                "tool_name": described.slug,
+                "account_id": connection.account_id,
+            }
+        ),
+        scope=scope,
+        binding=binding,
+    )
+
+
 async def _destination_is_internal(
     ctx: ToolContext,
     entry: ConnectorEntry,
@@ -591,6 +631,23 @@ class _ConnectorCall:
 
     async def run(self, arguments: dict[str, JsonValue], connection: ConnectorConnection) -> str:
         staged = {key: await self._staged_value(item) for key, item in arguments.items()}
+        authorization = self.ctx.connector_binding
+        if authorization is not None:
+            described = await self.entry.broker.schema(
+                self.ctx.turn.workspace_id,
+                self.entry.provider,
+                self.slug,
+            )
+            if (
+                authorization.provider != self.entry.provider
+                or authorization.account_id != connection.account_id
+                or authorization.connection_id != connection.id
+                or authorization.grant_id != connection.grant_id
+                or authorization.operation != self.slug
+                or described.slug != authorization.operation
+                or described.read_only != (authorization.access == "read")
+            ):
+                raise ValueError("the connector operation changed after member authorization")
         await self.ctx.require_connector_connection(connection)
         response = await self.entry.broker.execute(
             self.ctx.turn.workspace_id,
@@ -1125,6 +1182,7 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=DescribeExternalToolsInput,
         handler=describe_external_tools,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="search_connector_tools",
@@ -1138,6 +1196,7 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=SearchConnectorToolsInput,
         handler=search_connector_tools,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="call_external_tool",
@@ -1162,5 +1221,6 @@ CONNECTOR_TOOLS: tuple[ToolDef, ...] = (
         handler=call_external_tool,
         untrusted=True,
         side_effecting=True,
+        standing_authorization=call_external_tool_standing_authorization,
     ),
 )

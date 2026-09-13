@@ -147,6 +147,7 @@ ROLLOVER_TOOLS: tuple[ToolDef, ...] = (
         input_model=NewContextInput,
         handler=new_context_handler,
         subagent_default=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name=SEARCH_HISTORY_TOOL,
@@ -160,6 +161,7 @@ ROLLOVER_TOOLS: tuple[ToolDef, ...] = (
         handler=search_history_handler,
         parallel_safe=True,
         subagent_default=True,
+        binds_member_authority=False,
     ),
 )
 """The tools the `rollover` strategy declares on its Manifest. The boundary spec names them too, so

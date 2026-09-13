@@ -223,11 +223,13 @@ function CadencePills({
   cadence,
   cron,
   offset,
+  disabled,
   onPick,
 }: {
   cadence: Cadence;
   cron: string;
   offset: number;
+  disabled?: boolean;
   onPick: (next: Cadence) => Promise<NoticeState>;
 }) {
   const clock = clockOf(cadence);
@@ -242,6 +244,7 @@ function CadencePills({
         said={labelOf(cadence)}
         value={cadence.mode}
         options={CADENCE_MODES.map((offer) => ({ value: offer.mode, label: offer.label }))}
+        disabled={disabled}
         onPick={(mode) => void onPick(asMode(cadence, mode as CadenceMode, cron, offset))}
       />
       {cadence.mode === "interval" ? (
@@ -253,6 +256,7 @@ function CadencePills({
             value: String(hours),
             label: intervalLabel(hours),
           }))}
+          disabled={disabled}
           onPick={(hours) => void onPick({ mode: "interval", hours: Number(hours) })}
         />
       ) : null}
@@ -265,6 +269,7 @@ function CadencePills({
             value: String(day),
             label: dayOfMonthLabel(day),
           }))}
+          disabled={disabled}
           onPick={(day) => void onPick({ ...cadence, day: Number(day) })}
         />
       ) : null}
@@ -274,6 +279,7 @@ function CadencePills({
           said={weekdayName(cadence.weekday)}
           value={String(cadence.weekday)}
           options={WEEKDAYS.map((day) => ({ value: String(day), label: weekdayName(day) }))}
+          disabled={disabled}
           onPick={(day) => void onPick({ ...cadence, weekday: Number(day) })}
         />
       ) : null}
@@ -282,6 +288,7 @@ function CadencePills({
           type="time"
           aria-label="Time"
           value={time.held}
+          disabled={disabled}
           className="h-(--size-control) w-fit rounded-full py-0 text-label"
           onChange={(event) => time.typed(event.target.value)}
           onBlur={() => void time.commit(time.held)}
@@ -318,7 +325,11 @@ export function ScheduledTaskPane({
 }) {
   const viewer = useViewer();
   const [firing, setFiring] = useState(false);
-  const mine = status.mine === true;
+  const contentEditable = status.content_editable === true;
+  const scheduleEditable = status.schedule_editable === true;
+  const pausable = status.pausable === true;
+  const resumable = status.resumable === true;
+  const runnable = status.runnable === true;
   const paused = status.paused === true || spec?.paused === true;
   const origin = typeof status.origin === "string" && status.origin ? status.origin : ITS_CHAT;
   const reports = links.find((link) => link.relation === "reports_to") ?? null;
@@ -351,14 +362,14 @@ export function ScheduledTaskPane({
                 label="Prompt"
                 value={typeof spec.prompt === "string" ? spec.prompt : ""}
                 lines={8}
-                readOnly={!mine}
-                note={mine ? undefined : CONTENT_IS_THE_CREATORS}
+                readOnly={!contentEditable}
+                note={contentEditable ? undefined : CONTENT_IS_THE_CREATORS}
                 onSave={(prompt) => onApply({ prompt })}
               />
               <SelfSaving
                 label="Description"
                 value={typeof spec.description === "string" ? spec.description : ""}
-                readOnly={!mine}
+                readOnly={!contentEditable}
                 onSave={(description) => onApply({ description })}
               />
               <div className="flex flex-wrap items-center gap-sm">
@@ -366,6 +377,7 @@ export function ScheduledTaskPane({
                   cadence={cadence}
                   cron={schedule}
                   offset={offset}
+                  disabled={!scheduleEditable}
                   onPick={(next) => {
                     setAsCron(next.mode === "custom");
                     return next.mode === "custom"
@@ -384,12 +396,18 @@ export function ScheduledTaskPane({
                 />
               </div>
               {cadence.mode === "custom" ? (
-                <SelfSaving label="Cron (UTC)" value={schedule} onSave={save} />
+                <SelfSaving
+                  label="Cron (UTC)"
+                  value={schedule}
+                  readOnly={!scheduleEditable}
+                  onSave={save}
+                />
               ) : null}
               <SelfSaving
                 label="Expires"
                 type="datetime-local"
                 value={typeof spec.expires_at === "string" ? localMoment(spec.expires_at) : ""}
+                readOnly={!scheduleEditable}
                 note={NO_EXPIRY}
                 onSave={(local) => {
                   if (local !== "" && new Date(local).getTime() <= Date.now()) {
@@ -408,6 +426,7 @@ export function ScheduledTaskPane({
           <Button
             variant="row"
             busy={firing}
+            disabled={!runnable}
             onClick={async () => {
               setFiring(true);
               await onApply(paused ? { run_now: true, paused: false } : { run_now: true });
@@ -416,7 +435,11 @@ export function ScheduledTaskPane({
           >
             {paused ? "Resume and run now" : "Run now"}
           </Button>
-          <Button variant="row" onClick={() => void onApply({ paused: !paused })}>
+          <Button
+            variant="row"
+            disabled={paused ? !resumable : !pausable}
+            onClick={() => void onApply({ paused: !paused })}
+          >
             {paused ? "Resume" : "Pause"}
           </Button>
         </div>

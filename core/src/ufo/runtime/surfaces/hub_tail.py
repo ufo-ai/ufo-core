@@ -20,7 +20,6 @@ import sqlalchemy as sa
 
 from ufo.db import workspace_tx
 from ufo.harness.o11y import log
-from ufo.runtime.authority import authority_member_id, turn_authority
 from ufo.runtime.billing.accounting import (
     ALLOW,
     BalanceGate,
@@ -158,7 +157,6 @@ async def turn_status_frame(
                     tables.turn.c.agent_id,
                     tables.turn.c.conversation_id,
                     tables.turn.c.speaker_member_id,
-                    tables.turn.c.on_behalf_of_member_id,
                     tables.turn.c.admission_source,
                 ).where(tables.turn.c.id == turn_id)
             )
@@ -169,15 +167,15 @@ async def turn_status_frame(
             return Terminal(frame=TerminalFrame.model_validate(row.terminal))
         if row.status != PARKED:
             return None
-        authority = turn_authority(row.speaker_member_id, row.on_behalf_of_member_id)
-        if not await Seats(row.workspace_id).admits(connection, authority):
+        member_id = row.speaker_member_id
+        members = () if member_id is None else (member_id,)
+        if not await Seats(row.workspace_id).all_seated(connection, members):
             return Parked(message=SEAT_REVOKED_MESSAGE)
         balance = await BalanceGate(row.workspace_id).admits(
             connection, row.agent_id, key_slot_for, turn_id
         )
         if balance.outcome != ALLOW:
             return Parked(message=balance_park_message(billing_url))
-        member_id = authority_member_id(authority)
         if not applicable_caps_absent(row.workspace_id, member_id, row.agent_id):
             decision = await SpendEvaluator(row.workspace_id, member_id, row.agent_id).decide(
                 connection, 0

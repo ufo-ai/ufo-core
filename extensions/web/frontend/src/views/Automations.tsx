@@ -201,7 +201,11 @@ type Entry = {
   nextRunAt: string;
   lastRunAt: string;
   paused: boolean;
-  mine: boolean;
+  contentEditable: boolean;
+  scheduleEditable: boolean;
+  pausable: boolean;
+  resumable: boolean;
+  deletable: boolean;
 };
 
 type IndexRow = ObjectRow & { agent_id: string };
@@ -262,7 +266,11 @@ function taskEntry(row: IndexRow): Entry {
     nextRunAt: paused ? "" : said(row.next_run_at),
     lastRunAt: said(row.last_run_at),
     paused,
-    mine: row.mine === true,
+    contentEditable: row.content_editable === true,
+    scheduleEditable: row.schedule_editable === true,
+    pausable: row.pausable === true,
+    resumable: row.resumable === true,
+    deletable: row.deletable === true,
   };
 }
 
@@ -292,7 +300,11 @@ function triggerEntry(row: IndexRow): Entry {
     nextRunAt: "",
     lastRunAt: said(row.last_run_at),
     paused: row.paused === true,
-    mine: row.mine === true,
+    contentEditable: false,
+    scheduleEditable: false,
+    pausable: row.pausable === true,
+    resumable: row.resumable === true,
+    deletable: row.deletable === true,
   };
 }
 
@@ -528,7 +540,7 @@ function TaskFields({
       <SelfSaving
         label={NAME}
         value={entry.label}
-        readOnly={!entry.mine}
+        readOnly={!entry.contentEditable}
         onSave={(description) => save({ description })}
       />
       <SelfSaving
@@ -536,18 +548,18 @@ function TaskFields({
         value={entry.prompt}
         lines={INSTRUCTION_LINES}
         moreLines={INSTRUCTION_LINES_GROWN}
-        readOnly={!entry.mine}
+        readOnly={!entry.contentEditable}
         onSave={(prompt) => save({ prompt })}
       />
       <WhenToRun
         schedule={entry.schedule}
-        readOnly={!entry.mine}
+        readOnly={!entry.scheduleEditable}
         onSave={(schedule) => save({ schedule })}
       />
       <div className="flex flex-wrap gap-sm">
         <Button
           variant="row"
-          disabled={!entry.mine}
+          disabled={entry.paused ? !entry.resumable : !entry.pausable}
           onClick={() => void save({ paused: !entry.paused })}
         >
           {entry.paused ? RESUME : PAUSE}
@@ -556,7 +568,7 @@ function TaskFields({
           <ConfirmButton
             verb={DELETE}
             variant="row"
-            disabled={!entry.mine}
+            disabled={!entry.deletable}
             onClick={() => void remove()}
           />
         ) : null}
@@ -594,7 +606,7 @@ function TriggerInfo({
         {applies ? (
           <Button
             variant="row"
-            disabled={!entry.mine}
+            disabled={entry.paused ? !entry.resumable : !entry.pausable}
             onClick={() => void act(onPause(!entry.paused))}
           >
             {entry.paused ? RESUME : PAUSE}
@@ -604,7 +616,7 @@ function TriggerInfo({
           <ConfirmButton
             verb={DELETE}
             variant="row"
-            disabled={!entry.mine}
+            disabled={!entry.deletable}
             onClick={() => void act(onDelete())}
           />
         ) : null}

@@ -1,0 +1,42 @@
+name = "bash-background-description"
+base = "501c0290e"
+suites = ["bash_waiting"]
+cases = [
+  "bash-wait-foreground",
+  "bash-wait-background",
+  "bash-wait-restraint",
+  "bash-wait-long",
+  "bash-wait-remote",
+]
+repeats = 6
+concurrency = 2
+max_stacks = 2
+budget_usd = 40.0
+est_usd_per_case = 0.10
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "z-ai/glm-5.3-flash" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "prior-wording"
+
+[[arm.replacements]]
+path = "core/src/ufo/host/tools/builtins.py"
+old = '''        description="Run the command detached and return at once with its task id, log path, and "
+        "pid instead of waiting for it. It keeps network only until this turn ends, and stops "
+        "advancing whenever the sandbox pauses between turns.",
+'''
+new = '''        description="Run the command detached and return at once with its task id, log path, and "
+        "pid instead of waiting for it. The result names its log, pid, and exit files under "
+        "`$UFO_HOME/runs/<id>/tasks`. The command's network egress ends with this turn, "
+        "and a sandbox that suspends between turns advances it only while awake — use background "
+        "for compute that needs no network past this turn: builds, test runs, data processing.",
+'''

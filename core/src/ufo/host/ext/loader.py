@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from importlib.machinery import ModuleSpec
 from importlib.metadata import EntryPoint, entry_points
 from pathlib import Path
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
@@ -65,7 +66,6 @@ from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.grants import ConnectionRecorded
 from ufo.runtime.access.workspace_slots import SlotProvider, WorkspaceSlots
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority
 from ufo.runtime.ext.context import (
     ConversationProbes,
     DeployCredentials,
@@ -498,7 +498,7 @@ def turn_tools(
     public_base_url: str | None = None,
     home_surface: str | None = None,
     artifact_token_secret: str = "",
-    member_context_authority: ExecutionAuthority = WORKSPACE_AUTHORITY,
+    member_context_member_id: UUID | None = None,
     member_context_blob: WorkspaceBlobStore | None = None,
     invoker: TurnInvoker | None = None,
     probes: ConversationProbes | None = None,
@@ -554,7 +554,7 @@ def turn_tools(
             home_surface=home_surface,
             artifact_token_secret=artifact_token_secret,
             member_context_read=manifest.member_context_read,
-            member_context_authority=member_context_authority,
+            member_context_member_id=member_context_member_id,
             member_context_blob=member_context_blob,
             invoker=invoker,
             probes=probes,

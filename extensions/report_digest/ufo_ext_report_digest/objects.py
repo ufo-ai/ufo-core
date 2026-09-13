@@ -14,7 +14,6 @@ from uuid import UUID
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 
-from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import ExtensionContext, JsonValue
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
@@ -64,7 +63,7 @@ class ReportObjects:
     itself fences every row, so the kind adds projection and never authority."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        member_id = authority_member_id(ctx.authority)
+        member_id = ctx.speaker_member_id
         if member_id is None:
             return object_page((), query)
         return await self._page(
@@ -76,7 +75,7 @@ class ReportObjects:
         )
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ReportSpec] | None:
-        member_id = authority_member_id(ctx.authority)
+        member_id = ctx.speaker_member_id
         if member_id is None:
             return None
         found = await self._one(

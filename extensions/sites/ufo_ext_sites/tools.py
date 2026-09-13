@@ -57,7 +57,6 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ufo.sdk.authority import authority_member_id
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import AGENT_KIND
 from ufo.sdk.sandbox import (
@@ -917,7 +916,7 @@ def _site_actor(ctx: ToolContext, visibility: Visibility | None) -> tuple[Extens
     the serve kills the port and once at the write, where a concurrent deploy may have moved — and
     written once."""
     ext = _site_extension(ctx)
-    creator_member_id = authority_member_id(ctx.authority)
+    creator_member_id = ctx.speaker_member_id
     if creator_member_id is None:
         raise SpeakerRequired(SITE_NEEDS_AN_OWNER)
     if visibility is not None and ctx.speaker_member_id is None:
@@ -1301,7 +1300,7 @@ async def _redeploy_homepage(
         raise SpeakerRequired(HOMEPAGE_REDEPLOY_NEEDS_A_SPEAKER)
     if args.visibility is not None:
         raise ValueError(HOMEPAGE_KEEPS_THE_AGENTS_VISIBILITY)
-    member_id = authority_member_id(ctx.authority)
+    member_id = ctx.speaker_member_id
     if member_id is None:
         raise SpeakerRequired(SITE_NEEDS_AN_OWNER)
     sites = _sites_registry(ctx)
@@ -1386,11 +1385,8 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
     member for a workspace agent, its owner and admins for a private one — so the bind answers to
     the module's disclosure rule the way a visibility change does. It is the creator's act alone:
     another member's site is refused whatever its visibility, since a bind would widen a private
-    site or re-gate a shared one out from under its creator. And a standing site needs the creator
-    speaking — without a live speaker the bind reaches only a site this same turn deployed, onto
-    this same turn's agent, whose gate is the room's default rather than a choice anyone made —
-    which is exactly the seed's deploy-and-bind shape, so seeding stays speakerless-safe while a
-    scheduled turn can never re-gate what a member left standing."""
+    site or re-gate a shared one out from under its creator. Without a live creator speaking, the
+    bind is refused."""
     ext = _site_extension(ctx)
     if ctx.target is None or ctx.target.name is None:
         raise RuntimeError("set_homepage dispatched without its agent target")
@@ -1398,7 +1394,7 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
     if agent is None:
         raise ValueError(f"no live agent is named {ctx.target.name!r}")
     agent_id = agent.id
-    member_id = authority_member_id(ctx.authority)
+    member_id = ctx.speaker_member_id
     owns = member_id is not None and agent.owner_member_id == member_id
     if agent_id != ctx.turn.agent_id and not owns and not await ctx.speaker_is_admin():
         raise ValueError(HOMEPAGE_NEEDS_THE_AGENTS_OWNER.format(agent=ctx.target.name))
@@ -1411,7 +1407,9 @@ async def set_homepage(ctx: ToolContext, args: SetHomepageInput) -> ToolResult:
             f"no hosted site is named {args.site!r}: deploy the site and bind the name its "
             "result carries"
         )
-    if authority_member_id(ctx.authority) != site.creator_member_id:
+    if ctx.speaker_member_id is None:
+        raise SpeakerRequired(HOMEPAGE_NEEDS_ITS_CREATOR.format(site=args.site))
+    if ctx.speaker_member_id != site.creator_member_id:
         raise ValueError(HOMEPAGE_NEEDS_ITS_CREATOR.format(site=args.site))
     deployed_this_turn = (
         site.conversation_id == ctx.sandbox.conversation_id
@@ -1441,6 +1439,7 @@ SITES_TOOLS: tuple[ToolDef, ...] = (
         description=START_SERVER_DESCRIPTION,
         input_model=StartServerInput,
         handler=start_server,
+        retains_sandbox_authority=True,
     ),
     ToolDef(
         name=DEPLOY_WEBSITE_TOOL,

@@ -389,7 +389,15 @@ test("a trigger pauses and deletes from its own Details, and never edits what it
 });
 
 test("a trigger another member wrote stands its acts disabled", async () => {
-  automationsOnWire([{ ...WATCHED_PULL, mine: false }]);
+  automationsOnWire([
+    {
+      ...WATCHED_PULL,
+      mine: false,
+      pausable: false,
+      resumable: false,
+      deletable: false,
+    },
+  ]);
   location.hash = automationsHash();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -629,7 +637,16 @@ test("a row carries no gear, so Details is the one way into an automation", asyn
 });
 
 test("a task another member wrote states the refusal and stands its cadence disabled", async () => {
-  const theirs = { ...NIGHTLY, mine: false };
+  const theirs = {
+    ...NIGHTLY,
+    mine: false,
+    content_editable: false,
+    schedule_editable: false,
+    pausable: false,
+    resumable: false,
+    runnable: false,
+    deletable: false,
+  };
   wire({
     "/intents": () => json({ applied: false, message: REFUSED_EDIT }),
     "/workspace/automations": () => json({ heroes: HEROES }),
@@ -656,6 +673,48 @@ test("a task another member wrote states the refusal and stands its cadence disa
   expect(
     await within(details).findByText(REFUSED_EDIT),
   ).toBeTruthy();
+});
+
+test("an admin may stop or delete another member's task but cannot resume or rewrite it", async () => {
+  const posted: Record<string, unknown>[] = [];
+  const theirs = {
+    ...NIGHTLY,
+    mine: false,
+    content_editable: false,
+    schedule_editable: false,
+    pausable: true,
+    resumable: false,
+    runnable: false,
+    deletable: true,
+  };
+  automationsOnWire([theirs], posted);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByText("Digest the night's changes"));
+  const details = await screen.findByRole("dialog", { name: "Details" });
+
+  expect(within(details).getByLabelText("Name")).toHaveProperty("readOnly", true);
+  expect(within(details).getByRole("button", { name: "When to run" })).toHaveProperty(
+    "disabled",
+    true,
+  );
+  expect(within(details).getByRole("button", { name: "Pause" })).toHaveProperty(
+    "disabled",
+    false,
+  );
+  expect(within(details).getByRole("button", { name: "Delete" })).toHaveProperty(
+    "disabled",
+    false,
+  );
+
+  await userEvent.click(within(details).getByRole("button", { name: "Pause" }));
+  await vi.waitFor(() => expect(posted).toHaveLength(1));
+  expect(posted[0]).toMatchObject({ spec: { paused: true } });
+  expect(await within(details).findByRole("button", { name: "Resume" })).toHaveProperty(
+    "disabled",
+    true,
+  );
 });
 
 test("a private task another member wrote opens the acknowledgement instead of its words", async () => {

@@ -71,5 +71,6 @@ DELEGATION_TOOLS: tuple[ToolDef, ...] = (
         handler=_build_website,
         side_effecting=True,
         bound=ObjectBinding(kind=SITE_KIND, binding="collection"),
+        binds_member_authority=False,
     ),
 )

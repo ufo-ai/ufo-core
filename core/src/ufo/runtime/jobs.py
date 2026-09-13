@@ -44,7 +44,6 @@ from ufo.product import (
     product_census,
 )
 from ufo.runtime.access.grants import INDEX_REAP_EXTENSION, INDEX_REAP_KEY_PREFIX
-from ufo.runtime.authority import MemberAuthority, authority_member_id, turn_authority
 from ufo.runtime.billing.accounting import (
     ALLOW,
     BalanceGate,
@@ -98,6 +97,7 @@ from ufo.schema.records import (
     RUNNING,
     TURN_WORKFLOW_NAME,
     TurnAdmissionSource,
+    TurnRuntimeConfig,
     TurnStatus,
     turn_queue_for,
 )
@@ -154,7 +154,6 @@ class _DispatchTurn:
     conversation_id: UUID
     agent_id: UUID
     speaker_member_id: UUID | None
-    on_behalf_of_member_id: UUID | None
     admission_source: TurnAdmissionSource
     status: TurnStatus
     parent_turn_id: UUID | None
@@ -171,9 +170,8 @@ class TurnDispatcher:
     QUEUED turn's DBOS workflow id is the turn id, making an ambiguous duplicate offer safe.
 
     PARKED rows share the same scanner and advisory dispatch stamp, but remain retry-time-, spend-,
-    balance-, and seat-gated: a timed provider park is invisible until `retry_at`, and any parked
-    turn stays held while its founder, scheduled creator, or any pending absorbed speaker holds no
-    seat. A row
+    balance-, and seat-gated: a timed provider park is invisible until `retry_at`, and a parked
+    member turn stays held while its founder or any pending absorbed speaker holds no seat. A row
     that has ever been claimed — a PARKED one, or a QUEUED one a fold resumed from park — needs a
     fresh DBOS workflow id because the run that claimed it consumed its original id; the choice
     reads `running_attempt` from the stamping update itself, so a claim-park-requeue racing the
@@ -194,9 +192,7 @@ class TurnDispatcher:
         for turn in await self._dispatchable_turns():
             if turn.status == PARKED:
                 async with workspace_tx() as connection:
-                    member_id = authority_member_id(
-                        turn_authority(turn.speaker_member_id, turn.on_behalf_of_member_id)
-                    )
+                    member_id = turn.speaker_member_id
                     members = {member_id} if member_id is not None else set()
                     members.update(
                         (
@@ -249,7 +245,6 @@ class TurnDispatcher:
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
                         tables.turn.c.speaker_member_id,
-                        tables.turn.c.on_behalf_of_member_id,
                         tables.turn.c.admission_source,
                         tables.turn.c.status,
                         tables.turn.c.parent_turn_id,
@@ -270,7 +265,6 @@ class TurnDispatcher:
                 r.conversation_id,
                 r.agent_id,
                 r.speaker_member_id,
-                r.on_behalf_of_member_id,
                 r.admission_source,
                 r.status,
                 r.parent_turn_id,
@@ -1198,10 +1192,9 @@ class JobRunner:
 
     async def _tell_the_member(self, key: str, workspace_id: UUID, refusal: str) -> UUID | None:
         """The notice turn, or None where this workspace has nobody to open it with. It rides the
-        speaker's own authority in the conversation they last spoke in — the shape every on-behalf
-        invocation takes — because a room a job opened for itself lists nowhere and would state the
-        hold to nobody. Only a seated speaker and a live agent are named, so the invoke seam is
-        never handed a turn it must refuse.
+        member's own conversation because a room a job opened for itself lists nowhere and would
+        state the hold to nobody. Only a seated speaker and a live agent are named, so the invoke
+        seam is never handed a turn it must refuse.
 
         The ask carries the refusal's own words, because those name the act and the screen that
         performs it, and it says the work resumes by itself, because the job re-reads its own state
@@ -1265,8 +1258,8 @@ class JobRunner:
             "refusal above says to do about it, and that the job writes again on its next pass "
             "once the spend is allowed. Do nothing else.",
             f"{SPEND_REFUSAL_NOTICE_KEY}:{uuid4().hex}",
-            authority=MemberAuthority(told.speaker_member_id),
             as_scheduled=True,
+            runtime_config=TurnRuntimeConfig(connections=(), internet_access=False),
         )
 
     def _registered(self, key: str) -> _Binding | None:

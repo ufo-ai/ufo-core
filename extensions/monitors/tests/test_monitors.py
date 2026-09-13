@@ -57,7 +57,6 @@ from ufo.harness.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import ExecutionAuthority
 from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, context_for
 from ufo.runtime.objects import AdminRequired
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
@@ -406,11 +405,10 @@ async def test_monitor_connections_are_total_canonical_and_within_the_turn_scope
     async def recording(
         conversation: UUID,
         probe_id: UUID,
-        authority: ExecutionAuthority,
         connections: tuple[UUID, ...],
     ) -> dict[str, str]:
         asked.append((conversation, connections))
-        return await ProbeEnv().exports(conversation, probe_id, authority, connections)
+        return await ProbeEnv().exports(conversation, probe_id, connections)
 
     sandboxes = _sandboxes(tmp_path)
     base = replace(
@@ -501,15 +499,12 @@ async def test_a_monitor_row_without_a_scope_reads_as_no_connections(
             )
         [read] = await MonitorStore(ctx.ext).armed()
         async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(monitor_table)
-                .where(monitor_table.c.id == stored.id)
-                .values(internet_access=True)
+            internet_access = await connection.scalar(
+                sa.select(monitor_table.c.internet_access).where(monitor_table.c.id == stored.id)
             )
-        with pytest.raises(ValueError, match="only narrow"):
-            await MonitorStore(ctx.ext).armed()
     assert read.connections == ()
     assert read.internet_access is None
+    assert internet_access is True
 
 
 async def test_a_failing_probe_fails_the_arm_and_persists_nothing(db: None, tmp_path: Path) -> None:
@@ -577,8 +572,8 @@ def test_the_monitor_input_refuses_an_unknown_field() -> None:
 
 async def test_the_deadline_fires_once_and_retires_the_monitor(db: None, tmp_path: Path) -> None:
     """The watch's ceiling: nothing changed, no probe failed, and the arming turn still gets its one
-    arrival — carrying the reason, next steps, and metadata it armed with, on behalf of the member
-    who armed it, with the row gone afterwards."""
+    arrival — carrying the reason, next steps, metadata, and exact capabilities it armed with, with
+    the row gone afterwards."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     connection_id = await _connection(workspace_id, agent_id, member_id, "acct-own", shared=False)
     ctx = replace(
@@ -608,7 +603,6 @@ async def test_the_deadline_fires_once_and_retires_the_monitor(db: None, tmp_pat
     [turn] = turns
     assert remaining == []
     assert turn["admission_source"] == "internal"
-    assert turn["on_behalf_of_member_id"] == member_id
     assert turn["speaker_member_id"] is None
     assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
         connections=(connection_id,),
@@ -673,10 +667,10 @@ async def test_a_replayed_fire_keeps_one_turn_and_one_connection_scope(
     assert remaining == []
 
 
-async def test_a_deadline_fire_for_an_unseated_member_parks_with_its_authority(
+async def test_a_deadline_fire_uses_capabilities_without_the_creators_seat(
     db: None, tmp_path: Path
 ) -> None:
-    """The deadline keeps the arming member's identity and parks until their seat is restored."""
+    """The deadline fire does not depend on the management row creator's current seat."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     ctx = await _tool_ctx(
         workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
@@ -696,10 +690,9 @@ async def test_a_deadline_fire_for_an_unseated_member_parks_with_its_authority(
 
     [turn] = turns
     assert remaining == []
-    assert turn["on_behalf_of_member_id"] == member_id
     assert turn["speaker_member_id"] is None
-    assert turn["status"] == "parked"
-    assert dbos.enqueued == []
+    assert turn["status"] == "queued"
+    assert dbos.enqueued == [str(turn["id"])]
 
 
 async def test_the_fire_body_walls_probe_output_and_escapes_its_own_delimiters(
@@ -927,13 +920,10 @@ async def _unseat(member_id: UUID) -> None:
         )
 
 
-async def test_a_revoked_seat_stops_the_watch_acting_as_that_member(
+async def test_a_probe_uses_its_capabilities_without_the_creators_seat(
     db: None, tmp_path: Path
 ) -> None:
-    """A probe is the one thing here that acts rather than answers: it runs a command off-turn under
-    the arming member's forwarded connections. An admin's revoke stops that member's access
-    everywhere at once, so their watch stops probing and the tick counts as a skip — the row and its
-    deadline are untouched, and seating them again resumes the watch."""
+    """A probe runs from the stored capabilities, not from its management row creator."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     ctx = await _tool_ctx(
         workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
@@ -953,6 +943,6 @@ async def test_a_revoked_seat_stops_the_watch_acting_as_that_member(
 
         [row] = await _rows(workspace_id)
         turns = await _turns(conversation_id)
-    assert (row["probes_run"], row["skipped"], row["quiet_streak"]) == (0, 1, 0)
+    assert (row["probes_run"], row["skipped"], row["quiet_streak"]) == (1, 0, 1)
     assert row["claimed_by"] is None
     assert turns == []

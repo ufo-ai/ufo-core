@@ -36,8 +36,8 @@ name = "kind-guidance"
 
 [[arm.replacements]]
 path = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py"
-old = '''        "creator, but "'''
-new = '''        "creator and may use only the connections listed on the task, but "'''
+old = '''        "A fire has no speaker and carries only the task's exact stored capabilities, and recalls "'''
+new = '''        "A fire has no speaker and recalls "'''
 
 [[arm]]
 name = "no-field-plus-kind"
@@ -52,5 +52,5 @@ new = '''        description="",'''
 
 [[arm.replacements]]
 path = "extensions/scheduled_tasks/ufo_ext_scheduled_tasks/tools.py"
-old = '''        "creator, but "'''
-new = '''        "creator and may use only the connections listed on the task, but "'''
+old = '''        "A fire has no speaker and carries only the task's exact stored capabilities, and recalls "'''
+new = '''        "A fire has no speaker and recalls "'''

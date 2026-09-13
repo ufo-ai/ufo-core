@@ -54,7 +54,7 @@ monitor = sa.Table(
     sa.Column("user_description", sa.Text, nullable=False),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
     sa.Column("connections", sa.JSON(none_as_null=True), nullable=True),
-    sa.Column("internet_access", sa.Boolean, nullable=True),
+    sa.Column("internet_access", sa.Boolean, nullable=False),
     sa.Column("baseline", sa.Text, nullable=False),
     sa.Column("probes_run", sa.Integer, nullable=False, server_default=sa.text("0")),
     sa.Column("quiet_streak", sa.Integer, nullable=False, server_default=sa.text("0")),
@@ -145,8 +145,6 @@ def _row(row: sa.RowMapping) -> Monitor:
     """The one builder every read funnels through — SQLite hands naive datetimes back, so every
     timing mark leaves here aware UTC and no consumer re-normalizes."""
     probed_at = row["last_probe_at"]
-    if row["internet_access"] is True:
-        raise ValueError("a monitor internet scope can only narrow access")
     return Monitor(
         id=row["id"],
         conversation_id=row["conversation_id"],
@@ -170,7 +168,7 @@ def _row(row: sa.RowMapping) -> Monitor:
         created_at=_aware(row["created_at"]),
         updated_at=_aware(row["updated_at"]),
         connections=tuple(UUID(item) for item in (row["connections"] or ())),
-        internet_access=False if row["internet_access"] is False else None,
+        internet_access=None if row["internet_access"] else False,
     )
 
 
@@ -254,7 +252,7 @@ class MonitorStore:
                             user_description=reason,
                             created_by_member_id=created_by_member_id,
                             connections=[str(connection_id) for connection_id in connections],
-                            internet_access=internet_access,
+                            internet_access=internet_access is not False,
                             baseline=baseline,
                             probes_run=0,
                             quiet_streak=0,

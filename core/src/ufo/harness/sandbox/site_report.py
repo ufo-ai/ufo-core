@@ -34,7 +34,6 @@ from ufo.harness.sandbox.ingress_token import (
     mint_ingress_token,
     verify_ingress_token,
 )
-from ufo.runtime.authority import authority_from_member_id
 from ufo.runtime.ext.context import AgentArchived, TurnInvoker, conversation_agent_id
 from ufo.runtime.workspace import ws
 from ufo.schema.records import TurnRuntimeConfig
@@ -115,10 +114,9 @@ class SiteReports:
     session for, signed with the deploy secret this process holds too, under a kind neither hop of
     a visit accepts — so a session cookie cannot be posted here and this token opens no site.
 
-    The conversation names its own agent, and the site's creator is the exact authority that may
-    restart its sandbox server; the member whose browser met the failure may be someone else. The
-    recovery turn is standalone with no connection or public-internet access, so it keeps only the
-    model and sandbox it needs even beside a broader live turn. A missing site row founds nothing.
+    The conversation names its own agent. The recovery turn is standalone with no connection or
+    public-internet access, so it keeps only the model and sandbox it needs even beside a broader
+    live turn. A missing site row founds nothing.
     A conversation this workspace does not hold answers 404 — a shipped app page's origin is a
     synthetic anchor with no conversation behind it, so there is no agent to tell."""
 
@@ -143,8 +141,7 @@ class SiteReports:
             agent_id = await conversation_agent_id(claims.workspace_id, claims.conversation_id)
             if agent_id is None:
                 return Response(status_code=404)
-            creator_member_id = await self._creator(claims)
-            if creator_member_id is None:
+            if not await self._site_exists(claims):
                 return Response(status_code=204)
             bucket = int(now.timestamp()) // REPORT_BUCKET_SECONDS
             try:
@@ -153,7 +150,6 @@ class SiteReports:
                     agent_id,
                     SITE_NOT_ANSWERING_FIRE.format(port=claims.port),
                     f"site-down:{claims.conversation_id.hex}:{claims.port}:{bucket}",
-                    authority=authority_from_member_id(creator_member_id),
                     holds_work_already_done=True,
                     standalone=True,
                     runtime_config=TurnRuntimeConfig(connections=(), internet_access=False),
@@ -162,17 +158,17 @@ class SiteReports:
                 return Response(status_code=204)
         return Response(status_code=204)
 
-    async def _creator(self, claims: IngressClaims) -> UUID | None:
+    async def _site_exists(self, claims: IngressClaims) -> bool:
         async with workspace_tx() as connection:
-            return (
-                await connection.execute(
-                    sa.select(HOSTED_SITE.c.creator_member_id)
-                    .where(
-                        HOSTED_SITE.c.workspace_id == claims.workspace_id,
-                        HOSTED_SITE.c.conversation_id == claims.conversation_id,
-                        HOSTED_SITE.c.port == claims.port,
-                        HOSTED_SITE.c.source_manifest.is_(None),
+            return bool(
+                await connection.scalar(
+                    sa.select(
+                        sa.exists().where(
+                            HOSTED_SITE.c.workspace_id == claims.workspace_id,
+                            HOSTED_SITE.c.conversation_id == claims.conversation_id,
+                            HOSTED_SITE.c.port == claims.port,
+                            HOSTED_SITE.c.source_manifest.is_(None),
+                        )
                     )
-                    .limit(1)
                 )
-            ).scalar_one_or_none()
+            )

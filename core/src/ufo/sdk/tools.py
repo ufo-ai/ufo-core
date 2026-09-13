@@ -10,6 +10,12 @@ reported by the same handles under the same names whichever tool asked."""
 from ufo.runtime.access.grants import (
     ConnectUnavailable as ConnectUnavailable,
 )
+from ufo.runtime.access.member_authorization import (
+    AuthorizationBinding as AuthorizationBinding,
+)
+from ufo.runtime.access.member_authorization import (
+    AuthorizationScope as AuthorizationScope,
+)
 from ufo.runtime.media.previews import (
     StoredPreview as StoredPreview,
 )
@@ -63,6 +69,9 @@ from ufo.runtime.tools.registry import (
 )
 from ufo.runtime.tools.registry import (
     ObjectBinding as ObjectBinding,
+)
+from ufo.runtime.tools.registry import (
+    StandingAuthorization as StandingAuthorization,
 )
 from ufo.runtime.tools.registry import (
     ToolDef as ToolDef,

@@ -32,7 +32,6 @@ from ufo.db import workspace_tx
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.grants import Grant, GrantStore
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.engine import FRESH_CLAIM, _claim_turn
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker, MemberAdmission
@@ -41,7 +40,14 @@ from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import CONNECTION_SCOPE_MAX, Agent, TerminalFrame, Turn, TurnRuntimeConfig
+from ufo.schema.records import (
+    CONNECTION_SCOPE_MAX,
+    Agent,
+    ModelAccountCapability,
+    TerminalFrame,
+    Turn,
+    TurnRuntimeConfig,
+)
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -276,7 +282,7 @@ async def _due_now(row_id: UUID) -> None:
 
 async def test_pause_arms_a_row_and_returns_the_timer_directive(db: None) -> None:
     """The arm is unconditional and records what the fire will need: the resume body, the turn
-    sequence to arbitrate from, and who to act as."""
+    sequence to arbitrate from, and its exact capabilities."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=member_id)
     armed_at = datetime.now(UTC)
@@ -293,7 +299,6 @@ async def test_pause_arms_a_row_and_returns_the_timer_directive(db: None) -> Non
     assert row["conversation_id"] == conversation_id
     assert row["agent_id"] == agent_id
     assert row["origin_seq"] == 0
-    assert row["created_by_member_id"] == member_id
     assert row["user_description"] == row["prompt"]
     assert row["claimed_by"] is None
     assert "Read the code and continue onboarding." in row["prompt"]
@@ -302,12 +307,16 @@ async def test_pause_arms_a_row_and_returns_the_timer_directive(db: None) -> Non
     assert timedelta(minutes=9) < resume_at - armed_at < timedelta(minutes=11)
 
 
-async def test_pause_fires_the_timer_into_a_resumed_turn(db: None) -> None:
+@pytest.mark.parametrize("member_bound", [False, True])
+async def test_pause_fires_the_timer_into_a_resumed_turn(db: None, member_bound: bool) -> None:
     """Tool to timer to resumed turn. The turn carries the stored body verbatim — a pause composes
     its own resume prompt, so nothing wraps it in `<scheduled_task>` — and is stamped a scheduled
-    fire acting on behalf of the member who armed it."""
+    fire with no human principal."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
-    ctx = replace(_tool_ctx(workspace_id, conversation_id, agent_id), speaker_member_id=member_id)
+    ctx = replace(
+        _tool_ctx(workspace_id, conversation_id, agent_id),
+        speaker_member_id=member_id if member_bound else None,
+    )
     dbos = StubDbos()
     with ws(workspace_id), agent(agent_id):
         await pause_and_wait(ctx, _wait())
@@ -322,7 +331,6 @@ async def test_pause_fires_the_timer_into_a_resumed_turn(db: None) -> None:
     assert turn["inbound"] == row["prompt"]
     assert not turn["inbound"].startswith("<scheduled_task>")
     assert turn["admission_source"] == "scheduled"
-    assert turn["on_behalf_of_member_id"] == member_id
     assert turn["speaker_member_id"] is None
     assert turn["agent_id"] == agent_id
     assert dbos.enqueued == [str(turn["id"])]
@@ -553,7 +561,6 @@ async def test_a_spend_breach_cancels_the_resume_and_ends_the_wait(db: None) -> 
                 status="done",
                 inbound="earlier work",
                 admission_source="internal",
-                on_behalf_of_member_id=member_id,
                 terminal=TerminalFrame(status="done").model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -578,8 +585,8 @@ async def test_a_spend_breach_cancels_the_resume_and_ends_the_wait(db: None) -> 
             sa.insert(tables.spend_cap).values(
                 id=uuid4(),
                 workspace_id=workspace_id,
-                scope="member",
-                subject_id=member_id,
+                scope="workspace",
+                subject_id=None,
                 window_seconds=3600,
                 limit_micro_usd=50,
                 on_breach="reject",
@@ -724,7 +731,6 @@ async def test_a_member_message_the_live_turn_absorbed_supersedes_the_timer(db: 
             agent_id,
             "the arming work",
             "arming",
-            authority=WORKSPACE_AUTHORITY,
         )
         [arming_row] = await _turns(conversation_id)
         base = _tool_ctx(
@@ -806,7 +812,7 @@ async def test_a_pause_on_an_archived_app_keeps_its_row_for_the_restore(db: None
     assert len(dbos.enqueued) == 1
 
 
-async def test_a_pause_persists_and_resumes_the_arming_turn_connection_scope(db: None) -> None:
+async def test_a_pause_does_not_extend_private_authority_into_the_resumed_turn(db: None) -> None:
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     connection_id = uuid4()
     base = _tool_ctx(
@@ -818,7 +824,18 @@ async def test_a_pause_persists_and_resumes_the_arming_turn_connection_scope(db:
     ctx = replace(
         base,
         turn=base.turn.model_copy(
-            update={"runtime_config": TurnRuntimeConfig(connections=(connection_id,))}
+            update={
+                "runtime_config": TurnRuntimeConfig(
+                    connections=(connection_id,),
+                    internet_access=False,
+                ),
+                "model_accounts": (
+                    ModelAccountCapability(
+                        provider="openai",
+                        slot=f"openai_api_key:member:{member_id}",
+                    ),
+                ),
+            }
         ),
     )
     dbos = StubDbos()
@@ -828,13 +845,15 @@ async def test_a_pause_persists_and_resumes_the_arming_turn_connection_scope(db:
         await _due_now(row["id"])
         await PauseRunner(ctx=_runner_ctx(_invoker(workspace_id, dbos))).run()
         [turn] = await _turns(conversation_id)
-    assert row["connections"] == [str(connection_id)]
+    assert row["connections"] == []
+    assert row["internet_access"] is False
     assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
-        connections=(connection_id,)
+        connections=(), internet_access=False
     )
+    assert turn["model_accounts"] == []
 
 
-async def test_an_ordinary_pause_bounds_and_canonicalizes_its_connection_scope(db: None) -> None:
+async def test_an_ordinary_pause_does_not_snapshot_available_connections(db: None) -> None:
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     connection_ids = tuple(uuid4() for _ in range(CONNECTION_SCOPE_MAX + 1))
     ctx = replace(
@@ -846,7 +865,6 @@ async def test_an_ordinary_pause_bounds_and_canonicalizes_its_connection_scope(d
         ),
         grants=_ManyGrants(tuple(reversed(connection_ids)), member_id),
     )
-    expected = tuple(sorted(connection_ids, key=str)[:CONNECTION_SCOPE_MAX])
     dbos = StubDbos()
     with ws(workspace_id), agent(agent_id):
         await pause_and_wait(ctx, _wait())
@@ -854,12 +872,13 @@ async def test_an_ordinary_pause_bounds_and_canonicalizes_its_connection_scope(d
         await _due_now(row["id"])
         await PauseRunner(ctx=_runner_ctx(_invoker(workspace_id, dbos))).run()
         [turn] = await _turns(conversation_id)
-    assert row["connections"] == [str(connection_id) for connection_id in expected]
-    assert TurnRuntimeConfig.model_validate(turn["runtime_config"]).connections == expected
+    assert row["connections"] == []
+    assert TurnRuntimeConfig.model_validate(turn["runtime_config"]).connections == ()
 
 
-async def test_a_pause_row_without_a_scope_resumes_with_no_connections(db: None) -> None:
+async def test_a_pause_row_cannot_propagate_stored_connections(db: None) -> None:
     workspace_id, agent_id, conversation_id, member_id = await _seed()
+    connection_id = uuid4()
     ctx = _tool_ctx(
         workspace_id,
         conversation_id,
@@ -873,7 +892,10 @@ async def test_a_pause_row_without_a_scope_resumes_with_no_connections(db: None)
             await connection.execute(
                 sa.update(pause_table)
                 .where(pause_table.c.id == row["id"])
-                .values(connections=None, resume_at=datetime.now(UTC) - timedelta(minutes=1))
+                .values(
+                    connections=[str(connection_id)],
+                    resume_at=datetime.now(UTC) - timedelta(minutes=1),
+                )
             )
         await PauseRunner(ctx=_runner_ctx(_invoker(workspace_id, StubDbos()))).run()
         [turn] = await _turns(conversation_id)

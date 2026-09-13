@@ -266,6 +266,7 @@ from ufo.schema.records import (
     QuestionOption,
     TerminalFrame,
     TurnContext,
+    TurnRuntimeConfig,
     Usage,
 )
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
@@ -1433,7 +1434,7 @@ async def test_a_stop_refused_by_its_own_shape_touches_nothing(
 
 
 async def _seed_fired_turn(
-    workspace_id: UUID, conversation_id: UUID, agent_id: UUID, creator_id: UUID, seq: int
+    workspace_id: UUID, conversation_id: UUID, agent_id: UUID, seq: int
 ) -> UUID:
     turn_id = uuid4()
     async with workspace_tx() as connection:
@@ -1447,7 +1448,6 @@ async def _seed_fired_turn(
                 status="running",
                 inbound="fired",
                 admission_source="scheduled",
-                on_behalf_of_member_id=creator_id,
                 fired_by_kind="scheduled_task",
                 fired_by_name="nightly-digest",
                 fired_by_title="nightly-digest",
@@ -1460,11 +1460,11 @@ async def _seed_fired_turn(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_fired_turn_is_stopped_by_its_creator_or_an_admin_and_nobody_else(
+async def test_only_an_admin_stops_an_ownerless_fired_turn_in_a_shared_conversation(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     client, workspace_id, agent_id = web
-    creator_id, creator_token = await _seed_member(workspace_id, "creator@example.com")
+    _creator_id, creator_token = await _seed_member(workspace_id, "creator@example.com")
     _admin_id, admin_token = await _seed_member(workspace_id, "admin@example.com", admin=True)
     _viewer_id, viewer_token = await _seed_member(workspace_id, "viewer@example.com")
     conversation_id = await _seed_agent_conversation(
@@ -1476,31 +1476,24 @@ async def test_a_fired_turn_is_stopped_by_its_creator_or_an_admin_and_nobody_els
         surface="slack",
     )
     url = f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}"
-    first = await _seed_fired_turn(workspace_id, conversation_id, agent_id, creator_id, 1)
+    fired = await _seed_fired_turn(workspace_id, conversation_id, agent_id, 1)
 
-    refused = await client.post(
-        url,
-        headers={"cookie": f"{SESSION_COOKIE}={viewer_token}", "x-ufo-stop-turn": str(first)},
-    )
-    assert refused.status_code == 403
-    assert await _turn_status(first) == "running"
+    for token in (viewer_token, creator_token):
+        refused = await client.post(
+            url,
+            headers={"cookie": f"{SESSION_COOKIE}={token}", "x-ufo-stop-turn": str(fired)},
+        )
+        assert refused.status_code == 404
+        assert refused.headers[web_surface.REFUSAL_HEADER] == "1"
+    assert await _turn_status(fired) == "running"
 
-    stopped = await client.post(
-        url,
-        headers={"cookie": f"{SESSION_COOKIE}={creator_token}", "x-ufo-stop-turn": str(first)},
-    )
-    assert stopped.status_code == 200
-    assert stopped.json() == {"stopped": True}
-    assert await _turn_status(first) == "cancelled"
-
-    second = await _seed_fired_turn(workspace_id, conversation_id, agent_id, creator_id, 2)
     managed = await client.post(
         url,
-        headers={"cookie": f"{SESSION_COOKIE}={admin_token}", "x-ufo-stop-turn": str(second)},
+        headers={"cookie": f"{SESSION_COOKIE}={admin_token}", "x-ufo-stop-turn": str(fired)},
     )
     assert managed.status_code == 200
     assert managed.json() == {"stopped": True}
-    assert await _turn_status(second) == "cancelled"
+    assert await _turn_status(fired) == "cancelled"
 
 
 @pytest.mark.usefixtures("database_url")
@@ -1518,7 +1511,7 @@ async def test_an_admin_reaches_no_fired_turn_in_another_members_private_convers
         audience=str(conversation_audience(creator_id)),
         member_id=creator_id,
     )
-    fired = await _seed_fired_turn(workspace_id, private, agent_id, creator_id, 1)
+    fired = await _seed_fired_turn(workspace_id, private, agent_id, 1)
     cookie = {"cookie": f"{SESSION_COOKIE}={admin_token}"}
 
     streamed = await client.get(f"/surface/web/turns/{fired}/stream", headers=cookie)
@@ -5346,7 +5339,34 @@ async def test_only_a_target_member_can_submit_a_structured_question(
     client, workspace_id, agent_id = web
     target_id, target_token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
-    targeted = QUESTION.model_copy(update={"target_member_id": target_id})
+    authorization_id = uuid4()
+    targeted = AskUserInput(
+        title="Approval required",
+        questions=(
+            AskQuestion(
+                question="Read issues from the selected GitHub account?",
+                options=(
+                    QuestionOption(
+                        label="Allow once",
+                        description="Read issues this time.",
+                        authorization_choice="allow",
+                    ),
+                    QuestionOption(
+                        label="Deny",
+                        description="Do not read issues.",
+                        authorization_choice="deny",
+                    ),
+                    QuestionOption(
+                        label="Always allow issue reads",
+                        description="Read issues from this GitHub account without asking again.",
+                        authorization_choice="always",
+                    ),
+                ),
+            ),
+        ),
+        target_member_id=target_id,
+        authorization_id=authorization_id,
+    )
     conversation_id, asked_turn = await _seed_web_turn(
         workspace_id,
         agent_id,
@@ -5363,7 +5383,7 @@ async def test_only_a_target_member_can_submit_a_structured_question(
 
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
-        content=b"Allow",
+        content=b"Always allow issue reads",
         headers={**headers, "cookie": f"{SESSION_COOKIE}={peer_token}"},
     )
 
@@ -5381,25 +5401,131 @@ async def test_only_a_target_member_can_submit_a_structured_question(
             )
         ).scalar_one() == 1
 
+    malformed = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"Maybe",
+        headers={**headers, "cookie": f"{SESSION_COOKIE}={target_token}"},
+    )
+
+    assert malformed.status_code == 400
+    assert malformed.text == "This authorization choice is not available."
+
     admitted = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
-        content=b"Allow",
+        content=b"Always allow issue reads",
         headers={**headers, "cookie": f"{SESSION_COOKIE}={target_token}"},
     )
 
     assert admitted.status_code == 200
-    assert admitted.json()["body"] == "Allow"
+    assert admitted.json()["body"] == "Always allow issue reads"
     async with workspace_tx() as connection:
         answer = (
             await connection.execute(
-                sa.select(tables.turn.c.speaker_member_id, tables.turn.c.inbound).where(
+                sa.select(
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.inbound,
+                    tables.turn.c.context,
+                ).where(
                     tables.turn.c.id == UUID(admitted.json()["turn_id"]),
                     tables.turn.c.workspace_id == workspace_id,
                 )
             )
         ).one()
     assert answer.speaker_member_id == target_id
-    assert answer.inbound == "Allow"
+    assert answer.inbound == "Always allow issue reads"
+    assert TurnContext.model_validate(answer.context).authorization_id == authorization_id
+    assert TurnContext.model_validate(answer.context).authorization_choice == "always"
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_only_the_target_reads_a_targeted_question_live_and_after_a_later_turn(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    client, workspace_id, agent_id = web
+    _config, _hub, blob, _sandboxes = dbos_runtime
+    target_id, target_token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
+    targeted = AskUserInput(
+        title="Approval required",
+        target_member_id=target_id,
+        questions=(AskQuestion(question="Allow publish with private-detail-9f41?"),),
+    )
+    conversation_id, asked_turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        target_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Permission required.", question=targeted),
+        audience="shared",
+        surface="ufo",
+    )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=1,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {asked_turn}\n</context>\npublish",
+                ),
+                Message(role="assistant", content="Permission required."),
+            ),
+        ),
+    )
+
+    target_live = dict(await _collect_events(client, target_token, asked_turn))["terminal"]
+    peer_live = dict(await _collect_events(client, peer_token, asked_turn))["terminal"]
+    assert target_live["question"]["questions"][0]["question"].endswith("private-detail-9f41?")
+    assert peer_live["question"] is None
+
+    later_turn = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=later_turn,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="done",
+                inbound="a later message",
+                admission_source="member",
+                speaker_member_id=target_id,
+                terminal=TerminalFrame(status="done", text="Noted.").model_dump(mode="json"),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    await _write_transcript(
+        blob,
+        conversation_id,
+        Conversation(
+            seq=2,
+            messages=(
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {asked_turn}\n</context>\npublish",
+                ),
+                Message(role="assistant", content="Permission required."),
+                Message(
+                    role="user",
+                    content=f"<context>\nmessage_ref: {later_turn}\n</context>\na later message",
+                ),
+                Message(role="assistant", content="Noted."),
+            ),
+        ),
+    )
+    path = f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}"
+    target_transcript = await client.get(
+        path, headers={"cookie": f"{SESSION_COOKIE}={target_token}"}
+    )
+    peer_transcript = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={peer_token}"})
+
+    assert "private-detail-9f41" in target_transcript.text
+    assert "private-detail-9f41" not in peer_transcript.text
 
 
 @pytest.mark.usefixtures("database_url")
@@ -8336,7 +8462,9 @@ async def test_a_private_apps_shipped_page_reaches_the_member_it_was_granted_to(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_homepage_seed_leaves_a_refused_agent_unmarked_and_retries(db: None) -> None:
+async def test_homepage_seed_queues_without_borrowing_its_unseated_recipients_authority(
+    db: None,
+) -> None:
     workspace_id, main_agent = await _seed_workspace()
     unseated = uuid4()
     async with workspace_tx() as connection:
@@ -8362,24 +8490,42 @@ async def test_homepage_seed_leaves_a_refused_agent_unmarked_and_retries(db: Non
     )
     with ws(workspace_id):
         ctx = context_for(EXTENSION_WEB, frozenset(), invoker=invoker, member_context_read=True)
-        await web_surface.seed_homepages(ctx)
+        await web_surface.seed_homepages(ctx, bucket="first")
         assert await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX) == ()
+        assert await ctx.store.list(web_surface.HOMEPAGE_ATTEMPT_PREFIX) == (
+            (
+                f"{web_surface.HOMEPAGE_ATTEMPT_PREFIX}{main_agent}",
+                {"attempts": 1, "bucket": "first"},
+            ),
+        )
         async with workspace_tx() as connection:
             statuses = (await connection.execute(sa.select(tables.turn.c.status))).scalars()
-            assert list(statuses) == ["cancelled"]
-            await connection.execute(
-                sa.update(tables.member)
-                .where(tables.member.c.id == unseated)
-                .values(seated_at=sa.func.now())
-            )
+            assert list(statuses) == ["queued"]
+        await web_surface.seed_homepages(ctx, bucket="first")
+        async with workspace_tx() as connection:
+            assert await connection.scalar(sa.select(sa.func.count()).select_from(tables.turn)) == 1
         await web_surface.seed_homepages(ctx, bucket="retry")
         assert await ctx.store.list(web_surface.HOMEPAGE_SETTLED_PREFIX) == ()
         attempts = await ctx.store.list(web_surface.HOMEPAGE_ATTEMPT_PREFIX)
     assert [key for key, _ in attempts] == [f"{web_surface.HOMEPAGE_ATTEMPT_PREFIX}{main_agent}"]
-    assert attempts[0][1] == {"attempts": 1, "bucket": "retry"}
+    assert attempts[0][1] == {"attempts": 2, "bucket": "retry"}
     async with workspace_tx() as connection:
-        statuses = (await connection.execute(sa.select(tables.turn.c.status))).scalars()
-        assert sorted(statuses) == ["cancelled", "queued"]
+        turns = (
+            await connection.execute(
+                sa.select(
+                    tables.turn.c.status,
+                    tables.turn.c.speaker_member_id,
+                    tables.turn.c.runtime_config,
+                )
+            )
+        ).all()
+        assert [row.status for row in turns] == ["queued", "queued"]
+        assert all(row.speaker_member_id is None for row in turns)
+        assert all(
+            TurnRuntimeConfig.model_validate(row.runtime_config)
+            == TurnRuntimeConfig(connections=(), internet_access=False)
+            for row in turns
+        )
 
 
 @pytest.mark.usefixtures("database_url")
@@ -9806,9 +9952,9 @@ async def test_a_member_reads_the_room_the_sweep_opened_for_them(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """A room carries no chat row — that row is the (agent, member) binding a chat is founded with,
-    and the homepage room is opened by the sweep instead, on behalf of one member. So the durable
-    audience is what says whose it is, and without reading it the member the page was built for
-    opened their own room and met a 404 on it."""
+    and the homepage room is opened by the sweep for one member. The durable audience says whose
+    it is; without reading it, the member the page was built for opened their own room and met a
+    404 on it."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "builder@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}

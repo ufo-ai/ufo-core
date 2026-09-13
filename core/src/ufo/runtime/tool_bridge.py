@@ -15,8 +15,6 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import ToolSchema
 from ufo.harness.o11y import current_traceparent, log
-from ufo.harness.sandbox.session import RunToken
-from ufo.runtime.authority import authority_member_id
 from ufo.runtime.ext.surface import TurnTailer
 from ufo.runtime.hub import Parked, Terminal
 from ufo.runtime.objects import BoundAction
@@ -27,6 +25,7 @@ from ufo.runtime.tools.bridge import (
     ToolBridgeFailure,
     ToolBridgeIntent,
     ToolBridgeListedTool,
+    ToolBridgePrincipal,
     ToolBridgeRequest,
     ToolBridgeResponse,
     ToolBridgeSuccess,
@@ -42,18 +41,20 @@ from ufo.schema.records import (
     RUNNING,
     SUBAGENT_SURFACE,
     TURN_WORKFLOW_NAME,
+    ModelAccountCapability,
     TerminalFrame,
+    TurnRuntimeConfig,
     turn_id_for,
 )
 
 
 @dataclass(frozen=True)
 class ToolBridge:
-    """Describe or durably dispatch one bridge tool under a live sandbox run's authority.
+    """Describe or durably dispatch one bridge tool under a live sandbox run's capabilities.
     `actions` is the deploy's bound-action registry: `object_action` is listed and callable
     exactly when the parent's agent or profile holds at least one canonical action id, mirroring
     the wire registry a turn builds — and the admitted intent turn re-resolves the named action
-    under its own grants and speaker rules, so the bridge's answer is discovery, never
+    under the parent's exact runtime capabilities, so the bridge's answer is discovery, never
     authority."""
 
     dbos: DBOSClient
@@ -63,7 +64,9 @@ class ToolBridge:
     subagent_grants: dict[str, frozenset[str]]
     actions: Mapping[str, Mapping[str, BoundAction]] = field(default_factory=dict)
 
-    async def request(self, run: RunToken, request: ToolBridgeRequest) -> ToolBridgeResponse:
+    async def request(
+        self, run: ToolBridgePrincipal, request: ToolBridgeRequest
+    ) -> ToolBridgeResponse:
         parent = await self._parent(run)
         if parent is None:
             return ToolBridgeFailure(error="the parent turn is not running")
@@ -99,7 +102,7 @@ class ToolBridge:
         await self._enqueue(run.workspace_id, turn_id, conversation_id)
         return await self._terminal(turn_id)
 
-    async def _parent(self, run: RunToken) -> sa.Row[tuple[object, ...]] | None:
+    async def _parent(self, run: ToolBridgePrincipal) -> sa.Row[tuple[object, ...]] | None:
         async with workspace_tx() as connection:
             return (
                 await connection.execute(
@@ -109,6 +112,7 @@ class ToolBridge:
                         tables.turn.c.subagent_profile,
                         tables.turn.c.subagent_name,
                         tables.turn.c.runtime_config,
+                        tables.turn.c.model_accounts,
                         tables.agent.c.tools,
                         tables.conversation.c.id.label("conversation_id"),
                         tables.conversation.c.sandbox_conversation_id,
@@ -165,7 +169,7 @@ class ToolBridge:
 
     async def _admit(
         self,
-        run: RunToken,
+        run: ToolBridgePrincipal,
         parent: sa.Row[tuple[object, ...]],
         request: ToolBridgeRequest,
     ) -> tuple[UUID, UUID] | None:
@@ -178,7 +182,11 @@ class ToolBridge:
             tool=TypeAdapter(BridgeToolName).validate_python(request.tool_name),
             input=request.arguments,
         ).model_dump_json()
-        member_id = authority_member_id(run.authority)
+        runtime_config = (
+            TurnRuntimeConfig()
+            if parent.runtime_config is None
+            else TurnRuntimeConfig.model_validate(parent.runtime_config)
+        ).model_copy(update={"connections": run.connections})
         async with workspace_tx() as connection:
             live = (
                 await connection.execute(
@@ -225,12 +233,12 @@ class ToolBridge:
                     inbound=intent,
                     admission_source=INTENT_ADMISSION,
                     speaker_member_id=None,
-                    on_behalf_of_member_id=member_id,
                     terminal=None,
                     parent_turn_id=run.turn_id,
                     subagent_profile=parent.subagent_profile,
                     subagent_name=parent.subagent_name,
-                    runtime_config=parent.runtime_config,
+                    runtime_config=runtime_config.model_dump(mode="json"),
+                    model_accounts=parent.model_accounts,
                     traceparent=current_traceparent(),
                     idempotency_key=f"tool-bridge:{run.turn_id}:{request.request_id}",
                     created_at=sa.func.now(),
@@ -243,7 +251,8 @@ class ToolBridge:
                     sa.select(
                         tables.turn.c.inbound,
                         tables.turn.c.parent_turn_id,
-                        tables.turn.c.on_behalf_of_member_id,
+                        tables.turn.c.runtime_config,
+                        tables.turn.c.model_accounts,
                     )
                     .where(tables.turn.c.id == turn_id)
                     .with_for_update()
@@ -252,7 +261,15 @@ class ToolBridge:
             if (
                 existing.inbound != intent
                 or existing.parent_turn_id != run.turn_id
-                or existing.on_behalf_of_member_id != member_id
+                or TurnRuntimeConfig.model_validate(existing.runtime_config) != runtime_config
+                or tuple(
+                    ModelAccountCapability.model_validate(account)
+                    for account in existing.model_accounts
+                )
+                != tuple(
+                    ModelAccountCapability.model_validate(account)
+                    for account in parent.model_accounts
+                )
             ):
                 raise ValueError("tool bridge request id was reused for another call")
             await connection.execute(

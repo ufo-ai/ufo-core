@@ -44,12 +44,6 @@ from ufo.harness.o11y import BACKGROUND_PROFILE, emit_histogram, emit_metric, lo
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.harness.sandbox.session import ExecResult, ProbeToken, ProbeTokenCodec
 from ufo.runtime.agent_scope import agent, agent_current
-from ufo.runtime.authority import (
-    WORKSPACE_AUTHORITY,
-    AuthorityUnavailable,
-    ExecutionAuthority,
-    authority_member_id,
-)
 from ufo.runtime.billing.accounting import (
     ALLOW,
     BalanceGate,
@@ -80,7 +74,7 @@ from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.governance import Governance, prompt_digest
 from ufo.runtime.media.artifact_url import is_text_media, mint_image_preview_url
 from ufo.runtime.search import SearchProvider
-from ufo.runtime.seats import Seats, workspace_domain
+from ufo.runtime.seats import workspace_domain
 from ufo.runtime.sources.sync import (
     PageFeed,
     SourceRowConfig,
@@ -107,6 +101,7 @@ from ufo.schema.records import (
     AgentChange,
     AgentVisibility,
     FiredBy,
+    ModelAccountCapability,
     ProposalRef,
     TurnRuntimeConfig,
     TurnStatus,
@@ -551,13 +546,11 @@ async def conversation_agent_id(workspace_id: UUID, conversation_id: UUID) -> UU
 PROBE_TIMEOUT_SECONDS = 60
 PROBE_TIMEOUT_MAX_SECONDS = 120
 
-ProbeEnvironment = Callable[
-    [UUID, UUID, ExecutionAuthority, tuple[UUID, ...]], Awaitable[dict[str, str]]
-]
+ProbeEnvironment = Callable[[UUID, UUID, tuple[UUID, ...]], Awaitable[dict[str, str]]]
 """What a probe's sandbox open exports, answered for one conversation, one probe id, one exact
-authority, and its total connection scope: git proxy-auth and credential config, the scoped
-connector CLI sentinels, and the conversation id. The derivation reads the deploy's declared
-credential slots, so it is wired in by the deploy that holds them rather than reached from here."""
+connection scope: git proxy-auth and credential config, the scoped connector CLI sentinels, and the
+conversation id. The derivation reads the deploy's declared credential slots, so it is wired in by
+the deploy that holds them rather than reached from here."""
 
 
 @dataclass(frozen=True)
@@ -570,11 +563,9 @@ class ConversationProbes:
     conversation's own sandbox — the same `/workspace` the agent's files live in, resumed on touch —
     under a token this deployment signs for that one exec, and hands back what the command reported.
 
-    Its authority is the authority a turn's own sandbox open has: the conversation's agent, that
-    agent's snapshotted internet policy, the workspace's keyed credentials, and only the connector
-    grants in the caller's total `connections` scope. Member authority may select that member's
-    listed private connections; workspace authority may select listed shared connections. The one
-    thing it
+    Its capability is the conversation's agent, that agent's snapshotted internet policy, the
+    workspace's keyed credentials, and only the connector grants in the caller's total
+    `connections` scope. The one thing it
     deliberately lacks is the deployment's model key: no sentinel is exported and the proxy
     resolves no injection for it, so an unattended exec cannot spend the deployment's model
     budget.
@@ -593,7 +584,6 @@ class ConversationProbes:
         command: str,
         timeout_s: int = PROBE_TIMEOUT_SECONDS,
         *,
-        authority: ExecutionAuthority,
         connections: tuple[UUID, ...] = (),
         internet_access: Literal[False] | None = None,
     ) -> ExecResult:
@@ -601,10 +591,9 @@ class ConversationProbes:
         stdout, stderr, and exit code. A nonzero exit is a result, not an error — reading what a
         command reports is the whole point of running it.
 
-        `authority` is the member or workspace authority this exec carries from the work it serves.
         `connections` is the caller's immutable total allowlist: an empty tuple reaches no
-        connector, and a listed connection must still be live and usable by that authority. A
-        grant connected, attached, or shared after the work armed stays outside the list.
+        connector, and a listed connection must still be live. A grant connected, attached, or
+        shared after the work armed stays outside the list.
         `internet_access=False` preserves a caller's narrower internet policy.
 
         The exec runs bound to the conversation's own agent. A job binds a workspace and no agent —
@@ -631,15 +620,11 @@ class ConversationProbes:
         agent_id = await conversation_agent_id(workspace_id, conversation_id)
         if agent_id is None:
             raise ValueError(f"conversation {conversation_id} is not in this workspace")
-        async with workspace_tx() as connection:
-            if not await Seats(workspace_id).admits(connection, authority):
-                raise AuthorityUnavailable("the execution authority is not live")
         probe = ProbeToken(
             workspace_id=workspace_id,
             conversation_id=conversation_id,
             probe_id=uuid4(),
             expires_at=int(datetime.now(UTC).timestamp()) + timeout_s,
-            authority=authority,
             connections=connections,
             internet_access=internet_access,
         )
@@ -648,7 +633,7 @@ class ConversationProbes:
                 conversation_id,
                 None,
                 self._probe_tokens.encode(probe),
-                await self._env(conversation_id, probe.probe_id, authority, connections),
+                await self._env(conversation_id, probe.probe_id, probe.connections),
             )
             return await session.bash(command, timeout_s=timeout_s)
 
@@ -859,13 +844,13 @@ class TurnInvoker(Protocol):
         message: str,
         idempotency_key: str,
         *,
-        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
     ) -> UUID | None: ...
 
@@ -1134,11 +1119,9 @@ def _page_as_of(
 def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnElement[bool]:
     """Which sources this reader may read, as a predicate over `source` rows. A source is one
     stream of one connection, so the connection answers both halves: `disclosed` is whether this
-    reader's audience admits the connection's content at all, and `reachable` is whether this agent
-    is one that may read it — an agent holding a grant on the connection, or the workspace's main
-    agent, which every member talks to and expects to know what the workspace shares and what the
-    live speaker holds privately. A specialist agent reads only what it is granted, shared or not,
-    so its feed set stays the narrow one it was given."""
+    reader's audience or exact durable connection scope admits the content, and `reachable` is
+    whether this agent may read it — through its grant, or as the workspace's main agent reading a
+    shared connection or the live speaker's own. A specialist reads only what it is granted."""
     granted = sa.exists(
         sa.select(1)
         .select_from(tables.connector_grant)
@@ -1164,15 +1147,19 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
         for subject in reader.subjects
         if subject.startswith(MEMBER_SUBJECT_PREFIX)
     )
-    disclosed = sa.or_(
-        sa.and_(
-            tables.connection.c.shared,
-            sa.true() if SHARED_SUBJECT in reader.subjects else sa.false(),
-        ),
-        sa.and_(
-            tables.connection.c.shared.is_(False),
-            tables.connection.c.owner_member_id.in_(admitted) if admitted else sa.false(),
-        ),
+    disclosed = (
+        sa.true()
+        if reader.connections is not None
+        else sa.or_(
+            sa.and_(
+                tables.connection.c.shared,
+                sa.true() if SHARED_SUBJECT in reader.subjects else sa.false(),
+            ),
+            sa.and_(
+                tables.connection.c.shared.is_(False),
+                tables.connection.c.owner_member_id.in_(admitted) if admitted else sa.false(),
+            ),
+        )
     )
     speaker_owns = (
         sa.false()
@@ -1204,6 +1191,12 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
             )
             .correlate(tables.source)
         ),
+    )
+
+
+def _page_disclosed(reader: SourceReader) -> sa.ColumnElement[bool]:
+    return (
+        sa.true() if reader.connections is not None else tables.page.c.subject.in_(reader.subjects)
     )
 
 
@@ -1312,7 +1305,7 @@ class ExtensionContext:
     tailer: TurnTailer | None = None
     deploy_credentials: DeployCredentials = field(default_factory=DeployCredentials)
     member_context_read_allowed: bool = False
-    member_context_authority: ExecutionAuthority = WORKSPACE_AUTHORITY
+    member_context_member_id: UUID | None = None
     member_context_blob: WorkspaceBlobStore | None = None
     artifact_token_secret: str = ""
 
@@ -1458,8 +1451,7 @@ class ExtensionContext:
         )
 
     async def earliest_seated_admin(self) -> UUID | None:
-        """The workspace's earliest-seated admin — the deterministic member an ownerless agent's
-        background work acts on behalf of — or None in a workspace no admin holds a seat in."""
+        """The workspace's earliest-seated admin, or None if no admin holds a seat."""
         if not self.member_context_read_allowed:
             raise PermissionError("this extension cannot read seated members")
         async with workspace_tx() as connection:
@@ -1479,7 +1471,7 @@ class ExtensionContext:
 
     async def scheduled_member_timezone(self) -> str:
         """The scheduled member's IANA timezone, or UTC when the member has not reported one."""
-        member_id = authority_member_id(self.member_context_authority)
+        member_id = self.member_context_member_id
         if not self.member_context_read_allowed or member_id is None:
             raise PermissionError("member context is not bound to a scheduled member")
         async with workspace_tx() as connection:
@@ -1503,7 +1495,7 @@ class ExtensionContext:
         exclude_conversation_id: UUID | None = None,
     ) -> tuple[MemberContextRecord, ...]:
         """Read bounded cross-agent context visible to the scheduled member."""
-        member_id = authority_member_id(self.member_context_authority)
+        member_id = self.member_context_member_id
         if not self.member_context_read_allowed or member_id is None:
             raise PermissionError("member context is not bound to a scheduled member")
         if limit < 1 or limit > 200:
@@ -1986,7 +1978,6 @@ class ExtensionContext:
         message: str,
         idempotency_key: str,
         *,
-        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
@@ -1997,12 +1988,11 @@ class ExtensionContext:
     ) -> UUID | None:
         """Kick an internal turn in `conversation_id`, asserting the conversation is bound to
         `agent_id` — admission refuses a mismatch, so a stored binding can never fire into another
-        agent's conversation. `authority` is required so every automatic caller explicitly carries
-        either one member's immutable identity or workspace authority.
+        agent's conversation.
         `holds_work_already_done` parks the turn on a spend breach instead of cancelling work
         already performed and metered; `standalone` founds a new turn instead of folding into one
         already running; `as_scheduled` stamps the turn as a scheduled
-        fire — its own turn, never folded, seat-gated on the on-behalf member;
+        fire — its own turn, never folded;
         `unless_member_since` and `unless_member_arrival_since` — a pair, refused half-set —
         refuse the admission with None when a member turn past the turn watermark exists or a
         member arrival past the arrival watermark does (each watermark compares only its own
@@ -2018,7 +2008,6 @@ class ExtensionContext:
             agent_id,
             message,
             idempotency_key,
-            authority=authority,
             holds_work_already_done=holds_work_already_done,
             as_scheduled=as_scheduled,
             standalone=standalone,
@@ -2295,11 +2284,10 @@ class ExtensionContext:
         The key is the workflow subject — a pull request, a scheduled task, a delivery — so later
         events for that subject keep one history and a replay reopens the same conversation. The
         extension's name is the surface, so one extension's keys can never collide with another's.
-        Without `member_id` the audience is the workspace's, since no member delegated it. With
-        `member_id` the room is that member's own — the shape every on-behalf invocation runs in,
-        so the authority the turn carries stays inside the one room its member already reads; the
-        caller keys such rooms by the member as well as the subject, so a change of acting member
-        opens a fresh room rather than rebinding another member's. `invoke` admits the turns; this
+        Without `member_id` the audience is the workspace's. With `member_id` the room is that
+        member's own, so its contents stay inside the one room that member already reads; the
+        caller keys such rooms by the member as well as the subject, so a different member opens a
+        fresh room rather than rebinding another member's. `invoke` admits the turns; this
         only opens the room they run in, and an agent of another workspace fails loud rather than
         binding a conversation nothing can reach."""
         workspace_id = self.store.workspace_id
@@ -2433,7 +2421,7 @@ class ExtensionContext:
                 tables.page.c.workspace_id == self.store.workspace_id,
                 tables.page.c.uid.in_(page_ids),
                 tables.page.c.tombstone.is_(False),
-                tables.page.c.subject.in_(reader.subjects),
+                _page_disclosed(reader),
                 _source_readable(self.store.workspace_id, reader),
             )
         )
@@ -2714,7 +2702,7 @@ class ExtensionContext:
                 ),
             )
         ).where(
-            tables.page.c.subject.in_(reader.subjects),
+            _page_disclosed(reader),
             _source_readable(self.store.workspace_id, reader),
         )
         async with workspace_tx() as connection:
@@ -2885,7 +2873,7 @@ def context_for(
     tailer: TurnTailer | None = None,
     probes: ConversationProbes | None = None,
     member_context_read: bool = False,
-    member_context_authority: ExecutionAuthority = WORKSPACE_AUTHORITY,
+    member_context_member_id: UUID | None = None,
     member_context_blob: WorkspaceBlobStore | None = None,
     search: SearchProvider | None = None,
     *,
@@ -2937,7 +2925,7 @@ def context_for(
         home_surface=home_surface,
         tailer=tailer,
         member_context_read_allowed=member_context_read,
-        member_context_authority=member_context_authority,
+        member_context_member_id=member_context_member_id,
         member_context_blob=member_context_blob if member_context_read else None,
         artifact_token_secret=artifact_token_secret,
         deploy_credentials=deploy_credentials,

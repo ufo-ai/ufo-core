@@ -45,7 +45,6 @@ from ufo.product import (
     product_census,
 )
 from ufo.runtime import jobs as jobs_module
-from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.billing.accounting import PARK, OffTurnSpendRefused
 from ufo.runtime.candidates import owner_candidates
 from ufo.runtime.ext.context import ExtensionContext, ScopedStore
@@ -70,6 +69,7 @@ from ufo.schema.records import (
     MEMBER_ADMISSION,
     SCHEDULED_ADMISSION,
     TerminalFrame,
+    TurnRuntimeConfig,
     Usage,
 )
 
@@ -628,7 +628,7 @@ async def test_a_spend_refusal_defers_the_job_and_tells_the_member_once(
     """A handler the workspace's spend gates refused is deferred, not failed: nothing re-raises, no
     `jobs.failed` line is written, and the member is told exactly once — the mark the notice leaves
     keeps the next refusal quiet, and a cleared mark tells again."""
-    workspace_id, conversation_id, agent_id, member_id = await _spoken_workspace()
+    workspace_id, conversation_id, agent_id, _member_id = await _spoken_workspace()
     key = f"{CORE_EXTENSION}:memory"
 
     async def _refused(context: ExtensionContext) -> None:
@@ -663,9 +663,9 @@ async def test_a_spend_refusal_defers_the_job_and_tells_the_member_once(
     told = invoker.turns[0]
     assert told.conversation_id == conversation_id
     assert told.agent_id == agent_id
-    assert told.authority == MemberAuthority(member_id)
     assert "this workspace has no credit left" in told.message
     assert key in told.message
+    assert told.runtime_config == TurnRuntimeConfig(connections=(), internet_access=False)
 
     await runner.fire(key, workspace_id)
     assert len(invoker.turns) == 1

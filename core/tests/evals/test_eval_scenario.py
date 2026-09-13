@@ -50,7 +50,6 @@ from evals.harness.scorers import exact_scorer
 from evals.harness.target import CapabilityTarget, InProcessTarget, TargetResult
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority, MemberAuthority
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.transcript import (
@@ -61,7 +60,7 @@ from ufo.runtime.turns.transcript import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import FiredBy, TurnRuntimeConfig
+from ufo.schema.records import FiredBy, ModelAccountCapability, TurnRuntimeConfig
 from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
 
 MODEL = "claude-opus-4-8"
@@ -162,13 +161,13 @@ class ScriptedWorker:
         message: str,
         idempotency_key: str,
         *,
-        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
     ) -> UUID | None:
         return await self.admit(conversation_id, message, idempotency_key)
@@ -468,7 +467,6 @@ async def test_scenario_followup_merges_one_internal_flow(db: None, tmp_path) ->
             agent_id,
             "Build the homepage.",
             "homepage-seed",
-            authority=MemberAuthority(uuid4()),
             as_scheduled=True,
         )
 
@@ -528,7 +526,6 @@ async def test_scenario_followup_retains_offline_artifacts(db: None, tmp_path) -
             agent_id,
             "Build the homepage.",
             "homepage-seed",
-            authority=WORKSPACE_AUTHORITY,
             as_scheduled=True,
         )
 
@@ -665,7 +662,6 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
             agent_id,
             "Build the homepage without authority.",
             "homepage-seed:first",
-            authority=WORKSPACE_AUTHORITY,
             as_scheduled=True,
         )
         second = await target.invoke(
@@ -673,7 +669,6 @@ async def test_scenario_merges_two_internal_followup_flows(db: None, tmp_path) -
             agent_id,
             "Repair the homepage with authority.",
             "homepage-seed:second",
-            authority=MemberAuthority(uuid4()),
             as_scheduled=True,
         )
         return first, second
@@ -752,7 +747,6 @@ async def test_failed_scenario_followup_retains_its_evidence(db: None, tmp_path)
             agent_id,
             "Build the homepage.",
             "homepage-seed",
-            authority=WORKSPACE_AUTHORITY,
             as_scheduled=True,
         )
 
@@ -811,7 +805,6 @@ async def test_a_followup_that_ends_on_a_transient_is_the_providers_fault(
             agent_id,
             "Build the homepage.",
             "homepage-seed",
-            authority=WORKSPACE_AUTHORITY,
             as_scheduled=True,
         )
 

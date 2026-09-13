@@ -81,11 +81,10 @@ class MemberAccounts:
     A member who connected both a Claude and a ChatGPT account bought two subscriptions, so the
     provider rate-limiting the one in hand is not the end of the work: `next` resolves the account
     the work moves onto. It holds the move to the rule `_RebuiltOnRejection` holds a rebuild to. The
-    funding class must be the one the attempt froze, and the payer must be the member's own slot
-    for the moved model — never the workspace's row or the deploy's key that `client_for` falls
-    through to when the member's slot is unset, because that spend is exactly what a profile on the
-    member's account exists to prevent, and the frozen `byok` verdict and rate card would record it
-    as costing nothing."""
+    funding class must be the one the attempt froze, and the payer must be the exact capability
+    slot for the moved model — never the workspace's row or the deploy's key, because that spend is
+    exactly what a profile on the member's account exists to prevent, and the frozen `byok` verdict
+    and rate card would record it as costing nothing."""
 
     registry: "ModelRegistry"
     funding: Funding
@@ -98,8 +97,8 @@ class MemberAccounts:
         model, self.alternates = self.alternates[0], self.alternates[1:]
         spec = self.registry.spec(model)
         resolved = await self.registry.client_for(model)
-        if resolved.funding != self.funding or resolved.payer != ws_current().member_payer(
-            spec.key_slot, model
+        if resolved.funding != self.funding or resolved.payer != ws_current().routed_model_payer(
+            model
         ):
             raise ModelFundingChanged("model payer changed during account failover")
         return spec, resolved.client
@@ -175,6 +174,10 @@ class ModelRegistry:
                 spec.key_slot, spec.key_env or None, model
             )
         except CredentialSlotUnset as unset:
+            if ws_current().routed_model_call(model):
+                raise RuntimeError(
+                    f"model {model!r} needs the exact account credential bound to this turn"
+                ) from unset
             raise RuntimeError(
                 f"model {model!r} needs a key: set env UFO_{needed} (or {needed}) or the "
                 f"workspace's {spec.key_slot!r} BYOK slot"
@@ -188,7 +191,7 @@ class ModelRegistry:
                 "provider wire cannot carry."
             ) from error
         built = spec.client(spec, credential.value)
-        if spec.key_slot and ws_current().member_routed_call(spec.key_slot, model):
+        if ws_current().routed_model_call(model):
             built = _RebuiltOnRejection(
                 registry=self,
                 model=model,

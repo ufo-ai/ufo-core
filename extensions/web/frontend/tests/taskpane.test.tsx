@@ -46,6 +46,12 @@ const TASK = {
     last_run_status: "done",
     paused: false,
     mine: true,
+    content_editable: true,
+    schedule_editable: true,
+    pausable: true,
+    resumable: true,
+    runnable: true,
+    deletable: true,
     origin: "#general",
     owner_email: MEMBER.email,
   },
@@ -458,7 +464,17 @@ test("a task somebody else wrote states its prompt and refuses the keystroke", a
     "/objects/scheduled_task/daily-brief": () =>
       json({
         ...TASK,
-        status: { ...TASK.status, mine: false, owner_email: "mel@example.com" },
+        status: {
+          ...TASK.status,
+          mine: false,
+          content_editable: false,
+          schedule_editable: false,
+          pausable: false,
+          resumable: false,
+          runnable: false,
+          deletable: false,
+          owner_email: "mel@example.com",
+        },
       }),
   });
   mount();
@@ -468,7 +484,10 @@ test("a task somebody else wrote states its prompt and refuses the keystroke", a
   expect(
     await screen.findByText("Only the member who wrote this task can change what it says."),
   ).toBeTruthy();
-  expect(await screen.findByRole("button", { name: "Schedule" })).toBeTruthy();
+  expect((await screen.findByRole("button", { name: "Schedule" })).hasAttribute("disabled")).toBe(
+    true,
+  );
+  expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
 });
 
 test("a task whose prompt the reader may not see states its summary instead", async () => {
@@ -480,6 +499,34 @@ test("a task whose prompt the reader may not see states its summary instead", as
 
   expect(await screen.findByText(/private member task/)).toBeTruthy();
   expect(screen.queryByLabelText("Prompt")).toBeNull();
+  expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
+});
+
+test("an admin may stop or delete a private task without opening its content", async () => {
+  wire({
+    "/objects/scheduled_task/daily-brief": () =>
+      json({
+        ...TASK,
+        spec: null,
+        summary: "0 9 * * * — private member task",
+        status: {
+          ...TASK.status,
+          mine: false,
+          content_editable: false,
+          schedule_editable: false,
+          pausable: true,
+          resumable: false,
+          runnable: false,
+          deletable: true,
+          owner_email: "mel@example.com",
+        },
+      }),
+  });
+  mount();
+
+  expect(await screen.findByText(/private member task/)).toBeTruthy();
+  expect(screen.queryByLabelText("Prompt")).toBeNull();
+  expect(screen.getByRole("button", { name: "Pause" })).toHaveProperty("disabled", false);
   expect(screen.getByRole("button", { name: "Delete" })).toBeTruthy();
 });
 

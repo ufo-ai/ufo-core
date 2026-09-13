@@ -48,7 +48,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from ufo.sdk.authority import authority_member_id
 from ufo.sdk.o11y import warn
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_debugger.surface import SURFACE_DEBUG
@@ -127,7 +126,7 @@ async def report_problem(ctx: ToolContext, args: ReportProblemInput) -> ToolResu
         else f"{base.rstrip('/')}/surface/{SURFACE_DEBUG}"
         f"?ws={ctx.turn.workspace_id}&c={ctx.turn.conversation_id}&t={ctx.turn.id}"
     )
-    member_id = authority_member_id(ctx.authority)
+    member_id = ctx.speaker_member_id
     warn(
         PROBLEM_REPORTED_EVENT,
         problem=args.problem,
@@ -149,4 +148,5 @@ REPORT_PROBLEM_TOOL_DEF = ToolDef(
     input_model=ReportProblemInput,
     handler=report_problem,
     parallel_safe=True,
+    binds_member_authority=False,
 )

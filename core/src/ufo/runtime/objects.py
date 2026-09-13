@@ -37,7 +37,6 @@ from pydantic import (
 from pydantic.errors import PydanticInvalidForJsonSchema
 
 from ufo.db import workspace_tx
-from ufo.runtime.authority import authority_member_id
 from ufo.runtime.ext.context import ExtensionContext, JsonValue
 from ufo.runtime.object_name import (
     KIND_NAME_PATTERN,
@@ -444,7 +443,7 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         is_admin = await ctx.speaker_is_admin()
-        acting = authority_member_id(ctx.authority)
+        acting = ctx.speaker_member_id
         rows = tuple(
             ObjectRow(name=row.name, summary=row.summary, fields=row.fields)
             for row in await self._owned_rows(ctx)
@@ -455,7 +454,7 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[SpecT] | None:
         owner = await self._owner(ctx, name)
         if owner is None or not self._visible(
-            owner, authority_member_id(ctx.authority), await ctx.speaker_is_admin()
+            owner, ctx.speaker_member_id, await ctx.speaker_is_admin()
         ):
             return None
         detail = await self._detail(ctx, name, owner)
@@ -477,14 +476,14 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         if owner is None:
             return None
         is_admin = await ctx.speaker_is_admin()
-        if not self._visible(owner, authority_member_id(ctx.authority), is_admin):
+        if not self._visible(owner, ctx.speaker_member_id, is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         status = await self._status(ctx, name, owner)
         current = await self._owner(ctx, name)
         self._require_current_generation(name, current, expected_generation, "reading")
         if current is None:
             return None
-        if not self._visible(current, authority_member_id(ctx.authority), is_admin):
+        if not self._visible(current, ctx.speaker_member_id, is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         return status
 
@@ -503,12 +502,12 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
             await self._apply_owned(ctx, name, spec, old, owner)
             return
         is_admin = await ctx.speaker_is_admin()
-        if not self._visible(owner, authority_member_id(ctx.authority), is_admin):
+        if not self._visible(owner, ctx.speaker_member_id, is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         self._require_current_generation(name, owner, expected_generation, "editing")
         if self.mutate_requires_speaker:
             ctx.require_speaker(self.mutate_gate)
-        if not self._owned(owner, authority_member_id(ctx.authority)) and (
+        if not self._owned(owner, ctx.speaker_member_id) and (
             not is_admin
             or old is None
             or (owner.member_id is not None and not self._admin_can_apply(old, spec))
@@ -528,11 +527,11 @@ class MemberOwnedObjects[SpecT: BaseModel, OwnerT: ObjectOwner]:
         if owner is None:
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         is_admin = await ctx.speaker_is_admin()
-        if not self._visible(owner, authority_member_id(ctx.authority), is_admin):
+        if not self._visible(owner, ctx.speaker_member_id, is_admin):
             raise UnknownObject(f"no {self.kind_name} object named {name!r}")
         if self.delete_requires_speaker:
             ctx.require_speaker(self.delete_gate)
-        if not self._owned(owner, authority_member_id(ctx.authority)) and not is_admin:
+        if not self._owned(owner, ctx.speaker_member_id) and not is_admin:
             raise AdminRequired(self.delete_gate)
         await self._delete_owned(ctx, name, owner)
 
@@ -717,14 +716,12 @@ class MemberReadableObjects[SpecT: BaseModel, OwnerT: ObjectOwner](
         )
 
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[OwnerT], ...]:
-        return await self._member_rows(ctx.ext, member_id=authority_member_id(ctx.authority))
+        return await self._member_rows(ctx.ext, member_id=ctx.speaker_member_id)
 
     async def _detail(
         self, ctx: ToolContext, name: str, owner: OwnerT
     ) -> ObjectDetail[SpecT] | None:
-        return await self._member_object(
-            ctx.ext, name, owner, member_id=authority_member_id(ctx.authority)
-        )
+        return await self._member_object(ctx.ext, name, owner, member_id=ctx.speaker_member_id)
 
     async def _member_rows(
         self, ext: "ExtensionContext | None", *, member_id: UUID | None
@@ -1061,6 +1058,7 @@ class ObjectVerbs:
                 input_model=ObjectExplainInput,
                 handler=self._explain,
                 parallel_safe=True,
+                binds_member_authority=False,
             ),
             ToolDef(
                 name="object_apply",

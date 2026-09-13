@@ -61,6 +61,8 @@ struct Request {
     send_id: Option<String>,
     unsend_header: Option<String>,
     timezone_header: Option<String>,
+    authorization_id: Option<String>,
+    authorization_choice: Option<String>,
     since_header: Option<String>,
     listen_header: Option<String>,
     cwd_header: Option<String>,
@@ -211,6 +213,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         send_id,
         unsend_header,
         timezone_header,
+        authorization_id,
+        authorization_choice,
         since_header,
         listen_header,
         cwd_header,
@@ -243,6 +247,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         let mut send_key = None;
         let mut unsend = None;
         let mut timezone = None;
+        let mut authorization_id = None;
+        let mut authorization_choice = None;
         let mut since = None;
         let mut listen = None;
         let mut cwd = None;
@@ -272,6 +278,12 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
             if lower.starts_with("x-ufo-timezone:") {
                 timezone = Some(line.split_once(':').unwrap().1.trim().to_string());
             }
+            if lower.starts_with("x-ufo-authorization-id:") {
+                authorization_id = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
+            if lower.starts_with("x-ufo-authorization-choice:") {
+                authorization_choice = Some(line.split_once(':').unwrap().1.trim().to_string());
+            }
             if lower.starts_with("x-ufo-since:") {
                 since = Some(line.split_once(':').unwrap().1.trim().to_string());
             }
@@ -295,6 +307,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
             send_key,
             unsend,
             timezone,
+            authorization_id,
+            authorization_choice,
             since,
             listen,
             cwd,
@@ -319,6 +333,8 @@ fn read_request(stream: &mut std::net::TcpStream) -> Option<Request> {
         send_id,
         unsend_header,
         timezone_header,
+        authorization_id,
+        authorization_choice,
         since_header,
         listen_header,
         cwd_header,
@@ -916,6 +932,49 @@ fn plain_session_preserves_free_text_and_multi_select_questions() {
 }
 
 #[test]
+fn plain_authorization_selection_keeps_identity_and_code_across_a_retry() {
+    let authorization_id = "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6";
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "authorize\t92fc2a7b-d3fe-4fb7-8096-e78f658dbda6\tRead GitHub issues?\tallow\tAllow once\tRead issues this time.\tdeny\tDeny\tDo not read issues.\talways\tAlways allow issue reads\tRead issues from this GitHub account without asking again.",
+                "ask\t>",
+            ],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 599,
+            reply_lines: &[],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tdone", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("plain-authorization");
+    let (stdout, code) = run_client(&served.url, &["go"], "3\n", &home);
+    let requests = served.gateway.requests();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert!(
+        stdout.contains(
+            "Always allow issue reads: Read issues from this GitHub account without asking again."
+        ),
+        "stdout: {stdout}"
+    );
+    assert!(!stdout.contains(authorization_id), "stdout: {stdout}");
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    for request in &requests[1..] {
+        assert_eq!(request.body, "Always allow issue reads");
+        assert_eq!(request.authorization_id.as_deref(), Some(authorization_id));
+        assert_eq!(request.authorization_choice.as_deref(), Some("always"));
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
 fn an_abandoned_connection_is_no_exchange() {
     let served = serve(vec![Exchange {
         delay_ms: 0,
@@ -1008,6 +1067,76 @@ fn json_mode_speaks_the_event_protocol() {
         .expect("sign-in is observable");
     assert_eq!(signed_in["workspace_url"], "http://workspace.example");
     assert_eq!(signed_in["channel"], "e2e-test");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn json_authorization_command_posts_the_selected_code_and_display_label() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "authorize\t92fc2a7b-d3fe-4fb7-8096-e78f658dbda6\tRead GitHub issues?\tallow\tAllow once\tRead issues this time.\tdeny\tDeny\tDo not read issues.\talways\tAlways allow issue reads\tRead issues from this GitHub account without asking again.",
+                "ask\t>",
+            ],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["say\tdone", "exit\t0"],
+        },
+    ]);
+    let home = scratch_home("json-authorization");
+    let (stdout, code) = {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ufo"))
+            .args(["--json", "go"])
+            .env("WORKSPACE_URL", &served.url)
+            .env("UFO_URL", &served.url)
+            .env("UFO_HOME", &home)
+            .env("UFO_CHANNEL", "e2e-test")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn client");
+        let mut stdin = child.stdin.take().unwrap();
+        served
+            .arrived
+            .recv_timeout(ARRIVAL_WAIT)
+            .expect("the first post arrives");
+        thread::sleep(Duration::from_millis(300));
+        stdin
+            .write_all(b"{\"type\":\"authorize\",\"id\":1,\"choice\":\"deny\"}\n")
+            .unwrap();
+        drop(stdin);
+        let output = wait_for_client(child);
+        (
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            output.status.code().unwrap_or(-1),
+        )
+    };
+    let requests = served.gateway.requests();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    let authorization: serde_json::Value = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|event: &serde_json::Value| event["type"] == "authorization_request")
+        .expect("the authorization request is emitted");
+    assert!(authorization.get("authorization_id").is_none());
+    assert_eq!(authorization["options"][1]["choice"], "deny");
+    assert_eq!(authorization["options"][1]["label"], "Deny");
+    assert_eq!(
+        authorization["options"][1]["description"],
+        "Do not read issues."
+    );
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert_eq!(requests[1].body, "Deny");
+    assert_eq!(
+        requests[1].authorization_id.as_deref(),
+        Some("92fc2a7b-d3fe-4fb7-8096-e78f658dbda6")
+    );
+    assert_eq!(requests[1].authorization_choice.as_deref(), Some("deny"));
     let _ = std::fs::remove_dir_all(&home);
 }
 

@@ -69,7 +69,6 @@ from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.host.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.runtime.access.credentials import declared_slot_fingerprint
 from ufo.runtime.access.grants import installed_connect_flow
-from ufo.runtime.authority import authority_member_id
 from ufo.runtime.kinds.agents import RESTORE_APPLICATION_TOOL_DEF
 from ufo.runtime.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
@@ -155,10 +154,8 @@ class BashInput(BaseModel):
     background: bool = Field(
         default=False,
         description="Run the command detached and return at once with its task id, log path, and "
-        "pid instead of waiting for it. The result names its log, pid, and exit files under "
-        "`$UFO_HOME/runs/<id>/tasks`. The command's network egress ends with this turn, "
-        "and a sandbox that suspends between turns advances it only while awake — use background "
-        "for compute that needs no network past this turn: builds, test runs, data processing.",
+        "pid instead of waiting for it. It keeps network only until this turn ends, and stops "
+        "advancing whenever the sandbox pauses between turns.",
     )
 
 
@@ -929,7 +926,7 @@ async def share_file_handler(ctx: ToolContext, args: ShareFileInput) -> ToolResu
                     .values(
                         id=uuid5(NAMESPACE_URL, share.key),
                         turn_id=ctx.turn.id,
-                        member_id=authority_member_id(ctx.authority),
+                        member_id=ctx.speaker_member_id,
                         blob_key=share.key,
                         workspace_id=ctx.turn.workspace_id,
                         filename=share.safe_name,
@@ -1047,6 +1044,7 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
             name=args.name,
             detach_on_arrival=True,
             model=args.model,
+            requester_member_id=ctx.speaker_member_id,
         )
     except (
         AmbiguousSpawnTarget,
@@ -1285,6 +1283,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         handler=get_context_remaining_handler,
         parallel_safe=True,
         subagent_default=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="bash",
@@ -1301,6 +1300,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         handler=bash_handler,
         side_effecting=True,
         parallel_safe=True,
+        retains_sandbox_authority=True,
     ),
     ToolDef(
         name="read",
@@ -1314,6 +1314,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         input_model=ReadInput,
         handler=read_handler,
         parallel_safe=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="write",
@@ -1326,6 +1327,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=WriteInput,
         handler=write_handler,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="edit",
@@ -1338,6 +1340,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=EditInput,
         handler=edit_handler,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="glob",
@@ -1348,6 +1351,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         input_model=GlobInput,
         handler=glob_handler,
         parallel_safe=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="grep",
@@ -1360,6 +1364,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         input_model=GrepInput,
         handler=grep_handler,
         parallel_safe=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="share_file",
@@ -1381,6 +1386,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         input_model=ShareFileInput,
         handler=share_file_handler,
         side_effecting=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name=SPAWN_TOOL,
@@ -1414,6 +1420,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         ),
         input_model=AskUserCall,
         handler=ask_user_handler,
+        binds_member_authority=False,
         final_act_model=AskUserInput,
     ),
     ToolDef(
@@ -1428,6 +1435,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         input_model=LoadSkillInput,
         handler=load_skill_handler,
         parallel_safe=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="connect_account",
@@ -1453,6 +1461,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         input_model=CancelSpawnInput,
         handler=cancel_spawn_handler,
         parallel_safe=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="message_spawn",
@@ -1464,6 +1473,7 @@ BUILTIN_TOOLS: tuple[ToolDef, ...] = (
         handler=message_spawn_handler,
         side_effecting=True,
         parallel_safe=True,
+        binds_member_authority=False,
     ),
 )
 

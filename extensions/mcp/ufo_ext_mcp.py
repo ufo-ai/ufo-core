@@ -340,6 +340,7 @@ def manifest() -> Manifest:
                 input_model=ListMcpToolsInput,
                 handler=_list_mcp_tools,
                 untrusted=True,
+                binds_member_authority=False,
             ),
             ToolDef(
                 name=CALL_MCP_TOOL,
@@ -347,6 +348,7 @@ def manifest() -> Manifest:
                 input_model=CallMcpToolInput,
                 handler=_call_mcp_tool,
                 untrusted=True,
+                binds_member_authority=False,
             ),
         ),
         credentials=(

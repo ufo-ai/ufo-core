@@ -7,11 +7,10 @@ from uuid import UUID, uuid4
 
 from dbos import DBOSClient
 
-from ufo.runtime.authority import ExecutionAuthority
 from ufo.runtime.ext.context import MemberReach, TurnRuntimeConfig
 from ufo.runtime.jobs import InvokerFactory
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
-from ufo.schema.records import FiredBy
+from ufo.schema.records import FiredBy, ModelAccountCapability
 
 
 def invoker_factory(dbos: DBOSClient) -> InvokerFactory:
@@ -34,16 +33,16 @@ class RecordedTurn:
     agent_id: UUID
     message: str
     idempotency_key: str
-    authority: ExecutionAuthority
     standalone: bool
     runtime_config: TurnRuntimeConfig | None = None
 
 
 @dataclass
 class RecordingInvoker:
-    """Stands in for the invoker where what is under test is what reaches it — an automatic caller's
-    message, key, authority and folding. Typed rather than suppressed, so mypy holds it to
-    `TurnInvoker` and a stub that drifts from the protocol stops standing in for the dependency.
+    """Stands in for the invoker where what is under test is what reaches it — an automatic
+    caller's message, key, runtime capabilities, and folding. Typed rather than suppressed, so
+    mypy holds it to `TurnInvoker` and a stub that drifts from the protocol stops standing in for
+    the dependency.
 
     A caller whose subject is the *turn* wires `invoker_factory` and the real admission instead:
     this records the ask and founds nothing."""
@@ -57,13 +56,13 @@ class RecordingInvoker:
         message: str,
         idempotency_key: str,
         *,
-        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
     ) -> UUID | None:
         self.turns.append(
@@ -72,7 +71,6 @@ class RecordingInvoker:
                 agent_id=agent_id,
                 message=message,
                 idempotency_key=idempotency_key,
-                authority=authority,
                 standalone=standalone,
                 runtime_config=runtime_config,
             )

@@ -23,7 +23,6 @@ from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvid
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.audience import conversation_audience
-from ufo.sdk.authority import WORKSPACE_AUTHORITY
 from ufo.sdk.authproxy import AuthProxySpec, Credential
 from ufo.sdk.bearer import workspace_claim
 from ufo.sdk.browser import CdpEndpoint, CdpLease, FileBytes
@@ -419,7 +418,6 @@ async def _tick(ctx: ExtensionContext) -> None:
     probed = await ctx.probes.run(
         target.conversation_id,
         JOB_PROBE_COMMAND,
-        authority=WORKSPACE_AUTHORITY,
         connections=(),
     )
     await ctx.store.put(JOB_PROBE_KEY, {"stdout": probed.stdout, "exit_code": probed.exit_code})
@@ -1558,12 +1556,14 @@ def manifest() -> Manifest:
                 description="Echo a message, recording it through the extension's scoped store.",
                 input_model=EchoInput,
                 handler=_echo,
+                binds_member_authority=False,
             ),
             ToolDef(
                 name=NOTE_TOOL_NAME,
                 description="Write and read a note in the sample's own migration-created table.",
                 input_model=NoteInput,
                 handler=_note,
+                binds_member_authority=False,
             ),
             ToolDef(
                 name=AUDIT_ACTION,
@@ -1572,6 +1572,7 @@ def manifest() -> Manifest:
                 handler=_audit,
                 bound=ObjectBinding(kind=WORKSPACE_KIND, binding="collection"),
                 parallel_safe=True,
+                binds_member_authority=False,
             ),
             ToolDef(
                 name=POLISH_ACTION,
@@ -1588,6 +1589,7 @@ def manifest() -> Manifest:
                 handler=_engrave,
                 bound=ObjectBinding(kind=WIDGET_KIND, binding="instance"),
                 side_effecting=True,
+                binds_member_authority=False,
                 presentation=ActionPresentation(
                     label=ENGRAVE_PRESENTATION_LABEL,
                     confirm=ENGRAVE_PRESENTATION_CONFIRM,
@@ -1602,6 +1604,7 @@ def manifest() -> Manifest:
                 bound=ObjectBinding(kind=WIDGET_KIND, binding="collection"),
                 untrusted=True,
                 parallel_safe=True,
+                binds_member_authority=False,
             ),
             ToolDef(
                 name=CALIBRATE_ACTION,
@@ -1610,6 +1613,7 @@ def manifest() -> Manifest:
                 handler=_calibrate,
                 bound=ObjectBinding(kind=WIDGET_KIND, binding="collection"),
                 profile_only=True,
+                binds_member_authority=False,
             ),
             ToolDef(
                 name=BLESS_ACTION,
@@ -1617,6 +1621,7 @@ def manifest() -> Manifest:
                 input_model=BlessInput,
                 handler=_bless,
                 bound=ObjectBinding(kind=WIDGET_KIND, binding="instance"),
+                binds_member_authority=False,
             ),
             ToolDef(
                 name=BESEECH_ACTION,
@@ -1625,6 +1630,7 @@ def manifest() -> Manifest:
                 handler=_beseech,
                 bound=ObjectBinding(kind=WIDGET_KIND, binding="collection"),
                 final_act_model=AskUserInput,
+                binds_member_authority=False,
             ),
         ),
         objects=(

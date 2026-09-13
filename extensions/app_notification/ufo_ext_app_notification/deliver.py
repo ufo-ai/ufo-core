@@ -8,11 +8,12 @@ same id in its own allowlist fails loud rather than widening the fence in silenc
 
 The handler picks the channel, not the model: the member's newest durable-surface conversation
 they personally spoke in (`member_reach`), which is the founders' "best channel by last usage" as a
-sort. Delivery is a turn invoked there under the member's own authority — admission registers the
-writeback because the surface is durable, so the poller posts it and the member replies to it in the
-thread they already use. A conversation whose agent was archived between the read and the invoke
-is skipped for the next; a member with no durable conversation is not pushed, and the rows are
-marked delivered to the portal alone, where the kind already lists them.
+sort. Delivery is an automatic turn invoked there with the notification's exact capabilities —
+admission registers the writeback because the surface is durable, so the poller posts it and the
+member replies to it in the thread they already use. A conversation whose agent was archived
+between the read and the invoke is skipped for the next; a member with no durable conversation is
+not pushed, and the rows are marked delivered to the portal alone, where the kind already lists
+them.
 
 The relay turn holds the skip the app cannot: the member's own agent reads their standing orders and
 what it already said to them, so the instruction gives it the silence sentinel as a whole reply and
@@ -31,7 +32,7 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.authority import MemberAuthority, authority_member_id
+from ufo.sdk.audience import audience_member
 from ufo.sdk.context import AgentArchived, ExtensionContext
 from ufo.sdk.surfaces import SILENCE_SENTINEL
 from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
@@ -146,7 +147,7 @@ def _delivery_request_digest(rows: tuple[Notification, ...], text: str) -> str:
 async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult:
     ext = _require_ext(ctx.ext)
     await _require_notification_agent(ext, ctx)
-    member_id = authority_member_id(ctx.authority)
+    member_id = audience_member(ctx.audience)
     if member_id is None:
         return _refusal(NOTHING_TO_DELIVER)
     store = NotificationStore(ext)
@@ -187,7 +188,6 @@ async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult:
                 destination.agent_id,
                 wall(RELAY_SOURCE, args.text) + RELAY_INSTRUCTION,
                 delivery_key,
-                authority=MemberAuthority(member_id),
                 holds_work_already_done=True,
                 as_scheduled=True,
                 runtime_config=ctx.turn.runtime_config,
@@ -236,6 +236,7 @@ DELIVER = ToolDef(
     input_model=DeliverInput,
     handler=deliver,
     profile_only=True,
+    binds_member_authority=False,
     side_effecting=True,
     bound=ObjectBinding(kind=NOTIFICATION_KIND, binding="collection"),
     flag=NOTIFICATION_FLAG,

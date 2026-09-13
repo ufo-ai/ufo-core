@@ -66,12 +66,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
 from ufo.harness.o11y import current_traceparent, emit_metric, log, span
-from ufo.runtime.authority import (
-    ExecutionAuthority,
-    authority_from_member_id,
-    authority_member_id,
-    turn_authority,
-)
 from ufo.runtime.billing.accounting import ALLOW, BalanceGate, SpendDecision, SpendEvaluator
 from ufo.runtime.billing.balance import balance_park_message
 from ufo.runtime.ext.context import AgentArchived, MemberReach
@@ -96,6 +90,7 @@ from ufo.schema.records import (
     TURN_WORKFLOW_NAME,
     WRITEBACK_PENDING,
     FiredBy,
+    ModelAccountCapability,
     TerminalFrame,
     TerminalStatus,
     ToolIntent,
@@ -110,6 +105,7 @@ from ufo.schema.records import (
 )
 
 QUEUED: TurnStatus = "queued"
+RUNNING: TurnStatus = "running"
 CANCELLED: TerminalStatus = "cancelled"
 ADMITTED_TURN_METRIC = "admitted_turn_total"
 
@@ -126,7 +122,6 @@ class _Inbound:
     body: str
     speaker_member_id: UUID | None
     context: TurnContext | None
-    authority: ExecutionAuthority
     admitted_at: datetime | None = None
 
 
@@ -213,7 +208,6 @@ class Admission:
                 speaker_member_id,
                 idempotency_key,
                 context,
-                authority=authority_from_member_id(speaker_member_id),
                 member_admission=True,
                 intent=intent,
                 comment=comment,
@@ -250,19 +244,17 @@ class Admission:
         sender was answered when it was first admitted, so no gate answers them again — a seat or
         balance refusal holds the turn for the return that releases it rather than cancelling it
         with a reason nobody reads, and a pin the live turn no longer matches folds under the live
-        one's. The row carries the ended turn's runtime
-        config, which its fold matched, and a speakerless row takes the ended turn's authority,
-        since it records none. A member's founded run is announced as its first `Absorbed` frame,
-        since founding consumes the row outside any drain. A keyless row is stamped a key first, so
-        every path here is a re-admission and none can say a message twice."""
+        one's. The row carries the ended turn's runtime config, which its fold matched. A member's
+        founded run is announced as its first `Absorbed` frame, since founding consumes the row
+        outside any drain. A keyless row is stamped a key first, so every path here is a
+        re-admission and none can say a message twice."""
         async with workspace_tx() as connection:
             ended = (
                 await connection.execute(
                     sa.select(
                         tables.turn.c.status,
-                        tables.turn.c.speaker_member_id,
-                        tables.turn.c.on_behalf_of_member_id,
                         tables.turn.c.runtime_config,
+                        tables.turn.c.model_accounts,
                         tables.turn.c.parent_turn_id,
                     ).where(
                         tables.turn.c.id == ended_turn_id,
@@ -322,14 +314,13 @@ class Admission:
                 row.speaker_member_id,
                 idempotency_key,
                 context,
-                authority=(
-                    authority_from_member_id(row.speaker_member_id)
-                    if row.speaker_member_id is not None
-                    else turn_authority(ended.speaker_member_id, ended.on_behalf_of_member_id)
-                ),
                 member_admission=row.speaker_member_id is not None,
                 holds_work_already_done=True,
                 runtime_config=runtime_config,
+                model_accounts=tuple(
+                    ModelAccountCapability.model_validate(account)
+                    for account in ended.model_accounts
+                ),
             )
         except AgentArchived:
             return None
@@ -349,21 +340,17 @@ class Admission:
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
         *,
-        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
     ) -> UUID | None:
-        """Admit an internal turn. `authority` carries forward the authority the work already held
-        — a subagent hands its result back to the conversation that delegated it, and
-        a turn woken to read that result must not be able to do less than the turn that spawned it,
-        or the shortfall surfaces later as a refusal no member can place.
-
-        A turn founded on a spawned conversation inherits that conversation's spawn identity from
+        """Admit an internal turn. A turn founded on a spawned conversation inherits that
+        conversation's spawn identity from
         its founding turn — parent linkage, profile, display name — and delivers its result:
         nothing awaits a turn past the founding one, so a child woken by its grandchild's result
         or by a `message_spawn` follow-up continues under the same contract and its answer reaches
@@ -375,8 +362,8 @@ class Admission:
         acts for, so an unseated member's fire is refused wherever it lands.
 
         `standalone` also founds its own turn beside a live one, but keeps an internal admission's
-        meaning. Event delivery uses it when folding would discard that event's authority or
-        idempotency boundary.
+        meaning. Event delivery uses it when folding would discard that event's idempotency
+        boundary.
 
         `fired_by` names the object whose fire this is — a scheduled task, a source trigger — and
         is stamped on the turn the admission founds, so the runs list can say what fired it and
@@ -421,13 +408,13 @@ class Admission:
                 None,
                 idempotency_key,
                 context,
-                authority=authority,
                 holds_work_already_done=holds_work_already_done,
                 as_scheduled=as_scheduled,
                 standalone=standalone,
                 unless_member_since=unless_member_since,
                 unless_member_arrival_since=unless_member_arrival_since,
                 runtime_config=runtime_config,
+                model_accounts=model_accounts,
                 fired_by=fired_by,
             )
         except _SupersededByMember:
@@ -452,7 +439,6 @@ class Admission:
         speaker_member_id: UUID | None,
         idempotency_key: str | None,
         context: TurnContext | None,
-        authority: ExecutionAuthority,
         member_admission: bool = False,
         intent: ToolIntent | None = None,
         holds_work_already_done: bool = False,
@@ -462,6 +448,7 @@ class Admission:
         unless_member_arrival_since: int | None = None,
         comment: str | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
     ) -> Admitted:
         self._validate_member_watermarks(unless_member_since, unless_member_arrival_since)
@@ -473,7 +460,7 @@ class Admission:
         status: TurnStatus | None = None
         arrival_id: UUID | None = None
         redispatch_workflow_id: str | None = None
-        inbound = _Inbound(body, speaker_member_id, context, authority)
+        inbound = _Inbound(body, speaker_member_id, context)
         async with workspace_tx() as connection:
             conversation = (
                 await connection.execute(
@@ -523,6 +510,8 @@ class Admission:
                 agent_id,
                 idempotency_key,
                 runtime_config,
+                holds_work_already_done,
+                model_accounts,
                 inbound,
                 comment,
             )
@@ -535,7 +524,6 @@ class Admission:
             body = inbound.body
             context = inbound.context
             speaker_member_id = inbound.speaker_member_id
-            authority = inbound.authority
             await self._guard_member_watermark(
                 connection,
                 workspace_id,
@@ -553,9 +541,9 @@ class Admission:
                     agent_id,
                     archived,
                     member_admission,
-                    authority,
                     holds_work_already_done,
                     runtime_config,
+                    model_accounts,
                     idempotency_key,
                     inbound,
                     comment,
@@ -591,9 +579,9 @@ class Admission:
                     intent,
                     holds_work_already_done,
                     as_scheduled,
-                    authority,
                     idempotency_key,
                     runtime_config,
+                    model_accounts,
                     inbound,
                     fired_by,
                 )
@@ -604,21 +592,26 @@ class Admission:
                 counted_source = created.admission_source
             if folded_parked_turn is None and status == QUEUED and not waits_for_live_turn:
                 earlier_turn = tables.turn.alias("earlier_turn")
-                earlier_queued = (
+                blocking_statuses = (
+                    (QUEUED, RUNNING)
+                    if holds_work_already_done and not as_scheduled and not standalone
+                    else (QUEUED,)
+                )
+                earlier_active = (
                     await connection.execute(
                         sa.select(
                             sa.exists(
                                 sa.select(earlier_turn.c.id).where(
                                     earlier_turn.c.workspace_id == workspace_id,
                                     earlier_turn.c.conversation_id == conversation_id,
-                                    earlier_turn.c.status == QUEUED,
+                                    earlier_turn.c.status.in_(blocking_statuses),
                                     earlier_turn.c.seq < turn_seq,
                                 )
                             )
                         )
                     )
                 ).scalar_one()
-                dispatch_now = not earlier_queued
+                dispatch_now = not earlier_active
                 if dispatch_now:
                     await connection.execute(
                         sa.update(tables.turn)
@@ -736,16 +729,15 @@ class Admission:
         agent_id: UUID,
         idempotency_key: str | None,
         runtime_config: TurnRuntimeConfig | None,
+        exact_runtime_config: bool,
+        model_accounts: tuple[ModelAccountCapability, ...],
         inbound: _Inbound,
         comment: str | None,
     ) -> _DedupeResult:
         """Settle a repeated idempotency key: the turn it already founded, the live turn it already
         arrived on, or the orphaned arrival it re-founds here.
 
-        A re-founded arrival takes the queued row's body, context, and speaker. It keeps this
-        call's authority when the row names no speaker, because an internal arrival records no
-        member: the caller carries the authority the work already held, and reading it off a
-        speakerless row would found the turn as workspace work."""
+        A re-founded arrival takes the queued row's body, context, and speaker."""
         if idempotency_key is None:
             return _DedupeResult(None, inbound)
         row = (
@@ -758,6 +750,7 @@ class Admission:
                     tables.turn.c.agent_id,
                     tables.turn.c.running_attempt,
                     tables.turn.c.runtime_config,
+                    tables.turn.c.model_accounts,
                 )
                 .where(
                     tables.turn.c.workspace_id == workspace_id,
@@ -769,11 +762,24 @@ class Admission:
         if row is not None:
             if row.conversation_id != conversation_id or row.agent_id != agent_id:
                 raise RuntimeError("idempotency key reused for a different turn")
-            if runtime_config is not None and (
-                row.runtime_config is None
-                or TurnRuntimeConfig.model_validate(row.runtime_config) != runtime_config
+            recorded_runtime_config = (
+                None
+                if row.runtime_config is None
+                else TurnRuntimeConfig.model_validate(row.runtime_config)
+            )
+            if (exact_runtime_config and recorded_runtime_config != runtime_config) or (
+                not exact_runtime_config
+                and runtime_config is not None
+                and recorded_runtime_config != runtime_config
             ):
                 raise ValueError("turn already has a different runtime config")
+            if (
+                tuple(
+                    ModelAccountCapability.model_validate(account) for account in row.model_accounts
+                )
+                != model_accounts
+            ):
+                raise ValueError("turn already has different model account capabilities")
             return _DedupeResult(
                 _ExistingTurn(row.id, row.status, row.seq, row.running_attempt), inbound
             )
@@ -838,11 +844,6 @@ class Admission:
                     None if queued.context is None else TurnContext.model_validate(queued.context)
                 ),
                 speaker_member_id=queued.speaker_member_id,
-                authority=(
-                    authority_from_member_id(queued.speaker_member_id)
-                    if queued.speaker_member_id is not None
-                    else inbound.authority
-                ),
                 admitted_at=queued.created_at,
             ),
         )
@@ -856,9 +857,9 @@ class Admission:
         agent_id: UUID,
         archived: bool,
         member_admission: bool,
-        authority: ExecutionAuthority,
         holds_work_already_done: bool,
         runtime_config: TurnRuntimeConfig | None,
+        model_accounts: tuple[ModelAccountCapability, ...],
         idempotency_key: str | None,
         inbound: _Inbound,
         comment: str | None,
@@ -869,8 +870,8 @@ class Admission:
                     tables.turn.c.id,
                     tables.turn.c.status,
                     tables.turn.c.speaker_member_id,
-                    tables.turn.c.on_behalf_of_member_id,
                     tables.turn.c.runtime_config,
+                    tables.turn.c.model_accounts,
                     sa.or_(
                         tables.turn.c.retry_at.is_(None),
                         tables.turn.c.retry_at <= sa.func.now(),
@@ -891,25 +892,25 @@ class Admission:
             if live_turn is None or live_turn.runtime_config is None
             else TurnRuntimeConfig.model_validate(live_turn.runtime_config)
         )
+        if live_turn is not None and live_runtime_config != runtime_config:
+            if holds_work_already_done:
+                return _FoldResult(waits_for_live_turn=True)
+            if runtime_config is not None:
+                raise ValueError("running turn has a different runtime config")
         if (
-            runtime_config is not None
-            and live_turn is not None
-            and live_runtime_config != runtime_config
-            and not holds_work_already_done
+            live_turn is not None
+            and tuple(
+                ModelAccountCapability.model_validate(account)
+                for account in live_turn.model_accounts
+            )
+            != model_accounts
         ):
-            raise ValueError("running turn has a different runtime config")
+            if holds_work_already_done:
+                return _FoldResult(waits_for_live_turn=True)
+            raise ValueError("running turn has different model account capabilities")
         effective_runtime_config = live_runtime_config if live_turn is not None else runtime_config
-        live_authority = (
-            None
-            if live_turn is None
-            else turn_authority(live_turn.speaker_member_id, live_turn.on_behalf_of_member_id)
-        )
-        if live_authority is not None and not member_admission and authority != live_authority:
-            return _FoldResult(waits_for_live_turn=True)
         parked_member = (
-            None
-            if live_turn is None or live_turn.status != PARKED or live_authority is None
-            else authority_member_id(live_authority)
+            None if live_turn is None or live_turn.status != PARKED else live_turn.speaker_member_id
         )
         parked_members = {parked_member} if parked_member is not None else set()
         if live_turn is not None and live_turn.status == PARKED:
@@ -935,7 +936,7 @@ class Admission:
             live_turn is not None
             and not archived
             and (
-                await seats.admits(connection, authority_from_member_id(inbound.speaker_member_id))
+                await seats.all_seated(connection, (inbound.speaker_member_id,))
                 if inbound.speaker_member_id is not None
                 else not member_admission
             )
@@ -944,9 +945,9 @@ class Admission:
         fold_decision = (
             None
             if not fold_admitted
-            else await SpendEvaluator(
-                workspace_id, authority_member_id(authority), agent_id
-            ).decide(connection, 0)
+            else await SpendEvaluator(workspace_id, inbound.speaker_member_id, agent_id).decide(
+                connection, 0
+            )
         )
         fold_balance = (
             None
@@ -1042,9 +1043,9 @@ class Admission:
         intent: ToolIntent | None,
         holds_work_already_done: bool,
         as_scheduled: bool,
-        authority: ExecutionAuthority,
         idempotency_key: str | None,
         runtime_config: TurnRuntimeConfig | None,
+        model_accounts: tuple[ModelAccountCapability, ...],
         inbound: _Inbound,
         fired_by: FiredBy | None,
     ) -> _CreatedTurn:
@@ -1063,12 +1064,17 @@ class Admission:
                         tables.turn.c.parent_turn_id,
                         tables.turn.c.subagent_profile,
                         tables.turn.c.subagent_name,
+                        tables.turn.c.model_accounts,
                     ).where(
                         tables.turn.c.conversation_id == conversation_id,
                         tables.turn.c.seq == 1,
                     )
                 )
             ).one()
+            model_accounts = tuple(
+                ModelAccountCapability.model_validate(account)
+                for account in spawned_identity.model_accounts
+            )
         turn_id = turn_id_for(workspace_id, conversation_id, seq)
         admission_source = (
             INTENT_ADMISSION
@@ -1081,17 +1087,17 @@ class Admission:
         )
         terminal: TerminalFrame | None
         park_notice: str | None = None
-        refusal = await self._authority_refusal(
+        refusal = await self._admission_refusal(
             connection,
             workspace_id,
-            authority,
+            inbound.speaker_member_id,
             archived,
             member_admission,
             holds_work_already_done,
         )
         if refusal is None:
             decision = await SpendEvaluator(
-                workspace_id, authority_member_id(authority), agent_id
+                workspace_id, inbound.speaker_member_id, agent_id
             ).decide(connection, 0)
             balance = (
                 SpendDecision(outcome=ALLOW, message="")
@@ -1128,11 +1134,6 @@ class Admission:
                 inbound=inbound.body,
                 admission_source=admission_source,
                 speaker_member_id=inbound.speaker_member_id,
-                on_behalf_of_member_id=(
-                    None
-                    if inbound.speaker_member_id is not None
-                    else authority_member_id(authority)
-                ),
                 fired_by_kind=None if fired_by is None else fired_by.kind,
                 fired_by_name=None if fired_by is None else fired_by.name,
                 fired_by_title=None if fired_by is None else fired_by.title,
@@ -1153,6 +1154,7 @@ class Admission:
                 runtime_config=(
                     None if runtime_config is None else runtime_config.model_dump(mode="json")
                 ),
+                model_accounts=[account.model_dump(mode="json") for account in model_accounts],
                 created_at=(
                     inbound.admitted_at if inbound.admitted_at is not None else sa.func.now()
                 ),
@@ -1182,11 +1184,11 @@ class Admission:
                 await self._record_park_notice(connection, workspace_id, turn_id, park_notice)
         return _CreatedTurn(turn_id, seq, status, admission_source)
 
-    async def _authority_refusal(
+    async def _admission_refusal(
         self,
         connection: AsyncConnection,
         workspace_id: UUID,
-        authority: ExecutionAuthority,
+        speaker_member_id: UUID | None,
         archived: bool,
         member_admission: bool,
         holds_work_already_done: bool,
@@ -1197,9 +1199,11 @@ class Admission:
         credit returning is exactly what releases them."""
         if archived:
             return CANCELLED, TerminalFrame(status=CANCELLED, text=ARCHIVED_REFUSAL_MESSAGE)
-        if authority_member_id(authority) is None and member_admission:
+        if speaker_member_id is None and member_admission:
             return CANCELLED, TerminalFrame(status=CANCELLED, text=UNRESOLVED_SPEAKER_MESSAGE)
-        if not await Seats(workspace_id).admits(connection, authority):
+        if speaker_member_id is not None and not await Seats(workspace_id).all_seated(
+            connection, (speaker_member_id,)
+        ):
             return _refused(holds_work_already_done, SEAT_REFUSAL_MESSAGE)
         return None
 
@@ -1365,13 +1369,13 @@ class AdmissionInvoker:
         idempotency_key: str | None = None,
         context: TurnContext | None = None,
         *,
-        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
     ) -> UUID | None:
         return await self.admission.invoke(
@@ -1381,13 +1385,13 @@ class AdmissionInvoker:
             message,
             idempotency_key=idempotency_key,
             context=context,
-            authority=authority,
             holds_work_already_done=holds_work_already_done,
             as_scheduled=as_scheduled,
             standalone=standalone,
             unless_member_since=unless_member_since,
             unless_member_arrival_since=unless_member_arrival_since,
             runtime_config=runtime_config,
+            model_accounts=model_accounts,
             fired_by=fired_by,
         )
 

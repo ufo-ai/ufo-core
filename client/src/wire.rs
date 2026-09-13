@@ -48,6 +48,48 @@ pub struct RuntimeAttestation {
     pub environment: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationChoice {
+    Allow,
+    Deny,
+    Always,
+}
+
+impl AuthorizationChoice {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthorizationChoice::Allow => "allow",
+            AuthorizationChoice::Deny => "deny",
+            AuthorizationChoice::Always => "always",
+        }
+    }
+
+    fn parse(value: &str) -> Option<AuthorizationChoice> {
+        [
+            AuthorizationChoice::Allow,
+            AuthorizationChoice::Deny,
+            AuthorizationChoice::Always,
+        ]
+        .into_iter()
+        .find(|choice| choice.as_str() == value)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorizationOption {
+    pub label: String,
+    pub description: String,
+    pub choice: AuthorizationChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationAnswer {
+    pub authorization_id: String,
+    pub choice: AuthorizationChoice,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Directive {
     Say(String),
@@ -70,6 +112,11 @@ pub enum Directive {
         prompt: String,
         options: Vec<String>,
         multiple: bool,
+    },
+    Authorize {
+        authorization_id: String,
+        prompt: String,
+        options: Vec<AuthorizationOption>,
     },
     Secret {
         sealed: String,
@@ -142,6 +189,7 @@ pub fn parse_line(line: &str) -> Directive {
         "ask" => Directive::Ask(field(&fields, 0)),
         "choose" if !fields.is_empty() => question(&fields, false),
         "choose_many" if !fields.is_empty() => question(&fields, true),
+        "authorize" => authorization(&fields),
         "secret" if fields.len() >= 3 => Directive::Secret {
             sealed: fields[0].clone(),
             slot: fields[1].clone(),
@@ -188,9 +236,54 @@ fn question(fields: &[String], multiple: bool) -> Directive {
     }
 }
 
+fn authorization(fields: &[String]) -> Directive {
+    if !matches!(fields.len(), 6 | 8 | 11) || fields[0].is_empty() {
+        return Directive::Unknown;
+    }
+    let option_fields = &fields[2..];
+    let parse_options = |width: usize| {
+        if !option_fields.len().is_multiple_of(width) {
+            return None;
+        }
+        option_fields
+            .chunks_exact(width)
+            .map(|option| {
+                Some(AuthorizationOption {
+                    label: option[1].clone(),
+                    description: option.get(2).cloned().unwrap_or_default(),
+                    choice: AuthorizationChoice::parse(&option[0])?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+    };
+    let Some(options) = parse_options(3).or_else(|| parse_options(2)) else {
+        return Directive::Unknown;
+    };
+    let choices = options
+        .iter()
+        .map(|option| option.choice)
+        .collect::<Vec<_>>();
+    if choices.as_slice() != [AuthorizationChoice::Allow, AuthorizationChoice::Deny]
+        && choices.as_slice()
+            != [
+                AuthorizationChoice::Allow,
+                AuthorizationChoice::Deny,
+                AuthorizationChoice::Always,
+            ]
+    {
+        return Directive::Unknown;
+    }
+    Directive::Authorize {
+        authorization_id: fields[0].clone(),
+        prompt: fields[1].clone(),
+        options,
+    }
+}
+
 #[derive(Clone)]
 pub enum PostBody {
     Message(String),
+    Authorization(AuthorizationAnswer),
     Empty,
     Listen,
     OpReply {
@@ -502,6 +595,13 @@ impl Session {
         let mut request = self.request("POST", &self.endpoint());
         let outcome = match body {
             PostBody::Message(text) => request.send_string(&text),
+            PostBody::Authorization(answer) => request
+                .set(
+                    "x-ufo-authorization-id",
+                    &header_safe(&answer.authorization_id),
+                )
+                .set("x-ufo-authorization-choice", answer.choice.as_str())
+                .send_string(&answer.text),
             PostBody::Empty => request.send_string(""),
             PostBody::Listen => request.set("x-ufo-listen", "1").send_string(""),
             PostBody::OpReply { op_id, reply } => {
@@ -719,12 +819,37 @@ pub struct SendLane {
 
 impl SendLane {
     pub fn send(&self, send_id: &str, text: &str) -> Result<SentAck, String> {
+        self.send_request(send_id, text, None)
+    }
+
+    pub fn authorize(
+        &self,
+        send_id: &str,
+        answer: &AuthorizationAnswer,
+    ) -> Result<SentAck, String> {
+        self.send_request(send_id, &answer.text, Some(answer))
+    }
+
+    fn send_request(
+        &self,
+        send_id: &str,
+        text: &str,
+        authorization: Option<&AuthorizationAnswer>,
+    ) -> Result<SentAck, String> {
         let mut request = build_agent()
             .request("POST", &self.endpoint)
             .set("content-type", "text/plain")
             .set("x-ufo-session", &self.session_id)
             .set("x-ufo-send", "1")
             .set("x-ufo-send-id", &header_safe(send_id));
+        if let Some(answer) = authorization {
+            request = request
+                .set(
+                    "x-ufo-authorization-id",
+                    &header_safe(&answer.authorization_id),
+                )
+                .set("x-ufo-authorization-choice", answer.choice.as_str());
+        }
         if let Some(zone) = system_timezone() {
             request = request.set("x-ufo-timezone", zone);
         }
@@ -1002,6 +1127,87 @@ mod tests {
     }
 
     #[test]
+    fn parses_authorization_identity_codes_and_display_labels_separately() {
+        assert_eq!(
+            parse_line(
+                "authorize\t92fc2a7b-d3fe-4fb7-8096-e78f658dbda6\tProceed?\tallow\tAllow once\tThis action only.\tdeny\tDeny\tDo not allow this action.\talways\tAlways allow for GitHub\tFuture repository reads from this account."
+            ),
+            Directive::Authorize {
+                authorization_id: "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6".into(),
+                prompt: "Proceed?".into(),
+                options: vec![
+                    AuthorizationOption {
+                        label: "Allow once".into(),
+                        description: "This action only.".into(),
+                        choice: AuthorizationChoice::Allow,
+                    },
+                    AuthorizationOption {
+                        label: "Deny".into(),
+                        description: "Do not allow this action.".into(),
+                        choice: AuthorizationChoice::Deny,
+                    },
+                    AuthorizationOption {
+                        label: "Always allow for GitHub".into(),
+                        description: "Future repository reads from this account.".into(),
+                        choice: AuthorizationChoice::Always,
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            parse_line("authorize\tid\tProceed?\tapprove\tYes"),
+            Directive::Unknown
+        );
+        assert_eq!(
+            parse_line(
+                "authorize\tid\tProceed?\tallow\tAllow once\tThis action only.\tdeny\tDeny\tDo not allow this action."
+            ),
+            Directive::Authorize {
+                authorization_id: "id".into(),
+                prompt: "Proceed?".into(),
+                options: vec![
+                    AuthorizationOption {
+                        label: "Allow once".into(),
+                        description: "This action only.".into(),
+                        choice: AuthorizationChoice::Allow,
+                    },
+                    AuthorizationOption {
+                        label: "Deny".into(),
+                        description: "Do not allow this action.".into(),
+                        choice: AuthorizationChoice::Deny,
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            parse_line(
+                "authorize\tid\tProceed?\tallow\tAllow once\tdeny\tDeny\talways\tAlways allow"
+            ),
+            Directive::Authorize {
+                authorization_id: "id".into(),
+                prompt: "Proceed?".into(),
+                options: vec![
+                    AuthorizationOption {
+                        label: "Allow once".into(),
+                        description: String::new(),
+                        choice: AuthorizationChoice::Allow,
+                    },
+                    AuthorizationOption {
+                        label: "Deny".into(),
+                        description: String::new(),
+                        choice: AuthorizationChoice::Deny,
+                    },
+                    AuthorizationOption {
+                        label: "Always allow".into(),
+                        description: String::new(),
+                        choice: AuthorizationChoice::Always,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn parses_session_verbs() {
         assert_eq!(
             parse_line("since\tturn-1\tcursor-9"),
@@ -1106,6 +1312,21 @@ mod tests {
                 let mut fields = vec![prompt.clone()];
                 fields.extend(options.iter().cloned());
                 Some((if *multiple { "choose_many" } else { "choose" }, fields))
+            }
+            Directive::Authorize {
+                authorization_id,
+                prompt,
+                options,
+            } => {
+                let mut fields = vec![authorization_id.clone(), prompt.clone()];
+                for option in options {
+                    fields.extend([
+                        option.choice.as_str().to_string(),
+                        option.label.clone(),
+                        option.description.clone(),
+                    ]);
+                }
+                Some(("authorize", fields))
             }
             Directive::Secret {
                 sealed,
@@ -1418,6 +1639,52 @@ mod tests {
             "{request}"
         );
         assert!(request.ends_with("\r\n\r\nrun it"), "{request}");
+    }
+
+    #[test]
+    fn a_structured_authorization_posts_its_opaque_id_and_choice() {
+        let (base, serving) = served("200 OK", "ask\t>\n");
+        let mut session = stopping(base);
+        session
+            .post(PostBody::Authorization(AuthorizationAnswer {
+                authorization_id: "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6".into(),
+                choice: AuthorizationChoice::Always,
+                text: "Proceed every time".into(),
+            }))
+            .expect("the answer is accepted");
+        let request = serving.join().expect("the server thread");
+        assert!(
+            request.contains("x-ufo-authorization-id: 92fc2a7b-d3fe-4fb7-8096-e78f658dbda6"),
+            "{request}"
+        );
+        assert!(
+            request.contains("x-ufo-authorization-choice: always"),
+            "{request}"
+        );
+        assert!(request.ends_with("\r\n\r\nProceed every time"), "{request}");
+    }
+
+    #[test]
+    fn the_fast_send_lane_preserves_structured_authorization_headers() {
+        let (base, serving) = served("200 OK", "sent\tturn-1\t1\t");
+        let lane = stopping(base).send_lane().expect("a signed-in lane");
+        let answer = AuthorizationAnswer {
+            authorization_id: "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6".into(),
+            choice: AuthorizationChoice::Deny,
+            text: "Do not proceed".into(),
+        };
+        assert_eq!(lane.authorize("send-1", &answer).unwrap().turn_id, "turn-1");
+        let request = serving.join().expect("the server thread");
+        assert!(request.contains("x-ufo-send: 1"), "{request}");
+        assert!(request.contains("x-ufo-send-id: send-1"), "{request}");
+        assert!(
+            request.contains("x-ufo-authorization-choice: deny"),
+            "{request}"
+        );
+        assert!(
+            request.contains("x-ufo-authorization-id: 92fc2a7b-d3fe-4fb7-8096-e78f658dbda6"),
+            "{request}"
+        );
     }
 
     #[test]

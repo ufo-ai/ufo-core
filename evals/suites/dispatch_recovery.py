@@ -27,9 +27,9 @@ The buckets, and the case that stands for each:
   nonzero exit IS the answer — `grep` matching nothing — so the case asks a question whose true
   answer is zero and grades the answer.
 
-`SpeakerRequired` is the one confirmed bucket with no case here. It refuses a call that carries no
-member authority, and every capability case runs as a member's own message, so the harness cannot
-put the question. Its guidance is graded by `authority_handoff` instead.
+`SpeakerRequired` is the one confirmed bucket with no case here. It refuses a call with no live
+speaker, and every capability case runs as a member's own message, so the harness cannot put the
+question. Its guidance is graded by `authority_handoff` instead.
 """
 
 from __future__ import annotations

@@ -1,14 +1,14 @@
-"""`notify`: put one message in the Notification app's inbox for the member this turn runs for.
+"""`notify`: put one message in the Notification app's inbox for the member speaking this turn.
 
 The tool is the producer half of the back channel. It is in the member-facing set, so every agent
-holds it, and it writes one row under the turn's own authority — the member it concerns is the
-member the turn acts for, never a name the model supplies. Nothing is hidden because nothing is
+holds it, and it writes one row for the authenticated speaker — the member it concerns is never a
+name the model supplies. Nothing is hidden because nothing is
 spoken: a tool call never enters a delivered reply, so no redaction stands between this and the
 member. What the model sees back is one line, plus the reason when a fence refuses, which is what
 makes the fences steerable rather than silent.
 
-Five refusals are structural. A turn carrying workspace authority names no member, and a
-notification nobody is the recipient of is not one. The Notification agent's own turns cannot
+Five refusals are structural. A turn with no speaker names no member, and a notification nobody is
+the recipient of is not one. The Notification agent's own turns cannot
 post: an inbox that mails itself is the loop this whole design must be unable to enter. A spawned
 turn cannot post: it was started by another turn to do that turn's work, so what it finds belongs to
 the turn that spawned it, which raises what is worth raising — an agent this app woke, and anything
@@ -32,8 +32,7 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.authority import authority_member_id
-from ufo.sdk.context import ExtensionContext
+from ufo.sdk.context import ExtensionContext, TurnRuntimeConfig
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_app_notification.store import (
     BODY_MAX,
@@ -60,9 +59,7 @@ NOTIFY_DESCRIPTION = (
     "call per subject, whatever the batch size; two different things are two calls. Do not raise "
     "what this turn already told them or a fault you can repair."
 )
-NOTIFY_NEEDS_A_MEMBER = (
-    "this turn runs under workspace authority and names no member, so there is nobody to notify"
-)
+NOTIFY_NEEDS_A_MEMBER = "this turn has no member speaker, so there is nobody to notify"
 NOTIFY_NO_INBOX = "the Notification app is not live in this workspace, so there is no inbox"
 NOTIFY_SELF = "the notification agent does not notify itself"
 NOTIFY_INSIDE_A_SPAWN = (
@@ -122,7 +119,7 @@ def _refusal(text: str) -> ToolResult:
 
 
 async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
-    member_id = authority_member_id(ctx.authority)
+    member_id = ctx.speaker_member_id
     if member_id is None:
         return _refusal(NOTIFY_NEEDS_A_MEMBER)
     if ctx.turn.spawned:
@@ -139,6 +136,9 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
         return _refusal(NOTIFY_NO_INBOX)
     if inbox == ctx.turn.agent_id:
         return _refusal(NOTIFY_SELF)
+    runtime_config = (ctx.turn.runtime_config or TurnRuntimeConfig()).model_copy(
+        update={"connections": await ctx.connector_connection_ids()}
+    )
     posted = await store.post(
         to_agent_id=inbox,
         member_id=member_id,
@@ -148,7 +148,7 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
         agent_name=await ext.agent_name(),
         turn_id=ctx.turn.id,
         conversation_id=ctx.turn.conversation_id,
-        runtime_config=ctx.turn.runtime_config,
+        runtime_config=runtime_config,
     )
     match posted:
         case Refused(reason=reason):

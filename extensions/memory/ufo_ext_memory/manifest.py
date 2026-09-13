@@ -977,6 +977,7 @@ def manifest() -> Manifest:
                 ),
                 input_model=MemoryUpdateInput,
                 handler=memory_update_handler,
+                binds_member_authority=False,
                 side_effecting=True,
             ),
             ToolDef(
@@ -991,6 +992,7 @@ def manifest() -> Manifest:
                 bound=ObjectBinding(kind=MEMORY_KIND, binding="collection"),
                 side_effecting=True,
                 presentation=ActionPresentation(label=RECORD_CORRECTION_LABEL),
+                binds_member_authority=False,
             ),
             ToolDef(
                 name=RECORD_FIRST_RUN_ACTION,
@@ -1003,6 +1005,7 @@ def manifest() -> Manifest:
                 bound=ObjectBinding(kind=MEMORY_KIND, binding="collection"),
                 side_effecting=True,
                 presentation=ActionPresentation(label=RECORD_FIRST_RUN_LABEL),
+                binds_member_authority=False,
             ),
             ToolDef(
                 name="rebuild_page_facts",

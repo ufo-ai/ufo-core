@@ -41,7 +41,7 @@ from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
 from ufo.harness import o11y
 from ufo.harness.agent import ToolCall as HarnessToolCall
-from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, CORE_PRICING
+from ufo.harness.models.catalog import ANTHROPIC_KEY_SLOT, CORE_PRICING, OPENAI_KEY_SLOT
 from ufo.harness.models.interface import (
     ConversationCacheTtl,
     ImageBlock,
@@ -110,18 +110,16 @@ from ufo.runtime.access.grants import (
 from ufo.runtime.access.member_authorization import (
     MEMBER_AUTHORIZATION_MODEL,
     MEMBER_AUTHORIZATION_TOOL,
+    AuthorizationAnswer,
     AuthorizationAttempt,
+    AuthorizationBinding,
     AuthorizationRequest,
     AuthorizationResolution,
+    AuthorizationScope,
     AuthorizationVerdict,
     MemberAuthorization,
 )
-from ufo.runtime.authority import (
-    WORKSPACE_AUTHORITY,
-    ExecutionAuthority,
-    MemberAuthority,
-    authority_member_id,
-)
+from ufo.runtime.agent_scope import agent
 from ufo.runtime.billing.accounting import TOKENS_DIMENSION, TurnUsageConflict, record_turn_usage
 from ufo.runtime.billing.balance import credit, debit, set_reserve
 from ufo.runtime.engine import (
@@ -154,9 +152,11 @@ from ufo.runtime.engine import (
     DispatchResult,
     EffectiveCall,
     ModelStreamError,
+    SandboxAccess,
     TranscriptRepair,
     TurnEngine,
     TurnParked,
+    _AuthorizationPreflight,
     _bounded,
     _BoundToolCall,
     _claim_turn,
@@ -213,6 +213,7 @@ from ufo.runtime.tools.context import (
     ADMIN_GATE_NEEDS_A_SPEAKER,
     CALL_NEEDS_A_SPEAKER,
     ImageContent,
+    Spawn,
     SpawnResult,
     SpeakerRequired,
     TextContent,
@@ -220,7 +221,13 @@ from ufo.runtime.tools.context import (
     ToolResult,
 )
 from ufo.runtime.tools.question import ASK_USER_DIRECTIVE
-from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef, ToolRegistry
+from ufo.runtime.tools.registry import (
+    ActionPresentation,
+    ObjectBinding,
+    StandingAuthorization,
+    ToolDef,
+    ToolRegistry,
+)
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import ActivitySummarizer
 from ufo.runtime.turns.audience import Audience, audience_subjects, conversation_audience
@@ -236,18 +243,20 @@ from ufo.runtime.workspace import (
     PLAN_FUNDED,
     ResolvedModelClient,
     init_workspace_credentials,
-    model_authority,
+    model_credentials,
     ws,
 )
 from ufo.schema import tables
 from ufo.schema.records import (
     CANCELLED,
     DELIVERY_PENDING,
+    EXPRESS_QUEUE_NAME,
     INTENT_ADMISSION,
     INTERNAL_ADMISSION,
     MEMBER_ADMISSION,
     PARKED,
     SCHEDULED_ADMISSION,
+    TURN_QUEUE_NAME,
     Agent,
     AskQuestion,
     AskUserInput,
@@ -1119,7 +1128,6 @@ async def _seed_turn(
     terminal: TerminalFrame | None,
     seq: int = 1,
     admission_source: TurnAdmissionSource = INTERNAL_ADMISSION,
-    acts_on_behalf: bool = False,
 ) -> Turn:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     async with workspace_tx() as connection:
@@ -1170,9 +1178,6 @@ async def _seed_turn(
                 status=status,
                 inbound="hi",
                 admission_source=admission_source,
-                on_behalf_of_member_id=(
-                    member_id if acts_on_behalf or admission_source == SCHEDULED_ADMISSION else None
-                ),
                 terminal=None if terminal is None else terminal.model_dump(mode="json"),
                 created_at=ADMITTED_AT,
                 updated_at=sa.func.now(),
@@ -1187,9 +1192,6 @@ async def _seed_turn(
         status=status,
         inbound="hi",
         admission_source=admission_source,
-        on_behalf_of_member_id=(
-            member_id if acts_on_behalf or admission_source == SCHEDULED_ADMISSION else None
-        ),
         created_at=ADMITTED_AT,
         terminal=terminal,
     )
@@ -1361,7 +1363,7 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
     colleague = await _seat_member(turn.workspace_id, "colleague@example.com")
     arrival = uuid4()
     seen: list[tuple[UUID | None, Audience, frozenset[str], dict[str, object]]] = []
-    authorized: list[ExecutionAuthority] = []
+    authorized: list[tuple[UUID, ...]] = []
 
     async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
         seen.append(
@@ -1388,9 +1390,9 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
         ),
     )
 
-    async def sandbox_for(authority: ExecutionAuthority) -> SandboxSession:
-        authorized.append(authority)
-        return engine.sandbox
+    async def sandbox_for(connections: tuple[UUID, ...], _call: str) -> SandboxAccess:
+        authorized.append(connections)
+        return SandboxAccess(engine.sandbox)
 
     engine = replace(engine, sandbox_for=sandbox_for)
     context = ToolContext(
@@ -1459,11 +1461,7 @@ async def test_dispatch_binds_only_active_message_requesters_and_strips_the_ref(
             {},
         ),
     ]
-    assert authorized == [
-        MemberAuthority(requesters[arrival].member_id),
-        WORKSPACE_AUTHORITY,
-        MemberAuthority(founder),
-    ]
+    assert authorized == [(), (), ()]
 
     for index, invalid in enumerate((str(uuid4()), "not-a-ref", None)):
         result = await _dispatch(
@@ -1491,6 +1489,8 @@ async def test_multi_speaker_selection_is_authorized_before_member_access(
 
     events: list[str] = []
     seen: list[UUID | None] = []
+    authorized: list[tuple[UUID, ...]] = []
+    scoped: list[tuple[UUID, ...]] = []
 
     async def capture(ctx: ToolContext, args: Input) -> ToolResult:
         events.append("handler")
@@ -1502,37 +1502,63 @@ async def test_multi_speaker_selection_is_authorized_before_member_access(
     second = await _seat_member(turn.workspace_id, "second@example.com")
     second_ref = uuid4()
     gate = RecordingMemberAuthorization(AuthorizationResolution("allow"), events=events)
+    grants = GrantStore()
+    with ws(turn.workspace_id), agent(turn.agent_id):
+        second_connection = await grants.record(
+            provider="hub",
+            account_id="second-account",
+            host="api.hub.test",
+            grantor_member_id=second,
+            shared=False,
+        )
     engine = replace(
         _engine(turn, EchoModel(), tmp_path),
         member_authorization=gate,
+        grants=grants,
         tools=ToolRegistry(
             (ToolDef(name="member_probe", description="d", input_model=Input, handler=capture),)
         ),
     )
 
-    async def sandbox_for(authority: ExecutionAuthority) -> SandboxSession:
+    async def sandbox_for(connections: tuple[UUID, ...], _call: str) -> SandboxAccess:
         events.append("sandbox")
-        assert authority == MemberAuthority(second)
-        return engine.sandbox
+        authorized.append(connections)
 
-    engine = replace(engine, sandbox_for=sandbox_for)
-    result = await _dispatch(
-        engine,
-        _dispatch_context(engine),
-        ToolUseBlock(
-            id="probe",
-            name="member_probe",
-            input={"path": "/workspace/report", "requested_by": str(second_ref)},
-        ),
-        {
-            turn.id: ActiveMessage(member_id=first, rendered="Review it"),
-            second_ref: ActiveMessage(member_id=second, rendered="Use my access for the report"),
-        },
-    )
+        async def revoke() -> None:
+            events.append("revoke")
+
+        return SandboxAccess(engine.sandbox, revoke)
+
+    def subagents_for(
+        connections: tuple[UUID, ...],
+    ) -> tuple[Spawn, None]:
+        events.append("subagents")
+        scoped.append(connections)
+        return engine.spawn, None
+
+    engine = replace(engine, sandbox_for=sandbox_for, subagents_for=subagents_for)
+    with ws(turn.workspace_id), agent(turn.agent_id):
+        result = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(
+                id="probe",
+                name="member_probe",
+                input={"path": "/workspace/report", "requested_by": str(second_ref)},
+            ),
+            {
+                turn.id: ActiveMessage(member_id=first, rendered="Review it"),
+                second_ref: ActiveMessage(
+                    member_id=second, rendered="Use my access for the report"
+                ),
+            },
+        )
 
     assert not result.is_error
-    assert events == ["authorization", "sandbox", "handler"]
+    assert events == ["authorization", "subagents", "sandbox", "handler", "revoke"]
     assert seen == [second]
+    assert authorized == [(second_connection,)]
+    assert scoped == authorized
     [request] = gate.requests
     assert request.member_id == second
     assert request.dispatch_key == f"{turn.id}/member_probe/probe"
@@ -1541,6 +1567,156 @@ async def test_multi_speaker_selection_is_authorized_before_member_access(
     assert request.selected_from_multiple
     assert request.effect.call == "member_probe"
     assert request.effect.arguments == {"path": "/workspace/report"}
+
+
+async def test_multi_speaker_selection_rejects_a_member_message_superseded_by_their_own(
+    db: None, tmp_path: Path
+) -> None:
+    class Input(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    member_b = await _seat_member(turn.workspace_id, "b@example.com")
+    member_a = await _seat_member(turn.workspace_id, "a@example.com")
+    old_ref = uuid4()
+    newest_ref = uuid4()
+    events: list[str] = []
+    gate = RecordingMemberAuthorization(AuthorizationResolution("allow"), events=events)
+    grants = GrantStore()
+    with ws(turn.workspace_id), agent(turn.agent_id):
+        private_connection = await grants.record(
+            provider="hub",
+            account_id="a-account",
+            host="api.hub.test",
+            grantor_member_id=member_a,
+            shared=False,
+        )
+
+    async def capture(ctx: ToolContext, args: Input) -> ToolResult:
+        events.append("handler")
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        grants=grants,
+        member_authorization=gate,
+        tools=ToolRegistry(
+            (ToolDef(name="member_probe", description="d", input_model=Input, handler=capture),)
+        ),
+    )
+
+    async def sandbox_for(connections: tuple[UUID, ...], _call: str) -> SandboxAccess:
+        events.append("sandbox")
+        assert connections == (private_connection,)
+        return SandboxAccess(engine.sandbox)
+
+    engine = replace(engine, sandbox_for=sandbox_for)
+    requesters = {
+        turn.id: ActiveMessage(member_id=member_b, rendered="Review it"),
+        old_ref: ActiveMessage(member_id=member_a, rendered="Use my access"),
+        newest_ref: ActiveMessage(member_id=member_a, rendered="Never mind"),
+    }
+    with ws(turn.workspace_id), agent(turn.agent_id):
+        superseded = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(
+                id="superseded",
+                name="member_probe",
+                input={"requested_by": str(old_ref)},
+            ),
+            requesters,
+        )
+
+        assert superseded.is_error
+        assert superseded.content == (
+            "SpeakerRequired: requested_by must name this member's newest active inbound message: "
+            f"{newest_ref}"
+        )
+        assert events == []
+        assert gate.preflight_requests == []
+        assert gate.requests == []
+
+        current = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(
+                id="current",
+                name="member_probe",
+                input={"requested_by": str(newest_ref)},
+            ),
+            requesters,
+        )
+
+    assert not current.is_error
+    assert events == ["authorization", "sandbox", "handler"]
+    [request] = gate.requests
+    assert request.member_id == member_a
+    assert request.message_ref == newest_ref
+    assert request.message == "Never mind"
+
+
+@pytest.mark.parametrize(
+    "include_unattributed",
+    (False, True),
+    ids=("sole-member", "member-and-unattributed"),
+)
+async def test_explicit_selection_always_rejects_a_superseded_member_message(
+    db: None, tmp_path: Path, include_unattributed: bool
+) -> None:
+    class Input(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    member = await _seat_member(turn.workspace_id, "member@example.com")
+    old_ref = uuid4()
+    newest_ref = uuid4()
+    events: list[str] = []
+    gate = RecordingMemberAuthorization(AuthorizationResolution("allow"), events=events)
+
+    async def capture(ctx: ToolContext, args: Input) -> ToolResult:
+        events.append("handler")
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        member_authorization=gate,
+        tools=ToolRegistry(
+            (ToolDef(name="member_probe", description="d", input_model=Input, handler=capture),)
+        ),
+    )
+
+    async def sandbox_for(connections: tuple[UUID, ...]) -> SandboxSession:
+        events.append("sandbox")
+        return engine.sandbox
+
+    engine = replace(engine, sandbox_for=sandbox_for)
+    requesters = {
+        old_ref: ActiveMessage(member_id=member, rendered="Use my access"),
+        newest_ref: ActiveMessage(member_id=member, rendered="Never mind"),
+    }
+    if include_unattributed:
+        requesters[uuid4()] = ActiveMessage(member_id=None, rendered="Keep going")
+
+    result = await _dispatch(
+        engine,
+        _dispatch_context(engine),
+        ToolUseBlock(
+            id="superseded",
+            name="member_probe",
+            input={"requested_by": str(old_ref)},
+        ),
+        requesters,
+    )
+
+    assert result.is_error
+    assert result.content == (
+        "SpeakerRequired: requested_by must name this member's newest active inbound message: "
+        f"{newest_ref}"
+    )
+    assert events == []
+    assert gate.preflight_requests == []
+    assert gate.requests == []
 
 
 async def test_multi_speaker_authorizes_the_policy_rewritten_effect_without_member_authority(
@@ -1685,9 +1861,9 @@ async def test_an_unapproved_multi_speaker_call_ends_as_a_structured_question(
         ),
     )
 
-    async def sandbox_for(authority: ExecutionAuthority) -> SandboxSession:
+    async def sandbox_for(connections: tuple[UUID, ...], _call: str) -> SandboxAccess:
         events.append("sandbox")
-        return engine.sandbox
+        return SandboxAccess(engine.sandbox)
 
     engine = replace(engine, sandbox_for=sandbox_for)
     bound = await engine._bind_or_error(
@@ -1706,6 +1882,159 @@ async def test_an_unapproved_multi_speaker_call_ends_as_a_structured_question(
     assert result.question == question
     assert result.text.startswith(f"{ASK_USER_DIRECTIVE}\n")
     assert events == ["authorization"]
+
+
+async def test_a_standing_scope_is_resolved_before_multi_speaker_authorization(
+    db: None, tmp_path: Path
+) -> None:
+    class Input(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        account: str = ""
+        payload: str
+
+    scope = AuthorizationScope(
+        provider="gmail",
+        account_id="alice@example.com",
+        operation="GMAIL_SEND_EMAIL",
+        access="write",
+    )
+    binding = AuthorizationBinding(
+        connection_id=uuid4(),
+        grant_id=uuid4(),
+        **scope.model_dump(),
+    )
+    handled: list[tuple[bool, Input]] = []
+
+    async def authorize(ctx: ToolContext, args: Input) -> StandingAuthorization[Input]:
+        return StandingAuthorization(
+            context=replace(ctx, connector_read_only=True),
+            input=args.model_copy(update={"account": scope.account_id}),
+            scope=scope,
+            binding=binding,
+        )
+
+    async def handler(ctx: ToolContext, args: Input) -> ToolResult:
+        handled.append((ctx.connector_read_only, args))
+        return ToolResult(content=(TextContent(text="sent"),))
+
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    first = await _seat_member(turn.workspace_id, "first@example.com")
+    second = await _seat_member(turn.workspace_id, "second@example.com")
+    second_ref = uuid4()
+    gate = RecordingMemberAuthorization(AuthorizationResolution("allow"))
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        member_authorization=gate,
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="member_probe",
+                    description="d",
+                    input_model=Input,
+                    handler=handler,
+                    standing_authorization=authorize,
+                ),
+            )
+        ),
+    )
+    bound = await engine._bind_or_error(
+        _dispatch_context(engine),
+        engine._resolve_call(
+            ToolUseBlock(
+                id="probe",
+                name="member_probe",
+                input={"payload": "first", "requested_by": str(second_ref)},
+            )
+        ),
+        {
+            turn.id: ActiveMessage(member_id=first, rendered="Review it"),
+            second_ref: ActiveMessage(member_id=second, rendered="Send from my account"),
+        },
+    )
+    assert isinstance(bound, _BoundToolCall)
+    [preflight] = await engine._preflight_member_authorizations((bound,))
+
+    result = await engine._dispatch_step_recovering(bound, [], authorization_preflight=preflight)
+
+    assert result.is_error is False
+    [preflight_request] = gate.preflight_requests
+    [request] = gate.requests
+    assert request == preflight_request
+    assert request.scope == scope
+    assert request.binding == binding
+    assert request.effect.arguments == {"account": "alice@example.com", "payload": "first"}
+    assert handled == [(True, Input(account="alice@example.com", payload="first"))]
+
+
+async def test_authorization_context_keeps_the_selected_reply_and_conflicting_speakers(
+    db: None, tmp_path: Path
+) -> None:
+    class Input(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    async def handler(_ctx: ToolContext, _args: Input) -> ToolResult:
+        return ToolResult(content=(TextContent(text="unused"),))
+
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    first = await _seat_member(turn.workspace_id, "first@example.com")
+    second = await _seat_member(turn.workspace_id, "second@example.com")
+    first_ref, second_ref = uuid4(), uuid4()
+    proposal_ref = str(uuid4())
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (ToolDef(name="member_probe", description="d", input_model=Input, handler=handler),)
+        ),
+    )
+    engine._window.messages = tuple(
+        Message(role="assistant", content=f"old proposal {index} " + "x" * 1_000)
+        for index in range(20)
+    )
+    bound = await engine._bind_or_error(
+        _dispatch_context(engine),
+        engine._resolve_call(
+            ToolUseBlock(
+                id="probe",
+                name="member_probe",
+                input={"requested_by": str(second_ref)},
+            )
+        ),
+        {
+            first_ref: ActiveMessage(member_id=first, rendered="Do not send anything."),
+            second_ref: ActiveMessage(
+                member_id=second,
+                rendered="Do that.",
+                reply_to_ref=proposal_ref,
+                reply_to_text="Send an email to Bob from my Gmail account.",
+            ),
+        },
+    )
+
+    assert isinstance(bound, _BoundToolCall)
+    context = bound.authorization_context
+    assert context is not None
+    assert context.selected.ref == str(second_ref)
+    assert context.selected.member_id == second
+    assert context.selected.reply_to == proposal_ref
+    assert context.direct_reply_parent == context.assistant_proposal
+    assert context.assistant_proposal is not None
+    assert context.assistant_proposal.ref == proposal_ref
+    assert [(message.ref, message.member_id) for message in context.active_messages] == [
+        (str(first_ref), first)
+    ]
+    assert len(context.recent_messages) < 20
+    unique = {
+        message.ref: message
+        for message in (
+            context.selected,
+            context.assistant_proposal,
+            *context.active_messages,
+            *context.recent_messages,
+        )
+        if message is not None
+    }
+    assert sum(len(message.text) for message in unique.values()) <= 8_000
 
 
 async def test_an_unapproved_object_action_resolves_no_member_private_target(
@@ -1819,6 +2148,113 @@ async def test_an_unapproved_object_action_resolves_no_member_private_target(
     }
 
 
+async def test_object_target_resolution_holds_and_releases_sandbox_authority(
+    db: None, tmp_path: Path
+) -> None:
+    class Input(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        value: str
+
+    async def unreachable(ctx: ToolContext, args: Input) -> ToolResult:
+        raise AssertionError("rejected target reached its handler")
+
+    events: list[str] = []
+
+    class TargetProbe(ObjectVerbs):
+        async def action_target(
+            self, ctx: ToolContext, action: ToolDef, wire: ObjectActionInput
+        ) -> ObjectActionTarget:
+            assert ctx.sandbox is scoped
+            events.append("target")
+            raise ValueError("no target")
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(_engine(turn, EchoModel(), tmp_path), verbs=TargetProbe({}))
+    scoped = replace(engine.sandbox)
+
+    async def sandbox_for(connections: tuple[UUID, ...], call: str) -> SandboxAccess:
+        assert connections == ()
+        assert call == effective.dispatch_key(turn.id)
+        events.append("authorize")
+
+        async def revoke() -> None:
+            events.append("revoke")
+
+        return SandboxAccess(scoped, revoke)
+
+    engine = replace(engine, sandbox_for=sandbox_for)
+    tool = ToolDef(
+        name="erase",
+        description="d",
+        input_model=Input,
+        handler=unreachable,
+        bound=ObjectBinding(kind="private_record", binding="instance"),
+    )
+    wire = ObjectActionInput(
+        kind="private_record",
+        action="erase",
+        name="secret",
+        input={"value": "now"},
+    )
+    effective = EffectiveCall(
+        call=ToolUseBlock(id="erase", name="object_action", input=wire.model_dump(mode="json")),
+        tool=tool,
+        call_id=tool.canonical_id,
+        ext=None,
+        action=wire,
+        action_args=Input(value="now"),
+    )
+    bound = await engine._bind_or_error(_dispatch_context(engine), effective, {})
+
+    result = await engine._dispatch_step_recovering(bound, [])
+
+    assert result.is_error
+    assert result.text == "ValueError: no target"
+    assert events == ["authorize", "target", "revoke"]
+
+
+async def test_a_detached_tool_keeps_sandbox_authority_until_turn_cleanup(
+    db: None, tmp_path: Path
+) -> None:
+    events: list[str] = []
+
+    async def handler(context: ToolContext, args: _NoArgs) -> ToolResult:
+        events.append("handler")
+        return ToolResult(content=(TextContent(text="started"),))
+
+    turn = await _seed_turn("queued", None)
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="detached",
+                    description="d",
+                    input_model=_NoArgs,
+                    handler=handler,
+                    retains_sandbox_authority=True,
+                ),
+            )
+        ),
+    )
+
+    async def sandbox_for(_connections: tuple[UUID, ...], _call: str) -> SandboxAccess:
+        async def revoke() -> None:
+            events.append("revoke")
+
+        return SandboxAccess(engine.sandbox, revoke)
+
+    engine = replace(engine, sandbox_for=sandbox_for)
+    context = _dispatch_context(engine)
+    result = await _dispatch(engine, context, ToolUseBlock(id="c1", name="detached", input={}), {})
+
+    assert result.content == "started"
+    assert events == ["handler"]
+    await context.cleanup.drain()
+    assert events == ["handler", "revoke"]
+
+
 async def test_a_targeted_answer_opens_one_exact_multi_speaker_effect(
     db: None, tmp_path: Path
 ) -> None:
@@ -1860,8 +2296,13 @@ async def test_a_targeted_answer_opens_one_exact_multi_speaker_effect(
     request_ref, answer_ref = uuid4(), uuid4()
     model = AuthorizationModel(
         verdicts=[
-            AuthorizationVerdict(decision="ask", basis="none", evidence=""),
-            AuthorizationVerdict(decision="allow", basis="pending_answer", evidence="Allow"),
+            AuthorizationVerdict(
+                decision="ask",
+                basis="none",
+                evidence="",
+                selected_message_ref=request_ref,
+                request_summary="Review the file.",
+            ),
         ]
     )
     handled: list[tuple[UUID | None, str]] = []
@@ -1874,16 +2315,16 @@ async def test_a_targeted_answer_opens_one_exact_multi_speaker_effect(
 
     engine = replace(
         _engine(turn, EchoModel(), tmp_path),
-        member_authorization=MemberAuthorization(model),
+        member_authorization=MemberAuthorization(model, b"engine-member-authorization-test"),
         tools=ToolRegistry(
             (ToolDef(name="member_probe", description="d", input_model=Input, handler=capture),)
         ),
     )
 
-    async def sandbox_for(authority: ExecutionAuthority) -> SandboxSession:
+    async def sandbox_for(connections: tuple[UUID, ...], _call: str) -> SandboxAccess:
         events.append("sandbox")
-        assert authority == MemberAuthority(second)
-        return engine.sandbox
+        assert connections == ()
+        return SandboxAccess(engine.sandbox)
 
     engine = replace(engine, sandbox_for=sandbox_for)
     first_messages = {
@@ -1906,11 +2347,19 @@ async def test_a_targeted_answer_opens_one_exact_multi_speaker_effect(
     assert asked.is_error
     assert asked.question is not None
     assert asked.question.target_member_id == second
+    assert asked.question.authorization_id is not None
     assert events == []
 
     answer_messages = {
         turn.id: ActiveMessage(member_id=first, rendered="Review it"),
-        answer_ref: ActiveMessage(member_id=second, rendered="Allow"),
+        answer_ref: ActiveMessage(
+            member_id=second,
+            rendered="Allow",
+            authorization_answer=AuthorizationAnswer(
+                authorization_id=asked.question.authorization_id,
+                choice="allow",
+            ),
+        ),
     }
     allowed = await _dispatch(
         engine,
@@ -1937,7 +2386,7 @@ async def test_a_targeted_answer_opens_one_exact_multi_speaker_effect(
     assert spent.is_error
     assert events == ["sandbox", "handler"]
     assert handled == [(second, "/workspace/report")]
-    assert len(model.requests) == 2
+    assert len(model.requests) == 1
     async with workspace_tx() as connection:
         [stored] = (
             (
@@ -2103,9 +2552,7 @@ async def test_multi_speaker_authorization_preflights_overlap_before_ordered_dis
             self, request: AuthorizationRequest, attempt: AuthorizationAttempt | None = None
         ) -> AuthorizationResolution:
             assert attempt is not None
-            assert request.effect.arguments == {
-                "value": f"{attempt.request.effect.arguments['value']}-policy"
-            }
+            assert attempt.request == request
             self.committed.append(str(request.effect.arguments["value"]))
             return AuthorizationResolution("allow")
 
@@ -2120,10 +2567,13 @@ async def test_multi_speaker_authorization_preflights_overlap_before_ordered_dis
         handled.append(args.value)
         return ToolResult(content=(TextContent(text=args.value),))
 
+    hooked: list[str] = []
+
     async def shape(ctx: HookContext) -> HookOutcome:
         assert ctx.speaker_member_id is None
         match ctx.payload:
             case PreToolUse(tool_input=Input() as args):
+                hooked.append(args.value)
                 return ModifyInput(tool_input=Input(value=f"{args.value}-policy"))
         raise AssertionError("unexpected hook payload")
 
@@ -2152,9 +2602,82 @@ async def test_multi_speaker_authorization_preflights_overlap_before_ordered_dis
     frame = await engine.run()
 
     assert frame.status == "done"
-    assert gate.entered == ["first", "second"]
+    assert hooked == ["first", "second"]
+    assert gate.entered == ["first-policy", "second-policy"]
     assert gate.committed == ["first-policy", "second-policy"]
     assert handled == ["first-policy", "second-policy"]
+
+
+async def test_multi_speaker_hook_denial_reaches_no_authorization_model(
+    db: None, tmp_path: Path
+) -> None:
+    class Input(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    first = await _seat_member(turn.workspace_id, "first@example.com")
+    second = await _seat_member(turn.workspace_id, "second@example.com")
+    second_ref = await _queue_arrival(turn, "Use my access", second)
+
+    @dataclass
+    class CallingModel:
+        calls: int = 0
+
+        async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+            self.calls += 1
+            if self.calls == 1:
+                yield ToolCallStart(id="probe", name="member_probe")
+                yield ToolCallDelta(
+                    id="probe",
+                    partial_json=json.dumps({"requested_by": str(second_ref)}),
+                )
+            else:
+                yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+
+    denied: list[str] = []
+
+    async def deny(ctx: HookContext) -> HookOutcome:
+        match ctx.payload:
+            case PreToolUse(call=call):
+                denied.append(call)
+                return Deny(reason="Blocked by policy.")
+        raise AssertionError("unexpected hook payload")
+
+    gate = RecordingMemberAuthorization(AuthorizationResolution("allow"))
+    handled: list[str] = []
+
+    async def unreachable(ctx: ToolContext, args: Input) -> ToolResult:
+        handled.append("handled")
+        return ToolResult(content=(TextContent(text="unreachable"),))
+
+    audience = conversation_audience(first)
+    engine = replace(
+        _engine(turn, CallingModel(), tmp_path, member_id=first),
+        hooks=HookChain(
+            hooks={
+                "pre_tool_use": (
+                    BoundHook(
+                        spec=HookSpec(event="pre_tool_use", handler=deny),
+                        ext=context_for("probe", frozenset(), audience=audience),
+                    ),
+                )
+            },
+            audience=audience,
+        ),
+        member_authorization=gate,
+        tools=ToolRegistry(
+            (ToolDef(name="member_probe", description="d", input_model=Input, handler=unreachable),)
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert denied == ["member_probe"]
+    assert gate.preflight_requests == []
+    assert gate.requests == []
+    assert handled == []
 
 
 async def test_one_active_speaker_bypasses_member_authorization(db: None, tmp_path: Path) -> None:
@@ -2170,11 +2693,22 @@ async def test_one_active_speaker_bypasses_member_authorization(db: None, tmp_pa
         seen.append(ctx.speaker_member_id)
         return ToolResult(content=(TextContent(text="ok"),))
 
+    async def standing(_ctx: ToolContext, _args: Input) -> StandingAuthorization[Input]:
+        raise AssertionError("single-speaker calls do not resolve standing authorization")
+
     engine = replace(
         _engine(turn, EchoModel(), tmp_path),
         member_authorization=gate,
         tools=ToolRegistry(
-            (ToolDef(name="member_probe", description="d", input_model=Input, handler=capture),)
+            (
+                ToolDef(
+                    name="member_probe",
+                    description="d",
+                    input_model=Input,
+                    handler=capture,
+                    standing_authorization=standing,
+                ),
+            )
         ),
     )
     result = await _dispatch(
@@ -2245,21 +2779,15 @@ async def test_an_omitted_ref_binds_the_only_active_member_in_any_conversation(
     db: None, tmp_path: Path
 ) -> None:
     """A call the model left unattributed binds the only active member regardless of conversation
-    audience, while a background turn with no active speaker keeps its delegated authority."""
+    audience, while automatic work with no active speaker remains speakerless."""
 
     class StrictInput(BaseModel):
         model_config = ConfigDict(extra="forbid")
 
-    seen: list[tuple[UUID | None, UUID | None, bool]] = []
+    seen: list[tuple[UUID | None, bool]] = []
 
     async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
-        seen.append(
-            (
-                ctx.speaker_member_id,
-                authority_member_id(ctx.authority),
-                ctx.member_messages_active,
-            )
-        )
+        seen.append((ctx.speaker_member_id, ctx.member_messages_active))
         return ToolResult(content=(TextContent(text="ok"),))
 
     probe = ToolDef(name="bind_probe", description="d", input_model=StrictInput, handler=capture)
@@ -2302,9 +2830,9 @@ async def test_an_omitted_ref_binds_the_only_active_member_in_any_conversation(
         assert not result.is_error
 
     assert seen == [
-        (member, member, True),
-        (sharer, sharer, True),
-        (None, background.on_behalf_of_member_id, False),
+        (member, True),
+        (sharer, True),
+        (None, False),
     ]
 
 
@@ -2355,48 +2883,46 @@ async def test_a_member_creates_an_app_in_their_own_conversation_without_the_ref
     assert (row.owner_member_id, row.is_main) == (owner, False)
 
 
-async def test_requested_by_is_offered_with_every_authenticated_member_message(
+async def test_requested_by_schema_is_identical_without_or_with_member_messages(
     db: None, tmp_path: Path
 ) -> None:
-    own = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
     shared = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
-    owner = await _seeded_member(own.workspace_id)
     first = await _seeded_member(shared.workspace_id)
     second = await _seat_member(shared.workspace_id, "second@example.com")
-    own_engine = _engine(own, EchoModel(), tmp_path, member_id=owner)
-    shared_engine = _engine(shared, EchoModel(), tmp_path)
+    engine = _engine(shared, EchoModel(), tmp_path)
 
-    own_schemas = own_engine.tools.schemas(
-        include_requested_by=bool(
-            own_engine._member_refs({own.id: ActiveMessage(member_id=owner, rendered="mine")})
-        )
-    )
-    shared_schemas = shared_engine.tools.schemas(
-        include_requested_by=bool(
-            shared_engine._member_refs(
+    def schema_bytes(requesters: dict[UUID, ActiveMessage]) -> str:
+        definitions = _RuntimeTools(
+            engine=engine,
+            context=cast(ToolContext, None),
+            usage_events=[],
+            requesters=requesters,
+            change_paths={},
+            created={},
+            state=_RuntimeToolState(),
+        ).definitions()
+        return json.dumps(
+            [
                 {
-                    shared.id: ActiveMessage(member_id=first, rendered="mine"),
-                    uuid4(): ActiveMessage(member_id=second, rendered="mine too"),
+                    "name": definition.name,
+                    "description": definition.description,
+                    "input_schema": definition.input_schema,
                 }
-            )
+                for definition in definitions
+            ],
+            sort_keys=True,
         )
-    )
-    unattributed_schemas = shared_engine.tools.schemas(
-        include_requested_by=bool(
-            shared_engine._member_refs(
-                {
-                    shared.id: ActiveMessage(member_id=first, rendered="mine"),
-                    uuid4(): ActiveMessage(member_id=None, rendered="external"),
-                }
-            )
-        )
+
+    speakerless = schema_bytes({})
+    single = schema_bytes({shared.id: ActiveMessage(member_id=first, rendered="mine")})
+    multiple = schema_bytes(
+        {
+            shared.id: ActiveMessage(member_id=first, rendered="mine"),
+            uuid4(): ActiveMessage(member_id=second, rendered="mine too"),
+        }
     )
 
-    assert all("requested_by" in schema.input_schema["properties"] for schema in own_schemas)
-    assert all("requested_by" in schema.input_schema["properties"] for schema in shared_schemas)
-    assert all(
-        "requested_by" in schema.input_schema["properties"] for schema in unattributed_schemas
-    )
+    assert speakerless == single == multiple
 
 
 async def test_a_speaker_refusal_only_explains_when_no_member_ref_is_available(
@@ -2638,8 +3164,8 @@ async def test_a_handler_that_skips_the_helper_reads_back_its_own_plain_refusal(
     assert result.content == "ValueError: this act requires a speaking member"
 
 
-async def test_speakerless_turn_does_not_offer_requested_by(db: None, tmp_path: Path) -> None:
-    turn = await _seed_turn("queued", None, acts_on_behalf=True)
+async def test_speakerless_turn_keeps_static_requester_schema(db: None, tmp_path: Path) -> None:
+    turn = await _seed_turn("queued", None)
     model = CapturingModel()
     engine = _engine(turn, model, tmp_path)
 
@@ -2647,23 +3173,80 @@ async def test_speakerless_turn_does_not_offer_requested_by(db: None, tmp_path: 
 
     assert frame.status == "done"
     assert len(model.seen_tools) == 1
-    assert all(
-        "requested_by" not in schema.input_schema["properties"] for schema in model.seen_tools[0]
+    properties = {schema.name: schema.input_schema["properties"] for schema in model.seen_tools[0]}
+    assert "requested_by" in properties["bash"]
+    assert "requested_by" not in properties["read"]
+
+
+async def test_non_binding_tool_rejects_a_forged_requester_ref(db: None, tmp_path: Path) -> None:
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    first = await _seat_member(turn.workspace_id, "first@example.com")
+    second = await _seat_member(turn.workspace_id, "second@example.com")
+    second_ref = uuid4()
+    handled: list[UUID | None] = []
+
+    async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        handled.append(ctx.speaker_member_id)
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="shared_probe",
+                    description="d",
+                    input_model=StrictInput,
+                    handler=capture,
+                    binds_member_authority=False,
+                ),
+            )
+        ),
+    )
+    result = await _dispatch(
+        engine,
+        _dispatch_context(engine),
+        ToolUseBlock(
+            id="forged",
+            name="shared_probe",
+            input={"requested_by": str(second_ref)},
+        ),
+        {
+            turn.id: ActiveMessage(member_id=first, rendered="Review it"),
+            second_ref: ActiveMessage(member_id=second, rendered="Use mine"),
+        },
     )
 
+    assert result.is_error
+    assert result.content == "ValueError: requested_by is not accepted by shared_probe"
+    assert handled == []
 
-async def test_profile_tool_keeps_inherited_authority_when_it_sends_requested_by(
+    common = await _dispatch(
+        engine,
+        _dispatch_context(engine),
+        ToolUseBlock(id="common", name="shared_probe", input={}),
+        {turn.id: ActiveMessage(member_id=first, rendered="Review it")},
+    )
+
+    assert not common.is_error
+    assert handled == [None]
+
+
+async def test_profile_tool_stays_speakerless_when_it_sends_requested_by(
     db: None, tmp_path: Path
 ) -> None:
     class StrictInput(BaseModel):
         model_config = ConfigDict(extra="forbid")
 
-    turn = await _seed_turn("queued", None, acts_on_behalf=True)
+    turn = await _seed_turn("queued", None)
     turn = turn.model_copy(update={"subagent_profile": "ufo_application_builder"})
-    seen: list[tuple[UUID | None, UUID | None, dict[str, object]]] = []
+    seen: list[tuple[UUID | None, dict[str, object]]] = []
 
     async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
-        seen.append((ctx.speaker_member_id, authority_member_id(ctx.authority), args.model_dump()))
+        seen.append((ctx.speaker_member_id, args.model_dump()))
         return ToolResult(content=(TextContent(text="ok"),))
 
     engine = replace(
@@ -2676,6 +3259,7 @@ async def test_profile_tool_keeps_inherited_authority_when_it_sends_requested_by
                     input_model=StrictInput,
                     handler=capture,
                     profile_only=True,
+                    binds_member_authority=False,
                 ),
             )
         ),
@@ -2696,7 +3280,7 @@ async def test_profile_tool_keeps_inherited_authority_when_it_sends_requested_by
     )
 
     assert not result.is_error
-    assert seen == [(None, turn.on_behalf_of_member_id, {})]
+    assert seen == [(None, {})]
 
 
 async def _queue_arrival(
@@ -3120,7 +3704,7 @@ async def test_a_delivering_child_parks_until_the_provider_retry_time(
     await TurnDispatcher(client=client).run()
     assert len(client.options) == 1
     assert client.options[0]["workflow_id"] != str(turn.id)
-    assert client.options[0]["queue_name"] == "express"
+    assert client.options[0]["queue_name"] == EXPRESS_QUEUE_NAME
 
     resumed = turn.model_copy(update={"status": "queued"})
     frame = await _engine(resumed, ToolCallingModel(), tmp_path, carrier=carrier).run()
@@ -3529,10 +4113,10 @@ async def test_denied_founding_message_loses_its_authority_when_an_arrival_keeps
     allowed_ref = await _queue_arrival(turn, "allowed follow-up", second_member)
     seen: list[UUID | None] = []
 
-    class AuthorityInput(BaseModel):
+    class SpeakerInput(BaseModel):
         pass
 
-    async def capture(ctx: ToolContext, args: AuthorityInput) -> ToolResult:
+    async def capture(ctx: ToolContext, args: SpeakerInput) -> ToolResult:
         seen.append(ctx.speaker_member_id)
         return ToolResult(content=(TextContent(text="ok"),))
 
@@ -3552,7 +4136,7 @@ async def test_denied_founding_message_loses_its_authority_when_an_arrival_keeps
                 yield TextDelta(text="done")
                 yield Usage(input_tokens=1, output_tokens=1)
                 return
-            yield ToolCallStart(id=f"probe-{self.calls}", name="authority_probe")
+            yield ToolCallStart(id=f"probe-{self.calls}", name="speaker_probe")
             yield ToolCallDelta(
                 id=f"probe-{self.calls}",
                 partial_json=json.dumps({"requested_by": str(requested_by)}),
@@ -3566,9 +4150,9 @@ async def test_denied_founding_message_loses_its_authority_when_an_arrival_keeps
 
     model = DeniedRefProbe()
     tool = ToolDef(
-        name="authority_probe",
+        name="speaker_probe",
         description="d",
-        input_model=AuthorityInput,
+        input_model=SpeakerInput,
         handler=capture,
     )
     engine = _engine(turn, model, tmp_path)
@@ -3603,26 +4187,26 @@ async def test_denied_founding_message_loses_its_authority_when_an_arrival_keeps
     assert str(allowed_ref) in first
 
 
-async def test_a_denied_message_withholds_authority_from_a_call_in_the_members_own_conversation(
+async def test_a_denied_message_withholds_the_speaker_from_a_call_in_the_members_own_conversation(
     db: None, tmp_path: Path
 ) -> None:
     """A gating hook denies the founding message and the one behind it, and a second message pending
     keeps the turn running past the denial. The member's own conversation binds an omitted ref off
-    the turn's active messages, which a denial never enters, so the unattributed call gets no member
-    authority — the turn row still naming the speaker does not restore it."""
+    the turn's active messages, which a denial never enters, so the unattributed call gets no
+    speaker — the turn row still naming the speaker does not restore it."""
     blocked = "founding secret that the model must not see"
     turn = (await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)).model_copy(
         update={"inbound": blocked}
     )
     member = await _seeded_member(turn.workspace_id)
     await _queue_arrival(turn, "a second secret", member)
-    seen: list[tuple[UUID | None, UUID | None]] = []
+    seen: list[UUID | None] = []
 
-    class AuthorityInput(BaseModel):
+    class SpeakerInput(BaseModel):
         pass
 
-    async def capture(ctx: ToolContext, args: AuthorityInput) -> ToolResult:
-        seen.append((ctx.speaker_member_id, authority_member_id(ctx.authority)))
+    async def capture(ctx: ToolContext, args: SpeakerInput) -> ToolResult:
+        seen.append(ctx.speaker_member_id)
         return ToolResult(content=(TextContent(text="ok"),))
 
     @dataclass
@@ -3635,7 +4219,7 @@ async def test_a_denied_message_withholds_authority_from_a_call_in_the_members_o
                 yield TextDelta(text="done")
                 yield Usage(input_tokens=1, output_tokens=1)
                 return
-            yield ToolCallStart(id="probe", name="authority_probe")
+            yield ToolCallStart(id="probe", name="speaker_probe")
             yield ToolCallDelta(id="probe", partial_json="{}")
             yield Usage(input_tokens=1, output_tokens=1)
 
@@ -3650,9 +4234,9 @@ async def test_a_denied_message_withholds_authority_from_a_call_in_the_members_o
         tools=ToolRegistry(
             (
                 ToolDef(
-                    name="authority_probe",
+                    name="speaker_probe",
                     description="d",
-                    input_model=AuthorityInput,
+                    input_model=SpeakerInput,
                     handler=capture,
                 ),
             )
@@ -3674,7 +4258,7 @@ async def test_a_denied_message_withholds_authority_from_a_call_in_the_members_o
 
     assert frame.status == "done"
     assert engine.turn.speaker_member_id == member
-    assert seen == [(None, None)]
+    assert seen == [None]
 
 
 async def test_scheduled_turn_searches_memory_after_claim(db: None, tmp_path: Path) -> None:
@@ -3891,7 +4475,7 @@ async def test_a_lost_terminal_fails_the_turn_without_another_model_round(
             raise TerminalAbsent("no terminal is connected to this conversation")
         return ToolResult(content=(TextContent(text="unreachable"),))
 
-    async def absent(member_id: UUID | None) -> SandboxSession:
+    async def absent(_connections: tuple[UUID, ...], _call: str) -> SandboxAccess:
         raise TerminalAbsent("no terminal is connected to this conversation")
 
     turn = await _seed_turn("queued", None)
@@ -4224,17 +4808,17 @@ async def test_a_prepared_intent_turn_meters_its_wall_clock_and_no_rounds(
     assert "ufo.turn_rounds_total" not in points
 
 
-async def test_a_tool_bridge_intent_dispatches_under_its_inherited_member(
+async def test_a_tool_bridge_intent_dispatches_with_inherited_capabilities(
     db: None, tmp_path: Path
 ) -> None:
-    turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION, acts_on_behalf=True)
+    turn = await _seed_turn("queued", None, admission_source=INTENT_ADMISSION)
     request_id = uuid4()
     intent = ToolBridgeIntent(request_id=request_id, tool="object_list", input={})
     turn = turn.model_copy(update={"inbound": intent.model_dump_json()})
-    seen: list[tuple[UUID | None, UUID | None]] = []
+    seen: list[UUID | None] = []
 
     async def object_list(ctx: ToolContext, args: _NoArgs) -> ToolResult:
-        seen.append((ctx.speaker_member_id, authority_member_id(ctx.authority)))
+        seen.append(ctx.speaker_member_id)
         return ToolResult(content=(TextContent(text='{"objects":[]}'),))
 
     engine = replace(
@@ -4253,7 +4837,7 @@ async def test_a_tool_bridge_intent_dispatches_under_its_inherited_member(
     frame = await engine.run_intent()
     assert frame is not None and frame.status == "done"
     assert frame.text == '{"objects":[]}'
-    assert seen == [(None, turn.on_behalf_of_member_id)]
+    assert seen == [None]
 
 
 async def test_a_queued_prepared_intent_rechecks_the_speakers_seat(
@@ -4542,7 +5126,7 @@ async def test_exit_handoff_offers_an_ever_claimed_next_turn_a_fresh_workflow_id
     await dispatch_next_turn(client, turn.conversation_id)
     (options,) = client.options
     assert options["workflow_id"] != str(next_id)
-    assert options["queue_name"] == "turns"
+    assert options["queue_name"] == TURN_QUEUE_NAME
     async with workspace_tx() as connection:
         stamp = (
             await connection.execute(
@@ -4602,7 +5186,7 @@ async def test_the_sweep_holds_a_queued_turn_while_its_sibling_runs(db: None) ->
     await TurnDispatcher(client=client).run()
     (options,) = client.options
     assert options["workflow_id"] == str(next_id)
-    assert options["queue_name"] == "turns"
+    assert options["queue_name"] == TURN_QUEUE_NAME
 
 
 async def test_tool_call_round_dispatches_in_sandbox_then_answers(db: None, tmp_path: Path) -> None:
@@ -6379,8 +6963,15 @@ async def test_a_rate_limited_account_moves_the_turn_onto_the_members_other_acco
     )
     assert engine.context.window.context_tokens == CORE_SPECS["gpt-5.6-sol"].context_window
 
-    both = frozenset({"gpt-5.6-sol", "claude-opus-5"})
-    with ws(turn.workspace_id), model_authority(MemberAuthority(member), both):
+    with (
+        ws(turn.workspace_id),
+        model_credentials(
+            {
+                "gpt-5.6-sol": member_slot(OPENAI_KEY_SLOT, member),
+                "claude-opus-5": member_slot(ANTHROPIC_KEY_SLOT, member),
+            }
+        ),
+    ):
         frame = await engine.run()
 
     assert frame is not None and (frame.status, frame.text) == ("done", "done")
@@ -7016,7 +7607,7 @@ async def test_a_revocation_during_a_policy_hook_stops_its_tool_dispatch(
     assert await _turn_status(turn.id) == "parked"
 
 
-async def test_per_round_seat_gate_parks_a_scheduled_turn_for_an_unseated_member(
+async def test_per_round_seat_gate_does_not_bind_a_scheduled_turn_to_its_creator(
     db: None, tmp_path: Path
 ) -> None:
     turn = await _seed_turn("queued", None, admission_source=SCHEDULED_ADMISSION)
@@ -7027,23 +7618,22 @@ async def test_per_round_seat_gate_parks_a_scheduled_turn_for_an_unseated_member
             .where(tables.member.c.workspace_id == turn.workspace_id)
         )
     engine = _engine(turn, EchoModel(), tmp_path, memory=MemorySearch(StaticMemorySearch()))
-    with pytest.raises(TurnParked, match="seat was revoked"):
-        await engine.run()
+    frame = await engine.run()
     async with workspace_tx() as connection:
         status = (
             await connection.execute(
                 sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
             )
         ).scalar_one()
-    assert status == "parked"
+    assert frame.status == "done"
+    assert status == "done"
 
 
-async def test_per_round_seat_gate_parks_an_internal_turn_acting_for_an_unseated_member(
+async def test_per_round_seat_gate_does_not_bind_an_internal_turn_to_a_member(
     db: None, tmp_path: Path
 ) -> None:
-    """A subagent turn and a monitor fire carry an on-behalf member without the scheduled stamp;
-    the gate is the authority, not the stamp, so a revoke reaches them mid-run all the same."""
-    turn = await _seed_turn("queued", None, acts_on_behalf=True)
+    """An automatic child carries capabilities rather than a member whose seat can revoke it."""
+    turn = await _seed_turn("queued", None)
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.member)
@@ -7051,15 +7641,15 @@ async def test_per_round_seat_gate_parks_an_internal_turn_acting_for_an_unseated
             .where(tables.member.c.workspace_id == turn.workspace_id)
         )
     engine = _engine(turn, EchoModel(), tmp_path, memory=MemorySearch(StaticMemorySearch()))
-    with pytest.raises(TurnParked, match="seat was revoked"):
-        await engine.run()
+    frame = await engine.run()
     async with workspace_tx() as connection:
         status = (
             await connection.execute(
                 sa.select(tables.turn.c.status).where(tables.turn.c.id == turn.id)
             )
         ).scalar_one()
-    assert status == "parked"
+    assert frame.status == "done"
+    assert status == "done"
 
 
 async def test_per_round_balance_hold_parks_a_running_turn(db: None, tmp_path: Path) -> None:
@@ -7341,7 +7931,7 @@ async def test_recovered_find_dispatch_preserves_the_cancelled_cache_write(
         dispatching: TurnEngine,
         bound: object,
         target: ObjectActionTarget | None = None,
-        authorization_attempt: AuthorizationAttempt | None = None,
+        authorization_preflight: _AuthorizationPreflight | None = None,
     ) -> DispatchResult:
         result = results.pop(0)
         if result is completed:
@@ -7436,13 +8026,15 @@ async def test_interrupted_side_effecting_dispatch_retries_with_the_same_idempot
         dispatching: TurnEngine,
         retry_bound: object,
         target: ObjectActionTarget | None = None,
-        authorization_attempt: AuthorizationAttempt | None = None,
+        authorization_preflight: _AuthorizationPreflight | None = None,
     ) -> DispatchResult:
         nonlocal replayed
         if not replayed:
             replayed = True
             return interrupted
-        return await original_dispatch_step(dispatching, retry_bound, target, authorization_attempt)
+        return await original_dispatch_step(
+            dispatching, retry_bound, target, authorization_preflight
+        )
 
     monkeypatch.setattr(TurnEngine, "_dispatch_step", replay_then_retry)
     recovered = replace(engine)
@@ -7742,6 +8334,15 @@ async def test_dispatch_names_the_class_when_a_handler_raises_it_bare(
             )
         ),
     )
+    revoked: list[str] = []
+
+    async def sandbox_for(_connections: tuple[UUID, ...], call: str) -> SandboxAccess:
+        async def revoke() -> None:
+            revoked.append(call)
+
+        return SandboxAccess(engine.sandbox, revoke)
+
+    engine = replace(engine, sandbox_for=sandbox_for)
     context = _dispatch_context(engine)
 
     bare = await _dispatch(engine, context, ToolUseBlock(id="c1", name="bare", input={}), {})
@@ -7753,6 +8354,7 @@ async def test_dispatch_names_the_class_when_a_handler_raises_it_bare(
 
     spoken = await _dispatch(engine, context, ToolUseBlock(id="c2", name="spoken", input={}), {})
     assert spoken.content == "ValueError: the port is taken"
+    assert revoked == [f"{turn.id}/bare/c1", f"{turn.id}/spoken/c2"]
 
 
 async def test_a_rejected_payload_names_the_fields_the_tool_accepts(
@@ -7815,7 +8417,7 @@ async def test_a_call_rejected_before_its_handler_reads_a_bare_raise_as_bare(
     question the handler path answers: raised bare, the class name alone lands as a trailing colon
     over nothing, and the model cannot tell that from a message cut to nothing."""
 
-    async def raise_bare(authority: ExecutionAuthority) -> SandboxSession:
+    async def raise_bare(_connections: tuple[UUID, ...], _call: str) -> SandboxAccess:
         raise PermissionError
 
     turn = await _seed_turn("queued", None)

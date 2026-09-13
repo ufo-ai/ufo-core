@@ -47,7 +47,7 @@ source_trigger = sa.Table(
     sa.Column("delivery", sa.Text, nullable=False),
     sa.Column("paused", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
-    sa.Column("internet_access", sa.Boolean, nullable=True),
+    sa.Column("internet_access", sa.Boolean, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint(
@@ -116,9 +116,6 @@ def _utc(value: datetime) -> datetime:
 def _trigger(row: sa.RowMapping) -> SourceTrigger:
     """One row as a handler reads it. An empty `resource` or `streams` narrows nothing. The
     column holds the sorted names joined by commas, which is what the unique key compares."""
-    internet_access = row["internet_access"]
-    if internet_access is True:
-        raise ValueError("a source trigger internet scope can only narrow access")
     return SourceTrigger(
         id=row["id"],
         conversation_id=row["conversation_id"],
@@ -129,7 +126,7 @@ def _trigger(row: sa.RowMapping) -> SourceTrigger:
         delivery="current",
         paused=bool(row["paused"]),
         created_by_member_id=row["created_by_member_id"],
-        internet_access=False if internet_access is False else None,
+        internet_access=None if row["internet_access"] else False,
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
     )
@@ -177,7 +174,7 @@ class SourceTriggerStore:
             "delivery": delivery,
             "paused": False,
             "created_by_member_id": created_by_member_id,
-            "internet_access": internet_access,
+            "internet_access": internet_access is not False,
             "created_at": sa.func.now(),
             "updated_at": sa.func.now(),
         }
@@ -251,7 +248,7 @@ class SourceTriggerStore:
             raise ValueError(f"source trigger {expected.id} changed while removing")
 
     async def retire_unattributed(self, expected: SourceTrigger) -> None:
-        """Delete a trigger that has no member authority to fire under."""
+        """Delete a trigger created without a member owner."""
         if expected.created_by_member_id is not None:
             raise ValueError("only an unattributed source trigger may be retired here")
         async with self.ctx.transaction() as connection:

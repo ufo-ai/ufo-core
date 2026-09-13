@@ -297,4 +297,5 @@ WIDE_RESEARCH_TOOL = ToolDef(
     handler=_wide_research,
     side_effecting=True,
     untrusted=True,
+    binds_member_authority=False,
 )

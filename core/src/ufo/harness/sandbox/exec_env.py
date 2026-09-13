@@ -23,9 +23,8 @@ from ufo.runtime.access.credentials import (
     HostChoice,
     credential_host,
 )
-from ufo.runtime.access.grants import Grant, GrantStore, grant_sentinel, usable_cli_accounts
+from ufo.runtime.access.grants import Grant, GrantStore, grant_sentinel, scoped_cli_accounts
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.authority import ExecutionAuthority, authority_member_id
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL_ENV
 from ufo.runtime.workspace import ws_current
 
@@ -35,7 +34,7 @@ GIT_IDENTITY_ENV = frozenset(
     {"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"}
 )
 """The committer variables a git-cloning grant exports. Dropped on every re-authorization beside
-the CLI variables, so an authority holding no such grant commits under no stale identity."""
+the CLI variables, so a scope holding no such grant commits under no stale identity."""
 
 
 @dataclass(frozen=True)
@@ -55,10 +54,8 @@ class ProbeEnv:
     BYOK model key needs nothing here either — those slots declare no injection target at all and
     are read in-process by the model registry, never exported to a sandbox.
 
-    The probe's immutable authority selects connector CLI sentinels exactly as a turn's
-    re-authorization does, narrowed to the immutable connection scope beside it. Member authority
-    exports that member's listed account; workspace authority exports only listed connections
-    shared with the workspace."""
+    The probe's immutable connection capabilities select connector CLI sentinels exactly as a
+    turn's re-authorization does."""
 
     grants: GrantStore | None = None
     clis: Mapping[str, CliCredential] = field(default_factory=dict)
@@ -69,14 +66,13 @@ class ProbeEnv:
         self,
         conversation_id: UUID,
         probe_id: UUID,
-        authority: ExecutionAuthority,
         connections: tuple[UUID, ...] = (),
     ) -> dict[str, str]:
         workspace_id = ws_current().workspace_id
         return {
             CONVERSATION_ID_ENV: str(conversation_id),
             **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(self.clis))),
-            **await _grant_cli_env(self.grants, self.clis, authority, probe_id, connections),
+            **await _grant_cli_env(self.grants, self.clis, probe_id, connections),
             **await _keyed_provider_env(self.credentials, self.slots, workspace_id),
         }
 
@@ -190,19 +186,17 @@ async def _keyed_provider_env(
 async def _grant_cli_env(
     grants: GrantStore | None,
     clis: Mapping[str, CliCredential],
-    authority: ExecutionAuthority,
     run_id: UUID,
-    connections: tuple[UUID, ...] | None = None,
+    connections: tuple[UUID, ...],
 ) -> dict[str, str]:
-    """Each connector-declared CLI env var whose provider this process may use — its member's
-    own grant preferred, one shared with the agent's audience as the fallback — set to that
-    grant's sentinel, so the CLI inside the sandbox authenticates and the proxy swaps the account's
-    token in by the same sentinel. A static env var names no account, so two accounts in the
-    winning tier cannot be disambiguated per request: rather than silently pick one —
+    """Each connector-declared CLI env var whose provider this process may use from its exact
+    connection capabilities, set to that grant's sentinel so the CLI inside the sandbox
+    authenticates and the proxy swaps the account's token in by the same sentinel. A static env
+    var names no account, so two accounts cannot be disambiguated per request: rather than pick —
     `connector_account` fails loud on the same ambiguity — the export is skipped and logged
     against `run_id`, whichever run this open serves, so the CLI fails visibly to authenticate
-    instead of acting as an unintended account. A connection allowlist removes every account
-    outside it before the winning tier is chosen.
+    instead of acting as an unintended account. An exact connection scope admits only its listed
+    accounts and is independent of their owners; a private capability outranks every shared one.
 
     One sandbox has one git identity, because git reads one pair of variables however many hosts a
     turn clones from. Two CLIs claiming it would otherwise resolve by dict order, so the second
@@ -210,11 +204,10 @@ async def _grant_cli_env(
     turn committing as whichever provider happened to be first says nothing."""
     if grants is None or not clis:
         return {}
-    member_id = authority_member_id(authority)
     granted = await grants.active_grants()
     env: dict[str, str] = {}
     for provider, cli in clis.items():
-        accounts = usable_cli_accounts(granted, provider, member_id, connections)
+        accounts = scoped_cli_accounts(granted, provider, connections)
         if len(accounts) > 1:
             log(
                 "sandbox.cli_grant_ambiguous",

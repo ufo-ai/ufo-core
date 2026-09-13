@@ -5,11 +5,11 @@ data, and durable state across chat, automation, and extension-provided surfaces
 
 The workspace is the tenant boundary. An agent belongs to one workspace and may also have a member
 owner. It defines its model, prompt, tools, network policy, and sandbox size. A conversation is
-permanently bound to an agent, and each turn runs as that agent. Member authority begins with the
-person who starts the inbound turn; internal work may carry an explicit `on_behalf_of` member. Tool
-calls preserve that identity rather than inheriting unrestricted workspace authority. These
+permanently bound to an agent, and each turn runs as that agent. An authenticated member message
+attributes its speaker. Automatic work carries exact runtime capabilities, never a member identity
+inferred from its creator. These
 relationships are encoded in the [core schema](../core/src/ufo/schema/tables.py) and
-[turn engine](../core/src/ufo/loop/engine.py).
+[turn engine](../core/src/ufo/runtime/engine.py).
 
 ## Authority model
 
@@ -21,7 +21,7 @@ ufo separates five kinds of scope:
 | Agent, credential, connection, source, and stored object | Workspace |
 | Private connection or source | Owned by a member |
 | Connector or source grant | Attaches a workspace resource to an agent |
-| Effective access | Agent grants plus the current member, audience, and resource policy |
+| Effective access | Exact runtime capabilities plus the selected speaker, audience, and resource policy |
 
 A connector is not itself bound to an agent or workspace. It is a deployment capability supplied
 by an extension. A **connection** is a member-owned external account stored inside a workspace. A
@@ -86,4 +86,5 @@ and extension development uses a separate disposable-workspace workflow. It does
 general online A/B system for extensions, providers, or sandbox backends.
 
 ufo provides one durable agent runtime while keeping deployment capabilities, workspace data,
-member authority, agent grants, and experimental evidence explicit and independently enforceable.
+speaker attribution, agent grants, and experimental evidence explicit and independently
+enforceable.

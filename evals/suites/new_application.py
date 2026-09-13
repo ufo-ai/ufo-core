@@ -55,7 +55,6 @@ from evals.suites.ufo_app_bench import APP_WORKSPACE_FILES
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import AUTO_MODEL
 from ufo.harness.untrusted import unwall
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.context import ScopedStore
 from ufo.runtime.kinds.agents import AGENT_KIND
 from ufo.runtime.objects import ENVELOPE_KEYS
@@ -812,25 +811,23 @@ async def _sync_active_application_workspace(conversation_id: UUID, source: Path
 
 
 async def _build_created_homepage(outcome: ScenarioOutcome, target: CapabilityTarget):
-    application, conversation_id, owner_member_id = await _prepare_created_homepage(outcome, target)
+    application, conversation_id, _ = await _prepare_created_homepage(outcome, target)
     return await target.invoke(
         conversation_id,
         application.id,
         SEED_PROMPT,
         f"homepage-seed:{application.id}:{datetime.now(UTC).date().isoformat()}",
-        authority=MemberAuthority(owner_member_id),
         as_scheduled=True,
     )
 
 
 async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityTarget):
-    application, conversation_id, owner_member_id = await _prepare_created_homepage(outcome, target)
+    application, conversation_id, _ = await _prepare_created_homepage(outcome, target)
     first = await target.invoke(
         conversation_id,
         application.id,
         SEED_PROMPT,
-        f"homepage-seed:{application.id}:without-authority",
-        authority=WORKSPACE_AUTHORITY,
+        f"homepage-seed:{application.id}:first",
         as_scheduled=True,
     )
     workspace = target.conversations.workspace_path(conversation_id, "")
@@ -857,8 +854,7 @@ async def _repair_created_homepage(outcome: ScenarioOutcome, target: CapabilityT
         conversation_id,
         application.id,
         SEED_PROMPT,
-        f"homepage-seed:{application.id}:with-authority",
-        authority=MemberAuthority(owner_member_id),
+        f"homepage-seed:{application.id}:retry",
         as_scheduled=True,
     )
     return first, second

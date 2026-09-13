@@ -31,7 +31,6 @@ from uuid import UUID
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from ufo.sdk.authority import authority_from_member_id, authority_member_id
 from ufo.sdk.context import (
     SUBAGENT_SURFACE,
     AgentArchived,
@@ -53,14 +52,19 @@ from ufo.sdk.objects import (
     CONVERSATION_KIND,
     OBJECT_NAME_MAX_LENGTH,
     GeneratedObjectOwner,
+    MemberObject,
     MemberReadableObjects,
     ObjectDetail,
     ObjectKind,
     ObjectLink,
+    ObjectListQuery,
+    ObjectPage,
     ObjectRef,
+    ObjectRow,
     OwnedRow,
     UnknownObject,
     last_fires,
+    object_page,
     owner_emails,
 )
 from ufo.sdk.sources import PageChange
@@ -134,6 +138,21 @@ def _feed_summary(connection: FeedConnection) -> str:
     if not connection.account_id:
         return connection.provider
     return f"{connection.provider} account {connection.account_id}"
+
+
+def _portal_actions(
+    owner: GeneratedObjectOwner,
+    *,
+    paused: bool,
+    member_id: UUID,
+    admin: bool,
+) -> dict[str, bool]:
+    owned = owner.member_id == member_id
+    return {
+        "pausable": not paused and (owned or admin),
+        "resumable": paused and (owned or admin),
+        "deletable": owned or admin,
+    }
 
 
 def _shared_reader(agent_id: UUID, connections: tuple[UUID, ...] | None = None) -> SourceReader:
@@ -248,9 +267,77 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
     delete_gate: ClassVar[str] = TRIGGER_DELETE_GATE
 
     def _admin_can_apply(self, old: SourceTriggerSpec, spec: SourceTriggerSpec) -> bool:
-        """Pausing is management and an admin's, the same acts the delete gate already gives them;
-        nothing else on a trigger can be applied in place at all."""
         return spec.paused != old.paused
+
+    async def member_page(
+        self,
+        ext: ExtensionContext | None,
+        *,
+        member_id: UUID,
+        admin: bool,
+        query: ObjectListQuery,
+    ) -> ObjectPage:
+        rows = tuple(
+            row
+            for row in await self._member_rows(ext, member_id=member_id)
+            if self._visible(row.owner, member_id, admin) and self._listed(row, query)
+        )
+        owners = {row.name: row.owner for row in rows}
+        page = object_page(
+            tuple(ObjectRow(name=row.name, summary=row.summary, fields=row.fields) for row in rows),
+            query,
+        )
+        return ObjectPage(
+            rows=tuple(
+                ObjectRow(
+                    name=row.name,
+                    summary=row.summary,
+                    fields={
+                        **row.fields,
+                        **_portal_actions(
+                            owners[row.name],
+                            paused=row.fields["paused"] is True,
+                            member_id=member_id,
+                            admin=admin,
+                        ),
+                    },
+                )
+                for row in page.rows
+            ),
+            next_cursor=page.next_cursor,
+        )
+
+    async def member_detail(
+        self,
+        ext: ExtensionContext | None,
+        name: str,
+        *,
+        member_id: UUID,
+        admin: bool,
+    ) -> MemberObject[SourceTriggerSpec] | None:
+        rows = await self._member_rows(ext, member_id=member_id)
+        found = next((row for row in rows if row.name == name), None)
+        if found is None or not self._visible(found.owner, member_id, admin):
+            return None
+        detail = await self._member_object(ext, name, found.owner, member_id=member_id)
+        if detail is None:
+            return None
+        return MemberObject(
+            row=ObjectRow(
+                name=found.name,
+                summary=found.summary,
+                fields={
+                    **found.fields,
+                    **_portal_actions(
+                        found.owner,
+                        paused=found.fields["paused"] is True,
+                        member_id=member_id,
+                        admin=admin,
+                    ),
+                },
+            ),
+            detail=detail,
+        )
 
     async def _member_rows(
         self, ext: ExtensionContext | None, *, member_id: UUID | None
@@ -266,7 +353,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
         if connections is not None:
             allowed = frozenset(connections)
             watched = tuple(row for row in watched if row.listed.trigger.connection_id in allowed)
-        return await self._rows(watched, member_id=authority_member_id(ctx.authority))
+        return await self._rows(watched, member_id=ctx.speaker_member_id)
 
     async def _rows(
         self, watched: tuple[_Watched, ...], *, member_id: UUID | None
@@ -356,7 +443,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             "paused": trigger.paused,
             "origin": found.listed.surface_label or "Portal",
             "owner_email": emails.get(trigger.created_by_member_id),
-            "mine": trigger.created_by_member_id == authority_member_id(ctx.authority),
+            "mine": trigger.created_by_member_id == ctx.speaker_member_id,
         }
 
     async def _apply_owned(
@@ -681,7 +768,6 @@ async def _fire_trigger(
             f"source-trigger:{_trigger_scope(connection, trigger)}:"
             f"{trigger.conversation_id.hex}:{batch_id}"
         ),
-        authority=authority_from_member_id(trigger.created_by_member_id),
         holds_work_already_done=True,
         standalone=True,
         fired_by=fired_by,

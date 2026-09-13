@@ -1,6 +1,6 @@
 """Attachment delivery against a real store: the sandbox curls a presigned URL into the workspace
 itself, run as an off-turn probe so a signed token authorizes the egress. This drives the mechanism
-`SurfaceContext.deliver_attachment` uses — `ConversationProbes.run` under workspace authority — so
+`SurfaceContext.deliver_attachment` uses — `ConversationProbes.run` in workspace scope — so
 no attachment's bytes cross serve. Runs on the local carrier against minio; skips without Docker.
 
 The proxy's authorization of a probe token is proven in the egress suite; the local carrier reaches
@@ -19,7 +19,6 @@ from ufo.harness.sandbox.exec_env import ProbeEnv
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProbeTokenCodec, ProxyEndpoint, shell_path, workspace_path
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.context import ConversationProbes
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
@@ -97,9 +96,7 @@ async def test_a_probe_fetches_a_presigned_attachment_into_the_workspace(
             f"mkdir -p {parent} && curl -sS --fail-with-body "
             f"-o {shell_path(target)} --url {shlex.quote(url)}"
         )
-        result = await _probes(sandboxes).run(
-            conversation_id, command, timeout_s=60, authority=WORKSPACE_AUTHORITY
-        )
+        result = await _probes(sandboxes).run(conversation_id, command, timeout_s=60)
         assert result.exit_code == 0, result.stderr
         landed = await sandboxes.read(conversation_id, "web-inbox/report.pdf")
         assert landed is not None

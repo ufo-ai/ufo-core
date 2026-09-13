@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from pytest import raises
 
 from ufo.db import MIGRATIONS_DIR
 from ufo.host.ext.loader import migration_locations
@@ -259,7 +260,48 @@ def test_runtime_scope_migrations_accept_outgoing_inserts(tmp_path: Path) -> Non
             sa.text("select connections, internet_access from scheduled_task where id = :task"),
             {"task": scoped_task_id},
         ).one()
+        connection.execute(
+            sa.text(
+                "update pause set claimed_by = 'outgoing-runner', claim_expires_at = :expires "
+                "where id = :id"
+            ),
+            {"expires": NOW, "id": pause_id},
+        )
         connection.commit()
+
+    command.upgrade(config, "scheduled_tasks_0004")
+    replacement_pause_id = uuid4().hex
+    with engine.connect() as connection:
+        pause_unrestricted = connection.execute(
+            sa.text("select count(*) from pause where internet_access = 1")
+        ).scalar_one()
+        pause_total = connection.execute(sa.text("select count(*) from pause")).scalar_one()
+        connection.execute(
+            sa.text("update pause set id = :replacement where id = :id"),
+            {"replacement": replacement_pause_id, "id": pause_id},
+        )
+        replaced_pause_scope = connection.execute(
+            sa.text("select internet_access from pause where id = :id"),
+            {"id": replacement_pause_id},
+        ).scalar_one()
+        connection.commit()
+        with raises(sa.exc.IntegrityError):
+            _insert_pause(connection, workspace_id)
+        connection.rollback()
+        migrated_claim = connection.execute(
+            sa.text("select claimed_by, claim_expires_at from pause where id = :id"),
+            {"id": replacement_pause_id},
+        ).one()
+
+    command.downgrade(config, "scheduled_tasks_0003")
+    with engine.connect() as connection:
+        columns = {row[1] for row in connection.execute(sa.text("pragma table_info(pause)"))}
+        trigger = connection.execute(
+            sa.text(
+                "select name from sqlite_master where type = 'trigger' "
+                "and name = 'pause_generation_scope'"
+            )
+        ).scalar_one_or_none()
     engine.dispose()
 
     assert set(json.loads(rows[task_id])) == {str(UUID(own_id)), str(UUID(shared_id))}
@@ -271,3 +313,8 @@ def test_runtime_scope_migrations_accept_outgoing_inserts(tmp_path: Path) -> Non
     assert tuple(outgoing) == (None, None)
     assert restricted == total == 4
     assert tuple(scoped_outgoing) == (None, 0)
+    assert pause_unrestricted == pause_total == 2
+    assert replaced_pause_scope == 1
+    assert tuple(migrated_claim) == (None, None)
+    assert "internet_access" not in columns
+    assert trigger is None

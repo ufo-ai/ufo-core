@@ -34,6 +34,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from ufo.harness.models.interface import ToolSchema
+from ufo.runtime.access.member_authorization import AuthorizationBinding, AuthorizationScope
 from ufo.runtime.tools.context import ToolContext, ToolResult
 from ufo.schema.records import FINAL_ACT_FIELDS
 
@@ -78,10 +79,25 @@ class ActionPresentation:
 
 
 @dataclass(frozen=True)
+class StandingAuthorization[ModelT: BaseModel]:
+    """A callable's validated input, bound context, and reusable permission scope."""
+
+    context: ToolContext
+    input: ModelT
+    scope: AuthorizationScope
+    binding: AuthorizationBinding
+
+
+@dataclass(frozen=True)
 class ToolDef[ModelT: BaseModel]:
     """A callable a turn may hold. `flag` names the feature flag that offers it: where that flag
     reads off for the turn's workspace, or nothing answers, the tool is absent from the catalog the
-    model sees and the action is absent from the grants the turn holds — withheld, never refused."""
+    model sees and the action is absent from the grants the turn holds — withheld, never refused.
+    `binds_member_authority` gives a connector-, credential-, or access-grant callable a static
+    `requested_by` field and permits that ref to bind member authority; false rejects the field
+    regardless of who is speaking. `standing_authorization` binds a code-defined reusable scope
+    and the exact context and input its execution must retain; absent, Always Allow is
+    unavailable."""
 
     name: str
     description: str
@@ -91,12 +107,17 @@ class ToolDef[ModelT: BaseModel]:
     side_effecting: bool = False
     subagent_default: bool = False
     parallel_safe: bool = False
+    retains_sandbox_authority: bool = False
     profile_only: bool = False
+    binds_member_authority: bool = True
     bound: ObjectBinding | None = None
     agent_targetable: bool = False
     final_act_model: type[BaseModel] | None = None
     presentation: ActionPresentation | None = None
     flag: str | None = None
+    standing_authorization: (
+        Callable[[ToolContext, ModelT], Awaitable[StandingAuthorization[ModelT]]] | None
+    ) = None
 
     @property
     def canonical_id(self) -> str:
@@ -106,10 +127,10 @@ class ToolDef[ModelT: BaseModel]:
             return self.name
         return f"{ACTION_ID_PREFIX}{self.bound.kind}:{self.name}"
 
-    def schema(self, *, include_requested_by: bool = True) -> ToolSchema:
+    def schema(self) -> ToolSchema:
         input_schema = self.input_model.model_json_schema()
         properties = input_schema.setdefault("properties", {})
-        if include_requested_by:
+        if self.binds_member_authority:
             properties[REQUESTED_BY] = {
                 "type": "string",
                 "format": "uuid",
@@ -137,6 +158,15 @@ def validate_tool_declaration(tool: ToolDef[Any], label: str) -> None:
                 f"{label} is profile_only and declares a presentation — prepared member "
                 "intents never reach profile-only calls"
             )
+    if tool.profile_only and tool.binds_member_authority:
+        raise ValueError(
+            f"{label} is profile_only and binds member authority — supporting actors have no "
+            "member requester"
+        )
+    if tool.standing_authorization is not None and not tool.binds_member_authority:
+        raise ValueError(
+            f"{label} declares standing authorization without binding member authority"
+        )
     if tool.bound is not None and tool.bound.name is not None and tool.bound.binding != "instance":
         raise ValueError(
             f"{label} pins collection action to {tool.bound.kind}/{tool.bound.name} — only an "
@@ -175,8 +205,8 @@ class ToolRegistry:
         for tool in self.tools:
             validate_tool_declaration(tool, f"tool {tool.name!r}")
 
-    def schemas(self, *, include_requested_by: bool = True) -> tuple[ToolSchema, ...]:
-        return tuple(tool.schema(include_requested_by=include_requested_by) for tool in self.tools)
+    def schemas(self) -> tuple[ToolSchema, ...]:
+        return tuple(tool.schema() for tool in self.tools)
 
     def get(self, name: str) -> ToolDef[Any]:
         for tool in self.tools:

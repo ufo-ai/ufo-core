@@ -32,7 +32,6 @@ from ufo.harness.sandbox.session import ExecResult, SandboxHandle, SandboxSessio
 from ufo.host.ext.loader import turn_tools
 from ufo.host.kinds.workspace_kind import WORKSPACE_KIND
 from ufo.runtime.access.credentials import CredentialStore
-from ufo.runtime.authority import ExecutionAuthority
 from ufo.runtime.billing.accounting import (
     record_egress_request,
     record_sandbox_tokens,
@@ -59,7 +58,15 @@ from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, FiredBy, TerminalFrame, Turn, Usage
+from ufo.schema.records import (
+    Agent,
+    FiredBy,
+    ModelAccountCapability,
+    TerminalFrame,
+    Turn,
+    TurnRuntimeConfig,
+    Usage,
+)
 from ufo.sdk.audience import Audience, conversation_audience
 from ufo.sdk.http import Request
 
@@ -609,11 +616,13 @@ class _RecordingInvoker:
         message: str,
         idempotency_key: str,
         *,
-        authority: ExecutionAuthority,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
+        standalone: bool = False,
         unless_member_since: int | None = None,
         unless_member_arrival_since: int | None = None,
+        runtime_config: TurnRuntimeConfig | None = None,
+        model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
     ) -> UUID | None:
         return await self.admission.invoke(
@@ -622,7 +631,6 @@ class _RecordingInvoker:
             agent_id,
             message,
             idempotency_key,
-            authority=authority,
             holds_work_already_done=holds_work_already_done,
             as_scheduled=as_scheduled,
             unless_member_since=unless_member_since,

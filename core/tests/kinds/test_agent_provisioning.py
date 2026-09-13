@@ -495,6 +495,7 @@ def _tool(name: str, *, profile_only: bool = False) -> ToolDef:
         input_model=AgentSpec,
         handler=_unreached,
         profile_only=profile_only,
+        binds_member_authority=not profile_only,
     )
 
 

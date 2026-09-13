@@ -51,11 +51,6 @@ from ufo.harness.sandbox.session import (
 from ufo.harness.sandbox.terminal import TerminalGone
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
-from ufo.runtime.authority import (
-    WORKSPACE_AUTHORITY,
-    ExecutionAuthority,
-    MemberAuthority,
-)
 from ufo.runtime.billing.accounting import PARK, record_workspace_usage
 from ufo.runtime.billing.balance import credit, debit, set_reserve
 from ufo.runtime.ext.context import (
@@ -901,67 +896,42 @@ async def test_probe_runs_in_the_conversations_own_sandbox(db: None, tmp_path: P
         conversation_id = await _conversation(workspace_id)
         sandboxes = _sandboxes(root)
         await _files(sandboxes).write(conversation_id, "ci/status.txt", b"queued\n")
-        result = await _probes(sandboxes).run(
-            conversation_id,
-            "cat /workspace/ci/status.txt",
-            authority=WORKSPACE_AUTHORITY,
-        )
+        result = await _probes(sandboxes).run(conversation_id, "cat /workspace/ci/status.txt")
 
     assert (result.stdout, result.exit_code) == ("queued\n", 0)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_probes_authority_reaches_the_environment_and_the_token(
+async def test_a_probes_connection_capabilities_reach_the_environment_and_token(
     db: None, tmp_path: Path
 ) -> None:
-    """The member a probe acts as has to reach both ends or it buys nothing: the signed token, so
-    the proxy derives that member's injections, and the environment, so the CLI inside the sandbox
-    has a sentinel to send. This pins the second — the first is the proxy's own test — by recording
-    what the env derivation was asked for."""
-    asked: list[tuple[UUID, ExecutionAuthority, tuple[UUID, ...]]] = []
+    asked: list[tuple[UUID, tuple[UUID, ...]]] = []
 
     async def env(
         conversation_id: UUID,
         probe_id: UUID,
-        authority: ExecutionAuthority,
         connections: tuple[UUID, ...],
     ) -> dict[str, str]:
-        asked.append((probe_id, authority, connections))
+        asked.append((probe_id, connections))
         return {}
 
     workspace_id = await _workspace()
-    member_id = uuid4()
     carrier = _RecordingProbeCarrier()
     codec = ProbeTokenCodec(b"probe-token-test-secret")
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.insert(tables.member).values(
-                    id=member_id,
-                    workspace_id=workspace_id,
-                    email="probe-member@x.test",
-                    seated_at=sa.func.now(),
-                    created_at=sa.func.now(),
-                    updated_at=sa.func.now(),
-                )
-            )
         probes = ConversationProbes(_sandboxes(tmp_path / "workspaces", carrier), codec, env)
         first, second = sorted((uuid4(), uuid4()), key=str)
         await probes.run(
             conversation_id,
             "true",
-            authority=MemberAuthority(member_id),
             connections=(second, first),
             internet_access=False,
         )
-        await probes.run(conversation_id, "true", authority=WORKSPACE_AUTHORITY)
+        await probes.run(conversation_id, "true")
 
-    assert [(authority, connections) for _, authority, connections in asked] == [
-        (MemberAuthority(member_id), (first, second)),
-        (WORKSPACE_AUTHORITY, ()),
-    ]
-    assert len({probe_id for probe_id, _, _ in asked}) == 2
+    assert [connections for _, connections in asked] == [(first, second), ()]
+    assert len({probe_id for probe_id, _ in asked}) == 2
     assert len(carrier.specs) == 2
     principals = tuple(
         codec.from_proxy_auth("Basic " + b64encode(f"{spec.run_token}:x".encode()).decode())
@@ -972,7 +942,6 @@ async def test_a_probes_authority_reaches_the_environment_and_the_token(
         conversation_id=conversation_id,
         probe_id=asked[0][0],
         expires_at=principals[0].expires_at,
-        authority=MemberAuthority(member_id),
         connections=(first, second),
         internet_access=False,
     )
@@ -989,7 +958,6 @@ async def test_a_probe_connection_scope_is_bounded_and_distinct(db: None, tmp_pa
             await probes.run(
                 conversation_id,
                 "true",
-                authority=WORKSPACE_AUTHORITY,
                 connections=tuple(uuid4() for _ in range(CONNECTION_SCOPE_MAX + 1)),
             )
         repeated = uuid4()
@@ -997,7 +965,6 @@ async def test_a_probe_connection_scope_is_bounded_and_distinct(db: None, tmp_pa
             await probes.run(
                 conversation_id,
                 "true",
-                authority=WORKSPACE_AUTHORITY,
                 connections=(repeated, repeated),
             )
 
@@ -1029,9 +996,9 @@ async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_
     )
     with ws(workspace_id):
         exports = await ProbeEnv(credentials=store, slots=WorkspaceSlots(deploy=slots)).exports(
-            uuid4(), uuid4(), WORKSPACE_AUTHORITY
+            uuid4(), uuid4(), ()
         )
-        bare = await ProbeEnv().exports(uuid4(), uuid4(), WORKSPACE_AUTHORITY)
+        bare = await ProbeEnv().exports(uuid4(), uuid4(), ())
 
     assert exports["DD_API_KEY"] == "UFO_SENTINEL_DATADOG_API_KEY"
     assert "dd-real" not in exports.values()
@@ -1055,9 +1022,7 @@ async def test_a_probe_refuses_another_workspaces_conversation(db: None, tmp_pat
         foreign = await _conversation(other)
     with ws(await _workspace()):
         with pytest.raises(ValueError, match="not in this workspace"):
-            await _probes(_sandboxes(root)).run(
-                foreign, "echo reached", authority=WORKSPACE_AUTHORITY
-            )
+            await _probes(_sandboxes(root)).run(foreign, "echo reached")
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1073,10 +1038,9 @@ async def test_a_probe_refuses_a_timeout_over_the_ceiling(db: None, tmp_path: Pa
                 conversation_id,
                 "true",
                 timeout_s=PROBE_TIMEOUT_MAX_SECONDS + 1,
-                authority=WORKSPACE_AUTHORITY,
             )
         with pytest.raises(ValueError, match="outside"):
-            await probes.run(conversation_id, "true", timeout_s=0, authority=WORKSPACE_AUTHORITY)
+            await probes.run(conversation_id, "true", timeout_s=0)
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1098,9 +1062,7 @@ async def test_a_probe_says_so_when_the_bound_terminal_is_gone(
                 .where(tables.conversation.c.id == conversation_id)
             )
         with pytest.raises(TerminalGone):
-            await _probes(_sandboxes(tmp_path / "workspaces")).run(
-                conversation_id, "echo hi", authority=WORKSPACE_AUTHORITY
-            )
+            await _probes(_sandboxes(tmp_path / "workspaces")).run(conversation_id, "echo hi")
 
 
 def test_a_context_wired_without_probe_deps_has_no_probes() -> None:
@@ -1228,7 +1190,7 @@ async def test_open_conversation_is_the_agents_own_and_keyed_by_its_trigger(db: 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_open_conversation_binds_a_member_when_named(db: None) -> None:
     """A member-bound trigger room is that member's own — their id and their private audience —
-    so the authority an on-behalf turn carries stays inside a room its member already reads."""
+    so its contents stay inside a room that member already reads."""
     workspace_id = await _workspace()
     member_id = uuid4()
     async with workspace_tx() as connection:

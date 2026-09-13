@@ -13,7 +13,12 @@ from dbos._utils import INTERNAL_QUEUE_NAME
 from sqlalchemy.engine import make_url
 
 from ufo.runtime.jobs import JOB_QUEUE_NAME
-from ufo.schema.records import EXPRESS_QUEUE_NAME, TURN_QUEUE_NAME
+from ufo.schema.records import (
+    EXPRESS_QUEUE_NAME,
+    TURN_QUEUE_NAME,
+    UNSCOPED_EXPRESS_QUEUE_NAME,
+    UNSCOPED_TURN_QUEUE_NAME,
+)
 from ufo.serve import FLEETS, JOBS_FLEET, TURNS_FLEET, WHOLE_FLEET
 
 WORKER = Path(__file__).with_name("fleet_worker.py")
@@ -34,7 +39,13 @@ def test_the_fleets_partition_every_queue_the_deploy_registers() -> None:
     claimed = [queue for fleet in (TURNS_FLEET, JOBS_FLEET) for queue in fleet.queues]
 
     assert registered
-    assert registered == {TURN_QUEUE_NAME, EXPRESS_QUEUE_NAME, JOB_QUEUE_NAME}
+    assert registered == {
+        TURN_QUEUE_NAME,
+        EXPRESS_QUEUE_NAME,
+        UNSCOPED_TURN_QUEUE_NAME,
+        UNSCOPED_EXPRESS_QUEUE_NAME,
+        JOB_QUEUE_NAME,
+    }
     assert len(claimed) == len(set(claimed)), "a queue two fleets both claim is not a split"
     assert set(claimed) == registered
     assert set(WHOLE_FLEET.queues) == registered
@@ -68,12 +79,14 @@ def test_neither_fleet_can_dequeue_the_other_s_work(database_url: str) -> None:
     if not database_url.startswith("postgresql"):
         pytest.skip("prod-topology fleet proof runs on postgres")
     system_url = _reset_private_system_db(database_url)
-    job_id, turn_id = uuid4().hex, uuid4().hex
+    job_id, turn_id, unscoped_turn_id, unscoped_express_id = (uuid4().hex for _ in range(4))
     env = {
         **os.environ,
         "FLEET_TEST_SYSTEM_URL": system_url,
         "FLEET_TEST_JOB_ID": job_id,
         "FLEET_TEST_TURN_ID": turn_id,
+        "FLEET_TEST_UNSCOPED_TURN_ID": unscoped_turn_id,
+        "FLEET_TEST_UNSCOPED_EXPRESS_ID": unscoped_express_id,
     }
 
     jobs = _run_worker("jobs", env)
@@ -82,6 +95,8 @@ def test_neither_fleet_can_dequeue_the_other_s_work(database_url: str) -> None:
     assert jobs_seen[job_id] == {"status": SUCCESS, "executor": jobs_executor}
     assert jobs_seen[turn_id]["status"] == ENQUEUED
     assert jobs_seen[turn_id]["executor"] != jobs_executor
+    assert jobs_seen[unscoped_turn_id]["status"] == ENQUEUED
+    assert jobs_seen[unscoped_express_id]["status"] == ENQUEUED
 
     turns = _run_worker("turns", env)
     assert turns.returncode == 0, (
@@ -90,6 +105,8 @@ def test_neither_fleet_can_dequeue_the_other_s_work(database_url: str) -> None:
     turns_executor, turns_seen = _report(turns.stdout)
     assert turns_executor != jobs_executor
     assert turns_seen[turn_id] == {"status": SUCCESS, "executor": turns_executor}
+    assert turns_seen[unscoped_turn_id] == {"status": SUCCESS, "executor": turns_executor}
+    assert turns_seen[unscoped_express_id] == {"status": SUCCESS, "executor": turns_executor}
 
 
 def _run_worker(fleet: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:

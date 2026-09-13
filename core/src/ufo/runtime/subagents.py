@@ -21,7 +21,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -36,7 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo.db import workspace_tx
 from ufo.harness.o11y import current_traceparent, log
 from ufo.harness.untrusted import wall
-from ufo.runtime.authority import ExecutionAuthority, MemberAuthority, authority_member_id
 from ufo.runtime.billing.accounting import REJECT, BalanceGate
 from ufo.runtime.billing.balance import BalanceExhausted
 from ufo.runtime.ext.context import TurnInvoker
@@ -84,6 +83,7 @@ from ufo.schema.records import (
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     TURN_WORKFLOW_NAME,
+    ModelAccountCapability,
     TerminalFrame,
     Turn,
     TurnRuntimeConfig,
@@ -235,7 +235,6 @@ class Subagents:
     registry: SubagentRegistry
     parent: Turn
     audience: Audience
-    authority: ExecutionAuthority
     hub: Hub | None = None
     invoker: TurnInvoker | None = None
     key_slot_for: Callable[[str], str | None] | None = None
@@ -245,21 +244,8 @@ class Subagents:
     to. The registry is fixed at boot, so the ids ride here as data rather than as a handle
     `subagents` would have to import the registry to hold."""
     models: tuple[str, ...] = ()
-    """Whether this deploy can hold a member's own provider account at all. A deploy carrying no
-    extension that connects one has no member to refuse: the profile runs on the deploy's own key
-    there, so refusing work nobody could ever enable would take the capability away entirely."""
     member_accounts_connectable: bool = True
-
-    def authorize(self, authority: ExecutionAuthority) -> "Subagents":
-        """Bind a tool call's authority to the spawns it makes: the call's own bound requester, else
-        the authority the spawning turn already holds. A call that names no requester carries
-        workspace authority even on a member-spoken turn, and a spawn there is still that speaker's
-        — the ownership gate, the catalog, and the child's own stamp read one authority."""
-        match authority:
-            case MemberAuthority():
-                return replace(self, authority=authority)
-            case _:
-                return replace(self, authority=self.parent.authority)
+    connection_scope: tuple[UUID, ...] | None = None
 
     async def spawn(
         self,
@@ -271,6 +257,8 @@ class Subagents:
         name: str = "",
         detach_on_arrival: bool = False,
         model: str | None = None,
+        *,
+        requester_member_id: UUID | None = None,
     ) -> SpawnResult:
         """Admit and enqueue a child turn. With `dedup_key`, the child's conversation (and so its
         turn id, the DBOS workflow id) is derived from the parent turn and the key, so a re-run of
@@ -293,25 +281,43 @@ class Subagents:
         registry does not serve is refused here rather than at the child's first round, and so is a
         pin asked for under a turn tree that already carries one — that pin is the member's own
         admitted selection, which the tree keeps."""
-        runtime_config = self._child_runtime_config(model)
         conversation_id = (
             uuid5(NAMESPACE_URL, f"{self.parent.id}/{dedup_key}")
             if dedup_key is not None
             else uuid4()
         )
         turn_id = turn_id_for(self.parent.workspace_id, conversation_id, 1)
+        replay_exists, replayed_runtime, replayed_model_accounts = (
+            (False, None, ()) if dedup_key is None else await self._existing_runtime_config(turn_id)
+        )
         replay = None if dedup_key is None else await self._existing_agent_spawn(turn_id, target)
         resolved = replay[0] if replay is not None else await self._resolve(target)
         match resolved:
             case SubagentProfile():
                 if resolved.needs_own_model_key and model is not None:
                     raise SpawnModelRejected.own_account(model, target)
-                if (
-                    resolved.needs_own_model_key
-                    and self.member_accounts_connectable
-                    and not await ws_current().member_holds_own_model_key(self.authority)
-                ):
-                    raise SpawnNeedsOwnModelKey(target, self.connect_url)
+                available_model_accounts = (
+                    replayed_model_accounts if replay_exists else self.parent.model_accounts
+                )
+                model_accounts = (
+                    tuple(
+                        account
+                        for account in available_model_accounts
+                        if account.provider in resolved.own_key_models
+                    )
+                    if resolved.needs_own_model_key
+                    else available_model_accounts
+                )
+                if resolved.needs_own_model_key and not model_accounts and not replay_exists:
+                    model_accounts = tuple(
+                        ModelAccountCapability(provider=provider, slot=slot)
+                        for provider, slot in await ws_current().member_model_accounts(
+                            requester_member_id
+                        )
+                        if provider in resolved.own_key_models
+                    )
+                    if self.member_accounts_connectable and not model_accounts:
+                        raise SpawnNeedsOwnModelKey(target, self.connect_url)
                 agent_id = self.parent.agent_id
                 profile_name: str | None = resolved.name
                 inherits_sandbox = True
@@ -320,6 +326,9 @@ class Subagents:
                 untrusted = resolved.untrusted_output
                 agent_target: AgentTarget | None = None
             case AgentTarget():
+                model_accounts = (
+                    replayed_model_accounts if replay_exists else self.parent.model_accounts
+                )
                 agent_id = resolved.id
                 profile_name = None
                 inherits_sandbox = False
@@ -329,6 +338,7 @@ class Subagents:
                 agent_target = resolved
                 background = True
                 delivers_result = True
+        runtime_config = replayed_runtime if replay_exists else self._child_runtime_config(model)
         request_fingerprint = (
             "sha256:"
             + hashlib.sha256(
@@ -357,7 +367,9 @@ class Subagents:
             delivers_result=delivers_result,
             name=name,
             agent_target=agent_target,
+            requester_member_id=requester_member_id,
             runtime_config=runtime_config,
+            model_accounts=model_accounts,
             model=(
                 runtime_config.model
                 if runtime_config is not None and runtime_config.model is not None
@@ -526,6 +538,7 @@ class Subagents:
                         tables.turn.c.agent_id,
                         tables.turn.c.subagent_profile,
                         tables.turn.c.runtime_config,
+                        tables.turn.c.model_accounts,
                     ).where(tables.turn.c.id == turn_id)
                 )
             ).one()
@@ -548,8 +561,10 @@ class Subagents:
             child.agent_id,
             text,
             dedup_key,
-            authority=self.authority,
             runtime_config=runtime_config,
+            model_accounts=tuple(
+                ModelAccountCapability.model_validate(account) for account in child.model_accounts
+            ),
         )
         if admitted is None:
             raise RuntimeError("follow-up admission answered no turn")
@@ -609,7 +624,6 @@ class Subagents:
                 await connection.execute(
                     sa.select(
                         tables.turn.c.parent_turn_id,
-                        tables.turn.c.on_behalf_of_member_id,
                         tables.turn.c.subagent_profile,
                         tables.turn.c.inbound,
                         tables.agent.c.id,
@@ -625,8 +639,6 @@ class Subagents:
         if row is None or row.subagent_profile is not None:
             return None
         original_name = row.archived_name or row.agent_name
-        if row.on_behalf_of_member_id != authority_member_id(self.authority):
-            raise ValueError("spawn dedup key belongs to another member request")
         if row.parent_turn_id != self.parent.id or target not in (
             original_name,
             f"{AGENT_TARGET_KIND}:{original_name}",
@@ -642,10 +654,44 @@ class Subagents:
             row.inbound,
         )
 
+    async def _existing_runtime_config(
+        self, turn_id: UUID
+    ) -> tuple[bool, TurnRuntimeConfig | None, tuple[ModelAccountCapability, ...]]:
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.parent_turn_id,
+                        tables.turn.c.runtime_config,
+                        tables.turn.c.model_accounts,
+                    ).where(tables.turn.c.id == turn_id)
+                )
+            ).one_or_none()
+        if row is None:
+            return False, None, ()
+        if row.parent_turn_id != self.parent.id:
+            raise ValueError("spawn dedup key belongs to another request")
+        return (
+            True,
+            None
+            if row.runtime_config is None
+            else TurnRuntimeConfig.model_validate(row.runtime_config),
+            tuple(ModelAccountCapability.model_validate(account) for account in row.model_accounts),
+        )
+
     def _profile_names(self) -> tuple[str, ...]:
         return tuple(sorted(profile.name for profile in self.registry.profiles))
 
     async def _agent_names(self) -> tuple[str, ...]:
+        member_id = audience_member(self.audience)
+        visible = (
+            tables.agent.c.visibility == "workspace"
+            if member_id is None
+            else sa.or_(
+                tables.agent.c.visibility == "workspace",
+                tables.agent.c.owner_member_id == member_id,
+            )
+        )
         async with workspace_tx() as connection:
             rows = (
                 await connection.execute(
@@ -653,6 +699,7 @@ class Subagents:
                     .where(
                         tables.agent.c.workspace_id == self.parent.workspace_id,
                         tables.agent.c.archived_at.is_(None),
+                        visible,
                     )
                     .order_by(tables.agent.c.name)
                 )
@@ -708,15 +755,13 @@ class Subagents:
         refusal. A child that hands its result back wakes a *later* turn, and that turn is the one
         holding the id the result named — gated on the spawning turn alone it could never message
         or cancel the very child that woke it. So a sibling turn of the same conversation
-        qualifies, and the authority check, which is what actually walls one member's child off
-        from another's, is unchanged."""
+        qualifies; parent-turn lineage walls off children spawned by another conversation."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
                     sa.select(
                         tables.turn.c.parent_turn_id,
                         tables.turn.c.subagent_profile,
-                        tables.turn.c.on_behalf_of_member_id,
                     ).where(tables.turn.c.id == turn_id)
                 )
             ).one_or_none()
@@ -732,12 +777,7 @@ class Subagents:
                         )
                     )
                 ).scalar_one() == 1
-        if (
-            row is None
-            or row.parent_turn_id is None
-            or not spawned_here
-            or row.on_behalf_of_member_id != authority_member_id(self.authority)
-        ):
+        if row is None or row.parent_turn_id is None or not spawned_here:
             raise ValueError(f"{turn_id} is not a spawn of this conversation")
         return row.subagent_profile
 
@@ -749,11 +789,13 @@ class Subagents:
         named = next((one for one in self.registry.profiles if one.name == profile), None)
         return named.model if named is not None else None
 
-    def _child_runtime_config(self, model: str | None) -> TurnRuntimeConfig | None:
-        """The runtime config the child turn is admitted with: the parent's, with a requested model
-        taking the pin an unpinned tree leaves empty. A spawn that asks for no model inherits the
-        parent's config whole, as it always has — the pin is the one choice a caller makes per
-        child, and the internet and environment pins around it stay the turn tree's.
+    def _child_runtime_config(
+        self,
+        model: str | None,
+    ) -> TurnRuntimeConfig | None:
+        """The runtime config the child turn is admitted with: the parent's, narrowed to the exact
+        connections the spawning call held, with a requested model taking the pin an unpinned tree
+        leaves empty. The internet and environment pins stay the turn tree's.
 
         A tree that already carries a model pin keeps it. That pin is the member's own selection
         (`ufo --model`, `x-ufo-model`), which replaces every agent and subagent profile model in the
@@ -764,14 +806,30 @@ class Subagents:
         unregistered id would reach the child's setup, fail every attempt of that turn, and leave
         the caller nothing to repair."""
         inherited = self.parent.runtime_config
-        if model is None:
+        connections = (
+            self.connection_scope
+            if self.connection_scope is not None
+            else (
+                () if inherited is None or inherited.connections is None else inherited.connections
+            )
+        )
+        if (
+            inherited is not None
+            and inherited.connections is not None
+            and not set(connections).issubset(inherited.connections)
+        ):
+            raise RuntimeError("spawn connection scope exceeds its parent")
+        if model is None and (inherited is not None and inherited.connections == connections):
             return inherited
-        if inherited is not None and inherited.model is not None:
+        if model is not None and inherited is not None and inherited.model is not None:
             raise SpawnModelRejected.pinned_tree(model, inherited.model)
-        if self.models and model not in self.models:
+        if model is not None and self.models and model not in self.models:
             raise SpawnModelRejected.unknown(model, self.models)
         base = {} if inherited is None else inherited.model_dump(mode="json")
-        return TurnRuntimeConfig.model_validate({**base, "model": model})
+        if model is not None:
+            base["model"] = model
+        base["connections"] = connections
+        return TurnRuntimeConfig.model_validate(base)
 
     async def _require_balance(
         self, connection: AsyncConnection, model: str | None, agent_id: UUID | None = None
@@ -780,7 +838,7 @@ class Subagents:
         its own admission; a turn that fans out asks again per child, so an exhausted workspace
         stops at the first one instead of buying a free round per helper. Only genuinely new work
         is asked: an exact recovery re-run reconnects to the admitted row without re-deciding its
-        mutable balance or authority, so a later change cannot strand work admission already
+        mutable balance or requester access, so a later change cannot strand work admission already
         accepted.
 
         The child is weighed under the model that will answer it — its profile's where the profile
@@ -807,7 +865,9 @@ class Subagents:
         delivers_result: bool = False,
         name: str = "",
         agent_target: AgentTarget | None = None,
+        requester_member_id: UUID | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
+        model_accounts: tuple[ModelAccountCapability, ...] = (),
         model: str | None = None,
     ) -> bool:
         """Insert the child conversation and its first turn, stamped with the spawning turn's
@@ -826,7 +886,9 @@ class Subagents:
                 )
             ).one_or_none()
             if admitted is None and agent_target is not None:
-                await self._require_agent_spawn(connection, agent_target, inbound)
+                await self._require_agent_spawn(
+                    connection, agent_target, inbound, requester_member_id
+                )
             insert = pg_insert if connection.dialect.name == "postgresql" else sqlite_insert
             await connection.execute(
                 insert(tables.conversation)
@@ -861,7 +923,6 @@ class Subagents:
                     inbound=inbound,
                     admission_source=INTERNAL_ADMISSION,
                     speaker_member_id=None,
-                    on_behalf_of_member_id=authority_member_id(self.authority),
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     result_delivery=DELIVERY_PENDING if delivers_result else None,
@@ -873,6 +934,7 @@ class Subagents:
                     runtime_config=(
                         None if runtime_config is None else runtime_config.model_dump(mode="json")
                     ),
+                    model_accounts=[account.model_dump(mode="json") for account in model_accounts],
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -882,7 +944,6 @@ class Subagents:
                 await connection.execute(
                     sa.select(
                         tables.turn.c.status,
-                        tables.turn.c.on_behalf_of_member_id,
                         tables.turn.c.parent_turn_id,
                         tables.turn.c.agent_id,
                         tables.turn.c.subagent_profile,
@@ -890,19 +951,23 @@ class Subagents:
                         tables.turn.c.spawn_delivers_result,
                         tables.turn.c.spawn_request_fingerprint,
                         tables.turn.c.subagent_name,
+                        tables.turn.c.model_accounts,
                     )
                     .where(tables.turn.c.id == turn_id)
                     .with_for_update()
                 )
             ).one()
-            if claimed.on_behalf_of_member_id != authority_member_id(self.authority):
-                raise ValueError("spawn dedup key belongs to another member request")
             if (
                 claimed.parent_turn_id != self.parent.id
                 or claimed.agent_id != agent_id
                 or claimed.subagent_profile != profile
                 or claimed.inbound != inbound
                 or claimed.subagent_name != (name or None)
+                or tuple(
+                    ModelAccountCapability.model_validate(account)
+                    for account in claimed.model_accounts
+                )
+                != model_accounts
                 or (
                     claimed.spawn_delivers_result is not None
                     and claimed.spawn_delivers_result != delivers_result
@@ -929,11 +994,13 @@ class Subagents:
         connection: AsyncConnection,
         target: AgentTarget,
         inbound: str,
+        requester_member_id: UUID | None,
     ) -> None:
         row = (
             await connection.execute(
                 sa.select(
                     tables.agent.c.owner_member_id,
+                    tables.agent.c.visibility,
                     tables.agent.c.input_schema,
                     tables.agent.c.archived_at,
                 )
@@ -945,6 +1012,15 @@ class Subagents:
             )
         ).one_or_none()
         if row is None or row.archived_at is not None:
+            audience_id = audience_member(self.audience)
+            visible = (
+                tables.agent.c.visibility == "workspace"
+                if audience_id is None
+                else sa.or_(
+                    tables.agent.c.visibility == "workspace",
+                    tables.agent.c.owner_member_id == audience_id,
+                )
+            )
             names = (
                 (
                     await connection.execute(
@@ -952,6 +1028,7 @@ class Subagents:
                         .where(
                             tables.agent.c.workspace_id == self.parent.workspace_id,
                             tables.agent.c.archived_at.is_(None),
+                            visible,
                         )
                         .order_by(tables.agent.c.name)
                     )
@@ -960,21 +1037,23 @@ class Subagents:
                 .all()
             )
             raise UnknownSpawnTarget(target.name, self._profile_names(), tuple(names))
-        member_id = authority_member_id(self.authority)
-        owned = row.owner_member_id is not None and row.owner_member_id == member_id
-        if not owned:
-            if member_id is None:
+        if row.visibility != "workspace":
+            member_id = requester_member_id
+            owned = row.owner_member_id is not None and row.owner_member_id == member_id
+            if not owned and member_id is None:
                 raise ValueError(AGENT_SPAWN_REFUSAL.format(name=target.name))
-            await connection.execute(
-                sa.select(tables.member.c.id)
-                .where(
-                    tables.member.c.workspace_id == self.parent.workspace_id,
-                    tables.member.c.id == member_id,
+            if not owned:
+                assert member_id is not None
+                await connection.execute(
+                    sa.select(tables.member.c.id)
+                    .where(
+                        tables.member.c.workspace_id == self.parent.workspace_id,
+                        tables.member.c.id == member_id,
+                    )
+                    .with_for_update()
                 )
-                .with_for_update()
-            )
-            if not await member_is_admin(connection, self.parent.workspace_id, member_id):
-                raise ValueError(AGENT_SPAWN_REFUSAL.format(name=target.name))
+                if not await member_is_admin(connection, self.parent.workspace_id, member_id):
+                    raise ValueError(AGENT_SPAWN_REFUSAL.format(name=target.name))
         input_contract(row.input_schema).model_validate_json(inbound)
 
     async def _enqueue(self, turn_id: UUID, conversation_id: UUID) -> None:
@@ -1188,10 +1267,10 @@ class SubagentResult:
     next pass re-posts under the same key, which admits nothing. Stamping first would let that same
     crash retire a delivery no parent ever received.
 
-    The arrival carries the spawning turn's own runtime config, never the child's. A parent holding
-    no live turn takes this arrival as a whole new turn admitted under that config, so delivering
-    the child's would run the parent — and any member message folding into that turn — on a model
-    the caller pinned for the child alone."""
+    The arrival carries the child's exact connection scope back into the spawning turn's other
+    runtime settings. A parent holding no live turn takes this arrival as a whole new turn, so the
+    child-only model and model-account pins stay behind while its causal connector scope does not
+    widen."""
 
     invoker: TurnInvoker
     registry: SubagentRegistry
@@ -1208,6 +1287,7 @@ class SubagentResult:
                         tables.turn.c.conversation_id,
                         tables.turn.c.agent_id,
                         tables.turn.c.runtime_config,
+                        tables.turn.c.model_accounts,
                     ).where(
                         tables.turn.c.id == child.parent_turn_id,
                         tables.turn.c.workspace_id == child.workspace_id,
@@ -1225,17 +1305,31 @@ class SubagentResult:
                     )
                 ).one()
             )
+        parent_runtime = (
+            None
+            if parent.runtime_config is None
+            else TurnRuntimeConfig.model_validate(parent.runtime_config)
+        )
+        returned_runtime = parent_runtime
+        if child.runtime_config is not None and child.runtime_config.connections is not None:
+            if (
+                parent_runtime is not None
+                and parent_runtime.connections is not None
+                and not set(child.runtime_config.connections).issubset(parent_runtime.connections)
+            ):
+                raise RuntimeError("spawn result connection scope exceeds its parent")
+            returned = {} if parent_runtime is None else parent_runtime.model_dump(mode="json")
+            returned["connections"] = child.runtime_config.connections
+            returned_runtime = TurnRuntimeConfig.model_validate(returned)
         await self.invoker.invoke(
             parent.conversation_id,
             parent.agent_id,
             self._body(child, child_agent),
             f"{SPAWN_RESULT_KEY_PREFIX}{child.id}",
-            authority=child.authority,
             holds_work_already_done=True,
-            runtime_config=(
-                None
-                if parent.runtime_config is None
-                else TurnRuntimeConfig.model_validate(parent.runtime_config)
+            runtime_config=returned_runtime,
+            model_accounts=tuple(
+                ModelAccountCapability.model_validate(account) for account in parent.model_accounts
             ),
         )
         async with workspace_tx() as connection:

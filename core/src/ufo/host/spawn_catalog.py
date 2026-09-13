@@ -13,10 +13,9 @@ from dataclasses import dataclass
 import sqlalchemy as sa
 
 from ufo.db import workspace_tx
-from ufo.runtime.authority import ExecutionAuthority, authority_member_id
-from ufo.runtime.seats import member_is_admin
 from ufo.runtime.skills.runtime import RuntimeSkill
 from ufo.runtime.subagents import SubagentRegistry
+from ufo.runtime.turns.audience import Audience, audience_member
 from ufo.runtime.turns.contracts import input_contract, payload_keys
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
@@ -39,13 +38,11 @@ class SpawnTarget:
     keys: str
 
 
-async def spawn_targets(
-    registry: SubagentRegistry, authority: ExecutionAuthority
-) -> tuple[SpawnTarget, ...]:
-    """Every target this turn can spawn, with the payload keys each takes. Agents are the set the
-    spawn gate admits: the turn's member's own rows, and for a workspace admin every row — an
-    ownerless row (main, provisioned) is the admins'. An agent whose name a profile shadows is
-    listed under its qualified form, which is the only form a spawn of it accepts.
+async def spawn_targets(registry: SubagentRegistry, audience: Audience) -> tuple[SpawnTarget, ...]:
+    """Every target this conversation may discover, with the payload keys each takes. A member
+    audience sees that member's private agents and workspace agents; every shared or room audience
+    sees workspace agents only. An agent whose name a profile shadows is listed under its qualified
+    form, which is the only form a spawn of it accepts.
 
     A profile that runs on the member's own provider account is listed whether or not they
     connected one. Withholding it hides the capability from the member who has not met it yet: the
@@ -53,20 +50,25 @@ async def spawn_targets(
     spawn refusal is what carries that — it names the account the profile needs and the screen that
     connects one — so the member meets the requirement by reaching for the thing and being told,
     rather than by never being offered it."""
-    member_id = authority_member_id(authority)
     profiles = registry.profiles
     profile_names = frozenset(profile.name for profile in profiles)
-    async with workspace_tx() as connection:
-        admin = member_id is not None and await member_is_admin(
-            connection, ws_current().workspace_id, member_id
+    member_id = audience_member(audience)
+    agent_scope = (
+        tables.agent.c.visibility == "workspace"
+        if member_id is None
+        else sa.or_(
+            tables.agent.c.visibility == "workspace",
+            tables.agent.c.owner_member_id == member_id,
         )
+    )
+    async with workspace_tx() as connection:
         agents = (
             await connection.execute(
                 sa.select(tables.agent.c.name, tables.agent.c.input_schema)
                 .where(
                     tables.agent.c.workspace_id == ws_current().workspace_id,
                     tables.agent.c.archived_at.is_(None),
-                    *(() if admin else (tables.agent.c.owner_member_id == member_id,)),
+                    agent_scope,
                 )
                 .order_by(tables.agent.c.name)
             )

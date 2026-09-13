@@ -249,6 +249,95 @@ def test_a_terminal_renders_a_structured_permission_question_for_its_target() ->
     )
 
 
+def test_a_terminal_renders_one_time_authorization_choices() -> None:
+    target_member_id = uuid4()
+    authorization_id = uuid4()
+    question = AskUserInput(
+        title="Permission required",
+        questions=(
+            AskQuestion(
+                question="Allow this request?",
+                options=(
+                    QuestionOption(
+                        label="Allow once",
+                        description="Read issues from the selected GitHub account this time.",
+                        authorization_choice="allow",
+                    ),
+                    QuestionOption(
+                        label="Deny",
+                        description="Do not read the account.",
+                        authorization_choice="deny",
+                    ),
+                ),
+            ),
+        ),
+        target_member_id=target_member_id,
+        authorization_id=authorization_id,
+    )
+
+    assert directives_for(
+        Terminal(frame=TerminalFrame(status="done", question=question)),
+        streamed=True,
+        viewer_member_id=target_member_id,
+    ) == (
+        b"say\tPermission required\n",
+        (
+            f"authorize\t{authorization_id}\tAllow this request?"
+            "\tallow\tAllow once\tRead issues from the selected GitHub account this time."
+            "\tdeny\tDeny\tDo not read the account.\n"
+        ).encode(),
+        b"ask\t>\n",
+    )
+
+
+def test_a_terminal_transports_the_scoped_always_authorization_choice() -> None:
+    target_member_id = uuid4()
+    authorization_id = uuid4()
+    question = AskUserInput(
+        title="GitHub approval",
+        questions=(
+            AskQuestion(
+                question="Read issues from the selected GitHub account?",
+                options=(
+                    QuestionOption(
+                        label="Allow once",
+                        description="Read issues this time.",
+                        authorization_choice="allow",
+                    ),
+                    QuestionOption(
+                        label="Deny",
+                        description="Do not read issues.",
+                        authorization_choice="deny",
+                    ),
+                    QuestionOption(
+                        label="Always allow issue reads",
+                        description="Read issues from this GitHub account without asking again.",
+                        authorization_choice="always",
+                    ),
+                ),
+            ),
+        ),
+        target_member_id=target_member_id,
+        authorization_id=authorization_id,
+    )
+
+    assert directives_for(
+        Terminal(frame=TerminalFrame(status="done", question=question)),
+        streamed=True,
+        viewer_member_id=target_member_id,
+    ) == (
+        b"say\tGitHub approval\n",
+        (
+            f"authorize\t{authorization_id}\tRead issues from the selected GitHub account?"
+            "\tallow\tAllow once\tRead issues this time."
+            "\tdeny\tDeny\tDo not read issues."
+            "\talways\tAlways allow issue reads"
+            "\tRead issues from this GitHub account without asking again.\n"
+        ).encode(),
+        b"ask\t>\n",
+    )
+
+
 def test_a_terminal_hides_a_structured_permission_question_from_another_member() -> None:
     question = AskUserInput(
         title="Permission required",
@@ -1225,10 +1314,85 @@ async def test_admitted_turn_carries_the_member_and_the_terminal_as_its_source(
         "sender": "owner@example.com",
         "timezone": "America/Los_Angeles",
         "question": None,
+        "authorization_id": None,
+        "authorization_choice": None,
         "source": "ufo cli (owner@example.com)",
         "reply_reaches": "ufo",
     }
     assert timezone == "America/Los_Angeles"
+
+
+async def test_authorization_headers_land_as_structured_turn_context_on_both_send_paths(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    first = uuid4()
+    second = uuid4()
+    headers = {
+        "authorization": f"Bearer {token}",
+        "x-ufo-authorization-id": str(first),
+        "x-ufo-authorization-choice": "allow",
+    }
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        streamed = await client.post("/surface/ufo/streamed", content=b"Proceed", headers=headers)
+    assert streamed.status_code == 200
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        sent = await client.post(
+            "/surface/ufo/sent-authorization",
+            content=b"Keep allowing",
+            headers={
+                "authorization": f"Bearer {token}",
+                "x-ufo-send": "1",
+                "x-ufo-send-id": str(uuid4()),
+                "x-ufo-authorization-id": str(second),
+                "x-ufo-authorization-choice": "always",
+            },
+        )
+    assert sent.status_code == 200
+    await _post(client, "sent-authorization", token, b"")
+    async with workspace_tx() as connection:
+        rows = (
+            await connection.execute(
+                sa.select(tables.conversation.c.queue_key, tables.turn.c.context)
+                .select_from(tables.turn.join(tables.conversation))
+                .where(tables.turn.c.workspace_id == workspace_id)
+            )
+        ).all()
+    answers = {
+        row.queue_key: (row.context["authorization_id"], row.context["authorization_choice"])
+        for row in rows
+    }
+    assert answers == {
+        "owner@example.com:streamed": (str(first), "allow"),
+        "owner@example.com:sent-authorization": (str(second), "always"),
+    }
+
+
+async def test_invalid_authorization_headers_admit_no_turn(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    cases = (
+        {"x-ufo-authorization-id": str(uuid4())},
+        {"x-ufo-authorization-choice": "allow"},
+        {"x-ufo-authorization-id": "not-a-uuid", "x-ufo-authorization-choice": "deny"},
+        {
+            "x-ufo-authorization-id": str(uuid4()),
+            "x-ufo-authorization-choice": "approve",
+        },
+    )
+    for index, extra in enumerate(cases):
+        response = await client.post(
+            f"/surface/ufo/invalid-{index}",
+            content=b"Allow",
+            headers={"authorization": f"Bearer {token}", **extra},
+        )
+        assert response.status_code == 400
+    assert await _turn_count(workspace_id) == 0
 
 
 async def test_a_reported_timezone_lands_on_the_turn_and_an_unknown_one_drops(
@@ -2298,6 +2462,80 @@ async def test_a_joined_terminal_routes_a_targeted_question_to_its_member(
     assert ["say", "Permission required"] not in peer_lines
     assert not any(line[0] in {"choose", "choose_many"} for line in peer_lines)
     assert ["say", "Waiting for a decision."] in peer_lines
+
+
+async def test_terminal_authorization_carries_identity_and_choices_only_to_target(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    client, workspace_id = ufo
+    owner = await _seed_member(workspace_id, "owner@example.com")
+    await _seed_member(workspace_id, "peer@example.com")
+    main = await _main_agent_id(workspace_id)
+    shared = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="slack",
+        queue_key="C1:2.0",
+        audience="shared",
+        member_id=None,
+        title="Database access",
+        surface_label="#eng",
+    )
+    authorization_id = uuid4()
+    question = AskUserInput(
+        title="Permission required",
+        questions=(
+            AskQuestion(
+                question="Run this database change?",
+                options=(
+                    QuestionOption(label="Proceed once", authorization_choice="allow"),
+                    QuestionOption(label="Do not proceed", authorization_choice="deny"),
+                    QuestionOption(label="Proceed every time", authorization_choice="always"),
+                ),
+            ),
+        ),
+        target_member_id=owner,
+        authorization_id=authorization_id,
+    )
+    await _seed_done_turn(
+        workspace_id,
+        shared,
+        main,
+        inbound="Change it",
+        speaker_member_id=owner,
+        reply="Waiting for a decision.",
+        question=question,
+    )
+
+    async def open_as(email: str) -> list[list[str]]:
+        token = _mint(SECRET, workspace_id, email, _future())
+        async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+            response = await client.post(
+                f"/surface/ufo/conversation/{shared}",
+                content=b"",
+                headers={"authorization": f"Bearer {token}"},
+            )
+        assert response.status_code == 200
+        return _lines(response.content)
+
+    target_lines = await open_as("owner@example.com")
+    peer_lines = await open_as("peer@example.com")
+    assert [
+        "authorize",
+        str(authorization_id),
+        "Run this database change?",
+        "allow",
+        "Proceed once",
+        "",
+        "deny",
+        "Do not proceed",
+        "",
+        "always",
+        "Proceed every time",
+        "",
+    ] in target_lines
+    assert not any(line[0] == "authorize" for line in peer_lines)
+    assert ["say", "Permission required"] not in peer_lines
 
 
 async def _seed_agent(

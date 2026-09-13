@@ -93,7 +93,6 @@ from ufo.harness.sandbox.site_report import (
     SiteReporter,
     SiteReports,
 )
-from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.ext.manifest import CarrierSpec
 from ufo.schema import tables
 from ufo.schema.records import TurnRuntimeConfig
@@ -1348,7 +1347,7 @@ async def test_a_page_read_from_a_site_that_stopped_tells_the_conversation_that_
     public internet."""
     monkeypatch.setenv(UFO_TOKEN_SECRET_ENV, SECRET)
     workspace_id, conversation_id = await _seed_conversation("stub:sbx-1")
-    creator_member_id = await _seed_hosted_site(workspace_id, conversation_id, 8000)
+    await _seed_hosted_site(workspace_id, conversation_id, 8000)
     async with _reporting(_DeadPortCarrier(port=0)) as reported:
         await _open(reported.client, workspace_id, conversation_id)
         got = await _read(reported.client, conversation_id, "/", "iframe")
@@ -1356,7 +1355,6 @@ async def test_a_page_read_from_a_site_that_stopped_tells_the_conversation_that_
     assert got.status_code == 503
     assert [turn.conversation_id for turn in reported.turns] == [conversation_id]
     assert reported.turns[0].message == SITE_NOT_ANSWERING_FIRE.format(port=8000)
-    assert reported.turns[0].authority == MemberAuthority(creator_member_id)
     assert reported.turns[0].runtime_config == TurnRuntimeConfig(
         connections=(), internet_access=False
     )

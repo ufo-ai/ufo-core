@@ -17,8 +17,8 @@ use ufo::ui::conversations::{surface_word, Fetch};
 use ufo::ui::plain::Plain;
 use ufo::ui::{self, App, ClipEntry, Reply};
 use ufo::wire::{
-    ConversationRow, Directive, Lister, OpRequest, PostBody, SendLane, SentAck, Session, Stop,
-    Target,
+    AuthorizationAnswer, AuthorizationOption, ConversationRow, Directive, Lister, OpRequest,
+    PostBody, SendLane, SentAck, Session, Stop, Target,
 };
 use ufo::{config, jsonio, pr};
 
@@ -323,14 +323,40 @@ fn retract_instant(lane: SendLane, text: String, arrival_id: String, evt: Sender
     });
 }
 
-fn send_instant(lane: SendLane, text: String, evt: Sender<WireEvent>, cmd: Sender<WireCmd>) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MemberPost {
+    Message(String),
+    Authorization(AuthorizationAnswer),
+}
+
+impl MemberPost {
+    fn text(&self) -> &str {
+        match self {
+            MemberPost::Message(text) => text,
+            MemberPost::Authorization(answer) => &answer.text,
+        }
+    }
+
+    fn command(self) -> WireCmd {
+        match self {
+            MemberPost::Message(text) => WireCmd::Say(text),
+            MemberPost::Authorization(answer) => WireCmd::Authorize(answer),
+        }
+    }
+}
+
+fn send_instant(lane: SendLane, post: MemberPost, evt: Sender<WireEvent>, cmd: Sender<WireCmd>) {
     thread::spawn(move || {
         let send_id = random_hex::<16>();
         for attempt in 0..SEND_ATTEMPTS {
-            match lane.send(&send_id, &text) {
+            let sent = match &post {
+                MemberPost::Message(text) => lane.send(&send_id, text),
+                MemberPost::Authorization(answer) => lane.authorize(&send_id, answer),
+            };
+            match sent {
                 Ok(ack) => {
                     let _ = evt.send(WireEvent::Sent {
-                        text: text.clone(),
+                        text: post.text().to_string(),
                         ack,
                     });
                     return;
@@ -339,7 +365,7 @@ fn send_instant(lane: SendLane, text: String, evt: Sender<WireEvent>, cmd: Sende
                 Err(_) => {}
             }
         }
-        let _ = cmd.send(WireCmd::Say(text));
+        let _ = cmd.send(post.command());
     });
 }
 
@@ -490,6 +516,7 @@ enum WireEvent {
 
 enum WireCmd {
     Say(String),
+    Authorize(AuthorizationAnswer),
     SecretValue {
         sealed: String,
         slot: String,
@@ -506,7 +533,7 @@ struct Wire {
     home: config::Home,
     evt: Sender<WireEvent>,
     cmd: Receiver<WireCmd>,
-    queue: VecDeque<String>,
+    queue: VecDeque<MemberPost>,
     op_reply: Option<PostBody>,
     poll: Option<f64>,
     listen: Option<f64>,
@@ -532,7 +559,7 @@ impl Wire {
         let mut body = if first.is_empty() {
             Some(PostBody::Empty)
         } else {
-            self.queue.push_back(first);
+            self.queue.push_back(MemberPost::Message(first));
             Some(self.take_queue())
         };
         let mut reconnect = None;
@@ -800,13 +827,28 @@ impl Wire {
     }
 
     fn take_queue(&mut self) -> PostBody {
-        let joined: Vec<String> = self.queue.drain(..).collect();
-        for message in &joined {
-            let _ = self.evt.send(WireEvent::MemberEcho(message.clone()));
-        }
+        let first = self.queue.pop_front().expect("a queued post exists");
         self.detached = false;
         self.poll = None;
-        PostBody::Message(joined.join("\n\n"))
+        match first {
+            MemberPost::Authorization(answer) => {
+                let _ = self.evt.send(WireEvent::MemberEcho(answer.text.clone()));
+                PostBody::Authorization(answer)
+            }
+            MemberPost::Message(first) => {
+                let mut joined = vec![first];
+                while matches!(self.queue.front(), Some(MemberPost::Message(_))) {
+                    let Some(MemberPost::Message(message)) = self.queue.pop_front() else {
+                        unreachable!()
+                    };
+                    joined.push(message);
+                }
+                for message in &joined {
+                    let _ = self.evt.send(WireEvent::MemberEcho(message.clone()));
+                }
+                PostBody::Message(joined.join("\n\n"))
+            }
+        }
     }
 
     fn drain_cmds(&mut self) {
@@ -817,7 +859,8 @@ impl Wire {
 
     fn apply_cmd(&mut self, command: WireCmd) {
         match command {
-            WireCmd::Say(text) => self.queue.push_back(text),
+            WireCmd::Say(text) => self.queue.push_back(MemberPost::Message(text)),
+            WireCmd::Authorize(answer) => self.queue.push_back(MemberPost::Authorization(answer)),
             WireCmd::SecretValue {
                 sealed,
                 slot,
@@ -883,6 +926,20 @@ struct GateQuestion {
     prompt: String,
     options: Vec<String>,
     multiple: bool,
+    authorization: Option<(String, Vec<AuthorizationOption>)>,
+}
+
+fn authorization_labels(options: &[AuthorizationOption]) -> Vec<String> {
+    options
+        .iter()
+        .map(|option| {
+            if option.description.is_empty() {
+                option.label.clone()
+            } else {
+                format!("{}: {}", option.label, option.description)
+            }
+        })
+        .collect()
 }
 
 fn attach_dropped(app: &mut App, source: &std::path::Path, home: &std::path::Path, channel: &str) {
@@ -1165,18 +1222,21 @@ fn run_tty(
                             .front()
                             .is_some_and(|question| question.options.is_empty()) =>
                     {
-                        if let Some(reply) = collect_answer(&mut app, &mut live.gate, text) {
+                        if let Some(reply) = collect_answer(&mut app, &mut live.gate, text, &[]) {
                             app.begin_turn();
-                            let _ = live.cmd.send(WireCmd::Say(reply));
+                            let _ = live.cmd.send(reply.command());
                         }
                     }
                     Reply::Send(text) => {
                         if app.is_working() {
                             app.push_queued(&text);
                             match live.sends.clone() {
-                                Some(lane) => {
-                                    send_instant(lane, text, live.evt.clone(), live.cmd.clone())
-                                }
+                                Some(lane) => send_instant(
+                                    lane,
+                                    MemberPost::Message(text),
+                                    live.evt.clone(),
+                                    live.cmd.clone(),
+                                ),
                                 None => {
                                     let _ = live.cmd.send(WireCmd::Say(text));
                                 }
@@ -1186,7 +1246,12 @@ fn run_tty(
                             match live.sends.clone() {
                                 Some(lane) => {
                                     app.push_queued(&text);
-                                    send_instant(lane, text, live.evt.clone(), live.cmd.clone())
+                                    send_instant(
+                                        lane,
+                                        MemberPost::Message(text),
+                                        live.evt.clone(),
+                                        live.cmd.clone(),
+                                    )
                                 }
                                 None => {
                                     let _ = live.cmd.send(WireCmd::Say(text));
@@ -1197,10 +1262,12 @@ fn run_tty(
                             let _ = live.cmd.send(WireCmd::Say(text));
                         }
                     }
-                    Reply::Choice(choice) => {
-                        if let Some(reply) = collect_answer(&mut app, &mut live.gate, choice) {
+                    Reply::Choice { text, selected } => {
+                        if let Some(reply) =
+                            collect_answer(&mut app, &mut live.gate, text, &selected)
+                        {
                             app.begin_turn();
-                            let _ = live.cmd.send(WireCmd::Say(reply));
+                            let _ = live.cmd.send(reply.command());
                         }
                     }
                     Reply::ChoiceCancelled => break 0,
@@ -1514,8 +1581,17 @@ fn collect_answer<W: std::io::Write>(
     app: &mut App<W>,
     gate: &mut Gate,
     answer: String,
-) -> Option<String> {
+    selected: &[usize],
+) -> Option<MemberPost> {
     let question = gate.questions.pop_front()?;
+    if let Some((authorization_id, options)) = question.authorization {
+        let option = selected.first().and_then(|index| options.get(*index))?;
+        return Some(MemberPost::Authorization(AuthorizationAnswer {
+            authorization_id,
+            choice: option.choice,
+            text: option.label.clone(),
+        }));
+    }
     gate.answers.push(if gate.many {
         format!("{}: {answer}", question.prompt)
     } else {
@@ -1529,7 +1605,9 @@ fn collect_answer<W: std::io::Write>(
         }
         return None;
     }
-    Some(std::mem::take(&mut gate.answers).join("\n"))
+    Some(MemberPost::Message(
+        std::mem::take(&mut gate.answers).join("\n"),
+    ))
 }
 
 fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
@@ -1555,6 +1633,20 @@ fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
                 prompt,
                 options,
                 multiple,
+                authorization: None,
+            });
+            gate.many = gate.questions.len() > 1;
+        }
+        Directive::Authorize {
+            authorization_id,
+            prompt,
+            options,
+        } => {
+            gate.questions.push_back(GateQuestion {
+                prompt,
+                options: authorization_labels(&options),
+                multiple: false,
+                authorization: Some((authorization_id, options)),
             });
             gate.many = gate.questions.len() > 1;
         }
@@ -1643,6 +1735,20 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                         prompt,
                         options,
                         multiple,
+                        authorization: None,
+                    });
+                    gate.many = gate.questions.len() > 1;
+                }
+                Directive::Authorize {
+                    authorization_id,
+                    prompt,
+                    options,
+                } => {
+                    gate.questions.push_back(GateQuestion {
+                        prompt,
+                        options: authorization_labels(&options),
+                        multiple: false,
+                        authorization: Some((authorization_id, options)),
                     });
                     gate.many = gate.questions.len() > 1;
                 }
@@ -1682,19 +1788,37 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                 }
                 if !gate.questions.is_empty() {
                     let mut collected = Vec::new();
+                    let mut authorization = None;
                     let mut cancelled = false;
                     while let Some(question) = gate.questions.pop_front() {
-                        let answer = if question.options.is_empty() {
-                            out.ask(&question.prompt)
+                        let (answer, selected) = if question.options.is_empty() {
+                            (out.ask(&question.prompt), None)
+                        } else if question.authorization.is_some() {
+                            match out.menu_selected(&question.prompt, &question.options) {
+                                Some((answer, selected)) => (Some(answer), Some(selected)),
+                                None => (None, None),
+                            }
                         } else if question.multiple {
-                            out.menu_many(&question.prompt, &question.options)
+                            (out.menu_many(&question.prompt, &question.options), None)
                         } else {
-                            out.menu(&question.prompt, &question.options)
+                            (out.menu(&question.prompt, &question.options), None)
                         };
                         let Some(answer) = answer else {
                             cancelled = true;
                             break;
                         };
+                        if let Some((authorization_id, options)) = question.authorization {
+                            let Some(option) = selected.and_then(|index| options.get(index)) else {
+                                cancelled = true;
+                                break;
+                            };
+                            authorization = Some(AuthorizationAnswer {
+                                authorization_id,
+                                choice: option.choice,
+                                text: option.label.clone(),
+                            });
+                            continue;
+                        }
                         collected.push(if gate.many {
                             format!("{}: {answer}", question.prompt)
                         } else {
@@ -1704,7 +1828,11 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                     if cancelled {
                         break 0;
                     }
-                    let _ = cmd_tx.send(WireCmd::Say(collected.join("\n")));
+                    let command = match authorization {
+                        Some(answer) => WireCmd::Authorize(answer),
+                        None => WireCmd::Say(collected.join("\n")),
+                    };
+                    let _ = cmd_tx.send(command);
                 } else if gate.asked {
                     gate.asked = false;
                     match out.ask(&std::mem::take(&mut gate.prompt)) {
@@ -1799,11 +1927,33 @@ fn run_json(session: Session, runtime: OpRuntime, home: config::Home, first: Str
                                 let _ = cmd_tx.send(WireCmd::Say(text));
                             } else {
                                 match sends.clone() {
-                                    Some(lane) => {
-                                        send_instant(lane, text, send_evt.clone(), cmd_tx.clone())
-                                    }
+                                    Some(lane) => send_instant(
+                                        lane,
+                                        MemberPost::Message(text),
+                                        send_evt.clone(),
+                                        cmd_tx.clone(),
+                                    ),
                                     None => {
                                         let _ = cmd_tx.send(WireCmd::Say(text));
+                                    }
+                                }
+                            }
+                        }
+                        Ok(jsonio::AnswerRouting::Authorization(answer)) => {
+                            if !in_turn {
+                                emit_json(&driver.on_turn_start());
+                                in_turn = true;
+                                let _ = cmd_tx.send(WireCmd::Authorize(answer));
+                            } else {
+                                match sends.clone() {
+                                    Some(lane) => send_instant(
+                                        lane,
+                                        MemberPost::Authorization(answer),
+                                        send_evt.clone(),
+                                        cmd_tx.clone(),
+                                    ),
+                                    None => {
+                                        let _ = cmd_tx.send(WireCmd::Authorize(answer));
                                     }
                                 }
                             }
@@ -1938,25 +2088,88 @@ mod tests {
                     prompt: "Explain access".into(),
                     options: Vec::new(),
                     multiple: false,
+                    authorization: None,
                 },
                 GateQuestion {
                     prompt: "Select services".into(),
                     options: vec!["Mail".into(), "Calendar".into()],
                     multiple: true,
+                    authorization: None,
                 },
             ]),
             many: true,
             ..Gate::default()
         };
 
-        assert_eq!(collect_answer(&mut app, &mut gate, "because".into()), None);
+        assert_eq!(
+            collect_answer(&mut app, &mut gate, "because".into(), &[]),
+            None
+        );
         assert_eq!(gate.questions.len(), 1);
         assert_eq!(
-            collect_answer(&mut app, &mut gate, "Mail, Calendar".into()),
-            Some("Explain access: because\nSelect services: Mail, Calendar".into())
+            collect_answer(&mut app, &mut gate, "Mail, Calendar".into(), &[0, 1]),
+            Some(MemberPost::Message(
+                "Explain access: because\nSelect services: Mail, Calendar".into()
+            ))
         );
         assert!(gate.questions.is_empty());
         assert!(gate.answers.is_empty());
+        app.close();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_tui_selection_keeps_authorization_identity_and_code_out_of_its_label() {
+        let (mut app, home) = question_app();
+        let authorization_id = "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6";
+        let options = vec![
+            AuthorizationOption {
+                label: "Allow once".into(),
+                description: "This action only.".into(),
+                choice: ufo::wire::AuthorizationChoice::Allow,
+            },
+            AuthorizationOption {
+                label: "Deny".into(),
+                description: "Do not allow this action.".into(),
+                choice: ufo::wire::AuthorizationChoice::Deny,
+            },
+            AuthorizationOption {
+                label: "Always allow for GitHub".into(),
+                description: "Future repository reads from this account.".into(),
+                choice: ufo::wire::AuthorizationChoice::Always,
+            },
+        ];
+        let displayed = authorization_labels(&options);
+        let mut gate = Gate {
+            questions: VecDeque::from([GateQuestion {
+                prompt: "Proceed?".into(),
+                options: displayed.clone(),
+                multiple: false,
+                authorization: Some((authorization_id.into(), options)),
+            }]),
+            ..Gate::default()
+        };
+        assert_eq!(
+            displayed,
+            [
+                "Allow once: This action only.",
+                "Deny: Do not allow this action.",
+                "Always allow for GitHub: Future repository reads from this account.",
+            ]
+        );
+        assert_eq!(
+            collect_answer(
+                &mut app,
+                &mut gate,
+                "Always allow for GitHub: Future repository reads from this account.".into(),
+                &[2],
+            ),
+            Some(MemberPost::Authorization(AuthorizationAnswer {
+                authorization_id: authorization_id.into(),
+                choice: ufo::wire::AuthorizationChoice::Always,
+                text: "Always allow for GitHub".into(),
+            }))
+        );
         app.close();
         let _ = std::fs::remove_dir_all(home);
     }
@@ -2112,9 +2325,44 @@ mod tests {
     }
 
     #[test]
+    fn an_authorization_answer_is_not_coalesced_with_ordinary_text() {
+        let (mut wire, cmd, evt) = listening_wire(None);
+        cmd.send(WireCmd::Say("before".into())).unwrap();
+        cmd.send(WireCmd::Authorize(AuthorizationAnswer {
+            authorization_id: "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6".into(),
+            choice: ufo::wire::AuthorizationChoice::Allow,
+            text: "Proceed once".into(),
+        }))
+        .unwrap();
+        cmd.send(WireCmd::Say("after".into())).unwrap();
+        wire.detached = true;
+        assert!(matches!(
+            wire.next_body(),
+            Some(PostBody::Message(text)) if text == "before"
+        ));
+        assert!(matches!(
+            wire.next_body(),
+            Some(PostBody::Authorization(AuthorizationAnswer {
+                authorization_id,
+                choice: ufo::wire::AuthorizationChoice::Allow,
+                text,
+            })) if authorization_id == "92fc2a7b-d3fe-4fb7-8096-e78f658dbda6"
+                && text == "Proceed once"
+        ));
+        assert!(matches!(
+            wire.next_body(),
+            Some(PostBody::Message(text)) if text == "after"
+        ));
+        assert_eq!(
+            said(&evt),
+            vec!["echo:before", "echo:Proceed once", "echo:after"]
+        );
+    }
+
+    #[test]
     fn a_shutdown_drops_the_work_the_wire_was_holding() {
         let (mut wire, cmd, _evt) = listening_wire(Some(30.0));
-        wire.queue.push_back("unsent".into());
+        wire.queue.push_back(MemberPost::Message("unsent".into()));
         wire.poll = Some(1.0);
         wire.op_reply = Some(PostBody::Empty);
         cmd.send(WireCmd::Shutdown)

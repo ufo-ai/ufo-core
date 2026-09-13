@@ -12,17 +12,15 @@ idempotency key, which admits nothing, and a lease that lapses hands the rows to
 key is the batch as read — every row id with its occurrence count — so a row that folded since it
 was read is a different batch and its retry admits a turn carrying the folded body, rather than
 spending a key already spent and closing the row unread. The
-turn carries the member's own authority, so an unseated member's batch parks rather than becoming
-workspace work, and `holds_work_already_done` parks it on a spend breach rather than discarding the
-notifications already raised. Only the lanes of the agent this extension provisioned are woken: a
-row addressed to any other agent is nobody's to run a turn on under a member's authority, so it
-stays where it is."""
+turn carries only the lane's exact runtime capabilities, and `holds_work_already_done` parks it on
+a spend breach rather than discarding the notifications already raised. Only the lanes of the
+agent this extension provisioned are woken: a row addressed to any other agent is nobody's to run,
+so it stays where it is."""
 
 import hashlib
 from contextlib import suppress
 from dataclasses import dataclass
 
-from ufo.sdk.authority import authority_from_member_id
 from ufo.sdk.context import AgentArchived, ExtensionContext
 from ufo.sdk.flags import flag_enabled
 from ufo.sdk.untrusted import wall
@@ -88,7 +86,6 @@ class InboxDrain:
                     member=lane.member_id.hex,
                     batch=read.hexdigest()[:32],
                 ),
-                authority=authority_from_member_id(lane.member_id),
                 holds_work_already_done=True,
                 standalone=True,
                 runtime_config=lane.runtime_config,

@@ -731,7 +731,8 @@ export function ObjectDetail({
                     </span>
                   ) : null}
                 </div>
-                {record.deletes ? (
+                {record.deletes &&
+                (record.kind !== SCHEDULED_TASK_KIND || record.status.deletable === true) ? (
                   <div className="flex flex-wrap gap-sm">
                     {record.kind !== SCHEDULED_TASK_KIND &&
                     record.applies &&

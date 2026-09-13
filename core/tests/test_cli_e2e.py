@@ -59,7 +59,6 @@ from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore, member_slot
-from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.hub import InProcessHub
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
@@ -238,7 +237,9 @@ def test_init_seeds_the_owners_private_model_key(cli_home: CliRunner) -> None:
                 == "sk-test-cli"
             )
             with ws(workspace_id):
-                assert await ws_current().member_holds_own_model_key(MemberAuthority(member_id))
+                assert await ws_current().member_model_accounts(member_id) == (
+                    ("anthropic", member_slot(ANTHROPIC_KEY_SLOT, member_id)),
+                )
         finally:
             init_workspace_credentials(None)
 

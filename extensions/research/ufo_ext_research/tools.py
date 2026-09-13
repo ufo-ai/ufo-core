@@ -242,6 +242,7 @@ RESEARCH_TOOLS: tuple[ToolDef, ...] = (
         input_model=SearchWebInput,
         handler=_search_web,
         untrusted=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name=FETCH_URL_TOOL,
@@ -249,6 +250,7 @@ RESEARCH_TOOLS: tuple[ToolDef, ...] = (
         input_model=FetchUrlInput,
         handler=_fetch_url,
         untrusted=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name=SEARCH_VERTICAL_TOOL,
@@ -256,5 +258,6 @@ RESEARCH_TOOLS: tuple[ToolDef, ...] = (
         input_model=SearchVerticalInput,
         handler=_search_vertical,
         untrusted=True,
+        binds_member_authority=False,
     ),
 )

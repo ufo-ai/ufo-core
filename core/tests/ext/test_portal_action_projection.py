@@ -65,6 +65,7 @@ def test_the_profile_only_wall_holds_on_the_projection() -> None:
         handler=_handler,
         bound=ObjectBinding(kind="widget", binding="collection"),
         profile_only=True,
+        binds_member_authority=False,
         presentation=ActionPresentation(label="Hold"),
     )
     registry = {"widget": {"held": BoundAction(action=held, extension=None, context=None)}}

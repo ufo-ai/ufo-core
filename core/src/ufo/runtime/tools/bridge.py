@@ -1,11 +1,11 @@
 """The JSON contract and callable set for the live-turn sandbox tool bridge."""
 
+from dataclasses import dataclass
 from typing import Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, Field, JsonValue, model_validator
 
-from ufo.harness.sandbox.session import RunToken
 from ufo.runtime.ext.manifest import Manifest
 from ufo.runtime.objects import ObjectVerbs
 from ufo.runtime.tools.registry import ToolDef, ToolRegistry
@@ -86,10 +86,19 @@ class ToolBridgeFailure(BaseModel):
 type ToolBridgeResponse = ToolBridgeSuccess | ToolBridgeFailure
 
 
-class ToolBridgeRequester(Protocol):
-    """Describe or execute bridge tools under one signed live-run principal."""
+@dataclass(frozen=True, slots=True)
+class ToolBridgePrincipal:
+    workspace_id: UUID
+    turn_id: UUID
+    connections: tuple[UUID, ...]
 
-    async def request(self, run: RunToken, request: ToolBridgeRequest) -> ToolBridgeResponse: ...
+
+class ToolBridgeRequester(Protocol):
+    """Describe or execute bridge tools under one resolved live-run principal."""
+
+    async def request(
+        self, run: ToolBridgePrincipal, request: ToolBridgeRequest
+    ) -> ToolBridgeResponse: ...
 
 
 def bridge_tools(manifests: tuple[Manifest, ...]) -> tuple[ToolDef, ...]:

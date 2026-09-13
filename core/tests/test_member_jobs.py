@@ -11,7 +11,6 @@ from ufo_ext_objectives.store import objective, objective_event, objective_step
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import MemberAuthority
 from ufo.runtime.ext.context import _member_blob_text, context_for
 from ufo.runtime.sources.sync import feed_handle_for
 from ufo.runtime.turns.audience import conversation_audience, foreign_room_audience
@@ -219,7 +218,7 @@ async def test_member_reads_are_gated_on_member_context(db: None) -> None:
             "report_digest",
             frozenset(),
             member_context_read=True,
-            member_context_authority=MemberAuthority(member_id),
+            member_context_member_id=member_id,
         )
         assert await bound.scheduled_member_timezone() == "America/New_York"
 
@@ -565,7 +564,7 @@ async def test_member_context_excludes_foreign_other_member_and_current_conversa
             frozenset(),
             member_context_blob=blob,
             member_context_read=True,
-            member_context_authority=MemberAuthority(member_id),
+            member_context_member_id=member_id,
         )
         records = await context.member_context(
             since=now - timedelta(days=1),
@@ -659,7 +658,7 @@ async def test_member_context_drops_a_memory_the_page_pass_retired(
             frozenset(),
             member_context_blob=WorkspaceBlobStore(FilesystemBlobStore(tmp_path)),
             member_context_read=True,
-            member_context_authority=MemberAuthority(member_id),
+            member_context_member_id=member_id,
         )
         records = await context.member_context(since=now - timedelta(days=1))
     assert [record.text for record in records] == ["Live shared fact."]

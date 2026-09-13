@@ -8,6 +8,7 @@ import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict
 
 from ufo.db import workspace_tx
+from ufo.runtime.access.member_authorization import AuthorizationScope
 from ufo.runtime.ext.context import ExtensionContext, JsonValue
 from ufo.runtime.objects import (
     MemberObject,
@@ -28,14 +29,14 @@ MEMBER_PERMISSION_APPLY = "permissions are granted in conversation, not through 
 
 
 class MemberPermissionSpec(BaseModel):
-    """The redacted exact effect and agent a standing member permission covers."""
+    """The account operation and agent a standing member permission covers."""
 
     model_config = ConfigDict(extra="forbid")
 
     agent: str
     call: str
-    request: dict[str, JsonValue]
-    basis: Literal["selected_message", "pending_answer", "standing"] | None
+    scope: AuthorizationScope
+    basis: Literal["selected_message", "pending_answer"] | None
     evidence: str | None
 
 
@@ -145,7 +146,7 @@ class MemberPermissionObjects:
             spec=MemberPermissionSpec(
                 agent=row.agent,
                 call=row.call,
-                request=row.effect,
+                scope=AuthorizationScope.model_validate(row.scope),
                 basis=row.basis,
                 evidence=row.evidence,
             ),
@@ -167,30 +168,32 @@ class MemberPermissionObjects:
 
     def _query(self, member_id: UUID) -> sa.Select:
         decision = tables.member_authorization.alias("permission_decision")
-        exact_decision = (
+        grant_decision = (
             decision.c.workspace_id == tables.member_permission.c.workspace_id,
             decision.c.member_id == tables.member_permission.c.member_id,
             decision.c.agent_id == tables.member_permission.c.agent_id,
             decision.c.call == tables.member_permission.c.call,
             decision.c.effect_digest == tables.member_permission.c.effect_digest,
+            decision.c.scope_digest == tables.member_permission.c.scope_digest,
             decision.c.decided_by == tables.member_permission.c.granted_by,
+            decision.c.decision == "always",
         )
         return (
             sa.select(
                 tables.member_permission.c.id,
                 tables.member_permission.c.call,
-                tables.member_permission.c.effect,
+                tables.member_permission.c.scope,
                 tables.member_permission.c.created_at,
                 tables.member_permission.c.updated_at,
                 tables.agent.c.name.label("agent"),
                 sa.select(decision.c.basis)
-                .where(*exact_decision)
+                .where(*grant_decision)
                 .order_by(decision.c.updated_at.desc())
                 .limit(1)
                 .scalar_subquery()
                 .label("basis"),
                 sa.select(decision.c.evidence)
-                .where(*exact_decision)
+                .where(*grant_decision)
                 .order_by(decision.c.updated_at.desc())
                 .limit(1)
                 .scalar_subquery()
@@ -204,6 +207,8 @@ class MemberPermissionObjects:
             .where(
                 tables.member_permission.c.workspace_id == ws_current().workspace_id,
                 tables.member_permission.c.member_id == member_id,
+                tables.member_permission.c.scope_digest.is_not(None),
+                tables.member_permission.c.scope.is_not(None),
                 tables.member_permission.c.revoked_at.is_(None),
             )
         )

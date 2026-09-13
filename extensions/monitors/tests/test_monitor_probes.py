@@ -35,7 +35,6 @@ from ufo.harness.untrusted import UNTRUSTED_OPEN
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.grants import GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import ExecutionAuthority, authority_from_member_id
 from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, context_for
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.turns.audience import SHARED_AUDIENCE
@@ -235,30 +234,23 @@ async def _due_again(row_id: UUID) -> None:
 
 
 @pytest.mark.parametrize("armed_by_a_member", [True, False])
-async def test_a_probe_acts_as_the_member_who_armed_the_watch(
+async def test_a_probe_carries_the_watchs_exact_connection_capabilities(
     db: None, tmp_path: Path, armed_by_a_member: bool
 ) -> None:
-    """Off-turn is not anonymous. The probe carries the arming member, so a command reaching that
-    member's own connected account keeps reaching it after the arming turn ended — the authority a
-    scheduled fire already carries for its creator. A monitor nobody is recorded as arming carries
-    no member, and so reaches only the connections shared with the whole workspace.
-
-    The capability and the environment are both real; the wrapper only observes what the runner
-    handed the seam that consumes it."""
+    """The runner hands the persisted capability snapshot to both enforcement surfaces."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     await _probe_state(tmp_path, conversation_id, "queued\n")
     creator = member_id if armed_by_a_member else None
     env = ProbeEnv()
-    asked: list[tuple[ExecutionAuthority, tuple[UUID, ...]]] = []
+    asked: list[tuple[UUID, ...]] = []
 
     async def recording(
         conversation: UUID,
         probe_id: UUID,
-        authority: ExecutionAuthority,
         connections: tuple[UUID, ...],
     ) -> dict[str, str]:
-        asked.append((authority, connections))
-        return await env.exports(conversation, probe_id, authority, connections)
+        asked.append(connections)
+        return await env.exports(conversation, probe_id, connections)
 
     sandboxes = _sandboxes(tmp_path)
     ext = context_for(
@@ -284,7 +276,7 @@ async def test_a_probe_acts_as_the_member_who_armed_the_watch(
         await MonitorRunner(ctx=ext).run()
         row = await _row(armed.id)
 
-    assert asked == [(authority_from_member_id(creator), scope)]
+    assert asked == [scope]
     assert row is not None
     assert row["probes_run"] == 1
     assert row["internet_access"] is False
@@ -396,7 +388,6 @@ async def test_changed_output_founds_one_turn_and_retires_the_monitor(
     [turn] = turns
     assert dbos.enqueued == [str(turn["id"])]
     assert turn["admission_source"] == "internal"
-    assert turn["on_behalf_of_member_id"] == member_id
     body = turn["inbound"]
     assert f'<monitor_fired name="ci-run" cause="{CHANGED}">' in body
     assert "reason: the CI run for pull request 42" in body
@@ -407,10 +398,8 @@ async def test_changed_output_founds_one_turn_and_retires_the_monitor(
     assert "passed\n" in body
 
 
-async def test_a_fire_with_different_authority_founds_its_own_turn(
-    db: None, tmp_path: Path
-) -> None:
-    """A member's monitor cannot inherit workspace authority by folding into its live turn."""
+async def test_a_fire_founds_its_own_workspace_turn(db: None, tmp_path: Path) -> None:
+    """An automatic monitor fire does not fold into unrelated live workspace work."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     await _probe_state(tmp_path, conversation_id, "passed\n")
     running = uuid4()
@@ -442,7 +431,6 @@ async def test_a_fire_with_different_authority_founds_its_own_turn(
     assert row is None
     assert len(turns) == 2
     assert turns[0]["id"] == running
-    assert turns[1]["on_behalf_of_member_id"] == member_id
     assert f'cause="{CHANGED}"' in turns[1]["inbound"]
     assert "passed\n" in turns[1]["inbound"]
     assert arrivals == []

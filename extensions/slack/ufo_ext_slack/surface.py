@@ -118,7 +118,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ufo_ext_connectors.tools import SLACK_MARKDOWN_TEXT_LIMIT, SLACK_SECTION_TEXT_LIMIT
 
 from ufo.sdk.audience import (
@@ -153,6 +153,7 @@ from ufo.sdk.surfaces import (
     AmbientMessage,
     AskQuestion,
     AskUserInput,
+    AuthorizationChoice,
     BlobStore,
     ConnectRequest,
     ConnectRequestInvalid,
@@ -855,6 +856,7 @@ ASK_SUBMIT_TEXT = "Submit"
 ASK_PROSE_HINT = "_Answer by replying in this thread._"
 ASK_MULTI_SELECT_NOTE = "_Select all that apply._"
 ASK_EMPTY_SUBMIT_TEXT = "Choose an answer before you submit."
+TARGETED_ASK_PUBLIC_TEXT = "A private question is available to the requested member."
 ASK_SUBMITTED_LINE = "✅ *{question}* — {answer}"
 ASK_UNANSWERED_LINE = "*{question}* — no answer"
 ASK_SUBMITTED_BY_LINE = "Submitted by <@{user}>"
@@ -868,6 +870,7 @@ between, so it guides a text box rather than standing as a group of one."""
 SLACK_BUTTON_TEXT_LIMIT = 75
 SLACK_OPTION_TEXT_LIMIT = 75
 SLACK_INPUT_LABEL_LIMIT = 2_000
+SLACK_ACTION_VALUE_LIMIT = 2_000
 
 SLACK_REPLAY_SECONDS = 300
 MAX_SLACK_EVENT_BYTES = 1024 * 1024
@@ -1334,7 +1337,19 @@ def _mrkdwn_section(text: str) -> dict[str, object]:
     return {"type": "section", "text": {"type": "mrkdwn", "text": text[:SLACK_SECTION_TEXT_LIMIT]}}
 
 
-def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] | None:
+class _SlackAskBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    target_member_id: UUID
+    conversation_id: UUID
+    queue_key: str = Field(min_length=1, max_length=SLACK_ACTION_VALUE_LIMIT)
+    question_turn_id: UUID
+    authorization_id: UUID | None = None
+
+
+def slack_ask_blocks(
+    question: AskUserInput | None, binding: _SlackAskBinding | None = None
+) -> list[dict[str, object]] | None:
     """The rendered ask for a reply whose turn ended on a question: the title, then one input block
     per question — radio buttons for a single choice, checkboxes for a multi-select, a text box for
     a free-text answer or for a question offering one option — and one submit button for the whole
@@ -1357,9 +1372,19 @@ def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] |
     correct it in place rather than answering twice."""
     if question is None:
         return None
+    if question.target_member_id is None and binding is not None:
+        raise ValueError("an untargeted Slack question cannot carry a private binding")
+    if question.target_member_id is not None and (
+        binding is None
+        or binding.target_member_id != question.target_member_id
+        or binding.authorization_id != question.authorization_id
+    ):
+        raise ValueError("a targeted Slack question requires its exact private binding")
     controls = [_ask_control(index, ask) for index, ask in enumerate(question.questions)]
     title = _mrkdwn_section(f"*{question.title}*")
     if any(control is None for control in controls):
+        if binding is not None:
+            raise ValueError("a targeted Slack question requires structured controls")
         return [
             title,
             *(_ask_prose(ask) for ask in question.questions),
@@ -1375,15 +1400,18 @@ def slack_ask_blocks(question: AskUserInput | None) -> list[dict[str, object]] |
                     "type": "button",
                     "text": {"type": "plain_text", "text": ASK_SUBMIT_TEXT},
                     "action_id": ASK_SUBMIT_ACTION_ID,
-                    **(
-                        {"value": str(question.target_member_id)}
-                        if question.target_member_id is not None
-                        else {}
-                    ),
+                    **({"value": _ask_binding_value(binding)} if binding is not None else {}),
                 }
             ],
         },
     ]
+
+
+def _ask_binding_value(binding: _SlackAskBinding) -> str:
+    value = binding.model_dump_json()
+    if len(value) > SLACK_ACTION_VALUE_LIMIT:
+        raise ValueError("Slack question binding is too large")
+    return value
 
 
 def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
@@ -1444,7 +1472,7 @@ def _ask_control(index: int, ask: AskQuestion) -> dict[str, object] | None:
 def _ask_option(option: QuestionOption) -> dict[str, object]:
     rendered: dict[str, object] = {
         "text": {"type": "plain_text", "text": option.label},
-        "value": option.label,
+        "value": option.authorization_choice or option.label,
     }
     if option.description:
         rendered["description"] = {
@@ -2201,23 +2229,46 @@ async def _slack_permalink(bot_token: str, channel: str, ts: str) -> str | None:
 
 
 def _turn_context(
-    sender: SlackUser | None, source: str | None, question: str | None = None
+    sender: SlackUser | None,
+    source: str | None,
+    question: str | None = None,
+    *,
+    authorization_id: UUID | None = None,
+    authorization_choice: AuthorizationChoice | None = None,
 ) -> TurnContext:
     """The admitted turn's ambient context from the sender read plus the permalink to the member's
     message, and for a button answer the question it answered; a timezone Slack reports that is not
     a known zone is dropped with a log rather than failing the member's message."""
     if sender is None:
-        return TurnContext(source=source, question=question)
+        return TurnContext(
+            source=source,
+            question=question,
+            authorization_id=authorization_id,
+            authorization_choice=authorization_choice,
+        )
     line = (
         f"{sender.name} ({sender.email})"
         if sender.name and sender.email
         else sender.name or sender.email
     )
     try:
-        return TurnContext(sender=line, timezone=sender.timezone, question=question, source=source)
+        return TurnContext(
+            sender=line,
+            timezone=sender.timezone,
+            question=question,
+            authorization_id=authorization_id,
+            authorization_choice=authorization_choice,
+            source=source,
+        )
     except ValidationError:
         _LOG.warning("slack timezone %r is not a known zone; dropped", sender.timezone)
-        return TurnContext(sender=line, question=question, source=source)
+        return TurnContext(
+            sender=line,
+            question=question,
+            authorization_id=authorization_id,
+            authorization_choice=authorization_choice,
+            source=source,
+        )
 
 
 async def _resolve_member(
@@ -3620,6 +3671,7 @@ class SubmittedAnswer:
     block_id: str
     question: str
     answer: str
+    authorization_choice: AuthorizationChoice | None
 
 
 @dataclass(frozen=True)
@@ -3634,7 +3686,7 @@ class AnswerSubmit:
     Slack takes a thread's parent rather than a reply's timestamp."""
 
     slack_user_id: str
-    target_member_id: UUID | None
+    binding: _SlackAskBinding | None
     channel: str
     queue_key: str
     is_dm: bool
@@ -3680,14 +3732,14 @@ async def _handle_answer_submit(
     interaction: AnswerSubmit,
     member_id: UUID | None,
 ) -> Response | None:
-    conversation_id = await ctx.find_conversation(interaction.queue_key)
+    binding = interaction.binding
+    queue_key = interaction.queue_key if binding is None else binding.queue_key
+    conversation_id = await ctx.find_conversation(queue_key)
     if conversation_id is None:
         return JSONResponse({"ok": True, "ignored": True})
-    if (
-        interaction.target_member_id is not None
-        and member_id is not None
-        and interaction.target_member_id != member_id
-    ):
+    if binding is not None and conversation_id != binding.conversation_id:
+        return JSONResponse({"ok": True, "ignored": True})
+    if binding is not None and member_id is not None and binding.target_member_id != member_id:
         return JSONResponse({"ok": True, "ignored": True})
     answered = tuple(answer for answer in interaction.answers if answer.answer)
     if not answered:
@@ -3705,9 +3757,9 @@ async def _handle_answer_submit(
     )
     if member_id is None:
         member_id = await _resolve_member(ctx, interaction.slack_user_id, interaction.is_dm, sender)
-    if interaction.target_member_id is not None and interaction.target_member_id != member_id:
+    if binding is not None and binding.target_member_id != member_id:
         return JSONResponse({"ok": True, "ignored": True})
-    if interaction.is_dm and member_id is not None:
+    if binding is None and interaction.is_dm and member_id is not None:
         conversation_id = await ctx.conversation_for(
             interaction.queue_key, conversation_audience(member_id)
         )
@@ -3718,17 +3770,44 @@ async def _handle_answer_submit(
         else "\n".join(f"{answer.question}: {answer.answer}" for answer in answered)
     )
     body = fence_member_message(mint_marker(), "", answered_text, "")
-    thread = MirroredThread(queue_key=interaction.queue_key, message_ts=interaction.reply_root)
+    _, _, origin_thread = queue_key.partition(":")
+    thread = MirroredThread(queue_key=queue_key, message_ts=origin_thread or interaction.reply_root)
     await _mirror_thread(conversation_id, thread)
-    answer_key = f"{interaction.queue_key}:{interaction.message_ts}:answer"
+    answer_key = (
+        f"{interaction.queue_key}:{interaction.message_ts}:answer"
+        if binding is None
+        else f"{binding.queue_key}:{binding.question_turn_id}:answer"
+    )
+    authorization_choices = tuple(
+        answer.authorization_choice
+        for answer in answered
+        if answer.authorization_choice is not None
+    )
+    if (
+        binding is not None
+        and binding.authorization_id is not None
+        and (len(answered) != 1 or len(authorization_choices) != 1)
+    ):
+        return JSONResponse({"ok": True, "ignored": True})
+    authorization_choice = authorization_choices[0] if len(authorization_choices) == 1 else None
     admitted = await ctx.admit(
         conversation_id,
         body,
         idempotency_key=answer_key,
-        context=_turn_context(sender, answered_at, answered[0].question if lone else None),
+        context=_turn_context(
+            sender,
+            answered_at,
+            answered[0].question if lone else None,
+            authorization_id=None if binding is None else binding.authorization_id,
+            authorization_choice=(
+                authorization_choice
+                if binding is not None and binding.authorization_id is not None
+                else None
+            ),
+        ),
         speaker_member_id=member_id,
     )
-    if interaction.is_dm:
+    if binding is None and interaction.is_dm:
         await _anchor_dm_thread(admitted, interaction.reply_root)
     if admitted.opened_run:
         _arm_followers(
@@ -3878,10 +3957,14 @@ def _to_interaction(raw: bytes, identity: SlackIdentity) -> AnswerSubmit | Conne
         )
     if action_id != ASK_SUBMIT_ACTION_ID:
         return None
-    raw_target = action.get("value")
+    raw_binding = action.get("value")
     try:
-        target_member_id = UUID(raw_target) if isinstance(raw_target, str) else None
-    except ValueError:
+        binding = (
+            _SlackAskBinding.model_validate_json(raw_binding)
+            if isinstance(raw_binding, str)
+            else None
+        )
+    except ValidationError:
         return None
     raw_blocks = message.get("blocks")
     blocks = tuple(
@@ -3896,7 +3979,7 @@ def _to_interaction(raw: bytes, identity: SlackIdentity) -> AnswerSubmit | Conne
     is_dm = channel_id.startswith("D")
     return AnswerSubmit(
         slack_user_id=user_id,
-        target_member_id=target_member_id,
+        binding=binding,
         channel=channel_id,
         queue_key=slack_thread_key(channel_id, thread_ts or message_ts, is_dm),
         is_dm=is_dm,
@@ -3926,44 +4009,63 @@ def _submitted_answers(
             continue
         label = block.get("label")
         held = values.get(block_id) if isinstance(values, dict) else None
+        answer, authorization_choice = _held_answer(
+            next(iter(held.values()), None) if isinstance(held, dict) else None
+        )
         answers.append(
             SubmittedAnswer(
                 block_id=block_id,
                 question=str(label.get("text") or "") if isinstance(label, dict) else "",
-                answer=_held_answer(
-                    next(iter(held.values()), None) if isinstance(held, dict) else None
-                ),
+                answer=answer,
+                authorization_choice=authorization_choice,
             )
         )
     return tuple(answers)
 
 
-def _held_answer(field: object) -> str:
+def _held_answer(field: object) -> tuple[str, AuthorizationChoice | None]:
     """What one control held, as the answer text: a choice's own value (the option's label), every
     ticked value of a multi-select, or the text typed into a box. Empty where the member left the
     control alone — Slack sends the untouched ones too."""
     if not isinstance(field, dict):
-        return ""
+        return "", None
     match field.get("type"):
         case "radio_buttons":
             chosen = field.get("selected_option")
-            return _option_value(chosen)
+            return _option_label(chosen), _option_authorization_choice(chosen)
         case "checkboxes":
             chosen = field.get("selected_options")
             if not isinstance(chosen, list):
-                return ""
-            return ", ".join(filter(None, (_option_value(option) for option in chosen)))
+                return "", None
+            return ", ".join(filter(None, (_option_label(option) for option in chosen))), None
         case "plain_text_input":
             typed = field.get("value")
-            return typed.strip() if isinstance(typed, str) else ""
-    return ""
+            return (typed.strip() if isinstance(typed, str) else ""), None
+    return "", None
 
 
-def _option_value(option: object) -> str:
+def _option_label(option: object) -> str:
     if not isinstance(option, dict):
         return ""
+    text = option.get("text")
+    label = text.get("text") if isinstance(text, dict) else None
+    if isinstance(label, str):
+        return label
     value = option.get("value")
     return value if isinstance(value, str) else ""
+
+
+def _option_authorization_choice(option: object) -> AuthorizationChoice | None:
+    if not isinstance(option, dict):
+        return None
+    match option.get("value"):
+        case "allow":
+            return "allow"
+        case "deny":
+            return "deny"
+        case "always":
+            return "always"
+    return None
 
 
 def _dict_field(payload: Mapping[str, object], field: str) -> Mapping[str, object]:
@@ -4331,6 +4433,24 @@ class _SlackReplyDelivery(BaseModel):
     ts: str
 
 
+class _SlackReplyPending(BaseModel):
+    id: str
+    channel: str
+    thread_ts: str | None
+
+
+@dataclass(frozen=True)
+class _SlackReplyTarget:
+    channel: str
+    thread_ts: str | None
+    parts: tuple[str, ...]
+    metadata: str | None
+    actions: list[dict[str, object]] | None
+    scope: str
+    unfurl: bool
+    hold_connect: bool
+
+
 class _SlackReplyProgress(BaseModel):
     """What one reply has already posted, and the mention map it posts through.
 
@@ -4340,7 +4460,7 @@ class _SlackReplyProgress(BaseModel):
     resolved yet; the ids in it are wire ids, beside the reply's text and never inside it."""
 
     deliveries: tuple[_SlackReplyDelivery, ...] = ()
-    pending: str | None = None
+    pending: _SlackReplyPending | None = None
     complete: bool = False
     mentions: dict[str, str] | None = None
 
@@ -4419,6 +4539,11 @@ async def _reconcile_slack_reply(
     thread_ts: str | None,
     delivery_id: str,
 ) -> str | None:
+    if channel.startswith("U"):
+        resolved = await _member_dm_channel(bot_token, channel)
+        if resolved == channel:
+            return None
+        channel = resolved
     cursor = ""
     oldest = f"{time.time() - SLACK_REPLY_RECONCILE_WINDOW_SECONDS:.6f}"
     for _page in range(SLACK_CONVERSATIONS_MAX_PAGES):
@@ -4469,11 +4594,26 @@ async def _deliver_slack_reply(
     delivered = next((item for item in progress.deliveries if item.id == delivery_id), None)
     if delivered is not None:
         return progress, expected, {"ok": True, "ts": delivered.ts}
+    posted = json.loads(body)
+    channel = posted.get("channel")
+    thread_ts = posted.get("thread_ts")
+    if not isinstance(channel, str) or not channel:
+        raise ValueError("Slack reply body has no channel")
+    if thread_ts is not None and not isinstance(thread_ts, str):
+        raise ValueError("Slack reply body has an invalid thread")
     progress, expected = await _checkpoint_slack_reply(
         store,
         key,
         expected,
-        progress.model_copy(update={"pending": delivery_id}),
+        progress.model_copy(
+            update={
+                "pending": _SlackReplyPending(
+                    id=delivery_id,
+                    channel=channel,
+                    thread_ts=thread_ts,
+                )
+            }
+        ),
     )
     payload = await _chat_post(client, bot_token, body)
     if payload.get("error") == SLACK_INVALID_BLOCKS_ERROR:
@@ -4532,6 +4672,146 @@ async def _reply_mentions_mapped(
     return progress, expected, mention_markup(text, ids)
 
 
+@dataclass(frozen=True)
+class _SlackReplyWriter:
+    client: httpx.AsyncClient
+    bot_token: str
+    store: ScopedStore
+    progress_key: str
+    progress: _SlackReplyProgress
+    stored: JsonValue
+    turn_id: UUID
+    connect_request: ConnectRequest | None
+
+    async def run(
+        self, targets: Sequence[_SlackReplyTarget]
+    ) -> tuple[_SlackReplyProgress, JsonValue, str | None]:
+        progress, stored = self.progress, self.stored
+        first_ts: str | None = None
+        for target in targets:
+            for index, part in enumerate(target.parts):
+                last = index == len(target.parts) - 1
+                part_metadata = target.metadata if last else None
+                part_actions = target.actions if last else None
+                delivery_id = f"{self.turn_id}:{target.scope}{index}:markdown"
+                body = slack_reply_body(
+                    target.channel,
+                    target.thread_ts,
+                    part,
+                    part_metadata,
+                    delivery_id=delivery_id,
+                    actions=part_actions,
+                    unfurl=target.unfurl,
+                )
+                progress, stored, payload = await _deliver_slack_reply(
+                    self.client,
+                    self.bot_token,
+                    self.store,
+                    self.progress_key,
+                    progress,
+                    stored,
+                    delivery_id,
+                    body,
+                )
+                if payload.get("error") != SLACK_INVALID_BLOCKS_ERROR:
+                    ts = _posted_message_ts(payload)
+                    if target.scope == "" and first_ts is None:
+                        first_ts = ts
+                    if target.hold_connect:
+                        await _hold_connect_message(
+                            self.store,
+                            self.connect_request,
+                            json.loads(body),
+                            target.channel,
+                            ts,
+                        )
+                    continue
+                progress, stored, fallback_ts = await self._fallback(
+                    target,
+                    index,
+                    part,
+                    part_metadata,
+                    part_actions,
+                    progress,
+                    stored,
+                )
+                if target.scope == "" and first_ts is None:
+                    first_ts = fallback_ts
+        return progress, stored, first_ts
+
+    async def _fallback(
+        self,
+        target: _SlackReplyTarget,
+        index: int,
+        part: str,
+        part_metadata: str | None,
+        part_actions: list[dict[str, object]] | None,
+        progress: _SlackReplyProgress,
+        stored: JsonValue,
+    ) -> tuple[_SlackReplyProgress, JsonValue, str]:
+        _LOG.warning("slack rejected blocks for %s; re-posting conservatively", target.channel)
+        if part_actions is not None:
+            delivery_id = f"{self.turn_id}:{target.scope}{index}:sections"
+            conservative = slack_reply_body(
+                target.channel,
+                target.thread_ts,
+                part,
+                part_metadata,
+                delivery_id=delivery_id,
+                actions=part_actions,
+                sections=True,
+                unfurl=target.unfurl,
+            )
+            progress, stored, payload = await _deliver_slack_reply(
+                self.client,
+                self.bot_token,
+                self.store,
+                self.progress_key,
+                progress,
+                stored,
+                delivery_id,
+                conservative,
+            )
+            ts = _posted_message_ts(payload)
+            if target.hold_connect:
+                await _hold_connect_message(
+                    self.store,
+                    self.connect_request,
+                    json.loads(conservative),
+                    target.channel,
+                    ts,
+                )
+            return progress, stored, ts
+        metadata_size = len(part_metadata) + 2 if part_metadata is not None else 0
+        fallback_parts = slack_reply_parts(part, SLACK_TEXT_MESSAGE_LIMIT - metadata_size)
+        first_ts: str | None = None
+        for fallback_index, fallback_part in enumerate(fallback_parts):
+            fallback_metadata = part_metadata if fallback_index == len(fallback_parts) - 1 else None
+            delivery_id = f"{self.turn_id}:{target.scope}{index}:plain:{fallback_index}"
+            progress, stored, payload = await _deliver_slack_reply(
+                self.client,
+                self.bot_token,
+                self.store,
+                self.progress_key,
+                progress,
+                stored,
+                delivery_id,
+                slack_reply_body(
+                    target.channel,
+                    target.thread_ts,
+                    fallback_part,
+                    fallback_metadata,
+                    delivery_id=delivery_id,
+                    blocks=False,
+                ),
+            )
+            if first_ts is None:
+                first_ts = _posted_message_ts(payload)
+        if first_ts is None:
+            raise SlackApiError("Slack fallback response missing ts")
+        return progress, stored, first_ts
+
+
 async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelivered:
     """Post the reply parts and return the first message ref (`channel:ts`), the delivery record.
     A delivery that says nothing sends no message at all, so the thread gets neither a footer nor
@@ -4550,7 +4830,9 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
     Before an uncertain request, its delivery ID is attached as Slack message metadata; a retry
     reads that marker back before deciding whether to post, covering a response lost after Slack
     accepted the message. The completed checkpoint survives until `attach`, after core has durably
-    recorded the first message as the delivery ref."""
+    recorded the first message as the delivery ref. A targeted question posts only a generic line
+    in the public thread and sends its exact reply and controls to the target's linked bot DM; both
+    destinations share this checkpoint and the private control routes its answer back here."""
     channel = writeback.queue_key.partition(":")[0]
     if writeback_says_nothing(writeback):
         log("slack.reply_suppressed", turn=str(writeback.turn_id), channel=channel)
@@ -4571,18 +4853,30 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
             raise SlackApiError("Completed Slack reply has no deliveries")
         return f"{channel}:{progress.deliveries[0].ts}"
     linked = await _reply_with_links(ctx, writeback)
-    progress, stored, text = await _reply_mentions_mapped(
-        ctx,
-        bot_token,
-        channel,
-        linked,
-        store,
-        progress_key,
-        progress,
-        stored,
+    question = writeback.terminal.question
+    target_member_id = None if question is None else question.target_member_id
+    targeted = target_member_id is not None
+    private_user = (
+        None if target_member_id is None else await ctx.member_external_id(target_member_id)
     )
-    actions = [
-        *(slack_ask_blocks(writeback.terminal.question) or ()),
+    private_channel = (
+        None if private_user is None else await _member_dm_channel(bot_token, private_user)
+    )
+    if targeted:
+        text = TARGETED_ASK_PUBLIC_TEXT
+    else:
+        progress, stored, text = await _reply_mentions_mapped(
+            ctx,
+            bot_token,
+            channel,
+            linked,
+            store,
+            progress_key,
+            progress,
+            stored,
+        )
+    public_actions = [
+        *(() if targeted else slack_ask_blocks(question) or ()),
         *(slack_connect_blocks(writeback.terminal.connect_request, writeback.turn_id) or ()),
     ] or None
     unfurl = not any(artifact.role == "details" for artifact in writeback.artifacts)
@@ -4600,18 +4894,55 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
         f"({writeback.terminal.tokens:,} tokens, {writeback.terminal.cache_percent}% cached) · "
         f"{model}{params}",
     )
-    parts = slack_reply_parts(text)
+    targets = [
+        _SlackReplyTarget(
+            channel=channel,
+            thread_ts=thread,
+            parts=tuple(slack_reply_parts(text)),
+            metadata=metadata,
+            actions=public_actions,
+            scope="",
+            unfurl=unfurl,
+            hold_connect=True,
+        )
+    ]
+    if targeted and private_channel is not None:
+        assert question is not None
+        assert question.target_member_id is not None
+        binding = _SlackAskBinding(
+            target_member_id=question.target_member_id,
+            conversation_id=writeback.conversation_id,
+            queue_key=writeback.queue_key,
+            question_turn_id=writeback.turn_id,
+            authorization_id=question.authorization_id,
+        )
+        targets.append(
+            _SlackReplyTarget(
+                channel=private_channel,
+                thread_ts=None,
+                parts=tuple(slack_reply_parts(linked)),
+                metadata=None,
+                actions=slack_ask_blocks(question, binding),
+                scope="private:",
+                unfurl=unfurl,
+                hold_connect=False,
+            )
+        )
     first_ts: str | None = None
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         if progress.pending is not None:
             reconciled_ts = await _reconcile_slack_reply(
-                client, bot_token, channel, thread, progress.pending
+                client,
+                bot_token,
+                progress.pending.channel,
+                progress.pending.thread_ts,
+                progress.pending.id,
             )
             deliveries = progress.deliveries
             if reconciled_ts is not None:
                 deliveries = (
                     *deliveries,
-                    _SlackReplyDelivery(id=progress.pending, ts=reconciled_ts),
+                    _SlackReplyDelivery(id=progress.pending.id, ts=reconciled_ts),
                 )
             progress, stored = await _checkpoint_slack_reply(
                 store,
@@ -4619,103 +4950,17 @@ async def post(ctx: SurfaceContext, writeback: Writeback) -> str | NothingDelive
                 stored,
                 progress.model_copy(update={"deliveries": deliveries, "pending": None}),
             )
-        for index, part in enumerate(parts):
-            last = index == len(parts) - 1
-            part_metadata = metadata if last else None
-            part_actions = actions if last else None
-            delivery_id = f"{writeback.turn_id}:{index}:markdown"
-            body = slack_reply_body(
-                channel,
-                thread,
-                part,
-                part_metadata,
-                delivery_id=delivery_id,
-                actions=part_actions,
-                unfurl=unfurl,
-            )
-            progress, stored, payload = await _deliver_slack_reply(
-                client,
-                bot_token,
-                store,
-                progress_key,
-                progress,
-                stored,
-                delivery_id,
-                body,
-            )
-            if payload.get("error") != SLACK_INVALID_BLOCKS_ERROR:
-                ts = _posted_message_ts(payload)
-                if first_ts is None:
-                    first_ts = ts
-                await _hold_connect_message(
-                    store,
-                    writeback.terminal.connect_request,
-                    json.loads(body),
-                    channel,
-                    ts,
-                )
-                continue
-            _LOG.warning("slack rejected blocks for %s; re-posting conservatively", channel)
-            if part_actions is not None:
-                delivery_id = f"{writeback.turn_id}:{index}:sections"
-                conservative = slack_reply_body(
-                    channel,
-                    thread,
-                    part,
-                    part_metadata,
-                    delivery_id=delivery_id,
-                    actions=part_actions,
-                    sections=True,
-                    unfurl=unfurl,
-                )
-                progress, stored, payload = await _deliver_slack_reply(
-                    client,
-                    bot_token,
-                    store,
-                    progress_key,
-                    progress,
-                    stored,
-                    delivery_id,
-                    conservative,
-                )
-                ts = _posted_message_ts(payload)
-                if first_ts is None:
-                    first_ts = ts
-                await _hold_connect_message(
-                    store,
-                    writeback.terminal.connect_request,
-                    json.loads(conservative),
-                    channel,
-                    ts,
-                )
-                continue
-            metadata_size = len(part_metadata) + 2 if part_metadata is not None else 0
-            fallback_parts = slack_reply_parts(part, SLACK_TEXT_MESSAGE_LIMIT - metadata_size)
-            for fallback_index, fallback_part in enumerate(fallback_parts):
-                fallback_metadata = (
-                    part_metadata if fallback_index == len(fallback_parts) - 1 else None
-                )
-                delivery_id = f"{writeback.turn_id}:{index}:plain:{fallback_index}"
-                progress, stored, payload = await _deliver_slack_reply(
-                    client,
-                    bot_token,
-                    store,
-                    progress_key,
-                    progress,
-                    stored,
-                    delivery_id,
-                    slack_reply_body(
-                        channel,
-                        thread,
-                        fallback_part,
-                        fallback_metadata,
-                        delivery_id=delivery_id,
-                        blocks=False,
-                    ),
-                )
-                ts = _posted_message_ts(payload)
-                if first_ts is None:
-                    first_ts = ts
+        writer = _SlackReplyWriter(
+            client=client,
+            bot_token=bot_token,
+            store=store,
+            progress_key=progress_key,
+            progress=progress,
+            stored=stored,
+            turn_id=writeback.turn_id,
+            connect_request=writeback.terminal.connect_request,
+        )
+        progress, stored, first_ts = await writer.run(targets)
     if first_ts is None:
         raise SlackApiError("Slack response missing ts")
     await _checkpoint_slack_reply(
@@ -4772,13 +5017,17 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
     async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
         if progress.pending is not None:
             reconciled_ts = await _reconcile_slack_reply(
-                client, bot_token, channel, thread, progress.pending
+                client,
+                bot_token,
+                progress.pending.channel,
+                progress.pending.thread_ts,
+                progress.pending.id,
             )
             deliveries = progress.deliveries
             if reconciled_ts is not None:
                 deliveries = (
                     *deliveries,
-                    _SlackReplyDelivery(id=progress.pending, ts=reconciled_ts),
+                    _SlackReplyDelivery(id=progress.pending.id, ts=reconciled_ts),
                 )
             progress, stored = await _checkpoint_slack_reply(
                 store,
@@ -4824,6 +5073,39 @@ async def speak(ctx: SurfaceContext, reply: MidTurnReply) -> str:
         progress.model_copy(update={"complete": True}),
     )
     return f"{channel}:{first_ts}"
+
+
+async def _member_dm_channel(bot_token: str, slack_user_id: str) -> str:
+    async with httpx.AsyncClient(timeout=SLACK_API_TIMEOUT_SECONDS) as client:
+        cursor = ""
+        for _page in range(SLACK_CONVERSATIONS_MAX_PAGES):
+            payload = await _slack_ok(
+                partial(
+                    client.get,
+                    SLACK_CONVERSATIONS_LIST_URL,
+                    params={
+                        "types": "im",
+                        "exclude_archived": "true",
+                        "limit": str(SLACK_CONVERSATIONS_PAGE_SIZE),
+                        **({"cursor": cursor} if cursor else {}),
+                    },
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                ),
+                attempts=AMBIENT_FETCH_ATTEMPTS,
+            )
+            channels = payload.get("channels")
+            for channel in channels if isinstance(channels, list) else ():
+                if not isinstance(channel, dict) or channel.get("user") != slack_user_id:
+                    continue
+                channel_id = channel.get("id")
+                if isinstance(channel_id, str) and channel_id:
+                    return channel_id
+            metadata = payload.get("response_metadata")
+            next_cursor = metadata.get("next_cursor") if isinstance(metadata, dict) else None
+            cursor = next_cursor if isinstance(next_cursor, str) else ""
+            if not cursor:
+                return slack_user_id
+    raise SlackApiError("Slack DM lookup exceeded its page limit")
 
 
 async def _chat_post(

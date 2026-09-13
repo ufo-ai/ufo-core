@@ -74,6 +74,7 @@ from ufo.sdk.surfaces import (
     EXTENSION_SURFACE_PREFIX,
     PORTAL_SURFACE,
     AgentSummary,
+    AskUserInput,
     ConnectRequestInvalid,
     Conversation,
     CredentialPrompt,
@@ -114,6 +115,8 @@ LISTEN_HEADER = "x-ufo-listen"
 OP_ERR_HEADER = "x-ufo-op-err"
 SCRIPT_HEADER = "x-ufo-script"
 TIMEZONE_HEADER = "x-ufo-timezone"
+AUTHORIZATION_ID_HEADER = "x-ufo-authorization-id"
+AUTHORIZATION_CHOICE_HEADER = "x-ufo-authorization-choice"
 MODEL_HEADER = "x-ufo-model"
 INTERNET_HEADER = "x-ufo-internet"
 ENVIRONMENT_HEADER = "x-ufo-environment"
@@ -410,14 +413,7 @@ def _answer(
         None,
         viewer_member_id,
     ):
-        choices = tuple(
-            directive(
-                "choose_many" if ask.multi_select and not ask.free_text_only else "choose",
-                f"{ask.header}: {ask.question}" if ask.header else ask.question,
-                *(option.label for option in (() if ask.free_text_only else ask.options or ())),
-            )
-            for ask in frame.question.questions
-        )
+        choices = _question_directives(frame.question)
         question = (directive("say", frame.question.title), *choices)
     match frame.status:
         case "done":
@@ -454,6 +450,26 @@ def _answer(
                 return (*attestation, directive("say", frame.text), *shared, closing)
             return (*attestation, directive("say", "cancelled"), *shared, directive("ask", PROMPT))
     raise ValueError(f"unmapped terminal status {frame.status!r}")
+
+
+def _question_directives(question: AskUserInput) -> tuple[bytes, ...]:
+    if question.authorization_id is not None:
+        ask = question.questions[0]
+        fields: list[str] = []
+        for option in ask.options or ():
+            if option.authorization_choice is None:
+                raise RuntimeError("authorization question option has no choice")
+            fields.extend((option.authorization_choice, option.label, option.description or ""))
+        prompt = f"{ask.header}: {ask.question}" if ask.header else ask.question
+        return (directive("authorize", str(question.authorization_id), prompt, *fields),)
+    return tuple(
+        directive(
+            "choose_many" if ask.multi_select and not ask.free_text_only else "choose",
+            f"{ask.header}: {ask.question}" if ask.header else ask.question,
+            *(option.label for option in (() if ask.free_text_only else ask.options or ())),
+        )
+        for ask in question.questions
+    )
 
 
 @dataclass(frozen=True)
@@ -755,13 +771,31 @@ def _turn_context(email: str, request: Request) -> TurnContext:
     IANA name is dropped with a log rather than failing the member's message."""
     source = f"{SOURCE} ({email})"
     zone = request.headers.get(TIMEZONE_HEADER, "").strip()
+    authorization_id_value = request.headers.get(AUTHORIZATION_ID_HEADER, "").strip()
+    authorization_choice = request.headers.get(AUTHORIZATION_CHOICE_HEADER, "").strip()
+    if bool(authorization_id_value) != bool(authorization_choice):
+        raise ValueError("an authorization answer requires its id and choice")
+    authorization_id: UUID | None = None
+    if authorization_id_value:
+        try:
+            authorization_id = UUID(authorization_id_value)
+        except ValueError as error:
+            raise ValueError(f"{AUTHORIZATION_ID_HEADER} must be a uuid") from error
+        if authorization_choice not in {"allow", "deny", "always"}:
+            raise ValueError(f"{AUTHORIZATION_CHOICE_HEADER} is invalid")
+    values = {
+        "sender": email,
+        "source": source,
+        "authorization_id": authorization_id,
+        "authorization_choice": authorization_choice or None,
+    }
     if not zone:
-        return TurnContext(sender=email, source=source)
+        return TurnContext.model_validate(values)
     try:
-        return TurnContext(sender=email, timezone=zone, source=source)
+        return TurnContext.model_validate({**values, "timezone": zone})
     except ValidationError:
         log("ufo.timezone_dropped", zone=zone)
-        return TurnContext(sender=email, source=source)
+        return TurnContext.model_validate(values)
 
 
 def _runtime_config(ctx: SurfaceContext, request: Request) -> TurnRuntimeConfig | None:
@@ -883,20 +917,26 @@ async def _channel_message(
         return _ChannelTurn(turn_id, resumed=True)
     if stale:
         return PlainTextResponse(_client_update())
-    comment: str | None
+    author: str | None
     match posting:
         case _ReadOnly(surface):
             return PlainTextResponse(_read_only(surface), status_code=403)
-        case _Comment(author):
-            comment = f"{author} commented: {body}"
+        case _Comment(name):
+            author = name
         case _Plain():
-            comment = None
+            author = None
     if len(body.encode()) > MAX_MESSAGE_BYTES:
         return PlainTextResponse("message too large", status_code=413)
     try:
         runtime_config = _runtime_config(ctx, request)
+        turn_context = _turn_context(email, request)
     except ValueError as error:
         return PlainTextResponse(str(error), status_code=400)
+    comment = (
+        None
+        if author is None or turn_context.authorization_id is not None
+        else f"{author} commented: {body}"
+    )
     note = None
     if cwd and await ctx.claim_terminal(conversation_id, cwd):
         note = directive("note", f"Workspace: {cwd}")
@@ -904,7 +944,7 @@ async def _channel_message(
         admitted = await ctx.admit(
             conversation_id,
             body,
-            context=_turn_context(email, request),
+            context=turn_context,
             speaker_member_id=member_id,
             comment=comment,
             runtime_config=runtime_config,
@@ -1286,20 +1326,26 @@ async def _send(
     body = (await request.body()).decode("utf-8", "replace").strip()
     if not body:
         return PlainTextResponse("a send carries a message", status_code=400)
-    comment: str | None
+    author: str | None
     match posting:
         case _ReadOnly(surface):
             return PlainTextResponse(_read_only(surface), status_code=403)
-        case _Comment(author):
-            comment = f"{author} commented: {body}"
+        case _Comment(name):
+            author = name
         case _Plain():
-            comment = None
+            author = None
     if len(body.encode()) > MAX_MESSAGE_BYTES:
         return PlainTextResponse("message too large", status_code=413)
     try:
         runtime_config = _runtime_config(ctx, request)
+        turn_context = _turn_context(email, request)
     except ValueError as error:
         return PlainTextResponse(str(error), status_code=400)
+    comment = (
+        None
+        if author is None or turn_context.authorization_id is not None
+        else f"{author} commented: {body}"
+    )
     note = b""
     if cwd and await ctx.claim_terminal(conversation_id, cwd):
         note = directive("note", f"Workspace: {cwd}")
@@ -1310,7 +1356,7 @@ async def _send(
             idempotency_key=(
                 f"{conversation_id}{QUEUE_KEY_SEPARATOR}send{QUEUE_KEY_SEPARATOR}{send_id}"
             ),
-            context=_turn_context(email, request),
+            context=turn_context,
             speaker_member_id=member_id,
             comment=comment,
             runtime_config=runtime_config,

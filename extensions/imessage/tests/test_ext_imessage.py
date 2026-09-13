@@ -26,6 +26,7 @@ from ufo_ext_imessage.provider import (
     ProviderNotConfigured,
 )
 from ufo_ext_imessage.surface import (
+    APPROVAL_PORTAL_TEXT,
     CODE_EXPIRED_TEXT,
     CODE_UNKNOWN_TEXT,
     CONNECTED_TEXT,
@@ -86,7 +87,10 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     Agent,
+    AskQuestion,
+    AskUserInput,
     ConnectRequest,
+    QuestionOption,
     TerminalFrame,
     Turn,
 )
@@ -669,6 +673,76 @@ async def test_direct_writeback_mints_the_requesting_members_connect_url() -> No
 
     assert await surface.post(Context(), writeback) == "message"
     assert sent == ["https://ufo.example.test/connect"]
+
+
+async def test_a_targeted_authorization_is_withheld_for_web_review() -> None:
+    sent: list[str] = []
+    target_member_id = uuid4()
+
+    class Provider:
+        async def send_text(self, _conversation_id: str, text: str, _idempotency_key: str) -> str:
+            sent.append(text)
+            return "message"
+
+    class Context:
+        public_base_url = "https://ufo.example.test"
+
+        def home_url(self, fragment: str = "") -> str:
+            return f"https://ufo.example.test/surface/web{fragment}"
+
+    provider = Provider()
+    imessage = ImessageSurface(provider=lambda _base: provider)
+    authorization_id = uuid4()
+    conversation_id = uuid4()
+    writeback = Writeback(
+        turn_id=uuid4(),
+        conversation_id=conversation_id,
+        agent_id=uuid4(),
+        queue_key=queue_key("group-chat", direct=False),
+        terminal=TerminalFrame(
+            status="done",
+            text="Approval required from owner@example.com.",
+            question=AskUserInput(
+                title="GitHub approval",
+                questions=(
+                    AskQuestion(
+                        question="Read private-repository-name from the selected GitHub account?",
+                        options=(
+                            QuestionOption(
+                                label="Allow once",
+                                description="Read repositories this time.",
+                                authorization_choice="allow",
+                            ),
+                            QuestionOption(
+                                label="Deny",
+                                description="Do not read repositories.",
+                                authorization_choice="deny",
+                            ),
+                            QuestionOption(
+                                label="Always allow repository reads",
+                                description=(
+                                    "Read repositories from this GitHub account "
+                                    "without asking again."
+                                ),
+                                authorization_choice="always",
+                            ),
+                        ),
+                    ),
+                ),
+                target_member_id=target_member_id,
+                authorization_id=authorization_id,
+            ),
+        ),
+        artifacts=(),
+    )
+
+    assert await imessage.post(Context(), writeback) == "message"
+    assert sent == [
+        f"{APPROVAL_PORTAL_TEXT}: https://ufo.example.test/surface/web#/c/{conversation_id}"
+    ]
+    assert str(authorization_id) not in sent[0]
+    assert "owner@example.com" not in sent[0]
+    assert "private-repository-name" not in sent[0]
 
 
 @pytest.mark.parametrize("answer", [SILENCE_SENTINEL, SILENCE_LINE_BREAK])

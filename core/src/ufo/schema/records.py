@@ -20,7 +20,6 @@ from pydantic import (
 )
 from pydantic.json_schema import SkipJsonSchema
 
-from ufo.runtime.authority import ExecutionAuthority, turn_authority
 from ufo.runtime.object_name import ObjectRef
 
 TurnStatus = Literal["queued", "running", "parked", "done", "failed", "cancelled"]
@@ -245,8 +244,10 @@ APPROVED: ProposalStatus = "approved"
 REJECTED: ProposalStatus = "rejected"
 
 DEFAULT_AGENT_NAME = "chat"
-TURN_QUEUE_NAME = "turns"
-EXPRESS_QUEUE_NAME = "express"
+TURN_QUEUE_NAME = "capability-turns"
+EXPRESS_QUEUE_NAME = "capability-express"
+UNSCOPED_TURN_QUEUE_NAME = "turns"
+UNSCOPED_EXPRESS_QUEUE_NAME = "express"
 TURN_WORKFLOW_NAME = "turn"
 
 
@@ -309,6 +310,7 @@ class Usage(BaseModel):
 
 
 MAX_USER_QUESTIONS = 4
+type AuthorizationChoice = Literal["allow", "deny", "always"]
 
 
 class QuestionOption(BaseModel):
@@ -316,6 +318,7 @@ class QuestionOption(BaseModel):
     description: str | None = Field(
         default=None, description="Optional explanation of what the choice means."
     )
+    authorization_choice: SkipJsonSchema[AuthorizationChoice | None] = None
 
 
 class AskQuestion(BaseModel):
@@ -367,6 +370,32 @@ class AskUserInput(BaseModel):
     """The only member whose authenticated structured answer this question accepts. None leaves
     the ordinary question open to any member who may speak in its conversation. Hidden from the
     model's tool schema: runtime policy may target a question; a model call may not."""
+    authorization_id: SkipJsonSchema[UUID | None] = None
+    """The pending authorization this runtime-created question settles. None marks an ordinary
+    model-created question. Hidden from the model's tool schema."""
+
+    @model_validator(mode="after")
+    def _authorization_shape(self) -> "AskUserInput":
+        options = tuple(option for question in self.questions for option in question.options or ())
+        choices = tuple(
+            option.authorization_choice
+            for option in options
+            if option.authorization_choice is not None
+        )
+        if self.authorization_id is None:
+            if choices:
+                raise ValueError("an ordinary question cannot carry authorization choices")
+        elif (
+            self.target_member_id is None
+            or len(self.questions) != 1
+            or choices not in (("allow", "deny"), ("allow", "deny", "always"))
+            or len(options) != len(choices)
+            or self.questions[0].multi_select is True
+            or self.questions[0].free_text_only is True
+            or self.questions[0].allow_attachments is True
+        ):
+            raise ValueError("an authorization question requires its exact choices")
+        return self
 
 
 class CredentialPrompt(BaseModel):
@@ -392,7 +421,7 @@ class ConnectRequest(BaseModel):
     is minted only after that member privately claims it.
 
     `grantee_agent_id` names the agent the connection is granted to when that is not the asking
-    agent — the main agent connecting an account on behalf of an agent that cannot ask for itself.
+    agent — the main agent connecting an account for an agent that cannot ask for itself.
     It is resolved and gated when the request is made, so the durable request already names the
     agent the seal will bind, and no later step re-decides it."""
 
@@ -463,6 +492,36 @@ class RuntimeIdentity(BaseModel):
 
 
 ENVIRONMENT_DOCUMENT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+MODEL_ACCOUNT_SLOT_BY_PROVIDER = {
+    "anthropic": "anthropic_api_key",
+    "openai": "openai_api_key",
+}
+MODEL_ACCOUNT_MEMBER_INFIX = ":member:"
+
+
+class ModelAccountCapability(BaseModel):
+    """One exact stored model credential a turn tree may use."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: str = Field(min_length=1)
+    slot: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _known_member_slot(self) -> "ModelAccountCapability":
+        key_slot = MODEL_ACCOUNT_SLOT_BY_PROVIDER.get(self.provider)
+        if key_slot is None:
+            raise ValueError("model account provider is not supported")
+        prefix = f"{key_slot}{MODEL_ACCOUNT_MEMBER_INFIX}"
+        if not self.slot.startswith(prefix):
+            raise ValueError("model account slot does not match its provider")
+        try:
+            member_id = UUID(self.slot.removeprefix(prefix))
+        except ValueError as error:
+            raise ValueError("model account slot must name a member credential") from error
+        if self.slot != f"{prefix}{member_id}":
+            raise ValueError("model account slot must be canonical")
+        return self
 
 
 class TurnRuntimeConfig(BaseModel):
@@ -537,10 +596,12 @@ class Agent(BaseModel):
 
 class TurnContext(BaseModel):
     """Ambient facts the admitting surface knows about an inbound — who spoke, their IANA timezone,
-    the question their message answers when the surface knew one, and where they said it — carried
-    on the turn row and rendered by the engine as the <context> tag before the message. `source` is
-    one line naming the request's origin in whatever form the surface has: a permalink to the
-    message itself where the surface addresses messages, else the client and the member's address.
+    the question their message answers when the surface knew one, and where they said it. An
+    authorization control also carries its opaque identity and choice separately from the display
+    text. The record is carried on the turn row and rendered by the engine as the <context>
+    tag before the message. `source` is one line naming the request's origin in whatever form the
+    surface has: a permalink to the message itself where the surface addresses messages, else the
+    client and the member's address.
     The free-text fields are made safe at construction: sender, question, and source (all
     surface-reported) are flattened to one line without angle brackets so they cannot forge tag
     structure, and a bad zone fails at the surface, never mid-turn."""
@@ -548,12 +609,20 @@ class TurnContext(BaseModel):
     sender: str | None = None
     timezone: str | None = None
     question: str | None = None
+    authorization_id: UUID | None = None
+    authorization_choice: AuthorizationChoice | None = None
     source: str | None = None
     reply_reaches: str | None = None
     """Where this turn's reply goes, stamped by admission: the surface that posts it, or `nobody`
     when nothing does. A turn cannot otherwise tell — the reply of a background turn on an
     extension's own conversation is written and read by no one unless a member opens the page — and
     a turn that believes it has told the member stays quiet about what it found."""
+
+    @model_validator(mode="after")
+    def _authorization_answer_shape(self) -> "TurnContext":
+        if (self.authorization_id is None) != (self.authorization_choice is None):
+            raise ValueError("authorization id and choice must be supplied together")
+        return self
 
     @field_validator("sender", "question", "source", "reply_reaches")
     @classmethod
@@ -601,7 +670,6 @@ class Turn(BaseModel):
     admission_source: TurnAdmissionSource = INTERNAL_ADMISSION
     idempotency_key: str | None = None
     speaker_member_id: UUID | None = None
-    on_behalf_of_member_id: UUID | None = None
     fired_by: FiredBy | None = None
     context: TurnContext | None = None
     terminal: TerminalFrame | None = None
@@ -622,6 +690,7 @@ class Turn(BaseModel):
     sandbox_conversation_id: UUID | None = None
     traceparent: str | None = None
     runtime_config: TurnRuntimeConfig | None = None
+    model_accounts: tuple[ModelAccountCapability, ...] = ()
 
     @property
     def spawned(self) -> bool:
@@ -629,17 +698,18 @@ class Turn(BaseModel):
         child (parent linkage alone). Only the spawn path writes `parent_turn_id`."""
         return self.parent_turn_id is not None
 
-    @property
-    def authority(self) -> ExecutionAuthority:
-        """The immutable member or workspace authority this turn executes under."""
-        return turn_authority(self.speaker_member_id, self.on_behalf_of_member_id)
-
     @field_validator("created_refs", mode="before")
     @classmethod
     def _nothing_created(cls, value: object) -> object:
         """The column is nullable and only a round that created something writes it, so a turn
         that created nothing carries SQL NULL — which reads as the empty set."""
         return () if value is None else value
+
+    @model_validator(mode="after")
+    def _unique_model_account_providers(self) -> "Turn":
+        if len({account.provider for account in self.model_accounts}) != len(self.model_accounts):
+            raise ValueError("model account capabilities cannot repeat a provider")
+        return self
 
     @field_validator("created_at", "updated_at", "retry_at")
     @classmethod
@@ -652,7 +722,6 @@ class Turn(BaseModel):
 
     @model_validator(mode="after")
     def _terminal_matches_status(self) -> "Turn":
-        _ = self.authority
         if (self.status in NON_TERMINAL_STATUSES) != (self.terminal is None):
             raise ValueError("terminal is present exactly when the turn is terminal")
         if self.terminal is not None and self.terminal.status != self.status:

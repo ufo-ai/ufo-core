@@ -379,6 +379,92 @@ test("the issues page mounts and draws both of its bands", async () => {
   expect(await screen.findByRole("heading", { name: "Triaged" })).toBeTruthy();
 });
 
+test("the notification page lists the source, state, repeats, and first activity", async () => {
+  const name = "99999999999949998999999999999999";
+  const subject = "CI is failing on the release branch";
+  const raised = "2026-09-12T16:30:00Z";
+  const { calls } = await runPage("notification", {
+    ["/objects/notification/" + name]: () =>
+      json({
+        kind: "notification",
+        fields: [
+          "occurrences",
+          "first_raised_at",
+          "last_raised_at",
+          "triaged_turn",
+          "delivered_surface",
+        ],
+        spec_schema: null,
+        applies: false,
+        deletes: true,
+        name,
+        summary: subject + ": Tests failed in three jobs.",
+        spec: { subject, body: "Tests failed in three jobs." },
+        status: {
+          occurrences: 3,
+          first_raised_at: "2026-09-12T15:00:00Z",
+          last_raised_at: raised,
+          triaged_turn: "77777777-7777-4777-8777-777777777777",
+          delivered_surface: "slack",
+        },
+        links: [],
+        created_at: "2026-09-12T15:00:00Z",
+        updated_at: raised,
+      }),
+    "/objects/notification": () =>
+      json({
+        kind: "notification",
+        fields: [
+          "subject",
+          "occurrences",
+          "producer",
+          "triaged",
+          "delivered_surface",
+          "created_at",
+        ],
+        spec_schema: null,
+        applies: false,
+        deletes: true,
+        objects: [
+          {
+            name,
+            summary: subject + ": Tests failed in three jobs.",
+            agent_id: AGENT.id,
+            agent_name: "notification",
+            subject,
+            occurrences: 3,
+            producer: "code",
+            triaged: true,
+            delivered_surface: "slack",
+            created_at: "2026-09-12T15:00:00Z",
+          },
+        ],
+        next_cursor: null,
+      }),
+    "/objects/conversation": () => json({ objects: [] }),
+  });
+
+  expect(await screen.findByRole("heading", { name: "Inbox" })).toBeTruthy();
+  expect((await screen.findAllByRole("columnheader")).map((head) => head.textContent)).toEqual([
+    "Subject",
+    "Agent",
+    "Status",
+    "First raised",
+  ]);
+  const row = (await screen.findByText(subject)).closest("tr")!;
+  expect(within(row).getByText("3 times")).toBeTruthy();
+  expect(within(row).getByText("Code")).toBeTruthy();
+  expect(within(row).getByText("Delivered to Slack")).toBeTruthy();
+  expect(
+    calls.some((url) => url.includes("order_by=created_at&order=desc")),
+  ).toBe(true);
+
+  await userEvent.click(row);
+  const detail = await screen.findByRole("dialog");
+  expect(within(detail).getAllByText(subject)).toBeTruthy();
+  expect(within(detail).getByText("Tests failed in three jobs.")).toBeTruthy();
+});
+
 test("the metrics page mounts and states which measure sets are not on", async () => {
   await runPage("metrics", { "/objects/conversation": () => json({ objects: [] }) });
   expect(await screen.findByRole("heading", { name: "Metrics" })).toBeTruthy();

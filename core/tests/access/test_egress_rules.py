@@ -25,7 +25,6 @@ from ufo.runtime.access.egress_rules import (
     derive_model_rules,
 )
 from ufo.runtime.access.grants import Grant, grant_sentinel
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.ext.manifest import ConnectorProvider, Manifest
 
 
@@ -141,7 +140,9 @@ def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> 
         owner_email="acting@x.test",
         connection_shared=False,
     )
-    rules = derive_grant_rules((grant,), ConnectorTransferHosts({}, default=TRANSFER))
+    rules = derive_grant_rules(
+        (grant,), ConnectorTransferHosts({}, default=TRANSFER), (grant.connection_id,)
+    )
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert scope.allowed_hosts == frozenset(TRANSFER)
     assert "" not in scope.allowed_hosts
@@ -150,7 +151,8 @@ def test_brokered_grant_admits_only_its_transfer_hosts_never_an_empty_host() -> 
 
 def test_an_explicit_mapping_wins_over_the_open_namespace_default() -> None:
     hosts = ConnectorTransferHosts({"hub": ("hub.files.example.com",)}, default=TRANSFER)
-    rules = derive_grant_rules((_grant(),), hosts)
+    grant = _grant()
+    rules = derive_grant_rules((grant,), hosts, (grant.connection_id,))
     scope = next(r for r in rules if isinstance(r, ScopeRule))
     assert scope.allowed_hosts == frozenset({CLI_HOST, "hub.files.example.com"})
     assert TRANSFER[0] not in scope.allowed_hosts
@@ -162,10 +164,11 @@ def test_grant_sentinel_is_deterministic_per_account() -> None:
     assert "acct-1" in grant_sentinel("acct-1")
 
 
-async def test_cli_rule_injects_the_acting_members_own_token_on_the_grant_host() -> None:
+async def test_cli_rule_injects_an_exact_connection_capability_on_the_grant_host() -> None:
     tokens = _Tokens()
+    grant = _grant()
     rules = await derive_cli_rules(
-        (_grant(),), MemberAuthority(ACTING), {"hub": _cli(tokens)}, WORKSPACE
+        (grant,), {"hub": _cli(tokens)}, WORKSPACE, (grant.connection_id,)
     )
     assert rules == (
         InjectionRule(
@@ -178,20 +181,19 @@ async def test_cli_rule_injects_the_acting_members_own_token_on_the_grant_host()
     assert tokens.asked == [(WORKSPACE, "acct-1")]
 
 
-async def test_no_cli_rule_for_a_foreign_private_grant() -> None:
+async def test_no_cli_rule_for_an_unlisted_private_grant() -> None:
     tokens = _Tokens()
-    rules = await derive_cli_rules(
-        (_grant(grantor=OTHER),), MemberAuthority(ACTING), {"hub": _cli(tokens)}, WORKSPACE
-    )
+    rules = await derive_cli_rules((_grant(grantor=OTHER),), {"hub": _cli(tokens)}, WORKSPACE, ())
     assert rules == ()
     assert tokens.asked == []
 
 
 async def test_no_cli_rule_for_a_provider_without_a_declared_cli() -> None:
-    assert await derive_cli_rules((_grant(),), MemberAuthority(ACTING), {}, WORKSPACE) == ()
+    grant = _grant()
+    assert await derive_cli_rules((grant,), {}, WORKSPACE, (grant.connection_id,)) == ()
 
 
-async def test_workspace_authority_injects_shared_grants_and_a_member_adds_its_own() -> None:
+async def test_cli_rules_prefer_private_and_fall_back_to_shared_capabilities() -> None:
     grants = (
         _grant(),
         _grant(account="acct-2", grantor=OTHER, shared=True),
@@ -199,21 +201,25 @@ async def test_workspace_authority_injects_shared_grants_and_a_member_adds_its_o
     )
     clis = {"hub": _cli(_Tokens())}
 
-    memberless = await derive_cli_rules(grants, WORKSPACE_AUTHORITY, clis, WORKSPACE)
-    acting = await derive_cli_rules(grants, MemberAuthority(ACTING), clis, WORKSPACE)
+    shared = await derive_cli_rules(grants, clis, WORKSPACE, (grants[1].connection_id,))
+    exact = await derive_cli_rules(
+        grants, clis, WORKSPACE, (grants[0].connection_id, grants[1].connection_id)
+    )
 
-    assert [r.sentinel for r in memberless] == [grant_sentinel("acct-2")]
-    assert [r.sentinel for r in acting] == [grant_sentinel("acct-1"), grant_sentinel("acct-2")]
+    assert [r.sentinel for r in shared] == [grant_sentinel("acct-2")]
+    assert [r.sentinel for r in exact] == [grant_sentinel("acct-1")]
 
 
 async def test_a_git_wire_scopes_meters_and_injects_basic_on_the_git_host_once() -> None:
     """The API host takes the raw token as the CLI sends it; the git host takes the same token as
-    the password half of a Basic credential, under the same sentinel. Two usable accounts inject
-    twice on the git host but scope and meter it once — a request is one request however many
-    accounts could authenticate it."""
+    the password half of a Basic credential, under the same sentinel. A private capability wins
+    over the shared capability, and the git host is scoped and metered once."""
     grants = (_grant(), _grant(account="acct-2", grantor=OTHER, shared=True))
     rules = await derive_cli_rules(
-        grants, MemberAuthority(ACTING), {"hub": _cli(_Tokens(), git=GIT)}, WORKSPACE
+        grants,
+        {"hub": _cli(_Tokens(), git=GIT)},
+        WORKSPACE,
+        tuple(grant.connection_id for grant in grants),
     )
     assert rules == (
         InjectionRule(
@@ -222,24 +228,12 @@ async def test_a_git_wire_scopes_meters_and_injects_basic_on_the_git_host_once()
             sentinel=grant_sentinel("acct-1"),
             real="token-acct-1",
         ),
-        InjectionRule(
-            host=CLI_HOST,
-            header="authorization",
-            sentinel=grant_sentinel("acct-2"),
-            real="token-acct-2",
-        ),
         ScopeRule(allowed_hosts=frozenset({GIT.host})),
         InjectionRule(
             host=GIT.host,
             header="authorization",
             sentinel=grant_sentinel("acct-1"),
             real="token-acct-1",
-        ),
-        InjectionRule(
-            host=GIT.host,
-            header="authorization",
-            sentinel=grant_sentinel("acct-2"),
-            real="token-acct-2",
         ),
         MeterRule(host=GIT.host, dimension=REQUEST_METER_DIMENSION),
     )
@@ -248,11 +242,17 @@ async def test_a_git_wire_scopes_meters_and_injects_basic_on_the_git_host_once()
 async def test_a_grant_whose_token_the_broker_refuses_is_withheld_alone(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    grants = (_grant(), _grant(account="acct-2", grantor=OTHER, shared=True))
+    grants = (
+        _grant(),
+        _grant(account="acct-2", grantor=OTHER),
+        _grant(account="acct-shared", grantor=OTHER, shared=True),
+    )
     clis = {"hub": _cli(_Tokens(broken=frozenset({"acct-1"})), git=GIT)}
 
     with caplog.at_level(logging.WARNING, logger="ufo"):
-        rules = await derive_cli_rules(grants, MemberAuthority(ACTING), clis, WORKSPACE)
+        rules = await derive_cli_rules(
+            grants, clis, WORKSPACE, tuple(grant.connection_id for grant in grants)
+        )
 
     assert [r.sentinel for r in rules if isinstance(r, InjectionRule)] == [
         grant_sentinel("acct-2"),
@@ -328,13 +328,15 @@ async def test_connector_egress_stops_at_the_turn_connection_scope() -> None:
     restricted_hosts = derive_grant_rules((listed, unlisted), connections=connections)
     restricted_cli = await derive_cli_rules(
         (listed, unlisted),
-        MemberAuthority(ACTING),
         {"hub": _cli(_Tokens())},
         WORKSPACE,
         connections,
     )
     unrestricted_cli = await derive_cli_rules(
-        (listed, unlisted), MemberAuthority(ACTING), {"hub": _cli(_Tokens())}, WORKSPACE
+        (listed, unlisted),
+        {"hub": _cli(_Tokens())},
+        WORKSPACE,
+        (listed.connection_id, unlisted.connection_id),
     )
     assert ScopeRule(allowed_hosts=frozenset({listed.host})) in restricted_hosts
     assert len([rule for rule in restricted_hosts if isinstance(rule, MeterRule)]) == 1
@@ -343,5 +345,4 @@ async def test_connector_egress_stops_at_the_turn_connection_scope() -> None:
     ]
     assert [rule.sentinel for rule in unrestricted_cli if isinstance(rule, InjectionRule)] == [
         grant_sentinel("acct-1"),
-        grant_sentinel("acct-2"),
     ]

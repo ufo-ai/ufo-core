@@ -53,7 +53,6 @@ from ufo.runtime.access.egress_rules import (
     derive_credential_rules,
 )
 from ufo.runtime.access.workspace_slots import SlotProvider, WorkspaceSlots
-from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.ext.manifest import (
     CredentialSlot,
@@ -414,9 +413,9 @@ async def test_the_sandbox_exports_the_sentinel_and_never_the_secret(db: None) -
     with ws(workspace_id):
         await put_slot(_ext(), workspace_id, ACME)
         probe = ProbeEnv(credentials=store, slots=_slots())
-        unfilled = await probe.exports(uuid4(), uuid4(), WORKSPACE_AUTHORITY)
+        unfilled = await probe.exports(uuid4(), uuid4())
         await store.put(workspace_id, ACME.slot, SECRET)
-        exports = await probe.exports(uuid4(), uuid4(), WORKSPACE_AUTHORITY)
+        exports = await probe.exports(uuid4(), uuid4())
 
     assert ACME.env not in unfilled
     assert exports[ACME.env] == "UFO_SENTINEL_WORKSPACE_ACME_API_KEY"

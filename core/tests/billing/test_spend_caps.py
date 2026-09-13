@@ -9,7 +9,6 @@ from dbos import EnqueueOptions
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, MemberAuthority
 from ufo.runtime.billing.accounting import (
     SpendEvaluator,
     record_sandbox_tokens,
@@ -527,9 +526,11 @@ async def test_admission_parks_over_cap_member_without_enqueue(db: None) -> None
         )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi", authority=MemberAuthority(member_id)
-    )
+    turn_id = (
+        await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+            workspace_id, conversation_id, "hi", member_id
+        )
+    ).turn_id
     assert dbos.enqueued == []
     assert await _status(turn_id) == "parked"
 
@@ -548,17 +549,11 @@ async def test_admission_caps_the_speaking_member_not_the_conversations_founder(
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "park")
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    held = await admission.invoke(
-        workspace_id, shared, agent_id, "hi", authority=MemberAuthority(member_id)
-    )
+    held = (await admission.admit_member(workspace_id, shared, "hi", member_id)).turn_id
     assert dbos.enqueued == []
     assert await _status(held) == "parked"
-    workspace_turn = await admission.invoke(
-        workspace_id, elsewhere, agent_id, "hi", authority=WORKSPACE_AUTHORITY
-    )
-    founders_turn = await admission.invoke(
-        workspace_id, founded, agent_id, "hi", authority=WORKSPACE_AUTHORITY
-    )
+    workspace_turn = await admission.invoke(workspace_id, elsewhere, agent_id, "hi")
+    founders_turn = await admission.invoke(workspace_id, founded, agent_id, "hi")
     assert dbos.enqueued == [str(workspace_turn), str(founders_turn)]
     assert await _status(workspace_turn) == "queued"
     assert await _status(founders_turn) == "queued"
@@ -578,9 +573,11 @@ async def test_admission_rejects_over_cap_member_with_reason(db: None) -> None:
         )
         await _set_cap(connection, workspace_id, "member", member_id, 3600, 50, "reject")
     dbos = StubDbos()
-    turn_id = await Admission(dbos=dbos, durable_surfaces=frozenset()).invoke(
-        workspace_id, conversation_id, agent_id, "hi", authority=MemberAuthority(member_id)
-    )
+    turn_id = (
+        await Admission(dbos=dbos, durable_surfaces=frozenset()).admit_member(
+            workspace_id, conversation_id, "hi", member_id
+        )
+    ).turn_id
     assert dbos.enqueued == []
     async with workspace_tx() as connection:
         row = (

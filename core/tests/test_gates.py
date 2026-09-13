@@ -496,7 +496,7 @@ SCHEDULE_STORE = "class ScheduleStore:\n" + "".join(
 def _check_schedule_authority_gate_rejects_explicit_agent_selection() -> None:
     trees = {
         gates.SCHEDULING_MODULE: ast.parse(
-            SCHEDULE_STORE + "    async def create(self, conversation_id, on_behalf_of_agent_id):\n"
+            SCHEDULE_STORE + "    async def create(self, conversation_id, selected_agent_id):\n"
             "        pass\n"
             "    async def cancel(self, expected, selected_agent):\n"
             "        pass\n"
@@ -538,37 +538,6 @@ def _check_schedule_authority_gate_allows_ambient_agent_selection() -> None:
     assert gates._schedule_authority_failures(trees) == []
 
 
-def _check_execution_authority_gate_rejects_nullable_identity_in_shipped_code() -> None:
-    for source in (
-        "use(acting_member_id)\n",
-        "def use(acting_member_id): ...\n",
-        "invoke(acting_member_id=member_id)\n",
-    ):
-        failures = gates._execution_authority_failures({CORE_FILE: ast.parse(source)})
-        assert len(failures) == 1
-        assert "ExecutionAuthority" in failures[0]
-
-
-def _check_execution_authority_gate_leaves_durable_identity_fields_alone() -> None:
-    tree = ast.parse("persist(speaker_member_id=speaker, on_behalf_of_member_id=delegated)\n")
-    assert gates._execution_authority_failures({CORE_FILE: tree}) == []
-
-
-def _check_execution_authority_gate_keeps_extension_liveness_in_core() -> None:
-    trees = {ROGUE: ast.parse("await Seats(workspace_id).admits(connection, authority)\n")}
-    failures = gates._execution_authority_failures(trees)
-    assert len(failures) == 1
-    assert "core capability" in failures[0]
-
-
-def _check_execution_authority_gate_allows_core_liveness_and_extension_access_reads() -> None:
-    trees = {
-        CORE_FILE: ast.parse("await Seats(workspace_id).admits(connection, authority)\n"),
-        ROGUE: ast.parse("await ctx.member_has_access(member_id)\n"),
-    }
-    assert gates._execution_authority_failures(trees) == []
-
-
 def _check_wiring_gate_counts_database_program_reads_and_writes() -> None:
     trees = {
         gates.SCHEMA_TABLES: ast.parse(
@@ -600,6 +569,19 @@ def _check_wiring_gate_does_not_count_column_declaration_as_a_write() -> None:
         CORE_FILE: ast.parse("select(page.c.revision)\n"),
     }
     assert gates._wiring_failures(trees) == ["schema: page.revision has no write site"]
+
+
+def _check_wiring_gate_accepts_a_trigger_input_column() -> None:
+    trees = {
+        gates.SCHEMA_TABLES: ast.parse(
+            "turn = sa.Table('turn', metadata, sa.Column('on_behalf_of_member_id', sa.Uuid))\n"
+        ),
+        CORE_MIGRATIONS / "revision.py": ast.parse(
+            'op.execute(f"""create trigger {name} before insert on turn '
+            "when NEW.on_behalf_of_member_id is not null begin select 1; end" + '""")\n'
+        ),
+    }
+    assert gates._wiring_failures(trees) == []
 
 
 WEB_SURFACE = Path("extensions/web/ufo_ext_web/surface.py")
@@ -1289,12 +1271,9 @@ def test_repository_gates() -> None:
         _check_schedule_authority_gate_refuses_a_store_it_cannot_find,
         _check_schedule_authority_gate_refuses_a_name_no_method_answers,
         _check_schedule_authority_gate_allows_ambient_agent_selection,
-        _check_execution_authority_gate_rejects_nullable_identity_in_shipped_code,
-        _check_execution_authority_gate_leaves_durable_identity_fields_alone,
-        _check_execution_authority_gate_keeps_extension_liveness_in_core,
-        _check_execution_authority_gate_allows_core_liveness_and_extension_access_reads,
         _check_wiring_gate_counts_database_program_reads_and_writes,
         _check_wiring_gate_does_not_count_column_declaration_as_a_write,
+        _check_wiring_gate_accepts_a_trigger_input_column,
         _check_set_cookie_gate_flags_raw_set_cookie_outside_the_factory,
         _check_set_cookie_gate_exempts_the_factory_module,
         _check_set_cookie_gate_allows_the_factory_helper_at_call_sites,

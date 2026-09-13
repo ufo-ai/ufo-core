@@ -1184,8 +1184,10 @@ async def test_link_member_provisions_a_surface_identity(db: None, tmp_path) -> 
     workspace_id, _, member_id = await _seed(member_email="bee@example.com")
     context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
     assert await context.linked_member("UBEE") is None
+    assert await context.member_external_id(member_id) is None
     assert await context.link_member("UBEE", "BEE@example.com") == member_id
     assert await context.linked_member("UBEE") == member_id
+    assert await context.member_external_id(member_id) == "UBEE"
     async with workspace_tx() as connection:
         linked = (
             await connection.execute(

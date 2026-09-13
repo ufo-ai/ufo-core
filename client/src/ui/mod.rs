@@ -142,7 +142,7 @@ pub enum Reply {
     Clipboard(ClipEntry),
     Attach(std::path::PathBuf),
     Recall { text: String, arrival_id: String },
-    Choice(String),
+    Choice { text: String, selected: Vec<usize> },
     ChoiceCancelled,
     Secret(String),
     Stop,
@@ -1094,19 +1094,27 @@ impl<W: Write> App<W> {
                 .filter_map(|index| chooser.picker.item(*index))
                 .collect::<Vec<_>>()
                 .join(", ");
+            let selected = chooser.selected.iter().copied().collect();
             self.chooser = None;
             self.focus = Focus::Compose;
-            return Reply::Choice(choice);
+            return Reply::Choice {
+                text: choice,
+                selected,
+            };
         }
         let Some(pick) = pick_key(key) else {
             return Reply::None;
         };
+        let selected = chooser.picker.current_index();
         match chooser.picker.apply_key(pick) {
             PickOutcome::Continue => Reply::None,
             PickOutcome::Picked(choice) => {
                 self.chooser = None;
                 self.focus = Focus::Compose;
-                Reply::Choice(choice)
+                Reply::Choice {
+                    text: choice,
+                    selected: selected.into_iter().collect(),
+                }
             }
             PickOutcome::Cancelled => {
                 self.chooser = None;
@@ -2076,7 +2084,10 @@ mod tests {
         );
         app.on_key(key(KeyCode::Down));
         let reply = app.on_key(key(KeyCode::Enter));
-        assert!(matches!(&reply, Reply::Choice(choice) if choice == "second"));
+        assert!(matches!(
+            &reply,
+            Reply::Choice { text, selected } if text == "second" && selected == &[1]
+        ));
         assert!(app.chooser.is_none());
         assert!(matches!(app.focus, Focus::Compose));
         app.choose("again?", &["only".to_string()], false);
@@ -2111,7 +2122,8 @@ mod tests {
         assert!(rendered.contains("[x] Calendar"), "{rendered}");
         assert!(matches!(
             app.on_key(key(KeyCode::Enter)),
-            Reply::Choice(choice) if choice == "Mail, Calendar"
+            Reply::Choice { text, selected }
+                if text == "Mail, Calendar" && selected == [0, 1]
         ));
         assert!(app.chooser.is_none());
         assert!(matches!(app.focus, Focus::Compose));

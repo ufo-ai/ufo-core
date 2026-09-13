@@ -32,9 +32,9 @@ model post it publicly.
 
 Every member surface passes its authenticated member to admission. Slack resolves the sender on
 every inbound. A shared-channel resolution failure admits the turn with no speaker and
-member-authorized tools fail closed; a DM or other member-private conversation fails admission
-without its member. Only a surface-admitted member inbound has a speaker; timer, system, and
-subagent turns do not inherit member authority.
+member-gated tools fail closed; a DM or other member-private conversation fails admission without
+its member. Only a surface-admitted member inbound has a speaker; timer, system, and subagent turns
+have no speaker and carry only their exact persisted runtime capabilities.
 
 `ToolContext` and `HookContext` name both meanings: `speaker_member_id` gates `connect_account`,
 credential requests, and owner checks; the exact conversation `audience` atom feeds recall, memory
@@ -58,10 +58,10 @@ it through an ephemeral interaction response. Long replies split into bounded bl
 A different clicker or stale request receives an ephemeral refusal. CLI, the `ufo` terminal surface,
 and web use the same workflow with their authenticated member. The OAuth callback records the
 sealed speaker as grantor and directs the member back to chat; it does not fabricate an inbound
-turn. Later connector use begins with the member's next message and is scoped to the acting
-member — the speaker, or the initiator a speakerless scheduled fire or subagent acts on behalf
-of — so a grant is private to its grantor unless shared. The granting act is speaker-only; the
-use scoping narrows use, never widens grant authority.
+turn. Later connector use from a live message is scoped to its selected speaker. Automatic work
+uses only its exact persisted connection capabilities and never reconstructs access from a creator
+or conversation owner. The granting act is speaker-only; use scoping narrows use, never widens
+grant authority.
 
 Interactive continuations find their existing conversation before admission. A DM click may then
 bind a newly resolved member to that private conversation; a channel click never calls
@@ -70,7 +70,7 @@ bind a newly resolved member to that private conversation; a channel click never
 **Proof:** a linked member asks to connect Google Calendar in a public channel, receives the OAuth
 URL privately, completes the grant, returns to chat, and asks the agent to use it in that channel.
 Another member cannot obtain the URL. The conversation stays shared, personal recall stays absent,
-an unresolved speaker cannot connect, a subagent cannot inherit grant authority, extension-owned
+an unresolved speaker cannot connect, a subagent inherits only exact runtime capabilities, extension-owned
 authorization refuses a shared audience, a lost response replays the same URL, and DM/CLI/`ufo`/web
 flows still complete.
 

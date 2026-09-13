@@ -189,13 +189,13 @@ from ufo.runtime.access.credentials import (
     CredentialStore,
 )
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.authority import WORKSPACE_AUTHORITY
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.kinds.governance import prompt_digest
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
 from ufo.runtime.prompts.render import render_system_prompt
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
+from ufo.runtime.turns.audience import SHARED_AUDIENCE
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import DEFAULT_AGENT_NAME, ReasoningEffort
@@ -1088,11 +1088,7 @@ async def _run(
                         (*CORE_SUBAGENT_PROFILES, *turn_subagents(manifests))
                     )
                     loadable_skills |= frozenset(
-                        (
-                            spawn_catalog_skill(
-                                await spawn_targets(subagents, WORKSPACE_AUTHORITY)
-                            ).name,
-                        )
+                        (spawn_catalog_skill(await spawn_targets(subagents, SHARED_AUDIENCE)).name,)
                     )
                 rollover: RolloverTarget | None = None
                 if any(task.suite == "rollover" for task in tasks):

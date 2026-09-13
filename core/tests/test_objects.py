@@ -2051,14 +2051,14 @@ async def test_a_shared_artifact_belongs_to_the_member_bound_to_the_call(
     assert founder_mine.rows == ()
 
 
-async def test_a_delegated_share_file_belongs_to_the_bound_member(db: None, tmp_path: Path) -> None:
+async def test_an_automatic_share_file_has_no_member_owner(db: None, tmp_path: Path) -> None:
     workspace_id = await _workspace()
     tools = _object_tools()
     with ws(workspace_id):
         agent_id = await _agent_row(workspace_id, name="assistant", is_main=True)
         member_id = await _member(workspace_id, ADMIN_CREATED_AT)
         turn = await _turn_row(workspace_id, agent_id=agent_id, member_id=member_id)
-        delegated = turn.model_copy(update={"seq": 2, "on_behalf_of_member_id": member_id})
+        automatic = turn.model_copy(update={"seq": 2})
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.turn)
@@ -2066,7 +2066,6 @@ async def test_a_delegated_share_file_belongs_to_the_bound_member(db: None, tmp_
                 .values(
                     seq=2,
                     admission_source=SCHEDULED_ADMISSION,
-                    on_behalf_of_member_id=member_id,
                 )
             )
             await connection.execute(
@@ -2085,7 +2084,7 @@ async def test_a_delegated_share_file_belongs_to_the_bound_member(db: None, tmp_
                     updated_at=ADMIN_CREATED_AT,
                 )
             )
-        ctx, _ = await _workspace_context(delegated, tmp_path)
+        ctx, _ = await _workspace_context(automatic, tmp_path)
         await ctx.sandbox.bash("printf 'report' > report.txt")
         await _text(tools, "share_file", ctx, files=[{"file_path": "report.txt"}])
         async with workspace_tx() as connection:
@@ -2098,16 +2097,19 @@ async def test_a_delegated_share_file_belongs_to_the_bound_member(db: None, tmp_
             ).scalar_one()
         store = artifact_object().store
         assert isinstance(store, MemberListable)
+        every = ObjectListQuery(supported_fields=artifact_object().list_fields)
         mine = ObjectListQuery(
             filters={"mine": True}, supported_fields=artifact_object().list_fields
         )
         with agent(agent_id):
-            page = await store.member_page(None, member_id=member_id, admin=False, query=mine)
+            page = await store.member_page(None, member_id=member_id, admin=False, query=every)
+            mine_page = await store.member_page(None, member_id=member_id, admin=False, query=mine)
 
-    assert stored_member == member_id
+    assert stored_member is None
     (row,) = page.rows
-    assert row.fields["mine"] is True
-    assert row.fields["owner_email"] == f"{member_id.hex[:8]}@x.test"
+    assert row.fields["mine"] is False
+    assert row.fields["owner_email"] is None
+    assert mine_page.rows == ()
 
 
 async def test_mine_filters_an_artifact_by_its_current_versions_sharer(
@@ -4733,11 +4735,7 @@ async def test_private_conversation_metadata_stays_closed_without_a_speaking_adm
             speaker_member_id=carol,
         )
         admin_ctx = replace(ctx, speaker_member_id=admin, audience=conversation_audience(admin))
-        speakerless = replace(
-            ctx,
-            speaker_member_id=None,
-            turn=ctx.turn.model_copy(update={"on_behalf_of_member_id": admin}),
-        )
+        speakerless = replace(ctx, speaker_member_id=None)
         foreign_admin = replace(ctx, turn=foreign_turn, speaker_member_id=admin, audience=foreign)
         get_tool = tools["object_get"]
         name = str(private.conversation_id)

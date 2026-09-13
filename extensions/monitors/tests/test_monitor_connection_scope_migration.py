@@ -1,14 +1,18 @@
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from pytest import raises
 
-from ufo.db import MIGRATIONS_DIR
+from ufo.db import MIGRATIONS_DIR, workspace_tx
 from ufo.host.ext.loader import migration_locations
+from ufo.schema import tables
 from ufo.schema.records import CONNECTION_SCOPE_MAX
 
 NOW = "2026-09-13 12:00:00+00:00"
@@ -238,7 +242,6 @@ def test_scope_backfill_and_outgoing_insert_fail_closed_by_workspace(tmp_path: P
         connection.commit()
 
     command.upgrade(config, "monitors_0003")
-    outgoing_id = uuid4().hex
     with engine.connect() as connection:
         rows = {
             row.id: row
@@ -246,20 +249,17 @@ def test_scope_backfill_and_outgoing_insert_fail_closed_by_workspace(tmp_path: P
                 sa.text("select id, connections, internet_access from monitor")
             ).all()
         }
-        _insert_monitor(
-            connection,
-            monitor_id=outgoing_id,
-            workspace_id=workspace_id,
-            conversation_id=conversation_id,
-            agent_id=agent_id,
-            creator_id=creator_id,
-            name="outgoing",
-        )
-        outgoing = connection.execute(
-            sa.text("select connections, internet_access from monitor where id = :id"),
-            {"id": outgoing_id},
-        ).one()
-        connection.commit()
+        with raises(sa.exc.IntegrityError):
+            _insert_monitor(
+                connection,
+                monitor_id=uuid4().hex,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                creator_id=creator_id,
+                name="omitted-scope",
+            )
+        connection.rollback()
     engine.dispose()
 
     owned_scope = json.loads(rows[owned_id].connections)
@@ -277,5 +277,162 @@ def test_scope_backfill_and_outgoing_insert_fail_closed_by_workspace(tmp_path: P
         ]
     )
     assert json.loads(rows[other_monitor_id].connections) == [str(UUID(foreign_id))]
-    assert all(row.internet_access is None for row in rows.values())
-    assert outgoing == (None, None)
+    assert all(row.internet_access == 1 for row in rows.values())
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["postgresql"], indirect=True)
+async def test_omitted_monitor_scope_comes_from_the_active_member_turn(db: None) -> None:
+    workspace_id, member_id, agent_id = uuid4(), uuid4(), uuid4()
+    narrowed_conversation_id, ordinary_conversation_id, idle_conversation_id = (
+        uuid4() for _ in range(3)
+    )
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(id=workspace_id, created_at=now, updated_at=now)
+        )
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="monitor-speaker@example.com",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=agent_id,
+                workspace_id=workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation),
+            [
+                {
+                    "id": conversation_id,
+                    "workspace_id": workspace_id,
+                    "agent_id": agent_id,
+                    "surface": "cli",
+                    "queue_key": uuid4().hex,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for conversation_id in (
+                    narrowed_conversation_id,
+                    ordinary_conversation_id,
+                    idle_conversation_id,
+                )
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.turn),
+            [
+                {
+                    "id": uuid4(),
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation_id,
+                    "agent_id": agent_id,
+                    "seq": 1,
+                    "status": "running",
+                    "inbound": "watch",
+                    "admission_source": "member",
+                    "speaker_member_id": member_id,
+                    "runtime_config": runtime_config,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for conversation_id, runtime_config in (
+                    (narrowed_conversation_id, {"internet_access": False}),
+                    (ordinary_conversation_id, None),
+                )
+            ],
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=narrowed_conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound="newer unrestricted automatic work",
+                admission_source="scheduled",
+                speaker_member_id=None,
+                runtime_config=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        omitted = sa.table(
+            "monitor",
+            sa.column("id", sa.Uuid),
+            sa.column("workspace_id", sa.Uuid),
+            sa.column("conversation_id", sa.Uuid),
+            sa.column("agent_id", sa.Uuid),
+            sa.column("name", sa.Text),
+            sa.column("command", sa.Text),
+            sa.column("interval_minutes", sa.Integer),
+            sa.column("deadline_at", sa.DateTime(timezone=True)),
+            sa.column("reason", sa.Text),
+            sa.column("next_steps", sa.Text),
+            sa.column("user_description", sa.Text),
+            sa.column("created_by_member_id", sa.Uuid),
+            sa.column("internet_access", sa.Boolean),
+            sa.column("baseline", sa.Text),
+            sa.column("next_probe_at", sa.DateTime(timezone=True)),
+            sa.column("created_at", sa.DateTime(timezone=True)),
+            sa.column("updated_at", sa.DateTime(timezone=True)),
+        )
+        ids = {
+            conversation_id: uuid4()
+            for conversation_id in (
+                narrowed_conversation_id,
+                ordinary_conversation_id,
+                idle_conversation_id,
+            )
+        }
+        await connection.execute(
+            sa.insert(omitted),
+            [
+                {
+                    "id": ids[conversation_id],
+                    "workspace_id": workspace_id,
+                    "conversation_id": conversation_id,
+                    "agent_id": agent_id,
+                    "name": f"watch-{index}",
+                    "command": "true",
+                    "interval_minutes": 5,
+                    "deadline_at": now,
+                    "reason": "CI",
+                    "next_steps": "Report",
+                    "user_description": "CI",
+                    "created_by_member_id": member_id,
+                    "baseline": "",
+                    "next_probe_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                for index, conversation_id in enumerate(ids)
+            ],
+        )
+        scopes = dict(
+            (
+                await connection.execute(
+                    sa.select(omitted.c.id, omitted.c.internet_access).where(
+                        omitted.c.id.in_(ids.values())
+                    )
+                )
+            ).all()
+        )
+    assert scopes == {
+        ids[narrowed_conversation_id]: False,
+        ids[ordinary_conversation_id]: True,
+        ids[idle_conversation_id]: False,
+    }

@@ -787,6 +787,43 @@ async def test_side_effecting_action_receives_the_semantic_idempotency_key(
         assert recorded["idempotency_key"] == f"{turn.id}/{ENGRAVE_ID}/c1"
 
 
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_requester_free_action_strips_the_generic_envelope_requester(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn(speaker=True)
+    assert turn.speaker_member_id is not None
+    with ws(turn.workspace_id):
+        await _seed_widget()
+        engine = _engine(turn, _action_model(sample.ENGRAVE_ACTION), tmp_path)
+        result = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(
+                id="c1",
+                name="object_action",
+                input={
+                    "kind": sample.WIDGET_KIND,
+                    "action": sample.ENGRAVE_ACTION,
+                    "name": "anvil",
+                    "input": {"text": "ad astra"},
+                    "requested_by": str(turn.id),
+                },
+            ),
+            {
+                turn.id: ActiveMessage(
+                    member_id=turn.speaker_member_id,
+                    rendered="Engrave it",
+                )
+            },
+        )
+
+        assert not result.is_error
+        recorded = await ScopedStore(extension=sample.NAME).get(sample.ENGRAVE_KEY)
+        assert recorded is not None
+        assert recorded["target"]["agent"] is None
+
+
 class _DownStore:
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         raise RuntimeError("store down")

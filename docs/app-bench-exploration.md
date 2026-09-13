@@ -974,9 +974,9 @@ Both initial builder handoffs also lose their first full-source write. Gemini se
 message's `requested_by` value on `write_application_source`, but that message is not active in the
 child turn. The failed calls contain 49 KB and 35 KB of source. Their child spans are 237 seconds
 and 145 seconds, including first model rounds of 129 seconds and 106 seconds. A profile-only tool
-now ignores this irrelevant field and keeps the subagent's durable on-behalf authority. Normal
-tools still validate an active member message. This removes the repeated full-source generation
-without changing model-visible text.
+ignores this irrelevant field because it consumes no member-private capability. Normal tools still
+validate an active member message. This removes the repeated full-source generation without
+changing model-visible text.
 
 A deterministic replay of the retained edit payloads confirms the structural gate. Both initial
 sources have balanced delimiters and tags. The first briefs edit changes the brace balance to -1

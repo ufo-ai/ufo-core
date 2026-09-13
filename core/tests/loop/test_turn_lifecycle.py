@@ -48,6 +48,7 @@ from ufo.harness.models.catalog import (
 )
 from ufo.harness.models.grant import Grant
 from ufo.harness.models.interface import (
+    PROVIDER_ANTHROPIC,
     Message,
     ModelEvent,
     ModelRequest,
@@ -111,6 +112,7 @@ from ufo.schema.records import (
     INTENT_ADMISSION,
     MEMBER_ADMISSION,
     SCHEDULED_ADMISSION,
+    ModelAccountCapability,
     ReasoningEffort,
     TerminalFrame,
     Turn,
@@ -177,6 +179,7 @@ STUB_BACKENDS = Manifest(
             input_model=RoundTripInput,
             handler=_hidden_probe,
             profile_only=True,
+            binds_member_authority=False,
         ),
     ),
 )
@@ -1295,11 +1298,9 @@ OWN_ACCOUNT_PROFILE = SubagentProfile(
 async def test_only_a_turn_that_needs_the_members_account_runs_on_it(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A member connects a provider account so the work that requires it — the coding agent — runs
-    on it, so only a turn under such a profile binds them: that turn reads their key and is billed
-    as the workspace's own spend. The same member's ordinary turn binds nobody, reads the deploy's
-    key, and is billed to the platform, because normal operation is not what the account was
-    connected for. Neither turn reaches the admin's own key."""
+    """A turn carrying an exact member-account capability reads that key and is billed as the
+    workspace's own spend. The same member's ordinary turn carries no account, reads the deploy's
+    key, and is billed to the platform. Neither turn reaches the admin's own key."""
     workspace_id, turn_id = await _running_turn()
     async with workspace_tx() as connection:
         admin = await create_member(connection, workspace_id, "admin@work.com", is_admin=True)
@@ -1339,7 +1340,11 @@ async def test_only_a_turn_that_needs_the_members_account_runs_on_it(
     monkeypatch.setattr(
         loop_queue,
         "_runtime",
-        SimpleNamespace(hub=InProcessHub(), subagents=SubagentRegistry((OWN_ACCOUNT_PROFILE,))),
+        SimpleNamespace(
+            hub=InProcessHub(),
+            subagents=SubagentRegistry((OWN_ACCOUNT_PROFILE,)),
+            registry=SimpleNamespace(resolve=lambda model: model),
+        ),
     )
 
     assert await loop_queue._execute_turn(str(workspace_id), str(turn_id)) == "done"
@@ -1348,7 +1353,15 @@ async def test_only_a_turn_that_needs_the_members_account_runs_on_it(
         await connection.execute(
             sa.update(tables.turn)
             .where(tables.turn.c.id == turn_id)
-            .values(subagent_profile=OWN_ACCOUNT_PROFILE.name)
+            .values(
+                subagent_profile=OWN_ACCOUNT_PROFILE.name,
+                model_accounts=[
+                    ModelAccountCapability(
+                        provider="openai",
+                        slot=member_slot(OPENAI_KEY_SLOT, member),
+                    ).model_dump(mode="json")
+                ],
+            )
         )
     assert await loop_queue._execute_turn(str(workspace_id), str(turn_id)) == "done"
 
@@ -1452,8 +1465,13 @@ async def test_a_turn_a_members_plan_serves_costs_nothing_and_one_on_their_key_c
                     seq=1,
                     status="queued",
                     inbound='{"value": 1}',
-                    on_behalf_of_member_id=member,
                     subagent_profile=PLAN_ACCOUNT_PROFILE.name,
+                    model_accounts=[
+                        ModelAccountCapability(
+                            provider=PROVIDER_ANTHROPIC,
+                            slot=member_slot(ANTHROPIC_KEY_SLOT, member),
+                        ).model_dump(mode="json")
+                    ],
                     created_at=sa.func.now(),
                     updated_at=sa.func.now(),
                 )
@@ -2128,7 +2146,6 @@ async def test_a_background_child_wakes_its_parent_with_its_own_result(surface: 
         status=parent_row.status,
         inbound=parent_row.inbound,
         speaker_member_id=parent_row.speaker_member_id,
-        on_behalf_of_member_id=parent_row.on_behalf_of_member_id,
         created_at=parent_row.created_at,
         terminal=TerminalFrame.model_validate(parent_row.terminal),
     )
@@ -2136,7 +2153,6 @@ async def test_a_background_child_wakes_its_parent_with_its_own_result(surface: 
         client=runtime.dbos,
         registry=runtime.subagents,
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     (finished,) = await subagents.wait((child_id,))
@@ -2468,7 +2484,9 @@ async def test_runtime_config_model_overrides_the_parent_and_profile_models(
             )
         ).scalars()
     assert set(models) == {"claude-sonnet-5"}
-    assert TurnRuntimeConfig.model_validate(child.runtime_config) == runtime_config
+    assert TurnRuntimeConfig.model_validate(child.runtime_config) == runtime_config.model_copy(
+        update={"connections": ()}
+    )
 
 
 OVERRIDDEN_PROMPT = "OVERRIDDEN: answer as the environment document rewrote you."
@@ -2889,7 +2907,6 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         status=parent_row.status,
         inbound=parent_row.inbound,
         speaker_member_id=parent_row.speaker_member_id,
-        on_behalf_of_member_id=parent_row.on_behalf_of_member_id,
         created_at=parent_row.created_at,
         terminal=TerminalFrame.model_validate(parent_row.terminal),
     )
@@ -2897,7 +2914,6 @@ async def test_subagent_plain_text_followup_runs_without_a_spawn_payload(
         client=runtime.dbos,
         registry=runtime.subagents,
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
         invoker=runtime.invoker_for(parent.workspace_id),
     )
@@ -2973,7 +2989,6 @@ async def test_a_followup_left_pending_by_an_ended_child_runs_as_its_next_turn(
         status=parent_row.status,
         inbound=parent_row.inbound,
         speaker_member_id=parent_row.speaker_member_id,
-        on_behalf_of_member_id=parent_row.on_behalf_of_member_id,
         created_at=parent_row.created_at,
         terminal=TerminalFrame.model_validate(parent_row.terminal),
     )
@@ -2981,7 +2996,6 @@ async def test_a_followup_left_pending_by_an_ended_child_runs_as_its_next_turn(
         client=runtime.dbos,
         registry=runtime.subagents,
         parent=parent,
-        authority=parent.authority,
         audience=conversation_audience(None),
     )
     (followup,) = await subagents.wait((followup_id,))

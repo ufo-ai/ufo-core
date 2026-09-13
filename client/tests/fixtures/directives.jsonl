@@ -1,5 +1,6 @@
 {"wire": "workspace", "verb": "absorbed", "fields": ["arr-1", "arr-2"], "line": "absorbed\tarr-1\tarr-2"}
 {"wire": "workspace", "verb": "ask", "fields": [">"], "line": "ask\t>"}
+{"wire": "workspace", "verb": "authorize", "fields": ["92fc2a7b-d3fe-4fb7-8096-e78f658dbda6", "Allow this request?", "allow", "Allow once", "This action only.", "deny", "Deny", "Do not allow this action.", "always", "Always allow for GitHub", "Future repository reads from this account."], "line": "authorize\t92fc2a7b-d3fe-4fb7-8096-e78f658dbda6\tAllow this request?\tallow\tAllow once\tThis action only.\tdeny\tDeny\tDo not allow this action.\talways\tAlways allow for GitHub\tFuture repository reads from this account."}
 {"wire": "workspace", "verb": "choose", "fields": ["Allow this request?", "Allow", "Deny", "Always Allow"], "line": "choose\tAllow this request?\tAllow\tDeny\tAlways Allow"}
 {"wire": "workspace", "verb": "choose_many", "fields": ["Select services", "Mail", "Calendar"], "line": "choose_many\tSelect services\tMail\tCalendar"}
 {"wire": "workspace", "verb": "exit", "fields": ["0"], "line": "exit\t0"}

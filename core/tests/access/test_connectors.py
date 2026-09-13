@@ -42,7 +42,7 @@ from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.turns.subjects import member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
+from ufo.schema.records import CONNECTION_SCOPE_MAX, Agent, Turn, TurnRuntimeConfig
 from ufo.serve import (
     CONNECT_CALLBACK_PATH,
     _connect_flow,
@@ -385,9 +385,9 @@ async def test_source_credential_stays_bound_to_its_connection_generation(db: No
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_connector_account_prefers_the_acting_members_private_account(db: None) -> None:
     """A provider bound both privately and agent-shared resolves by tier: the acting member's own
-    private account first, the agent-shared one as the fallback — M's turns act as M's account, a
-    member without a private grant acts as the shared one and can never name M's, and a scheduled
-    fire acting on behalf of M keeps M's private account."""
+    private account first, the agent-shared one as the fallback — M's turns use M's account, a
+    member without a private grant uses the shared one and can never name M's, and an automatic
+    turn with M's exact connection capability keeps that private account."""
     workspace_id = await _workspace()
     member_m, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_m)
@@ -404,8 +404,9 @@ async def test_connector_account_prefers_the_acting_members_private_account(db: 
         )
     store = GrantStore()
     with ws(workspace_id), agent(agent_id):
+        connection_ids = {}
         for account, shared in (("acct-m", False), ("acct-shared", True)):
-            await store.record(
+            connection_ids[account] = await store.record(
                 provider=sample.CONNECTOR_PROVIDER,
                 account_id=account,
                 host=sample.CONNECTOR_HOST,
@@ -430,7 +431,11 @@ async def test_connector_account_prefers_the_acting_members_private_account(db: 
         scheduled = replace(
             ctx_m,
             speaker_member_id=None,
-            turn=ctx_m.turn.model_copy(update={"on_behalf_of_member_id": member_m}),
+            turn=ctx_m.turn.model_copy(
+                update={
+                    "runtime_config": TurnRuntimeConfig(connections=(connection_ids["acct-m"],))
+                }
+            ),
         )
         assert await scheduled.connector_account(sample.CONNECTOR_PROVIDER) == "acct-m"
 
@@ -542,7 +547,7 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
     return conversation_id
 
 
-async def test_connector_account_stops_at_the_turn_connection_scope(db: None) -> None:
+async def test_scoped_connector_account_prefers_private_and_can_select_shared(db: None) -> None:
     workspace_id = await _workspace()
     member_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, member_id)
@@ -555,27 +560,77 @@ async def test_connector_account_stops_at_the_turn_connection_scope(db: None) ->
             grantor_member_id=member_id,
             shared=False,
         )
-        await store.record(
+        shared = await store.record(
             provider=sample.CONNECTOR_PROVIDER,
             account_id="acct-other",
             host=sample.CONNECTOR_HOST,
             grantor_member_id=member_id,
             shared=True,
         )
+        await store.record(
+            provider=sample.CONNECTOR_PROVIDER,
+            account_id="acct-unlisted",
+            host=sample.CONNECTOR_HOST,
+            grantor_member_id=member_id,
+            shared=False,
+        )
         unrestricted = _turn_context(
             workspace_id, agent_id, conversation_id, member_id, grants=store
         )
         restricted = replace(
             unrestricted,
+            speaker_member_id=None,
             turn=unrestricted.turn.model_copy(
-                update={"runtime_config": TurnRuntimeConfig(connections=(listed,))}
+                update={"runtime_config": TurnRuntimeConfig(connections=(listed, shared))}
             ),
+        )
+        automatic = replace(
+            restricted,
+            speaker_member_id=None,
+            agent=restricted.agent.model_copy(update={"is_main": True}),
+            audience=conversation_audience(None),
         )
         assert await unrestricted.connector_accounts(sample.CONNECTOR_PROVIDER) == (
             "acct-listed",
             "acct-other",
+            "acct-unlisted",
         )
-        assert await restricted.connector_accounts(sample.CONNECTOR_PROVIDER) == ("acct-listed",)
+        assert await restricted.connector_accounts(sample.CONNECTOR_PROVIDER) == (
+            "acct-listed",
+            "acct-other",
+        )
         assert await restricted.connector_account(sample.CONNECTOR_PROVIDER) == "acct-listed"
-        with pytest.raises(ValueError, match="acct-other"):
+        assert (
             await restricted.connector_account(sample.CONNECTOR_PROVIDER, account_id="acct-other")
+            == "acct-other"
+        )
+        assert await automatic.connector_connection_ids() == tuple(
+            sorted((listed, shared), key=str)
+        )
+        with pytest.raises(ValueError, match="acct-unlisted"):
+            await restricted.connector_account(
+                sample.CONNECTOR_PROVIDER, account_id="acct-unlisted"
+            )
+
+
+async def test_persisted_connection_scope_is_bounded_before_automatic_work(db: None) -> None:
+    workspace_id = await _workspace()
+    member_id, agent_id = await _member_agent(workspace_id)
+    conversation_id = await _conversation(workspace_id, member_id)
+    store = GrantStore()
+    recorded: list[UUID] = []
+    with ws(workspace_id), agent(agent_id):
+        for index in range(CONNECTION_SCOPE_MAX + 1):
+            recorded.append(
+                await store.record(
+                    provider=sample.CONNECTOR_PROVIDER,
+                    account_id=f"acct-{index:02}",
+                    host=sample.CONNECTOR_HOST,
+                    grantor_member_id=member_id,
+                    shared=False,
+                )
+            )
+        context = _turn_context(workspace_id, agent_id, conversation_id, member_id, grants=store)
+        selected = await context.connector_connection_ids()
+
+    assert selected == tuple(sorted(recorded, key=str)[:CONNECTION_SCOPE_MAX])

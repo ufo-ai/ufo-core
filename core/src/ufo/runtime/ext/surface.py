@@ -96,12 +96,6 @@ from ufo.runtime.access.grants import (
     installed_connect_flow,
 )
 from ufo.runtime.agent_scope import agent as bind_agent
-from ufo.runtime.authority import (
-    WORKSPACE_AUTHORITY,
-    MemberAuthority,
-    authority_member_id,
-    turn_authority,
-)
 from ufo.runtime.billing.accounting import (
     ALLOW,
     PARK,
@@ -187,6 +181,7 @@ from ufo.schema.records import (
     WRITEBACK_PENDING,
     AgentVisibility,
     ArtifactRole,
+    AskUserInput,
     FiredBy,
     ReasoningEffort,
     RuntimeIdentity,
@@ -2602,9 +2597,29 @@ class SurfaceContext:
     async def linked_member(self, external_id: str) -> UUID | None:
         return await self._identity_member(self.surface, external_id)
 
+    async def member_external_id(self, member_id: UUID) -> str | None:
+        """This surface's external id linked to one member, or None when it cannot reach them."""
+        async with workspace_tx() as connection:
+            linked = (
+                await connection.execute(
+                    sa.select(tables.surface_identity.c.external_id)
+                    .where(
+                        tables.surface_identity.c.workspace_id == self.workspace_id,
+                        tables.surface_identity.c.surface == self.surface,
+                        tables.surface_identity.c.member_id == member_id,
+                    )
+                    .order_by(
+                        tables.surface_identity.c.created_at,
+                        tables.surface_identity.c.external_id,
+                    )
+                    .limit(1)
+                )
+            ).one_or_none()
+        return None if linked is None else linked.external_id
+
     async def member_has_access(self, member_id: UUID) -> bool:
         async with workspace_tx() as connection:
-            return await Seats(self.workspace_id).admits(connection, MemberAuthority(member_id))
+            return await Seats(self.workspace_id).all_seated(connection, (member_id,))
 
     async def is_operator_workspace(self) -> bool:
         """Whether this workspace is the fleet operator's own — the workspace whose own domain
@@ -3100,16 +3115,14 @@ class SurfaceContext:
             ).one_or_none()
         return None if message_row is None else message_row.body
 
-    async def question_answerable_by(
+    async def answerable_question(
         self,
         conversation_id: UUID,
         turn_id: UUID,
         question_index: int,
         member_id: UUID,
-    ) -> bool:
-        """Whether this turn asked the named question in this conversation and its structured
-        answer is open to this member. An untargeted question is open to every member the surface
-        already admitted to the conversation."""
+    ) -> AskUserInput | None:
+        """Return the named question when it is open to this member in this conversation."""
         async with workspace_tx() as connection:
             row = (
                 await connection.execute(
@@ -3121,11 +3134,11 @@ class SurfaceContext:
                 )
             ).one_or_none()
         if row is None or row.terminal is None:
-            return False
+            return None
         question = TerminalFrame.model_validate(row.terminal).question
         if question is None or not 0 <= question_index < len(question.questions):
-            return False
-        return question.target_member_id in (None, member_id)
+            return None
+        return question if question.target_member_id in (None, member_id) else None
 
     async def turn_owner(self, turn_id: UUID) -> UUID | None:
         """The member whose conversation owns a turn, or None when no such turn exists — the check a
@@ -3235,7 +3248,6 @@ class SurfaceContext:
                         tables.turn.c.status,
                         tables.turn.c.agent_id,
                         tables.turn.c.speaker_member_id,
-                        tables.turn.c.on_behalf_of_member_id,
                     )
                     .where(
                         tables.turn.c.workspace_id == self.workspace_id,
@@ -3248,9 +3260,7 @@ class SurfaceContext:
             ).one_or_none()
             if row is None:
                 return None
-            member_id = authority_member_id(
-                turn_authority(row.speaker_member_id, row.on_behalf_of_member_id)
-            )
+            member_id = row.speaker_member_id
             decision = await SpendEvaluator(self.workspace_id, member_id, row.agent_id).decide(
                 connection, 0
             )
@@ -3363,10 +3373,9 @@ class SurfaceContext:
 
         On S3 the sandbox fetches it itself: a `curl` of a presigned GET, run as an off-turn probe
         so a signed token authorizes the egress — the bytes go store to sandbox and never cross this
-        process. The probe carries workspace authority, since the presigned URL is its own authority
-        and the store host is admitted to every principal by the base egress rules; a member need
-        not be seated for their own file to arrive. A filesystem dev store signs no URL, so the
-        bytes stream out through the carrier instead."""
+        process. The probe needs no connector capability: the presigned URL is its own authority
+        and the store host is admitted by the base egress rules. A filesystem dev store signs no
+        URL, so the bytes stream out through the carrier instead."""
         match self.blob.backend:
             case S3BlobStore():
                 if self._probes is None:
@@ -3382,7 +3391,6 @@ class SurfaceContext:
                     conversation_id,
                     command,
                     timeout_s=ATTACHMENT_FETCH_TIMEOUT_SECONDS,
-                    authority=WORKSPACE_AUTHORITY,
                 )
                 if result.exit_code != 0:
                     detail = result.stdout.strip() or result.stderr.strip()
@@ -5221,7 +5229,6 @@ class SurfaceContext:
             tables.turn.c.inbound,
             tables.turn.c.admission_source,
             tables.turn.c.speaker_member_id,
-            tables.turn.c.on_behalf_of_member_id,
             tables.turn.c.fired_by_kind,
             tables.turn.c.fired_by_name,
             tables.turn.c.fired_by_title,
@@ -5234,6 +5241,7 @@ class SurfaceContext:
             tables.turn.c.subagent_name,
             tables.turn.c.traceparent,
             tables.turn.c.connect_landed_at,
+            tables.turn.c.model_accounts,
         )
 
     def _turn_record(self, row: sa.Row) -> Turn:
@@ -5247,7 +5255,6 @@ class SurfaceContext:
             inbound=row.inbound,
             admission_source=row.admission_source,
             speaker_member_id=row.speaker_member_id,
-            on_behalf_of_member_id=row.on_behalf_of_member_id,
             fired_by=(
                 None
                 if row.fired_by_kind is None
@@ -5264,6 +5271,7 @@ class SurfaceContext:
             subagent_name=row.subagent_name,
             traceparent=row.traceparent,
             connect_landed_at=row.connect_landed_at,
+            model_accounts=row.model_accounts,
         )
 
 

@@ -105,12 +105,11 @@ extension's store:
    `SHARED_AUDIENCE` (`core/src/ufo/runtime/ext/context.py:1643`), so the deploy's default visibility is
    `workspace` and the room never reaches a rail.
 3. Admit one turn: `ctx.invoke(conversation, agent_id, SEED_PROMPT, "homepage-seed:<agent_id>",
-   on_behalf_of_member_id=..., as_scheduled=True)` — the pause-runner pattern
+   runtime_config=TurnRuntimeConfig(connections=(), internet_access=False), as_scheduled=True)`
    (`extensions/scheduled_tasks/ufo_ext_scheduled_tasks/pause_runner.py:46`).
 
-- **On-behalf member:** the agent's `owner_member_id`; for an ownerless agent (main,
-  provisioned), the workspace's earliest-seated admin. `deploy_website` requires an acting
-  member, who becomes the site's creator and visibility owner.
+- **No inferred member:** the owner remains management metadata. `deploy_website` requires a live
+  selected member, who becomes the site's creator and visibility owner.
 - **One core addition.** No `ExtensionContext` accessor answers the workspace's agent roster; the
   sweep needs `(agent_id, owner_member_id)` rows and the earliest-seated admin. Extensions cannot
   express this, and `invoke_agent_for_member` (`core/src/ufo/runtime/ext/context.py:939`) is the
@@ -168,9 +167,9 @@ live topology, not a browsable record.
 
 | Surface | Tests |
 |---|---|
-| `set_homepage` | binds, rebinds (old row cleared, one homepage per agent), refuses a dangling name, binds on a speakerless turn; unhost clears the binding |
+| `set_homepage` | binds and rebinds for a live selected speaker (old row cleared, one homepage per agent), refuses a dangling name and a speakerless turn; unhost clears the binding |
 | homepage read | `none`, `set` carrying exactly `{state, url}`, out-of-audience 404; sqlite + postgres |
-| seed job | one turn + marker per agent; second tick admits nothing; the seeded conversation is workspace-audience and agent-held; on-behalf resolution (owner, else earliest-seated admin) |
+| seed job | one turn + marker per agent; second tick admits nothing; the seeded conversation is workspace-audience and agent-held; no member identity or private capability is inferred |
 | portal | index lists agents only; `#/agents` shows the main agent's Home; Home tab renders the iframe from a stubbed read and the absent state without one; tab strip and hash round-trip; graph node click routes; drawer and subagent tests rewritten or deleted with their views |
 | copy/theme | new token declared in `theme.css`; `theme.test.tsx` and `gates.py` hold as-is; fresh worktree needs `npm run build` before theme tests |
 

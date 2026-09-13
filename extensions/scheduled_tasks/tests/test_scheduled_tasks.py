@@ -459,6 +459,98 @@ async def test_a_turn_reads_a_prompt_excerpt_the_member_reads_whole(db: None) ->
     assert member_row.fields["prompt"] == sprawling
 
 
+async def test_portal_detail_issues_the_mutations_the_reader_may_make(db: None) -> None:
+    workspace_id, agent_id, conversation_id = await _seed()
+    creator = await _member(workspace_id)
+    admin = await _member(workspace_id, is_admin=True)
+    reader = await _member(workspace_id)
+    objects = ScheduledTaskObjects()
+    with ws(workspace_id), agent(agent_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.conversation)
+                .where(tables.conversation.c.id == conversation_id)
+                .values(audience=SHARED_SUBJECT, member_id=None)
+            )
+        store = _store()
+        await store.create(
+            conversation_id,
+            "member-task",
+            DAILY_9AM,
+            "Summarize my work",
+            "member task",
+            datetime(2026, 8, 8, 9, tzinfo=UTC),
+            created_by_member_id=creator,
+        )
+        await store.create(
+            conversation_id,
+            "workspace-task",
+            DAILY_9AM,
+            "Summarize the workspace",
+            "workspace task",
+            datetime(2026, 8, 8, 9, tzinfo=UTC),
+            created_by_member_id=None,
+        )
+        member_detail = await objects.member_detail(
+            context_for(NAME, frozenset()), "member-task", member_id=creator, admin=False
+        )
+        admin_detail = await objects.member_detail(
+            context_for(NAME, frozenset()), "member-task", member_id=admin, admin=True
+        )
+        reader_detail = await objects.member_detail(
+            context_for(NAME, frozenset()), "member-task", member_id=reader, admin=False
+        )
+        workspace_detail = await objects.member_detail(
+            context_for(NAME, frozenset()), "workspace-task", member_id=admin, admin=True
+        )
+        admin_page = await objects.member_page(
+            context_for(NAME, frozenset()),
+            member_id=admin,
+            admin=True,
+            query=ObjectListQuery(supported_fields=SCHEDULED_TASK_OBJECT.list_fields),
+        )
+
+    assert member_detail is not None
+    assert member_detail.row.fields["content_editable"] is True
+    assert member_detail.row.fields["schedule_editable"] is True
+    assert member_detail.row.fields["pausable"] is True
+    assert member_detail.row.fields["resumable"] is False
+    assert member_detail.row.fields["runnable"] is True
+    assert member_detail.row.fields["deletable"] is True
+    assert admin_detail is not None
+    assert admin_detail.row.fields["content_editable"] is False
+    assert admin_detail.row.fields["schedule_editable"] is False
+    assert admin_detail.row.fields["pausable"] is True
+    assert admin_detail.row.fields["resumable"] is False
+    assert admin_detail.row.fields["runnable"] is False
+    assert admin_detail.row.fields["deletable"] is True
+    assert reader_detail is not None
+    assert reader_detail.row.fields["content_editable"] is False
+    assert reader_detail.row.fields["schedule_editable"] is False
+    assert reader_detail.row.fields["pausable"] is False
+    assert reader_detail.row.fields["resumable"] is False
+    assert reader_detail.row.fields["runnable"] is False
+    assert reader_detail.row.fields["deletable"] is False
+    assert workspace_detail is not None
+    assert workspace_detail.row.fields["content_editable"] is True
+    assert workspace_detail.row.fields["schedule_editable"] is True
+    assert workspace_detail.row.fields["pausable"] is True
+    assert workspace_detail.row.fields["resumable"] is False
+    assert workspace_detail.row.fields["runnable"] is True
+    assert workspace_detail.row.fields["deletable"] is True
+    listed = {row.name: row.fields for row in admin_page.rows}
+    assert listed["member-task"]["content_editable"] is False
+    assert listed["member-task"]["schedule_editable"] is False
+    assert listed["member-task"]["pausable"] is True
+    assert listed["member-task"]["resumable"] is False
+    assert listed["member-task"]["runnable"] is False
+    assert listed["member-task"]["deletable"] is True
+    assert listed["workspace-task"]["content_editable"] is True
+    assert listed["workspace-task"]["schedule_editable"] is True
+    assert listed["workspace-task"]["runnable"] is True
+    assert listed["workspace-task"]["deletable"] is True
+
+
 async def test_automations_slot_rejects_a_recreated_task_generation(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     with ws(workspace_id), agent(agent_id):
@@ -1300,8 +1392,8 @@ async def test_apply_captures_the_creating_member(db: None) -> None:
 
 async def test_a_stranger_cannot_hijack_or_read_another_members_task(db: None) -> None:
     """A task reporting into one member's own conversation is that member's: a stranger cannot read
-    it, re-point it (the re-point hijack), or delete it. An admin may inspect or delete, but only
-    the creator may edit, so the created_by identity cannot be reassigned."""
+    it, re-point it (the re-point hijack), or delete it. An admin may inspect, stop, or delete, but
+    only the creator may otherwise edit, so the created_by identity cannot be reassigned."""
     workspace_id, agent_id, conversation_id = await _seed()
     creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
     stranger = await _member(workspace_id, created_at=datetime(2027, 1, 2, tzinfo=UTC))
@@ -1938,8 +2030,7 @@ async def test_a_recorded_disclosure_opens_no_task_in_chat(db: None) -> None:
     assert read["spec"] is None
 
 
-async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> None:
-    """An admin can manage cadence and cancellation without reading or changing task content."""
+async def test_admin_may_stop_or_delete_but_not_run_or_rewrite_a_members_task(db: None) -> None:
     workspace_id, agent_id, conversation_id = await _seed()
     admin = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC), is_admin=True)
     creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
@@ -2024,8 +2115,21 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
                     private_description,
                 ),
             )
-        cadence = "0 17 * * 1"
-        expiry = datetime.now(UTC) + timedelta(days=30)
+        with pytest.raises(AdminRequired, match="creator"):
+            await _dispatch(
+                apply,
+                admin_ctx,
+                manifest=yaml.safe_dump(
+                    {
+                        "kind": SCHEDULED_TASK_KIND,
+                        "name": "digest",
+                        "spec": {
+                            "schedule": "0 17 * * 1",
+                            "expires_at": datetime.now(UTC) + timedelta(days=30),
+                        },
+                    }
+                ),
+            )
         await _dispatch(
             apply,
             admin_ctx,
@@ -2033,11 +2137,23 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
                 {
                     "kind": SCHEDULED_TASK_KIND,
                     "name": "digest",
-                    "spec": {"schedule": cadence, "expires_at": expiry},
+                    "spec": {"paused": True},
                 }
             ),
         )
         after_edit = await _store().list()
+        with pytest.raises(AdminRequired, match="creator"):
+            await _dispatch(
+                apply,
+                admin_ctx,
+                manifest=yaml.safe_dump(
+                    {
+                        "kind": SCHEDULED_TASK_KIND,
+                        "name": "digest",
+                        "spec": {"paused": False},
+                    }
+                ),
+            )
         admin_delete = json.loads(
             await _dispatch(delete, admin_ctx, kind=SCHEDULED_TASK_KIND, name="digest")
         )
@@ -2058,16 +2174,17 @@ async def test_admin_may_delete_but_not_edit_another_members_task(db: None) -> N
     assert admin_delete["spec"] is None
     assert after_edit[0].prompt == private_prompt
     assert after_edit[0].description == private_description
-    assert after_edit[0].schedule == cadence
-    assert after_edit[0].expires_at == expiry
+    assert after_edit[0].schedule == DAILY_9AM
+    assert after_edit[0].expires_at is None
+    assert after_edit[0].paused is True
     assert after_edit[0].created_by_member_id == creator
     assert after_delete == ()
 
 
 async def test_admin_cannot_force_another_members_task_to_run_now(db: None) -> None:
-    """`run_now` fires the creator's prompt at once under the creator's authority, so it is content
-    the creator owns rather than cadence an admin manages: an admin who created nothing is refused
-    and the next fire stays where the schedule put it, and the creator's own ask fires."""
+    """`run_now` fires the creator's prompt at once with the task's stored capabilities. An admin
+    who created nothing is refused and the next fire stays where the schedule put it, while the
+    creator's own ask fires."""
     workspace_id, agent_id, conversation_id = await _seed()
     admin = await _member(workspace_id, created_at=datetime(2020, 1, 1, tzinfo=UTC), is_admin=True)
     creator = await _member(workspace_id, created_at=datetime(2027, 1, 1, tzinfo=UTC))
@@ -2162,7 +2279,6 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                         status="done",
                         inbound=private_prompt,
                         admission_source="scheduled",
-                        on_behalf_of_member_id=alice,
                         terminal=TerminalFrame(
                             status="done",
                             text=private_response,
@@ -2264,7 +2380,7 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
                         {
                             "kind": SCHEDULED_TASK_KIND,
                             "name": "digest",
-                            "spec": {"schedule": "0 8 * * *"},
+                            "spec": {"paused": True},
                         }
                     ),
                     agent=child_name,
@@ -2320,12 +2436,12 @@ async def test_main_controls_a_members_child_agent_task_without_moving_it(
     assert admin_updated["result"] == "updated"
     [after_row] = admin_after["objects"]
     assert after_row["name"] == "digest"
-    assert after_row["summary"] == "0 8 * * * — private member task"
-    assert after_row["paused"] is False
+    assert after_row["summary"] == "0 17 * * 1 — private member task"
+    assert after_row["paused"] is True
     assert remaining == ()
 
 
-async def test_cross_agent_object_target_requires_main_live_member_authority(db: None) -> None:
+async def test_cross_agent_object_target_requires_main_agent_and_live_speaker(db: None) -> None:
     workspace_id, main_agent, main_conversation = await _seed()
     child_agent, child_conversation = await _second_agent(workspace_id)
     alice = await _member(workspace_id)
@@ -3074,6 +3190,14 @@ async def test_a_fire_carries_the_creating_turn_runtime_scope(db: None) -> None:
         connections=connection_scope,
         internet_access=False,
     )
+    fired = replace(
+        base,
+        turn=Turn.model_validate(dict(turn)),
+        speaker_member_id=None,
+        grants=GrantStore(),
+    )
+    with ws(workspace_id), agent(agent_id):
+        assert await fired.connector_accounts("hub") == ("acct-own",)
 
 
 async def test_a_task_row_without_a_scope_reads_as_no_connections(db: None) -> None:
@@ -3160,6 +3284,18 @@ async def test_a_workspace_authority_task_fires_with_its_runtime_scope(db: None)
                     updated_at=sa.func.now(),
                 )
             )
+            await connection.execute(
+                sa.update(tables.conversation)
+                .where(tables.conversation.c.id == conversation_id)
+                .values(audience=SHARED_SUBJECT, member_id=None)
+            )
+        listed = json.loads(
+            await _dispatch(
+                _object_tool("object_list"),
+                _tool_ctx(workspace_id, conversation_id, agent_id),
+                kind=SCHEDULED_TASK_KIND,
+            )
+        )
         await ScheduledTaskRunner(
             ctx=_runner_ctx(
                 AdmissionInvoker(
@@ -3172,9 +3308,9 @@ async def test_a_workspace_authority_task_fires_with_its_runtime_scope(db: None)
         [turn] = await _turns(conversation_id)
 
     assert remaining.created_by_member_id is None
+    assert listed["objects"][0]["mine"] is False
     assert remaining.last_run_at is not None
     assert turn["speaker_member_id"] is None
-    assert turn["on_behalf_of_member_id"] is None
     assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
         connections=(), internet_access=False
     )

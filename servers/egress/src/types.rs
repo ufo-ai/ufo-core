@@ -88,26 +88,27 @@ pub enum MeterRecord {
     },
 }
 
-/// The turn and member authority one sandbox process tree carries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The turn and exact connection capabilities one sandbox process tree carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunToken {
     pub workspace_id: Uuid,
     pub turn_id: Uuid,
-    pub acting_member_id: Option<Uuid>,
+    pub capability_id: Option<Uuid>,
 }
 
-/// The conversation and member authority one off-turn sandbox exec carries, until it expires.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The conversation and exact connection capabilities one off-turn sandbox exec carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeToken {
     pub workspace_id: Uuid,
     pub conversation_id: Uuid,
     pub probe_id: Uuid,
     pub expires_at: i64,
-    pub acting_member_id: Option<Uuid>,
+    pub connections: Vec<Uuid>,
+    pub internet_access: bool,
 }
 
 /// What a CONNECT presents itself as: a turn's run token, or one probe exec's own token.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Principal {
     Run(RunToken),
     Probe(ProbeToken),

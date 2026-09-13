@@ -371,7 +371,18 @@ export function automationsIndex(objects: unknown[], next: string | null = null)
 }
 
 export function owned(row: object, agent = AGENT) {
-  return { ...row, agent_id: agent.id, agent_name: agent.name };
+  const mine = (row as { mine?: unknown }).mine === true;
+  return {
+    content_editable: mine,
+    schedule_editable: mine,
+    pausable: mine,
+    resumable: mine,
+    runnable: mine,
+    deletable: mine,
+    ...row,
+    agent_id: agent.id,
+    agent_name: agent.name,
+  };
 }
 
 export async function opened(name: string): Promise<HTMLElement[]> {

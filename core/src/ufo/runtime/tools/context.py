@@ -67,12 +67,7 @@ from ufo.harness.sandbox.session import Sandbox, shell_path
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialRequests
 from ufo.runtime.access.grants import ConnectUnavailable, Grant, GrantStore
-from ufo.runtime.authority import (
-    ExecutionAuthority,
-    MemberAuthority,
-    authority_from_member_id,
-    authority_member_id,
-)
+from ufo.runtime.access.member_authorization import AuthorizationBinding
 from ufo.runtime.billing.accounting import record_image_usage, record_video_usage
 from ufo.runtime.ext.context import ExtensionContext, SourceReader
 from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
@@ -91,7 +86,7 @@ from ufo.runtime.turns.audience import (
 from ufo.runtime.turns.contracts import ValidatedJson
 from ufo.runtime.turns.subjects import member_subject
 from ufo.schema import tables
-from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn
+from ufo.schema.records import CONNECTION_SCOPE_MAX, Agent, AgentVisibility, TerminalFrame, Turn
 
 if TYPE_CHECKING:
     from ufo.runtime.access.workspace_slots import WorkspaceSlots
@@ -449,6 +444,8 @@ class Spawn(Protocol):
         name: str = "",
         detach_on_arrival: bool = False,
         model: str | None = None,
+        *,
+        requester_member_id: UUID | None = None,
     ) -> SpawnResult: ...
 
 
@@ -637,6 +634,8 @@ class ToolContext:
     cdp_provider: CdpProvider | None = None
     search_provider: SearchProvider | None = None
     connectors: ConnectorRegistry | None = None
+    connector_selection: ConnectorConnection | None = None
+    connector_binding: AuthorizationBinding | None = None
     connector_read_only: bool = False
     find: FindCompleter | None = None
     requestable_credentials: CredentialRequests | None = None
@@ -659,15 +658,6 @@ class ToolContext:
     trims to. None outside a turn loop that owns a window."""
 
     @property
-    def authority(self) -> ExecutionAuthority:
-        """The exact authority this tool call carries: its active requester, a delegated turn's
-        member, or the workspace. A founding speaker grants no call that their admitted message did
-        not reach."""
-        if self.speaker_member_id is not None:
-            return MemberAuthority(self.speaker_member_id)
-        return authority_from_member_id(self.turn.on_behalf_of_member_id)
-
-    @property
     def effective_audience(self) -> Audience:
         """The exact audience a write belongs to: the conversation's own. What is said in a
         conversation is that conversation's to remember — a workspace conversation remembers for
@@ -683,7 +673,7 @@ class ToolContext:
         never the workspace-shared atom their private audience also reads — a Slack Connect
         audience is sealed against internal content, and speaking there does not unseal it."""
         subjects = audience_subjects(self.audience)
-        acting = authority_member_id(self.authority)
+        acting = self.speaker_member_id
         if acting is None:
             return subjects
         return subjects | {member_subject(acting)}
@@ -747,10 +737,9 @@ class ToolContext:
 
     def source_reader(self) -> SourceReader:
         """Who is asking for a source's synced pages: this turn's agent, the member speaking right
-        now, and what the two may jointly read. The requester is the live speaker rather than
-        member authority, because the main agent's owner exception is a live-work privilege — a
-        scheduled run or a subagent carries its initiator's authority everywhere else, but reaches
-        a source only through that agent's own grant."""
+        now, and what the two may jointly read. An exact connection scope is the durable capability
+        for automatic work; without one, the main agent's private-owner exception belongs only to
+        the live speaker and every other read follows the agent's grants and audience."""
         return SourceReader(
             agent_id=self.turn.agent_id,
             requesting_member_id=self.speaker_member_id,
@@ -760,7 +749,8 @@ class ToolContext:
 
     @property
     def connection_scope(self) -> tuple[UUID, ...] | None:
-        """This turn's exact connection allowlist; None leaves an ordinary turn unrestricted."""
+        """This turn's exact durable connection capabilities; None derives them from the live
+        requester and current grants."""
         return None if self.turn.runtime_config is None else self.turn.runtime_config.connections
 
     async def meter_images(self, model: str, images: int, micro_usd: int) -> None:
@@ -834,7 +824,7 @@ class ToolContext:
                     .values(
                         id=uuid5(NAMESPACE_URL, key),
                         turn_id=self.turn.id,
-                        member_id=authority_member_id(self.authority),
+                        member_id=self.speaker_member_id,
                         blob_key=key,
                         workspace_id=self.turn.workspace_id,
                         filename=filename,
@@ -960,13 +950,16 @@ class ToolContext:
         execute API (the broker holds the account's token and injects it itself, so no sentinel and
         no egress proxy). Resolved strictly from the turn's own workspace and agent, so a tool
         executes only against the turn-agent's accounts, never another agent's. `account_id`
-        targets any account this turn may use; omitted, MemberAuthority prefers that member's own
-        private grants and agent-shared ones are the fallback, while WorkspaceAuthority admits only
-        agent-shared grants — exactly one account must exist in the winning tier. Fails loud when no
-        grant subsystem is configured or the selection is absent or ambiguous. A call that misses
-        only because the accounts are other members' private ones raises `SpeakerRequired`
-        wherever another member can still be named — a speakerless call, and any call in a
-        shared-audience conversation — so the engine can name the member refs a retry may carry."""
+        targets any account this turn may use; omitted, the requested member's own private grants
+        are preferred and agent-shared ones are the fallback. With no requested member, only
+        agent-shared grants are admitted. An exact connection scope admits precisely its listed
+        capabilities, independent of ownership, while preserving the private-before-shared tiers.
+        Exactly one account must exist in the winning tier. Fails loud when no grant subsystem is
+        configured or the selection is absent or ambiguous. A call
+        that misses only because the accounts are other members' private ones raises
+        `SpeakerRequired` wherever another member can still be named — a speakerless call, and any
+        call in a shared-audience conversation — so the engine can name the member refs a retry may
+        carry."""
         return (await self.connector_connection(provider, account_id)).account_id
 
     async def connector_connection(
@@ -975,6 +968,12 @@ class ToolContext:
         """The exact member-owned connection generation this turn may use. Source registration
         persists its id so disconnecting and reconnecting the same external account cannot revive a
         prior member's sync."""
+        if self.connector_selection is not None:
+            selected = self.connector_selection
+            if selected.provider != provider or account_id not in (None, selected.account_id):
+                raise ValueError("the connector call changed after member authorization")
+            await self.require_connector_connection(selected)
+            return selected
         private, shared, withheld = await self._connector_account_tiers(provider)
         if account_id is not None:
             match = next(
@@ -1021,7 +1020,7 @@ class ToolContext:
 
     async def require_connector_connection(self, selected: ConnectorConnection) -> None:
         """Refuse a connection selection whose exact agent-grant generation is no longer usable by
-        this call's authority. A connector call can stage files after selecting its account; this
+        this call. A connector call can stage files after selecting its account; this
         last-mile read keeps a revoke, disconnect, regrant, or sharing change during that work from
         reaching the broker as an external side effect."""
         private, shared, _ = await self._connector_account_tiers(selected.provider)
@@ -1042,10 +1041,9 @@ class ToolContext:
             )
 
     async def connector_accounts(self, provider: str) -> tuple[str, ...]:
-        """The connected-account ids this call may use for one provider. `MemberAuthority` admits
-        that member's own grants plus grants shared with the agent; `WorkspaceAuthority` admits
-        shared grants only. A member's scheduled job and delegated subagents therefore keep their
-        private connections without turning workspace work into member work."""
+        """The connected-account ids this call may use for one provider. A requested member's own
+        grants and grants shared with the agent are admitted; without one, only shared grants
+        are. An exact connection scope instead admits only its listed capabilities."""
         return tuple(
             account.account_id
             for account in await self.usable_connector_accounts()
@@ -1053,19 +1051,19 @@ class ToolContext:
         )
 
     async def usable_connector_accounts(self) -> tuple[ConnectorAccount, ...]:
-        """Every connected account this call may discover or select, after its authority and any
+        """Every connected account this call may discover or select, after its requester and any
         automatic-turn allowlist are applied. Owner and sharing metadata describe only those usable
         accounts; an empty tuple discloses none."""
         if self.grants is None:
             return ()
-        acting = authority_member_id(self.authority)
+        acting = self.speaker_member_id
         connections = self.connection_scope
         granted = [
             grant
             for grant in await self.grants.active_grants()
             if connections is None or grant.connection_id in connections
         ]
-        if (
+        if connections is None and (
             acting is not None
             or self.agent.is_main
             or self.other_members_active
@@ -1091,14 +1089,12 @@ class ToolContext:
         )
 
     async def connector_connection_ids(self) -> tuple[UUID, ...]:
-        """Every connection this call may select, after its authority and any automatic-turn
-        allowlist are applied. The ordered ids are a total scope an automatic child may persist;
-        an empty tuple reaches no account."""
+        """The bounded connection scope this call may persist after requester scoping."""
         return tuple(
             sorted(
                 {account.connection_id for account in await self.usable_connector_accounts()},
                 key=str,
-            )
+            )[:CONNECTION_SCOPE_MAX]
         )
 
     async def _connector_account_tiers(
@@ -1123,7 +1119,7 @@ class ToolContext:
         nobody else, so their call withholds nothing and its miss stays the plain refusal."""
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
-        acting = authority_member_id(self.authority)
+        acting = self.speaker_member_id
         connections = self.connection_scope
         granted = [
             grant
@@ -1131,6 +1127,18 @@ class ToolContext:
             if grant.provider == provider
             and (connections is None or grant.connection_id in connections)
         ]
+        if connections is not None:
+            return (
+                sorted(
+                    (grant for grant in granted if not grant.connection_shared),
+                    key=lambda grant: grant.account_id,
+                ),
+                sorted(
+                    (grant for grant in granted if grant.connection_shared),
+                    key=lambda grant: grant.account_id,
+                ),
+                [],
+            )
         if (
             granted
             and acting is None

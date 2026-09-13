@@ -411,6 +411,7 @@ PLAN_OBJECTIVE_TOOL = ToolDef(
     handler=plan_objective,
     side_effecting=True,
     subagent_default=True,
+    binds_member_authority=False,
 )
 
 RECORD_STEP_TOOL = ToolDef(
@@ -423,6 +424,7 @@ RECORD_STEP_TOOL = ToolDef(
     handler=record_step,
     side_effecting=True,
     subagent_default=True,
+    binds_member_authority=False,
 )
 
 RUN_INDEPENDENT_STEPS_TOOL = ToolDef(
@@ -436,6 +438,7 @@ RUN_INDEPENDENT_STEPS_TOOL = ToolDef(
     input_model=RunIndependentStepsInput,
     handler=run_independent_steps,
     side_effecting=True,
+    binds_member_authority=False,
 )
 
 
@@ -448,4 +451,5 @@ READ_OBJECTIVE_TOOL = ToolDef(
     input_model=ReadObjectiveInput,
     handler=read_objective,
     subagent_default=True,
+    binds_member_authority=False,
 )

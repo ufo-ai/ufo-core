@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,14 +11,14 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from pydantic import ValidationError
 
 from ufo.db import workspace_tx
 from ufo.harness import o11y
-from ufo.runtime.authority import WORKSPACE_AUTHORITY, ExecutionAuthority, MemberAuthority
 from ufo.runtime.engine import _claim_turn
 from ufo.runtime.ext.context import AgentArchived
 from ufo.runtime.ext.surface import Admitted, conversation_name, fence_member_message, mint_marker
-from ufo.runtime.hub import ArrivalQueued, InProcessHub, Reply
+from ufo.runtime.hub import Absorbed, ArrivalQueued, InProcessHub, Reply
 from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
 from ufo.runtime.surfaces.admission import (
     ADMITTED_TURN_METRIC,
@@ -29,6 +30,7 @@ from ufo.runtime.turns.audience import conversation_audience
 from ufo.schema import tables
 from ufo.schema.records import (
     SURFACE_COMMENT_ROUND_INDEX,
+    ModelAccountCapability,
     TerminalFrame,
     TurnContext,
     TurnRuntimeConfig,
@@ -62,7 +64,6 @@ async def _invoke(
     idempotency_key: str | None = None,
     context: TurnContext | None = None,
     *,
-    authority: ExecutionAuthority = WORKSPACE_AUTHORITY,
     holds_work_already_done: bool = False,
     as_scheduled: bool = False,
     standalone: bool = False,
@@ -77,7 +78,6 @@ async def _invoke(
         body,
         idempotency_key,
         context,
-        authority=authority,
         holds_work_already_done=holds_work_already_done,
         as_scheduled=as_scheduled,
         standalone=standalone,
@@ -207,11 +207,17 @@ async def test_each_opening_turn_persists_its_own_runtime_config(db: None) -> No
     )
 
 
-async def test_paid_work_with_an_old_runtime_config_joins_the_live_turn(db: None) -> None:
+@pytest.mark.parametrize("delivered_is_unrestricted", [False, True])
+async def test_paid_work_with_another_runtime_config_waits_in_its_own_turn(
+    db: None, delivered_is_unrestricted: bool
+) -> None:
     workspace_id, member_id, agent_id, conversation_id = await _seed()
-    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
-    old_config = TurnRuntimeConfig(model="model-one")
-    live_config = TurnRuntimeConfig(model="model-two")
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    delivered_config = (
+        None if delivered_is_unrestricted else TurnRuntimeConfig(connections=(uuid4(),))
+    )
+    live_config = TurnRuntimeConfig(connections=(uuid4(),))
     live = await admission.admit_member(
         workspace_id,
         conversation_id,
@@ -227,20 +233,74 @@ async def test_paid_work_with_an_old_runtime_config_joins_the_live_turn(db: None
         agent_id,
         "<spawn_result>done</spawn_result>",
         "subagent-result:old-config",
-        authority=MemberAuthority(member_id),
         holds_work_already_done=True,
-        runtime_config=old_config,
+        runtime_config=delivered_config,
     )
 
-    assert delivered == live.turn_id
-    assert await _queued_bodies(conversation_id) == ["<spawn_result>done</spawn_result>"]
+    assert delivered is not None
+    assert delivered != live.turn_id
+    assert await _queued_bodies(conversation_id) == []
     async with workspace_tx() as connection:
-        runtime_config = (
+        row = (
             await connection.execute(
-                sa.select(tables.turn.c.runtime_config).where(tables.turn.c.id == live.turn_id)
+                sa.select(tables.turn.c.status, tables.turn.c.runtime_config).where(
+                    tables.turn.c.id == delivered
+                )
             )
-        ).scalar_one()
-    assert TurnRuntimeConfig.model_validate(runtime_config) == live_config
+        ).one()
+    assert row.status == "queued"
+    assert (
+        None if row.runtime_config is None else TurnRuntimeConfig.model_validate(row.runtime_config)
+    ) == delivered_config
+    assert (
+        await _invoke(
+            admission,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            "<spawn_result>done</spawn_result>",
+            "subagent-result:old-config",
+            holds_work_already_done=True,
+            runtime_config=delivered_config,
+        )
+        == delivered
+    )
+    with pytest.raises(ValueError, match="already has a different runtime config"):
+        await _invoke(
+            admission,
+            workspace_id,
+            conversation_id,
+            agent_id,
+            "<spawn_result>done</spawn_result>",
+            "subagent-result:old-config",
+            holds_work_already_done=True,
+            runtime_config=live_config if delivered_config is None else None,
+        )
+    assert dbos.enqueued == [str(live.turn_id)]
+
+
+async def test_member_admission_cannot_mint_a_model_account_capability(db: None) -> None:
+    workspace_id, member_id, _, conversation_id = await _seed()
+    with pytest.raises(TypeError, match="unexpected keyword argument 'model_accounts'"):
+        await cast(Any, Admission(dbos=StubDbos(), durable_surfaces=frozenset()).admit_member)(
+            workspace_id,
+            conversation_id,
+            "use this account",
+            member_id,
+            model_accounts=(
+                ModelAccountCapability(
+                    provider="openai", slot=f"openai_api_key:member:{member_id}"
+                ),
+            ),
+        )
+
+
+def test_model_account_capability_accepts_only_canonical_member_slots() -> None:
+    with pytest.raises(ValidationError, match="does not match its provider"):
+        ModelAccountCapability(provider="openai", slot="connector:github")
+
+    with pytest.raises(ValidationError, match="must name a member credential"):
+        ModelAccountCapability(provider="openai", slot="openai_api_key:member:not-a-uuid")
 
 
 async def _queued_bodies(conversation_id: UUID) -> list[str]:
@@ -553,10 +613,7 @@ async def test_redelivery_refounds_a_row_whose_turn_died_undrained(db: None) -> 
     assert str(redelivered.turn_id) in dbos.enqueued
 
 
-async def test_a_refounded_internal_arrival_keeps_the_authority_it_arrived_with(db: None) -> None:
-    """An internal arrival carries no speaker, so its row records no member. A re-post after the
-    turn it queued on died undrained re-founds the work under the authority the caller carries: the
-    woken turn does no less than the turn that queued the arrival."""
+async def test_a_refounded_internal_arrival_remains_speakerless(db: None) -> None:
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
     live = await admission.admit_member(workspace_id, conversation_id, "start", member_id, "C:1")
@@ -567,7 +624,6 @@ async def test_a_refounded_internal_arrival_keeps_the_authority_it_arrived_with(
         agent_id,
         "<spawn_result …>",
         "subagent-result:1",
-        authority=MemberAuthority(member_id),
         holds_work_already_done=True,
     )
     assert folded == live.turn_id
@@ -589,13 +645,12 @@ async def test_a_refounded_internal_arrival_keeps_the_authority_it_arrived_with(
         agent_id,
         "<spawn_result …>",
         "subagent-result:1",
-        authority=MemberAuthority(member_id),
         holds_work_already_done=True,
     )
 
     assert refounded is not None
     assert refounded != live.turn_id
-    assert await _admission_stamp(refounded) == ("internal", None, member_id)
+    assert await _admission_stamp(refounded) == ("internal", None)
     assert await _turn_row(refounded) == ("queued", None)
 
 
@@ -978,7 +1033,6 @@ async def test_a_reject_cap_holds_a_turn_carrying_work_already_paid_for(db: None
         conversation_id,
         agent_id,
         "ordinary",
-        authority=MemberAuthority(member_id),
     )
     delivered = await _invoke(
         admission,
@@ -987,7 +1041,6 @@ async def test_a_reject_cap_holds_a_turn_carrying_work_already_paid_for(db: None
         agent_id,
         "<spawn_result …>",
         "subagent-result:held",
-        authority=MemberAuthority(member_id),
         holds_work_already_done=True,
     )
 
@@ -1015,25 +1068,24 @@ async def _dispatch_stamp(turn_id: UUID) -> datetime | None:
         ).scalar_one()
 
 
-async def _admission_stamp(turn_id: UUID) -> tuple[str, UUID | None, UUID | None]:
-    """What the turn says about who admitted it: its source, its speaker, the member it acts for."""
+async def _admission_stamp(turn_id: UUID) -> tuple[str, UUID | None]:
+    """What the turn says about who admitted it: its source and speaker."""
     async with workspace_tx() as connection:
         row = (
             await connection.execute(
                 sa.select(
                     tables.turn.c.admission_source,
                     tables.turn.c.speaker_member_id,
-                    tables.turn.c.on_behalf_of_member_id,
                 ).where(tables.turn.c.id == turn_id)
             )
         ).one()
-    return row.admission_source, row.speaker_member_id, row.on_behalf_of_member_id
+    return row.admission_source, row.speaker_member_id
 
 
 async def test_an_as_scheduled_fire_founds_its_own_turn_beside_a_live_one(db: None) -> None:
     """A fire asserting the scheduled meaning gets it without a scheduled row: its own turn while
-    another runs, stamped scheduled, speakerless, acting for the member who armed it."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    another runs, stamped scheduled and speakerless."""
+    workspace_id, _member_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
     live = await _invoke(admission, workspace_id, conversation_id, agent_id, "background job")
@@ -1047,7 +1099,6 @@ async def test_an_as_scheduled_fire_founds_its_own_turn_beside_a_live_one(db: No
         agent_id,
         "run the report",
         "task:fire-1",
-        authority=MemberAuthority(member_id),
         as_scheduled=True,
     )
 
@@ -1055,31 +1106,19 @@ async def test_an_as_scheduled_fire_founds_its_own_turn_beside_a_live_one(db: No
     assert fired != live
     assert await _turn_count(conversation_id) == 2
     assert await _queued_bodies(conversation_id) == []
-    assert await _admission_stamp(fired) == ("scheduled", None, member_id)
+    assert await _admission_stamp(fired) == ("scheduled", None)
     status, _ = await _turn_row(fired)
     assert status == "queued"
     assert str(fired) in dbos.enqueued
 
 
-@pytest.mark.parametrize("live_turn_is_the_members", (True, False))
-async def test_an_internal_arrival_under_another_authority_waits_for_the_live_turn(
-    db: None, live_turn_is_the_members: bool
-) -> None:
-    """An internal arrival whose authority is not the live turn's cannot fold into it — a monitor
-    fire carrying no member, a child result carrying one. It founds the turn that reads it and
-    waits: the conversation keeps running one turn, and the live turn's own exit offers this one."""
+async def test_an_internal_arrival_folds_without_a_principal_partition(db: None) -> None:
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    if live_turn_is_the_members:
-        live = (
-            await admission.admit_member(workspace_id, conversation_id, "start", member_id, "C:1")
-        ).turn_id
-        arriving: ExecutionAuthority = WORKSPACE_AUTHORITY
-    else:
-        live = await _invoke(admission, workspace_id, conversation_id, agent_id, "background job")
-        arriving = MemberAuthority(member_id)
-    assert live is not None
+    live = (
+        await admission.admit_member(workspace_id, conversation_id, "start", member_id, "C:1")
+    ).turn_id
     assert await _claim_turn(live, str(live))
 
     arrived = await _invoke(
@@ -1089,96 +1128,34 @@ async def test_an_internal_arrival_under_another_authority_waits_for_the_live_tu
         agent_id,
         "<result …>",
         "arrival:1",
-        authority=arriving,
         holds_work_already_done=True,
     )
 
-    assert arrived is not None
-    assert arrived != live
-    assert await _turn_count(conversation_id) == 2
-    assert await _queued_bodies(conversation_id) == []
-    assert await _turn_row(arrived) == ("queued", None)
-    assert await _admission_stamp(arrived) == (
-        "internal",
-        None,
-        None if live_turn_is_the_members else member_id,
-    )
+    assert arrived == live
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == ["<result …>"]
     assert dbos.enqueued == [str(live)]
-    assert await _dispatch_stamp(arrived) is None
 
 
-async def test_an_as_scheduled_fire_is_seat_gated_on_the_member_it_acts_for(db: None) -> None:
-    """The same gate a scheduled row's fire meets: an unseated creator's fire is refused, and held
-    instead of discarded when it carries work the ledger already booked."""
+async def test_automatic_turns_do_not_execute_as_a_member(db: None) -> None:
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     await _unseat(member_id)
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
 
-    refused = await _invoke(
+    admitted = await _invoke(
         admission,
         workspace_id,
         conversation_id,
         agent_id,
         "run the report",
         "task:fire-1",
-        authority=MemberAuthority(member_id),
         as_scheduled=True,
     )
-    held = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "<probe_result …>",
-        "task:fire-2",
-        authority=MemberAuthority(member_id),
-        as_scheduled=True,
-        holds_work_already_done=True,
-    )
-
-    assert refused is not None
-    assert held is not None
-    assert await _turn_row(refused) == ("cancelled", SEAT_REFUSAL_MESSAGE)
-    assert await _turn_row(held) == ("parked", None)
-    assert dbos.enqueued == []
-
-
-async def test_an_internal_fire_is_seat_gated_on_the_member_it_acts_for(db: None) -> None:
-    """A monitor fire and a delivered subagent result carry an on-behalf member without the
-    scheduled stamp; the gate is the authority, not the stamp — an admin's revoke stops that
-    member's work whatever admitted it, and work the ledger already booked is held, not
-    discarded."""
-    workspace_id, member_id, agent_id, conversation_id = await _seed()
-    await _unseat(member_id)
-    dbos = StubDbos()
-    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-
-    refused = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "run the errand",
-        "errand:1",
-        authority=MemberAuthority(member_id),
-    )
-    held = await _invoke(
-        admission,
-        workspace_id,
-        conversation_id,
-        agent_id,
-        "<subagent_result …>",
-        "delivery:1",
-        authority=MemberAuthority(member_id),
-        holds_work_already_done=True,
-    )
-
-    assert refused is not None
-    assert held is not None
-    assert await _turn_row(refused) == ("cancelled", SEAT_REFUSAL_MESSAGE)
-    assert await _turn_row(held) == ("parked", None)
-    assert dbos.enqueued == []
+    assert admitted is not None
+    assert await _turn_row(admitted) == ("queued", None)
+    assert await _admission_stamp(admitted) == ("scheduled", None)
+    assert dbos.enqueued == [str(admitted)]
 
 
 async def test_a_member_turn_past_the_armed_seq_supersedes_a_fire(db: None) -> None:
@@ -1428,7 +1405,6 @@ async def test_redispatch_leaves_a_root_turns_internal_arrival_for_the_next_turn
         agent_id,
         "child result",
         "subagent-result:child",
-        authority=MemberAuthority(member_id),
     )
     await _cancel_turn_row(first.turn_id)
 
@@ -1472,7 +1448,6 @@ async def _spawned_conversation(
                 inbound="{}",
                 terminal=TerminalFrame(status=status, text="over").model_dump(mode="json"),
                 parent_turn_id=parent_id,
-                on_behalf_of_member_id=member_id,
                 subagent_profile="general-purpose",
                 runtime_config=pinned.model_dump(mode="json"),
                 created_at=sa.func.now(),
@@ -1500,8 +1475,8 @@ async def test_redispatch_readmits_a_failed_spawned_turns_followup_under_its_own
     db: None,
 ) -> None:
     """A parent's follow-up folded into a child whose turn then failed is re-admitted as the
-    child's next turn: the row records no speaker, so it takes the ended turn's authority and
-    runtime config, inherits the spawn identity every founded turn on that conversation carries,
+    child's next turn: the row records no speaker, inherits the runtime config and spawn identity
+    every founded turn on that conversation carries,
     and announces no `Absorbed` frame, which names a member's own message."""
     workspace_id, member_id, agent_id, _ = await _seed()
     child_conversation, child_id, parent_id, pinned = await _spawned_conversation(
@@ -1525,7 +1500,6 @@ async def test_redispatch_readmits_a_failed_spawned_turns_followup_under_its_own
                     tables.turn.c.subagent_profile,
                     tables.turn.c.parent_turn_id,
                     tables.turn.c.speaker_member_id,
-                    tables.turn.c.on_behalf_of_member_id,
                     tables.turn.c.result_delivery,
                     tables.turn.c.runtime_config,
                 ).where(tables.turn.c.id == founded)
@@ -1537,7 +1511,7 @@ async def test_redispatch_readmits_a_failed_spawned_turns_followup_under_its_own
         "internal",
     )
     assert (row.subagent_profile, row.parent_turn_id) == ("general-purpose", parent_id)
-    assert (row.speaker_member_id, row.on_behalf_of_member_id) == (None, member_id)
+    assert row.speaker_member_id is None
     assert row.result_delivery == "pending"
     assert TurnRuntimeConfig.model_validate(row.runtime_config) == pinned
     assert dbos.enqueued == [str(founded)]
@@ -1694,13 +1668,11 @@ async def test_a_message_left_by_a_stop_is_refused_by_an_app_archived_under_it(d
     assert await _turn_row(newest) == ("cancelled", ARCHIVED_REFUSAL_MESSAGE)
 
 
-async def test_redispatch_folds_a_pinned_followup_under_a_live_sibling_rather_than_raising(
+async def test_redispatch_keeps_a_pinned_followup_separate_from_a_live_sibling(
     db: None,
 ) -> None:
-    """A stop with a scheduled turn standing beside the stopped one: the member's pinned follow-up
-    cannot found a second turn and its pin no longer matches the live one's, so it folds under the
-    sibling's config — the mismatch is a refusal to the sender at admission, and nobody is there to
-    receive one at re-admission, least of all before the stop publishes its terminal."""
+    """A stop with a scheduled turn standing beside the stopped one keeps the member's pinned
+    follow-up queued under its own runtime config."""
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     dbos, hub = StubDbos(), _RecordingHub()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset(), hub=hub)
@@ -1708,7 +1680,7 @@ async def test_redispatch_folds_a_pinned_followup_under_a_live_sibling_rather_th
     first = await admission.admit_member(
         workspace_id, conversation_id, "start", member_id, runtime_config=pinned
     )
-    await admission.admit_member(
+    followup = await admission.admit_member(
         workspace_id,
         conversation_id,
         "follow up",
@@ -1723,28 +1695,32 @@ async def test_redispatch_folds_a_pinned_followup_under_a_live_sibling_rather_th
         agent_id,
         "scheduled fire",
         "fire-1",
-        authority=MemberAuthority(member_id),
         as_scheduled=True,
     )
     await _cancel_turn_row(first.turn_id)
 
-    assert await admission.redispatch(workspace_id, conversation_id, first.turn_id) is None
+    founded = await admission.redispatch(workspace_id, conversation_id, first.turn_id)
 
-    assert await _turn_count(conversation_id) == 2
+    assert founded is not None
+    assert founded not in (first.turn_id, scheduled)
+    assert await _turn_count(conversation_id) == 3
     async with workspace_tx() as connection:
-        moved = (
+        row = (
             await connection.execute(
-                sa.select(tables.inbound_message.c.admitted_turn_id).where(
-                    tables.inbound_message.c.conversation_id == conversation_id,
-                    tables.inbound_message.c.consumed_turn_id.is_(None),
+                sa.select(tables.turn.c.status, tables.turn.c.runtime_config).where(
+                    tables.turn.c.id == founded
                 )
             )
-        ).scalars()
-    assert list(moved) == [scheduled]
+        ).one()
+    assert row.status == "queued"
+    assert TurnRuntimeConfig.model_validate(row.runtime_config) == pinned
+    assert await _queued_bodies(conversation_id) == []
     assert [turn_id for turn_id, frame in hub.frames if isinstance(frame, ArrivalQueued)] == [
-        first.turn_id,
-        scheduled,
+        first.turn_id
     ]
+    assert [
+        (turn_id, frame.arrivals) for turn_id, frame in hub.frames if isinstance(frame, Absorbed)
+    ] == [(founded, (followup.arrival_id,))]
 
 
 async def test_a_message_to_an_archived_app_is_refused_beside_a_live_turn_rather_than_folded(
@@ -1892,7 +1868,6 @@ async def test_admission_stamps_where_a_turn_reply_lands(db: None) -> None:
         agent_id,
         "the review found two blocking defects",
         "probe-key",
-        authority=MemberAuthority(member_id),
     )
 
     assert await _reply_reaches(spoken.turn_id) == "cli"

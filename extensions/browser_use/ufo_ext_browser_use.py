@@ -456,6 +456,7 @@ BROWSER_USE_TOOLS: tuple[ToolDef, ...] = (
         handler=_browser_task,
         untrusted=True,
         side_effecting=True,
+        binds_member_authority=False,
     ),
     ToolDef(
         name="wide_browse",
@@ -464,6 +465,7 @@ BROWSER_USE_TOOLS: tuple[ToolDef, ...] = (
         handler=_wide_browse,
         untrusted=True,
         side_effecting=True,
+        binds_member_authority=False,
     ),
 )
 
