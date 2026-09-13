@@ -137,6 +137,14 @@ as a review gate:
   point → steps → types, one file, top to bottom. More than two file-hops to trace a flow means
   the seams are wrong — fix the seams.
 - **Fail loud** — raise on missing config or unexpected values; no silent fallbacks.
+- **Never branch on English words** — intent, control flow, and feature gates are never decided by
+  a hardcoded word list, a regex over English text, or punctuation such as `?`. The wording shifts,
+  the input is terse (`s&p close`), the language is not English, or the phrase is idiomatic, and
+  the heuristic then misreads it silently, which is worse than raising. Decide with a model call,
+  with an explicit structured signal the caller supplies, or with a language-agnostic structural
+  check. The prefetch router is the case that proved it: its `QUESTION_OPENERS` list and
+  question-mark gate (`extensions/rag/ufo_ext_rag/route.py`) refuse terse and non-English asks that
+  want retrieval, and its RFC replaces the read of the text with an always-on router.
 - **Async-native, one event loop** — `ufoctl serve` is one process: a blocking call stalls
   every surface, stream, and turn at once. Async DB driver, async HTTP, `async def` DBOS
   workflows/steps; never `time.sleep`, `subprocess.run`, sync `open()`, or a sync client inside
