@@ -168,6 +168,14 @@ def _invoke_failure(conversation_id: UUID, error: Exception) -> TargetResult:
     )
 
 
+def _seed_failure(error: Exception) -> TargetResult:
+    """A seed that raises fails its own case and leaves the suite standing. Raising instead loses
+    every case of the suite and the report with them, so a precondition one case cannot meet reads
+    as a suite that never ran (`github_connections` produced no report on two 2026-09 nights)."""
+    message = f"{type(error).__name__}: {error}"
+    return TargetResult(CapabilityOutput("", (), (message,)), False, f"seed raised: {message}")
+
+
 def _is_turn_inbound(message: Message, inbound: str) -> bool:
     return (
         message.role == "user"
@@ -350,7 +358,10 @@ class InProcessTarget:
         if case.seed is not None:
             if self.blob is None:
                 raise RuntimeError("a seeded capability case requires blob access")
-            await case.seed(ws_current().workspace_id, self.agent_id, self.blob)
+            try:
+                await case.seed(ws_current().workspace_id, self.agent_id, self.blob)
+            except Exception as error:
+                return _seed_failure(error)
         conversation_id = await self.conversations.open(
             case.name,
             case.member_key,

@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -11,6 +13,7 @@ from evals.harness.capability import (
     EvalTrajectory,
     ToolInvocation,
     expired_after_model_output,
+    run_capability_case,
 )
 from evals.harness.harness import (
     WAIT_EXPIRED,
@@ -20,7 +23,18 @@ from evals.harness.harness import (
     provider_owned_error,
     provider_owned_fault,
 )
-from evals.harness.target import CapabilityTarget, TargetResult, capability_output
+from evals.harness.scorers import exact_scorer
+from evals.harness.target import (
+    CapabilityTarget,
+    EvalConversations,
+    InProcessTarget,
+    TargetResult,
+    TurnOutcome,
+    capability_output,
+)
+from ufo.blob import WorkspaceBlobStore
+from ufo.runtime.ext.context import ExtensionContext
+from ufo.runtime.workspace import ws
 from ufo.schema.records import TurnStatus
 from ufo.sdk.models import Message
 
@@ -360,3 +374,36 @@ def test_the_rebuilt_answer_projects_the_workspace_link_the_window_keeps() -> No
 
     assert output.response == "Move the jobs onto a queue.\n\nplan.md\n"
     assert output.calls == ()
+
+
+async def test_a_seed_that_raises_fails_its_case_and_leaves_the_suite_standing(
+    tmp_path: Path,
+) -> None:
+    """A seed raising out of the suite loses every case of it and the report with them: the nightly
+    summary then reads a suite that never ran. `github_connections` refused a workspace another
+    suite had already connected GitHub on, and produced no report on two 2026-09 nights."""
+    target = InProcessTarget(
+        ctx=cast(ExtensionContext, object()),
+        agent_id=uuid4(),
+        conversations=cast(EvalConversations, _RefusingConversations()),
+        outcome=cast(TurnOutcome, object()),
+        blob=cast(WorkspaceBlobStore, object()),
+    )
+
+    async def seed(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+        raise RuntimeError("this workspace already holds an account")
+
+    case = CapabilityCase("seeded", "hello", exact_scorer("never graded"), seed=seed)
+
+    with ws(uuid4()):
+        result = await run_capability_case(case, target)
+
+    assert not result.passed
+    assert not result.excluded
+    assert "seed raised: RuntimeError: this workspace already holds an account" in result.reason
+
+
+@dataclass(frozen=True)
+class _RefusingConversations:
+    async def open(self, *args: object, **kwargs: object) -> UUID:
+        raise AssertionError("a case whose seed raised must never open a conversation")
