@@ -5,6 +5,12 @@ the join link, the record link, the address. The register requires that handle o
 reports the result, so the member acts from the reply instead of asking again for something the
 turn already read.
 
+Every case names the file it seeds, the way every other suite staging a workspace file does. The
+question under test is what the reply carries once the turn has read the material, so a question
+that leaves the agent to find the file measures discovery instead: unnamed, the agent searched
+memory and the connector catalogue and answered "no calendar account is connected" on three
+straight sweeps, and the suite scored 0/8.
+
 Grading is deterministic on the delivered text. A case that seeds a handle requires that exact
 string. Every case also fails a URL the seeded material never carried, so the suite cannot be
 bought by writing a plausible link, and the one-handle case fails the reply that answers about one
@@ -104,7 +110,7 @@ def handle_scorer(
 CASES = (
     CapabilityCase(
         "meeting-answer-carries-the-join-link",
-        "When is the design review this week?",
+        "When is the design review this week? It's in team-calendar.md.",
         handle_scorer(
             required=(DESIGN_REVIEW_LINK,),
             seeded=(DESIGN_REVIEW_LINK, ROADMAP_LINK, HIRING_LINK),
@@ -120,7 +126,7 @@ CASES = (
     ),
     CapabilityCase(
         "record-answer-carries-the-record-link",
-        "How much does Northwind still owe us on that October invoice?",
+        "How much does Northwind still owe us on that October invoice? billing-records.md",
         handle_scorer(
             required=(INVOICE_RECORD,),
             seeded=(INVOICE_RECORD, "https://records.example.com/invoices/INV-20417"),
@@ -133,7 +139,7 @@ CASES = (
     ),
     CapabilityCase(
         "one-handle-not-every-handle",
-        "What time is the hiring sync?",
+        "What time is the hiring sync? team-calendar.md",
         handle_scorer(
             required=(HIRING_LINK,),
             seeded=(DESIGN_REVIEW_LINK, ROADMAP_LINK, HIRING_LINK),
@@ -148,7 +154,7 @@ CASES = (
     ),
     CapabilityCase(
         "no-handle-in-the-material-invents-none",
-        "When is the design review this week, and how do I join it?",
+        "When is the design review this week, and how do I join it? It's in team-calendar.md.",
         handle_scorer(
             required=(),
             seeded=(),

@@ -89,3 +89,14 @@ async def test_a_long_reply_fails_its_word_budget() -> None:
 
     assert not verdict.passed
     assert "over the 10 budget" in verdict.reason
+
+
+def test_every_case_names_the_material_it_stages() -> None:
+    """The suite grades what the reply carries once the turn has read the material, so a question
+    that leaves the agent to find the staged file measures discovery instead. Unnamed, the agent
+    searched memory and the connector catalogue and answered "no calendar account is connected":
+    the suite scored 0/8 on the 2026-09-10 to 2026-09-12 sweeps."""
+    for case in CASES:
+        staged = tuple(item.path for item in case.workspace_files)
+        assert staged, case.name
+        assert any(path in case.message for path in staged), case.name
