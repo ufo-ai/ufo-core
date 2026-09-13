@@ -1,25 +1,39 @@
-"""The Mailchimp Marketing v3.0 connector — audiences, subscribers, campaigns, automations, reports,
-and their per-list / per-report fan-out collections synced as recallable pages.
+"""The Mailchimp Marketing v3.0 connector — audiences, subscribers, campaigns, automations, reports
+and the collections under them synced as recallable pages.
 
-Every top-level resource comes back under a plural JSON key (`{lists: [...], total_items: N}`) paged
-by `?count=N&offset=M` until a short page. `paginate` has three families sharing one dispatcher:
-top-level offset walks (lists, campaigns, automations, reports); per-list fan-outs (list_members,
-segments, tags, interest_categories) and the deeper list→category→interest and list→segment→member
-walks; and per-report fan-outs (unsubscribes, and email_activity, whose per-recipient `activity[]`
-array is exploded into one row per action with a synthesized stable id). A cursor-bearing stream
-seeds `?since_<field>=<iso>` when Mailchimp filters on that field. Auth is an OAuth2 bearer sent by
-the base client. The base URL is the per-tenant data-center host (`https://<dc>.api.mailchimp.com`)
-— the stream paths carry the `/3.0` version prefix — so the class default is empty and a run without
-a resolved host fails loud. A refusal (401/403) raises `StreamSkipped`. The write path is
-intentionally absent — the source seam only reads."""
+Every resource comes back under a plural JSON key (`{lists: [...], total_items: N}`) paged by
+`?count=N&offset=M` until a short page. A top-level stream seeds `?since_<field>=<iso>` where
+Mailchimp filters on that field; the collections under a list, a segment, an interest category or a
+report take no such filter, since Mailchimp orders none of them by the field a run would resume at.
+`email_activity` explodes each recipient's `activity[]` array into one row per action with a
+synthesized `<email_id>:<action>:<timestamp>` id, Mailchimp shipping no per-event id of its own.
+
+A member id is the subscriber hash — the same value for one contact in every list it belongs to —
+so a member is addressed under its list, and the list reaches the record as `list_id`.
+
+Auth is an OAuth2 bearer sent by the base client. The base URL is the per-tenant data-center host
+(`https://<dc>.api.mailchimp.com`) — the stream paths carry the `/3.0` version prefix — so the class
+default is empty and a run without a resolved host fails loud. A refusal (401/403) raises
+`StreamSkipped`. The write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator, Mapping
+from functools import partial
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 500
@@ -60,6 +74,9 @@ _CURSOR_PARAM: dict[str, str] = {
 def _stream(
     name: str,
     *,
+    parent: str | None = None,
+    path: str | None = None,
+    carry: Mapping[str, str] | None = None,
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = None,
@@ -67,6 +84,10 @@ def _stream(
     updated_at_field: str | None = "updated_at",
     canonical: bool = False,
 ) -> StreamSpec:
+    if (parent is None) != (path is None):
+        raise ValueError(
+            f"mailchimp: stream {name!r} names a parent without a path, or the reverse"
+        )
     return StreamSpec(
         name=name,
         source_object=source_object or name,
@@ -75,6 +96,9 @@ def _stream(
         created_at_field=created_at_field,
         updated_at_field=updated_at_field,
         canonical=canonical,
+        parents=()
+        if parent is None or path is None
+        else (ParentEdge(stream=parent, path=path, carry=carry or {}),),
     )
 
 
@@ -87,12 +111,15 @@ MAILCHIMP_STREAMS: list[StreamSpec] = [
     ),
     _stream(
         "list_members",
+        parent="lists",
+        path="/3.0/lists/{id}/members",
+        carry={"list_id": "id"},
         source_object="members",
         cursor_field="last_changed",
         updated_at_field="last_changed",
         canonical=True,
     ),
-    _stream("segments", cursor_field="updated_at"),
+    _stream("segments", parent="lists", path="/3.0/lists/{id}/segments", cursor_field="updated_at"),
     _stream(
         "campaigns",
         cursor_field="create_time",
@@ -108,6 +135,8 @@ MAILCHIMP_STREAMS: list[StreamSpec] = [
     ),
     _stream(
         "email_activity",
+        parent="reports",
+        path="/3.0/reports/{id}/email-activity",
         source_object="emails",
         cursor_field="timestamp",
         created_at_field="timestamp",
@@ -116,17 +145,25 @@ MAILCHIMP_STREAMS: list[StreamSpec] = [
     _stream(
         "reports", cursor_field="send_time", created_at_field="send_time", updated_at_field=None
     ),
-    _stream("tags"),
-    _stream("interest_categories"),
-    _stream("interests"),
+    _stream("tags", parent="lists", path="/3.0/lists/{id}/tag-search"),
+    _stream("interest_categories", parent="lists", path="/3.0/lists/{id}/interest-categories"),
+    _stream(
+        "interests",
+        parent="interest_categories",
+        path="/3.0/lists/{list_id}/interest-categories/{id}/interests",
+    ),
     _stream(
         "segment_members",
+        parent="segments",
+        path="/3.0/lists/{list_id}/segments/{id}/members",
         source_object="members",
         cursor_field="last_changed",
         updated_at_field="last_changed",
     ),
     _stream(
         "unsubscribes",
+        parent="reports",
+        path="/3.0/reports/{id}/unsubscribed",
         primary_key="email_id",
         cursor_field="timestamp",
         created_at_field="timestamp",
@@ -135,20 +172,34 @@ MAILCHIMP_STREAMS: list[StreamSpec] = [
 ]
 
 
+def _activity_rows(page: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per action out of each recipient's `activity[]` array, keyed by a synthesized
+    `<email_id>:<action>:<timestamp>` id — Mailchimp ships no per-event id, so this is what keeps
+    the page's primary key stable across re-syncs."""
+    rows: list[dict[str, Any]] = []
+    for recipient in page:
+        if not isinstance(recipient, dict):
+            continue
+        base = {key: value for key, value in recipient.items() if key != "activity"}
+        for action in recipient.get("activity") or []:
+            if not isinstance(action, dict):
+                continue
+            row = {**base, **action}
+            row.setdefault(
+                "id",
+                f"{base.get('email_id', '')}:"
+                f"{action.get('action', '')}:"
+                f"{action.get('timestamp', '')}",
+            )
+            rows.append(row)
+    return rows
+
+
 class MailchimpConnector(RestConnector):
     name = "mailchimp"
     base_url = ""
     streams_list = MAILCHIMP_STREAMS
     checkpoint = staticmethod(text_checkpoint)
-
-    def record_identity(self, record: Mapping[str, Any], stream: StreamSpec) -> str | None:
-        if stream.name != "unsubscribes":
-            return super().record_identity(record, stream)
-        campaign_id = record.get("campaign_id")
-        email_id = record.get("email_id")
-        if campaign_id is None or email_id is None:
-            return None
-        return f"{campaign_id}:{email_id}"
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
         if stream.name in {"list_members", "segment_members"}:
@@ -173,53 +224,19 @@ class MailchimpConnector(RestConnector):
         return {param: cursor}
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name in _TOP_LEVEL_PATHS:
                 async for page in self._paginate_top_level(
-                    client, stream, _TOP_LEVEL_PATHS[stream.name], cursor=cursor
+                    client, stream, _TOP_LEVEL_PATHS[stream.name], cursor=run.cursor
                 ):
                     yield page
                 return
-            per_list_child = {
-                "list_members": "members",
-                "segments": "segments",
-                "tags": "tag-search",
-                "interest_categories": "interest-categories",
-            }
-            if stream.name in per_list_child:
-                async for page in self._paginate_per_list(
-                    client,
-                    stream,
-                    child_path=per_list_child[stream.name],
-                    cursor=cursor,
-                    stamp_parent_field="list_id",
-                ):
-                    yield page
-                return
-            if stream.name == "interests":
-                async for page in self._paginate_interests(client, stream, cursor=cursor):
-                    yield page
-                return
-            if stream.name == "segment_members":
-                async for page in self._paginate_segment_members(client, stream, cursor=cursor):
-                    yield page
-                return
-            per_report_child = {"unsubscribes": "unsubscribed"}
-            if stream.name in per_report_child:
-                async for page in self._paginate_per_report(
-                    client,
-                    stream,
-                    child_path=per_report_child[stream.name],
-                    cursor=cursor,
-                    stamp_parent_field="campaign_id",
-                ):
-                    yield page
-                return
-            if stream.name == "email_activity":
-                async for page in self._paginate_email_activity(client, cursor=cursor):
-                    yield page
+            if stream.parents:
+                pages = partial(self._partition_pages, client, stream)
+                async for child_page in fanned_out(stream, run, pages):
+                    yield child_page
                 return
             raise NotImplementedError(f"mailchimp: stream {stream.name!r} has no paginate dispatch")
         except httpx.HTTPStatusError as error:
@@ -243,166 +260,20 @@ class MailchimpConnector(RestConnector):
         ):
             yield page
 
-    async def _paginate_child(
+    async def _partition_pages(
         self,
         client: httpx.AsyncClient,
-        path: str,
-        *,
-        data_field: str,
-        params_base: dict[str, Any] | None = None,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Generic offset walk for a nested endpoint, reading records at `data_field`."""
+        stream: StreamSpec,
+        partition: Partition,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
         async for page in self._get_offset_pages(
             client,
-            path,
-            records_path=data_field,
+            partition.path,
+            records_path=self._data_field(stream),
             limit=PAGE_SIZE,
-            params=params_base,
             limit_param="count",
         ):
-            yield page
-
-    async def _ids(
-        self, client: httpx.AsyncClient, path: str, data_field: str
-    ) -> AsyncIterator[str]:
-        async for page in self._get_offset_pages(
-            client, path, records_path=data_field, limit=PAGE_SIZE, limit_param="count"
-        ):
-            for row in page:
-                if isinstance(row, dict) and row.get("id"):
-                    yield str(row["id"])
-
-    async def _list_ids(self, client: httpx.AsyncClient) -> AsyncIterator[str]:
-        async for list_id in self._ids(client, "/3.0/lists", "lists"):
-            yield list_id
-
-    async def _report_ids(self, client: httpx.AsyncClient) -> AsyncIterator[str]:
-        async for report_id in self._ids(client, "/3.0/reports", "reports"):
-            yield report_id
-
-    async def _paginate_per_list(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        child_path: str,
-        cursor: str | None,
-        stamp_parent_field: str | None,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """For each list, fetch the child collection, stamping the parent `list_id`."""
-        data_field = self._data_field(stream)
-        params_base = self._cursor_params(stream, cursor)
-        async for list_id in self._list_ids(client):
-            path = f"/3.0/lists/{quote(list_id, safe='')}/{child_path}"
-            async for page in self._paginate_child(
-                client, path, data_field=data_field, params_base=params_base
-            ):
-                if stamp_parent_field:
-                    for row in page:
-                        if isinstance(row, dict):
-                            row.setdefault(stamp_parent_field, list_id)
-                yield page
-
-    async def _paginate_interests(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Walk lists → interest-categories → interests."""
-        async for list_id in self._list_ids(client):
-            cat_path = f"/3.0/lists/{quote(list_id, safe='')}/interest-categories"
-            async for cat_page in self._paginate_child(client, cat_path, data_field="categories"):
-                for cat in cat_page:
-                    if not isinstance(cat, dict) or not cat.get("id"):
-                        continue
-                    cat_id = str(cat["id"])
-                    int_path = (
-                        f"/3.0/lists/{quote(list_id, safe='')}"
-                        f"/interest-categories/{quote(cat_id, safe='')}/interests"
-                    )
-                    async for int_page in self._paginate_child(
-                        client, int_path, data_field="interests"
-                    ):
-                        for row in int_page:
-                            if isinstance(row, dict):
-                                row.setdefault("list_id", list_id)
-                                row.setdefault("category_id", cat_id)
-                        yield int_page
-
-    async def _paginate_segment_members(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        params_base = self._cursor_params(stream, cursor)
-        async for list_id in self._list_ids(client):
-            seg_path = f"/3.0/lists/{quote(list_id, safe='')}/segments"
-            async for seg_page in self._paginate_child(client, seg_path, data_field="segments"):
-                for seg in seg_page:
-                    if not isinstance(seg, dict) or seg.get("id") is None:
-                        continue
-                    seg_id = str(seg["id"])
-                    mem_path = (
-                        f"/3.0/lists/{quote(list_id, safe='')}"
-                        f"/segments/{quote(seg_id, safe='')}/members"
-                    )
-                    async for mem_page in self._paginate_child(
-                        client, mem_path, data_field="members", params_base=params_base
-                    ):
-                        for row in mem_page:
-                            if isinstance(row, dict):
-                                row.setdefault("list_id", list_id)
-                                row.setdefault("segment_id", seg_id)
-                        yield mem_page
-
-    async def _paginate_per_report(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        child_path: str,
-        cursor: str | None,
-        stamp_parent_field: str | None,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        data_field = self._data_field(stream)
-        params_base = self._cursor_params(stream, cursor)
-        async for cid in self._report_ids(client):
-            path = f"/3.0/reports/{quote(cid, safe='')}/{child_path}"
-            async for page in self._paginate_child(
-                client, path, data_field=data_field, params_base=params_base
-            ):
-                if stamp_parent_field:
-                    for row in page:
-                        if isinstance(row, dict):
-                            row.setdefault(stamp_parent_field, cid)
-                yield page
-
-    async def _paginate_email_activity(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Walk reports → email-activity, exploding each recipient's `activity[]` into one row per
-        action with a synthesized `<email_id>:<action>:<timestamp>` id (Mailchimp ships no per-event
-        id) so the page's primary key stays stable across re-syncs."""
-        params_base: dict[str, Any] = {}
-        if cursor:
-            params_base["since"] = cursor
-        async for cid in self._report_ids(client):
-            path = f"/3.0/reports/{quote(cid, safe='')}/email-activity"
-            async for page in self._paginate_child(
-                client, path, data_field="emails", params_base=params_base
-            ):
-                exploded: list[dict[str, Any]] = []
-                for parent in page:
-                    if not isinstance(parent, dict):
-                        continue
-                    base = {key: value for key, value in parent.items() if key != "activity"}
-                    base.setdefault("campaign_id", cid)
-                    for act in parent.get("activity") or []:
-                        if not isinstance(act, dict):
-                            continue
-                        row = {**base, **act}
-                        row.setdefault(
-                            "id",
-                            f"{base.get('email_id', '')}:"
-                            f"{act.get('action', '')}:"
-                            f"{act.get('timestamp', '')}",
-                        )
-                        exploded.append(row)
-                if exploded:
-                    yield exploded
+            records = _activity_rows(page) if stream.name == "email_activity" else page
+            if records:
+                yield WalkPage(records=records)

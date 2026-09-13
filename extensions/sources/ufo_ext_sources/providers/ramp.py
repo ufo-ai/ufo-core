@@ -24,7 +24,13 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    list_or_empty,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
@@ -105,7 +111,7 @@ class RampConnector(RestConnector):
         return f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         path = _LIST_PATHS.get(stream.name)
         if path is None:
@@ -113,8 +119,8 @@ class RampConnector(RestConnector):
         params: dict[str, Any] | None = {"page_size": PAGE_SIZE}
         if stream.name == "transactions":
             params = {"page_size": PAGE_SIZE, "order_by_date_asc": "true"}
-            if cursor:
-                params["from_date"] = cursor
+            if run.cursor:
+                params["from_date"] = run.cursor
         try:
             while True:
                 data = await self._get(client, path, params=params)

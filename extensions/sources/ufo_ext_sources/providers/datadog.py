@@ -36,8 +36,8 @@ import httpx
 
 from ufo.sdk.sources import (
     RestConnector,
+    Run,
     StreamFault,
-    StreamPage,
     StreamSkipped,
     StreamSpec,
     dict_or_empty,
@@ -105,25 +105,8 @@ class DatadogConnector(RestConnector):
     }
     checkpoint = staticmethod(text_checkpoint)
 
-    def paginate_source(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        self_user_id: str | None,
-        backfill_after: datetime | None = None,
-    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        """Widen the seam by the row's pinned floor, which opens the alert feed's first read."""
-        return self.paginate(client, stream, cursor=cursor, backfill_after=backfill_after)
-
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        backfill_after: datetime | None = None,
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
             match stream.name:
@@ -132,7 +115,7 @@ class DatadogConnector(RestConnector):
                         yield page
                 case MONITOR_ALERTS.name:
                     async for page in self._alert_pages(
-                        client, cursor=cursor, floor=backfill_after
+                        client, cursor=run.cursor, floor=run.backfill_after
                     ):
                         yield page
                 case _:

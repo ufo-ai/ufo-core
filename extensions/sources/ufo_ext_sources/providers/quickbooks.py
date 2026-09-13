@@ -22,7 +22,13 @@ from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, get_path
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    get_path,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
@@ -97,13 +103,13 @@ class QuickBooksConnector(RestConnector):
         return " ".join(parts)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         entity = stream.source_object
         start_position = 1
         try:
             while True:
-                query = self._build_query(stream, cursor=cursor, start_position=start_position)
+                query = self._build_query(stream, cursor=run.cursor, start_position=start_position)
                 data = await self._get(client, "/query", params={"query": query})
                 envelope = data.get("QueryResponse") or {}
                 records = envelope.get(entity) or []

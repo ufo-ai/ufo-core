@@ -6,21 +6,25 @@ scope is `error="missing_scope"`). `users.list` and `conversations.list` enumera
 collection each run, so they are `delete_missing` snapshots — a member or channel that vanished from
 the grant's view is tombstoned, which is how deletes are detected on an API with no delete signal.
 The three message-derived streams (`messages`, `conversation_threads`, `message_participants`) come
-from one `conversations.history` walk per channel (a POST, matching Slack's own read shape). Each
-channel is a `newest_first` partition of the SDK's `PartitionWalk`: `conversations.history`
+from one `conversations.history` walk per channel (a POST, matching Slack's own read shape). They
+hang under `conversations` by one edge each, so each carries only the channel fields its own records
+are recalled by — a message its channel's name and type, a thread its name and privacy — and an
+archived channel is excluded by the edge rather than by a walk of its own. A
+key already spells its channel (`C1:1700000100.000100`), so all three declare `key_scope="global"`
+and a record is addressed by that key alone. Each
+channel is a `newest_first` partition: `conversations.history`
 returns newest-first, so a first backfill walks a channel downward as a `{high, until}` window
 (bounded with `latest`) and a capped run resumes from `until` without the position drift that would
 drop messages posted between slices, while steady-state reads only what is newer than the channel
-watermark (`oldest`). The per-channel cursor map lives in `PartitionWalk`, so a busy channel
-advancing never skips a quiet one. A grant that can't enumerate at all (`users.list`/
-`conversations.list` refused for a
+watermark (`oldest`). A busy channel advancing never skips a quiet one.
+A grant that can't enumerate at all (`users.list`/`conversations.list` refused for a
 missing scope, `ok=false` or a 403) can read no stream, so the walk raises `StreamSkipped` and the
 run records a skip, not a failure; a per-channel refusal deeper in the history walk skips that
 channel and the others still sync. Message streams reject the Slack surface's exact live bot-user
 id before deriving message, thread, or participant records; another app's `bot_id` remains source
 material. The write path is intentionally absent — the source seam only reads."""
 
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -29,27 +33,50 @@ import httpx
 from ufo.sdk.sources import (
     CHAT_BACKFILL_WINDOW_DAYS,
     Ordering,
+    ParentEdge,
+    Partition,
     PartitionBound,
     PartitionSkipped,
-    PartitionWalk,
     RestConnector,
+    Run,
     StreamPage,
     StreamSkipped,
     StreamSpec,
     WalkPage,
+    fanned_out,
 )
 
 USER_PAGE_SIZE = 200
 CONVERSATION_PAGE_SIZE = 200
 HISTORY_PAGE_SIZE = 15
+HISTORY_FETCH_BUDGET = 20
 HISTORY_TYPES = "public_channel,private_channel,mpim,im"
+HISTORY_PATH = "/api/conversations.history"
 SNIPPET_CAP = 240
 
-_MESSAGE_STREAMS = frozenset({"conversation_threads", "messages", "message_participants"})
 _SCOPE_REFUSAL_ERRORS = frozenset({"missing_scope", "no_permission", "not_allowed_token_type"})
 _SCOPE_REFUSAL_STATUS = frozenset({403})
 _CHANNEL_SKIP_ERRORS = frozenset(
     {"missing_scope", "not_in_channel", "channel_not_found", "is_archived"}
+)
+_CHANNEL_PATH = f"{HISTORY_PATH}?channel={{id}}"
+_LIVE = {"is_archived": (False,)}
+_UNDER_CHANNEL = ParentEdge(stream="conversations", path=_CHANNEL_PATH, where=_LIVE)
+_MESSAGES_UNDER_CHANNEL = ParentEdge(
+    stream="conversations",
+    path=_CHANNEL_PATH,
+    where=_LIVE,
+    carry={"channel_name": "name", "channel_type": "conversation_type"},
+)
+_THREADS_UNDER_CHANNEL = ParentEdge(
+    stream="conversations",
+    path=_CHANNEL_PATH,
+    where=_LIVE,
+    carry={
+        "channel_name": "name",
+        "is_private": "is_private",
+        "is_archived": "is_archived",
+    },
 )
 
 ALL_STREAMS: list[StreamSpec] = [
@@ -68,6 +95,9 @@ ALL_STREAMS: list[StreamSpec] = [
         ordering=Ordering.newest_first,
         backfill_window_days=CHAT_BACKFILL_WINDOW_DAYS,
         canonical=True,
+        parents=(_THREADS_UNDER_CHANNEL,),
+        key_scope="global",
+        fetch_budget=HISTORY_FETCH_BUDGET,
     ),
     StreamSpec(
         name="messages",
@@ -78,6 +108,9 @@ ALL_STREAMS: list[StreamSpec] = [
         ordering=Ordering.newest_first,
         backfill_window_days=CHAT_BACKFILL_WINDOW_DAYS,
         canonical=True,
+        parents=(_MESSAGES_UNDER_CHANNEL,),
+        key_scope="global",
+        fetch_budget=HISTORY_FETCH_BUDGET,
     ),
     StreamSpec(
         name="message_participants",
@@ -85,6 +118,8 @@ ALL_STREAMS: list[StreamSpec] = [
         primary_key="id",
         ordering=Ordering.newest_first,
         backfill_window_days=CHAT_BACKFILL_WINDOW_DAYS,
+        parents=(_UNDER_CHANNEL,),
+        key_scope="global",
     ),
 ]
 
@@ -105,31 +140,8 @@ class SlackConnector(RestConnector):
     base_url = "https://slack.com"
     streams_list = ALL_STREAMS
 
-    def paginate_source(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        self_user_id: str | None,
-        backfill_after: datetime | None = None,
-    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        return self.paginate(
-            client,
-            stream,
-            cursor=cursor,
-            self_user_id=self_user_id,
-            backfill_after=backfill_after,
-        )
-
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        self_user_id: str | None = None,
-        backfill_after: datetime | None = None,
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         if stream.name == "users":
             async for page in self.iter_users(client):
@@ -139,43 +151,25 @@ class SlackConnector(RestConnector):
             async for page in self.iter_conversations(client):
                 yield page
             return
-        if stream.name in _MESSAGE_STREAMS:
-            users = await self.user_index(client)
-            channels: dict[str, dict[str, Any]] = {}
-            async for conversation_page in self.iter_conversations(client):
-                for conversation in conversation_page:
-                    channel_id = conversation.get("id")
-                    if isinstance(channel_id, str) and conversation.get("is_archived") is not True:
-                        channels[channel_id] = conversation
+        if not stream.parents:
+            raise StreamSkipped(f"slack: stream {stream.name!r} is not implemented")
+        users = await self.user_index(client)
 
-            async def partitions() -> AsyncIterator[str]:
-                for channel_id in channels:
-                    yield channel_id
+        def channel_pages(partition: Partition, bound: PartitionBound) -> AsyncIterator[WalkPage]:
+            return self._channel_pages(client, stream, partition, bound, users, run.self_user_id)
 
-            def channel_pages(channel_id: str, bound: PartitionBound) -> AsyncIterator[WalkPage]:
-                return self._channel_pages(
-                    client,
-                    stream,
-                    channels[channel_id],
-                    bound,
-                    users,
-                    self_user_id,
-                )
+        floor = _slack_ts(run.backfill_after)
+        async for stream_page in fanned_out(stream, run, channel_pages, floor):
+            yield stream_page
 
-            walk = PartitionWalk(
-                ordering=stream.ordering,
-                partitions=partitions,
-                pages=channel_pages,
-                floor=_slack_ts(backfill_after),
-            ).stream(cursor)
-            try:
-                async for stream_page in walk:
-                    yield stream_page
-            finally:
-                if isinstance(walk, AsyncGenerator):
-                    await walk.aclose()
-            return
-        raise StreamSkipped(f"slack: stream {stream.name!r} is not implemented")
+    def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
+        """Name a thread after the channel it sits in when its first message carries no text. The
+        channel's name reaches the record as `channel_name`, carried from the channel this walk
+        fanned out from, and the walk writes it after the thread is derived — so the fallback is
+        resolved here rather than where the rest of the title is chosen."""
+        if stream.name != "conversation_threads" or record.get("title"):
+            return record
+        return {**record, "title": record.get("channel_name")}
 
     async def iter_users(self, client: httpx.AsyncClient) -> AsyncIterator[list[dict[str, Any]]]:
         cursor: str | None = None
@@ -250,19 +244,23 @@ class SlackConnector(RestConnector):
         self,
         client: httpx.AsyncClient,
         stream: StreamSpec,
-        conversation: dict[str, Any],
+        partition: Partition,
         bound: PartitionBound,
         users: dict[str, dict[str, Any]],
         self_user_id: str | None,
     ) -> AsyncIterator[WalkPage]:
-        """One channel's `conversations.history` slice for `PartitionWalk`: newest-first, bounding
+        """One channel's `conversations.history` slice: newest-first, bounding
         a steady-state pass above the channel watermark with `oldest` (exclusive — the watermark
         message is already landed) and a backfill below `until` with `latest` (inclusive, so a
         message tied at a capped boundary `ts` is re-fetched and deduped, not dropped). Each page
         reports the raw-message `ts` span so the walk tracks the channel's window, and derives this
         stream's records (threads/messages/participants) from the same page; a channel the grant
-        can't read drops out without failing the run."""
-        channel_id = conversation["id"]
+        can't read drops out without failing the run.
+
+        The edge spells the channel in the query, which Slack reads from the POST body instead, so
+        the partition's path carries it and the request sends it where Slack takes it."""
+        target = httpx.URL(partition.path)
+        channel_id = target.params["channel"]
         cursor: str | None = None
         while True:
             params: dict[str, Any] = {"channel": channel_id, "limit": HISTORY_PAGE_SIZE}
@@ -276,7 +274,7 @@ class SlackConnector(RestConnector):
                 if bound.since:
                     params |= {"oldest": bound.since, "inclusive": "true"}
             try:
-                data = await self._slack_post(client, "/api/conversations.history", json=params)
+                data = await self._slack_post(client, target.path, json=params)
             except SlackApiError as error:
                 if error.error in _CHANNEL_SKIP_ERRORS:
                     raise PartitionSkipped(f"slack: channel refused ({error.error})") from error
@@ -289,7 +287,7 @@ class SlackConnector(RestConnector):
             if raw_messages:
                 yield self._message_page(
                     stream,
-                    conversation,
+                    channel_id,
                     raw_messages,
                     users,
                     self_user_id,
@@ -301,14 +299,13 @@ class SlackConnector(RestConnector):
     def _message_page(
         self,
         stream: StreamSpec,
-        conversation: dict[str, Any],
+        channel_id: str,
         raw_messages: list[dict[str, Any]],
         users: dict[str, dict[str, Any]],
         self_user_id: str | None,
     ) -> WalkPage:
         """One history page fanned into this stream's records, carrying the raw-message `ts` span so
         the walk advances the channel's newest-first window over it."""
-        channel_id = conversation["id"]
         threads_by_id: dict[str, dict[str, Any]] = {}
         messages: list[dict[str, Any]] = []
         participants: list[dict[str, Any]] = []
@@ -321,13 +318,13 @@ class SlackConnector(RestConnector):
                 continue
             row = _flatten_message(
                 raw,
-                conversation=conversation,
+                channel_id=channel_id,
                 users=users,
                 self_user_id=self_user_id,
             )
             if row is None:
                 continue
-            thread = _conversation_thread_from_message(row, raw=raw, conversation=conversation)
+            thread = _conversation_thread_from_message(row, raw=raw)
             if thread is not None:
                 existing = threads_by_id.get(thread["id"])
                 if existing is None or str(existing.get("updated_at") or "") < str(
@@ -464,13 +461,12 @@ def _flatten_user(raw: dict[str, Any]) -> dict[str, Any]:
 def _flatten_message(
     raw: dict[str, Any],
     *,
-    conversation: dict[str, Any],
+    channel_id: str,
     users: dict[str, dict[str, Any]],
     self_user_id: str | None,
 ) -> dict[str, Any] | None:
     ts = raw.get("ts")
-    channel_id = conversation.get("id")
-    if not isinstance(ts, str) or not isinstance(channel_id, str):
+    if not isinstance(ts, str):
         return None
     user_id = raw.get("user")
     if isinstance(user_id, str) and user_id == self_user_id:
@@ -485,8 +481,6 @@ def _flatten_message(
         "slack_ts": ts,
         "channel_id": channel_id,
         "conversation_id": channel_id,
-        "channel_name": conversation.get("name"),
-        "channel_type": conversation.get("conversation_type"),
         "thread_id": f"{channel_id}:{thread_ts}",
         "thread_ts": thread_ts,
         "sent_at": _slack_ts_to_iso(ts),
@@ -506,7 +500,7 @@ def _flatten_message(
 
 
 def _conversation_thread_from_message(
-    message: dict[str, Any], *, raw: dict[str, Any], conversation: dict[str, Any]
+    message: dict[str, Any], *, raw: dict[str, Any]
 ) -> dict[str, Any] | None:
     thread_id = message.get("thread_id")
     thread_ts = message.get("thread_ts")
@@ -523,12 +517,9 @@ def _conversation_thread_from_message(
     reply_users = raw.get("reply_users")
     return {
         "id": thread_id,
-        "title": message.get("subject") or message.get("snippet") or conversation.get("name"),
+        "title": message.get("subject") or message.get("snippet") or None,
         "conversation_type": "thread",
         "snippet": message.get("snippet"),
-        "channel_name": conversation.get("name"),
-        "is_private": conversation.get("is_private"),
-        "is_archived": conversation.get("is_archived"),
         "message_count": reply_count + 1 if isinstance(reply_count, int) else None,
         "participant_count": len(reply_users) if isinstance(reply_users, list) else None,
         "last_message_at": _slack_ts_to_iso(latest_ts),

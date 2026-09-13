@@ -29,6 +29,7 @@ import httpx
 
 from ufo.sdk.sources import (
     RestConnector,
+    Run,
     StreamFault,
     StreamSkipped,
     StreamSpec,
@@ -109,7 +110,7 @@ class DocuSignConnector(RestConnector):
         return f"{chosen['base_uri'].rstrip('/')}/restapi/v2.1/accounts/{chosen['account_id']}"
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         route = _LIST_PATHS.get(stream.name)
         if route is None:
@@ -124,7 +125,7 @@ class DocuSignConnector(RestConnector):
                     "start_position": start_position,
                 }
                 if stream.name == "envelopes":
-                    params["from_date"] = cursor or EPOCH_FROM_DATE
+                    params["from_date"] = run.cursor or EPOCH_FROM_DATE
                     params["include"] = _ENVELOPE_INCLUDE
                     params["order"] = "asc"
                 data = await self._get(client, f"{base}/{path}", params=params)

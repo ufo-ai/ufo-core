@@ -4,18 +4,35 @@ recallable pages.
 Every list answers `{data: [...]}`, so `flatten` stays the identity passthrough, but each one is
 reached its own way. `contracts` pages by cursor, carrying `page.cursor` back as `after_cursor`;
 `timesheets` pages by `offset`/`limit` until a page comes up short. `tasks` answers under one
-contract at a time and pages not at all, so the walk enumerates contracts and reads each one's,
-stamping the contract it came from onto every row. Streams whose `cursor_field` is set filter
+contract at a time, never as a collection of its own, so it declares `contracts` as its parent and
+carries each contract's id onto the rows it holds — the only thing tying a task to a worker, which
+the task record does not name. A task id is unique inside its contract and no further: Deel types
+it as a bare string, writes `format: uuid` where it means one, and publishes no `GET /tasks/{id}`
+(`developer.deel.com/openapi/endpoints-5.json`). The per-contract read pages not at all and takes
+no filter, so a pass re-reads every contract's tasks whole and is the authoritative collection the
+driver tombstones against. Streams whose `cursor_field` is set filter
 incrementally with `?updated_after=<iso>`; streams without one full-refresh each run. Auth is the
 OAuth bearer the resolved `Credential` carries. A refusal (401/403) raises `StreamSkipped`. The
 write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
@@ -30,6 +47,8 @@ def _stream(
     primary_key: str = "id",
     cursor_field: str | None = "updated_at",
     canonical: bool = False,
+    delete_missing: bool = False,
+    parents: tuple[ParentEdge, ...] = (),
 ) -> StreamSpec:
     return StreamSpec(
         name=name,
@@ -37,6 +56,8 @@ def _stream(
         primary_key=primary_key,
         cursor_field=cursor_field,
         canonical=canonical,
+        delete_missing=delete_missing,
+        parents=parents,
     )
 
 
@@ -45,7 +66,19 @@ DEEL_STREAMS: list[StreamSpec] = [
     _stream("forms", cursor_field=None),
     _stream("payslips", canonical=True),
     _stream("timesheets", canonical=True),
-    _stream("tasks", cursor_field=None, canonical=True),
+    _stream(
+        "tasks",
+        cursor_field=None,
+        canonical=True,
+        delete_missing=True,
+        parents=(
+            ParentEdge(
+                stream="contracts",
+                path=f"{CONTRACTS_PATH}/{{id}}/tasks",
+                carry={"contract_id": "id"},
+            ),
+        ),
+    ),
 ]
 
 
@@ -73,19 +106,22 @@ class DeelConnector(RestConnector):
         return []
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name == "tasks":
-                async for page in self._paginate_contract_tasks(client):
-                    yield page
+                pages = partial(self._contract_tasks, client)
+                async for task_page in fanned_out(stream, run, pages):
+                    yield task_page
                 return
             if stream.name == "contracts":
-                async for page in self._paginate_cursor(client, CONTRACTS_PATH, stream, cursor):
-                    yield page
+                async for contract_page in self._paginate_cursor(
+                    client, CONTRACTS_PATH, stream, run.cursor
+                ):
+                    yield contract_page
                 return
-            async for page in self._paginate_offset(client, stream, cursor):
-                yield page
+            async for offset_page in self._paginate_offset(client, stream, run.cursor):
+                yield offset_page
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
                 raise StreamSkipped(
@@ -133,27 +169,12 @@ class DeelConnector(RestConnector):
                 return
             offset += PAGE_SIZE
 
-    async def _paginate_contract_tasks(
-        self, client: httpx.AsyncClient
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Tasks answer under one contract at a time, so the walk enumerates contracts and reads
-        each one's. Every row carries the contract it came from, which the task record does not
-        name and which is the only thing tying it to a worker.
-
-        The contract list goes out unfiltered, and the per-contract read takes no filter of its own,
-        so every run reads every contract's tasks. A task's own change does not touch its contract,
-        so narrowing the enumeration by a task watermark would stop asking the contracts that did
-        not change and lose their tasks for good."""
-        async for page in self._paginate_cursor(client, CONTRACTS_PATH, _stream("contracts"), None):
-            for contract in page:
-                identity = contract.get("id")
-                if identity is None:
-                    continue
-                data = await self._get(
-                    client, f"{CONTRACTS_PATH}/{identity}/tasks", params={"limit": PAGE_SIZE}
-                )
-                records = [
-                    {**record, "contract_id": identity} for record in self._extract_records(data)
-                ]
-                if records:
-                    yield records
+    async def _contract_tasks(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        """One contract's tasks, which the endpoint answers whole. A refusal fails the run rather
+        than dropping the contract out of the pass: this stream tombstones against its own
+        enumeration, so a partition missing from a pass that still completed would sweep tasks that
+        are merely unread."""
+        data = await self._get(client, partition.path, params={"limit": PAGE_SIZE})
+        yield WalkPage(records=self._extract_records(data))

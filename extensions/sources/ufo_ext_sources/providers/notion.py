@@ -9,30 +9,45 @@ values, a block's paragraph/heading/list/to-do/code text, a comment's body, a us
 
 Reads route through three shapes. `pages` and `data_sources` come from `POST /search` filtered by
 object type, sorted ascending by `last_edited_time`, paged by the `next_cursor`/`has_more` envelope
-and watermarked on `last_edited_time`. `blocks` walks every page's block tree recursively
-(`GET /blocks/{id}/children`, bounded to `MAX_BLOCK_DEPTH`, not descending into child pages or
-databases which are their own records) so a page's body text is captured. `comments` fans out
-`GET /comments` per page. `users` is a flat `GET /users`. Every collection GET sends the
-`Notion-Version` header and paginates on `start_cursor`/`next_cursor`. A grant whose integration
-lacks the capability for a
+and watermarked on `last_edited_time`. `blocks` hangs under `pages` and under itself at the same
+`GET /blocks/{id}/children`.
+Only the self-edge narrows: a block holds further blocks where `has_children` is true and its type
+is not one that carries another object's body under an id of its own. A page answers neither field,
+which is why the edge under `pages` names no predicate at all. `comments` fans out
+`GET /comments?block_id={id}` under `pages`. `users` is a flat `GET /users`.
+Every collection GET sends the `Notion-Version` header and paginates on
+`start_cursor`/`next_cursor`. A grant whose integration lacks the capability for a
 stream (`401`/`403`) yields `StreamSkipped` so the run records a skip, not a failure. The credential
 is resolved through the auth proxy the runner threads — this connector holds no token. The write
 path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo.sdk.sources import (
+    Ordering,
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+    list_or_empty,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
-MAX_BLOCK_DEPTH = 30
 NOTION_VERSION = "2025-09-03"
+BLOCK_CHILDREN_PATH = "/blocks/{id}/children"
 _REFUSAL_STATUS = frozenset({401, 403})
-_BLOCK_NO_DESCEND = frozenset({"child_page", "child_database", "ai_block"})
 
 NOTION_STREAMS: list[StreamSpec] = [
     StreamSpec(name="users", source_object="users", primary_key="id"),
@@ -61,6 +76,8 @@ NOTION_STREAMS: list[StreamSpec] = [
         cursor_field="created_time",
         created_at_field="created_time",
         updated_at_field=None,
+        ordering=Ordering.ascending,
+        parents=(ParentEdge(stream="pages", path="/comments?block_id={id}"),),
     ),
     StreamSpec(
         name="blocks",
@@ -69,6 +86,16 @@ NOTION_STREAMS: list[StreamSpec] = [
         cursor_field="last_edited_time",
         created_at_field="created_time",
         updated_at_field="last_edited_time",
+        ordering=Ordering.ascending,
+        parents=(
+            ParentEdge(stream="pages", path=BLOCK_CHILDREN_PATH),
+            ParentEdge(
+                stream="blocks",
+                path=BLOCK_CHILDREN_PATH,
+                where={"has_children": (True,)},
+                unless={"type": ("child_page", "child_database", "ai_block")},
+            ),
+        ),
     ),
 ]
 
@@ -85,27 +112,25 @@ class NotionConnector(RestConnector):
         return client
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             match stream.name:
                 case "users":
                     async for page in self._collection(client, "/users"):
                         yield page
                 case "pages":
-                    async for page in self._search(client, object_type="page", cursor=cursor):
+                    async for page in self._search(client, object_type="page", cursor=run.cursor):
                         yield page
                 case "data_sources":
                     async for page in self._search(
-                        client, object_type="data_source", cursor=cursor
+                        client, object_type="data_source", cursor=run.cursor
                     ):
                         yield page
-                case "comments":
-                    async for page in self._comments(client, cursor=cursor):
-                        yield page
-                case "blocks":
-                    async for page in self._blocks(client, cursor=cursor):
-                        yield page
+                case _ if stream.parents:
+                    pages = partial(self._partition_pages, client, stream)
+                    async for stream_page in fanned_out(stream, run, pages):
+                        yield stream_page
                 case _:
                     raise StreamSkipped(f"notion stream {stream.name!r} is not implemented")
         except httpx.HTTPStatusError as error:
@@ -115,6 +140,28 @@ class NotionConnector(RestConnector):
                     "integration lacks the capability or was not shared the content"
                 ) from error
             raise
+
+    async def _partition_pages(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        partition: Partition,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
+        """One parent's collection, resumed past that partition's own watermark. Notion publishes no
+        server-side `since` on either child endpoint, so the bound is applied to the records."""
+        target = httpx.URL(partition.path)
+        field = stream.cursor_field or ""
+        async for records in self._collection(client, target.path, params=dict(target.params)):
+            kept = [
+                record
+                for record in records
+                if not bound.after or str(record.get(field) or "") > bound.after
+            ]
+            if not kept:
+                continue
+            values = [str(record.get(field) or "") for record in kept]
+            yield WalkPage(records=kept, high=max(values), low=min(values))
 
     async def _search(
         self, client: httpx.AsyncClient, *, object_type: str, cursor: str | None
@@ -140,57 +187,6 @@ class NotionConnector(RestConnector):
             next_cursor = data.get("next_cursor")
             if not isinstance(next_cursor, str) or not data.get("has_more"):
                 return
-
-    async def _blocks(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for pages in self._search(client, object_type="page", cursor=None):
-            for page in pages:
-                page_id = page.get("id")
-                if isinstance(page_id, str) and page_id:
-                    async for blocks in self._block_children(
-                        client, block_id=page_id, depth=0, cursor=cursor
-                    ):
-                        yield blocks
-
-    async def _block_children(
-        self, client: httpx.AsyncClient, *, block_id: str, depth: int, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        if depth > MAX_BLOCK_DEPTH:
-            return
-        async for blocks in self._collection(client, f"/blocks/{block_id}/children"):
-            filtered = [
-                b for b in blocks if not cursor or str(b.get("last_edited_time") or "") > cursor
-            ]
-            if filtered:
-                yield filtered
-            for block in blocks:
-                if not block.get("has_children") or block.get("type") in _BLOCK_NO_DESCEND:
-                    continue
-                child_id = block.get("id")
-                if isinstance(child_id, str) and child_id:
-                    async for page in self._block_children(
-                        client, block_id=child_id, depth=depth + 1, cursor=cursor
-                    ):
-                        yield page
-
-    async def _comments(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for pages in self._search(client, object_type="page", cursor=None):
-            for page in pages:
-                page_id = page.get("id")
-                if not isinstance(page_id, str) or not page_id:
-                    continue
-                async for comments in self._collection(
-                    client, "/comments", params={"block_id": page_id}
-                ):
-                    if cursor:
-                        comments = [
-                            c for c in comments if str(c.get("created_time") or "") > cursor
-                        ]
-                    if comments:
-                        yield comments
 
     async def _collection(
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None

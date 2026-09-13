@@ -194,6 +194,7 @@ from ufo.runtime.sources.sync import (
     FolderSource,
     SourceBackend,
     SourceIdentityResolver,
+    SourceWatchReader,
     SyncDriver,
     register_sources,
 )
@@ -518,6 +519,7 @@ def run(fleet: Fleet) -> None:
         postgres=config.database.url.startswith("postgresql"),
         source_credentials=SourceCredentialResolver(connectors),
         identity_resolvers=_source_identity_resolvers(manifests, credentials, blob),
+        watch_readers=_source_watch_readers(manifests),
         own_key_slots=model_key_slots(registry),
     )
     unknown_backends = sorted(
@@ -733,6 +735,22 @@ def _source_backends(manifests: tuple[Manifest, ...]) -> dict[str, SourceBackend
                 raise RuntimeError(f"two extensions register source backend {provider.backend!r}")
             backends[provider.backend] = provider.build(credentials)
     return backends
+
+
+def _source_watch_readers(manifests: tuple[Manifest, ...]) -> dict[str, SourceWatchReader]:
+    """The sync driver's watch map: the reader of pinned resources each source backend's own
+    extension answers, built on that extension's scoped context. A backend whose extension declares
+    none is absent, and its runs pin no partition."""
+    readers: dict[str, SourceWatchReader] = {}
+    for manifest in manifests:
+        declared = frozenset(slot.name for slot in manifest.credentials)
+        for provider in manifest.sources:
+            if provider.watches is None:
+                continue
+            readers[provider.backend] = provider.watches(
+                extension_context_for(manifest.name, declared)
+            )
+    return readers
 
 
 def _source_identity_resolvers(

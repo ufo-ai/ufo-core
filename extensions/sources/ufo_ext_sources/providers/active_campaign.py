@@ -20,7 +20,12 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_LIMIT = 100
@@ -183,14 +188,14 @@ class ActiveCampaignConnector(RestConnector):
         return _STREAM_PATHS.get(stream.name, (stream.name, stream.name))
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         url_segment, envelope_key = self._resolve_stream_segment(stream)
         path = f"{API_PREFIX}/{url_segment}"
         base_params: dict[str, Any] = {"limit": PAGE_LIMIT}
         filter_key = _INCREMENTAL_FILTER_STREAMS.get(stream.name)
-        if cursor and filter_key:
-            base_params[f"filters[{filter_key}_after]"] = cursor
+        if run.cursor and filter_key:
+            base_params[f"filters[{filter_key}_after]"] = run.cursor
         try:
             async for page in self._get_offset_pages(
                 client,

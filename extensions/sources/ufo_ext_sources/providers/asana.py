@@ -15,7 +15,13 @@ from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    list_or_empty,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
@@ -72,12 +78,12 @@ class AsanaConnector(RestConnector):
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         path = f"/{stream.source_object}"
         params: dict[str, Any] = {"limit": PAGE_SIZE}
-        if cursor and stream.name in _MODIFIED_SINCE_STREAMS:
-            params["modified_since"] = cursor
+        if run.cursor and stream.name in _MODIFIED_SINCE_STREAMS:
+            params["modified_since"] = run.cursor
         try:
             while True:
                 data = await self._get(client, path, params=params)

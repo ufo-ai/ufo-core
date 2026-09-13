@@ -5,7 +5,7 @@ Every assertion drives a real seam and reads back durable rows. The connect path
 `connection_recorded` hook bound exactly as `serve` binds it, so the rows are asserted at the
 instant the callback answers. The retry path runs the declared job through `JobRunner`, so its
 candidates and handler are the ones exercised. Covered here: the callback leaves one row per
-canonical stream on the connection, whichever agent asked for the connection; a per-tenant provider
+syncing stream on the connection, whichever agent asked for the connection; a per-tenant provider
 registers nothing until the connection names a tenant URL and then registers on the next tick; a
 connector that dials no host at all registers its streams with the connection; the
 job creates what a connect-time creation did not and adds nothing once the rows are there; a stream
@@ -39,7 +39,12 @@ from ufo.runtime.jobs import JobRunner, bindings_from
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
-from ufo.sdk.sources import ConnectorSourceConfig, RestConnector, StreamSpec
+from ufo.sdk.sources import (
+    ConnectorSourceConfig,
+    RestConnector,
+    StreamSpec,
+    syncing_streams,
+)
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -305,8 +310,8 @@ async def _connection_id(state: _Workspace) -> UUID:
             ).scalar_one()
 
 
-def _canonical(provider: str) -> set[str]:
-    return {stream.name for stream in CONNECTORS[provider]().streams() if stream.canonical}
+def _syncing(provider: str) -> set[str]:
+    return set(syncing_streams(CONNECTORS[provider]().streams()))
 
 
 def _pins(rows: list[sa.RowMapping]) -> dict[str, tuple[int | None, str | None]]:
@@ -331,7 +336,7 @@ async def test_connecting_an_account_creates_its_feeds_in_the_callback(db: None)
 
     rows = await _rows(state)
     connection_id = await _connection_id(state)
-    assert {row["config"]["stream"] for row in rows} == _canonical(ASANA)
+    assert {row["config"]["stream"] for row in rows} == _syncing(ASANA)
     for row in rows:
         assert row["backend"] == ASANA
         assert row["connection_id"] == connection_id
@@ -350,7 +355,7 @@ async def test_a_connection_a_specialist_agent_recorded_gets_its_feeds_too(db: N
 
     await _connect(state, state.other_id, ASANA)
 
-    assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(ASANA)
+    assert {row["config"]["stream"] for row in await _rows(state)} == _syncing(ASANA)
 
 
 async def test_the_retry_job_reaches_a_workspace_holding_only_a_specialists_connection(
@@ -367,7 +372,7 @@ async def test_the_retry_job_reaches_a_workspace_holding_only_a_specialists_conn
     assert state.workspace_id in set(await _runner().candidates(JOB_KEY))
     await _tick(state)
 
-    assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(ASANA)
+    assert {row["config"]["stream"] for row in await _rows(state)} == _syncing(ASANA)
 
 
 async def test_a_per_tenant_provider_waits_for_its_tenant_url(db: None) -> None:
@@ -382,7 +387,7 @@ async def test_a_per_tenant_provider_waits_for_its_tenant_url(db: None) -> None:
     await _set_tenant_url(state, await _connection_id(state), TENANT_URL)
     await _tick(state)
 
-    assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(FRESHDESK)
+    assert {row["config"]["stream"] for row in await _rows(state)} == _syncing(FRESHDESK)
 
 
 async def test_a_connector_that_dials_no_host_registers_its_streams(db: None) -> None:
@@ -393,7 +398,7 @@ async def test_a_connector_that_dials_no_host_registers_its_streams(db: None) ->
 
     await _connect(state, state.main_id, GRANOLA)
 
-    assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(GRANOLA)
+    assert {row["config"]["stream"] for row in await _rows(state)} == _syncing(GRANOLA)
 
 
 async def test_the_job_creates_what_the_callback_did_not_and_then_adds_nothing(db: None) -> None:
@@ -405,7 +410,7 @@ async def test_the_job_creates_what_the_callback_did_not_and_then_adds_nothing(d
     created = await _rows(state)
     await _tick(state)
 
-    assert {row["config"]["stream"] for row in created} == _canonical(ASANA)
+    assert {row["config"]["stream"] for row in created} == _syncing(ASANA)
     assert await _rows(state) == created
 
 
@@ -417,7 +422,7 @@ async def test_a_stream_newly_marked_canonical_joins_a_connection_that_already_s
     already syncing are left exactly as they are."""
     state = await _workspace()
     connection_id = await _connect_without_the_hook(state, ASANA)
-    first = sorted(_canonical(ASANA))[0]
+    first = sorted(_syncing(ASANA))[0]
     with ws(state.workspace_id), agent(state.main_id):
         await _ext().register_source(
             ASANA, ConnectorSourceConfig(stream=first), connection_id=connection_id
@@ -428,7 +433,7 @@ async def test_a_stream_newly_marked_canonical_joins_a_connection_that_already_s
 
     rows = await _rows(state)
     assert {row["config"]["stream"] for row in held} == {first}
-    assert {row["config"]["stream"] for row in rows} == _canonical(ASANA)
+    assert {row["config"]["stream"] for row in rows} == _syncing(ASANA)
     assert held[0]["uid"] in {row["uid"] for row in rows}
 
 
@@ -547,7 +552,7 @@ async def test_a_source_declaring_no_stream_leaves_a_connection_its_feeds(db: No
 
     rows = await _rows(state)
     origin = [row for row in rows if row["backend"] == GIT_BACKEND]
-    assert {row["config"].get("stream") for row in rows} == _canonical(ASANA) | {None}
+    assert {row["config"].get("stream") for row in rows} == _syncing(ASANA) | {None}
     assert [row["config"] for row in origin] == [{"repo": "metalcraftai/handbook", "branch": None}]
 
 
@@ -600,7 +605,7 @@ async def test_a_filled_credential_slot_mints_its_connection_and_syncs_it(db: No
         None,
         True,
     )
-    assert {row["config"]["stream"] for row in rows} == _canonical(KEYED)
+    assert {row["config"]["stream"] for row in rows} == _syncing(KEYED)
     assert {row["connection_id"] for row in rows} == {minted[0]["id"]}
     assert await _connections(state) == minted
     assert await _rows(state) == rows
@@ -720,8 +725,12 @@ async def test_github_reaches_back_as_far_as_each_of_its_streams_is_read(db: Non
     comments a week, its pull requests a month, its issues a year. The streams left unpinned read
     their whole history — `repositories` and `workflows` are small catalogs, `commit_comments` and
     `releases` answer no time filter, so a cutoff on either would be honoured by nothing, and
-    `check_runs` and `commit_statuses` are read once per open pull request head, so the open set is
-    their bound and a date is not."""
+    `check_runs` is not here at all: it is syncable and not canonical, so no connection registers
+    it by declaration.
+
+    `organizations` is not content and is registered anyway: it is the root every other row's
+    partitions descend from, and it reads whole because an account's organizations are a handful of
+    records and the repo catalog below them is what a cutoff would strand."""
     state = await _workspace()
     await _connect_without_the_hook(state, GITHUB)
 
@@ -734,16 +743,48 @@ async def test_github_reaches_back_as_far_as_each_of_its_streams_is_read(db: Non
         "review_comments": 7,
         "pull_requests": 30,
         "issues": 365,
-        "check_runs": None,
         "commit_comments": None,
-        "commit_statuses": None,
+        "organizations": None,
         "releases": None,
         "repositories": None,
         "workflows": None,
     }
-    assert set(windows) == _canonical(GITHUB)
+    assert set(windows) == _syncing(GITHUB)
     assert all(pins[stream][1] is not None for stream, days in windows.items() if days is not None)
     assert all(pins[stream][1] is None for stream, days in windows.items() if days is None)
+
+
+async def test_the_check_run_and_status_rows_a_github_connection_holds_are_retired_with_their_pages(
+    db: None,
+) -> None:
+    """Both per-head streams leave the connections that already sync them. A commit's check contexts
+    reach a member through the rollup on its pull request's own page, so `commit_statuses` is not a
+    stream github declares at all; `check_runs` is declared and not canonical, so no connection
+    registers it either. Their pages go with them by cascade, and `pull_requests` — the stream whose
+    page carries that rollup — is left exactly as it is."""
+    state = await _workspace()
+    connection_id = await _connect_without_the_hook(state, GITHUB)
+    await _register(state)
+    kept = next(row for row in await _rows(state) if row["config"]["stream"] == "pull_requests")
+    retired: dict[str, UUID] = {}
+    with ws(state.workspace_id), agent(state.main_id):
+        for stream in ("check_runs", "commit_statuses"):
+            retired[stream] = await _ext().register_source(
+                GITHUB,
+                ConnectorSourceConfig(stream=stream),
+                connection_id=connection_id,
+            )
+    for stream, source_uid in retired.items():
+        await _land_a_page(state, source_uid, stream=stream)
+    await _land_a_page(state, kept["uid"], stream="pull_requests")
+
+    await _register(state)
+
+    rows = await _rows(state)
+    assert set(retired.values()).isdisjoint({row["uid"] for row in rows})
+    assert kept["uid"] in {row["uid"] for row in rows}
+    assert {row["config"]["stream"] for row in rows} == _syncing(GITHUB)
+    assert await _page_source_ids(state) == {kept["uid"]}
 
 
 async def test_raising_the_connections_window_repins_its_rows_and_refetches(
@@ -871,7 +912,7 @@ async def test_a_provider_keyed_by_two_slots_mints_only_once_both_are_filled(db:
 
     await _set_tenant_url(state, minted[0]["id"], DATADOG_SITE)
     await _tick(state)
-    assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(DATADOG)
+    assert {row["config"]["stream"] for row in await _rows(state)} == _syncing(DATADOG)
 
 
 async def test_clearing_one_key_of_a_pair_keeps_the_feed_and_clearing_both_removes_it(
@@ -892,7 +933,7 @@ async def test_clearing_one_key_of_a_pair_keeps_the_feed_and_clearing_both_remov
     await _clear_slot(state, DATADOG_SLOTS[1])
     await _tick(state)
     assert [row["id"] for row in await _connections(state)] == [minted[0]["id"]]
-    assert {row["config"]["stream"] for row in await _rows(state)} == _canonical(DATADOG)
+    assert {row["config"]["stream"] for row in await _rows(state)} == _syncing(DATADOG)
 
     await _clear_slot(state, DATADOG_SLOTS[0])
     await _tick(state)
@@ -978,5 +1019,5 @@ async def test_the_carried_slots_keep_the_connection_the_last_release_minted(db:
     settled = await _rows(state)
     assert [row["id"] for row in await _connections(state)] == [connection_id]
     assert [row["uid"] for row in settled] == [row["uid"] for row in rows]
-    assert {row["config"]["stream"] for row in settled} == _canonical(DATADOG)
+    assert {row["config"]["stream"] for row in settled} == _syncing(DATADOG)
     assert await _page_ids(state) == [page_id]

@@ -7,7 +7,8 @@ every site (its `cloud_id`) the grant reaches, and each stream's requests are sc
 paginates its REST collections with `startAt`+`maxResults` and terminates on `isLast`/`total`;
 `users/search` answers a bare JSON array read as a single page. `issues` are incremental: the run
 filters `ORDER BY updated ASC` past the stored `updated` watermark with a JQL `updated > "<cursor>"`
-clause, and `issue_comments`/`sprints` fan out per issue/board and advance their own watermark. A
+clause. `issue_comments` and `sprints` are published only under an issue and a board, so they name
+that parent, and read the `cloud_id` of the site it came from off it. A
 grant that can't reach a site or resource (`401`/`403`) yields `StreamSkipped` so the run records a
 skip, not a failure. `render` lifts an issue into its summary, status, assignee, and description
 text (Jira's description and comment bodies are Atlassian Document Format trees, walked by
@@ -16,14 +17,23 @@ threads — this connector holds no token. The write path is intentionally absen
 only reads."""
 
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import httpx
 
 from ufo.sdk.sources import (
+    Ordering,
+    ParentEdge,
+    Partition,
+    PartitionBound,
     RestConnector,
+    Run,
+    StreamPage,
     StreamSkipped,
     StreamSpec,
+    WalkPage,
+    fanned_out,
     list_or_empty,
     records_at,
     with_context,
@@ -33,6 +43,7 @@ from ufo_ext_sources.watermark import text_checkpoint
 PAGE_SIZE = 100
 ISSUE_FIELDS = "summary,description,status,priority,created,updated,project,assignee,reporter"
 _REFUSAL_STATUS = frozenset({401, 403})
+_RECORD_KEYS = {"issue_comments": "comments", "sprints": "values"}
 
 JIRA_STREAMS: list[StreamSpec] = [
     StreamSpec(name="projects", source_object="project", primary_key="id", canonical=True),
@@ -52,6 +63,10 @@ JIRA_STREAMS: list[StreamSpec] = [
         cursor_field="updated",
         created_at_field="created",
         updated_at_field="updated",
+        ordering=Ordering.ascending,
+        parents=(
+            ParentEdge(stream="issues", path="/ex/jira/{cloud_id}/rest/api/3/issue/{id}/comment"),
+        ),
     ),
     StreamSpec(name="users", source_object="user", primary_key="accountId"),
     StreamSpec(name="boards", source_object="board", primary_key="id"),
@@ -61,6 +76,12 @@ JIRA_STREAMS: list[StreamSpec] = [
         primary_key="id",
         cursor_field="updatedDate",
         updated_at_field="updatedDate",
+        ordering=Ordering.ascending,
+        parents=(
+            ParentEdge(
+                stream="boards", path="/ex/jira/{cloud_id}/rest/agile/1.0/board/{id}/sprint"
+            ),
+        ),
     ),
 ]
 
@@ -72,18 +93,15 @@ class JiraConnector(RestConnector):
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             match stream.name:
                 case "projects":
                     async for page in self._projects(client):
                         yield page
                 case "issues":
-                    async for page in self._issues(client, cursor=cursor):
-                        yield page
-                case "issue_comments":
-                    async for page in self._comments(client, cursor=cursor):
+                    async for page in self._issues(client, cursor=run.cursor):
                         yield page
                 case "users":
                     async for page in self._users(client):
@@ -91,9 +109,10 @@ class JiraConnector(RestConnector):
                 case "boards":
                     async for page in self._boards(client):
                         yield page
-                case "sprints":
-                    async for page in self._sprints(client, cursor=cursor):
-                        yield page
+                case _ if stream.parents:
+                    pages = partial(self._partition_pages, client, stream)
+                    async for stream_page in fanned_out(stream, run, pages):
+                        yield stream_page
                 case _:
                     raise StreamSkipped(f"jira stream {stream.name!r} is not implemented")
         except httpx.HTTPStatusError as error:
@@ -155,27 +174,30 @@ class JiraConnector(RestConnector):
             ):
                 yield with_context(page, cloud_id=cloud_id, site_url=site.get("url"))
 
-    async def _comments(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for issues in self._issues(client, cursor=None):
-            for issue in issues:
-                issue_id = issue.get("id")
-                cloud_id = issue.get("cloud_id")
-                if not isinstance(issue_id, str) or not isinstance(cloud_id, str):
-                    continue
-                path = f"/ex/jira/{cloud_id}/rest/api/3/issue/{issue_id}/comment"
-                async for comments in self._offset_values(client, path, result_key="comments"):
-                    if cursor:
-                        comments = [c for c in comments if str(c.get("updated") or "") > cursor]
-                    if comments:
-                        yield with_context(
-                            comments,
-                            cloud_id=cloud_id,
-                            site_url=issue.get("site_url"),
-                            issue_id=issue_id,
-                            issue_key=issue.get("key"),
-                        )
+    async def _partition_pages(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        partition: Partition,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
+        """One issue's comments or one board's sprints, resumed past that partition's own
+        watermark. Neither endpoint takes a time filter, so the bound is applied to the records; the
+        walk climbs, so the page is never cut short and a row edited below the watermark still
+        lands."""
+        field = stream.cursor_field or ""
+        async for records in self._offset_values(
+            client, partition.path, result_key=_RECORD_KEYS[stream.name]
+        ):
+            kept = [
+                record
+                for record in records
+                if not bound.after or str(record.get(field) or "") > bound.after
+            ]
+            if not kept:
+                continue
+            values = [str(record.get(field) or "") for record in kept]
+            yield WalkPage(records=kept, high=max(values), low=min(values))
 
     async def _users(self, client: httpx.AsyncClient) -> AsyncIterator[list[dict[str, Any]]]:
         for site in await self._sites(client):
@@ -198,22 +220,6 @@ class JiraConnector(RestConnector):
             path = f"/ex/jira/{cloud_id}/rest/agile/1.0/board"
             async for page in self._offset_values(client, path):
                 yield with_context(page, cloud_id=cloud_id, site_url=site.get("url"))
-
-    async def _sprints(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for boards in self._boards(client):
-            for board in boards:
-                board_id = board.get("id")
-                cloud_id = board.get("cloud_id")
-                if board_id is None or not isinstance(cloud_id, str):
-                    continue
-                path = f"/ex/jira/{cloud_id}/rest/agile/1.0/board/{board_id}/sprint"
-                async for sprints in self._offset_values(client, path):
-                    if cursor:
-                        sprints = [s for s in sprints if str(s.get("updatedDate") or "") > cursor]
-                    if sprints:
-                        yield with_context(sprints, cloud_id=cloud_id, board_id=board_id)
 
     def flatten(self, record: dict[str, Any], stream: StreamSpec) -> dict[str, Any]:
         """Lift the nested `fields.updated` an issue carries into the flat `updated` the sync

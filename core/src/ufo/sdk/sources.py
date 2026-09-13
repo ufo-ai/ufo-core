@@ -33,11 +33,16 @@ The pagination helpers (`get_path`, `list_or_empty`, `records_at`,
 `with_context`) are the shared record-shaping primitives a provider reaches for, and
 `normalize_page_timestamp` is the one rule for reading a provider's instant — the same rule the
 adapter projects a page's own timestamps through, so a provider rendering an instant of its own
-cannot disagree with the page beside it. A stream that fans
-out over partitions (one cursor per repo, channel) drives `PartitionWalk` with an `Ordering` and a
-per-partition page factory, so the per-partition cursor-map codec and bounded-backfill resume live
-once here, not in each connector. The concrete shapes live in `ufo.runtime.sources`, reached only
-here."""
+cannot disagree with the page beside it.
+
+A collection a provider publishes only under a parent declares that parent as a `ParentEdge` rather
+than descending to it by hand: its partitions are the parent's landed records, and `fanned_out`
+drives the whole of that — the fan-out, the per-partition cursor map under an `Ordering`, the tally
+each pass reports, and the close its consumer's early stop owes the response it was reading — so a
+connector writes the page factory and nothing else. `syncing_streams` is which streams a connection
+registers. So the per-partition
+cursor-map codec, the bounded-backfill resume and the descent itself live once here, not in each
+connector. The concrete shapes live in `ufo.runtime.sources`, reached only here."""
 
 from ufo.runtime.access.connectors import (
     ToolExecutor as ToolExecutor,
@@ -70,6 +75,18 @@ from ufo.runtime.sources.connector import (
     PaginationStrategy as PaginationStrategy,
 )
 from ufo.runtime.sources.connector import (
+    ParentEdge as ParentEdge,
+)
+from ufo.runtime.sources.connector import (
+    ParentPages as ParentPages,
+)
+from ufo.runtime.sources.connector import (
+    ParentRecord as ParentRecord,
+)
+from ufo.runtime.sources.connector import (
+    Partition as Partition,
+)
+from ufo.runtime.sources.connector import (
     PartitionBound as PartitionBound,
 )
 from ufo.runtime.sources.connector import (
@@ -79,6 +96,12 @@ from ufo.runtime.sources.connector import (
     PartitionWalk as PartitionWalk,
 )
 from ufo.runtime.sources.connector import (
+    PinnedPartitions as PinnedPartitions,
+)
+from ufo.runtime.sources.connector import (
+    Run as Run,
+)
+from ufo.runtime.sources.connector import (
     StreamPage as StreamPage,
 )
 from ufo.runtime.sources.connector import (
@@ -86,6 +109,18 @@ from ufo.runtime.sources.connector import (
 )
 from ufo.runtime.sources.connector import (
     WalkPage as WalkPage,
+)
+from ufo.runtime.sources.connector import (
+    WatchedResources as WatchedResources,
+)
+from ufo.runtime.sources.connector import (
+    fanned_out as fanned_out,
+)
+from ufo.runtime.sources.connector import (
+    no_parents as no_parents,
+)
+from ufo.runtime.sources.connector import (
+    syncing_streams as syncing_streams,
 )
 from ufo.runtime.sources.rest import (
     ProviderRateLimited as ProviderRateLimited,

@@ -29,6 +29,7 @@ import httpx
 from ufo.sdk.sources import (
     MAIL_BACKFILL_WINDOW_DAYS,
     RestConnector,
+    Run,
     StreamPage,
     StreamSkipped,
     StreamSpec,
@@ -129,51 +130,33 @@ class OutlookConnector(RestConnector):
     streams_list = ALL_STREAMS
     checkpoint = staticmethod(text_checkpoint)
 
-    def paginate_source(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        self_user_id: str | None,
-        backfill_after: datetime | None = None,
-    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        """Widen the seam by the row's pinned floor, which only the two mail streams read, and
-        only on the request that opens a walk."""
-        return self.paginate(client, stream, cursor=cursor, backfill_after=backfill_after)
-
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        backfill_after: datetime | None = None,
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name == "conversations":
                 async for conversation_page in self._conversation_pages(
-                    client, cursor=cursor, after=backfill_after
+                    client, cursor=run.cursor, after=run.backfill_after
                 ):
                     yield conversation_page
                 return
             if stream.name == "messages":
                 async for message_page in self._message_delta_pages(
-                    client, cursor=cursor, after=backfill_after
+                    client, cursor=run.cursor, after=run.backfill_after
                 ):
                     yield message_page
                 return
             if stream.name == "contacts":
-                async for contact_page in self._contact_delta_pages(client, cursor=cursor):
+                async for contact_page in self._contact_delta_pages(client, cursor=run.cursor):
                     yield contact_page
                 return
             if stream.name == "events":
-                async for event_page in self._event_delta_pages(client, cursor=cursor):
+                async for event_page in self._event_delta_pages(client, cursor=run.cursor):
                     yield event_page
                 return
             if stream.name == "mail_folders":
                 async for folder_page in self._graph_delta_pages(
-                    client, initial_path="/me/mailFolders/delta", cursor=cursor
+                    client, initial_path="/me/mailFolders/delta", cursor=run.cursor
                 ):
                     yield folder_page
                 return

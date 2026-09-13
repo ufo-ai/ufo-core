@@ -16,7 +16,13 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    records_at,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 SQUARE_VERSION = "2026-04-16"
@@ -90,7 +96,7 @@ class SquareConnector(RestConnector):
         return client
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
             if stream.name == "locations":
@@ -99,15 +105,15 @@ class SquareConnector(RestConnector):
                     yield locations
                 return
             if stream.name in {"customers", "payments", "refunds"}:
-                async for page in self._cursor_get(client, stream, cursor=cursor):
+                async for page in self._cursor_get(client, stream, cursor=run.cursor):
                     yield page
                 return
             if stream.name in _CATALOG_OBJECT_TYPES:
-                async for page in self._catalog(client, stream, cursor=cursor):
+                async for page in self._catalog(client, stream, cursor=run.cursor):
                     yield page
                 return
             if stream.name == "orders":
-                async for page in self._orders(client, cursor=cursor):
+                async for page in self._orders(client, cursor=run.cursor):
                     yield page
                 return
             if stream.name == "inventory_counts":

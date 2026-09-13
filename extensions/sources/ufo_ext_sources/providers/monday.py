@@ -1,29 +1,39 @@
 """The monday.com connector — users, teams, workspaces, boards, items, updates, activity logs, and
 tags synced into recallable pages. The GraphQL provider on the connector framework.
 
-monday speaks only GraphQL: every stream is a query posted to `/`. Top-level collections page by
-`(limit, page)` (`_paged_root`); board items page by an opaque `next_items_page` cursor threaded
-across `items_page`/`next_items_page` calls; activity logs and item updates fan out per board or
-per item. `_graphql` unwraps `data`, and a GraphQL `errors` array — monday's channel for a refused
-or unavailable query — raises `StreamSkipped` so the run records a skip rather than committing a
-partial page. An incremental stream filters each page past the stored watermark on its
-`cursor_field` (`updated_at`/`created_at`); monday has no server-side `since`. A transport refusal
-(HTTP 401/403)
-also raises `StreamSkipped`. The credential is resolved through the auth proxy the runner threads —
-this connector holds no token. The write path (mutations) is intentionally absent — the source seam
-only reads."""
+monday speaks only GraphQL: every stream is a query posted to `/`, so a board reaches its items and
+its activity logs as a query variable rather than an address — which is why their edges read the
+board id alone. A board's items are threaded across `items_page`/`next_items_page` by monday's own
+opaque cursor; top-level collections page by `(limit, page)`. A monday id is unique across the
+account, so an item is addressed by its own.
+
+`_graphql` unwraps `data`, and a GraphQL `errors` array — monday's channel for a refused or
+unavailable query — raises `StreamSkipped` so the run records a skip rather than committing a
+partial page. monday publishes no `since` filter and orders nothing by `updated_at`, so a root
+stream filters its own pages past the stored watermark. A transport refusal (HTTP 401/403) also
+raises `StreamSkipped`. The credential is resolved through the auth proxy the runner threads — this
+connector holds no token. The write path (mutations) is intentionally absent — the source seam only
+reads."""
 
 import json
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import httpx
 
 from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
     RestConnector,
+    Run,
+    StreamPage,
     StreamSkipped,
     StreamSpec,
+    WalkPage,
     dict_or_empty,
+    fanned_out,
     list_or_empty,
 )
 from ufo_ext_sources.watermark import text_checkpoint
@@ -48,6 +58,8 @@ ITEMS = StreamSpec(
     cursor_field="updated_at",
     updated_at_field="updated_at",
     canonical=True,
+    key_scope="global",
+    parents=(ParentEdge(stream="boards", path="{id}"),),
 )
 UPDATES = StreamSpec(
     name="updates",
@@ -63,6 +75,7 @@ ACTIVITY_LOGS = StreamSpec(
     primary_key="id",
     cursor_field="created_at",
     updated_at_field=None,
+    parents=(ParentEdge(stream="boards", path="{id}"),),
 )
 TAGS = StreamSpec(name="tags", source_object="tags", primary_key="id")
 
@@ -145,119 +158,101 @@ class MondayConnector(RestConnector):
                 return
             page += 1
 
-    async def _boards(self, client: httpx.AsyncClient) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        async for page in self._paged_root(
-            client,
-            field="boards",
-            selection=(
-                "id name description state board_kind type created_at updated_at url "
-                "workspace{id name kind description}"
-            ),
-        ):
-            out.extend(page)
-        return out
-
-    async def _items(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        for board in await self._boards(client):
-            board_id = board.get("id")
-            if board_id is None:
-                continue
-            item_cursor: str | None = None
-            while True:
-                if item_cursor:
-                    data = await self._graphql(
-                        client,
-                        """
-                        query($cursor: String!) {
-                          next_items_page(limit: 100, cursor: $cursor) {
-                            cursor
-                            items {
-                                id name state created_at updated_at url
-                                board { id name }
-                                group { id title }
-                                column_values { id type value }
-                              }
+    async def _item_pages(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        """One board's items, threaded across `items_page`/`next_items_page` by monday's own opaque
+        cursor. The board is named as a GraphQL variable, so it is the parent's value the partition
+        carries rather than an address a request is sent to."""
+        item_cursor: str | None = None
+        while True:
+            if item_cursor:
+                data = await self._graphql(
+                    client,
+                    """
+                    query($cursor: String!) {
+                      next_items_page(limit: 100, cursor: $cursor) {
+                        cursor
+                        items {
+                            id name state created_at updated_at url
+                            board { id name }
+                            group { id title }
+                            column_values { id type value }
+                          }
+                      }
+                    }
+                    """,
+                    variables={"cursor": item_cursor},
+                )
+                page_obj = dict_or_empty(data.get("next_items_page"))
+            else:
+                data = await self._graphql(
+                    client,
+                    """
+                    query($board_ids: [ID!]!) {
+                      boards(ids: $board_ids) {
+                        items_page(limit: 100) {
+                          cursor
+                          items {
+                            id name state created_at updated_at url
+                            board { id name }
+                            group { id title }
+                            column_values { id type value }
                           }
                         }
-                        """,
-                        variables={"cursor": item_cursor},
-                    )
-                    page_obj = dict_or_empty(data.get("next_items_page"))
-                else:
-                    data = await self._graphql(
-                        client,
-                        """
-                        query($board_ids: [ID!]!) {
-                          boards(ids: $board_ids) {
-                            items_page(limit: 100) {
-                              cursor
-                              items {
-                                id name state created_at updated_at url
-                                board { id name }
-                                group { id title }
-                                column_values { id type value }
-                              }
-                            }
-                          }
-                        }
-                        """,
-                        variables={"board_ids": [str(board_id)]},
-                    )
-                    boards = list_or_empty(data.get("boards"))
-                    page_obj = dict_or_empty(boards[0].get("items_page") if boards else None)
-                records = list_or_empty(page_obj.get("items"))
-                for record in records:
-                    record["assignee_ids"] = _extract_person_ids(record.get("column_values"))
-                if cursor:
-                    records = [r for r in records if str(r.get("updated_at") or "") > cursor]
-                if records:
-                    yield records
-                item_cursor = page_obj.get("cursor")
-                if not isinstance(item_cursor, str) or not item_cursor:
-                    break
-
-    async def _activity_logs(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        for board in await self._boards(client):
-            board_id = board.get("id")
-            if board_id is None:
-                continue
-            data = await self._graphql(
-                client,
-                """
-                query($board_ids: [ID!]!) {
-                  boards(ids: $board_ids) {
-                    id
-                    activity_logs(limit: 100) { id event data entity created_at user_id }
-                  }
-                }
-                """,
-                variables={"board_ids": [str(board_id)]},
-            )
-            boards = list_or_empty(data.get("boards"))
-            records: list[dict[str, Any]] = []
-            for found in boards:
-                logs = found.get("activity_logs")
-                if isinstance(logs, list):
-                    records.extend({**log, "board_id": found.get("id")} for log in logs)
-            if cursor:
-                records = [r for r in records if str(r.get("created_at") or "") > cursor]
+                      }
+                    }
+                    """,
+                    variables={"board_ids": [partition.scope]},
+                )
+                boards = list_or_empty(data.get("boards"))
+                page_obj = dict_or_empty(boards[0].get("items_page") if boards else None)
+            records = list_or_empty(page_obj.get("items"))
+            for record in records:
+                record["assignee_ids"] = _extract_person_ids(record.get("column_values"))
             if records:
-                yield records
+                yield WalkPage(records=records)
+            item_cursor = page_obj.get("cursor")
+            if not isinstance(item_cursor, str) or not item_cursor:
+                return
+
+    async def _activity_log_pages(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        data = await self._graphql(
+            client,
+            """
+            query($board_ids: [ID!]!) {
+              boards(ids: $board_ids) {
+                id
+                activity_logs(limit: 100) { id event data entity created_at user_id }
+              }
+            }
+            """,
+            variables={"board_ids": [partition.scope]},
+        )
+        records: list[dict[str, Any]] = []
+        for found in list_or_empty(data.get("boards")):
+            logs = found.get("activity_logs")
+            if isinstance(logs, list):
+                records.extend(logs)
+        if records:
+            yield WalkPage(records=records)
 
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
-            async for page in self._stream_pages(client, stream.name, cursor):
+            if stream.parents:
+                pages = (
+                    partial(self._item_pages, client)
+                    if stream.name == "items"
+                    else partial(self._activity_log_pages, client)
+                )
+                async for board_page in fanned_out(stream, run, pages):
+                    yield board_page
+                return
+            async for page in self._stream_pages(client, stream.name, run.cursor):
                 yield page
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
@@ -293,8 +288,6 @@ class MondayConnector(RestConnector):
                 cursor=cursor,
                 cursor_field="updated_at",
             )
-        if name == "items":
-            return self._items(client, cursor=cursor)
         if name == "updates":
             return self._paged_root(
                 client,
@@ -303,8 +296,6 @@ class MondayConnector(RestConnector):
                 cursor=cursor,
                 cursor_field="created_at",
             )
-        if name == "activity_logs":
-            return self._activity_logs(client, cursor=cursor)
         raise StreamSkipped(f"monday stream {name!r} is not implemented")
 
     async def _single_root(
@@ -359,6 +350,5 @@ class MondayConnector(RestConnector):
                 "body": record.get("data"),
                 "author": record.get("user_id"),
                 "created_at": record.get("created_at"),
-                "parent_external_id": record.get("board_id"),
             }
         return record

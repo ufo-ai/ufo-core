@@ -5,21 +5,35 @@ Intercom exposes three pagination shapes, dispatched on stream name in `paginate
 (POST `/conversations|contacts|tickets/search`, whose body carries a `pagination.starting_after`
 cursor and a `query` filtering `updated_at > cursor`), the scroll API (GET `/companies/scroll`,
 resumed by the `scroll_param` a page returns), and the plain list API (GET `/admins|tags|teams|
-segments`, a single response). `conversation_parts` and `company_segments` are substreams that fan
-out from a parent conversation/company. Auth layers an `Intercom-Version` header on whichever client
-the base built from the resolved `Credential`.
+segments`, a single response). A conversation answers its parts nested in its own detail record,
+and a part is unique account-wide where a segment is unique only inside its company, which is what
+`key_scope` states on each. Auth layers an `Intercom-Version` header on whichever client the base
+built from the resolved `Credential`.
 
 Intercom orders its `updated_at` watermark as Unix seconds and stores it as decimal text. A refusal
 (HTTP 401/403) raises `StreamSkipped` so the run records a skip. The write path is intentionally
 absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator, Mapping
-from typing import Any
+from functools import partial
+from typing import Any, Literal
 
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+    records_at,
+)
 from ufo_ext_sources.watermark import integer_checkpoint
 
 PAGE_LIMIT = 150
@@ -46,6 +60,10 @@ _ATTRIBUTE_MODELS: dict[str, str] = {
     "company_attributes": "company",
     "contact_attributes": "contact",
 }
+_CHILD_RECORD_PATHS: dict[str, str] = {
+    "company_segments": "data",
+    "conversation_parts": "conversation_parts.conversation_parts",
+}
 
 
 def _stream(
@@ -55,19 +73,38 @@ def _stream(
     primary_key: str = "id",
     cursor_field: str | None = "updated_at",
     canonical: bool = False,
+    parent: str | None = None,
+    path: str | None = None,
+    carry: dict[str, str] | None = None,
+    refan: Literal["on_parent_change"] | None = None,
+    key_scope: Literal["local", "global"] = "local",
 ) -> StreamSpec:
+    if (parent is None) != (path is None):
+        raise ValueError(f"intercom: stream {name!r} names a parent without a path, or the reverse")
     return StreamSpec(
         name=name,
         source_object=source_object or name,
         primary_key=primary_key,
         cursor_field=cursor_field,
         canonical=canonical,
+        parents=()
+        if parent is None or path is None
+        else (ParentEdge(stream=parent, path=path, carry=carry or {}, refan=refan),),
+        key_scope=key_scope,
     )
 
 
 INTERCOM_STREAMS: list[StreamSpec] = [
     _stream("conversations", canonical=True),
-    _stream("conversation_parts", canonical=True),
+    _stream(
+        "conversation_parts",
+        canonical=True,
+        parent="conversations",
+        path="/conversations/{id}",
+        carry={"conversation_id": "id"},
+        refan="on_parent_change",
+        key_scope="global",
+    ),
     _stream("contacts", source_object="contact", canonical=True),
     _stream("companies", source_object="company", canonical=True),
     _stream("admins", cursor_field=None),
@@ -85,7 +122,7 @@ INTERCOM_STREAMS: list[StreamSpec] = [
         source_object="contact",
         cursor_field=None,
     ),
-    _stream("company_segments"),
+    _stream("company_segments", parent="companies", path="/companies/{id}/segments"),
     _stream("tickets", canonical=True),
 ]
 
@@ -173,9 +210,8 @@ class IntercomConnector(RestConnector):
 
     @classmethod
     def _flatten_conversation_part(cls, record: dict[str, Any]) -> dict[str, Any]:
-        """Surface `author.{type,id}` as flat `author_type` / `author_id`.
-        `conversation_id` is stamped by the substream paginator before
-        records reach flatten — keep it untouched."""
+        """Surface `author.{type,id}` as flat `author_type` / `author_id`. The `conversation_id`
+        the fan-out stamped is already flat — keep it untouched."""
         flat = dict(record)
         author = record.get("author")
         if isinstance(author, dict):
@@ -205,14 +241,10 @@ class IntercomConnector(RestConnector):
         return record
 
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
-            async for page in self._stream_pages(client, stream, cursor):
+            async for page in self._stream_pages(client, stream, run):
                 yield page
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
@@ -223,24 +255,33 @@ class IntercomConnector(RestConnector):
             raise
 
     def _stream_pages(
-        self, client: httpx.AsyncClient, stream: StreamSpec, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         name = stream.name
+        if stream.parents:
+            pages = partial(self._partition_pages, client, stream)
+            return fanned_out(stream, run, pages)
         if name in _SEARCH_PATHS:
-            return self._paginate_search(client, stream, cursor=cursor)
+            return self._paginate_search(client, stream, cursor=run.cursor)
         if name == "companies":
             return self._paginate_scroll(client)
         if name in _LIST_PATHS:
             return self._paginate_list(client, stream)
         if name in _ATTRIBUTE_MODELS:
             return self._paginate_attributes(client, stream)
-        if name == "conversation_parts":
-            return self._paginate_conversation_parts(client, cursor=cursor)
-        if name == "company_segments":
-            return self._paginate_company_segments(client)
         if name == "activity_logs":
-            return self._paginate_activity_logs(client, cursor=cursor)
+            return self._paginate_activity_logs(client, cursor=run.cursor)
         raise NotImplementedError(f"intercom: no pagination strategy for stream {name!r}")
+
+    async def _partition_pages(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        partition: Partition,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
+        data = await self._get(client, partition.path)
+        yield WalkPage(records=records_at(data, _CHILD_RECORD_PATHS[stream.name]))
 
     async def _paginate_search(
         self,
@@ -304,66 +345,6 @@ class IntercomConnector(RestConnector):
         recs = [rec for rec in data.get("data") or [] if isinstance(rec, dict)]
         if recs:
             yield recs
-
-    async def _paginate_conversation_parts(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        cursor: str | None,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        starting_after: str | None = None
-        conv_stream = next(s for s in INTERCOM_STREAMS if s.name == "conversations")
-        while True:
-            body = self._build_search_body(conv_stream, cursor, starting_after)
-            data = await self._post(client, "/conversations/search", json=body)
-            convs = data.get("conversations") or []
-            for conv in convs:
-                conv_id = conv.get("id")
-                if not conv_id:
-                    continue
-                detail = await self._get(client, f"/conversations/{conv_id}")
-                parts_envelope = detail.get("conversation_parts") or {}
-                parts = (
-                    parts_envelope.get("conversation_parts")
-                    if isinstance(parts_envelope, dict)
-                    else None
-                ) or []
-                for part in parts:
-                    if isinstance(part, dict):
-                        part.setdefault("conversation_id", conv_id)
-                if parts:
-                    yield parts
-            pages = data.get("pages") or {}
-            nxt = pages.get("next") or {}
-            starting_after = nxt.get("starting_after") if isinstance(nxt, dict) else None
-            if not starting_after:
-                return
-
-    async def _paginate_company_segments(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        scroll_param: str | None = None
-        while True:
-            params = {"scroll_param": scroll_param} if scroll_param else None
-            data = await self._get(client, "/companies/scroll", params=params)
-            companies = data.get("data") or []
-            if not companies:
-                return
-            for company in companies:
-                cid = company.get("id")
-                if not cid:
-                    continue
-                resp = await self._get(client, f"/companies/{cid}/segments")
-                segs = resp.get("data") or []
-                for seg in segs:
-                    if isinstance(seg, dict):
-                        seg.setdefault("company_id", cid)
-                if segs:
-                    yield segs
-            scroll_param = data.get("scroll_param")
-            if not scroll_param:
-                return
 
     async def _paginate_activity_logs(
         self,

@@ -11,6 +11,14 @@ list endpoint so a deleted record lands as a tombstone. Product APIs that CRM se
 …) use their own list endpoints — the flat ones through a declared `next_cursor` `Pagination`, the
 rest through per-stream fan-out walks.
 
+A campaign's assets are filed per asset type, and the type is a constant of this connector rather
+than a field of the campaign, so the edge reaches the asset collection and the types are read under
+it — which also keeps the type in the asset's key, where every type of one campaign shares a scope.
+A contact's sequence enrollment is a single object rather than a `results` array, so the body is the
+record. An owner that is not a user carries no `userId` and has no sequences. A contact's
+subscription statuses and its unsubscribe-all row are two collections of the same record, reached by
+its `email` and keyed by its `id`, which the edges carry onto each row.
+
 `flatten` lifts HubSpot's `{ id, properties: {...}, createdAt, updatedAt }` envelope so the
 `hs_lastmodifieddate` cursor and every property read as top-level keys; product-API rows are
 normalized by lifting their `objectId`, `properties`, and `values[]` shapes into the same flat
@@ -23,18 +31,25 @@ this connector holds no token. The write path is intentionally absent — the so
 from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any
-from urllib.parse import quote
+from typing import Any, Literal
 
 import httpx
 
+from ufo.sdk.o11y import warn
 from ufo.sdk.sources import (
     Pagination,
     PaginationStrategy,
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    PartitionSkipped,
     RestConnector,
+    Run,
     StreamPage,
     StreamSkipped,
     StreamSpec,
+    WalkPage,
+    fanned_out,
 )
 from ufo_ext_sources.watermark import text_checkpoint
 
@@ -48,11 +63,10 @@ _CUSTOM_OBJECTS_STREAM = "custom_objects"
 _CUSTOM_OBJECT_SCHEMA_PATH = "/crm/v3/schemas"
 _ASSOCIATION_LABELS_STREAM = "association_labels"
 _ASSOCIATIONS_STREAM = "associations"
-_LIST_MEMBERSHIPS_STREAM = "list_memberships"
 _SUBSCRIPTION_DEFINITIONS_STREAM = "subscription_definitions"
 _CONSENT_STATES_STREAM = "consent_states"
-_SEQUENCES_STREAM = "sequences"
-_SEQUENCE_ENROLLMENTS_STREAM = "sequence_enrollments"
+_CONSENT_STATUSES_PATH = "/communication-preferences/2026-03/statuses"
+_UNSUBSCRIBE_ALL = "/unsubscribe-all"
 _PRODUCT_API_STREAMS = frozenset(
     {
         "owners",
@@ -81,11 +95,11 @@ _PRODUCT_API_STREAMS = frozenset(
         "email_events",
         _ASSOCIATION_LABELS_STREAM,
         _ASSOCIATIONS_STREAM,
-        _LIST_MEMBERSHIPS_STREAM,
+        "list_memberships",
         _SUBSCRIPTION_DEFINITIONS_STREAM,
         _CONSENT_STATES_STREAM,
-        _SEQUENCES_STREAM,
-        _SEQUENCE_ENROLLMENTS_STREAM,
+        "sequences",
+        "sequence_enrollments",
     }
 )
 _PASSTHROUGH_STREAMS = _PRODUCT_API_STREAMS
@@ -282,7 +296,14 @@ def _product_api_stream(
     updated_at_field: str | None = "updatedAt",
     pagination: Pagination | None = None,
     canonical: bool = False,
+    parent: str | None = None,
+    paths: tuple[str, ...] = (),
+    carry: dict[str, str] | None = None,
+    optional: bool = False,
+    key_scope: Literal["local", "global"] = "local",
 ) -> StreamSpec:
+    if (parent is None) != (not paths):
+        raise ValueError(f"hubspot: stream {name!r} names a parent without a path, or the reverse")
     return StreamSpec(
         name=name,
         source_object=source_object,
@@ -292,6 +313,12 @@ def _product_api_stream(
         updated_at_field=updated_at_field,
         canonical=canonical,
         pagination=pagination,
+        parents=tuple(
+            ParentEdge(stream=parent, path=path, carry=carry or {}, optional=optional)
+            for path in paths
+            if parent is not None
+        ),
+        key_scope=key_scope,
     )
 
 
@@ -410,6 +437,8 @@ FORM_SUBMISSIONS = _product_api_stream(
     cursor_field="submittedAt",
     created_at_field="submittedAt",
     updated_at_field=None,
+    parent="forms",
+    paths=("/form-integrations/v1/submissions/forms/{id}",),
 )
 CONVERSATIONS = _product_api_stream(
     "conversations",
@@ -422,6 +451,8 @@ CONVERSATION_MESSAGES = _product_api_stream(
     "conversation_messages",
     source_object="conversation_messages",
     cursor_field="createdAt",
+    parent="conversations",
+    paths=("/conversations/v3/conversations/threads/{id}/messages",),
 )
 KNOWLEDGE_ARTICLES = _product_api_stream(
     "knowledge_articles",
@@ -431,6 +462,8 @@ KNOWLEDGE_ARTICLES = _product_api_stream(
 CAMPAIGN_ASSETS = _product_api_stream(
     "campaign_assets",
     source_object="campaign_assets",
+    parent="campaigns",
+    paths=("/marketing/campaigns/2026-09/{id}/assets",),
 )
 SITE_PAGES = _product_api_stream(
     "site_pages",
@@ -513,6 +546,8 @@ ASSOCIATIONS = _product_api_stream(
 LIST_MEMBERSHIPS = _product_api_stream(
     "list_memberships",
     source_object="list_memberships",
+    parent="lists",
+    paths=("/crm/lists/2026-03/{listId}/memberships",),
 )
 SUBSCRIPTION_DEFINITIONS = _product_api_stream(
     "subscription_definitions",
@@ -524,17 +559,29 @@ CONSENT_STATES = _product_api_stream(
     cursor_field="captured_at",
     created_at_field="captured_at",
     updated_at_field=None,
+    parent="contacts",
+    paths=(
+        f"{_CONSENT_STATUSES_PATH}/{{email}}?channel=EMAIL",
+        f"{_CONSENT_STATUSES_PATH}/{{email}}{_UNSUBSCRIBE_ALL}?channel=EMAIL",
+    ),
+    carry={"contact_id": "id"},
+    key_scope="global",
 )
 
 SEQUENCES = _product_api_stream(
     "sequences",
     source_object="sequences",
     cursor_field="updatedAt",
+    parent="owners",
+    paths=("/automation/v4/sequences?userId={userId}",),
+    optional=True,
 )
 SEQUENCE_ENROLLMENTS = _product_api_stream(
     "sequence_enrollments",
     source_object="sequence_enrollments",
     cursor_field="updatedAt",
+    parent="contacts",
+    paths=("/automation/v4/sequences/enrollments/contact/{id}",),
 )
 
 CUSTOM_OBJECTS = _stream("custom_objects", object_type="custom_objects", canonical=True)
@@ -740,14 +787,10 @@ class HubSpotConnector(RestConnector):
         ]
 
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
-            async for page in self._paginate_unchecked(client, stream, cursor=cursor):
+            async for page in self._paginate_unchecked(client, stream, run):
                 yield page
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401 or self._is_stream_unavailable(e):
@@ -755,12 +798,14 @@ class HubSpotConnector(RestConnector):
             raise
 
     async def _paginate_unchecked(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        cursor = run.cursor
+        if stream.parents:
+            pages = partial(self._partition_pages, client, stream)
+            async for walked in fanned_out(stream, run, pages):
+                yield walked
+            return
         if stream.pagination is not None:
             async for strategy_page in self.paginate_from_strategy(stream, client=client):
                 yield strategy_page
@@ -908,7 +953,6 @@ class HubSpotConnector(RestConnector):
             "knowledge_articles": partial(
                 self._paginate_site_search, content_type="KNOWLEDGE_ARTICLE"
             ),
-            "campaign_assets": self._paginate_campaign_assets,
             "analytics_views": self._paginate_analytics_views,
             "analytics_reports": self._paginate_analytics_reports,
             "event_types": self._paginate_event_types,
@@ -916,13 +960,7 @@ class HubSpotConnector(RestConnector):
             "email_events": partial(self._paginate_email_events, cursor=cursor),
             _ASSOCIATION_LABELS_STREAM: self._paginate_association_labels,
             _ASSOCIATIONS_STREAM: self._paginate_associations,
-            _LIST_MEMBERSHIPS_STREAM: self._paginate_list_memberships,
             _SUBSCRIPTION_DEFINITIONS_STREAM: self._paginate_subscription_definitions,
-            _CONSENT_STATES_STREAM: self._paginate_consent_states,
-            _SEQUENCES_STREAM: self._paginate_sequences,
-            _SEQUENCE_ENROLLMENTS_STREAM: self._paginate_sequence_enrollments,
-            "form_submissions": self._paginate_form_submissions,
-            "conversation_messages": self._paginate_conversation_messages,
             "pipelines": self._paginate_pipelines,
             "pipeline_stages": self._paginate_pipeline_stages,
         }
@@ -933,6 +971,146 @@ class HubSpotConnector(RestConnector):
         if path is None:
             raise NotImplementedError(f"hubspot: product API stream {name!r} has no path")
         return self._paginate_get_collection(client, path)
+
+    def _partition_pages(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        partition: Partition,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
+        factories = {
+            "campaign_assets": self._campaign_asset_pages,
+            "conversation_messages": self._collection_pages,
+            "form_submissions": self._form_submission_pages,
+            "list_memberships": self._list_membership_pages,
+            "consent_states": self._consent_pages,
+            "sequence_enrollments": self._sequence_enrollment_pages,
+            "sequences": self._collection_pages,
+        }
+        return factories[stream.name](client, partition)
+
+    async def _campaign_asset_pages(
+        self, client: httpx.AsyncClient, partition: Partition
+    ) -> AsyncIterator[WalkPage]:
+        """Every asset type of one campaign. HubSpot answers 403 for a type this portal's tier does
+        not carry and 404 for one the campaign has none of, and both are ordinary — but a run
+        reporting twenty-six requests and no record is the shape a wrong path has too, so each
+        refusal says which type and which status rather than being swallowed."""
+        for asset_type in _CAMPAIGN_ASSET_TYPES:
+            try:
+                async for assets in self._paginate_get_collection(
+                    client, f"{partition.path}/{asset_type}"
+                ):
+                    page = [
+                        {
+                            **asset,
+                            "id": f"{asset_type}:{asset.get('id') or asset.get('assetId')}",
+                            "asset_id": str(asset.get("id") or asset.get("assetId")),
+                            "asset_type": asset_type,
+                            "asset_kind": _MARKETING_ASSET_KIND_BY_TYPE.get(
+                                asset_type, asset_type.lower()
+                            ),
+                            "metrics": asset.get("metrics") or {},
+                        }
+                        for asset in assets
+                        if asset.get("id") or asset.get("assetId")
+                    ]
+                    if page:
+                        yield WalkPage(records=page)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in {403, 404}:
+                    warn(
+                        "source_sync.collection_refused",
+                        connector=self.name,
+                        stream="campaign_assets",
+                        campaign=partition.scope,
+                        collection=asset_type,
+                        http_status=e.response.status_code,
+                    )
+                    continue
+                raise
+
+    async def _consent_pages(
+        self, client: httpx.AsyncClient, partition: Partition
+    ) -> AsyncIterator[WalkPage]:
+        """One contact's statuses under one of the two collections its edges declare. The contact is
+        addressed by the email its path read, and identified by the id the edge carries onto every
+        row."""
+        if partition.scope is None:
+            raise RuntimeError(f"hubspot: {partition.path!r} addresses no contact")
+        kind = "unsubscribe_all" if _UNSUBSCRIBE_ALL in partition.path else "subscription"
+        try:
+            data = await self._get(client, partition.path)
+        except httpx.HTTPStatusError as e:
+            if not self._is_optional_pair_unavailable(e):
+                raise
+            raise PartitionSkipped(f"hubspot: {partition.path} refused") from e
+        rows = [
+            self._consent_row(row, email=partition.scope, status_kind=kind)
+            for row in data.get("results", []) or []
+            if isinstance(row, dict)
+        ]
+        if rows:
+            yield WalkPage(records=rows)
+
+    async def _collection_pages(
+        self, client: httpx.AsyncClient, partition: Partition
+    ) -> AsyncIterator[WalkPage]:
+        async for records in self._paginate_get_collection(client, partition.path):
+            yield WalkPage(records=records)
+
+    async def _form_submission_pages(
+        self, client: httpx.AsyncClient, partition: Partition
+    ) -> AsyncIterator[WalkPage]:
+        async for submissions in self._paginate_get_collection(
+            client, partition.path, limit=_FORMS_SUBMISSIONS_LIMIT
+        ):
+            yield WalkPage(
+                records=[
+                    {
+                        **submission,
+                        "id": str(
+                            submission.get("conversionId")
+                            or f"{submission.get('submittedAt')}:{index}"
+                        ),
+                    }
+                    for index, submission in enumerate(submissions)
+                ]
+            )
+
+    async def _list_membership_pages(
+        self, client: httpx.AsyncClient, partition: Partition
+    ) -> AsyncIterator[WalkPage]:
+        async for rows in self._paginate_partition_collection(client, partition):
+            yield WalkPage(
+                records=[{**row, "id": str(row["recordId"])} for row in rows if row.get("recordId")]
+            )
+
+    async def _sequence_enrollment_pages(
+        self, client: httpx.AsyncClient, partition: Partition
+    ) -> AsyncIterator[WalkPage]:
+        """One contact's enrollment, which HubSpot answers as a single
+        `PublicSequenceEnrollmentResponse` object rather than a `results` array."""
+        try:
+            enrollment = await self._get(client, partition.path)
+        except httpx.HTTPStatusError as e:
+            if not self._is_optional_pair_unavailable(e):
+                raise
+            raise PartitionSkipped(f"hubspot: {partition.path} refused") from e
+        if enrollment.get("id") is not None:
+            yield WalkPage(records=[enrollment])
+
+    async def _paginate_partition_collection(
+        self, client: httpx.AsyncClient, partition: Partition
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        try:
+            async for page in self._paginate_get_collection(client, partition.path):
+                yield page
+        except httpx.HTTPStatusError as e:
+            if not self._is_optional_pair_unavailable(e):
+                raise
+            raise PartitionSkipped(f"hubspot: {partition.path} refused") from e
 
     async def _paginate_get_collection(
         self,
@@ -1213,69 +1391,6 @@ class HubSpotConnector(RestConnector):
             if not isinstance(total, int) or next_offset >= total:
                 return
             offset = next_offset
-
-    async def _paginate_campaign_assets(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for campaigns_page in self._paginate_get_collection(
-            client,
-            _GET_PRODUCT_API_PATHS["campaigns"],
-        ):
-            for campaign in campaigns_page:
-                campaign_id = campaign.get("id") or campaign.get("campaignGuid")
-                if not campaign_id:
-                    continue
-                campaign_name = (
-                    campaign.get("name")
-                    or campaign.get("hs_name")
-                    or (campaign.get("properties") or {}).get("hs_name")
-                )
-                for asset_type in _CAMPAIGN_ASSET_TYPES:
-                    async for page in self._paginate_campaign_asset_type(
-                        client,
-                        campaign_id=str(campaign_id),
-                        campaign_name=campaign_name,
-                        asset_type=asset_type,
-                    ):
-                        yield page
-
-    async def _paginate_campaign_asset_type(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        campaign_id: str,
-        campaign_name: Any,
-        asset_type: str,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        path = f"/marketing/campaigns/2026-03/{campaign_id}/assets/{asset_type}"
-        try:
-            async for assets in self._paginate_get_collection(client, path):
-                page: list[dict[str, Any]] = []
-                for asset in assets:
-                    asset_id = asset.get("id") or asset.get("assetId")
-                    if asset_id is None:
-                        continue
-                    page.append(
-                        {
-                            **asset,
-                            "id": f"{campaign_id}:{asset_type}:{asset_id}",
-                            "asset_id": str(asset_id),
-                            "asset_type": asset_type,
-                            "asset_kind": _MARKETING_ASSET_KIND_BY_TYPE.get(
-                                asset_type, asset_type.lower()
-                            ),
-                            "campaign_id": campaign_id,
-                            "campaign_name": campaign_name,
-                            "metrics": asset.get("metrics") or {},
-                        }
-                    )
-                if page:
-                    yield page
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in {403, 404}:
-                return
-            raise
 
     async def _paginate_analytics_views(
         self,
@@ -1835,67 +1950,6 @@ class HubSpotConnector(RestConnector):
             return True
         return HubSpotConnector._is_stream_unavailable(exc)
 
-    async def _paginate_list_memberships(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for lists_page in self._paginate_lists(client):
-            for list_record in lists_page:
-                list_id = list_record.get("listId") or list_record.get("id")
-                if list_id is None:
-                    continue
-                async for memberships in self._paginate_memberships_for_list(
-                    client,
-                    list_record=list_record,
-                    list_id=str(list_id),
-                ):
-                    yield memberships
-
-    async def _paginate_memberships_for_list(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        list_record: dict[str, Any],
-        list_id: str,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        after: str | None = None
-        while True:
-            params: dict[str, Any] = {"limit": PAGE_LIMIT}
-            if after:
-                params["after"] = after
-            try:
-                data = await self._get(
-                    client,
-                    f"/crm/lists/2026-03/{list_id}/memberships",
-                    params=params,
-                )
-            except httpx.HTTPStatusError as e:
-                if self._is_optional_pair_unavailable(e):
-                    return
-                raise
-            page: list[dict[str, Any]] = []
-            for row in data.get("results", []) or []:
-                if not isinstance(row, dict):
-                    continue
-                record_id = row.get("recordId")
-                if record_id is None:
-                    continue
-                page.append(
-                    {
-                        **row,
-                        "id": f"{list_id}:{record_id}",
-                        "list_id": list_id,
-                        "list_name": list_record.get("name"),
-                        "object_type_id": list_record.get("objectTypeId"),
-                        "processingType": list_record.get("processingType"),
-                    }
-                )
-            if page:
-                yield page
-            after = ((data.get("paging") or {}).get("next") or {}).get("after")
-            if not after:
-                return
-
     async def _paginate_subscription_definitions(
         self,
         client: httpx.AsyncClient,
@@ -1911,93 +1965,10 @@ class HubSpotConnector(RestConnector):
         if rows:
             yield rows
 
-    async def _paginate_consent_states(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for contacts in self._paginate_contact_identity_pages(client):
-            page: list[dict[str, Any]] = []
-            for contact in contacts:
-                email = contact.get("email")
-                if not isinstance(email, str) or not email:
-                    continue
-                page.extend(await self._consent_status_rows(client, contact=contact, email=email))
-                page.extend(await self._unsubscribe_all_rows(client, contact=contact, email=email))
-            if page:
-                yield page
-
-    async def _paginate_contact_identity_pages(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for records in self._paginate_crm_object_pages(
-            client,
-            "contacts",
-            properties=("email",),
-        ):
-            page: list[dict[str, Any]] = []
-            for record in records:
-                props = record.get("properties")
-                properties = props if isinstance(props, dict) else {}
-                email = record.get("email") or properties.get("email")
-                page.append({**record, "email": email})
-            if page:
-                yield page
-
-    async def _consent_status_rows(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        contact: dict[str, Any],
-        email: str,
-    ) -> list[dict[str, Any]]:
-        try:
-            data = await self._get(
-                client,
-                f"/communication-preferences/2026-03/statuses/{quote(email, safe='')}",
-                params={"channel": "EMAIL"},
-            )
-        except httpx.HTTPStatusError as e:
-            if self._is_optional_pair_unavailable(e):
-                return []
-            raise
-        return [
-            self._consent_row(row, contact=contact, email=email, status_kind="subscription")
-            for row in data.get("results", []) or []
-            if isinstance(row, dict)
-        ]
-
-    async def _unsubscribe_all_rows(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        contact: dict[str, Any],
-        email: str,
-    ) -> list[dict[str, Any]]:
-        try:
-            data = await self._get(
-                client,
-                (
-                    "/communication-preferences/2026-03/statuses/"
-                    f"{quote(email, safe='')}/unsubscribe-all"
-                ),
-                params={"channel": "EMAIL"},
-            )
-        except httpx.HTTPStatusError as e:
-            if self._is_optional_pair_unavailable(e):
-                return []
-            raise
-        return [
-            self._consent_row(row, contact=contact, email=email, status_kind="unsubscribe_all")
-            for row in data.get("results", []) or []
-            if isinstance(row, dict)
-        ]
-
     @staticmethod
     def _consent_row(
         row: dict[str, Any],
         *,
-        contact: dict[str, Any],
         email: str,
         status_kind: str,
     ) -> dict[str, Any]:
@@ -2005,7 +1976,6 @@ class HubSpotConnector(RestConnector):
         business_unit_id = row.get("businessUnitId")
         suffix = subscription_id if subscription_id is not None else status_kind
         business_unit_part = business_unit_id if business_unit_id is not None else "default"
-        contact_id = str(contact["id"]) if contact.get("id") is not None else None
         subscription_name = row.get("subscriptionName")
         purpose = row.get("purpose") or (
             "unsubscribe_all" if status_kind == "unsubscribe_all" else subscription_name
@@ -2014,7 +1984,6 @@ class HubSpotConnector(RestConnector):
         return {
             **row,
             "id": f"{email}:{suffix}:{business_unit_part}",
-            "contact_id": contact_id,
             "subject_email": email,
             "purpose": purpose,
             "subscription_type": subscription_name
@@ -2026,145 +1995,6 @@ class HubSpotConnector(RestConnector):
             "captured_at": timestamp,
             "created_at": timestamp,
         }
-
-    async def _paginate_sequences(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for users in self._sequence_user_rows(client):
-            for user in users:
-                user_id = user["user_id"]
-                try:
-                    async for rows in self._paginate_get_collection(
-                        client,
-                        "/automation/sequences/2026-03",
-                        extra_params={"userId": user_id},
-                    ):
-                        page = [
-                            {
-                                **row,
-                                "userId": row.get("userId") or user_id,
-                                "owner_id": user.get("owner_id"),
-                                "owner_email": user.get("owner_email"),
-                            }
-                            for row in rows
-                        ]
-                        if page:
-                            yield page
-                except httpx.HTTPStatusError as e:
-                    if self._is_optional_pair_unavailable(e):
-                        continue
-                    raise
-
-    async def _sequence_user_rows(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        seen: set[str] = set()
-        page: list[dict[str, Any]] = []
-        async for owners in self._paginate_get_collection(client, "/crm/v3/owners"):
-            for owner in owners:
-                user_id = owner.get("userId")
-                if user_id is None:
-                    continue
-                user_id_str = str(user_id)
-                if user_id_str in seen:
-                    continue
-                seen.add(user_id_str)
-                page.append(
-                    {
-                        "user_id": user_id_str,
-                        "owner_id": str(owner["id"]) if owner.get("id") is not None else None,
-                        "owner_email": owner.get("email"),
-                    }
-                )
-        if page:
-            yield page
-
-    async def _paginate_sequence_enrollments(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for contact_ids in self._paginate_crm_object_id_pages(client, "contacts"):
-            page: list[dict[str, Any]] = []
-            for contact_id in contact_ids:
-                try:
-                    data = await self._get(
-                        client,
-                        f"/automation/sequences/2026-03/enrollments/contact/{contact_id}",
-                    )
-                except httpx.HTTPStatusError as e:
-                    if self._is_optional_pair_unavailable(e):
-                        continue
-                    raise
-                page.extend(self._sequence_enrollment_rows(data, contact_id=contact_id))
-            if page:
-                yield page
-
-    @staticmethod
-    def _sequence_enrollment_rows(
-        data: dict[str, Any],
-        *,
-        contact_id: str,
-    ) -> list[dict[str, Any]]:
-        raw_results = data.get("results")
-        raw_rows: list[Any] = raw_results if isinstance(raw_results, list) else [data]
-        rows: list[dict[str, Any]] = []
-        for idx, row in enumerate(raw_rows):
-            if not isinstance(row, dict):
-                continue
-            sequence_id = row.get("sequenceId")
-            row_id = row.get("id") or f"{contact_id}:{sequence_id or idx}"
-            rows.append({**row, "id": str(row_id), "contact_id": contact_id})
-        return rows
-
-    async def _paginate_form_submissions(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for forms_page in self._paginate_get_collection(client, "/marketing/v3/forms"):
-            for form in forms_page:
-                form_id = form.get("id") or form.get("guid")
-                if not form_id:
-                    continue
-                path = f"/form-integrations/v1/submissions/forms/{form_id}"
-                async for submissions in self._paginate_get_collection(
-                    client,
-                    path,
-                    limit=_FORMS_SUBMISSIONS_LIMIT,
-                ):
-                    page: list[dict[str, Any]] = []
-                    for idx, submission in enumerate(submissions):
-                        conversion_id = submission.get("conversionId")
-                        submitted_at = submission.get("submittedAt")
-                        row_id = conversion_id or f"{form_id}:{submitted_at}:{idx}"
-                        page.append(
-                            {
-                                **submission,
-                                "id": str(row_id),
-                                "form_id": str(form_id),
-                                "form_name": form.get("name"),
-                            }
-                        )
-                    if page:
-                        yield page
-
-    async def _paginate_conversation_messages(
-        self,
-        client: httpx.AsyncClient,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for threads_page in self._paginate_get_collection(
-            client, "/conversations/v3/conversations/threads"
-        ):
-            for thread in threads_page:
-                thread_id = thread.get("id")
-                if not thread_id:
-                    continue
-                path = f"/conversations/v3/conversations/threads/{thread_id}/messages"
-                async for messages in self._paginate_get_collection(client, path):
-                    page = [{**message, "thread_id": str(thread_id)} for message in messages]
-                    if page:
-                        yield page
 
     async def _paginate_pipelines(
         self,

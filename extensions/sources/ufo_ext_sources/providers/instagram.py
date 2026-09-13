@@ -1,25 +1,37 @@
 """The Instagram connector — Facebook Pages, their linked Instagram business accounts, media,
 stories, and the insights on each synced into recallable pages, over the Facebook Graph API.
 
-Every stream fans out from the grant's Pages: `paginate` walks `/me/accounts`, lifts each Page's
-linked `instagram_business_account`, then reads that account's media/stories and their per-object
-insights. Graph collections page by a `data` array plus an absolute `paging.next` URL
-(`_paged`). Media and stories are incremental — each page is filtered past the stored watermark on
-`timestamp`; user insights advance over `end_time`. A per-object insights read that the account
-can't serve (HTTP 400/403/404) is skipped and the walk continues; a refusal at the account walk
-(HTTP 401/403) raises `StreamSkipped` so the run records a skip, not a failure. The credential is
-resolved through the auth proxy the runner threads — this connector holds no token. The write path
-(media publish) is intentionally absent — the source seam only reads."""
+The account a collection hangs under is the grant's own: `paginate` walks `/me/accounts` and lifts
+each Page's linked `instagram_business_account`, which is this connection's tenant identity rather
+than a parent record. Media, stories and user insights read under it. Graph collections page by a
+`data` array plus an absolute `paging.next` URL (`_paged`). Media and stories are incremental — each
+page is filtered past the stored watermark on `timestamp`; user insights advance over `end_time`.
+
+`media_insights` and `story_insights` are the two real edges, and a metric name addresses one
+insight inside one object. A per-object read the account can't serve (HTTP 400/403/404) drops that
+object from the pass and the rest still land; a refusal at the account walk (HTTP 401/403) raises
+`StreamSkipped` so the run records a skip, not a failure. The credential is resolved through the
+auth proxy the runner threads — this connector holds no token. The write path (media publish) is
+intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import httpx
 
 from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    PartitionSkipped,
     RestConnector,
+    Run,
+    StreamPage,
     StreamSkipped,
     StreamSpec,
+    WalkPage,
+    fanned_out,
     list_or_empty,
     records_at,
     with_context,
@@ -28,6 +40,11 @@ from ufo_ext_sources.watermark import text_checkpoint
 
 GRAPH_VERSION = "v25.0"
 _REFUSAL_STATUS = frozenset({401, 403})
+_OBJECT_REFUSAL_STATUS = frozenset({400, 403, 404})
+INSIGHT_METRICS = {
+    "media_insights": "impressions,reach,engagement,saved,video_views",
+    "story_insights": "impressions,reach,replies,taps_forward,taps_back,exits",
+}
 
 PAGES = StreamSpec(name="pages", source_object="accounts", primary_key="id")
 INSTAGRAM_ACCOUNTS = StreamSpec(
@@ -47,7 +64,8 @@ MEDIA = StreamSpec(
 MEDIA_INSIGHTS = StreamSpec(
     name="media_insights",
     source_object="insights",
-    primary_key="id",
+    primary_key="name",
+    parents=(ParentEdge(stream="media", path="/{id}/insights"),),
 )
 STORIES = StreamSpec(
     name="stories",
@@ -60,8 +78,9 @@ STORIES = StreamSpec(
 )
 STORY_INSIGHTS = StreamSpec(
     name="story_insights",
-    source_object="story_insights",
-    primary_key="id",
+    source_object="insights",
+    primary_key="name",
+    parents=(ParentEdge(stream="stories", path="/{id}/insights"),),
 )
 USER_INSIGHTS = StreamSpec(
     name="user_insights",
@@ -150,42 +169,6 @@ class InstagramConnector(RestConnector):
                 if page:
                     yield with_context(page, instagram_account_id=account_id)
 
-    async def _object_insights(
-        self,
-        client: httpx.AsyncClient,
-        objects: AsyncIterator[list[dict[str, Any]]],
-        *,
-        metrics: str,
-        stream_name: str,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for page in objects:
-            out: list[dict[str, Any]] = []
-            for obj in page:
-                obj_id = obj.get("id")
-                if not isinstance(obj_id, str) or not obj_id:
-                    continue
-                try:
-                    data = await self._get(
-                        client,
-                        f"/{obj_id}/insights",
-                        params={"metric": metrics},
-                    )
-                except httpx.HTTPStatusError as error:
-                    if error.response.status_code in {400, 403, 404}:
-                        continue
-                    raise
-                for insight in records_at(data, "data"):
-                    out.append(
-                        {
-                            **insight,
-                            "id": f"{obj_id}:{insight.get('name')}",
-                            "parent_external_id": obj_id,
-                            "stream_name": stream_name,
-                        }
-                    )
-            if out:
-                yield out
-
     async def _user_insights(
         self, client: httpx.AsyncClient, *, cursor: str | None
     ) -> AsyncIterator[list[dict[str, Any]]]:
@@ -219,14 +202,10 @@ class InstagramConnector(RestConnector):
                 yield rows
 
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
-            async for page in self._stream_pages(client, stream.name, cursor):
+            async for page in self._stream_pages(client, stream, run):
                 yield page
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:
@@ -237,8 +216,12 @@ class InstagramConnector(RestConnector):
             raise
 
     def _stream_pages(
-        self, client: httpx.AsyncClient, name: str, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        name = stream.name
+        if stream.parents:
+            pages = partial(self._object_insights, client, INSIGHT_METRICS[name])
+            return fanned_out(stream, run, pages)
         if name in {"pages", "instagram_accounts"}:
             return self._root_pages(client, name)
         if name == "media":
@@ -249,7 +232,7 @@ class InstagramConnector(RestConnector):
                     "id,caption,media_type,media_url,permalink,timestamp,username,"
                     "like_count,comments_count"
                 ),
-                cursor=cursor,
+                cursor=run.cursor,
                 cursor_field="timestamp",
             )
         if name == "stories":
@@ -257,19 +240,11 @@ class InstagramConnector(RestConnector):
                 client,
                 "stories",
                 fields="id,caption,media_type,media_url,permalink,timestamp,username",
-                cursor=cursor,
+                cursor=run.cursor,
                 cursor_field="timestamp",
             )
-        if name == "media_insights":
-            return self._insight_pages(
-                client, "media", "impressions,reach,engagement,saved,video_views", name
-            )
-        if name == "story_insights":
-            return self._insight_pages(
-                client, "stories", "impressions,reach,replies,taps_forward,taps_back,exits", name
-            )
         if name == "user_insights":
-            return self._user_insights(client, cursor=cursor)
+            return self._user_insights(client, cursor=run.cursor)
         raise StreamSkipped(f"instagram stream {name!r} is not implemented")
 
     async def _root_pages(
@@ -281,13 +256,20 @@ class InstagramConnector(RestConnector):
         if records:
             yield records
 
-    def _insight_pages(
-        self, client: httpx.AsyncClient, source: str, metrics: str, name: str
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        source_stream = next(stream for stream in self.streams_list if stream.name == source)
-        return self._object_insights(
-            client,
-            self.paginate(client, source_stream, cursor=None),
-            metrics=metrics,
-            stream_name=name,
-        )
+    async def _object_insights(
+        self,
+        client: httpx.AsyncClient,
+        metrics: str,
+        partition: Partition,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
+        """One object's insights. Graph refuses a metric an account's plan or a media type does not
+        carry with a `400`, which is about that object and not the stream, so it drops out of the
+        pass and every other object still lands."""
+        try:
+            data = await self._get(client, partition.path, params={"metric": metrics})
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in _OBJECT_REFUSAL_STATUS:
+                raise PartitionSkipped(f"instagram: {partition.ref} refused") from error
+            raise
+        yield WalkPage(records=records_at(data, "data"))

@@ -19,7 +19,13 @@ from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 API_VERSION = "v60.0"
@@ -92,11 +98,11 @@ class SalesforceConnector(RestConnector):
         ]
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             fields = await self._describe_fields(client, stream.source_object)
-            soql = self._build_soql(stream, fields, cursor)
+            soql = self._build_soql(stream, fields, run.cursor)
             path: str | None = f"/services/data/{API_VERSION}/query"
             params: dict[str, Any] | None = {"q": soql}
             while path:
@@ -108,8 +114,8 @@ class SalesforceConnector(RestConnector):
                     break
                 path = data.get("nextRecordsUrl")
                 params = None
-            if cursor:
-                delete_page = await self._deleted_page(client, stream, cursor=cursor)
+            if run.cursor:
+                delete_page = await self._deleted_page(client, stream, cursor=run.cursor)
                 if delete_page is not None:
                     yield delete_page
         except httpx.HTTPStatusError as error:

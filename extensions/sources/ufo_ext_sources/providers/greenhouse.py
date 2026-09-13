@@ -6,22 +6,34 @@ arrive flat and the default passthrough stands. Auth is HTTP Basic with the API 
 and an empty password (`base64("<api_key>:")`): when the resolved `Credential` carries the key
 host-side (the direct/BYOK backend) the client sends it as Basic auth; under a broker the proxying
 transport injects auth and the client is left as the base built it. Pagination is RFC 5988
-`Link: rel=next` on every endpoint (`?per_page=500`). Most streams hit a top-level path; the
-substreams (per-application, per-candidate, per-job, per-user, per-question) walk the parent
-collection first and fetch the nested collection per parent, stamping each child with its parent id.
-Incremental streams filter server-side by `?updated_after` (with `applications` on `created_after`
-and `eeoc` on `submitted_after`); the provider computes a watermark over each stream's cursor field.
-A grant the account can't read (`401`/`403`) raises `StreamSkipped` so the run records a skip, not a
+`Link: rel=next` on every endpoint (`?per_page=500`). Most streams hit a top-level path; the nine
+substreams Harvest publishes only under a parent — per-application, per-candidate, per-job,
+per-user, per-question — name that parent instead. Incremental top-level
+streams filter server-side by `?updated_after` (with `applications` on `created_after` and `eeoc` on
+`submitted_after`); the provider computes a watermark over each stream's cursor field. A grant the
+account can't read (`401`/`403`) raises `StreamSkipped` so the run records a skip, not a
 failure. The credential is resolved through the auth proxy the runner threads — this connector holds
 no token. The write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 500
@@ -72,7 +84,13 @@ def _stream(
     created_at_field: str | None = "created_at",
     updated_at_field: str | None = "updated_at",
     canonical: bool = False,
+    parent: str | None = None,
+    path: str | None = None,
 ) -> StreamSpec:
+    if (parent is None) != (path is None):
+        raise ValueError(
+            f"greenhouse: stream {name!r} names a parent without a path, or the reverse"
+        )
     return StreamSpec(
         name=name,
         source_object=source_object or name,
@@ -81,6 +99,7 @@ def _stream(
         created_at_field=created_at_field,
         updated_at_field=updated_at_field,
         canonical=canonical,
+        parents=() if parent is None or path is None else (ParentEdge(stream=parent, path=path),),
     )
 
 
@@ -97,28 +116,51 @@ USERS = _stream("users", cursor_field="updated_at")
 
 APPLICATIONS_DEMOGRAPHICS_ANSWERS = _stream(
     "applications_demographics_answers",
-    source_object="applications/{application_id}/demographics/answers",
-    cursor_field="updated_at",
+    source_object="demographics/answers",
+    parent="applications",
+    path="/v1/applications/{id}/demographics/answers",
 )
 APPLICATIONS_INTERVIEWS = _stream(
     "applications_interviews",
-    source_object="applications/{application_id}/scheduled_interviews",
-    cursor_field="updated_at",
+    source_object="scheduled_interviews",
+    parent="applications",
+    path="/v1/applications/{id}/scheduled_interviews",
 )
-ACTIVITY_FEED = _stream("activity_feed", source_object="candidates/{candidate_id}/activity_feed")
-APPROVALS = _stream("approvals", source_object="jobs/{job_id}/approval_flows")
-JOBS_OPENINGS = _stream("jobs_openings", source_object="jobs/{job_id}/openings")
+ACTIVITY_FEED = _stream(
+    "activity_feed",
+    source_object="activity_feed",
+    parent="candidates",
+    path="/v1/candidates/{id}/activity_feed",
+)
+APPROVALS = _stream(
+    "approvals",
+    source_object="approval_flows",
+    parent="jobs",
+    path="/v1/jobs/{id}/approval_flows",
+)
+JOBS_OPENINGS = _stream(
+    "jobs_openings", source_object="openings", parent="jobs", path="/v1/jobs/{id}/openings"
+)
 JOBS_STAGES = _stream(
-    "jobs_stages", source_object="jobs/{job_id}/stages", cursor_field="updated_at"
+    "jobs_stages", source_object="stages", parent="jobs", path="/v1/jobs/{id}/stages"
 )
-USER_PERMISSIONS = _stream("user_permissions", source_object="users/{user_id}/permissions/jobs")
+USER_PERMISSIONS = _stream(
+    "user_permissions",
+    source_object="permissions/jobs",
+    parent="users",
+    path="/v1/users/{id}/permissions/jobs",
+)
 DEMOGRAPHICS_ANSWERS_ANSWER_OPTIONS = _stream(
     "demographics_answers_answer_options",
-    source_object="demographics/questions/{question_id}/answer_options",
+    source_object="answer_options",
+    parent="demographics_questions",
+    path="/v1/demographics/questions/{id}/answer_options",
 )
 DEMOGRAPHICS_QUESTION_SETS_QUESTIONS = _stream(
     "demographics_question_sets_questions",
-    source_object="demographics/question_sets/{question_set_id}/questions",
+    source_object="questions",
+    parent="demographics_question_sets",
+    path="/v1/demographics/question_sets/{id}/questions",
 )
 
 CLOSE_REASONS = _stream("close_reasons")
@@ -191,34 +233,6 @@ ALL_STREAMS = [
     USER_ROLES,
 ]
 
-_PER_PARENT: dict[str, tuple[str, str, str]] = {
-    "activity_feed": ("/v1/candidates", "/v1/candidates/{id}/activity_feed", "candidate_id"),
-    "applications_demographics_answers": (
-        "/v1/applications",
-        "/v1/applications/{id}/demographics/answers",
-        "application_id",
-    ),
-    "applications_interviews": (
-        "/v1/applications",
-        "/v1/applications/{id}/scheduled_interviews",
-        "application_id",
-    ),
-    "approvals": ("/v1/jobs", "/v1/jobs/{id}/approval_flows", "job_id"),
-    "jobs_openings": ("/v1/jobs", "/v1/jobs/{id}/openings", "job_id"),
-    "jobs_stages": ("/v1/jobs", "/v1/jobs/{id}/stages", "job_id"),
-    "user_permissions": ("/v1/users", "/v1/users/{id}/permissions/jobs", "user_id"),
-    "demographics_answers_answer_options": (
-        "/v1/demographics/questions",
-        "/v1/demographics/questions/{id}/answer_options",
-        "question_id",
-    ),
-    "demographics_question_sets_questions": (
-        "/v1/demographics/question_sets",
-        "/v1/demographics/question_sets/{id}/questions",
-        "question_set_id",
-    ),
-}
-
 
 class GreenhouseConnector(RestConnector):
     name = "greenhouse"
@@ -244,19 +258,13 @@ class GreenhouseConnector(RestConnector):
         return _CURSOR_PARAM.get(stream_name, "updated_after")
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
-            parent = _PER_PARENT.get(stream.name)
-            if parent is not None:
-                parent_path, child_template, stamp_key = parent
-                async for page in self._paginate_per_parent(
-                    client,
-                    parent_path=parent_path,
-                    child_path_template=child_template,
-                    stamp_key=stamp_key,
-                ):
-                    yield page
+            if stream.parents:
+                pages = partial(self._partition_pages, client)
+                async for stream_page in fanned_out(stream, run, pages):
+                    yield stream_page
                 return
             path = _SIMPLE_PATHS.get(stream.name)
             if not path:
@@ -264,8 +272,8 @@ class GreenhouseConnector(RestConnector):
                     f"greenhouse: stream {stream.name!r} has no paginate dispatch"
                 )
             params: dict[str, Any] = {"per_page": PAGE_SIZE}
-            if stream.cursor_field and cursor:
-                params[self._cursor_param(stream.name)] = cursor
+            if stream.cursor_field and run.cursor:
+                params[self._cursor_param(stream.name)] = run.cursor
             async for page in self._paginate_link_header(client, path, params=params):
                 yield page
         except httpx.HTTPStatusError as error:
@@ -285,25 +293,12 @@ class GreenhouseConnector(RestConnector):
         ):
             yield page
 
-    async def _paginate_per_parent(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        parent_path: str,
-        child_path_template: str,
-        stamp_key: str,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Walk the parent collection, then fetch each parent's child collection, stamping every
-        child row with the parent id under `stamp_key` so a downstream resolve keeps the origin."""
-        async for parent_page in self._paginate_link_header(client, parent_path):
-            for parent in parent_page:
-                pid = parent.get("id") if isinstance(parent, dict) else None
-                if pid is None:
-                    continue
-                async for child_page in self._paginate_link_header(
-                    client, child_path_template.format(id=pid)
-                ):
-                    for child in child_page:
-                        if isinstance(child, dict):
-                            child.setdefault(stamp_key, pid)
-                    yield child_page
+    async def _partition_pages(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        """One parent's child collection, walked whole. Harvest publishes no cursor filter on a
+        per-parent endpoint, so these streams are ordered `none` and the walk hands down no bound —
+        the partition boundary is all that is checkpointed, and a completed pass re-walks."""
+        async for page in self._paginate_link_header(client, partition.path):
+            if page:
+                yield WalkPage(records=page)

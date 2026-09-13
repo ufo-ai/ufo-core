@@ -17,7 +17,9 @@ specs and addresses the probe connector was driven with."""
 import json
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
@@ -27,7 +29,27 @@ import pytest
 from ufo.runtime.access.connectors import Credential, GrantUnusable
 from ufo.runtime.sources import backend as backend_module
 from ufo.runtime.sources.backend import BACKFILL_KEY, ConnectorBackend, ConnectorSourceConfig
-from ufo.runtime.sources.connector import Connector, StreamPage, StreamSpec
+from ufo.runtime.sources.connector import (
+    Connector,
+    Ordering,
+    ParentEdge,
+    ParentPages,
+    ParentRecord,
+    Partition,
+    PartitionBound,
+    PartitionSkipped,
+    PartitionWalk,
+    Run,
+    StreamPage,
+    StreamSpec,
+    TreeFanOut,
+    UnprojectedParent,
+    UnreadyParent,
+    WalkPage,
+    fanned_out,
+    no_parents,
+    syncing_streams,
+)
 from ufo.runtime.sources.rest import ProviderRateLimited, RestConnector
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
 
@@ -66,6 +88,8 @@ class _FeedConnector(Connector):
         self_user_id: str | None,
         backfill_after: datetime | None = None,
         yield_rate_limits: bool = True,
+        parents: Any = None,
+        watched: Any = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         self.received_cursors.append(cursor)
         self.received_streams.append(stream)
@@ -213,6 +237,8 @@ class _RateLimitedConnector(_FeedConnector):
         self_user_id: str | None,
         backfill_after: datetime | None = None,
         yield_rate_limits: bool = True,
+        parents: Any = None,
+        watched: Any = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         yield StreamPage(records=_records(1, 2), next_cursor="ck1")
         raise ProviderRateLimited(60)
@@ -622,9 +648,9 @@ class _NewestFirstConnector(RestConnector):
         self.records = [{"id": str(sequence), "sequence": sequence} for sequence in range(4, 0, -1)]
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        minimum = int(cursor) if cursor is not None else None
+        minimum = int(run.cursor) if run.cursor is not None else None
         for record in self.records:
             if minimum is None or record["sequence"] >= minimum:
                 yield [record]
@@ -675,7 +701,7 @@ class _RestFeedConnector(RestConnector):
         raise AssertionError("native page checkpoints must bypass the record checkpoint callback")
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             for index in range(100):
@@ -726,10 +752,1040 @@ async def _check_a_row_that_pins_the_address_drives_the_run() -> None:
     assert connector.received_base_urls == ["https://tenant-1.probe.example"]
 
 
+async def test_a_child_stream_with_no_parent_reader_fails_loud() -> None:
+    """A stream declaring a parent has no collection of its own to fall back on, so a run threaded
+    no reader of the parent's landed records cannot proceed. Enumerating nothing instead would leave
+    the row quietly idle forever, which is the shape a stream asking a wrong path already has."""
+    child = StreamSpec(
+        name="issues",
+        source_object="issues",
+        parents=(ParentEdge(stream="repositories", path="/repos/{full_name}/issues"),),
+    )
+    connector = _FeedConnector(child, [_records(1)])
+
+    with pytest.raises(RuntimeError, match="threaded no reader"):
+        await ConnectorBackend(connector=connector).fetch(
+            ConnectorSourceConfig(stream=child.name),
+            None,
+            SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy()),
+        )
+
+
+async def test_a_page_carries_the_fields_its_children_build_their_paths_from() -> None:
+    """A parent's page is where its children read what they need of it, so the adapter projects
+    every field their edges name onto each record it lands — the ones a path renders, and the ones
+    an edge writes onto the child beside them — the dotted ones reached the same way a nested
+    primary key is. A field the record does not carry is left out rather than stored empty, so the
+    child raises at its fan-out instead of asking a half-built path."""
+    parent = StreamSpec(name="repositories", source_object="repositories")
+    child = StreamSpec(
+        name="workflow_jobs",
+        source_object="jobs",
+        parents=(
+            ParentEdge(
+                stream="repositories",
+                path="{owner.url}/{full_name}/jobs",
+                carry={"repository": "name"},
+            ),
+        ),
+    )
+
+    class _Catalog(_FeedConnector):
+        def streams(self) -> list[StreamSpec]:
+            return [parent, child]
+
+    connector = _Catalog(
+        parent,
+        [
+            [
+                {
+                    "id": 1,
+                    "name": "ufo",
+                    "full_name": "acme/ufo",
+                    "owner": {"url": "https://x/acme"},
+                },
+                {"id": 2},
+            ]
+        ],
+    )
+    result = await _run(connector, parent)
+
+    assert [page.parent_fields for page in result.pages] == [
+        {"full_name": "acme/ufo", "name": "ufo", "owner.url": "https://x/acme"},
+        {},
+    ]
+
+
+class _TreeConnector(Connector):
+    """Drives the real fan-out — `TreeFanOut` over the parent records handed in, through
+    `PartitionWalk` — so the pages the adapter addresses are the ones a declared child yields.
+    `records` is keyed by the scope a partition reads off its parent."""
+
+    name = "probe"
+    base_url = "https://probe.example"
+
+    def __init__(self, specs: list[StreamSpec], records: dict[str, list[dict[str, Any]]]) -> None:
+        self._specs = specs
+        self._records = records
+
+    def streams(self) -> list[StreamSpec]:
+        return list(self._specs)
+
+    async def fetch_page(
+        self,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        credential: Credential,
+        base_url: str,
+        self_user_id: str | None,
+        backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
+        parents: Any = None,
+        watched: Any = None,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        fan_out = TreeFanOut(stream=stream, parents=parents)
+        walk = PartitionWalk(
+            ordering=stream.ordering,
+            partitions=fan_out.partitions,
+            pages=self._pages,
+            report=fan_out.report,
+        ).stream(cursor)
+        async for page in walk:
+            yield page
+
+    async def _pages(self, partition: Partition, bound: PartitionBound) -> AsyncIterator[WalkPage]:
+        records = self._records[partition.scope or ""]
+        values = [str(record["v"]) for record in records]
+        yield WalkPage(records=records, high=max(values), low=min(values))
+
+
+def _landed(**streams: tuple[ParentRecord | UnprojectedParent | UnreadyParent, ...]):
+    async def read(
+        name: str,
+    ) -> AsyncIterator[ParentRecord | UnprojectedParent | UnreadyParent]:
+        for record in streams.get(name, ()):
+            yield record
+
+    return read
+
+
+async def _drive(connector: _TreeConnector, stream: StreamSpec, parents: Any) -> SyncResult:
+    return await ConnectorBackend(connector=connector).fetch(
+        ConnectorSourceConfig(stream=stream.name),
+        None,
+        SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy(), parents=parents),
+    )
+
+
+def _two_parent_child(**scope: Any) -> StreamSpec:
+    return StreamSpec(
+        name="records",
+        source_object="records",
+        cursor_field="v",
+        ordering=Ordering.ascending,
+        parents=(
+            ParentEdge(stream="tables", path="/tables/{id}/records"),
+            ParentEdge(stream="views", path="/views/{id}/records"),
+        ),
+        **scope,
+    )
+
+
+async def _check_a_globally_keyed_child_is_addressed_by_its_record_alone() -> None:
+    """A provider whose ids are unique across the account — a Stripe charge, an Airtable record —
+    needs no scope to tell its records apart, so the page is keyed by the record and nothing else.
+    The fan-out is unchanged: the cursor map still carries one entry per parent page, because the
+    scope is what the walk reads and resumes by whatever the key is."""
+    child = _two_parent_child(key_scope="global")
+    connector = _TreeConnector(
+        [StreamSpec(name="tables", source_object="tables"), child],
+        {"tblY": [{"id": "recZ", "v": "2026-01-01"}], "viwZ": [{"id": "recW", "v": "2026-01-02"}]},
+    )
+    result = await _drive(
+        connector,
+        child,
+        _landed(
+            tables=(ParentRecord(ref="tables/tblY", fields={"id": "tblY"}),),
+            views=(ParentRecord(ref="views/viwZ", fields={"id": "viwZ"}),),
+        ),
+    )
+
+    assert {page.source_identity for page in result.pages} == {"records/recZ", "records/recW"}
+    assert {page.source_ref for page in result.pages} == {"records/recZ", "records/recW"}
+    assert json.loads(result.next_cursor) == {
+        "tables/tblY\n/tables/tblY/records": "2026-01-01",
+        "views/viwZ\n/views/viwZ/records": "2026-01-02",
+    }
+
+
+async def _check_a_locally_keyed_child_addresses_one_page_per_parent() -> None:
+    """A key the provider only promises unique inside its parent — a Teams message id, a Drive
+    permission id — is the same string under two parents, so the scope its edge's path read is part
+    of the address and each parent's record 1 is its own page. Without it the second parent's record
+    would rewrite the first's every sync."""
+    child = _two_parent_child()
+    connector = _TreeConnector(
+        [StreamSpec(name="tables", source_object="tables"), child],
+        {"tblY": [{"id": "1", "v": "2026-01-01"}], "viwZ": [{"id": "1", "v": "2026-01-02"}]},
+    )
+    result = await _drive(
+        connector,
+        child,
+        _landed(
+            tables=(ParentRecord(ref="tables/tblY", fields={"id": "tblY"}),),
+            views=(ParentRecord(ref="views/viwZ", fields={"id": "viwZ"}),),
+        ),
+    )
+
+    assert {page.source_identity for page in result.pages} == {
+        "records/tblY/1",
+        "records/viwZ/1",
+    }
+    assert json.loads(result.next_cursor) == {
+        "tables/tblY\n/tables/tblY/records": "2026-01-01",
+        "views/viwZ\n/views/viwZ/records": "2026-01-02",
+    }
+
+
+class _EdgeConnector(RestConnector):
+    """A REST connector whose one child stream drives the real fan-out and asks the provider for
+    each partition it admits, over a mock transport — so what a predicate narrows is counted where
+    the requests are made."""
+
+    name = "probe"
+    base_url = "https://probe.example"
+
+    def __init__(self, specs: list[StreamSpec], seen: list[str]) -> None:
+        self.streams_list = specs
+        self._seen = seen
+        self._urls: list[httpx.URL] = []
+        self._params: dict[str, Any] | None = None
+
+    def paginate(
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        return fanned_out(stream, run, partial(self._pages, client))
+
+    async def _pages(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        response = await self._get_raw(client, partition.path, params=self._params)
+        self._seen.append(str(response.request.url.path))
+        self._urls.append(response.request.url)
+        records = list(response.json())
+        spans = [str(record["v"]) for record in records if "v" in record]
+        yield WalkPage(
+            records=records,
+            high=max(spans, default=None),
+            low=min(spans, default=None),
+        )
+
+
+def _edge_run(
+    specs: list[StreamSpec],
+    parents: Any,
+    seen: list[str],
+    *,
+    cursor: str | None = None,
+    urls: list[httpx.URL] | None = None,
+    params: dict[str, Any] | None = None,
+    records: int = 1,
+) -> Any:
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[{"id": f"r{len(seen)}-{index}", "v": "2026-01-01"} for index in range(records)],
+        )
+
+    connector = _EdgeConnector(specs, seen)
+    connector._urls = urls if urls is not None else []
+    connector._params = params
+    return ConnectorBackend(connector=connector).fetch(
+        ConnectorSourceConfig(stream=specs[-1].name),
+        cursor,
+        SourceAuth(
+            workspace_id=uuid4(),
+            auth_proxy=_TransportProxy(answer),
+            parents=parents,
+        ),
+    )
+
+
+class _TransportProxy:
+    def __init__(self, handler: Any) -> None:
+        self._handler = handler
+
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
+        return Credential(transport=httpx.MockTransport(self._handler))
+
+
+async def _check_an_edge_hangs_only_under_the_parents_its_predicate_admits() -> None:
+    """Recurly publishes unique codes only under a bulk coupon, so the coupon that is not bulk is
+    not a parent of that stream and costs no request. Before the predicate this lived in a walker
+    that read the whole collection and filtered it by hand."""
+    coupons = StreamSpec(name="coupons", source_object="coupons")
+    codes = StreamSpec(
+        name="unique_coupon_codes",
+        source_object="codes",
+        parents=(
+            ParentEdge(
+                stream="coupons",
+                path="/coupons/{id}/unique_coupon_codes",
+                where={"coupon_type": ("bulk",)},
+            ),
+        ),
+    )
+    seen: list[str] = []
+    await _edge_run(
+        [coupons, codes],
+        _landed(
+            coupons=(
+                ParentRecord(ref="coupons/c1", fields={"id": "c1", "coupon_type": "bulk"}),
+                ParentRecord(ref="coupons/c2", fields={"id": "c2", "coupon_type": "single_code"}),
+            )
+        ),
+        seen,
+    )
+
+    assert seen == ["/coupons/c1/unique_coupon_codes"]
+
+
+async def _check_a_parent_lacking_the_field_a_predicate_weighs_is_not_a_parent() -> None:
+    """The half a path field cannot have: a record carrying nothing for the field is skipped rather
+    than failing the run, because the provider answering nothing there is the answer — the coupon is
+    not bulk."""
+    coupons = StreamSpec(name="coupons", source_object="coupons")
+    codes = StreamSpec(
+        name="unique_coupon_codes",
+        source_object="codes",
+        parents=(
+            ParentEdge(
+                stream="coupons",
+                path="/coupons/{id}/unique_coupon_codes",
+                where={"coupon_type": ("bulk",)},
+            ),
+        ),
+    )
+    seen: list[str] = []
+    result = await _edge_run(
+        [coupons, codes],
+        _landed(coupons=(ParentRecord(ref="coupons/c3", fields={"id": "c3"}),)),
+        seen,
+    )
+
+    assert seen == []
+    assert result.pages == ()
+
+
+async def _check_a_recursive_edge_asks_nothing_of_the_blocks_that_contain_none() -> None:
+    """Notion's blocks contain blocks, and a leaf costs one empty request per pass unless the
+    declaration says it is not a parent. `has_children` answers that, and the three block types that
+    hold a page of their own rather than children are excluded by name — an exclusion, because the
+    types that do contain children are whatever Notion ships next."""
+    pages = StreamSpec(name="pages", source_object="pages")
+    child = ParentEdge(
+        stream="blocks",
+        path="/blocks/{id}/children",
+        where={"has_children": (True,)},
+        unless={"type": ("child_page", "child_database", "ai_block")},
+    )
+    blocks = StreamSpec(
+        name="blocks",
+        source_object="blocks",
+        canonical=True,
+        parents=(ParentEdge(stream="pages", path="/blocks/{id}/children"), child),
+    )
+    seen: list[str] = []
+    await _edge_run(
+        [pages, blocks],
+        _landed(
+            pages=(ParentRecord(ref="pages/p1", fields={"id": "p1"}),),
+            blocks=(
+                ParentRecord(
+                    ref="blocks/b1",
+                    fields={"id": "b1", "has_children": True, "type": "paragraph"},
+                ),
+                ParentRecord(
+                    ref="blocks/b2",
+                    fields={"id": "b2", "has_children": False, "type": "paragraph"},
+                ),
+                ParentRecord(
+                    ref="blocks/b3",
+                    fields={"id": "b3", "has_children": True, "type": "child_page"},
+                ),
+            ),
+        ),
+        seen,
+    )
+
+    assert seen == ["/blocks/b1/children", "/blocks/p1/children"]
+
+
+def _check_a_predicate_on_a_field_the_path_reads_is_refused() -> None:
+    with pytest.raises(ValueError, match="both addresses and filters"):
+        ParentEdge(stream="coupons", path="/coupons/{id}/codes", where={"id": ("c1",)})
+
+
+async def _check_two_edges_to_one_parent_resume_separately() -> None:
+    """HubSpot publishes 26 asset collections under one campaign, so a stream can declare several
+    edges to the same parent. Each asks a collection of its own, and keying the cursor on the parent
+    alone would give them one entry between them: a capped run would checkpoint the first and a
+    resume would read that as both being finished."""
+    campaigns = StreamSpec(name="campaigns", source_object="campaigns")
+    assets = StreamSpec(
+        name="campaign_assets",
+        source_object="assets",
+        cursor_field="v",
+        ordering=Ordering.ascending,
+        parents=(
+            ParentEdge(stream="campaigns", path="/campaigns/{id}/forms"),
+            ParentEdge(stream="campaigns", path="/campaigns/{id}/emails"),
+        ),
+    )
+    landed = _landed(campaigns=(ParentRecord(ref="campaigns/c1", fields={"id": "c1"}),))
+    seen: list[str] = []
+    first = await _edge_run([campaigns, assets], landed, seen)
+
+    assert seen == ["/campaigns/c1/emails", "/campaigns/c1/forms"]
+    assert set(json.loads(first.next_cursor)) == {
+        "campaigns/c1\n/campaigns/c1/forms",
+        "campaigns/c1\n/campaigns/c1/emails",
+    }
+
+    resumed: list[str] = []
+    await _edge_run(
+        [campaigns, assets],
+        landed,
+        resumed,
+        cursor=json.dumps({"campaigns/c1\n/campaigns/c1/forms": "2026-01-01"}),
+    )
+    assert resumed == ["/campaigns/c1/emails", "/campaigns/c1/forms"]
+
+
+async def _check_an_entry_under_a_key_this_declaration_no_longer_produces_is_re_walked() -> None:
+    """A cursor an earlier declaration wrote is still a map of strings, so it decodes; its entries
+    name partitions this pass does not enumerate, so each is walked from scratch once and the
+    completed pass prunes it. A decoder that refused the old shape would wedge every row that holds
+    one."""
+    campaigns = StreamSpec(name="campaigns", source_object="campaigns")
+    assets = StreamSpec(
+        name="campaign_assets",
+        source_object="assets",
+        parents=(ParentEdge(stream="campaigns", path="/campaigns/{id}/forms"),),
+    )
+    seen: list[str] = []
+    result = await _edge_run(
+        [campaigns, assets],
+        _landed(campaigns=(ParentRecord(ref="campaigns/c1", fields={"id": "c1"}),)),
+        seen,
+        cursor=json.dumps({"campaigns/c1": ""}),
+    )
+
+    assert seen == ["/campaigns/c1/forms"]
+    assert json.loads(result.next_cursor) == {}
+
+
+async def _check_an_edge_that_carries_its_own_query_keeps_it_beside_the_pagers() -> None:
+    """Stripe reaches the balance transactions of one payout by query parameter rather than by path
+    segment, and httpx REPLACES a URL's query with the params it is handed. The two are merged where
+    the path becomes a request, so no connector splits a URL of its own."""
+    payouts = StreamSpec(name="payouts", source_object="payouts")
+    transactions = StreamSpec(
+        name="balance_transactions",
+        source_object="transactions",
+        parents=(ParentEdge(stream="payouts", path="/v1/balance_transactions?payout={id}"),),
+    )
+    asked: list[httpx.URL] = []
+    await _edge_run(
+        [payouts, transactions],
+        _landed(payouts=(ParentRecord(ref="payouts/po_1", fields={"id": "po_1"}),)),
+        [],
+        urls=asked,
+        params={"limit": "100"},
+    )
+
+    assert asked[0].path == "/v1/balance_transactions"
+    assert dict(asked[0].params) == {"payout": "po_1", "limit": "100"}
+
+
+async def _check_an_optional_edge_passes_over_a_parent_of_another_kind() -> None:
+    """A HubSpot owner that is not a user carries no `userId`, and the sequences under a user are
+    not a collection it has — so it is no partition of that edge. Without the declaration the same
+    record ends the run, which is the default a wrong path field needs."""
+    owners = StreamSpec(name="owners", source_object="owners")
+    landed = _landed(
+        owners=(
+            ParentRecord(ref="owners/o1", fields={"userId": "u1"}),
+            ParentRecord(ref="owners/o2", fields={}),
+        )
+    )
+    optional = StreamSpec(
+        name="sequences",
+        source_object="sequences",
+        parents=(ParentEdge(stream="owners", path="/sequences/{userId}", optional=True),),
+    )
+    seen: list[str] = []
+    await _edge_run([owners, optional], landed, seen)
+    assert seen == ["/sequences/u1"]
+
+    required = StreamSpec(
+        name="sequences",
+        source_object="sequences",
+        parents=(ParentEdge(stream="owners", path="/sequences/{userId}"),),
+    )
+    with pytest.raises(RuntimeError, match="carries no value that addresses a collection"):
+        await _edge_run([owners, required], landed, [])
+
+
+def _fan_out(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    return [record.ufo for record in caplog.records if record.getMessage() == "source_sync.fan_out"]
+
+
+COUPONS = StreamSpec(name="coupons", source_object="coupons")
+THREE_COUPONS = _landed(
+    coupons=(
+        ParentRecord(ref="coupons/c1", fields={"id": "c1", "coupon_type": "bulk"}),
+        ParentRecord(ref="coupons/c2", fields={"id": "c2", "coupon_type": "single_code"}),
+        ParentRecord(ref="coupons/c3", fields={"id": "c3", "coupon_type": "single_code"}),
+    )
+)
+
+
+def _codes(where: dict[str, tuple[Any, ...]]) -> StreamSpec:
+    return StreamSpec(
+        name="unique_coupon_codes",
+        source_object="codes",
+        parents=(ParentEdge(stream="coupons", path="/coupons/{id}/codes", where=where),),
+    )
+
+
+async def test_a_completed_pass_counts_what_each_edge_enumerated_and_what_it_cost(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stream that lands nothing reads the same whether its collection is empty, its predicate
+    admits none of a full parent set, or its record path drops every record the provider sent — the
+    row is quiet either way, which is how eight connectors asked a wrong path unnoticed. The pass
+    says which: the parents it saw, the ones its edge hangs under, the collections it asked, and the
+    records it got."""
+    codes = _codes({"coupon_type": ("bulk",)})
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _edge_run([COUPONS, codes], THREE_COUPONS, [], records=2)
+
+    assert _fan_out(caplog) == [
+        {
+            "stream": "unique_coupon_codes",
+            "parent": "coupons",
+            "edge": "/coupons/{id}/codes",
+            "enumerated": "3",
+            "admitted": "1",
+            "fetched": "1",
+            "landed": "2",
+        }
+    ]
+
+
+async def test_an_edge_naming_a_field_no_parent_carries_admits_none_of_a_full_set(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The trap the tree adds: a `where` on a field the parent kind never carries matches nothing,
+    and a parent set legitimately all filtered out looks identical. `enumerated` above zero beside
+    `admitted` at zero is the pair that tells them apart."""
+    codes = _codes({"coupon_kind": ("bulk",)})
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _edge_run([COUPONS, codes], THREE_COUPONS, [], records=2)
+
+    assert _fan_out(caplog) == [
+        {
+            "stream": "unique_coupon_codes",
+            "parent": "coupons",
+            "edge": "/coupons/{id}/codes",
+            "enumerated": "3",
+            "admitted": "0",
+            "fetched": "0",
+            "landed": "0",
+        }
+    ]
+
+
+async def test_a_pass_that_asks_and_gets_nothing_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The audit's own class: the request is answered, the records are behind an envelope key the
+    stream does not read, and every page parses to nothing. Landing zero from three collections
+    asked is the difference between a wrong path and an empty account."""
+    codes = _codes({})
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _edge_run([COUPONS, codes], THREE_COUPONS, [], records=0)
+
+    assert _fan_out(caplog) == [
+        {
+            "stream": "unique_coupon_codes",
+            "parent": "coupons",
+            "edge": "/coupons/{id}/codes",
+            "enumerated": "3",
+            "admitted": "3",
+            "fetched": "3",
+            "landed": "0",
+        }
+    ]
+
+
+class _PlainConnector(RestConnector):
+    """A connector that overrides nothing but `paginate` — the shape 22 of 24 conversions could not
+    have, because the seam dropped the reader unless a connector overrode the seam to keep it."""
+
+    name = "probe"
+    base_url = "https://probe.example"
+
+    def __init__(self, spec: StreamSpec) -> None:
+        self.streams_list = [spec]
+        self.received: list[ParentPages] = []
+
+    async def paginate(
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        self.received.append(run.parents)
+        yield []
+
+
+async def _check_a_declared_stream_is_handed_its_reader_without_overriding_the_seam() -> None:
+    """The edges a stream declares are the shape of the catalog, not an extra: the reader crosses
+    the seam by itself, so a connector that wants nothing else of a run writes no seam override at
+    all."""
+    stream = StreamSpec(
+        name="issues",
+        source_object="issues",
+        parents=(ParentEdge(stream="repositories", path="/repos/{full_name}/issues"),),
+    )
+    connector = _PlainConnector(stream)
+    reader = _landed(
+        repositories=(ParentRecord(ref="repositories/1", fields={"full_name": "a/b"}),)
+    )
+    await ConnectorBackend(connector=connector).fetch(
+        ConnectorSourceConfig(stream=stream.name),
+        None,
+        SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy(), parents=reader),
+    )
+
+    assert connector.received == [reader]
+
+
+async def _check_a_root_stream_is_handed_a_reader_of_nothing() -> None:
+    """A root collection hangs under nothing, and it is handed a reader that reads nothing rather
+    than none of one — so a connector never asks whether it has one, and the two that raised
+    `StreamSkipped` when it was absent cannot silently skip a stream for a case that does not
+    arise."""
+    stream = StreamSpec(name="charges", source_object="charges")
+    connector = _PlainConnector(stream)
+    await ConnectorBackend(connector=connector).fetch(
+        ConnectorSourceConfig(stream=stream.name),
+        None,
+        SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy()),
+    )
+
+    assert [record async for record in connector.received[0]("anything")] == []
+
+
+async def _check_the_fan_out_closes_its_walk_when_its_consumer_stops_early() -> None:
+    """The adapter returns out of its `async for` the moment a run reaches its record cap, which
+    abandons the generator underneath. An abandoned one releases the response it was reading when it
+    is collected and not before, so the close is the fan-out's to own rather than each connector's
+    to remember — seven of them did not."""
+    closed: list[str] = []
+    stream = StreamSpec(
+        name="issues",
+        source_object="issues",
+        parents=(ParentEdge(stream="repositories", path="/repos/{full_name}/issues"),),
+    )
+
+    async def pages(partition: Partition, bound: PartitionBound) -> AsyncIterator[WalkPage]:
+        try:
+            yield WalkPage(records=[{"id": "1"}])
+            yield WalkPage(records=[{"id": "2"}])
+        finally:
+            closed.append(partition.path)
+
+    reader = _landed(
+        repositories=(ParentRecord(ref="repositories/1", fields={"full_name": "a/b"}),)
+    )
+    driven = fanned_out(stream, Run(cursor=None, parents=reader), pages)
+    assert [record["id"] for record in (await anext(driven)).records] == ["1"]
+    await driven.aclose()
+
+    assert closed == ["/repos/a%2Fb/issues"]
+
+
+class _SkippingConnector(Connector):
+    """A declared child whose provider refuses one of its two partitions — the shape every page
+    factory already has, since a partition the grant cannot read drops out rather than failing the
+    run."""
+
+    name = "probe"
+    base_url = "https://probe.example"
+
+    def __init__(self, spec: StreamSpec) -> None:
+        self._spec = spec
+
+    def streams(self) -> list[StreamSpec]:
+        return [self._spec]
+
+    async def fetch_page(
+        self,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        credential: Credential,
+        base_url: str,
+        self_user_id: str | None,
+        backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
+        parents: Any = no_parents,
+        watched: Any = None,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        async for page in fanned_out(stream, Run(cursor=cursor, parents=parents), self._pages):
+            yield page
+
+    async def _pages(self, partition: Partition, bound: PartitionBound) -> AsyncIterator[WalkPage]:
+        if partition.scope == "c1":
+            raise PartitionSkipped("probe: c1 refused")
+        yield WalkPage(records=[{"id": "t1"}])
+
+
+def _two_contracts() -> Any:
+    return _landed(
+        contracts=(
+            ParentRecord(ref="contracts/c1", fields={"id": "c1"}),
+            ParentRecord(ref="contracts/c2", fields={"id": "c2"}),
+        )
+    )
+
+
+def _tasks(*, delete_missing: bool) -> StreamSpec:
+    return StreamSpec(
+        name="tasks",
+        source_object="tasks",
+        delete_missing=delete_missing,
+        parents=(ParentEdge(stream="contracts", path="/contracts/{id}/tasks"),),
+    )
+
+
+async def _check_a_snapshot_stream_refuses_to_pass_over_a_partition() -> None:
+    """A `delete_missing` run is an authoritative enumeration, and the driver tombstones every prior
+    page it does not mention. A partition the provider refused is absent from exactly that way, so
+    passing over it would delete the pages of a contract whose tasks were merely unreadable this
+    tick — the connector's one loud refusal turned into a silent deletion.
+
+    A snapshot that skipped a partition is not a snapshot, so the run raises instead: it commits no
+    page and sweeps none."""
+    spec = _tasks(delete_missing=True)
+    with pytest.raises(RuntimeError, match="'tasks' cannot snapshot"):
+        await ConnectorBackend(connector=_SkippingConnector(spec)).fetch(
+            ConnectorSourceConfig(stream=spec.name),
+            None,
+            SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy(), parents=_two_contracts()),
+        )
+
+
+async def _check_a_stream_that_tombstones_nothing_still_passes_over_one() -> None:
+    """An incremental run names the removals it saw and sweeps nothing else, so a refused partition
+    costs only what it did not land this tick — which is what every connector's page factory means
+    by raising."""
+    spec = _tasks(delete_missing=False)
+    result = await ConnectorBackend(connector=_SkippingConnector(spec)).fetch(
+        ConnectorSourceConfig(stream=spec.name),
+        None,
+        SourceAuth(workspace_id=uuid4(), auth_proxy=_NoAuthProxy(), parents=_two_contracts()),
+    )
+
+    assert {page.source_identity for page in result.pages} == {"tasks/c2/t1"}
+    assert result.snapshot is False
+
+
+def _one_contract_unprojected() -> Any:
+    return _landed(
+        contracts=(
+            UnprojectedParent(ref="contracts/c1"),
+            ParentRecord(ref="contracts/c2", fields={"id": "c2"}),
+        )
+    )
+
+
+async def _check_a_snapshot_stream_refuses_a_parent_landed_without_its_projection() -> None:
+    """A parent page with no projection is a hole in the enumeration one step up from a refused
+    partition: the tasks under it are live pages no partition of this pass mentions, so a sweep
+    would tombstone them for a run that observed nothing — every page the image before the
+    projection landed, on the first pass after deploy. The run raises naming the stream, the parent
+    and the page, commits nothing, and clears once the parent re-lands with its fields."""
+    spec = _tasks(delete_missing=True)
+    with pytest.raises(
+        RuntimeError,
+        match="'tasks' cannot snapshot under 'contracts': page 'contracts/c1' landed without",
+    ):
+        await ConnectorBackend(connector=_SkippingConnector(spec)).fetch(
+            ConnectorSourceConfig(stream=spec.name),
+            None,
+            SourceAuth(
+                workspace_id=uuid4(), auth_proxy=_NoAuthProxy(), parents=_one_contract_unprojected()
+            ),
+        )
+
+
+async def _check_a_stream_that_tombstones_nothing_passes_over_an_unprojected_parent() -> None:
+    """An incremental run asserts nothing about deletions, so a parent it cannot read yet costs
+    only the children it did not land this tick; it fans out over them on the pass after the parent
+    re-lands."""
+    spec = _tasks(delete_missing=False)
+    result = await ConnectorBackend(connector=_SkippingConnector(spec)).fetch(
+        ConnectorSourceConfig(stream=spec.name),
+        None,
+        SourceAuth(
+            workspace_id=uuid4(), auth_proxy=_NoAuthProxy(), parents=_one_contract_unprojected()
+        ),
+    )
+
+    assert {page.source_identity for page in result.pages} == {"tasks/c2/t1"}
+    assert result.snapshot is False
+
+
+async def _check_a_snapshot_stream_refuses_an_unready_parent_catalog() -> None:
+    spec = _tasks(delete_missing=True)
+    with pytest.raises(RuntimeError, match="the parent has not completed a sync"):
+        await ConnectorBackend(connector=_SkippingConnector(spec)).fetch(
+            ConnectorSourceConfig(stream=spec.name),
+            None,
+            SourceAuth(
+                workspace_id=uuid4(),
+                auth_proxy=_NoAuthProxy(),
+                parents=_landed(contracts=(UnreadyParent(),)),
+            ),
+        )
+
+
+async def _check_an_incremental_stream_waits_for_an_unready_parent_catalog() -> None:
+    spec = _tasks(delete_missing=False)
+    result = await ConnectorBackend(connector=_SkippingConnector(spec)).fetch(
+        ConnectorSourceConfig(stream=spec.name),
+        None,
+        SourceAuth(
+            workspace_id=uuid4(),
+            auth_proxy=_NoAuthProxy(),
+            parents=_landed(contracts=(UnreadyParent(),)),
+        ),
+    )
+
+    assert result.pages == ()
+    assert result.snapshot is False
+
+
+FREE_TEXT_KEY = "a b/c#d?e@f"
+
+
+async def _check_a_free_text_parent_key_reaches_the_wire_as_one_encoded_segment() -> None:
+    """A parent key is whatever the provider let someone type — a contact's email, a board's title —
+    and the path is the one place that reads `#`, `?` and `/` as syntax: unencoded, a `#` truncates
+    the request at a fragment and the collection asked for is not the one meant."""
+    contacts = StreamSpec(name="contacts", source_object="contacts")
+    statuses = StreamSpec(
+        name="consent_states",
+        source_object="statuses",
+        parents=(ParentEdge(stream="contacts", path="/statuses/{email}"),),
+    )
+    asked: list[httpx.URL] = []
+    result = await _edge_run(
+        [contacts, statuses],
+        _landed(contacts=(ParentRecord(ref="contacts/c1", fields={"email": FREE_TEXT_KEY}),)),
+        [],
+        urls=asked,
+    )
+
+    assert str(asked[0]) == "https://probe.example/statuses/a%20b%2Fc%23d%3Fe%40f"
+    assert result.pages[0].source_identity == f"consent_states/{FREE_TEXT_KEY}/r0-0"
+
+
+async def _check_a_free_text_parent_key_in_a_query_reaches_it_as_a_query_value() -> None:
+    """A placeholder after the `?` is read back by the request helper's own `parse_qsl` before httpx
+    re-encodes it, so it is encoded the way that reads it: what the connector declared is what the
+    provider is asked for, `&` and all."""
+    owners = StreamSpec(name="owners", source_object="owners")
+    sequences = StreamSpec(
+        name="sequences",
+        source_object="sequences",
+        parents=(ParentEdge(stream="owners", path="/sequences?owner={handle}"),),
+    )
+    asked: list[httpx.URL] = []
+    await _edge_run(
+        [owners, sequences],
+        _landed(owners=(ParentRecord(ref="owners/o1", fields={"handle": "ada & co/x"}),)),
+        [],
+        urls=asked,
+        params={"limit": "100"},
+    )
+
+    assert asked[0].path == "/sequences"
+    assert dict(asked[0].params) == {"owner": "ada & co/x", "limit": "100"}
+
+
+def _conversations_edge() -> ParentEdge:
+    return ParentEdge(
+        stream="conversations",
+        path="/history/{id}",
+        carry={"channel_name": "name", "channel_type": "type", "is_private": "is_private"},
+    )
+
+
+async def _check_an_edge_carries_its_parents_fields_onto_every_child_record() -> None:
+    """A Slack message is recalled by the channel it was posted in, which the message itself does
+    not name. The edge writes the channel's fields onto each record before the connector shapes it,
+    so they reach the rendered body a member reads back — under the names the child reads, which are
+    not the provider's names for them."""
+    conversations = StreamSpec(name="conversations", source_object="conversations")
+    messages = StreamSpec(
+        name="messages", source_object="messages", canonical=True, parents=(_conversations_edge(),)
+    )
+    seen: list[str] = []
+    result = await _edge_run(
+        [conversations, messages],
+        _landed(
+            conversations=(
+                ParentRecord(
+                    ref="conversations/C1",
+                    fields={"id": "C1", "name": "general", "type": "channel", "is_private": False},
+                ),
+            )
+        ),
+        seen,
+    )
+
+    assert seen == ["/history/C1"]
+    landed = json.loads(result.pages[0].body.split("\n\n", 1)[1])
+    assert landed["channel_name"] == "general"
+    assert landed["channel_type"] == "channel"
+    assert landed["is_private"] is False
+
+
+async def _check_a_parent_carrying_nothing_for_a_field_writes_nothing() -> None:
+    """A parent of another kind carries none of it, and the child lands without it rather than
+    failing the run — the same answer a predicate gives, and the opposite of a path field."""
+    conversations = StreamSpec(name="conversations", source_object="conversations")
+    messages = StreamSpec(
+        name="messages", source_object="messages", parents=(_conversations_edge(),)
+    )
+    seen: list[str] = []
+    result = await _edge_run(
+        [conversations, messages],
+        _landed(conversations=(ParentRecord(ref="conversations/D1", fields={"id": "D1"}),)),
+        seen,
+    )
+
+    assert seen == ["/history/D1"]
+    landed = json.loads(result.pages[0].body.split("\n\n", 1)[1])
+    assert "channel_name" not in landed
+
+
+async def _check_a_record_already_carrying_a_carried_field_raises() -> None:
+    """Two answers for one field is a thing to say out loud: the provider sent one and the parent
+    would write the other, and which wins is the connector's to state in `flatten`."""
+    conversations = StreamSpec(name="conversations", source_object="conversations")
+    messages = StreamSpec(
+        name="messages",
+        source_object="messages",
+        parents=(ParentEdge(stream="conversations", path="/history/{id}", carry={"v": "name"}),),
+    )
+
+    with pytest.raises(RuntimeError, match="already carries it"):
+        await _edge_run(
+            [conversations, messages],
+            _landed(
+                conversations=(
+                    ParentRecord(ref="conversations/C1", fields={"id": "C1", "name": "general"}),
+                )
+            ),
+            [],
+        )
+
+
+def _check_a_globally_keyed_root_is_refused() -> None:
+    """The bit says whether a record's key needs its parent's scope to be unique. A stream with no
+    parent has no scope to leave out, so declaring one there states nothing and reads as though it
+    did."""
+    with pytest.raises(ValueError, match="declares no parent"):
+        StreamSpec(name="charges", source_object="charges", key_scope="global")
+
+
+def _check_a_snapshot_stream_declaring_a_bounded_pass_is_refused() -> None:
+    """`PartitionWalk` emits only the partitions a budget let it visit and nothing while an interval
+    holds the pass, while a `delete_missing` run returns whatever it emitted as the authoritative
+    snapshot — so a bounded snapshot would sweep the pages of every parent the pass did not reach.
+    Each knob is refused at declaration, naming the stream and the knob."""
+    edge = ParentEdge(stream="contracts", path="/contracts/{id}/tasks")
+    for knob, declaration in (
+        ("fetch_budget", {"fetch_budget": 10, "parents": (edge,)}),
+        ("pass_interval_seconds", {"pass_interval_seconds": 60, "parents": (edge,)}),
+        ("refan", {"parents": (replace(edge, refan="on_parent_change"),)}),
+    ):
+        with pytest.raises(ValueError, match=f"'tasks' declares delete_missing with {knob}"):
+            StreamSpec(name="tasks", source_object="tasks", delete_missing=True, **declaration)
+    StreamSpec(name="tasks", source_object="tasks", delete_missing=True, parents=(edge,))
+
+
+def _check_the_ancestors_of_a_canonical_stream_sync() -> None:
+    """A canonical stream whose parent does not sync has no landed records to fan over, so the
+    closure up the edges is what a connection registers. Nothing declares it."""
+    streams = [
+        StreamSpec(name="organizations", source_object="orgs"),
+        StreamSpec(
+            name="repositories",
+            source_object="repos",
+            canonical=True,
+            parents=(ParentEdge(stream="organizations", path="/orgs/{login}/repos"),),
+        ),
+        StreamSpec(name="teams", source_object="teams"),
+    ]
+    assert syncing_streams(streams) == {"organizations", "repositories"}
+
+
+def _check_a_stream_that_is_its_own_parent_terminates() -> None:
+    """Notion's blocks contain blocks: the catalog is a graph, and the closure walks each stream
+    once rather than following the self-edge forever."""
+    streams = [
+        StreamSpec(name="pages", source_object="pages"),
+        StreamSpec(
+            name="blocks",
+            source_object="blocks",
+            canonical=True,
+            parents=(
+                ParentEdge(stream="pages", path="/blocks/{id}/children"),
+                ParentEdge(stream="blocks", path="/blocks/{id}/children"),
+            ),
+        ),
+    ]
+    assert syncing_streams(streams) == {"pages", "blocks"}
+
+
+def _check_an_edge_naming_no_declared_stream_raises() -> None:
+    streams = [
+        StreamSpec(
+            name="payslips",
+            source_object="payslips",
+            canonical=True,
+            parents=(ParentEdge(stream="gp_workers", path="/rest/gp/workers/{id}/payslips"),),
+        )
+    ]
+    with pytest.raises(ValueError, match="gp_workers"):
+        syncing_streams(streams)
+
+
 def test_connector_backend_sync_contract() -> None:
     for check in (
         _check_default_render_rejects_record_without_title_or_identity,
         _check_envelope_decoder_rejects_extra_keys,
+        _check_a_globally_keyed_root_is_refused,
+        _check_a_snapshot_stream_declaring_a_bounded_pass_is_refused,
+        _check_a_predicate_on_a_field_the_path_reads_is_refused,
+        _check_the_ancestors_of_a_canonical_stream_sync,
+        _check_a_stream_that_is_its_own_parent_terminates,
+        _check_an_edge_naming_no_declared_stream_raises,
     ):
         check()
 
@@ -738,6 +1794,29 @@ async def test_connector_backend_async_contract() -> None:
     for check in (
         _check_an_unusable_grant_skips_the_stream_instead_of_failing_the_run,
         _check_only_the_raiser_decides_that_a_grant_event_is_the_one_repair,
+        _check_a_snapshot_stream_refuses_to_pass_over_a_partition,
+        _check_a_stream_that_tombstones_nothing_still_passes_over_one,
+        _check_a_snapshot_stream_refuses_a_parent_landed_without_its_projection,
+        _check_a_stream_that_tombstones_nothing_passes_over_an_unprojected_parent,
+        _check_a_snapshot_stream_refuses_an_unready_parent_catalog,
+        _check_an_incremental_stream_waits_for_an_unready_parent_catalog,
+        _check_a_declared_stream_is_handed_its_reader_without_overriding_the_seam,
+        _check_a_root_stream_is_handed_a_reader_of_nothing,
+        _check_the_fan_out_closes_its_walk_when_its_consumer_stops_early,
+        _check_a_free_text_parent_key_reaches_the_wire_as_one_encoded_segment,
+        _check_a_free_text_parent_key_in_a_query_reaches_it_as_a_query_value,
+        _check_an_edge_carries_its_parents_fields_onto_every_child_record,
+        _check_a_parent_carrying_nothing_for_a_field_writes_nothing,
+        _check_a_record_already_carrying_a_carried_field_raises,
+        _check_two_edges_to_one_parent_resume_separately,
+        _check_an_entry_under_a_key_this_declaration_no_longer_produces_is_re_walked,
+        _check_an_edge_that_carries_its_own_query_keeps_it_beside_the_pagers,
+        _check_an_optional_edge_passes_over_a_parent_of_another_kind,
+        _check_an_edge_hangs_only_under_the_parents_its_predicate_admits,
+        _check_a_parent_lacking_the_field_a_predicate_weighs_is_not_a_parent,
+        _check_a_recursive_edge_asks_nothing_of_the_blocks_that_contain_none,
+        _check_a_globally_keyed_child_is_addressed_by_its_record_alone,
+        _check_a_locally_keyed_child_addresses_one_page_per_parent,
         _check_a_rows_pinned_window_reaches_the_connector_beside_the_spec_it_drives,
         _check_cursor_field_supplies_updated_at_when_provider_value_is_absent,
         _check_record_timestamp_fields_resolve_nested_provider_paths,

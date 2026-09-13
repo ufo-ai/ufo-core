@@ -2624,7 +2624,7 @@ class ExtensionContext:
     async def rewindow_sources(
         self, configs: Mapping[UUID, BaseModel], *, refetch: frozenset[UUID] = frozenset()
     ) -> None:
-        """Rewrite live rows' non-identity config in one transaction, clearing the cursor of each
+        """Rewrite live rows' non-identity config in one transaction, clearing the cursors of each
         row in `refetch` so its next run re-walks from the new parameter. A binding's several
         stream rows settle together, never in torn per-stream commits.
 
@@ -2679,6 +2679,7 @@ class ExtensionContext:
                 if row.uid in refetch:
                     values |= {
                         "cursor": None,
+                        "partition_cursor": None,
                         "next_sync_at": now,
                         "claimed_by": None,
                         "claim_expires_at": None,

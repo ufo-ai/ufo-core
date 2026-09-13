@@ -23,7 +23,14 @@ from urllib.parse import quote
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamPage, StreamSkipped, StreamSpec, list_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    list_or_empty,
+)
 from ufo_ext_sources.providers import google
 from ufo_ext_sources.watermark import text_checkpoint
 
@@ -56,15 +63,15 @@ class GoogleMeetConnector(RestConnector):
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[StreamPage]:
         if stream.name != "meeting_artifacts":
             raise NotImplementedError(
                 f"googlemeet: stream {stream.name!r} has no paginate dispatch"
             )
         params: dict[str, Any] = {"pageSize": CONFERENCE_PAGE_SIZE}
-        if cursor:
-            params["filter"] = f'start_time >= "{_lookback(cursor)}"'
+        if run.cursor:
+            params["filter"] = f'start_time >= "{_lookback(run.cursor)}"'
         token: str | None = None
         try:
             while True:
@@ -74,7 +81,7 @@ class GoogleMeetConnector(RestConnector):
                 data = await self._get(client, CONFERENCE_RECORDS_PATH, params=request_params)
                 conferences = list_or_empty(data.get("conferenceRecords"))
                 records: list[dict[str, Any]] = []
-                next_cursor = _max_start_time(conferences, cursor)
+                next_cursor = _max_start_time(conferences, run.cursor)
                 for conference in conferences:
                     record = await self._conference_record(client, conference)
                     if record["transcripts"] or record["smart_notes"]:

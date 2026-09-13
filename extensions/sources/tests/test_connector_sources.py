@@ -41,8 +41,11 @@ from ufo.sdk.sources import (
     ConnectorSourceConfig,
     Pagination,
     PaginationStrategy,
+    ParentPages,
+    ParentRecord,
     ProviderRateLimited,
     RestConnector,
+    Run,
     StreamPage,
     StreamSpec,
 )
@@ -65,15 +68,30 @@ class _MockProxy:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
-def _auth(handler: Callable[[httpx.Request], httpx.Response]) -> SourceAuth:
-    return SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=handler))
+def _auth(
+    handler: Callable[[httpx.Request], httpx.Response],
+    parents: ParentPages | None = None,
+) -> SourceAuth:
+    return SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=handler), parents=parents)
+
+
+def _landed(**streams: ParentRecord) -> ParentPages:
+    async def read(stream: str) -> AsyncIterator[ParentRecord]:
+        record = streams.get(stream)
+        if record is not None:
+            yield record
+
+    return read
 
 
 async def _fetch(
-    connector: Connector, stream: str, handler: Callable[[httpx.Request], httpx.Response]
+    connector: Connector,
+    stream: str,
+    handler: Callable[[httpx.Request], httpx.Response],
+    parents: ParentPages | None = None,
 ):
     return await ConnectorBackend(connector=connector).fetch(
-        ConnectorSourceConfig(stream=stream), None, _auth(handler)
+        ConnectorSourceConfig(stream=stream), None, _auth(handler, parents)
     )
 
 
@@ -356,7 +374,7 @@ class _CannedConnector(RestConnector):
         )
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         for page in self._pages:
             yield page
@@ -451,25 +469,28 @@ def _github_handler(
     return handle
 
 
-async def test_github_repositories_fan_out_over_granted_orgs() -> None:
-    """The org→repo fan-out lands the granted-org repos. GitHub surfaces no delete signal, so every
-    stream is incremental (never an authoritative snapshot); the sync runner's row-level cursor
-    handles re-reads."""
-    result = await _fetch(GitHubConnector(), "repositories", _github_handler([]))
-    assert result.snapshot is False
+async def test_github_repositories_fan_out_over_the_landed_organizations() -> None:
+    """The repo catalog hangs under an organization page, one request per landed org, and the
+    whole listing lands every pass: `repositories` and `organizations` are the two snapshots, so a
+    repository that stops qualifying is tombstoned and leaves the partition set. Every other GitHub
+    stream is incremental — GitHub surfaces no delete signal for them, and the sync runner's
+    row-level cursor handles re-reads."""
+    landed = _landed(organizations=ParentRecord(ref="organizations/1", fields={"login": "acme"}))
+    result = await _fetch(GitHubConnector(), "repositories", _github_handler([]), landed)
+    assert result.snapshot is True
     assert {page.source_ref for page in result.pages} == {"repositories/acme/7"}
     assert "acme/widgets" in result.pages[0].body
 
 
 async def test_github_skips_when_org_enumeration_is_refused() -> None:
-    """A grant with no org scope (`/user/orgs` → 403) can read no stream, so the fetch raises
-    `StreamSkipped` — the driver records a skip, never a failure."""
+    """A grant with no org scope (`/user/orgs` → 403) has no root to hang the catalog off, so the
+    `organizations` row raises `StreamSkipped` — the driver records a skip, never a failure."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"message": "insufficient scope"})
 
     with pytest.raises(StreamSkipped):
-        await _fetch(GitHubConnector(), "repositories", handler)
+        await _fetch(GitHubConnector(), "organizations", handler)
 
 
 def _asana_handler(

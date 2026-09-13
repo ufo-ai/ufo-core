@@ -41,6 +41,7 @@ from ufo.sdk.sources import (
     MAIL_BACKFILL_WINDOW_DAYS,
     CursorExpired,
     RestConnector,
+    Run,
     StreamPage,
     StreamSkipped,
     StreamSpec,
@@ -92,34 +93,17 @@ class GmailConnector(RestConnector):
     base_url = GMAIL_API_BASE
     streams_list = GMAIL_STREAMS
 
-    def paginate_source(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        self_user_id: str | None,
-        backfill_after: datetime | None = None,
-    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        """Widen the seam by the row's pinned floor, which only the cursor-less backfill reads."""
-        return self.paginate(client, stream, cursor=cursor, backfill_after=backfill_after)
-
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        backfill_after: datetime | None = None,
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[StreamPage]:
         if stream.name != "messages":
             raise NotImplementedError(f"gmail: stream {stream.name!r} has no paginate dispatch")
         try:
-            if cursor is None:
-                added_ids, next_history = await self._backfill(client, after=backfill_after)
+            if run.cursor is None:
+                added_ids, next_history = await self._backfill(client, after=run.backfill_after)
                 deleted_ids: list[str] = []
             else:
-                added_ids, deleted_ids, next_history = await self._history(client, cursor)
+                added_ids, deleted_ids, next_history = await self._history(client, run.cursor)
             chunks = [
                 added_ids[start : start + BODIES_CHUNK_SIZE]
                 for start in range(0, len(added_ids), BODIES_CHUNK_SIZE)

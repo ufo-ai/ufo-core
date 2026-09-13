@@ -14,7 +14,12 @@ from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+)
 
 PAGE_SIZE = 100
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -32,7 +37,7 @@ class RecruiteeConnector(RestConnector):
     streams_list = RECRUITEE_STREAMS
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
             async for page in self._get_page_number_pages(

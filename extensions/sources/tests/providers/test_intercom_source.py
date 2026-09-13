@@ -1,20 +1,42 @@
 """Intercom connector over a mock transport: the search-API POST body + `pages.next.starting_after`
-cursor, the scroll API, the `Intercom-Version` header, numeric watermark ordering,
-and the `StreamSkipped` a refusal raises. Offline — a canned
+cursor, the scroll API, the `Intercom-Version` header, numeric watermark ordering, segments read
+under the company that holds them, and the `StreamSkipped` a refusal raises. Offline — a canned
 transport, no DB, no token, no broker."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.providers.intercom import INTERCOM_VERSION, IntercomConnector
+from ufo_ext_sources.providers.intercom import (
+    INTERCOM_STREAMS,
+    INTERCOM_VERSION,
+    IntercomConnector,
+)
 
 from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
-from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sdk.sources import (
+    ConnectorBackend,
+    ConnectorSourceConfig,
+    ParentPages,
+    ParentRecord,
+    no_parents,
+)
+
+ParentsReader = Callable[[Mapping[str, tuple[ParentRecord, ...]]], ParentPages]
+
+LANDED: Mapping[str, tuple[ParentRecord, ...]] = {
+    "companies": (ParentRecord(ref="companies/comp1", fields={"id": "comp1"}),),
+    "conversations": (ParentRecord(ref="conversations/c1", fields={"id": "c1"}),),
+}
+
+
+def _spec(name: str):
+    return next(spec for spec in INTERCOM_STREAMS if spec.name == name)
+
 
 CONV1 = {
     "id": "c1",
@@ -38,15 +60,15 @@ class _MockProxy:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
-def _auth(handler: Callable[[httpx.Request], httpx.Response]) -> SourceAuth:
-    return SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=handler))
-
-
 async def _fetch(
-    stream: str, handler: Callable[[httpx.Request], httpx.Response], cursor: str | None = None
+    stream: str,
+    handler: Callable[[httpx.Request], httpx.Response],
+    cursor: str | None = None,
+    parents: ParentPages = no_parents,
 ):
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=handler), parents=parents)
     return await ConnectorBackend(connector=IntercomConnector()).fetch(
-        ConnectorSourceConfig(stream=stream), cursor, _auth(handler)
+        ConnectorSourceConfig(stream=stream), cursor, auth
     )
 
 
@@ -134,26 +156,32 @@ async def test_conversations_flatten_lifts_source_and_requester_and_keeps_cursor
     assert record["updated_at"] == 1700000200
 
 
-async def test_conversation_parts_flatten_surface_author_type_and_id() -> None:
-    def handle(request: httpx.Request) -> httpx.Response:
-        if request.method == "POST" and request.url.path == "/conversations/search":
-            return httpx.Response(
-                200, json={"conversations": [{"id": "c1", "updated_at": 1700000000}], "pages": {}}
-            )
-        if request.method == "GET" and request.url.path == "/conversations/c1":
-            return httpx.Response(
-                200,
-                json={
-                    "conversation_parts": {
-                        "conversation_parts": [
-                            {"id": "p1", "author": {"type": "admin", "id": "a1"}}
-                        ]
-                    }
-                },
-            )
-        return httpx.Response(404, json={"path": request.url.path})
+async def test_conversation_parts_flatten_surface_author_type_and_id(
+    parents_reader: ParentsReader,
+) -> None:
+    """An Intercom conversation part id is unique account-wide, so the stream keys globally and its
+    pages keep the address they have on the release this replaces — `conversation_parts/p1`, with
+    the conversation carried as a record field, which is the only place a reader finds it once the
+    address does not. The `/conversations/search` walk the stream ran for itself is gone: the
+    conversations row already landed those records."""
+    seen: list[str] = []
 
-    record = _flat(await _fetch("conversation_parts", handle), "conversation_parts/p1")
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        return httpx.Response(
+            200,
+            json={
+                "conversation_parts": {
+                    "conversation_parts": [{"id": "p1", "author": {"type": "admin", "id": "a1"}}]
+                }
+            },
+        )
+
+    result = await _fetch("conversation_parts", handle, parents=parents_reader(LANDED))
+    assert seen == ["GET /conversations/c1"]
+    assert [page.source_identity for page in result.pages] == ["conversation_parts/p1"]
+    assert [page.source_ref for page in result.pages] == ["conversation_parts/p1"]
+    record = _flat(result, "conversation_parts/p1")
     assert record["author_type"] == "admin"
     assert record["author_id"] == "a1"
     assert record["conversation_id"] == "c1"
@@ -208,3 +236,87 @@ async def test_data_attributes_key_on_the_id_and_a_standard_one_on_its_full_name
         "contact_attributes/91",
         "contact_attributes/email",
     }
+
+
+async def test_segments_are_addressed_under_the_company_that_holds_them(
+    parents_reader: ParentsReader,
+) -> None:
+    """One request per landed company, and the `/companies/scroll` walk the companies row already
+    spends is not spent again here. A segment id is unique workspace-wide, so the company in the
+    address scopes rather than disambiguates it — the stream is not canonical, so no page has ever
+    landed under the unscoped key."""
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(
+            200, json={"data": [{"id": "seg1", "name": "Enterprise", "updated_at": 1700000000}]}
+        )
+
+    result = await _fetch("company_segments", handle, parents=parents_reader(LANDED))
+
+    assert seen == ["/companies/comp1/segments"]
+    assert [page.source_identity for page in result.pages] == ["company_segments/comp1/seg1"]
+    assert [page.source_ref for page in result.pages] == ["company_segments/comp1/seg1"]
+    assert _spec("company_segments").canonical is False
+
+
+async def test_a_company_that_has_landed_nothing_yet_spends_no_request(
+    parents_reader: ParentsReader,
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    result = await _fetch("company_segments", handle, parents=no_parents)
+    assert result.pages == ()
+
+
+async def test_conversation_parts_declare_the_global_key_that_keeps_their_address() -> None:
+    """`conversation_parts` is the one canonical stream converted here, so the declaration that
+    leaves its landed pages where they are is load-bearing: `local` would address every one of them
+    a second time under its conversation."""
+    parts = _spec("conversation_parts")
+    assert parts.canonical is True
+    assert parts.key_scope == "global"
+    assert [edge.path for edge in parts.parents] == ["/conversations/{id}"]
+
+
+async def test_conversation_parts_refan_only_the_conversations_that_moved(
+    parents_reader: ParentsReader,
+) -> None:
+    """Intercom moves a conversation's `updated_at` when a part lands, which is the filter the
+    `/conversations/search` walk this stream ran on main narrowed by. The edge declares `refan`, so
+    a pass after the first reads only the conversations whose page moved — `1 + changed` detail
+    requests a tick, not one per landed conversation."""
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        conversation = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200,
+            json={"conversation_parts": {"conversation_parts": [{"id": f"p-{conversation}"}]}},
+        )
+
+    def landed(second: int) -> Mapping[str, tuple[ParentRecord, ...]]:
+        return {
+            "conversations": (
+                ParentRecord(ref="conversations/c1", fields={"id": "c1"}, revision=3),
+                ParentRecord(ref="conversations/c2", fields={"id": "c2"}, revision=second),
+            )
+        }
+
+    first = await _fetch("conversation_parts", handle, parents=parents_reader(landed(5)))
+    assert seen == ["/conversations/c1", "/conversations/c2"]
+
+    seen.clear()
+    unchanged = await _fetch(
+        "conversation_parts", handle, first.next_cursor, parents=parents_reader(landed(5))
+    )
+    assert seen == []
+
+    seen.clear()
+    await _fetch(
+        "conversation_parts", handle, unchanged.next_cursor, parents=parents_reader(landed(8))
+    )
+    assert seen == ["/conversations/c2"]

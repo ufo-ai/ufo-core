@@ -34,7 +34,13 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources import backend as connector_backend
 from ufo.runtime.sources.backend import BACKFILL_KEY
 from ufo.runtime.sources.sync import SourceAuth, StreamFault, StreamSkipped
-from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, StreamPage
+from ufo.sdk.sources import (
+    ConnectorBackend,
+    ConnectorSourceConfig,
+    Run,
+    StreamPage,
+    no_parents,
+)
 
 
 class _MockProxy:
@@ -442,7 +448,12 @@ async def _pages(
     async with httpx.AsyncClient(
         base_url=connector.base_url, transport=httpx.MockTransport(handler)
     ) as client:
-        return [page async for page in connector.paginate(client, spec, cursor=cursor)]
+        return [
+            page
+            async for page in connector.paginate(
+                client, spec, Run(cursor=cursor, parents=no_parents)
+            )
+        ]
 
 
 @pytest.mark.parametrize("stream", ["sheets", "sheet_values"])

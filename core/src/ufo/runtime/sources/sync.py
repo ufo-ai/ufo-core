@@ -1,7 +1,11 @@
 """Content sources: a backend fetches documents into pages, a core job syncs them on an interval.
 
 `SourceBackend` is the seam — `fetch(config, cursor, auth) -> SyncResult` returns the documents a
-source currently holds plus a resume cursor. `config` is the backend's own typed model (each backend
+source currently holds plus a resume cursor. That cursor lives in one of two row columns: `cursor`
+for a stream that walks its collection itself, `partition_cursor` for one whose backend says it fans
+out over parents (`PartitionedBackend`) — so the image being replaced, which reads every `cursor` as
+its own watermark, never meets a partition map there and the map never meets a watermark. `config`
+is the backend's own typed model (each backend
 owns `config_model`, so a source carries typed parameters, never an untyped bag); `auth` is the
 workspace the sync runs for, so a connector backend can resolve its provider token itself — core
 never mints or holds one. Core ships `FolderSource` (a local directory); connector/S3/GitHub
@@ -31,12 +35,13 @@ a grant ends the refusal, so it is a warning to read, never an alert to answer."
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
-from typing import ClassVar, Protocol, TypeVar
+from typing import Any, ClassVar, Protocol, TypeVar, runtime_checkable
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -61,6 +66,14 @@ from ufo.harness.o11y import (
 )
 from ufo.runtime.access.connectors import AuthProxy, SourceCredentialResolver
 from ufo.runtime.billing.balance import funded
+from ufo.runtime.sources.connector import (
+    FieldValue,
+    ParentPages,
+    ParentRecord,
+    UnprojectedParent,
+    UnreadyParent,
+    WatchedResources,
+)
 from ufo.runtime.sources.rest import list_or_empty
 from ufo.runtime.turns.subjects import connection_subject
 from ufo.schema import tables
@@ -145,7 +158,12 @@ def normalize_page_timestamp(value: str) -> str:
 
 
 class Page(BaseModel):
-    """One fetched document: its source reference, provider identity, body, and browse metadata."""
+    """One fetched document: its source reference, provider identity, body, and browse metadata.
+
+    `parent_fields` are the record fields the streams hanging under this page's stream build their
+    request paths from, projected as the page lands, and None where nothing hangs under it. A
+    child's fan-out reads them off the page, so the collection under this record is reached without
+    re-walking the collection this record came from."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -156,6 +174,7 @@ class Page(BaseModel):
     title: str = Field(min_length=1)
     created_at: str | None = None
     updated_at: str | None = None
+    parent_fields: dict[str, FieldValue] | None = None
 
     @property
     def digest(self) -> str:
@@ -311,18 +330,38 @@ class SourceAuth:
     read host-side). `base_url` is the connection's tenant API URL, for the per-tenant providers
     whose connector class declares no host of its own. `self_user_id` is the live external speaker
     resolved by a same-named surface, so a source can reject only records the product itself
-    authored. The folder backend ignores all three. A value object, never persisted."""
+    authored. `parents` reads the landed records of a named stream of this same connection, which
+    are the partitions of a stream declaring it a parent — the one connection is the reach, so a row
+    fans out only over records its own authority synced. `watched` reads the resources a standing
+    watch on this same connection pins, which a connector turns into the partitions it visits every
+    tick. The folder backend ignores all of it. A value object, never persisted."""
 
     workspace_id: UUID
     auth_proxy: AuthProxy | None = None
     base_url: str | None = None
     self_user_id: str | None = None
+    parents: ParentPages | None = None
+    watched: WatchedResources | None = None
 
 
 SourceIdentityResolver = Callable[[UUID], Awaitable[str | None]]
+SourceWatchReader = Callable[[UUID], Awaitable[tuple[str, ...]]]
+"""The resources a live watch on one connection pins, answered by the extension holding the
+watches and registered per source backend through its `SourceProvider`. The driver binds it to the
+connection the run syncs, so a connector that pins partitions reads its own extension's rows and
+core never learns what a watch is."""
 
 
 ConfigT = TypeVar("ConfigT", bound=BaseModel)
+
+
+@runtime_checkable
+class PartitionedBackend(Protocol):
+    """A backend that can say whether a row's cursor is a walk's partition map. `SyncDriver` keeps
+    such a row's cursor in `source.partition_cursor` and every other row's in `source.cursor`, and a
+    backend that cannot say keeps `cursor`."""
+
+    def partitioned(self, config: Mapping[str, object]) -> bool: ...
 
 
 class SourceBackend(Protocol[ConfigT]):
@@ -511,8 +550,15 @@ async def register_sources(configured: tuple[SourceEntry, ...]) -> tuple[UUID, .
     return tuple(settled)
 
 
+CursorWrite = str | None | sa.ColumnElement[Any]
+
+
 @dataclass(frozen=True)
 class ClaimedSource:
+    """One due row this run holds the claim on. Both cursor columns are read off the row and exactly
+    one is this row's: `partitioned` says which, decided once at the claim from the backend's own
+    declaration, and `resume` and `advanced` are the only readers of the pair."""
+
     source_uid: UUID
     workspace_id: UUID
     claim: str
@@ -522,8 +568,23 @@ class ClaimedSource:
     account_id: str
     base_url: str | None
     cursor: str | None
+    partition_cursor: str | None
+    partitioned: bool
     consecutive_errors: int
     claimed_at: datetime
+
+    @property
+    def resume(self) -> str | None:
+        """Where this row's next run starts: its partition map, or its watermark."""
+        return self.partition_cursor if self.partitioned else self.cursor
+
+    def advanced(self, cursor: str | None) -> tuple[CursorWrite, CursorWrite]:
+        """What a run of this row writes to `cursor` and to `partition_cursor`, in that order: the
+        column the row lives in takes the value, the other is assigned itself, so the image being
+        replaced still reads exactly what it wrote there."""
+        if self.partitioned:
+            return tables.source.c.cursor, cursor
+        return cursor, tables.source.c.partition_cursor
 
 
 def _rescheduled(claimed: ClaimedSource, when: datetime | sa.Case[datetime]) -> sa.Case[datetime]:
@@ -597,6 +658,7 @@ class PageBrowse:
     title: str
     record_created_at: str | None
     record_updated_at: str | None
+    parent_fields: dict[str, FieldValue] | None
 
 
 @dataclass(frozen=True)
@@ -712,6 +774,7 @@ class SyncDriver:
     postgres: bool
     source_credentials: SourceCredentialResolver | None = None
     identity_resolvers: Mapping[str, SourceIdentityResolver] = field(default_factory=dict)
+    watch_readers: Mapping[str, SourceWatchReader] = field(default_factory=dict)
     own_key_slots: tuple[str, ...] = ()
 
     async def candidate_workspaces(self) -> tuple[UUID, ...]:
@@ -870,6 +933,7 @@ class SyncDriver:
                 tables.connection.c.account_id,
                 tables.connection.c.base_url,
                 tables.source.c.cursor,
+                tables.source.c.partition_cursor,
                 tables.source.c.consecutive_errors,
             )
             .select_from(_source_authority())
@@ -896,22 +960,30 @@ class SyncDriver:
                     .values(claimed_by=claim, claim_expires_at=expires, updated_at=sa.func.now())
                     .where(tables.source.c.uid.in_([row["uid"] for row in rows]))
                 )
-        return tuple(
-            ClaimedSource(
-                source_uid=row["uid"],
-                workspace_id=row["workspace_id"],
-                claim=claim,
-                backend=row["backend"],
-                config=row["config"],
-                connection_id=row["connection_id"],
-                account_id=row["account_id"],
-                base_url=row["base_url"],
-                cursor=row["cursor"],
-                consecutive_errors=row["consecutive_errors"],
-                claimed_at=now,
+        claimed: list[ClaimedSource] = []
+        for row in rows:
+            backend = self.backends.get(row["backend"])
+            claimed.append(
+                ClaimedSource(
+                    source_uid=row["uid"],
+                    workspace_id=row["workspace_id"],
+                    claim=claim,
+                    backend=row["backend"],
+                    config=row["config"],
+                    connection_id=row["connection_id"],
+                    account_id=row["account_id"],
+                    base_url=row["base_url"],
+                    cursor=row["cursor"],
+                    partition_cursor=row["partition_cursor"],
+                    partitioned=(
+                        isinstance(backend, PartitionedBackend)
+                        and backend.partitioned(row["config"])
+                    ),
+                    consecutive_errors=row["consecutive_errors"],
+                    claimed_at=now,
+                )
             )
-            for row in rows
-        )
+        return tuple(claimed)
 
     async def _fetch(self, source: ClaimedSource) -> SyncResult:
         backend = self.backends.get(source.backend)
@@ -929,8 +1001,91 @@ class SyncDriver:
             ),
             base_url=source.base_url,
             self_user_id=self_user_id,
+            parents=partial(self._parent_pages, source),
+            watched=self._watched_resources(source),
         )
-        return await backend.fetch(config, source.cursor, auth)
+        return await backend.fetch(config, source.resume, auth)
+
+    def _watched_resources(self, source: ClaimedSource) -> WatchedResources | None:
+        """This connection's watches, as the backend's own extension answers them, and None where no
+        extension answers this backend's. Bound to the connection rather than read here: a stream
+        that pins no partition pays nothing for it."""
+        reader = self.watch_readers.get(source.backend)
+        return None if reader is None else partial(reader, source.connection_id)
+
+    async def _parent_pages(
+        self, source: ClaimedSource, stream: str
+    ) -> AsyncIterator[ParentRecord | UnprojectedParent | UnreadyParent]:
+        """The landed records of one stream of this row's own connection: each page's ref, which
+        keys the child's cursor entry and addresses its records, and the fields that page carries
+        for its children's paths. A parent row with neither a page nor a completed run yields an
+        `UnreadyParent`, so an incremental child spends nothing while a snapshot child refuses to
+        treat the missing result as an authoritative empty catalog.
+
+        A live page carrying no projection at all — nothing asked anything of it when it landed —
+        is handed down as an `UnprojectedParent` rather than as a record answering none of the
+        fields, which is the fault the fan-out raises on. The walk decides what the gap means for
+        the stream it drives; a reader that dropped it would hand a `delete_missing` child an
+        enumeration missing the parents of pages it is about to sweep.
+
+        The page's `revision` rides down with it, which an edge declaring `refan` compares to decide
+        whether this parent moved since the last completed pass. It is the workspace-wide counter
+        the database assigns, and it moves only when a page's body, disclosure or liveness moves —
+        a metadata-only rewrite leaves it alone, so the projection backfill does not read as a
+        change."""
+        async with workspace_tx() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.source.c.uid,
+                            tables.source.c.config,
+                            tables.source.c.synced_at,
+                        ).where(
+                            tables.source.c.workspace_id == source.workspace_id,
+                            tables.source.c.connection_id == source.connection_id,
+                            tables.source.c.backend == source.backend,
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            parent_rows = [row for row in rows if row["config"].get("stream") == stream]
+            holders = [row["uid"] for row in parent_rows]
+            if not holders:
+                return
+            pages = (
+                (
+                    await connection.execute(
+                        sa.select(
+                            tables.page.c.source_uid,
+                            tables.page.c.source_identity,
+                            tables.page.c.parent_fields,
+                            tables.page.c.revision,
+                        ).where(
+                            tables.page.c.workspace_id == source.workspace_id,
+                            tables.page.c.source_uid.in_(holders),
+                            tables.page.c.tombstone.is_(False),
+                            tables.page.c.source_identity.is_not(None),
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        page_sources = {row["source_uid"] for row in pages}
+        if any(row["synced_at"] is None and row["uid"] not in page_sources for row in parent_rows):
+            yield UnreadyParent()
+        for row in pages:
+            if row["parent_fields"] is None:
+                yield UnprojectedParent(ref=row["source_identity"])
+                continue
+            yield ParentRecord(
+                ref=row["source_identity"],
+                fields=row["parent_fields"],
+                revision=row["revision"],
+            )
 
     async def _commit(self, source: ClaimedSource, result: SyncResult) -> None:
         await self._refresh_claim(source)
@@ -961,6 +1116,7 @@ class SyncDriver:
                     title=page.title,
                     record_created_at=page.created_at,
                     record_updated_at=page.updated_at,
+                    parent_fields=page.parent_fields,
                 )
                 if existing is None or existing[:2] != (page.digest, False):
                     body_ref = (
@@ -1050,6 +1206,7 @@ class SyncDriver:
                             tables.page.c.title,
                             tables.page.c.record_created_at,
                             tables.page.c.record_updated_at,
+                            tables.page.c.parent_fields,
                         ).where(tables.page.c.source_uid == source_uid)
                     )
                 )
@@ -1067,6 +1224,7 @@ class SyncDriver:
                     title=row["title"],
                     record_created_at=row["record_created_at"],
                     record_updated_at=row["record_updated_at"],
+                    parent_fields=row["parent_fields"],
                 ),
             )
             for row in rows
@@ -1144,6 +1302,7 @@ class SyncDriver:
                         title=changed_page.browse.title,
                         record_created_at=changed_page.browse.record_created_at,
                         record_updated_at=changed_page.browse.record_updated_at,
+                        parent_fields=changed_page.browse.parent_fields,
                         subject=subject,
                         tombstone=False,
                         updated_at=now,
@@ -1163,6 +1322,7 @@ class SyncDriver:
                             title=changed_page.browse.title,
                             record_created_at=changed_page.browse.record_created_at,
                             record_updated_at=changed_page.browse.record_updated_at,
+                            parent_fields=changed_page.browse.parent_fields,
                             indexed=indexed,
                             subject=subject,
                             tombstone=False,
@@ -1179,6 +1339,7 @@ class SyncDriver:
                         title=browse_page.title,
                         record_created_at=browse_page.record_created_at,
                         record_updated_at=browse_page.record_updated_at,
+                        parent_fields=browse_page.parent_fields,
                     )
                     .where(tables.page.c.uid == browse_page.id)
                 )
@@ -1227,10 +1388,12 @@ class SyncDriver:
                 .correlate()
             )
             idles = sa.and_(empty_runs >= SOURCE_EMPTY_IDLE_THRESHOLD, never_landed)
+            cursor, partition_cursor = source.advanced(next_cursor)
             await connection.execute(
                 sa.update(tables.source)
                 .values(
-                    cursor=next_cursor,
+                    cursor=cursor,
+                    partition_cursor=partition_cursor,
                     next_sync_at=(
                         sa.case(
                             (tables.source.c.next_sync_at < retry_at, retry_at),
@@ -1252,6 +1415,7 @@ class SyncDriver:
                         tables.source.c.consecutive_refusals if retry_at is not None else 0
                     ),
                     consecutive_empty=empty_runs,
+                    synced_at=tables.source.c.synced_at if retry_at is not None else now,
                     parked_at=tables.source.c.parked_at if retry_at is not None else None,
                     parked_reason=tables.source.c.parked_reason if retry_at is not None else None,
                     claimed_by=None,
@@ -1426,11 +1590,13 @@ class SyncDriver:
         while the failing sync ran stands instead (`_rescheduled`). On `CursorExpired` the stored
         cursor is cleared so the next run refetches from scratch; otherwise it resumes where it left
         off. A successful sync resets the counter and the interval in `_write`."""
+        cursor, partition_cursor = source.advanced(None if cursor_reset else source.resume)
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.source)
                 .values(
-                    cursor=None if cursor_reset else source.cursor,
+                    cursor=cursor,
+                    partition_cursor=partition_cursor,
                     next_sync_at=_rescheduled(source, next_sync_at),
                     consecutive_errors=errors,
                     claimed_by=None,

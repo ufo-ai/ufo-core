@@ -13,7 +13,13 @@ from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, dict_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    dict_or_empty,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -76,7 +82,7 @@ class WrikeConnector(RestConnector):
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
             if stream.name not in _RUNNABLE_STREAMS:
@@ -89,8 +95,10 @@ class WrikeConnector(RestConnector):
                 cursor_param="nextPageToken",
                 page_size_param=None,
             ):
-                if cursor and stream.cursor_field:
-                    records = [r for r in records if str(r.get(stream.cursor_field) or "") > cursor]
+                if run.cursor and stream.cursor_field:
+                    records = [
+                        r for r in records if str(r.get(stream.cursor_field) or "") > run.cursor
+                    ]
                 if records:
                     yield records
         except httpx.HTTPStatusError as error:

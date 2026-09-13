@@ -3,11 +3,11 @@ import hashlib
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import asyncpg
@@ -19,6 +19,7 @@ import ufo_ext_memory.manifest as memory_manifest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncConnection
 from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import MemoryStore, PageIndexer, mem_page, recall_subjects
@@ -29,6 +30,7 @@ from ufo.db import workspace_tx
 from ufo.harness import o11y
 from ufo.product import PRODUCT_CENSUS_JOB
 from ufo.runtime import jobs
+from ufo.runtime.access.connectors import Credential
 from ufo.runtime.access.grants import INDEX_REAP_KEY_PREFIX, GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.authority import authority_member_id
@@ -65,7 +67,19 @@ from ufo.runtime.jobs import (
     reap_index_queue,
 )
 from ufo.runtime.sources import rest, sync
-from ufo.runtime.sources.backend import ConnectorSourceConfig
+from ufo.runtime.sources.backend import ConnectorBackend, ConnectorSourceConfig
+from ufo.runtime.sources.connector import (
+    PASS_FROM_KEY,
+    Connector,
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    Run,
+    StreamPage,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+)
 from ufo.runtime.sources.sync import (
     FOLDER_BACKEND,
     SOURCE_EMPTY_IDLE_THRESHOLD,
@@ -849,7 +863,7 @@ async def test_rewindow_sources_refuses_a_config_that_would_move_the_row(db: Non
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.source)
-                .values(cursor="9001")
+                .values(cursor="9001", partition_cursor="{}")
                 .where(tables.source.c.uid == source_id)
             )
         with pytest.raises(ValueError, match="would change which dataset"):
@@ -874,13 +888,16 @@ async def test_rewindow_sources_refuses_a_config_that_would_move_the_row(db: Non
         async with workspace_tx() as connection:
             moved = (
                 await connection.execute(
-                    sa.select(tables.source.c.config, tables.source.c.cursor).where(
-                        tables.source.c.uid == source_id
-                    )
+                    sa.select(
+                        tables.source.c.config,
+                        tables.source.c.cursor,
+                        tables.source.c.partition_cursor,
+                    ).where(tables.source.c.uid == source_id)
                 )
             ).one()
     assert moved.config["backfill_days"] == 90
     assert moved.cursor is None
+    assert moved.partition_cursor is None
 
 
 async def test_register_source_settles_two_racers_that_asked_for_the_same_window(db: None) -> None:
@@ -2828,6 +2845,8 @@ async def _source_state(source_id: UUID) -> sa.RowMapping:
                 await connection.execute(
                     sa.select(
                         tables.source.c.cursor,
+                        tables.source.c.partition_cursor,
+                        tables.source.c.synced_at,
                         tables.source.c.config,
                         tables.source.c.consecutive_errors,
                         tables.source.c.consecutive_refusals,
@@ -4092,6 +4111,455 @@ async def test_a_failed_stream_reports_its_provider_stream_and_cause(
             "error_class": "RuntimeError",
         }
     ]
+
+
+TREE_PROVIDER = "probe"
+FAR_FUTURE = datetime(2999, 1, 1, tzinfo=UTC)
+CONTRACTS_WATERMARK = "contracts-watermark"
+OUTGOING_WATERMARK = "1700000000.000100"
+
+
+class _TreeConnector(Connector):
+    """A root `contracts` stream and a `tasks` child hanging under it, driven through the real
+    fan-out so the pages the driver commits are the ones a declared child yields. Every partition
+    the walk asks for answers one task."""
+
+    name = TREE_PROVIDER
+    base_url = "https://probe.example"
+
+    def __init__(
+        self,
+        *,
+        delete_missing: bool,
+        fetch_budget: int | None = None,
+        contracts: tuple[str, ...] = ("c1",),
+    ) -> None:
+        self._delete_missing = delete_missing
+        self._fetch_budget = fetch_budget
+        self._contracts = contracts
+        self.asked: list[str] = []
+
+    def streams(self) -> list[StreamSpec]:
+        return [
+            StreamSpec(name="contracts", source_object="contracts"),
+            StreamSpec(
+                name="tasks",
+                source_object="tasks",
+                delete_missing=self._delete_missing,
+                fetch_budget=self._fetch_budget,
+                parents=(ParentEdge(stream="contracts", path="/contracts/{id}/tasks"),),
+            ),
+        ]
+
+    async def fetch_page(
+        self,
+        stream: StreamSpec,
+        *,
+        cursor: str | None,
+        credential: Credential,
+        base_url: str,
+        self_user_id: str | None,
+        backfill_after: datetime | None = None,
+        yield_rate_limits: bool = True,
+        parents: Any = None,
+        watched: Any = None,
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
+        if not stream.parents:
+            yield StreamPage(
+                records=[{"id": contract} for contract in self._contracts],
+                next_cursor=CONTRACTS_WATERMARK,
+            )
+            return
+        async for page in fanned_out(stream, Run(cursor=cursor, parents=parents), self._pages):
+            yield page
+
+    async def _pages(self, partition: Partition, bound: PartitionBound) -> AsyncIterator[WalkPage]:
+        self.asked.append(partition.path)
+        yield WalkPage(records=[{"id": "t1"}])
+
+
+class _BearerForEveryConnection:
+    def bind(self, connection_id: UUID) -> "_BearerForEveryConnection":
+        return self
+
+    async def credential(self, workspace_id: UUID, provider: str) -> Credential:
+        return Credential(bearer="unused")
+
+
+async def _seed_tree(workspace_id: UUID) -> tuple[UUID, UUID, UUID]:
+    """Two source rows of one connection: `contracts`, landed and not due, and `tasks`, due. The
+    contracts landed two live pages — one projected, one from before the projection existed — and
+    the tasks landed one page under the unprojected contract. Returns the tasks source, the
+    unprojected contract page and the task page."""
+    connection_id = await _connection(workspace_id, TREE_PROVIDER, account_id="acct")
+    contracts_uid, tasks_uid = uuid7(), uuid7()
+    unprojected_uid, task_uid = uuid7(), uuid7()
+    async with workspace_tx() as connection:
+        for source_uid, stream, due in (
+            (contracts_uid, "contracts", FAR_FUTURE),
+            (tasks_uid, "tasks", sa.func.now()),
+        ):
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    uid=source_uid,
+                    workspace_id=workspace_id,
+                    backend=TREE_PROVIDER,
+                    config={"stream": stream},
+                    feed_handle=feed_handle_for({"stream": stream}, frozenset()),
+                    connection_id=connection_id,
+                    cursor=None,
+                    next_sync_at=due,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        for page_uid, source_uid, stream, identity, parent_fields in (
+            (uuid7(), contracts_uid, "contracts", "contracts/c1", {"id": "c1"}),
+            (unprojected_uid, contracts_uid, "contracts", "contracts/c2", None),
+            (task_uid, tasks_uid, "tasks", "tasks/c2/t9", None),
+        ):
+            await connection.execute(
+                sa.insert(tables.page).values(
+                    uid=page_uid,
+                    workspace_id=workspace_id,
+                    source_uid=source_uid,
+                    source_identity=identity,
+                    digest="d",
+                    body_ref="",
+                    stream=stream,
+                    title=identity,
+                    parent_fields=parent_fields,
+                    subject=SHARED_SUBJECT,
+                    tombstone=False,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+    return tasks_uid, unprojected_uid, task_uid
+
+
+async def _live_task_identities(tasks_uid: UUID) -> set[str]:
+    async with workspace_tx() as connection:
+        return set(
+            (
+                await connection.execute(
+                    sa.select(tables.page.c.source_identity).where(
+                        tables.page.c.source_uid == tasks_uid,
+                        tables.page.c.tombstone.is_(False),
+                    )
+                )
+            ).scalars()
+        )
+
+
+def _tree_driver(
+    database_url: str,
+    blob_root: Path,
+    *,
+    delete_missing: bool,
+    fetch_budget: int | None = None,
+    contracts: tuple[str, ...] = ("c1",),
+) -> tuple[SyncDriver, _TreeConnector]:
+    connector = _TreeConnector(
+        delete_missing=delete_missing,
+        fetch_budget=fetch_budget,
+        contracts=contracts,
+    )
+    driver = SyncDriver(
+        backends={TREE_PROVIDER: ConnectorBackend(connector=connector)},
+        blob=FilesystemBlobStore(root=blob_root),
+        postgres=database_url.startswith("postgresql"),
+        source_credentials=_BearerForEveryConnection(),
+    )
+    return driver, connector
+
+
+async def _seed_contracts(
+    workspace_id: UUID, ids: tuple[str, ...], *, due: str = "tasks"
+) -> tuple[UUID, UUID]:
+    """A `contracts` row holding one projected page per id and a `tasks` row holding nothing, one
+    of them due. Returns both source uids."""
+    connection_id = await _connection(workspace_id, TREE_PROVIDER, account_id="acct")
+    contracts_uid, tasks_uid = uuid7(), uuid7()
+    async with workspace_tx() as connection:
+        for source_uid, stream in ((contracts_uid, "contracts"), (tasks_uid, "tasks")):
+            due_at = sa.func.now() if stream == due else FAR_FUTURE
+            await connection.execute(
+                sa.insert(tables.source).values(
+                    uid=source_uid,
+                    workspace_id=workspace_id,
+                    backend=TREE_PROVIDER,
+                    config={"stream": stream},
+                    feed_handle=feed_handle_for({"stream": stream}, frozenset()),
+                    connection_id=connection_id,
+                    cursor=None,
+                    next_sync_at=due_at,
+                    claimed_by=None,
+                    claim_expires_at=None,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        for contract in ids:
+            await _land_contract(connection, workspace_id, contracts_uid, contract)
+    return contracts_uid, tasks_uid
+
+
+async def _land_contract(
+    connection: AsyncConnection, workspace_id: UUID, contracts_uid: UUID, contract: str
+) -> None:
+    await connection.execute(
+        sa.insert(tables.page).values(
+            uid=uuid7(),
+            workspace_id=workspace_id,
+            source_uid=contracts_uid,
+            source_identity=f"contracts/{contract}",
+            digest="d",
+            body_ref="",
+            stream="contracts",
+            title=contract,
+            parent_fields={"id": contract},
+            subject=SHARED_SUBJECT,
+            tombstone=False,
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+
+
+async def _tick(driver: SyncDriver, connector: _TreeConnector, tasks_uid: UUID) -> list[str]:
+    """One due run of the tasks row: what it asked, in the order it asked."""
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.source)
+            .values(next_sync_at=sa.func.now())
+            .where(tables.source.c.uid == tasks_uid)
+        )
+    connector.asked.clear()
+    await _sync(driver)
+    return list(connector.asked)
+
+
+async def test_a_budgeted_pass_resumes_past_a_mark_whose_parent_is_gone(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """The mark a truncated pass leaves is the last key it fetched. A resume that looked for that
+    exact key would, once the parent behind it was deleted, discard the whole enumeration, close the
+    pass with the tail unvisited and hold it for the interval. Resuming means skipping every key at
+    or below the mark in the order the walk imposes, so the next tick carries on from the first key
+    after it and the pass ends where the enumeration does."""
+    workspace_id = await _workspace()
+    _, tasks_uid = await _seed_contracts(workspace_id, tuple(f"c{i:02d}" for i in range(10)))
+    driver, connector = _tree_driver(
+        database_url, tmp_path / "blobs", delete_missing=False, fetch_budget=4
+    )
+
+    first = await _tick(driver, connector, tasks_uid)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.page).where(tables.page.c.source_identity == "contracts/c03")
+        )
+    second = await _tick(driver, connector, tasks_uid)
+    third = await _tick(driver, connector, tasks_uid)
+
+    assert first == [f"/contracts/c{i:02d}/tasks" for i in range(4)]
+    assert second == [f"/contracts/c{i:02d}/tasks" for i in range(4, 8)]
+    assert third == ["/contracts/c08/tasks", "/contracts/c09/tasks"]
+    assert json.loads((await _source_state(tasks_uid))["partition_cursor"]) == {}
+
+
+async def test_a_parent_landed_below_the_mark_waits_for_the_next_pass(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A parent that lands between two ticks at a key below the mark is not what the pass is
+    resuming toward: the tick after the mark spends its budget on the tail it has not reached, and
+    the new parent is fetched by the pass that opens once this one completes."""
+    workspace_id = await _workspace()
+    contracts_uid, tasks_uid = await _seed_contracts(
+        workspace_id, tuple(f"c{i:02d}" for i in range(6))
+    )
+    driver, connector = _tree_driver(
+        database_url, tmp_path / "blobs", delete_missing=False, fetch_budget=4
+    )
+
+    first = await _tick(driver, connector, tasks_uid)
+    async with workspace_tx() as connection:
+        await _land_contract(connection, workspace_id, contracts_uid, "c01a")
+    second = await _tick(driver, connector, tasks_uid)
+    third = await _tick(driver, connector, tasks_uid)
+
+    assert first == [f"/contracts/c{i:02d}/tasks" for i in range(4)]
+    assert second == ["/contracts/c04/tasks", "/contracts/c05/tasks"]
+    assert third == [
+        "/contracts/c00/tasks",
+        "/contracts/c01/tasks",
+        "/contracts/c01a/tasks",
+        "/contracts/c02/tasks",
+    ]
+
+
+async def test_a_snapshot_child_fails_rather_than_sweep_under_an_unprojected_parent(
+    db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The deploy shape: `page.parent_fields` arrives NULL on every page the previous image landed,
+    so the first pass of a `delete_missing` child would enumerate none of those parents, fetch a
+    snapshot holding nothing under them, and tombstone every one of its live pages. The run fails
+    instead — recorded as a failure, committing nothing — and the page under the unprojected
+    contract stands. Once the contract re-lands with its projection the run passes and the sweep
+    behaves as a snapshot's should: the task the provider no longer holds is tombstoned, the ones it
+    does land."""
+    workspace_id = await _workspace()
+    tasks_uid, unprojected_uid, _ = await _seed_tree(workspace_id)
+    driver, _ = _tree_driver(database_url, tmp_path / "blobs", delete_missing=True)
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    assert await _live_task_identities(tasks_uid) == {"tasks/c2/t9"}
+    (failed,) = _events(caplog, "source_sync.failed")
+    assert failed.ufo["stream"] == "tasks"
+    assert failed.ufo["error_class"] == "RuntimeError"
+    assert _events(caplog, "source_sync.ok") == []
+    assert (await _source_state(tasks_uid))["consecutive_errors"] == 1
+
+    caplog.clear()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.page)
+            .values(parent_fields={"id": "c2"})
+            .where(tables.page.c.uid == unprojected_uid)
+        )
+        await connection.execute(
+            sa.update(tables.source)
+            .values(next_sync_at=sa.func.now())
+            .where(tables.source.c.uid == tasks_uid)
+        )
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    assert _events(caplog, "source_sync.failed") == []
+    assert len(_events(caplog, "source_sync.ok")) == 1
+    assert (await _source_state(tasks_uid))["consecutive_errors"] == 0
+    assert await _live_task_identities(tasks_uid) == {"tasks/c1/t1", "tasks/c2/t1"}
+
+
+async def test_an_empty_parent_catalog_becomes_authoritative_only_after_it_completes(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    workspace_id = await _workspace()
+    contracts_uid, tasks_uid = await _seed_contracts(workspace_id, ())
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.page).values(
+                uid=uuid7(),
+                workspace_id=workspace_id,
+                source_uid=tasks_uid,
+                source_identity="tasks/c1/t1",
+                digest="d",
+                body_ref="",
+                stream="tasks",
+                title="t1",
+                subject=SHARED_SUBJECT,
+                tombstone=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    driver, connector = _tree_driver(
+        database_url,
+        tmp_path / "blobs",
+        delete_missing=True,
+        contracts=(),
+    )
+
+    await _sync(driver)
+
+    assert connector.asked == []
+    assert await _live_task_identities(tasks_uid) == {"tasks/c1/t1"}
+    assert (await _source_state(tasks_uid))["consecutive_errors"] == 1
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.source)
+            .values(next_sync_at=sa.func.now())
+            .where(tables.source.c.uid == contracts_uid)
+        )
+        await connection.execute(
+            sa.update(tables.source)
+            .values(next_sync_at=FAR_FUTURE)
+            .where(tables.source.c.uid == tasks_uid)
+        )
+    await _sync(driver)
+    assert (await _source_state(contracts_uid))["synced_at"] is not None
+
+    await _tick(driver, connector, tasks_uid)
+
+    assert await _live_task_identities(tasks_uid) == set()
+
+
+async def test_an_incremental_child_passes_over_a_parent_landed_without_its_projection(
+    db: None, database_url: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A child that asserts nothing about deletions loses nothing by skipping a parent it cannot
+    read yet: the run passes, lands the tasks of the projected contract, and leaves the page under
+    the unprojected one standing for the pass after that contract re-lands."""
+    workspace_id = await _workspace()
+    tasks_uid, _, _ = await _seed_tree(workspace_id)
+    driver, _ = _tree_driver(database_url, tmp_path / "blobs", delete_missing=False)
+
+    with caplog.at_level(logging.INFO, logger="ufo"):
+        await _sync(driver)
+
+    assert _events(caplog, "source_sync.failed") == []
+    assert len(_events(caplog, "source_sync.ok")) == 1
+    assert (await _source_state(tasks_uid))["consecutive_errors"] == 0
+    assert await _live_task_identities(tasks_uid) == {"tasks/c1/t1", "tasks/c2/t9"}
+
+
+async def test_a_tree_rows_map_lives_beside_the_watermark_the_outgoing_image_keeps(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """While the fleet rolls, both images run the same row. The outgoing one reads `cursor` as its
+    own watermark and writes one back; this one keeps a fanned-out stream's map in
+    `partition_cursor`, so neither ever reads what the other wrote. The watermark the outgoing image
+    left stands untouched after a run, and the map records the tree key the pass stopped at."""
+    workspace_id = await _workspace()
+    _, tasks_uid = await _seed_contracts(workspace_id, tuple(f"c{i:02d}" for i in range(6)))
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.source)
+            .values(cursor=OUTGOING_WATERMARK)
+            .where(tables.source.c.uid == tasks_uid)
+        )
+    driver, connector = _tree_driver(
+        database_url, tmp_path / "blobs", delete_missing=False, fetch_budget=4
+    )
+
+    await _tick(driver, connector, tasks_uid)
+
+    state = await _source_state(tasks_uid)
+    assert state["cursor"] == OUTGOING_WATERMARK
+    assert json.loads(state["partition_cursor"])[PASS_FROM_KEY] == (
+        "contracts/c03\n/contracts/c03/tasks"
+    )
+
+
+async def test_a_root_rows_watermark_stays_in_the_column_it_always_had(
+    db: None, database_url: str, tmp_path: Path
+) -> None:
+    """A stream that walks its collection itself keeps `cursor` exactly as today, through the same
+    connector backend, and never touches the map column."""
+    workspace_id = await _workspace()
+    contracts_uid, _ = await _seed_contracts(workspace_id, (), due="contracts")
+    driver, _ = _tree_driver(database_url, tmp_path / "blobs", delete_missing=False)
+
+    await _sync(driver)
+
+    state = await _source_state(contracts_uid)
+    assert state["cursor"] == CONTRACTS_WATERMARK
+    assert state["partition_cursor"] is None
 
 
 async def test_a_stream_whose_pool_had_nothing_left_defers_instead_of_failing(

@@ -546,6 +546,35 @@ async def test_a_trigger_pauses_after_its_stream_stops_syncing(db: None) -> None
         assert await _woken(state, feed) == {}
 
 
+async def test_the_resources_a_connection_pins_are_the_live_narrowed_ones(db: None) -> None:
+    """What the sync driver reads off this table to decide which partitions it visits every tick:
+    the resources of the live narrowed triggers, once each. A whole-feed trigger pins nothing —
+    there is no one resource to read — and a paused one pins nothing either, because a read every
+    minute for a wake nobody gets is an hour of requests spent on nothing."""
+    state = await _workspace()
+    feed, _ = await _feed_with_stream(state, provider=GITHUB, stream="pull_requests")
+    other = await _conversation_on(state, "cli")
+    elsewhere = _context(state)
+    elsewhere = replace(
+        elsewhere, turn=elsewhere.turn.model_copy(update={"conversation_id": other})
+    )
+    store = SourceTriggerStore(context_for(NAME, DECLARED_PROVIDERS))
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(_context(state), _trigger_manifest(feed, state.conversation_id))
+        await _apply(
+            _context(state), _trigger_manifest(feed, state.conversation_id, resource=PR_URL)
+        )
+        await _apply(elsewhere, _trigger_manifest(feed, other, resource=PR_URL))
+        assert await store.pinned(feed.id) == (PR_URL,)
+
+        await _apply(
+            _context(state),
+            _trigger_manifest(feed, state.conversation_id, resource=PR_URL, paused=True),
+        )
+        await _apply(elsewhere, _trigger_manifest(feed, other, resource=PR_URL, paused=True))
+        assert await store.pinned(feed.id) == ()
+
+
 async def test_a_new_trigger_cannot_be_applied_already_paused(db: None) -> None:
     state = await _workspace()
     feed, _ = await _feed_with_stream(state)

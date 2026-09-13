@@ -19,7 +19,14 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, get_path, list_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    get_path,
+    list_or_empty,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
@@ -70,7 +77,7 @@ class ApolloConnector(RestConnector):
         return client
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         search = _SEARCHES.get(stream.name)
         if search is None:
@@ -87,7 +94,7 @@ class ApolloConnector(RestConnector):
                 }
                 data = await self._post(client, path, json=body)
                 records = list_or_empty(data.get(key))
-                landed = self._above(records, cursor)
+                landed = self._above(records, run.cursor)
                 if landed:
                     yield landed
                 if not records or len(landed) < len(records):

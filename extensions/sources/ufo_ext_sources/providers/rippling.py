@@ -15,7 +15,12 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
@@ -84,10 +89,10 @@ class RipplingConnector(RestConnector):
         return []
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         path: str | None = f"/{stream.source_object.lstrip('/')}"
-        params: dict[str, Any] | None = self._initial_query(stream, cursor)
+        params: dict[str, Any] | None = self._initial_query(stream, run.cursor)
         try:
             while path:
                 data = await self._get(client, path, params=params)

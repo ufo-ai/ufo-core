@@ -20,7 +20,12 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
@@ -91,14 +96,14 @@ class AshbyConnector(RestConnector):
         )
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
             if stream.name == "application_criteria_evaluations":
                 async for page in self._paginate_application_criteria(client):
                     yield page
                 return
-            async for page in self._paginate_default(client, stream, cursor=cursor):
+            async for page in self._paginate_default(client, stream, cursor=run.cursor):
                 yield page
         except httpx.HTTPStatusError as error:
             if error.response.status_code in _REFUSAL_STATUS:

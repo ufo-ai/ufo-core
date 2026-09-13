@@ -2,25 +2,47 @@
 pages.
 
 Typeform paginates collections by `?page=N&page_size=200` over an `{items: [...], page_count}`
-envelope, looping until the reported page count is reached. `responses` fans out per form: it
-walks the forms first, then pulls each form's responses through the shared body-cursor pager
-(`next_page_token` fed back as `after`), threading `?since` for incremental runs and stamping the
-`form_id`/`form_title` context onto each response. `webhooks` fans out per form as a single GET. A
-refusal (401/403) raises `StreamSkipped`; an unimplemented stream raises it too. The credential is
-resolved through the auth proxy the runner threads; this connector holds no token. The write path is
-intentionally absent — the source seam only reads."""
+envelope, looping until the reported page count is reached. A refusal (401/403) raises
+`StreamSkipped`; an unimplemented stream raises it too. The credential is resolved through the auth
+proxy the runner threads; this connector holds no token. The write path is intentionally absent —
+the source seam only reads.
+
+`responses` and `webhooks` are published only under a form, so both hang under `forms`. Responses
+page through the shared body-cursor pager (`next_page_token` fed back as `after`) and climb
+`submitted_at`, which each form's endpoint bounds server-side as `?since`. A response `token` is
+unique across the account, so `responses` declares `key_scope="global"`."""
 
 from collections.abc import AsyncIterator, Mapping
+from functools import partial
 from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at, with_context
+from ufo.sdk.sources import (
+    Ordering,
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+    records_at,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 200
 RESPONSES_PAGE_SIZE = 1000
 _REFUSAL_STATUS = frozenset({401, 403})
+
+
+def _cursor_bounds(records: list[dict[str, Any]], field: str) -> tuple[str | None, str | None]:
+    values = sorted(str(record[field]) for record in records if isinstance(record.get(field), str))
+    return (values[-1], values[0]) if values else (None, None)
+
 
 TYPEFORM_STREAMS: list[StreamSpec] = [
     StreamSpec(
@@ -39,11 +61,19 @@ TYPEFORM_STREAMS: list[StreamSpec] = [
         created_at_field="submitted_at",
         updated_at_field=None,
         canonical=True,
+        ordering=Ordering.ascending,
+        parents=(ParentEdge(stream="forms", path="/forms/{id}/responses"),),
+        key_scope="global",
     ),
     StreamSpec(name="workspaces", source_object="workspaces", primary_key="id"),
     StreamSpec(name="images", source_object="images", primary_key="id"),
     StreamSpec(name="themes", source_object="themes", primary_key="id"),
-    StreamSpec(name="webhooks", source_object="webhooks", primary_key="id"),
+    StreamSpec(
+        name="webhooks",
+        source_object="webhooks",
+        primary_key="id",
+        parents=(ParentEdge(stream="forms", path="/forms/{id}/webhooks"),),
+    ),
 ]
 
 
@@ -60,24 +90,26 @@ class TypeformConnector(RestConnector):
         return str(value) if isinstance(value, (str, int)) else None
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name == "forms":
-                async for page in self._forms(client, cursor=cursor):
+                async for page in self._forms(client, cursor=run.cursor):
                     yield page
                 return
             if stream.name == "responses":
-                async for page in self._responses(client, cursor=cursor):
-                    yield page
+                pages = partial(self._response_pages, client)
+                async for answers in fanned_out(stream, run, pages):
+                    yield answers
                 return
             if stream.name in {"workspaces", "images", "themes"}:
                 async for page in self._paged_items(client, f"/{stream.source_object}"):
                     yield page
                 return
             if stream.name == "webhooks":
-                async for page in self._webhooks(client):
-                    yield page
+                pages = partial(self._webhook_pages, client)
+                async for hooks in fanned_out(stream, run, pages):
+                    yield hooks
                 return
             raise StreamSkipped(f"typeform stream {stream.name!r} is not implemented")
         except httpx.HTTPStatusError as error:
@@ -117,37 +149,27 @@ class TypeformConnector(RestConnector):
             if forms:
                 yield forms
 
-    async def _responses(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for forms in self._forms(client, cursor=None):
-            for form in forms:
-                form_id = form.get("id")
-                if not isinstance(form_id, str) or not form_id:
-                    continue
-                params: dict[str, Any] = {}
-                if cursor:
-                    params["since"] = cursor
-                async for items in self._get_cursor_pages(
-                    client,
-                    f"/forms/{form_id}/responses",
-                    records_path="items",
-                    next_cursor_path="next_page_token",
-                    params=params,
-                    cursor_param="after",
-                    page_size_param="page_size",
-                    page_size=RESPONSES_PAGE_SIZE,
-                ):
-                    if items:
-                        yield with_context(items, form_id=form_id, form_title=form.get("title"))
+    async def _response_pages(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        params = {"since": bound.after} if bound.after else {}
+        async for items in self._get_cursor_pages(
+            client,
+            partition.path,
+            records_path="items",
+            next_cursor_path="next_page_token",
+            params=params,
+            cursor_param="after",
+            page_size_param="page_size",
+            page_size=RESPONSES_PAGE_SIZE,
+        ):
+            high, low = _cursor_bounds(items, "submitted_at")
+            yield WalkPage(records=items, high=high, low=low)
 
-    async def _webhooks(self, client: httpx.AsyncClient) -> AsyncIterator[list[dict[str, Any]]]:
-        async for forms in self._forms(client, cursor=None):
-            for form in forms:
-                form_id = form.get("id")
-                if not isinstance(form_id, str) or not form_id:
-                    continue
-                data = await self._get(client, f"/forms/{form_id}/webhooks")
-                records = records_at(data, "items")
-                if records:
-                    yield with_context(records, form_id=form_id, form_title=form.get("title"))
+    async def _webhook_pages(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        data = await self._get(client, partition.path)
+        records = records_at(data, "items")
+        if records:
+            yield WalkPage(records=records)

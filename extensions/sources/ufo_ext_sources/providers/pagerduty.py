@@ -4,7 +4,8 @@ schedules, and on-calls synced into recallable pages.
 PagerDuty paginates by `offset`+`limit` with the response reporting its own continuation: a `more`
 boolean says whether another page exists and a `limit` echo gives the applied page size the next
 offset advances by (`_get_offset_pages(more_path=..., response_limit_path=...)`). Incidents read
-incrementally with `?since=<cursor>` sorted by `updated_at`; incident notes fan out per incident.
+incrementally with `?since=<cursor>` sorted by `updated_at`. A note's collection composes none of
+PagerDuty's `Pagination` schema, so it answers one unpaged page.
 Records arrive flat under a stream-named envelope key, so keying and the watermark read the raw
 fields directly. A refusal (HTTP 401/403) raises `StreamSkipped` so the run records a skip, not a
 failure. Auth pins PagerDuty's versioned media type. The credential is resolved through the auth
@@ -12,12 +13,25 @@ proxy the runner threads — this connector holds no token. The write path is in
 the source seam only reads."""
 
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at, with_context
+from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+    records_at,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 _REFUSAL_STATUS = frozenset({401, 403})
@@ -40,6 +54,7 @@ INCIDENT_NOTES = StreamSpec(
     primary_key="id",
     cursor_field="created_at",
     updated_at_field=None,
+    parents=(ParentEdge(stream="incidents", path="/incidents/{id}/notes"),),
 )
 ESCALATION_POLICIES = StreamSpec(
     name="escalation_policies",
@@ -112,35 +127,23 @@ class PagerDutyConnector(RestConnector):
         ):
             yield page
 
-    async def _incident_notes(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for incidents in self._incidents(client, cursor=None):
-            for incident in incidents:
-                incident_id = incident.get("id")
-                if not isinstance(incident_id, str) or not incident_id:
-                    continue
-                data = await self._get(client, f"/incidents/{incident_id}/notes")
-                notes = records_at(data, "notes")
-                if cursor:
-                    notes = [n for n in notes if str(n.get("created_at") or "") > cursor]
-                if notes:
-                    yield with_context(notes, incident_id=incident_id)
+    async def _notes(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        data = await self._get(client, partition.path)
+        yield WalkPage(records=records_at(data, "notes"))
 
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name == "incidents":
-                async for page in self._incidents(client, cursor=cursor):
-                    yield page
+                async for records in self._incidents(client, cursor=run.cursor):
+                    yield records
                 return
-            if stream.name == "incident_notes":
-                async for page in self._incident_notes(client, cursor=cursor):
+            if stream.parents:
+                pages = partial(self._notes, client)
+                async for page in fanned_out(stream, run, pages):
                     yield page
                 return
             if stream.name in {
@@ -151,8 +154,8 @@ class PagerDutyConnector(RestConnector):
                 "schedules",
                 "oncalls",
             }:
-                async for page in self._offset_pages(client, stream, cursor=cursor):
-                    yield page
+                async for records in self._offset_pages(client, stream, cursor=run.cursor):
+                    yield records
                 return
             raise StreamSkipped(f"pagerduty stream {stream.name!r} is not implemented")
         except httpx.HTTPStatusError as error:

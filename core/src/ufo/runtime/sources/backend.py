@@ -60,7 +60,7 @@ agent surface, which is the invariant this preserves. Keep the `Credential` out 
 log. The manifest registers one backend per connector in the registry."""
 
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, ClassVar
@@ -69,7 +69,15 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.harness.o11y import warn
 from ufo.runtime.access.connectors import Credential, GrantUnusable
-from ufo.runtime.sources.connector import Connector, StreamPage, StreamSpec, get_path
+from ufo.runtime.sources.connector import (
+    Connector,
+    FieldValue,
+    ParentPages,
+    StreamPage,
+    StreamSpec,
+    get_path,
+    no_parents,
+)
 from ufo.runtime.sources.rest import ProviderRateLimited
 from ufo.runtime.sources.sync import (
     Page,
@@ -127,12 +135,33 @@ class ConnectorBackend:
     connector: Connector
     config_model: ClassVar[type[ConnectorSourceConfig]] = ConnectorSourceConfig
 
+    def partitioned(self, config: Mapping[str, object]) -> bool:
+        """Whether this row's cursor is a walk's partition map — its stream fans out over parents —
+        and so lives in `source.partition_cursor`, which the image before the tree never reads,
+        rather than in `source.cursor`, which that image reads as its own watermark. Total over any
+        row: a stream the connector no longer declares is not partitioned, so the run that fails on
+        it still releases its claim."""
+        return any(
+            bool(stream.parents)
+            for stream in self.connector.streams()
+            if stream.name == config.get("stream")
+        )
+
     async def fetch(
         self, config: ConnectorSourceConfig, cursor: str | None, auth: SourceAuth
     ) -> SyncResult:
         credential = await self._credential(config, auth)
         stream = self._stream(config.stream)
         base_url = self._base_url(auth)
+        parents = self._parents(stream, auth)
+        local_keys = stream.key_scope == "local"
+        read_by_children = frozenset(
+            field_path
+            for spec in self.connector.streams()
+            for edge in spec.parents
+            if edge.stream == stream.name
+            for field_path in edge.reads
+        )
         envelope = None if stream.delete_missing else self._decode_cursor(cursor)
         if envelope is None:
             origin, skip_target, watermark = cursor, 0, cursor
@@ -155,10 +184,14 @@ class ConnectorBackend:
             self_user_id=auth.self_user_id,
             backfill_after=config.backfill_after,
             yield_rate_limits=not stream.delete_missing and skip_target == 0,
+            parents=parents,
+            watched=auth.watched,
         )
         try:
             async for page in stream_pages:
                 records = page.records if isinstance(page, StreamPage) else page
+                scope = page.scope if isinstance(page, StreamPage) else None
+                address = f"{stream.name}/{scope}" if scope and local_keys else stream.name
                 checkpoint_records: list[dict[str, Any]] = []
                 for record in records:
                     consumed += 1
@@ -166,13 +199,13 @@ class ConnectorBackend:
                         skipped += 1
                         continue
                     checkpoint_records.append(record)
-                    page_row = self._page(stream, record)
+                    page_row = self._page(stream, record, address, read_by_children)
                     if page_row is None:
                         dropped += 1
                     else:
                         pages.append(page_row)
                 if isinstance(page, StreamPage):
-                    deletes.extend(f"{stream.name}/{external_id}" for external_id in page.deletes)
+                    deletes.extend(f"{address}/{external_id}" for external_id in page.deletes)
                     if page.next_cursor is not None:
                         native_checkpointed = True
                         page_cursor = page.next_cursor
@@ -238,6 +271,20 @@ class ConnectorBackend:
             dropped=dropped,
             indexed=stream.indexed,
         )
+
+    def _parents(self, stream: StreamSpec, auth: SourceAuth) -> ParentPages:
+        """The reader this run hands the connector: the run's own, or a reader of nothing for a
+        stream that hangs under nothing. A stream that declares an edge and is handed no reader
+        cannot enumerate a partition, so it says so rather than syncing an empty collection."""
+        if auth.parents is not None:
+            return auth.parents
+        if stream.parents:
+            raise RuntimeError(
+                f"connector source {self.connector.name!r} stream {stream.name!r} fans out over "
+                f"{sorted(edge.stream for edge in stream.parents)} and the run threaded no reader "
+                "of their landed records"
+            )
+        return no_parents
 
     def _warn_missing_cursor(
         self,
@@ -346,10 +393,24 @@ class ConnectorBackend:
         except ValidationError as error:
             raise RuntimeError(f"malformed {BACKFILL_KEY} cursor envelope: {cursor!r}") from error
 
-    def _page(self, stream: StreamSpec, record: dict[str, Any]) -> Page | None:
+    def _page(
+        self,
+        stream: StreamSpec,
+        record: dict[str, Any],
+        address: str,
+        read_by_children: frozenset[str],
+    ) -> Page | None:
         """One provider record as a recallable page: the connector's rendered body, keyed by
-        `stream.name/<primary key>` so a re-fetch of an unchanged record, an upsert, and a `deletes`
-        entry all settle on the same page.
+        `<address>/<primary key>` — the stream name, and under it the scope the record was fanned
+        out from where its key needs one — so a re-fetch of an unchanged record, an upsert, and a
+        `deletes` entry all settle on the same page, and a key unique only inside one partition (a
+        branch `name`, a commit `sha`) addresses one page per partition instead of colliding onto
+        one. A record of a flat collection has no scope, and neither has one the stream declares
+        `key_scope="global"`, whatever its own walk keys a cursor by.
+
+        `read_by_children` are the field paths this stream's own children read off its records;
+        the page carries them so a child composes its request path from the landed page rather than
+        walking the parent collection again.
 
         None when the record carries no primary key, or when the page model rejects what the
         connector rendered for that one record. It is dropped, named by the stream and the key that
@@ -383,23 +444,46 @@ class ConnectorBackend:
         )
         try:
             return Page(
-                source_ref=f"{stream.name}/{ref}",
-                source_identity=f"{stream.name}/{identity}",
+                source_ref=f"{address}/{ref}",
+                source_identity=f"{address}/{identity}",
                 body=body,
                 stream=stream.name,
                 title=title,
                 created_at=created_at,
                 updated_at=updated_at,
+                parent_fields=_parent_fields(record, read_by_children),
             )
         except ValidationError as error:
             warn(
                 "source_sync.unrepresentable_record",
                 connector=self.connector.name,
                 stream=stream.name,
-                source_ref=f"{stream.name}/{ref}",
+                source_ref=f"{address}/{ref}",
                 fault=validation_fault(error),
             )
             return None
+
+
+def _parent_fields(
+    record: dict[str, Any], read_by_children: frozenset[str]
+) -> dict[str, FieldValue] | None:
+    """The values this record carries for the fields its stream's children read — the ones their
+    paths render and the ones their predicates weigh — and None where no stream hangs under this one
+    at all. The provider's own scalar is kept, so a predicate compares what the provider sent.
+
+    A field the record does not carry is left out of the projection rather than given a stand-in, so
+    the child decides: a path raises at its fan-out naming the field and the record, a predicate
+    reads it as a record it does not hang under. That is why a projected-but-empty mapping and no
+    projection are different values: the first is a record that answered none of the fields asked of
+    it, the second is a page nothing asks anything of."""
+    if not read_by_children:
+        return None
+    projected: dict[str, FieldValue] = {}
+    for name in sorted(read_by_children):
+        value = record[name] if name in record else get_path(record, name)
+        if isinstance(value, (str, int, float, bool)):
+            projected[name] = value
+    return projected
 
 
 def _record_timestamp(

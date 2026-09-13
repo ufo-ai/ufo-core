@@ -18,7 +18,15 @@ from datetime import datetime
 from typing import Any, ClassVar
 
 from ufo.runtime.access.connectors import Credential, ToolExecutor
-from ufo.runtime.sources.connector import Connector, StreamPage, StreamSpec
+from ufo.runtime.sources.connector import (
+    Connector,
+    ParentPages,
+    Run,
+    StreamPage,
+    StreamSpec,
+    WatchedResources,
+    no_parents,
+)
 
 
 class ToolConnector(Connector):
@@ -40,6 +48,8 @@ class ToolConnector(Connector):
         self_user_id: str | None,
         backfill_after: datetime | None = None,
         yield_rate_limits: bool = True,
+        parents: ParentPages = no_parents,
+        watched: WatchedResources | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         if credential.execute is None:
             raise RuntimeError(
@@ -48,7 +58,9 @@ class ToolConnector(Connector):
                 "broker rather than setting a provider key"
             )
         pages = self.paginate(
-            credential.execute, stream, cursor=cursor, backfill_after=backfill_after
+            credential.execute,
+            stream,
+            Run(cursor=cursor, parents=parents, backfill_after=backfill_after),
         )
         try:
             async for page in pages:
@@ -60,11 +72,6 @@ class ToolConnector(Connector):
 
     @abstractmethod
     def paginate(
-        self,
-        execute: ToolExecutor,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        backfill_after: datetime | None,
+        self, execute: ToolExecutor, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        """Async-yield one stream's records from `cursor`, reading through `execute`."""
+        """Async-yield one stream's records for one run, reading through `execute`."""

@@ -1,5 +1,5 @@
-"""The Mercury connector over a mock transport: the accounts read, the per-account transaction
-fan-out with the day-granular `start` filter and `offset` paging, the counterparty title, the
+"""The Mercury connector over a mock transport: the accounts read, the flat transactions walk with
+its day-granular `postedStart` filter and `page.nextPage` cursor, the counterparty title, the
 `postedAt` watermark, and a refusal as `StreamSkipped`. Offline — a canned transport, no DB, no
 token."""
 
@@ -55,64 +55,72 @@ async def test_accounts_land_as_pages() -> None:
     assert [page.title for page in result.pages] == ["Operating", "Payroll"]
 
 
-async def test_transactions_fan_out_over_accounts_and_carry_the_start_filter() -> None:
+async def test_transactions_read_every_account_in_one_walk() -> None:
+    """The flat collection lists every account's transactions, so the accounts read the per-account
+    fan-out spent is gone and each transaction keeps the identity it already has."""
     seen: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/accounts":
-            return _accounts()
         seen.append(str(request.url))
-        account_id = request.url.path.split("/")[4]
         return httpx.Response(
             200,
             json={
                 "transactions": [
                     {
-                        "id": f"tx-{account_id}",
+                        "id": "tx-1",
+                        "accountId": "acc-1",
                         "counterpartyName": "Stripe",
                         "createdAt": "2026-02-01T00:00:00Z",
                         "postedAt": "2026-02-02T00:00:00Z",
-                    }
-                ]
+                    },
+                    {
+                        "id": "tx-2",
+                        "accountId": "acc-2",
+                        "counterpartyName": "AWS",
+                        "createdAt": "2026-02-03T00:00:00Z",
+                        "postedAt": "2026-02-04T00:00:00Z",
+                    },
+                ],
+                "page": {"nextPage": None},
             },
         )
 
     result = await _fetch("transactions", handle, cursor="2026-01-30T12:00:00Z")
 
-    assert {page.source_ref for page in result.pages} == {
-        "transactions/tx-acc-1",
-        "transactions/tx-acc-2",
-    }
-    assert {page.title for page in result.pages} == {"Stripe"}
-    assert result.next_cursor == "2026-02-02T00:00:00Z"
-    assert all("start=2026-01-30" in url for url in seen)
-    assert all("limit=100" in url for url in seen)
-    assert "/api/v1/account/acc-1/transactions" in seen[0]
-    assert "/api/v1/account/acc-2/transactions" in seen[1]
-    assert "acc-1" in result.pages[0].body
+    assert [page.source_identity for page in result.pages] == [
+        "transactions/tx-1",
+        "transactions/tx-2",
+    ]
+    assert {page.title for page in result.pages} == {"Stripe", "AWS"}
+    assert result.next_cursor == "2026-02-04T00:00:00Z"
+    assert len(seen) == 1
+    assert "/api/v1/transactions" in seen[0]
+    assert "postedStart=2026-01-30" in seen[0]
+    assert "limit=100" in seen[0]
 
 
-async def test_a_full_page_is_followed_by_the_next_offset() -> None:
-    offsets: list[str | None] = []
+async def test_a_full_page_is_followed_by_the_next_page_cursor() -> None:
+    """`page.nextPage` is the id to start the next page after, which is how the flat collection
+    pages where the per-account one only reported a total."""
+    starts: list[str | None] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/accounts":
-            return httpx.Response(200, json={"accounts": [{"id": "acc-1"}]})
-        offsets.append(request.url.params.get("offset"))
-        if request.url.params.get("offset") == "100":
-            return httpx.Response(200, json={"transactions": []})
+        starts.append(request.url.params.get("start_after"))
+        if request.url.params.get("start_after") == "tx-99":
+            return httpx.Response(200, json={"transactions": [], "page": {"nextPage": None}})
         return httpx.Response(
             200,
             json={
                 "transactions": [
                     {"id": f"tx-{index}", "postedAt": "2026-02-02T00:00:00Z"}
                     for index in range(100)
-                ]
+                ],
+                "page": {"nextPage": "tx-99"},
             },
         )
 
     result = await _fetch("transactions", handle)
-    assert offsets == ["0", "100"]
+    assert starts == [None, "tx-99"]
     assert len(result.pages) == 100
 
 

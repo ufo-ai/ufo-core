@@ -3,17 +3,29 @@ collections, the `updated_at` watermark filter on an incremental stream, and the
 array surfacing as `StreamSkipped`. Offline — a canned transport, no DB, no token."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.providers.monday import MondayConnector
+from ufo_ext_sources.providers.monday import ALL_STREAMS, MondayConnector
 
 from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped
-from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sdk.sources import (
+    ConnectorBackend,
+    ConnectorSourceConfig,
+    ParentPages,
+    ParentRecord,
+)
+
+Landed = Mapping[str, tuple[ParentRecord, ...]]
+ParentsReader = Callable[[Landed], ParentPages]
+
+LANDED: Mapping[str, tuple[ParentRecord, ...]] = {
+    "boards": (ParentRecord(ref="boards/b1", fields={"id": "b1"}),)
+}
 
 
 @dataclass(frozen=True)
@@ -24,15 +36,20 @@ class _MockProxy:
         return Credential(transport=httpx.MockTransport(self.handler))
 
 
-def _auth(handler: Callable[[httpx.Request], httpx.Response]) -> SourceAuth:
-    return SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=handler))
+def _auth(
+    handler: Callable[[httpx.Request], httpx.Response], parents: ParentPages | None
+) -> SourceAuth:
+    return SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler=handler), parents=parents)
 
 
 async def _fetch(
-    stream: str, handler: Callable[[httpx.Request], httpx.Response], cursor: str | None = None
+    stream: str,
+    handler: Callable[[httpx.Request], httpx.Response],
+    cursor: str | None = None,
+    parents: ParentPages | None = None,
 ):
     return await ConnectorBackend(connector=MondayConnector()).fetch(
-        ConnectorSourceConfig(stream=stream), cursor, _auth(handler)
+        ConnectorSourceConfig(stream=stream), cursor, _auth(handler, parents)
     )
 
 
@@ -118,15 +135,11 @@ async def test_boards_flatten_derives_api_url() -> None:
     assert record["api_url"] == "https://api.monday.com/v2/boards/b1"
 
 
-def _items_handler() -> Callable[[httpx.Request], httpx.Response]:
+def _items_handler(asked: list[dict] | None = None) -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         variables = _graphql(request)["variables"]
-        if "page" in variables:
-            if variables["page"] == 1:
-                return httpx.Response(
-                    200, json={"data": {"boards": [{"id": "b1", "name": "Board"}]}}
-                )
-            return httpx.Response(200, json={"data": {"boards": []}})
+        if asked is not None:
+            asked.append(variables)
         if "board_ids" in variables:
             return httpx.Response(
                 200,
@@ -157,14 +170,84 @@ def _items_handler() -> Callable[[httpx.Request], httpx.Response]:
     return handle
 
 
-async def test_items_flatten_derives_name_and_status_from_state() -> None:
-    result = await _fetch("items", _items_handler())
+async def test_items_flatten_derives_name_and_status_from_state(
+    parents_reader: ParentsReader,
+) -> None:
+    result = await _fetch("items", _items_handler(), parents=parents_reader(LANDED))
     record = _flat(result, "items/it1")
     assert record["name"] == "Task A"
     assert record["status"] == "done"
     assert record["created_at"] == "2026-01-01T00:00:00Z"
     assert result.pages[0].created_at == "2026-01-01T00:00:00.000000+00:00"
     assert result.pages[0].updated_at == "2026-02-01T00:00:00.000000+00:00"
+
+
+async def test_items_hang_on_their_board_and_keep_an_item_id_address(
+    parents_reader: ParentsReader,
+) -> None:
+    """A monday item id is unique across the account, so an item asks its board's items page and is
+    addressed by its own id."""
+    asked: list[dict] = []
+
+    result = await _fetch("items", _items_handler(asked), parents=parents_reader(LANDED))
+
+    assert {page.source_ref for page in result.pages} == {"items/it1"}
+    assert {page.source_identity for page in result.pages} == {"items/it1"}
+    assert asked == [{"board_ids": ["b1"]}]
+
+
+async def test_activity_logs_fan_out_over_landed_boards(parents_reader: ParentsReader) -> None:
+    asked: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = _graphql(request)
+        asked.append(body["query"])
+        assert body["variables"] == {"board_ids": ["b1"]}
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "boards": [
+                        {
+                            "id": "b1",
+                            "activity_logs": [
+                                {
+                                    "id": "log1",
+                                    "event": "update_column_value",
+                                    "data": "{}",
+                                    "user_id": "u2",
+                                    "created_at": "2026-02-01T00:00:00Z",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+
+    result = await _fetch("activity_logs", handle, parents=parents_reader(LANDED))
+
+    assert {page.source_ref for page in result.pages} == {"activity_logs/b1/log1"}
+    assert len(asked) == 1
+    assert "activity_logs(" in asked[0]
+    record = _flat(result, "activity_logs/b1/log1")
+    assert record["subject"] == "update_column_value"
+    assert record["author"] == "u2"
+
+
+async def test_board_children_declare_the_board_whose_id_their_query_names() -> None:
+    declared = {stream.name: stream for stream in ALL_STREAMS}
+    edges = {
+        name: tuple((edge.stream, edge.path) for edge in stream.parents)
+        for name, stream in declared.items()
+        if stream.parents
+    }
+    assert edges == {
+        "items": (("boards", "{id}"),),
+        "activity_logs": (("boards", "{id}"),),
+    }
+    assert declared["items"].key_scope == "global"
+    assert declared["activity_logs"].key_scope == "local"
 
 
 def _updates_handler() -> Callable[[httpx.Request], httpx.Response]:

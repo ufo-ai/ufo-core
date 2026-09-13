@@ -21,6 +21,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, 
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, ClassVar
+from urllib.parse import parse_qsl
 
 import httpx
 
@@ -28,9 +29,13 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.connector import (
     Connector,
     PaginationStrategy,
+    ParentPages,
+    Run,
     StreamPage,
     StreamSpec,
+    WatchedResources,
     get_path,
+    no_parents,
 )
 
 MAX_ATTEMPTS = 8
@@ -235,8 +240,19 @@ class RestConnector(Connector):
     async def _get_raw(
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None
     ) -> httpx.Response:
-        """A GET returning the raw response for header-driven pagers, retried on transient/5xx."""
-        return await self._send(lambda: client.get(path, params=params))
+        """A GET returning the raw response for header-driven pagers, retried on transient/5xx.
+
+        A path may carry its own query — an edge reaches Stripe's balance transactions of one payout
+        at `/v1/balance_transactions?payout={id}`, and a `Link: rel=next` arrives as a whole URL —
+        and httpx REPLACES a URL's query with the `params` it is handed, so the two are merged here
+        instead: every one of a declared query's pairs rides, repeats included, and the caller's
+        params win the keys they name, being what advances the walk."""
+        address, _, query = path.partition("?")
+        if not query:
+            return await self._send(lambda: client.get(path, params=params))
+        declared = [pair for pair in parse_qsl(query) if pair[0] not in (params or {})]
+        merged = [*declared, *(params or {}).items()]
+        return await self._send(lambda: client.get(address, params=merged))
 
     async def _post(
         self, client: httpx.AsyncClient, path: str, *, json: dict[str, Any] | None = None
@@ -291,6 +307,8 @@ class RestConnector(Connector):
         self_user_id: str | None,
         backfill_after: datetime | None = None,
         yield_rate_limits: bool = True,
+        parents: ParentPages = no_parents,
+        watched: WatchedResources | None = None,
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         url = (base_url or self.base_url) or ""
         if not url:
@@ -298,12 +316,20 @@ class RestConnector(Connector):
         rate_limit_token = _RATE_LIMIT_YIELDS.set(yield_rate_limits)
         try:
             async with self._make_client(url, credential) as client:
-                source = self.paginate_source(
+                source = self.paginate(
                     client,
                     stream,
-                    cursor=cursor,
-                    self_user_id=self_user_id,
-                    backfill_after=backfill_after,
+                    Run(
+                        cursor=cursor,
+                        parents=parents,
+                        self_user_id=self_user_id,
+                        backfill_after=backfill_after,
+                        pinned=(
+                            None
+                            if watched is None
+                            else self.pinned_partitions(stream, await watched())
+                        ),
+                    ),
                 )
                 try:
                     async for page in source:
@@ -318,6 +344,7 @@ class RestConnector(Connector):
                                 records=records,
                                 deletes=native.deletes,
                                 next_cursor=native.next_cursor,
+                                scope=native.scope,
                             )
                         else:
                             yield records
@@ -327,27 +354,15 @@ class RestConnector(Connector):
         finally:
             _RATE_LIMIT_YIELDS.reset(rate_limit_token)
 
-    def paginate_source(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        self_user_id: str | None,
-        backfill_after: datetime | None = None,
-    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        """The one seam between `fetch_page` and a connector's own `paginate`. Both run-scoped
-        extras — the acting identity and the row's pinned backfill floor — are dropped by default,
-        so a connector wanting either overrides this to widen its own `paginate` and the rest keep
-        the one they have."""
-        return self.paginate(client, stream, cursor=cursor)
-
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
-        """Yield raw record-pages. The default routes a stream whose `pagination` declares a
-        non-`none` strategy through `paginate_from_strategy`; a stream that needs a bespoke shape
-        leaves `pagination` unset and the connector overrides this method."""
+        """Yield raw record-pages for one stream of one run. The default routes a stream whose
+        `pagination` declares a non-`none` strategy through `paginate_from_strategy`; a stream that
+        needs a bespoke shape leaves `pagination` unset and the connector overrides this method.
+
+        The whole run crosses in one object, so a connector reads the values its streams need and
+        names none of the rest."""
         pagination = stream.pagination
         if pagination is None or pagination.strategy is PaginationStrategy.none:
             raise NotImplementedError(

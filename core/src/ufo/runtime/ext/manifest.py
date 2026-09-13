@@ -50,7 +50,7 @@ from ufo.runtime.object_scope import ObjectActionTarget
 from ufo.runtime.objects import ObjectKind
 from ufo.runtime.search import SearchProvider
 from ufo.runtime.skills.runtime import RuntimeSkill, SkillCard
-from ufo.runtime.sources.sync import PageChange, SourceBackend
+from ufo.runtime.sources.sync import PageChange, SourceBackend, SourceWatchReader
 from ufo.runtime.tools.registry import OBJECT_ACTION_TOOL, ToolDef
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience
 from ufo.runtime.turns.delivery_register import SUBAGENT_RESULT_DESCRIPTION
@@ -269,10 +269,15 @@ class SourceProvider:
     credential slots. `serve` sources these into the driver's backend map, so a row with this
     backend name syncs through this backend and its pages land in memory via the derivation pipeline
     exactly as the core folder source's do. A source row is created in chat through
-    `ExtensionContext.register_source`."""
+    `ExtensionContext.register_source`.
+
+    `watches` builds the reader of the resources a standing watch on one connection pins, given the
+    extension's own context: the driver binds it to each run's connection and the connector turns
+    those resources into the partitions it visits every tick. None is a backend nothing watches."""
 
     backend: str
     build: Callable[[CredentialAccess], SourceBackend]
+    watches: Callable[[ExtensionContext], SourceWatchReader] | None = None
 
 
 @dataclass(frozen=True)

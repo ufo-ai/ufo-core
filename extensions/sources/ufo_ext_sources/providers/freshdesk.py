@@ -2,24 +2,40 @@
 companies, agents), the admin/config objects, the solutions knowledge-base tree, and the forums
 tree synced as recallable pages.
 
-Records arrive flat — no envelope to lift. `paginate` has three shapes. `tickets` uses page-number
-incrementing (`?page=N&per_page=100`) with `?updated_since=<iso>&order_by=updated_at` for
-incremental, bounded at Freshdesk's 300-page ceiling. The nested trees fan out from a parent
-(conversations per ticket; the two- and three-level solutions/forums walks). Everything else follows
+Records arrive flat — no envelope to lift. `tickets` uses page-number incrementing
+(`?page=N&per_page=100`) with `?updated_since=<iso>&order_by=updated_at` for incremental, bounded at
+Freshdesk's 300-page ceiling. Everything else follows
 RFC 5988 `Link: rel=next` cursor pagination. Auth is HTTP Basic with the API key as the username and
 any non-empty password (the documented `"X"`): when the resolved `Credential` carries a direct key,
 `_make_client` sends it as Basic auth; a broker's proxying transport is honored unchanged. The base
 URL is per-tenant (`https://<domain>.freshdesk.com`), so the class default is empty and a run
 without a resolved host fails loud. A refusal (401/403) raises `StreamSkipped`. The write path is
-intentionally absent — the source seam only reads."""
+intentionally absent — the source seam only reads.
+
+Freshdesk publishes no flat `/conversations`, `/discussions/forums`, `/discussions/topics` or
+`/solutions/articles`, so every collection below the root declares the parent it hangs under. A
+Freshdesk id is unique across the tenant, so `conversations` and `solution_articles` declare
+`key_scope="global"`."""
 
 from collections.abc import AsyncIterator, Mapping
-from typing import Any
+from functools import partial
+from typing import Any, Literal
 
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_LIMIT = 100
@@ -27,6 +43,8 @@ TIMEOUT_CONNECT_SECONDS = 30.0
 TIMEOUT_READ_SECONDS = 60.0
 TICKET_PAGE_CEILING = 300
 SETTINGS_PAGE_KEY = "helpdesk"
+CONVERSATIONS_FETCH_BUDGET = 20
+SOLUTIONS_FETCH_BUDGET = 5
 _REFUSAL_STATUS = frozenset({401, 403})
 
 _SIMPLE_PATHS: dict[str, str] = {
@@ -60,6 +78,12 @@ def _stream(
     primary_key: str = "id",
     cursor_field: str | None = None,
     canonical: bool = False,
+    indexed: bool = True,
+    parent: str | None = None,
+    path: str | None = None,
+    refan: Literal["on_parent_change"] | None = None,
+    key_scope: Literal["local", "global"] = "local",
+    fetch_budget: int | None = None,
 ) -> StreamSpec:
     return StreamSpec(
         name=name,
@@ -67,12 +91,26 @@ def _stream(
         primary_key=primary_key,
         cursor_field=cursor_field,
         canonical=canonical,
+        indexed=indexed,
+        parents=()
+        if parent is None or path is None
+        else (ParentEdge(stream=parent, path=path, refan=refan),),
+        key_scope=key_scope,
+        fetch_budget=fetch_budget,
     )
 
 
 FRESHDESK_STREAMS: list[StreamSpec] = [
     _stream("tickets", cursor_field="updated_at", canonical=True),
-    _stream("conversations", canonical=True),
+    _stream(
+        "conversations",
+        canonical=True,
+        parent="tickets",
+        path="/api/v2/tickets/{id}/conversations",
+        refan="on_parent_change",
+        key_scope="global",
+        fetch_budget=CONVERSATIONS_FETCH_BUDGET,
+    ),
     _stream("contacts", cursor_field="updated_at", canonical=True),
     _stream("companies", canonical=True),
     _stream("agents"),
@@ -88,14 +126,43 @@ FRESHDESK_STREAMS: list[StreamSpec] = [
     _stream("email_configs"),
     _stream("email_mailboxes", source_object="email/mailboxes"),
     _stream("canned_response_folders"),
-    _stream("canned_responses"),
-    _stream("solution_categories", source_object="solutions/categories"),
-    _stream("solution_folders"),
-    _stream("solution_articles", canonical=True),
+    _stream(
+        "canned_responses",
+        parent="canned_response_folders",
+        path="/api/v2/canned_response_folders/{id}/responses",
+    ),
+    _stream("solution_categories", source_object="solutions/categories", indexed=False),
+    _stream(
+        "solution_folders",
+        indexed=False,
+        parent="solution_categories",
+        path="/api/v2/solutions/categories/{id}/folders",
+        fetch_budget=SOLUTIONS_FETCH_BUDGET,
+    ),
+    _stream(
+        "solution_articles",
+        canonical=True,
+        parent="solution_folders",
+        path="/api/v2/solutions/folders/{id}/articles",
+        key_scope="global",
+        fetch_budget=SOLUTIONS_FETCH_BUDGET,
+    ),
     _stream("discussion_categories", source_object="discussions/categories"),
-    _stream("discussion_forums"),
-    _stream("discussion_topics"),
-    _stream("discussion_comments"),
+    _stream(
+        "discussion_forums",
+        parent="discussion_categories",
+        path="/api/v2/discussions/categories/{id}/forums",
+    ),
+    _stream(
+        "discussion_topics",
+        parent="discussion_forums",
+        path="/api/v2/discussions/forums/{id}/topics",
+    ),
+    _stream(
+        "discussion_comments",
+        parent="discussion_topics",
+        path="/api/v2/discussions/topics/{id}/comments",
+    ),
     _stream("satisfaction_ratings", source_object="surveys/satisfaction_ratings"),
     _stream("surveys"),
     _stream("time_entries"),
@@ -150,12 +217,16 @@ class FreshdeskConnector(RestConnector):
         return params
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
-            special = self._special_pages(client, stream.name, cursor)
-            if special is not None:
-                async for page in special:
+            if stream.parents:
+                pages = partial(self._child_pages, client)
+                async for under in fanned_out(stream, run, pages):
+                    yield under
+                return
+            if stream.name == "tickets":
+                async for page in self._paginate_tickets(client, cursor=run.cursor):
                     yield page
                 return
             path = _SIMPLE_PATHS.get(stream.name)
@@ -178,49 +249,6 @@ class FreshdeskConnector(RestConnector):
                 ) from error
             raise
 
-    def _special_pages(
-        self, client: httpx.AsyncClient, name: str, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]] | None:
-        if name == "tickets":
-            return self._paginate_tickets(client, cursor=cursor)
-        if name == "conversations":
-            return self._paginate_conversations(client, cursor=cursor)
-        two_level = {
-            "canned_responses": (
-                "/api/v2/canned_response_folders",
-                "/api/v2/canned_response_folders/{id}/responses",
-            ),
-            "solution_folders": (
-                "/api/v2/solutions/categories",
-                "/api/v2/solutions/categories/{id}/folders",
-            ),
-            "discussion_forums": (
-                "/api/v2/discussions/categories",
-                "/api/v2/discussions/categories/{id}/forums",
-            ),
-            "discussion_topics": (
-                "/api/v2/discussions/forums",
-                "/api/v2/discussions/forums/{id}/topics",
-            ),
-            "discussion_comments": (
-                "/api/v2/discussions/topics",
-                "/api/v2/discussions/topics/{id}/comments",
-            ),
-        }.get(name)
-        if two_level is not None:
-            parent_path, child_path = two_level
-            return self._paginate_two_level(
-                client, parent_path=parent_path, child_path_template=child_path
-            )
-        if name == "solution_articles":
-            return self._paginate_three_level(
-                client,
-                root_path="/api/v2/solutions/categories",
-                mid_path_template="/api/v2/solutions/categories/{id}/folders",
-                leaf_path_template="/api/v2/solutions/folders/{id}/articles",
-            )
-        return None
-
     async def _paginate_link_header(
         self, client: httpx.AsyncClient, path: str, *, params: dict[str, Any] | None = None
     ) -> AsyncIterator[list[dict[str, Any]]]:
@@ -229,6 +257,12 @@ class FreshdeskConnector(RestConnector):
             client, path, params=params, page_size=PAGE_LIMIT
         ):
             yield page
+
+    async def _child_pages(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        async for page in self._paginate_link_header(client, partition.path):
+            yield WalkPage(records=page)
 
     async def _paginate_tickets(
         self, client: httpx.AsyncClient, *, cursor: str | None
@@ -248,59 +282,3 @@ class FreshdeskConnector(RestConnector):
             page += 1
             if page > TICKET_PAGE_CEILING:
                 return
-
-    async def _paginate_conversations(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Walk every ticket the cursor admits, then fetch its conversations, stamping `ticket_id`
-        (Freshdesk returns it, but a defensive stamp guards a future API change)."""
-        async for ticket_page in self._paginate_tickets(client, cursor=cursor):
-            for ticket in ticket_page:
-                tid = ticket.get("id") if isinstance(ticket, dict) else None
-                if tid is None:
-                    continue
-                async for convo_page in self._paginate_link_header(
-                    client, f"/api/v2/tickets/{tid}/conversations"
-                ):
-                    for convo in convo_page:
-                        if isinstance(convo, dict):
-                            convo.setdefault("ticket_id", tid)
-                    yield convo_page
-
-    async def _paginate_two_level(
-        self, client: httpx.AsyncClient, *, parent_path: str, child_path_template: str
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for parent_page in self._paginate_link_header(client, parent_path):
-            for parent in parent_page:
-                pid = parent.get("id") if isinstance(parent, dict) else None
-                if pid is None:
-                    continue
-                async for page in self._paginate_link_header(
-                    client, child_path_template.format(id=pid)
-                ):
-                    yield page
-
-    async def _paginate_three_level(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        root_path: str,
-        mid_path_template: str,
-        leaf_path_template: str,
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for cat_page in self._paginate_link_header(client, root_path):
-            for cat in cat_page:
-                cid = cat.get("id") if isinstance(cat, dict) else None
-                if cid is None:
-                    continue
-                async for folder_page in self._paginate_link_header(
-                    client, mid_path_template.format(id=cid)
-                ):
-                    for folder in folder_page:
-                        fid = folder.get("id") if isinstance(folder, dict) else None
-                        if fid is None:
-                            continue
-                        async for leaf_page in self._paginate_link_header(
-                            client, leaf_path_template.format(id=fid)
-                        ):
-                            yield leaf_page

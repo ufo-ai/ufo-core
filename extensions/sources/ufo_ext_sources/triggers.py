@@ -5,9 +5,11 @@ that conversation. The row carries the connection it watches, the owning convers
 it invokes, and the member who asked for it.
 
 A trigger narrows to one resource of that feed — a pull request, an issue — named by the row's
-`resource`, and to the streams its `streams` names. Both join the conversation and the connection
-in the table's unique key, so a thread watches the two pull requests it is talking about and the
-whole feed beside them. The trigger on everything is the row whose two are empty.
+`resource`, and to the streams its `streams` names. A live narrowed row is also what the connection
+syncs for: `pinned` answers the sync driver which resources it reads every tick. Both join the
+conversation and the connection in the table's unique key, so a thread watches the two pull
+requests it is talking about and the whole feed beside them. The trigger on everything is the row
+whose two are empty.
 
 The connection is a foreign key that cascades, so disconnecting an account takes its triggers with
 its source rows and its pages: nothing here sweeps them, and no trigger outlives the feed it
@@ -253,6 +255,26 @@ class SourceTriggerStore:
                 )
             ).all()
         return frozenset((row.connection_id, row.resource) for row in rows)
+
+    async def pinned(self, connection_id: UUID) -> tuple[str, ...]:
+        """The resources a live watch on this connection names, workspace-wide and once each — what
+        the connection's sync pins a partition on, so a pull request a thread is watching is read
+        every tick however quiet the repository around it is. A paused trigger names none: pausing
+        stops the wake, and reading for a wake nobody gets is a request an hour spent on nothing."""
+        async with self.ctx.transaction() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(source_trigger.c.resource)
+                    .where(
+                        source_trigger.c.workspace_id == self.workspace_id,
+                        source_trigger.c.connection_id == connection_id,
+                        source_trigger.c.paused == sa.false(),
+                        source_trigger.c.resource != "",
+                    )
+                    .distinct()
+                )
+            ).all()
+        return tuple(sorted(row.resource for row in rows))
 
     async def waking(self, connection_id: UUID) -> tuple[SourceTrigger, ...]:
         """Every running trigger for this connection, workspace-wide — the alert sweep's read, the

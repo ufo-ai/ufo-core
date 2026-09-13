@@ -21,7 +21,13 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    list_or_empty,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
@@ -74,7 +80,7 @@ class PandaDocConnector(RestConnector):
         return client
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         path = _LIST_PATHS.get(stream.name)
         if path is None:
@@ -85,8 +91,8 @@ class PandaDocConnector(RestConnector):
                 params: dict[str, Any] = {"count": PAGE_SIZE, "page": page}
                 if stream.name == "documents":
                     params["order_by"] = "date_modified"
-                    if cursor:
-                        params["modified_from"] = cursor
+                    if run.cursor:
+                        params["modified_from"] = run.cursor
                 data = await self._get(client, path, params=params)
                 records = list_or_empty(data.get("results"))
                 if records:

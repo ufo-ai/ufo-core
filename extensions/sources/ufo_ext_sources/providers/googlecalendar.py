@@ -22,7 +22,14 @@ from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import CursorExpired, RestConnector, StreamPage, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    CursorExpired,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+)
 from ufo_ext_sources.providers import google
 
 EVENTS_PATH = "/calendar/v3/calendars/primary/events"
@@ -51,7 +58,7 @@ class GoogleCalendarConnector(RestConnector):
     streams_list = GOOGLE_CALENDAR_STREAMS
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[StreamPage]:
         if stream.name not in ("calendar_events", "event_attendees"):
             raise NotImplementedError(
@@ -59,8 +66,8 @@ class GoogleCalendarConnector(RestConnector):
             )
         attendees_stream = stream.name == "event_attendees"
         params: dict[str, Any] = {"maxResults": LIST_PAGE_SIZE}
-        if cursor:
-            params["syncToken"] = cursor
+        if run.cursor:
+            params["syncToken"] = run.cursor
         else:
             params["timeMin"] = (
                 datetime.now(UTC) - timedelta(days=BOOTSTRAP_LOOKBACK_DAYS)
@@ -102,7 +109,7 @@ class GoogleCalendarConnector(RestConnector):
                 return
         except httpx.HTTPStatusError as error:
             if error.response.status_code == 410:
-                raise CursorExpired(f"googlecalendar syncToken {cursor} expired") from error
+                raise CursorExpired(f"googlecalendar syncToken {run.cursor} expired") from error
             if google.refused_for_scope(error):
                 raise StreamSkipped(
                     f"googlecalendar: {stream.name!r} refused ({error.response.status_code}); "

@@ -22,6 +22,7 @@ import httpx
 from ufo.sdk.authproxy import Credential
 from ufo.sdk.sources import (
     RestConnector,
+    Run,
     StreamFault,
     StreamSkipped,
     StreamSpec,
@@ -181,13 +182,13 @@ class XeroConnector(RestConnector):
         client.headers[TENANT_HEADER] = tenants[0]
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         path = f"/{stream.source_object}"
         envelope = stream.source_object
         headers: dict[str, str] = {}
-        if stream.cursor_field and cursor:
-            modified_since = _cursor_to_rfc1123(cursor)
+        if stream.cursor_field and run.cursor:
+            modified_since = _cursor_to_rfc1123(run.cursor)
             if modified_since:
                 headers["If-Modified-Since"] = modified_since
         try:

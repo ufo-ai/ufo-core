@@ -18,7 +18,13 @@ from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    list_or_empty,
+)
 from ufo_ext_sources.providers import google
 from ufo_ext_sources.watermark import text_checkpoint
 
@@ -52,11 +58,11 @@ class GoogleDocsConnector(RestConnector):
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         page: list[dict[str, Any]] = []
         try:
-            async for files in self._iter_doc_files(client, cursor=cursor):
+            async for files in self._iter_doc_files(client, cursor=run.cursor):
                 for file in files:
                     file_id = file.get("id")
                     if not isinstance(file_id, str) or not file_id:

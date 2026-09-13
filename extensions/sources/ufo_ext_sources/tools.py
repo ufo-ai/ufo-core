@@ -1,6 +1,6 @@
 """The `source_trigger` object kind: the conversations that wake when a connection's feed changes.
 
-A connection is one account's authority and its canonical streams sync as `source` rows the moment
+A connection is one account's authority and its syncing streams land as `source` rows the moment
 it lands, so nobody registers a feed. A trigger is one conversation's standing interest in one of
 those feeds: apply the kind from the conversation and delete the row to stop. Each batch of changed
 pages wakes that conversation. Only a shared connection can carry one — a private connection's

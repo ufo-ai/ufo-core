@@ -1,12 +1,14 @@
 """A connection's feeds are created with the connection: the registrar the `connection_recorded`
 hook fires, and the job that retries a creation which did not land.
 
-A connection is one account's authority and a feed is one `source` row per canonical stream of its
+A connection is one account's authority and a feed is one `source` row per syncing stream of its
 connector, so connecting an account is the whole of what a member does to sync it. Canonical
 streams are the provider's core collections — the ones a connector marks as the objects it exists
-to carry, one to nine per provider — so the feed is what the account is for rather than every list
-its API publishes. Which agents read what it syncs is the grant's answer at read time, so this asks
-nothing about grants and nothing about disclosure: the connection carries both.
+to carry, one to nine per provider — and a stream one of those hangs under syncs with them, because
+its landed records are the partitions the canonical stream fans over. So the feed is what the
+account is for, plus what reaching it costs, rather than every list its API publishes. Which agents
+read what it syncs is the grant's answer at read time, so this asks nothing about grants and nothing
+about disclosure: the connection carries both.
 
 A provider no broker grants is connected the same way from the other end: a member fills its
 credential slots, and the job mints the workspace's own connection to it — no account handle, and
@@ -39,7 +41,7 @@ from uuid import UUID
 from ufo.sdk.context import ExtensionContext, SourceRecord
 from ufo.sdk.grants import ConnectionRecorded, FeedConnection, feed_connections
 from ufo.sdk.manifest import HookContext, HookOutcome
-from ufo.sdk.sources import ConnectorSourceConfig, StreamSpec
+from ufo.sdk.sources import ConnectorSourceConfig, StreamSpec, syncing_streams
 from ufo_ext_sources.registry import CONNECTORS, direct_slots
 
 
@@ -71,7 +73,7 @@ def backfill_days(connection: FeedConnection, stream: StreamSpec) -> int | None:
 
 @dataclass(frozen=True)
 class ConnectedSources:
-    """Register the canonical streams of a connection — one connection for the hook that fires as it
+    """Register the syncing streams of a connection — one connection for the hook that fires as it
     lands, every one of them for the job that retries. See the module docstring."""
 
     ext: ExtensionContext
@@ -96,7 +98,7 @@ class ConnectedSources:
     async def _settle_keyed_connections(self) -> None:
         """The workspace's own connection to each provider whose credentials a member filled, and
         none to a provider whose credentials are empty — the slots are the whole of a keyed feed's
-        lifecycle. Filling them mints the connection here and its canonical streams register below
+        lifecycle. Filling them mints the connection here and its syncing streams register below
         on the same tick; clearing them removes the connection here, and its streams, their pages
         and every grant on it go by cascade, so nothing keeps asking for a key that is gone and
         nothing it synced stays recallable.
@@ -138,27 +140,27 @@ class ConnectedSources:
         streams: dict[str, StreamSpec],
         live: tuple[SourceRecord, ...],
     ) -> None:
-        """A stream a later connector release stops marking canonical leaves the connections that
-        already sync it, so the rows are the record in both directions of a release: the one that
-        adds a stream and the one that withdraws it reach a connection registered long ago alike.
+        """A stream a later connector release stops syncing leaves the connections that already sync
+        it, so the rows are the record in both directions of a release: the one that adds a stream
+        and the one that withdraws it reach a connection registered long ago alike.
 
-        Only a row this provider registered for a stream it no longer declares canonical is
-        removed, and it is removed rather than parked, because the rows are the record of what a
-        connection carries: a row left inert would be found by the next registration of that stream
+        Only a row this provider registered for a stream it no longer syncs is removed — a stream it
+        stopped marking canonical, or one that was an ancestor of a canonical stream and is no
+        longer fanned out from — and it is removed rather than parked, because the rows are the
+        record of what a connection carries: a row left inert would be found by the next
+        registration of that stream
         and read as a feed the member asked for. Its pages go with it by cascade, and a
         `source_trigger` narrowed to that stream stops being woken by it, while every other row of
         the connection — and every trigger on one — is left exactly as it is.
 
         A row of another backend names no stream (a gbrain origin's config is a repository, not a
         stream) and is never a row this registrar looks at, so it is passed over."""
+        syncing = syncing_streams(list(streams.values()))
         for record in live:
             if record.connection_id != connection.id or record.backend != connection.provider:
                 continue
             stream = record.config.get("stream")
-            if not isinstance(stream, str):
-                continue
-            declared = streams.get(stream)
-            if declared is not None and declared.canonical:
+            if not isinstance(stream, str) or stream in syncing:
                 continue
             await self.ext.remove_source(record.id)
 
@@ -168,16 +170,18 @@ class ConnectedSources:
         streams: dict[str, StreamSpec],
         live: tuple[SourceRecord, ...],
     ) -> None:
-        """One row per canonical stream the connection does not hold yet, read off the streams this
-        connection already holds — the natural key a connector's rows carry, so a stream already
-        syncing is left exactly as it is and a stream a later connector release marks canonical
-        joins a connection registered long ago. Only this connection's rows name a stream: a
-        gbrain origin, a folder root and the sample feed each hang off a connection of their own
-        and their configs declare no stream at all."""
+        """One row per syncing stream the connection does not hold yet — the canonical ones and the
+        ancestors they fan out from — read off the streams this connection already holds: the
+        natural key a connector's rows carry, so a stream already syncing is left exactly as it is
+        and a stream a later connector release marks canonical joins a connection registered long
+        ago. Only this connection's rows name a stream: a gbrain origin, a folder root and the
+        sample feed each hang off a connection of their own and their configs declare no stream at
+        all."""
         held = {record.config["stream"] for record in live if record.connection_id == connection.id}
+        syncing = syncing_streams(list(streams.values()))
         registered_at = datetime.now(UTC)
         for stream in streams.values():
-            if not stream.canonical or stream.name in held:
+            if stream.name not in syncing or stream.name in held:
                 continue
             days = backfill_days(connection, stream)
             config = ConnectorSourceConfig(

@@ -5,7 +5,9 @@ key through the `direct` backend — plus the pinned backfill window holding acr
 
 import asyncio
 import base64
+import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,7 +29,10 @@ from ufo_ext_embed_openai import EMBED_DIM
 from ufo_ext_index_default import DefaultIndex
 from ufo_ext_memory.store import PageIndexer
 from ufo_ext_sources.direct import DirectAuthProxy
+from ufo_ext_sources.providers.github import GitHubConnector
 from ufo_ext_sources.providers.klaviyo import KLAVIYO_REVISION, KlaviyoConnector
+from ufo_ext_sources.tools import on_page_change
+from ufo_ext_sources.triggers import SourceTriggerStore
 
 from ufo.blob import FilesystemBlobStore
 from ufo.config import Config
@@ -42,22 +47,25 @@ from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.manifest import HookContext, PageChangeBatch
 from ufo.runtime.indexing import TextChunker
 from ufo.runtime.sources import rest
 from ufo.runtime.sources.sync import CorePageFeed, SyncDriver
+from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.sources import ConnectorSourceConfig
-from ufo.serve import _select_auth_proxy, _source_backends
+from ufo.serve import _select_auth_proxy, _source_backends, _source_watch_readers
 
 TOOL_NARRATION = "syncing their pages"
 
 ASANA_ACCOUNT = "ca_asana_e2e"
 GMAIL_ACCOUNT = "apn_gmail_e2e"
 KLAVIYO_KEY = "pk_live_byok_e2e"
+GITHUB_KEY = "ghp_byok_e2e"
 MEMBER_WINDOW_DAYS = 7
 DUE_AGAIN_AT = datetime(2000, 1, 1, tzinfo=UTC)
 KLAVIYO_PROFILE = {
@@ -906,3 +914,807 @@ async def _source_row(state: State) -> sa.Row[Any]:
                     )
                 )
             ).one()
+
+
+WATCHED_PULL = "https://github.com/acme/repo1/pull/3122"
+WATCHED_PULL_IDENTITY = "pull_requests/acme/repo1/9003122"
+PULL_STREAMS = ("organizations", "repositories", "pull_requests")
+
+
+def _pull_node(number: int, checks: str) -> dict[str, Any]:
+    return {
+        "databaseId": int(f"900{number}"),
+        "number": number,
+        "title": "Add retry to egress dial",
+        "state": "OPEN",
+        "isDraft": False,
+        "mergeable": "MERGEABLE",
+        "reviewDecision": None,
+        "updatedAt": "2026-01-05T00:00:00Z",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "author": {"login": "ada"},
+        "headRefName": "work",
+        "baseRefName": "main",
+        "url": f"https://github.com/acme/repo1/pull/{number}",
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "statusCheckRollup": {
+                            "state": checks,
+                            "contexts": {"nodes": [{"name": "ci", "conclusion": checks}]},
+                        }
+                    }
+                }
+            ]
+        },
+        "reviews": {"nodes": []},
+        "reviewThreads": {"nodes": []},
+        "files": {"nodes": [{"path": "a.py", "additions": 1, "deletions": 0}]},
+        "timelineItems": {"nodes": []},
+    }
+
+
+def _graphql_answer(request_body: dict[str, Any], checks: str) -> dict[str, Any]:
+    variables = request_body["variables"]
+    repository = (
+        {"pullRequest": _pull_node(variables["number"], checks)}
+        if "number" in variables
+        else {
+            "pullRequests": {
+                "nodes": [_pull_node(4, "SUCCESS")],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        }
+    )
+    return {
+        "data": {
+            "rateLimit": {"cost": 3, "remaining": 4000, "resetAt": "2026-09-12T23:00:00Z"},
+            "repository": repository,
+        }
+    }
+
+
+PAGE_BATCH = 50
+
+
+def _sources_context(invoker: object | None = None) -> Any:
+    manifest = sources_manifest.manifest()
+    declared = frozenset(slot.name for slot in manifest.credentials)
+    return context_for(manifest.name, declared, invoker=invoker)
+
+
+@dataclass
+class _StubDbos:
+    async def enqueue_async(self, options: object, workspace_id: str, workflow_id: str) -> None:
+        return None
+
+
+GITHUB_BODIES: dict[str, list[dict[str, Any]]] = {
+    "/user/orgs": [{"login": "acme", "id": 1}],
+    "/orgs/acme/repos": [
+        {
+            "id": 100,
+            "name": "repo1",
+            "full_name": "acme/repo1",
+            "owner": {"login": "acme"},
+            "updated_at": "2026-02-02T00:00:00Z",
+            "archived": False,
+            "fork": False,
+        }
+    ],
+    "/repos/acme/repo1/issues": [
+        {"id": 500, "number": 1, "title": "Bug", "updated_at": "2026-02-04T00:00:00Z"}
+    ],
+}
+
+
+async def _github_listener(
+    seen: list[str], bodies: Mapping[str, list[dict[str, Any]]] = GITHUB_BODIES
+) -> asyncio.Server:
+    """GitHub's own host as a real listener, answering the three paths its catalog root, its repo
+    collection and one repo's issues take. `seen` is the request path each dial actually carried."""
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = (await reader.readuntil(b"\r\n\r\n")).decode()
+        target = head.split("\r\n")[0].split(" ")[1]
+        path = target.split("?")[0]
+        seen.append(path)
+        payload = json.dumps(bodies.get(path, [])).encode()
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"Connection: close\r\nContent-Length: %d\r\n\r\n" % len(payload) + payload
+        )
+        await writer.drain()
+        writer.close()
+
+    return await asyncio.start_server(answer, "127.0.0.1", 0)
+
+
+async def _github_graphql_listener(seen: list[str], checks: list[str]) -> asyncio.Server:
+    """GitHub's own host, answering the catalog over REST and pull requests over GraphQL. `seen` is
+    every path dialed, in order, and a POST body names the pull request it asked for."""
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        head = (await reader.readuntil(b"\r\n\r\n")).decode()
+        lines = head.split("\r\n")
+        path = lines[0].split(" ")[1].split("?")[0]
+        length = next(
+            (int(line.split(":", 1)[1]) for line in lines if line.lower().startswith("content-l")),
+            0,
+        )
+        body = json.loads(await reader.readexactly(length)) if length else {}
+        if path == "/graphql":
+            variables = body["variables"]
+            seen.append(f"/graphql/{variables['number']}" if "number" in variables else "/graphql")
+            payload = json.dumps(_graphql_answer(body, checks[0])).encode()
+        else:
+            seen.append(path)
+            payload = json.dumps(GITHUB_BODIES.get(path, [])).encode()
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"Connection: close\r\nContent-Length: %d\r\n\r\n" % len(payload) + payload
+        )
+        await writer.drain()
+        writer.close()
+
+    return await asyncio.start_server(answer, "127.0.0.1", 0)
+
+
+async def _tick(state: State, driver: SyncDriver) -> None:
+    with ws(state.workspace_id), agent(state.agent_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .values(next_sync_at=DUE_AGAIN_AT, claimed_by=None, claim_expires_at=None)
+                .where(tables.source.c.workspace_id == state.workspace_id)
+            )
+        await driver.run()
+
+
+async def _pull_revision(state: State) -> tuple[int, str]:
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.revision, tables.page.c.body_ref).where(
+                            tables.page.c.workspace_id == state.workspace_id,
+                            tables.page.c.source_identity == WATCHED_PULL_IDENTITY,
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+    return row["revision"], row["body_ref"]
+
+
+async def _github_driver(
+    state: State,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seen: list[str],
+    checks: list[str],
+) -> tuple[SyncDriver, UUID, asyncio.Server]:
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+
+    def composio_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"path": request.url.path})
+
+    client = composio.ComposioClient(
+        api_key="test", transport=httpx.MockTransport(composio_handler)
+    )
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    broker_manifest = composio_manifest.manifest()
+    connectors = _registry(broker_manifest, "github", _selected_fallback(store, broker_manifest))
+    context = _context(state, GrantStore(), connectors)
+    listener = await _github_graphql_listener(seen, checks)
+    monkeypatch.setattr(
+        GitHubConnector, "base_url", f"http://127.0.0.1:{listener.sockets[0].getsockname()[1]}"
+    )
+    manifest = sources_manifest.manifest()
+    driver = SyncDriver(
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+        backends=_source_backends((manifest,)),
+        source_credentials=SourceCredentialResolver(connectors),
+        watch_readers=_source_watch_readers((manifest,)),
+    )
+    with ws(state.workspace_id), agent(state.agent_id):
+        await ws_current().put_credential("github", GITHUB_KEY)
+        connection_id = await context.ext.register_connection("github")
+        for stream in PULL_STREAMS:
+            await context.ext.register_source(
+                "github", ConnectorSourceConfig(stream=stream), connection_id=connection_id
+            )
+    return driver, connection_id, listener
+
+
+async def test_a_watched_pull_request_is_read_every_tick_and_wakes_its_conversation(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole watch path over a real socket: a trigger naming a pull request URL and no streams
+    at all, the connection's own rows syncing under the real driver, and the conversation woken by
+    what moved.
+
+    The pull request's `updatedAt` never moves — a check run does not touch it — so the repository's
+    newest-first walk reaches it on no tick. It lands every tick because the trigger pinned it, its
+    page takes a new revision when the rollup flips, and that revision is what wakes the
+    conversation. The pass interval holds the catalog walk back on the second tick and the watched
+    read goes out regardless, which is the whole shape of the two together."""
+    state = await _state()
+    seen: list[str] = []
+    checks = ["PENDING"]
+    driver, connection_id, listener = await _github_driver(
+        state, database_url, tmp_path, monkeypatch, seen, checks
+    )
+    try:
+        with ws(state.workspace_id), agent(state.agent_id):
+            await SourceTriggerStore(_sources_context()).create(
+                conversation_id=state.conversation_id,
+                connection_id=connection_id,
+                delivery="current",
+                created_by_member_id=state.member_id,
+                resource=WATCHED_PULL,
+            )
+        await _tick(state, driver)
+        pending_revision, pending_body = await _pull_revision(state)
+
+        checks[0] = "FAILURE"
+        await _tick(state, driver)
+        failed_revision, failed_body = await _pull_revision(state)
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    graphql = [path for path in seen if path.startswith("/graphql")]
+    assert graphql == ["/graphql/3122", "/graphql", "/graphql/3122"]
+    assert failed_revision > pending_revision
+    assert failed_body != pending_body
+
+    with ws(state.workspace_id), agent(state.agent_id):
+        ext = _sources_context(
+            invoker=AdmissionInvoker(
+                admission=Admission(dbos=_StubDbos(), durable_surfaces=frozenset({"cli"})),
+                workspace_id=state.workspace_id,
+            )
+        )
+        feed = CorePageFeed(blob=FilesystemBlobStore(root=tmp_path / "blobs"))
+        batch = await feed.pages_changed_since(None, PAGE_BATCH)
+        await on_page_change(HookContext(ext=ext, payload=PageChangeBatch(changes=batch.changes)))
+
+    async with workspace_tx() as connection:
+        turns = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.inbound).where(
+                        tables.turn.c.conversation_id == state.conversation_id
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert len(turns) == 1
+    assert turns[0]["inbound"].startswith("github: Add retry to egress dial — pull_requests")
+    assert WATCHED_PULL in turns[0]["inbound"]
+
+
+async def test_an_unwatched_connection_reads_no_pull_request_by_number(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same three rows with no trigger: the pull requests row walks the repository once, waits
+    out its pass interval across the ticks after it, and asks for no pull request by number at
+    all."""
+    state = await _state()
+    seen: list[str] = []
+    driver, _, listener = await _github_driver(
+        state, database_url, tmp_path, monkeypatch, seen, ["SUCCESS"]
+    )
+    try:
+        for _ in range(3):
+            await _tick(state, driver)
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    assert seen.count("/graphql") == 1
+    assert [path for path in seen if path.startswith("/graphql/")] == []
+
+
+async def test_a_child_stream_fans_out_over_the_pages_its_parent_row_landed(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tree through the real driver: three rows of one connection, each a stream of GitHub's
+    catalog, over a real socket. `organizations` reads the root; `repositories` fans out over the
+    organization pages that row landed; `issues` fans out over the repository pages that row landed,
+    and every issue page is addressed under the repository page it hangs off.
+
+    Nothing between the rows is stood in for — the parent records come back out of the `page` table
+    the previous pass wrote, read under the connection's own authority — so the assertion that
+    `/user/orgs` is dialed once per pass is the whole redundancy this replaces: before, all three
+    rows re-derived that catalog on every run of every one of them."""
+    state = await _state()
+    seen: list[str] = []
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+
+    def composio_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"path": request.url.path})
+
+    client = composio.ComposioClient(
+        api_key="test", transport=httpx.MockTransport(composio_handler)
+    )
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    broker_manifest = composio_manifest.manifest()
+    connectors = _registry(broker_manifest, "github", _selected_fallback(store, broker_manifest))
+    context = _context(state, GrantStore(), connectors)
+    listener = await _github_listener(seen)
+    monkeypatch.setattr(
+        GitHubConnector, "base_url", f"http://127.0.0.1:{listener.sockets[0].getsockname()[1]}"
+    )
+    driver = SyncDriver(
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+        backends=_source_backends((sources_manifest.manifest(),)),
+        source_credentials=SourceCredentialResolver(connectors),
+    )
+    try:
+        with ws(state.workspace_id), agent(state.agent_id):
+            await ws_current().put_credential("github", GITHUB_KEY)
+            connection_id = await context.ext.register_connection("github")
+            for stream in ("organizations", "repositories", "issues"):
+                await context.ext.register_source(
+                    "github", ConnectorSourceConfig(stream=stream), connection_id=connection_id
+                )
+        for _ in range(3):
+            with ws(state.workspace_id), agent(state.agent_id):
+                async with workspace_tx() as connection:
+                    await connection.execute(
+                        sa.update(tables.source)
+                        .values(next_sync_at=DUE_AGAIN_AT, claimed_by=None, claim_expires_at=None)
+                        .where(tables.source.c.workspace_id == state.workspace_id)
+                    )
+                await driver.run()
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            landed = (
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.source_identity, tables.page.c.parent_fields).where(
+                            tables.page.c.workspace_id == state.workspace_id
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+    fields = {row["source_identity"]: row["parent_fields"] for row in landed}
+    assert set(fields) == {
+        "organizations/1",
+        "repositories/acme/100",
+        "issues/acme/repo1/500",
+    }
+    assert fields["organizations/1"] == {"login": "acme"}
+    assert fields["repositories/acme/100"] == {
+        "full_name": "acme/repo1",
+        "name": "repo1",
+        "owner.login": "acme",
+    }
+    assert seen.count("/user/orgs") == 3
+    assert seen.count("/repos/acme/repo1/issues") >= 1
+
+
+async def test_a_repository_that_stops_qualifying_is_tombstoned_and_leaves_the_partition_set(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The catalog through the real driver: two repositories land and `issues` asks both; the
+    second is archived by the next pass, so `repositories` — a full listing every pass, swept
+    against as authoritative — no longer holds it and its page is tombstoned. `issues` then reads
+    its partitions off the non-tombstoned repository pages and asks the first alone. Nothing between
+    the rows is stood in for: the parent records come back out of the `page` table the previous
+    pass wrote."""
+    state = await _state()
+    seen: list[str] = []
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+
+    def composio_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"path": request.url.path})
+
+    client = composio.ComposioClient(
+        api_key="test", transport=httpx.MockTransport(composio_handler)
+    )
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    broker_manifest = composio_manifest.manifest()
+    connectors = _registry(broker_manifest, "github", _selected_fallback(store, broker_manifest))
+    context = _context(state, GrantStore(), connectors)
+    repo1, repo2 = (
+        GITHUB_BODIES["/orgs/acme/repos"][0],
+        {
+            **GITHUB_BODIES["/orgs/acme/repos"][0],
+            "id": 101,
+            "name": "repo2",
+            "full_name": "acme/repo2",
+        },
+    )
+    bodies: dict[str, list[dict[str, Any]]] = {
+        **GITHUB_BODIES,
+        "/orgs/acme/repos": [repo1, repo2],
+        "/repos/acme/repo2/issues": [
+            {"id": 600, "number": 1, "title": "Flake", "updated_at": "2026-02-04T00:00:00Z"}
+        ],
+    }
+    listener = await _github_listener(seen, bodies)
+    monkeypatch.setattr(
+        GitHubConnector, "base_url", f"http://127.0.0.1:{listener.sockets[0].getsockname()[1]}"
+    )
+    driver = SyncDriver(
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+        backends=_source_backends((sources_manifest.manifest(),)),
+        source_credentials=SourceCredentialResolver(connectors),
+    )
+    try:
+        with ws(state.workspace_id), agent(state.agent_id):
+            await ws_current().put_credential("github", GITHUB_KEY)
+            connection_id = await context.ext.register_connection("github")
+            rows = {
+                stream: await context.ext.register_source(
+                    "github", ConnectorSourceConfig(stream=stream), connection_id=connection_id
+                )
+                for stream in ("organizations", "repositories", "issues")
+            }
+        for stream in ("organizations", "repositories", "issues"):
+            await _park(state)
+            await _make_due(state, rows[stream])
+            with ws(state.workspace_id), agent(state.agent_id):
+                await driver.run()
+        landed_before = await _live_identities(state)
+        bodies["/orgs/acme/repos"] = [repo1, {**repo2, "archived": True}]
+        asked_before = len(seen)
+        for stream in ("repositories", "issues"):
+            await _park(state)
+            await _make_due(state, rows[stream])
+            with ws(state.workspace_id), agent(state.agent_id):
+                await driver.run()
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    assert {"repositories/acme/100", "repositories/acme/101"} <= landed_before
+    assert {"issues/acme/repo1/500", "issues/acme/repo2/600"} <= landed_before
+    assert await _faults(state) == 0
+    tombstoned = await _tombstoned_identities(state)
+    assert "repositories/acme/101" in tombstoned
+    assert "repositories/acme/100" not in tombstoned
+    assert "/repos/acme/repo1/issues" in seen[asked_before:]
+    assert "/repos/acme/repo2/issues" not in seen[asked_before:]
+
+
+async def _live_identities(state: State) -> set[str]:
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            rows = await connection.execute(
+                sa.select(tables.page.c.source_identity).where(
+                    tables.page.c.workspace_id == state.workspace_id,
+                    tables.page.c.tombstone.is_(False),
+                )
+            )
+            return {row[0] for row in rows}
+
+
+async def _tombstoned_identities(state: State) -> set[str]:
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            rows = await connection.execute(
+                sa.select(tables.page.c.source_identity).where(
+                    tables.page.c.workspace_id == state.workspace_id,
+                    tables.page.c.tombstone.is_(True),
+                )
+            )
+            return {row[0] for row in rows}
+
+
+async def test_the_pages_a_connection_already_holds_are_adopted_not_relanded(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What a connection that already syncs meets on the tick this lands: its `repositories` and
+    `issues` rows hold pages addressed `repositories/acme/100` and `issues/acme/repo1/500`, carrying
+    no projection because nothing hung under their streams when they landed.
+
+    Every one of them settles on the row it already has — same page uid, no second row — because a
+    record is addressed by the values its edge's path reads, which is what the repo-scoped key spelt
+    out by hand. And a page carrying no projection is not a record to fan from, so the run that
+    meets one raises nothing and its stream keeps syncing."""
+    state = await _state()
+    seen: list[str] = []
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+
+    def composio_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"path": request.url.path})
+
+    client = composio.ComposioClient(
+        api_key="test", transport=httpx.MockTransport(composio_handler)
+    )
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    broker_manifest = composio_manifest.manifest()
+    connectors = _registry(broker_manifest, "github", _selected_fallback(store, broker_manifest))
+    context = _context(state, GrantStore(), connectors)
+    listener = await _github_listener(seen)
+    monkeypatch.setattr(
+        GitHubConnector, "base_url", f"http://127.0.0.1:{listener.sockets[0].getsockname()[1]}"
+    )
+    driver = SyncDriver(
+        blob=FilesystemBlobStore(root=tmp_path / "blobs"),
+        postgres=database_url.startswith("postgresql"),
+        backends=_source_backends((sources_manifest.manifest(),)),
+        source_credentials=SourceCredentialResolver(connectors),
+    )
+    try:
+        with ws(state.workspace_id), agent(state.agent_id):
+            await ws_current().put_credential("github", GITHUB_KEY)
+            connection_id = await context.ext.register_connection("github")
+            rows = {
+                stream: await context.ext.register_source(
+                    "github", ConnectorSourceConfig(stream=stream), connection_id=connection_id
+                )
+                for stream in ("organizations", "repositories", "issues")
+            }
+            planted = {
+                "repositories/acme/100": await _plant(
+                    state, rows["repositories"], "repositories/acme/100"
+                ),
+                "issues/acme/repo1/500": await _plant(
+                    state, rows["issues"], "issues/acme/repo1/500"
+                ),
+            }
+        await _make_due(state, rows["issues"])
+        with ws(state.workspace_id), agent(state.agent_id):
+            await driver.run()
+        faults = await _faults(state)
+        for _ in range(3):
+            await _make_due(state)
+            with ws(state.workspace_id), agent(state.agent_id):
+                await driver.run()
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            live = (
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.source_identity, tables.page.c.uid).where(
+                            tables.page.c.workspace_id == state.workspace_id,
+                            tables.page.c.tombstone.is_(False),
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+    held = {row["source_identity"]: row["uid"] for row in live}
+    assert faults == 0
+    assert set(held) == {"organizations/1", "repositories/acme/100", "issues/acme/repo1/500"}
+    assert held["repositories/acme/100"] == planted["repositories/acme/100"]
+    assert held["issues/acme/repo1/500"] == planted["issues/acme/repo1/500"]
+
+
+async def _park(state: State) -> None:
+    """Hold every row of the workspace off the due list, so a run drives exactly the rows a test
+    then makes due — registration leaves them all due at once."""
+    with ws(state.workspace_id), agent(state.agent_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .values(next_sync_at=datetime(2099, 1, 1, tzinfo=UTC))
+                .where(tables.source.c.workspace_id == state.workspace_id)
+            )
+
+
+async def _make_due(state: State, source_id: UUID | None = None) -> None:
+    with ws(state.workspace_id), agent(state.agent_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.source)
+                .values(next_sync_at=DUE_AGAIN_AT, claimed_by=None, claim_expires_at=None)
+                .where(
+                    tables.source.c.workspace_id == state.workspace_id,
+                    *(() if source_id is None else (tables.source.c.uid == source_id,)),
+                )
+            )
+
+
+async def _faults(state: State) -> int:
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            return sum(
+                (
+                    await connection.execute(
+                        sa.select(tables.source.c.consecutive_errors).where(
+                            tables.source.c.workspace_id == state.workspace_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+
+def _repository_digest() -> str:
+    """The digest the driver derives for the repository the listener answers with, off the real
+    connector's own render over the record as the organization edge carries it, so a run of
+    `repositories` finds that page unchanged."""
+    connector = GitHubConnector()
+    stream = next(spec for spec in connector.streams() if spec.name == "repositories")
+    record = {**GITHUB_BODIES["/orgs/acme/repos"][0], "org_login": "acme"}
+    _, body = connector.render(connector.flatten(record, stream), stream)
+    return "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+
+
+def _stored_bodies(root: Path) -> int:
+    return sum(1 for path in root.rglob("*") if path.is_file())
+
+
+async def _landed_fields(state: State) -> dict[str, dict[str, str] | None]:
+    with ws(state.workspace_id):
+        async with workspace_tx() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        sa.select(tables.page.c.source_identity, tables.page.c.parent_fields).where(
+                            tables.page.c.workspace_id == state.workspace_id,
+                            tables.page.c.tombstone.is_(False),
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+    return {row["source_identity"]: row["parent_fields"] for row in rows}
+
+
+async def test_an_edge_declared_after_a_page_landed_reaches_it_without_a_refetch(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A page that landed before anything hung under its stream carries no projection, and its body
+    has not moved since — so the digest skip writes no blob for it and the browse comparison is the
+    only thing that can put the fields on the row. That comparison is what every later edge rests
+    on: until it runs the child fans over nothing, and the pass that runs it is the pass after which
+    the child reaches the parent, at one request on the edge's path.
+
+    The blob count across the parent's pass says which path wrote it: a run that re-landed the body
+    would have written one."""
+    state = await _state()
+    seen: list[str] = []
+    store = CredentialStore(fernet=Fernet(Fernet.generate_key()))
+    init_workspace_credentials(store)
+
+    def composio_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"path": request.url.path})
+
+    client = composio.ComposioClient(
+        api_key="test", transport=httpx.MockTransport(composio_handler)
+    )
+    monkeypatch.setattr(composio, "composio_client", lambda: client)
+    broker_manifest = composio_manifest.manifest()
+    connectors = _registry(broker_manifest, "github", _selected_fallback(store, broker_manifest))
+    context = _context(state, GrantStore(), connectors)
+    listener = await _github_listener(seen)
+    monkeypatch.setattr(
+        GitHubConnector, "base_url", f"http://127.0.0.1:{listener.sockets[0].getsockname()[1]}"
+    )
+    blobs = tmp_path / "blobs"
+    driver = SyncDriver(
+        blob=FilesystemBlobStore(root=blobs),
+        postgres=database_url.startswith("postgresql"),
+        backends=_source_backends((sources_manifest.manifest(),)),
+        source_credentials=SourceCredentialResolver(connectors),
+    )
+    try:
+        with ws(state.workspace_id), agent(state.agent_id):
+            await ws_current().put_credential("github", GITHUB_KEY)
+            connection_id = await context.ext.register_connection("github")
+            rows = {
+                stream: await context.ext.register_source(
+                    "github", ConnectorSourceConfig(stream=stream), connection_id=connection_id
+                )
+                for stream in ("organizations", "repositories", "issues")
+            }
+        await _park(state)
+        await _make_due(state, rows["organizations"])
+        with ws(state.workspace_id), agent(state.agent_id):
+            await driver.run()
+        with ws(state.workspace_id):
+            await _plant(
+                state,
+                rows["repositories"],
+                "repositories/acme/100",
+                _repository_digest(),
+            )
+
+        await _make_due(state, rows["issues"])
+        with ws(state.workspace_id), agent(state.agent_id):
+            await driver.run()
+        unreached = list(seen)
+        stored = _stored_bodies(blobs)
+
+        await _make_due(state, rows["repositories"])
+        with ws(state.workspace_id), agent(state.agent_id):
+            await driver.run()
+        rewritten = _stored_bodies(blobs)
+        carried = await _landed_fields(state)
+
+        await _make_due(state, rows["issues"])
+        with ws(state.workspace_id), agent(state.agent_id):
+            await driver.run()
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    assert unreached.count("/repos/acme/repo1/issues") == 0
+    assert rewritten == stored
+    assert carried["repositories/acme/100"] == {
+        "full_name": "acme/repo1",
+        "name": "repo1",
+        "owner.login": "acme",
+    }
+    assert seen.count("/repos/acme/repo1/issues") == 1
+    assert "issues/acme/repo1/500" in await _landed_fields(state)
+
+
+async def _plant(
+    state: State,
+    source_id: UUID,
+    identity: str,
+    digest: str = "sha256:" + "0" * 64,
+) -> UUID:
+    """One page carrying no projection, at the address and body digest given, and its row id."""
+    now = datetime.now(UTC)
+    uid = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.page).values(
+                uid=uid,
+                workspace_id=state.workspace_id,
+                source_uid=source_id,
+                source_identity=identity,
+                digest=digest,
+                body_ref="planted",
+                stream=identity.split("/")[0],
+                title=identity,
+                subject="shared",
+                tombstone=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return uid

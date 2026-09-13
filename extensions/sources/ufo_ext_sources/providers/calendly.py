@@ -5,29 +5,49 @@ Every collection is organization-scoped: the connector first reads `/users/me` f
 `current_organization`, then fans each stream out under `?organization=<uri>`. Collections page by
 the `pagination.next_page_token` the response body carries (`?page_token=<token>&count=100`).
 `event_types` and `scheduled_events` filter incrementally through Calendly's own `updated_since` /
-`min_start_time` params; `event_invitees` fans out per scheduled event and filters past the stored
-watermark on `created_at`. A grant whose account exposes no `current_organization` yields
+`min_start_time` params. A grant whose account exposes no `current_organization` yields
 `StreamSkipped`. Organization memberships lift the member's name and email, then drop the foreign
 user object so profile changes do not change the membership. Auth is the OAuth bearer the resolved
 `Credential` carries. A refusal (401/403) raises `StreamSkipped` too. The write path is
-intentionally absent — the source seam only reads."""
+intentionally absent — the source seam only reads.
+
+Calendly is HATEOAS: a scheduled event's `uri` is its own absolute address, so `event_invitees`
+hangs under it at `{uri}/invitees` and the request needs no id lifted out of the URL. Invitees come
+back `sort=created_at:desc`, which is the `cursor_field`'s own order, and the endpoint takes no time
+filter, so the bound is applied to the records the page carries."""
 
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import httpx
 
 from ufo.sdk.sources import (
+    Ordering,
+    ParentEdge,
+    Partition,
+    PartitionBound,
     RestConnector,
+    Run,
+    StreamPage,
     StreamSkipped,
     StreamSpec,
+    WalkPage,
     dict_or_empty,
+    fanned_out,
     with_context,
 )
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
+INVITEE_SORT = "created_at:desc"
 _REFUSAL_STATUS = frozenset({401, 403})
+
+
+def _cursor_bounds(records: list[dict[str, Any]], field: str) -> tuple[str | None, str | None]:
+    values = sorted(str(record[field]) for record in records if isinstance(record.get(field), str))
+    return (values[-1], values[0]) if values else (None, None)
+
 
 CALENDLY_STREAMS: list[StreamSpec] = [
     StreamSpec(name="api_user", source_object="users/me", primary_key="uri"),
@@ -56,14 +76,10 @@ CALENDLY_STREAMS: list[StreamSpec] = [
         source_object="event_invitees",
         primary_key="uri",
         cursor_field="created_at",
+        ordering=Ordering.newest_first,
+        parents=(ParentEdge(stream="scheduled_events", path="{uri}/invitees"),),
     ),
 ]
-
-
-def _uuid_from_uri(uri: Any) -> str | None:
-    if not isinstance(uri, str) or not uri:
-        return None
-    return uri.rstrip("/").rsplit("/", 1)[-1]
 
 
 class CalendlyConnector(RestConnector):
@@ -110,29 +126,27 @@ class CalendlyConnector(RestConnector):
         async for page in self._paginate_collection(client, path, params=params):
             yield with_context(page, organization=org)
 
-    async def _invitees(
-        self, client: httpx.AsyncClient, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for events in self._org_stream(client, "/scheduled_events"):
-            for event in events:
-                event_uuid = _uuid_from_uri(event.get("uri"))
-                if not event_uuid:
-                    continue
-                async for invitees in self._paginate_collection(
-                    client, f"/scheduled_events/{event_uuid}/invitees"
-                ):
-                    if cursor:
-                        invitees = [i for i in invitees if str(i.get("created_at") or "") > cursor]
-                    if invitees:
-                        yield with_context(
-                            invitees,
-                            scheduled_event_uri=event.get("uri"),
-                            scheduled_event_uuid=event_uuid,
-                        )
+    async def _invitee_pages(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        async for page in self._paginate_collection(
+            client, partition.path, params={"sort": INVITEE_SORT}
+        ):
+            landed = [
+                record
+                for record in page
+                if isinstance(record.get("created_at"), str)
+                and (bound.before is None or record["created_at"] <= bound.before)
+                and (bound.since is None or record["created_at"] >= bound.since)
+                and (bound.after is None or record["created_at"] > bound.after)
+            ]
+            high, _ = _cursor_bounds(landed, "created_at")
+            _, low = _cursor_bounds(page, "created_at")
+            yield WalkPage(records=landed, high=high, low=low)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name == "api_user":
                 user = await self._current_user(client)
@@ -141,7 +155,7 @@ class CalendlyConnector(RestConnector):
                 return
             if stream.name == "event_types":
                 async for page in self._org_stream(
-                    client, "/event_types", cursor=cursor, cursor_param="updated_since"
+                    client, "/event_types", cursor=run.cursor, cursor_param="updated_since"
                 ):
                     yield page
                 return
@@ -155,13 +169,14 @@ class CalendlyConnector(RestConnector):
                 return
             if stream.name == "scheduled_events":
                 async for page in self._org_stream(
-                    client, "/scheduled_events", cursor=cursor, cursor_param="min_start_time"
+                    client, "/scheduled_events", cursor=run.cursor, cursor_param="min_start_time"
                 ):
                     yield page
                 return
             if stream.name == "event_invitees":
-                async for page in self._invitees(client, cursor=cursor):
-                    yield page
+                pages = partial(self._invitee_pages, client)
+                async for invitees in fanned_out(stream, run, pages):
+                    yield invitees
                 return
             raise StreamSkipped(f"calendly stream {stream.name!r} is not implemented")
         except httpx.HTTPStatusError as error:

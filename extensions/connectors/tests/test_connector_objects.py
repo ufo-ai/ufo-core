@@ -1584,8 +1584,8 @@ class _StreamConfig(BaseModel):
 
 
 async def test_a_connections_status_lists_the_streams_it_syncs(db: None) -> None:
-    """A connection carries no stream list to edit — its canonical streams are the connector's, and
-    the sources registrar lands one row per canonical stream through `register_source`, the call
+    """A connection carries no stream list to edit — its syncing streams are the connector's, and
+    the sources registrar lands one row per syncing stream through `register_source`, the call
     made here — but a member asking what an account syncs reads it off those rows: each stream under
     the connection, its next sync, its error count and the reason the provider parked it, if it
     did."""

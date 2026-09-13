@@ -1,9 +1,9 @@
+from inspect import getsource
+
 import pytest
 from ufo_ext_sources.manifest import manifest
 from ufo_ext_sources.providers.asana import AsanaConnector
 from ufo_ext_sources.registry import CONNECTORS, _connector_registry
-
-from ufo.sdk.sources import RestConnector
 
 
 class FirstConnector(AsanaConnector):
@@ -25,17 +25,13 @@ def test_registry_rejects_duplicate_connector_names() -> None:
 
 
 def test_every_connector_declaring_a_window_reads_the_floor_it_is_handed() -> None:
-    """A run's pinned floor arrives as `fetch_page`'s `backfill_after`, and `paginate_source` drops
-    it by default so the connectors that read no window keep the `paginate` they have. That default
-    is a trap for the next connector to declare `backfill_window_days`: the connection's window
-    would be resolved onto the row and pinned, while its walk quietly reached back forever —
-    honoured by nothing, which is the exact state a stream declaring no window avoids by taking no
-    cutoff at all.
+    """A run's pinned floor arrives as `Run.backfill_after`, and every connector's `paginate` is
+    handed the run whole — so a connector that declares `backfill_window_days` and never reads it
+    has the connection's window resolved onto its row and pinned while its walk reaches back
+    forever, honoured by nothing. That is the exact state a stream declaring no window avoids by
+    taking no cutoff at all, so declaring one obliges the connector to read the floor it is given.
 
-    So declaring a window on a stream obliges the connector to take delivery of one. Overriding
-    `paginate_source` is how a REST connector does that (gmail and outlook do; slack overrides it
-    for the acting identity instead and declares no window). A `ToolConnector` is obliged by its own
-    ABC — `paginate` takes the floor as an argument — so granola_mcp meets it by construction."""
+    Nothing hides the value any more — the obligation is to use it, which is what this reads."""
     obliged = {
         name: [stream.name for stream in cls().streams() if stream.backfill_window_days is not None]
         for name, cls in CONNECTORS.items()
@@ -44,10 +40,9 @@ def test_every_connector_declaring_a_window_reads_the_floor_it_is_handed() -> No
     assert set(declaring) == {"datadog", "github", "gmail", "granola_mcp", "outlook", "slack"}
 
     deaf = [
-        f"{name} declares a window on {streams} but does not override paginate_source"
+        f"{name} declares a window on {streams} and its paginate never reads the floor"
         for name, streams in declaring.items()
-        if issubclass(CONNECTORS[name], RestConnector)
-        and CONNECTORS[name].paginate_source is RestConnector.paginate_source
+        if "backfill_after" not in getsource(CONNECTORS[name].paginate)
     ]
     assert deaf == []
 

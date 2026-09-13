@@ -4,10 +4,11 @@ recordings synced into recallable pages.
 Attio splits its API across endpoint families the connector picks per stream. Standard/custom
 objects read through `POST /v2/objects/<slug>/records/query` with offset paging; tasks and notes are
 workspace-level resources at `/v2/tasks` and `/v2/notes` (offset-paged); meetings and call
-recordings use the newer cursor-paged endpoints, and call recordings fan out per meeting with each
-recording's transcript fetched inline. Attio exposes no uniform "last modified" slug, so every
-stream is a full
-snapshot (`delete_missing`) keyed idempotently by the record's composite id.
+recordings use the newer cursor-paged endpoints. Attio publishes a recording only under the meeting
+that holds it (`/v2/meetings/{id}/call_recordings`), and the transcript only under the recording, so
+a recording is one request and its transcript another. Attio exposes no uniform "last modified"
+slug, so every stream is a full snapshot (`delete_missing`) keyed idempotently by the record's
+composite id.
 
 `flatten` is where this connector does its real work: an Attio record nests its identity under `id`
 and every attribute under a `values` array of value-cells, so `flatten` lifts the id (`record_id` /
@@ -18,12 +19,23 @@ standard object (`standard_object_disabled`) or a missing OAuth scope (`403 unau
 intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
-from datetime import datetime
+from functools import partial
 from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_LIMIT = 50  # Attio records-query limit cap
@@ -63,6 +75,13 @@ ATTIO_STREAMS: list[StreamSpec] = [
         source_object="call_recordings",
         primary_key="call_recording_id",
         delete_missing=True,
+        parents=(
+            ParentEdge(
+                stream="meetings",
+                path="/v2/meetings/{id.meeting_id}/call_recordings",
+                carry={"parent_meeting_id": "id.meeting_id"},
+            ),
+        ),
     ),
 ]
 
@@ -266,10 +285,10 @@ class AttioConnector(RestConnector):
         return self._flatten_record(record, stream)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
-            async for page in self._pages(client, stream):
+            async for page in self._pages(client, stream, run):
                 yield page
         except httpx.HTTPStatusError as error:
             if self._is_scope_unauthorized(error):
@@ -277,8 +296,8 @@ class AttioConnector(RestConnector):
             raise
 
     def _pages(
-        self, client: httpx.AsyncClient, stream: StreamSpec
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         match stream.name:
             case "tasks":
                 return self._paginate_simple(client, "/v2/tasks", page_size=TASKS_PAGE_LIMIT)
@@ -287,9 +306,30 @@ class AttioConnector(RestConnector):
             case "meetings":
                 return self._paginate_cursor(client, "/v2/meetings", page_size=MEETINGS_PAGE_LIMIT)
             case "call_recordings":
-                return self._paginate_call_recordings(client)
+                return fanned_out(stream, run, partial(self._recording_pages, client))
             case _:
                 return self._paginate_records(client, stream)
+
+    async def _recording_pages(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        """One meeting's recordings, each carrying the transcript read from beneath it. Attio
+        publishes the transcript only under the recording, so it is one request per recording and
+        the row is incomplete without it."""
+        async for page in self._paginate_cursor(
+            client, partition.path, page_size=CALL_RECORDINGS_PAGE_LIMIT
+        ):
+            for recording in page:
+                recording_id = self._call_recording_id(recording)
+                if not recording_id:
+                    continue
+                transcript = await self._fetch_transcript(
+                    client, path=f"{partition.path}/{recording_id}/transcript"
+                )
+                if transcript is not None:
+                    recording["transcript"] = transcript.get("transcript") or []
+                    recording["raw_transcript"] = transcript.get("raw_transcript")
+            yield WalkPage(records=page)
 
     async def _paginate_records(
         self, client: httpx.AsyncClient, stream: StreamSpec
@@ -343,49 +383,10 @@ class AttioConnector(RestConnector):
         ):
             yield page
 
-    async def _paginate_call_recordings(
-        self, client: httpx.AsyncClient
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Per-meeting fan-out: walk every meeting, list its recordings, fetch each recording's
-        transcript inline, and stamp parent-meeting context on each row."""
-        async for meeting_page in self._paginate_cursor(
-            client, "/v2/meetings", page_size=MEETINGS_PAGE_LIMIT
-        ):
-            for meeting in meeting_page:
-                meeting_id = self._meeting_id(meeting)
-                if not meeting_id:
-                    continue
-                title = meeting.get("title")
-                start_at = self._datetime_of(meeting.get("start"))
-                end_at = self._datetime_of(meeting.get("end"))
-                duration = self._duration_seconds(start_at, end_at)
-                async for rec_page in self._paginate_cursor(
-                    client,
-                    f"/v2/meetings/{meeting_id}/call_recordings",
-                    page_size=CALL_RECORDINGS_PAGE_LIMIT,
-                ):
-                    for rec in rec_page:
-                        rec["parent_meeting_id"] = meeting_id
-                        rec.setdefault("title", title)
-                        rec.setdefault("starts_at", start_at)
-                        rec.setdefault("ends_at", end_at)
-                        if duration is not None:
-                            rec.setdefault("duration", duration)
-                        rec_id = self._call_recording_id(rec)
-                        if rec_id:
-                            transcript = await self._fetch_transcript(
-                                client, meeting_id=meeting_id, recording_id=rec_id
-                            )
-                            if transcript is not None:
-                                rec["transcript"] = transcript.get("transcript") or []
-                                rec["raw_transcript"] = transcript.get("raw_transcript")
-                    yield rec_page
-
     async def _fetch_transcript(
-        self, client: httpx.AsyncClient, *, meeting_id: str, recording_id: str
+        self, client: httpx.AsyncClient, *, path: str
     ) -> dict[str, Any] | None:
         """GET a recording's transcript; None when the recording isn't ready (404 / 409)."""
-        path = f"/v2/meetings/{meeting_id}/call_recordings/{recording_id}/transcript"
         try:
             data = await self._get(client, path)
         except httpx.HTTPStatusError as error:
@@ -396,38 +397,11 @@ class AttioConnector(RestConnector):
         return body if isinstance(body, dict) else None
 
     @staticmethod
-    def _meeting_id(meeting: dict[str, Any]) -> str | None:
-        ident = meeting.get("id") or {}
-        if isinstance(ident, dict):
-            return ident.get("meeting_id")
-        return ident if isinstance(ident, str) else None
-
-    @staticmethod
     def _call_recording_id(rec: dict[str, Any]) -> str | None:
         ident = rec.get("id") or {}
         if isinstance(ident, dict):
             return ident.get("call_recording_id")
         return ident if isinstance(ident, str) else None
-
-    @staticmethod
-    def _datetime_of(timeshape: Any) -> str | None:
-        """Attio's meeting start/end is `{datetime, timezone}` (timed) or `{date}` (all-day)."""
-        if not isinstance(timeshape, dict):
-            return None
-        return timeshape.get("datetime") or timeshape.get("date") or None
-
-    @staticmethod
-    def _duration_seconds(start_at: str | None, end_at: str | None) -> float | None:
-        """Coarse duration in seconds from ISO 8601 start/end; None if either is missing or
-        unparseable."""
-        if not start_at or not end_at:
-            return None
-        try:
-            start = datetime.fromisoformat(start_at.replace("Z", "+00:00"))
-            end = datetime.fromisoformat(end_at.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        return max(0.0, (end - start).total_seconds())
 
     @staticmethod
     def _is_object_disabled(error: httpx.HTTPStatusError) -> bool:

@@ -24,7 +24,12 @@ from urllib.parse import urlparse
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 KLAVIYO_REVISION = "2024-10-15"
@@ -247,14 +252,10 @@ class KlaviyoConnector(RestConnector):
         flat.setdefault("from_email", attrs.get("from_email") if isinstance(attrs, dict) else None)
 
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         path: str | None = f"/api/{stream.source_object}"
-        params: dict[str, Any] | None = self._initial_query(stream, cursor)
+        params: dict[str, Any] | None = self._initial_query(stream, run.cursor)
         wants_metric_lookup = stream.name == "events"
         try:
             while path:

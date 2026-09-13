@@ -84,6 +84,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ufo.sdk.sources import (
     RestConnector,
+    Run,
     StreamFault,
     StreamPage,
     StreamSkipped,
@@ -153,14 +154,14 @@ class GoogleSheetsConnector(RestConnector):
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[StreamPage]:
-        watermark, carried, retried = _decode_cursor(cursor)
+        watermark, carried, retried = _decode_cursor(run.cursor)
         page: list[dict[str, Any]] = []
         reported = watermark
         refused_ids = set(carried)
         listed: set[str] = set()
-        last = cursor
+        last = run.cursor
         try:
             async for visit in self._spreadsheet_visits(client, watermark=watermark):
                 listed.add(visit.file_id)

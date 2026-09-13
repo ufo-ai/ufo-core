@@ -26,6 +26,7 @@ import httpx
 
 from ufo.sdk.sources import (
     RestConnector,
+    Run,
     StreamSkipped,
     StreamSpec,
     get_path,
@@ -125,7 +126,7 @@ class ConfluenceConnector(RestConnector):
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         suffix = _PATHS.get(stream.name)
         if suffix is None:
@@ -140,7 +141,7 @@ class ConfluenceConnector(RestConnector):
                     client,
                     path,
                     params=_PARAMS.get(stream.name),
-                    cursor=cursor,
+                    cursor=run.cursor,
                     cursor_field=stream.cursor_field,
                 ):
                     yield with_context(page, cloud_id=cloud_id, site_url=site.get("url"))

@@ -7,21 +7,35 @@ Three read shapes share one `paginate` dispatch. High-volume objects (`tickets`,
 `end_of_stream`; `tickets` also sideloads `users` and lifts requester/assignee emails onto each
 record. The rest page through `next_page` links. `ticket_comments` derives from the
 `incremental/ticket_events.json` feed — each `Comment` child event is lifted to a row stamped with
-its `ticket_id`; `users_identities` fans out per user. The base URL is per-subdomain
-(`https://<subdomain>.zendesk.com`), so the class default is empty and a run without a resolved
-tenant URL fails loud. A refusal (401/403) raises `StreamSkipped`. The credential is resolved
-through the auth proxy the runner threads; this connector holds no token. The write path is
-intentionally absent — the source seam only reads."""
+its `ticket_id`. A Zendesk id is unique across the account, so a comment under an article is
+addressed by its own id, and the article it hangs under reaches its record as `article_id` — the
+provenance that ties a comment's votes back to the article, which the comment names `source_id`.
+
+The base URL is per-subdomain (`https://<subdomain>.zendesk.com`), so the class default is empty and
+a run without a resolved tenant URL fails loud. A refusal (401/403) raises `StreamSkipped`. The
+credential is resolved through the auth proxy the runner threads; this connector holds no token. The
+write path is intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from functools import partial
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
@@ -52,32 +66,13 @@ _DATA_FIELD_OVERRIDES = {
     "ticket_activities": "activities",
     "schedules": "schedules",
     "deleted_tickets": "deleted_tickets",
-}
-
-
-@dataclass(frozen=True)
-class _Hop:
-    """One collection on the way to a child stream's rows: the path segment it sits at, the body key
-    holding its records, and — for a collection being walked as a parent — the field each descendant
-    row carries its id in."""
-
-    collection: str
-    records: str
-    stamp: str = ""
-
-
-_ARTICLES = _Hop("help_center/articles", "articles", "article_id")
-_POSTS = _Hop("community/posts", "posts", "post_id")
-_COMMENTS = _Hop("comments", "comments", "comment_id")
-
-_CHILD_COLLECTIONS: dict[str, tuple[_Hop, ...]] = {
-    "article_attachments": (_ARTICLES, _Hop("attachments", "article_attachments")),
-    "article_comments": (_ARTICLES, _Hop("comments", "comments")),
-    "article_votes": (_ARTICLES, _Hop("votes", "votes")),
-    "article_comment_votes": (_ARTICLES, _COMMENTS, _Hop("votes", "votes")),
-    "post_comments": (_POSTS, _Hop("comments", "comments")),
-    "post_votes": (_POSTS, _Hop("votes", "votes")),
-    "post_comment_votes": (_POSTS, _COMMENTS, _Hop("votes", "votes")),
+    "article_comments": "comments",
+    "article_votes": "votes",
+    "article_comment_votes": "votes",
+    "post_comments": "comments",
+    "post_votes": "votes",
+    "post_comment_votes": "votes",
+    "users_identities": "identities",
 }
 
 _DEFINITION_CONDITIONS = {"conditions_all": "all", "conditions_any": "any"}
@@ -95,6 +90,10 @@ def _condition_qualified(key: str | None, record: Mapping[str, Any]) -> str | No
 def _stream(
     name: str,
     *,
+    parent: str | None = None,
+    path: str | None = None,
+    carry: Mapping[str, str] | None = None,
+    key_scope: Literal["local", "global"] = "local",
     source_object: str | None = None,
     primary_key: str = "id",
     cursor_field: str | None = "updated_at",
@@ -102,6 +101,8 @@ def _stream(
     updated_at_field: str | None = "updated_at",
     canonical: bool = False,
 ) -> StreamSpec:
+    if (parent is None) != (path is None):
+        raise ValueError(f"zendesk: stream {name!r} names a parent without a path, or the reverse")
     return StreamSpec(
         name=name,
         source_object=source_object or name,
@@ -110,6 +111,10 @@ def _stream(
         created_at_field=created_at_field,
         updated_at_field=updated_at_field,
         canonical=canonical,
+        key_scope=key_scope,
+        parents=()
+        if parent is None or path is None
+        else (ParentEdge(stream=parent, path=path, carry=carry or {}),),
     )
 
 
@@ -154,19 +159,57 @@ ZENDESK_STREAMS: list[StreamSpec] = [
     _stream("audit_logs", cursor_field="created_at"),
     _stream("tags", primary_key="name", cursor_field=None),
     _stream("deleted_tickets", cursor_field=None),
-    _stream("users_identities", source_object="users", cursor_field="updated_at"),
+    _stream(
+        "users_identities",
+        parent="users",
+        path="/api/v2/users/{id}/identities.json",
+        source_object="users",
+        cursor_field="updated_at",
+    ),
     _stream("categories", source_object="help_center/categories"),
     _stream("sections", source_object="help_center/sections"),
     _stream("articles", source_object="help_center/articles", canonical=True),
-    _stream("article_attachments", cursor_field=None),
-    _stream("article_comments", canonical=True),
-    _stream("article_comment_votes", cursor_field=None),
-    _stream("article_votes", cursor_field=None),
+    _stream(
+        "article_attachments",
+        parent="articles",
+        path="/api/v2/help_center/articles/{id}/attachments.json",
+        cursor_field=None,
+    ),
+    _stream(
+        "article_comments",
+        parent="articles",
+        path="/api/v2/help_center/articles/{id}/comments.json",
+        carry={"article_id": "id"},
+        key_scope="global",
+        canonical=True,
+    ),
+    _stream(
+        "article_comment_votes",
+        parent="article_comments",
+        path="/api/v2/help_center/articles/{source_id}/comments/{id}/votes.json",
+        cursor_field=None,
+    ),
+    _stream(
+        "article_votes",
+        parent="articles",
+        path="/api/v2/help_center/articles/{id}/votes.json",
+        cursor_field=None,
+    ),
     _stream("topics", source_object="community/topics"),
     _stream("posts", source_object="community/posts"),
-    _stream("post_comments"),
-    _stream("post_comment_votes", cursor_field=None),
-    _stream("post_votes", cursor_field=None),
+    _stream("post_comments", parent="posts", path="/api/v2/community/posts/{id}/comments.json"),
+    _stream(
+        "post_comment_votes",
+        parent="post_comments",
+        path="/api/v2/community/posts/{post_id}/comments/{id}/votes.json",
+        cursor_field=None,
+    ),
+    _stream(
+        "post_votes",
+        parent="posts",
+        path="/api/v2/community/posts/{id}/votes.json",
+        cursor_field=None,
+    ),
 ]
 
 
@@ -246,29 +289,26 @@ class ZendeskConnector(RestConnector):
         return _condition_qualified(super().record_ref(record, stream), record)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
-            if stream.name == "ticket_comments":
-                async for page in self._paginate_ticket_comments(client, cursor):
-                    yield page
+            if stream.parents:
+                pages = partial(self._partition_pages, client, stream)
+                async for child_page in fanned_out(stream, run, pages):
+                    yield child_page
                 return
-            if stream.name == "users_identities":
-                async for page in self._paginate_user_identities(client, cursor):
+            if stream.name == "ticket_comments":
+                async for page in self._paginate_ticket_comments(client, run.cursor):
                     yield page
                 return
             if stream.name in _INCREMENTAL_CURSOR_STREAMS:
-                async for page in self._paginate_incremental_cursor(client, stream, cursor=cursor):
+                async for page in self._paginate_incremental_cursor(
+                    client, stream, cursor=run.cursor
+                ):
                     yield page
                 return
             if stream.name == "attribute_definitions":
                 async for page in self._paginate_attribute_definitions(client, stream):
-                    yield page
-                return
-            if stream.name in _CHILD_COLLECTIONS:
-                async for page in self._walk_children(
-                    client, _CHILD_COLLECTIONS[stream.name], "/api/v2", {}
-                ):
                     yield page
                 return
             async for page in self._paginate_default(client, stream):
@@ -304,42 +344,20 @@ class ZendeskConnector(RestConnector):
                 return
             path = self._next_page_path(data.get("after_url") or data.get("next_page"))
 
-    async def _walk_children(
+    async def _partition_pages(
         self,
         client: httpx.AsyncClient,
-        hops: tuple[_Hop, ...],
-        base: str,
-        stamps: dict[str, Any],
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """One hop of a child collection's chain: page this collection, and either yield its rows as
-        the stream's own or descend per id to the next hop.
-
-        Zendesk publishes these only under their parent, so the chain is the whole read: there is
-        no flat collection to ask for, and asking for one is a 404 the run cannot skip. Each row
-        carries the ids it was reached through, because the record itself does not name every
-        ancestor and that provenance is what ties a comment's vote back to its article."""
-        hop, rest = hops[0], hops[1:]
-        collection = f"{base}/{hop.collection}"
-        path: str | None = f"{collection}.json?per_page={PAGE_SIZE}"
+        stream: StreamSpec,
+        partition: Partition,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
+        data_key = self._data_field(stream)
+        path: str | None = f"{partition.path}?per_page={PAGE_SIZE}"
         while path:
             data = await self._get(client, path)
-            records = [record for record in data.get(hop.records) or [] if isinstance(record, dict)]
-            if not rest:
-                stamped = [{**record, **stamps} for record in records]
-                if stamped:
-                    yield stamped
-            else:
-                for record in records:
-                    identity = record.get("id")
-                    if identity is None:
-                        continue
-                    async for page in self._walk_children(
-                        client,
-                        rest,
-                        f"{collection}/{identity}",
-                        {**stamps, hop.stamp: identity},
-                    ):
-                        yield page
+            records = [record for record in data.get(data_key) or [] if isinstance(record, dict)]
+            if records:
+                yield WalkPage(records=records)
             path = self._next_page_path(data.get("next_page"))
 
     async def _paginate_attribute_definitions(
@@ -407,30 +425,3 @@ class ZendeskConnector(RestConnector):
             if data.get("end_of_stream"):
                 return
             path = self._next_page_path(data.get("after_url") or data.get("next_page"))
-
-    async def _paginate_user_identities(
-        self, client: httpx.AsyncClient, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        users_path: str | None = (
-            f"/api/v2/incremental/users/cursor.json"
-            f"?start_time={self._cursor_to_unix(cursor)}&per_page={PAGE_SIZE}"
-        )
-        while users_path:
-            users_data = await self._get(client, users_path)
-            for user in users_data.get("users") or []:
-                if not isinstance(user, dict) or not user.get("id"):
-                    continue
-                ident_path: str | None = (
-                    f"/api/v2/users/{user['id']}/identities.json?per_page={PAGE_SIZE}"
-                )
-                while ident_path:
-                    ident_data = await self._get(client, ident_path)
-                    identities = ident_data.get("identities") or []
-                    if identities:
-                        yield identities
-                    ident_path = self._next_page_path(ident_data.get("next_page"))
-            if users_data.get("end_of_stream"):
-                return
-            users_path = self._next_page_path(
-                users_data.get("after_url") or users_data.get("next_page")
-            )

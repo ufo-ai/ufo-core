@@ -21,7 +21,13 @@ from typing import Any
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, dict_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    dict_or_empty,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 GOOGLE_ADS_VERSION = "v24"
@@ -130,11 +136,7 @@ class GoogleAdsConnector(RestConnector):
                 yield [{**row, "customer_id": customer_id} for row in rows]
 
     async def paginate(
-        self,
-        client: httpx.AsyncClient,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
             if stream.name == "customers":
@@ -171,7 +173,11 @@ class GoogleAdsConnector(RestConnector):
                     yield page
                 return
             if stream.name == "campaign_metrics":
-                since = cursor[:10] if cursor else (datetime.now(UTC) - timedelta(days=90)).date()
+                since = (
+                    run.cursor[:10]
+                    if run.cursor
+                    else (datetime.now(UTC) - timedelta(days=90)).date()
+                )
                 query = (
                     "SELECT segments.date, campaign.id, campaign.resource_name, "
                     "metrics.impressions, metrics.clicks, metrics.cost_micros, "

@@ -17,7 +17,14 @@ from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, records_at, with_context
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    records_at,
+    with_context,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 GRAPH_VERSION = "v25.0"
@@ -169,7 +176,7 @@ class FacebookAdsConnector(RestConnector):
                     yield rows
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         try:
             if stream.name == "ad_accounts":
@@ -178,11 +185,11 @@ class FacebookAdsConnector(RestConnector):
                     yield accounts
                 return
             if stream.name in {"campaigns", "ad_sets", "ads"}:
-                async for page in self._account_children(client, stream, cursor=cursor):
+                async for page in self._account_children(client, stream, cursor=run.cursor):
                     yield page
                 return
             if stream.name == "ads_insights":
-                async for page in self._insights(client, cursor=cursor):
+                async for page in self._insights(client, cursor=run.cursor):
                     yield page
                 return
             raise StreamSkipped(f"facebook_ads stream {stream.name!r} is not implemented")

@@ -3,24 +3,38 @@ timesheet windows, the field catalog, and a custom report synced as recallable p
 
 BambooHR has no traditional pagination — each list endpoint returns its full dataset in one
 response, in a shape that varies per endpoint, so `paginate` dispatches on stream name: the
-directory (`/employees/directory`, list under `employees`), per-employee detail fanned out over the
-directory (`/employees/{id}`), the time-off and timesheet date windows (`start`/`end`, seeded from
-the run cursor), the field catalog (`/meta/fields`), and a POST custom report (`/reports/custom`,
-rows under `employees`). Auth is HTTP Basic with the API key as the username and the literal `"x"`
-as the password: when the resolved `Credential` carries a direct key, `_make_client` sends it as
-Basic auth; a broker's proxying transport is honored unchanged. `Accept: application/json` is
-mandatory — BambooHR defaults to XML. The base URL is per-tenant
+directory (`/employees/directory`, list under `employees`), the time-off and timesheet date windows
+(`start`/`end`, seeded from the run cursor), the field catalog (`/meta/fields`), and a POST custom
+report (`/reports/custom`, rows under `employees`). `employees` is the detail view of a directory
+row and declares it as an edge. Its key is the directory's own `id`, unique across the account, so
+it is addressed by the record alone rather than under the scope its path read. Auth is HTTP Basic
+with the API key as the username and the literal `"x"` as the password: when the resolved
+`Credential` carries a direct key, `_make_client` sends it as Basic auth; a broker's proxying
+transport is honored unchanged. `Accept: application/json` is mandatory — BambooHR defaults to
+XML. The base URL is per-tenant
 (`https://api.bamboohr.com/api/gateway.php/<subdomain>`), so the class default is empty and a run
 without a resolved host fails loud. A refusal (401/403) raises `StreamSkipped`. The write path is
 intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
-from typing import Any
+from functools import partial
+from typing import Any, Literal
 
 import httpx
 
 from ufo.sdk.authproxy import Credential
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec
+from ufo.sdk.sources import (
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    RestConnector,
+    Run,
+    StreamPage,
+    StreamSkipped,
+    StreamSpec,
+    WalkPage,
+    fanned_out,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 TIMEOUT_CONNECT_SECONDS = 30.0
@@ -37,6 +51,8 @@ def _stream(
     created_at_field: str | None = None,
     updated_at_field: str | None = None,
     canonical: bool = False,
+    parents: tuple[ParentEdge, ...] = (),
+    key_scope: Literal["local", "global"] = "local",
 ) -> StreamSpec:
     return StreamSpec(
         name=name,
@@ -46,6 +62,8 @@ def _stream(
         created_at_field=created_at_field,
         updated_at_field=updated_at_field,
         canonical=canonical,
+        parents=parents,
+        key_scope=key_scope,
     )
 
 
@@ -57,7 +75,11 @@ BAMBOOHR_STREAMS: list[StreamSpec] = [
         created_at_field="created",
         canonical=True,
     ),
-    _stream("employees"),
+    _stream(
+        "employees",
+        parents=(ParentEdge(stream="employees_directory", path="/v1/employees/{id}"),),
+        key_scope="global",
+    ),
     _stream("timesheet_entries", cursor_field="start", created_at_field="start", canonical=True),
     _stream("meta_fields"),
     _stream("custom_reports"),
@@ -88,23 +110,24 @@ class BambooHRConnector(RestConnector):
         raise RuntimeError("bamboohr: credential carries no auth")
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
+    ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name == "employees_directory":
                 async for page in self._fetch_directory(client):
                     yield page
                 return
             if stream.name == "employees":
-                async for page in self._fetch_employees(client):
-                    yield page
+                pages = partial(self._fetch_employee, client)
+                async for detail in fanned_out(stream, run, pages):
+                    yield detail
                 return
             if stream.name == "time_off_requests":
-                async for page in self._fetch_time_off(client, cursor=cursor):
+                async for page in self._fetch_time_off(client, cursor=run.cursor):
                     yield page
                 return
             if stream.name == "timesheet_entries":
-                async for page in self._fetch_timesheets(client, cursor=cursor):
+                async for page in self._fetch_timesheets(client, cursor=run.cursor):
                     yield page
                 return
             if stream.name == "meta_fields":
@@ -132,23 +155,12 @@ class BambooHRConnector(RestConnector):
         if records:
             yield records
 
-    async def _fetch_employees(
-        self, client: httpx.AsyncClient
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        """Per-employee detail: walk the directory, then GET `/v1/employees/{id}` for each row,
-        yielding one batch per row so the sync gets an immediate checkpoint."""
-        data = await self._get(client, "/v1/employees/directory")
-        directory = data.get("employees") or []
-        for row in directory:
-            if not isinstance(row, dict):
-                continue
-            eid = row.get("id")
-            if eid is None:
-                continue
-            detail = await self._get(client, f"/v1/employees/{eid}")
-            if isinstance(detail, dict):
-                detail.setdefault("id", eid)
-                yield [detail]
+    async def _fetch_employee(
+        self, client: httpx.AsyncClient, partition: Partition, bound: PartitionBound
+    ) -> AsyncIterator[WalkPage]:
+        detail = await self._get(client, partition.path)
+        if isinstance(detail, dict):
+            yield WalkPage(records=[detail])
 
     async def _fetch_time_off(
         self, client: httpx.AsyncClient, *, cursor: str | None

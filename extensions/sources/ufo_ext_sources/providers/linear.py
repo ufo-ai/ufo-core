@@ -25,7 +25,13 @@ from typing import Any
 
 import httpx
 
-from ufo.sdk.sources import RestConnector, StreamSkipped, StreamSpec, list_or_empty
+from ufo.sdk.sources import (
+    RestConnector,
+    Run,
+    StreamSkipped,
+    StreamSpec,
+    list_or_empty,
+)
 from ufo_ext_sources.watermark import text_checkpoint
 
 GRAPHQL_PATH = "/graphql"
@@ -246,7 +252,7 @@ class LinearConnector(RestConnector):
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]]]:
         entry = _STREAM_QUERIES.get(stream.name)
         if entry is None:
@@ -255,8 +261,8 @@ class LinearConnector(RestConnector):
         variables: dict[str, Any] = {}
         if accepts_filter:
             variables["orderBy"] = ORDER_BY_UPDATED_AT
-            if stream.cursor_field and cursor:
-                variables["filter"] = {ORDER_BY_UPDATED_AT: {"gte": cursor}}
+            if stream.cursor_field and run.cursor:
+                variables["filter"] = {ORDER_BY_UPDATED_AT: {"gte": run.cursor}}
         after: str | None = None
         while True:
             page_vars = dict(variables)

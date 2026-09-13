@@ -10,7 +10,7 @@ body rather than dumping JSON, the JQL `updated > "<cursor>"` filter on an incre
 records a skip, not a failure. Every Jira stream is incremental (no `delete_missing`), so a run is
 never an authoritative snapshot."""
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from uuid import UUID, uuid4
 
 import httpx
@@ -19,10 +19,21 @@ from ufo_ext_sources.providers.jira import JiraConnector
 
 from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
-from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig, ParentPages, ParentRecord
 
 CLOUD_ID = "cloud-1"
 SITE = {"id": CLOUD_ID, "url": "https://acme.atlassian.net", "name": "Acme"}
+Landed = Mapping[str, tuple[ParentRecord, ...]]
+ParentsReader = Callable[[Landed], ParentPages]
+
+
+async def _no_parents(stream: str) -> AsyncIterator[ParentRecord]:
+    return
+    yield
+
+
+LANDED_ISSUE = (ParentRecord(ref="issues/10001", fields={"cloud_id": CLOUD_ID, "id": "10001"}),)
+LANDED_BOARD = (ParentRecord(ref="boards/7", fields={"cloud_id": CLOUD_ID, "id": "7"}),)
 
 
 class _MockProxy:
@@ -38,8 +49,9 @@ async def _fetch(
     handler: Callable[[httpx.Request], httpx.Response],
     *,
     cursor: str | None = None,
+    parents: ParentPages = _no_parents,
 ) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler))
+    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler), parents=parents)
     return await ConnectorBackend(connector=JiraConnector()).fetch(
         ConnectorSourceConfig(stream=stream), cursor, auth
     )
@@ -156,46 +168,164 @@ async def test_issues_incremental_filters_with_jql_and_advances_the_watermark() 
     assert result.next_cursor == "2026-02-05T00:00:00.000+0000"
 
 
-async def test_issue_comments_preserve_comment_creation_time() -> None:
+def _comment(comment_id: str, author: str, text: str, created: str, updated: str) -> dict:
+    return {
+        "id": comment_id,
+        "author": {"displayName": author},
+        "body": {
+            "type": "doc",
+            "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}],
+        },
+        "created": created,
+        "updated": updated,
+    }
+
+
+COMMENT_1 = _comment(
+    "c1", "Ada", "Investigating", "2026-01-02T00:00:00.000+0000", "2026-01-03T00:00:00.000+0000"
+)
+COMMENT_2 = _comment(
+    "c2", "Bo", "Shipped", "2026-01-06T00:00:00.000+0000", "2026-01-06T00:00:00.000+0000"
+)
+
+
+def _comments_handler(asked: list[str]) -> Callable[[httpx.Request], httpx.Response]:
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/oauth/token/accessible-resources":
-            return httpx.Response(200, json=[SITE])
-        if path == f"/ex/jira/{CLOUD_ID}/rest/api/3/search":
-            return httpx.Response(
-                200, json={"issues": [ISSUE_1], "startAt": 0, "maxResults": 100, "total": 1}
-            )
+        asked.append(path)
         if path == f"/ex/jira/{CLOUD_ID}/rest/api/3/issue/10001/comment":
+            start = int(request.url.params.get("startAt") or "0")
+            rows = [] if start else [COMMENT_1, COMMENT_2]
             return httpx.Response(
-                200,
-                json={
-                    "comments": [
-                        {
-                            "id": "c1",
-                            "author": {"displayName": "Ada"},
-                            "body": {
-                                "type": "doc",
-                                "content": [
-                                    {
-                                        "type": "paragraph",
-                                        "content": [{"type": "text", "text": "Investigating"}],
-                                    }
-                                ],
-                            },
-                            "created": "2026-01-02T00:00:00.000+0000",
-                            "updated": "2026-01-03T00:00:00.000+0000",
-                        }
-                    ],
-                    "startAt": 0,
-                    "maxResults": 100,
-                    "total": 1,
-                },
+                200, json={"comments": rows, "startAt": start, "maxResults": 100, "total": 2}
             )
         return httpx.Response(404, json={"path": path})
 
-    result = await _fetch("issue_comments", handle)
-    assert result.pages[0].created_at == "2026-01-02T00:00:00.000000+00:00"
-    assert result.pages[0].updated_at == "2026-01-03T00:00:00.000000+00:00"
+    return handle
+
+
+async def test_issue_comments_read_one_issue_and_nothing_above_it(
+    parents_reader: ParentsReader,
+) -> None:
+    """The comment walk asks the issue's own comment collection and no more: the issues enumeration
+    that re-derived those partitions — and the site lookup above it — belong to the `issues` row."""
+    asked: list[str] = []
+    result = await _fetch(
+        "issue_comments", _comments_handler(asked), parents=parents_reader({"issues": LANDED_ISSUE})
+    )
+
+    assert asked == [f"/ex/jira/{CLOUD_ID}/rest/api/3/issue/10001/comment"]
+    assert {page.source_identity for page in result.pages} == {
+        f"issue_comments/{CLOUD_ID}/10001/c1",
+        f"issue_comments/{CLOUD_ID}/10001/c2",
+    }
+    first = next(page for page in result.pages if page.source_ref.endswith("/c1"))
+    assert first.created_at == "2026-01-02T00:00:00.000000+00:00"
+    assert first.updated_at == "2026-01-03T00:00:00.000000+00:00"
+
+
+async def test_issue_comments_resume_past_that_issues_own_watermark(
+    parents_reader: ParentsReader,
+) -> None:
+    asked: list[str] = []
+    first = await _fetch(
+        "issue_comments", _comments_handler(asked), parents=parents_reader({"issues": LANDED_ISSUE})
+    )
+    assert first.next_cursor == (
+        f'{{"issues/10001\\n/ex/jira/{CLOUD_ID}/rest/api/3/issue/10001/comment": '
+        '"2026-01-06T00:00:00.000+0000"}'
+    )
+
+    second = await _fetch(
+        "issue_comments",
+        _comments_handler(asked),
+        cursor=first.next_cursor,
+        parents=parents_reader({"issues": LANDED_ISSUE}),
+    )
+    assert second.pages == ()
+
+    edited = dict(COMMENT_1, updated="2026-02-01T00:00:00.000+0000")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        start = int(request.url.params.get("startAt") or "0")
+        rows = [] if start else [edited, COMMENT_2]
+        return httpx.Response(
+            200, json={"comments": rows, "startAt": start, "maxResults": 100, "total": 2}
+        )
+
+    third = await _fetch(
+        "issue_comments",
+        handle,
+        cursor=first.next_cursor,
+        parents=parents_reader({"issues": LANDED_ISSUE}),
+    )
+    assert {page.source_identity for page in third.pages} == {f"issue_comments/{CLOUD_ID}/10001/c1"}
+
+
+async def test_a_second_issue_keeps_its_own_cursor_entry(parents_reader: ParentsReader) -> None:
+    landed = {
+        "issues": (
+            *LANDED_ISSUE,
+            ParentRecord(ref="issues/10002", fields={"cloud_id": CLOUD_ID, "id": "10002"}),
+        )
+    }
+    asked: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        asked.append(path)
+        start = int(request.url.params.get("startAt") or "0")
+        rows = [] if start else [COMMENT_1]
+        return httpx.Response(
+            200, json={"comments": rows, "startAt": start, "maxResults": 100, "total": 1}
+        )
+
+    result = await _fetch("issue_comments", handle, parents=parents_reader(landed))
+    assert asked == [
+        f"/ex/jira/{CLOUD_ID}/rest/api/3/issue/10001/comment",
+        f"/ex/jira/{CLOUD_ID}/rest/api/3/issue/10002/comment",
+    ]
+    assert result.next_cursor == (
+        f'{{"issues/10001\\n/ex/jira/{CLOUD_ID}/rest/api/3/issue/10001/comment": '
+        '"2026-01-03T00:00:00.000+0000", '
+        f'"issues/10002\\n/ex/jira/{CLOUD_ID}/rest/api/3/issue/10002/comment": '
+        '"2026-01-03T00:00:00.000+0000"}'
+    )
+
+
+async def test_sprints_hang_under_their_board(parents_reader: ParentsReader) -> None:
+    asked: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        start = int(request.url.params.get("startAt") or "0")
+        rows = (
+            []
+            if start
+            else [{"id": 70, "name": "Sprint 1", "updatedDate": "2026-01-03T00:00:00.000Z"}]
+        )
+        return httpx.Response(200, json={"values": rows, "isLast": True})
+
+    result = await _fetch("sprints", handle, parents=parents_reader({"boards": LANDED_BOARD}))
+    assert asked == [f"/ex/jira/{CLOUD_ID}/rest/agile/1.0/board/7/sprint"]
+    assert {page.source_identity for page in result.pages} == {f"sprints/{CLOUD_ID}/7/70"}
+
+
+async def test_a_child_whose_parent_landed_nothing_spends_no_request() -> None:
+    asked: list[str] = []
+    result = await _fetch("issue_comments", _comments_handler(asked))
+    assert asked == []
+    assert result.pages == ()
+
+
+async def test_the_scoped_child_identities_restamp_nothing() -> None:
+    """`issue_comments/c1` and `sprints/70` are what main addresses these records by. On main,
+    `_create` registered canonical streams only, so neither of these has ever landed a page and
+    scoping them under their parent restamps nothing."""
+    by_name = {stream.name: stream for stream in JiraConnector().streams()}
+    assert by_name["issue_comments"].canonical is False
+    assert by_name["sprints"].canonical is False
+    assert by_name["issues"].canonical is True
 
 
 async def test_projects_are_incremental_not_a_snapshot() -> None:

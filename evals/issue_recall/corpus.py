@@ -4,10 +4,9 @@ near-topic — and the issue-filing prompts graded against them.
 
 Records are GitHub API shaped and turned into page bodies by the real `GitHubConnector`, through the
 same `flatten` then `render` pair the connector source adapter applies, so a fixture page body is
-what a live GitHub sync would land. That includes the `repo_full_name` the connector's repo fan-out
-stamps onto every record it yields, which `flatten` scopes the record id to — so a fixture page is
-keyed `<stream>/<repo>/<id>` exactly as a synced one is. A case names its related pages by key;
-every other page in the corpus is that case's distractor.
+what a live GitHub sync would land. A repository's streams are addressed by the `full_name` their
+path reads off it, so a fixture page is keyed `<stream>/<repo>/<id>` exactly as a synced one is. A
+case names its related pages by key; every other page in the corpus is that case's distractor.
 """
 
 import hashlib
@@ -51,7 +50,6 @@ class IssueThread:
         path = "pull" if self.stream == PULL_REQUESTS else "issues"
         record: dict[str, Any] = {
             "id": ISSUE_ID_BASE + self.number,
-            "repo_full_name": REPO,
             "number": self.number,
             "title": self.title,
             "body": self.body,
@@ -93,7 +91,6 @@ class Comment:
     def record(self) -> dict[str, Any]:
         return {
             "id": COMMENT_ID_BASE + self.identifier,
-            "repo_full_name": REPO,
             "issue_url": f"https://api.github.com/repos/{REPO}/issues/{self.thread}",
             "html_url": (
                 f"https://github.com/{REPO}/issues/{self.thread}#issuecomment-{self.identifier}"
@@ -1467,7 +1464,8 @@ def rendered_pages() -> tuple[RenderedPage, ...]:
     pages: list[RenderedPage] = []
     for page in PAGES:
         stream = streams[page.stream]
-        title, body = connector.render(connector.flatten(page.record(), stream), stream)
+        record = {**page.record(), "repo_full_name": REPO}
+        title, body = connector.render(connector.flatten(record, stream), stream)
         pages.append(
             RenderedPage(
                 key=page.key,

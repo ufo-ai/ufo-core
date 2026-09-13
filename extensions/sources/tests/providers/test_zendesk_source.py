@@ -5,18 +5,53 @@ as `StreamSkipped`. The class base URL is empty (per-subdomain), so the tenant h
 `SourceAuth.base_url` — the real per-tenant path. Offline — a canned transport, no
 token."""
 
-from collections.abc import Callable
+import hashlib
+from collections.abc import Callable, Mapping
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from ufo_ext_sources.providers.zendesk import ZendeskConnector
+from ufo_ext_sources.providers.zendesk import ZENDESK_STREAMS, ZendeskConnector
 
 from ufo.runtime.access.connectors import Credential
 from ufo.runtime.sources.sync import SourceAuth, StreamSkipped, SyncResult
-from ufo.sdk.sources import ConnectorBackend, ConnectorSourceConfig
+from ufo.sdk.sources import (
+    ConnectorBackend,
+    ConnectorSourceConfig,
+    ParentPages,
+    ParentRecord,
+)
+
+Landed = Mapping[str, tuple[ParentRecord, ...]]
+ParentsReader = Callable[[Landed], ParentPages]
 
 BASE_URL = "https://acme.zendesk.com"
+COMMENT = {
+    "id": 11,
+    "url": "https://acme.zendesk.com/api/v2/help_center/articles/101/comments/11.json",
+    "body": "one",
+    "author_id": 77,
+    "source_id": 101,
+    "source_type": "Article",
+    "locale": "en-us",
+    "vote_sum": 2,
+    "vote_count": 3,
+    "created_at": "2026-03-01T00:00:00Z",
+    "updated_at": "2026-03-01T00:00:00Z",
+}
+COMMENT_BODY_DIGEST = "4367929d6bd1d55f9f7543005cab14cfe8ac4e82ce2d73dfd398758fd76e0ff6"
+"""What `COMMENT` renders to, pinned so a change to the body a landed comment page holds — the
+`article_id` its edge carries included — has to be made on purpose."""
+
+LANDED: Mapping[str, tuple[ParentRecord, ...]] = {
+    "articles": (ParentRecord(ref="articles/101", fields={"id": 101}),),
+    "article_comments": (
+        ParentRecord(ref="article_comments/11", fields={"id": 11, "source_id": 101}),
+    ),
+    "posts": (ParentRecord(ref="posts/201", fields={"id": 201}),),
+    "post_comments": (ParentRecord(ref="post_comments/61", fields={"id": 61, "post_id": 201}),),
+    "users": (ParentRecord(ref="users/301", fields={"id": 301}),),
+}
 
 
 class _MockProxy:
@@ -28,9 +63,18 @@ class _MockProxy:
 
 
 async def _fetch(
-    stream: str, handler: Callable[[httpx.Request], httpx.Response], *, cursor: str | None = None
+    stream: str,
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    cursor: str | None = None,
+    parents: ParentPages | None = None,
 ) -> SyncResult:
-    auth = SourceAuth(workspace_id=uuid4(), auth_proxy=_MockProxy(handler), base_url=BASE_URL)
+    auth = SourceAuth(
+        workspace_id=uuid4(),
+        auth_proxy=_MockProxy(handler),
+        base_url=BASE_URL,
+        parents=parents,
+    )
     return await ConnectorBackend(connector=ZendeskConnector()).fetch(
         ConnectorSourceConfig(stream=stream), cursor, auth
     )
@@ -183,66 +227,162 @@ async def test_attribute_definitions_lift_both_condition_lists_to_rows() -> None
     }
 
 
-async def test_article_comments_fan_out_over_articles() -> None:
-    """Zendesk publishes article comments only under their article — there is no flat collection to
-    ask for, and asking for one is a 404 the run cannot skip, so the stream never landed a row. The
-    walk enumerates articles, pages each one's comments, and follows the parent's own pages so an
-    article on page two is not missed."""
+async def test_article_comments_hang_on_their_article_and_keep_a_comment_id_address(
+    parents_reader: ParentsReader,
+) -> None:
+    """Zendesk publishes article comments only under their article, and a comment id is unique
+    across the account — so the edge reads the article to compose the request and the comment keeps
+    the address it is already recallable at. Its page projects both fields its own child reads."""
     asked: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         asked.append(request.url.path)
-        if request.url.path == "/api/v2/help_center/articles.json":
-            if b"page=2" in request.url.query:
-                return httpx.Response(200, json={"articles": [{"id": 2}], "next_page": None})
-            return httpx.Response(
-                200,
-                json={
-                    "articles": [{"id": 1}],
-                    "next_page": "https://acme.zendesk.com/api/v2/help_center/articles.json?page=2",
-                },
-            )
-        if request.url.path == "/api/v2/help_center/articles/1/comments.json":
-            return httpx.Response(
-                200,
-                json={
-                    "comments": [{"id": 11, "body": "one", "updated_at": "2026-03-01T00:00:00Z"}],
-                    "next_page": None,
-                },
-            )
-        if request.url.path == "/api/v2/help_center/articles/2/comments.json":
-            return httpx.Response(
-                200,
-                json={
-                    "comments": [{"id": 22, "body": "two", "updated_at": "2026-03-02T00:00:00Z"}],
-                    "next_page": None,
-                },
-            )
+        assert request.url.params.get("per_page") == "100"
+        if request.url.path == "/api/v2/help_center/articles/101/comments.json":
+            return httpx.Response(200, json={"comments": [COMMENT], "next_page": None})
         return httpx.Response(404, json={"path": request.url.path})
 
-    result = await _fetch("article_comments", handle)
+    result = await _fetch("article_comments", handle, parents=parents_reader(LANDED))
 
-    assert _refs(result) == {"article_comments/11", "article_comments/22"}
-    assert "/api/v2/help_center/article_comments.json" not in asked
+    assert _refs(result) == {"article_comments/11"}
+    assert {page.source_identity for page in result.pages} == {"article_comments/11"}
+    assert asked == ["/api/v2/help_center/articles/101/comments.json"]
+    assert result.pages[0].parent_fields == {"id": 11, "source_id": 101}
+    assert hashlib.sha256(result.pages[0].body.encode()).hexdigest() == COMMENT_BODY_DIGEST
 
 
-async def test_article_comment_votes_carry_every_id_they_were_reached_through() -> None:
-    """A vote sits two collections down, under a comment under an article. Each row carries both
-    ancestor ids because the record names neither, and that is what ties a vote back to its
-    article."""
+async def test_article_comment_votes_read_the_article_off_the_comment_record(
+    parents_reader: ParentsReader,
+) -> None:
+    """A vote sits two collections down, under a comment under an article, and Zendesk's comment
+    record names its article `source_id` — so that is the field the edge reads, and the values it
+    reads are what address the vote."""
+    asked: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v2/help_center/articles.json":
-            return httpx.Response(200, json={"articles": [{"id": 5}], "next_page": None})
-        if request.url.path == "/api/v2/help_center/articles/5/comments.json":
-            return httpx.Response(200, json={"comments": [{"id": 50}], "next_page": None})
-        if request.url.path == "/api/v2/help_center/articles/5/comments/50/votes.json":
+        asked.append(request.url.path)
+        if request.url.path == "/api/v2/help_center/articles/101/comments/11/votes.json":
             return httpx.Response(200, json={"votes": [{"id": 500, "value": 1}], "next_page": None})
         return httpx.Response(404, json={"path": request.url.path})
 
-    result = await _fetch("article_comment_votes", handle)
+    result = await _fetch("article_comment_votes", handle, parents=parents_reader(LANDED))
 
-    assert _refs(result) == {"article_comment_votes/500"}
-    body = result.pages[0].body
-    assert '"article_id": 5' in body
-    assert '"comment_id": 50' in body
+    assert _refs(result) == {"article_comment_votes/101/11/500"}
+    assert asked == ["/api/v2/help_center/articles/101/comments/11/votes.json"]
+
+
+async def test_article_attachments_and_votes_fan_out_over_landed_articles(
+    parents_reader: ParentsReader,
+) -> None:
+    asked: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path == "/api/v2/help_center/articles/101/attachments.json":
+            return httpx.Response(
+                200,
+                json={"article_attachments": [{"id": 31, "file_name": "f.png"}], "next_page": None},
+            )
+        if request.url.path == "/api/v2/help_center/articles/101/votes.json":
+            return httpx.Response(200, json={"votes": [{"id": 41, "value": 1}], "next_page": None})
+        return httpx.Response(404, json={"path": request.url.path})
+
+    attachments = await _fetch("article_attachments", handle, parents=parents_reader(LANDED))
+    votes = await _fetch("article_votes", handle, parents=parents_reader(LANDED))
+
+    assert _refs(attachments) == {"article_attachments/101/31"}
+    assert _refs(votes) == {"article_votes/101/41"}
+    assert asked == [
+        "/api/v2/help_center/articles/101/attachments.json",
+        "/api/v2/help_center/articles/101/votes.json",
+    ]
+
+
+async def test_post_children_fan_out_over_landed_posts_and_their_comments(
+    parents_reader: ParentsReader,
+) -> None:
+    asked: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path == "/api/v2/community/posts/201/comments.json":
+            return httpx.Response(
+                200,
+                json={
+                    "comments": [{"id": 61, "post_id": 201, "updated_at": "2026-03-01T00:00:00Z"}],
+                    "next_page": None,
+                },
+            )
+        if request.url.path == "/api/v2/community/posts/201/votes.json":
+            return httpx.Response(200, json={"votes": [{"id": 71, "value": 1}], "next_page": None})
+        if request.url.path == "/api/v2/community/posts/201/comments/61/votes.json":
+            return httpx.Response(200, json={"votes": [{"id": 81, "value": -1}], "next_page": None})
+        return httpx.Response(404, json={"path": request.url.path})
+
+    reader = parents_reader(LANDED)
+    assert _refs(await _fetch("post_comments", handle, parents=reader)) == {"post_comments/201/61"}
+    assert _refs(await _fetch("post_votes", handle, parents=reader)) == {"post_votes/201/71"}
+    assert _refs(await _fetch("post_comment_votes", handle, parents=reader)) == {
+        "post_comment_votes/201/61/81"
+    }
+    assert asked == [
+        "/api/v2/community/posts/201/comments.json",
+        "/api/v2/community/posts/201/votes.json",
+        "/api/v2/community/posts/201/comments/61/votes.json",
+    ]
+
+
+async def test_users_identities_fan_out_over_landed_users(parents_reader: ParentsReader) -> None:
+    asked: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.path)
+        if request.url.path == "/api/v2/users/301/identities.json":
+            return httpx.Response(
+                200,
+                json={
+                    "identities": [
+                        {"id": 401, "type": "email", "updated_at": "2026-03-01T00:00:00Z"}
+                    ],
+                    "next_page": None,
+                },
+            )
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("users_identities", handle, parents=parents_reader(LANDED))
+
+    assert _refs(result) == {"users_identities/301/401"}
+    assert asked == ["/api/v2/users/301/identities.json"]
+
+
+async def test_help_centre_children_declare_the_parent_that_holds_them() -> None:
+    declared = {stream.name: stream for stream in ZENDESK_STREAMS}
+    edges = {
+        name: tuple((edge.stream, edge.path) for edge in stream.parents)
+        for name, stream in declared.items()
+        if stream.parents
+    }
+    assert edges == {
+        "article_attachments": (
+            ("articles", "/api/v2/help_center/articles/{id}/attachments.json"),
+        ),
+        "article_comments": (("articles", "/api/v2/help_center/articles/{id}/comments.json"),),
+        "article_votes": (("articles", "/api/v2/help_center/articles/{id}/votes.json"),),
+        "article_comment_votes": (
+            (
+                "article_comments",
+                "/api/v2/help_center/articles/{source_id}/comments/{id}/votes.json",
+            ),
+        ),
+        "post_comments": (("posts", "/api/v2/community/posts/{id}/comments.json"),),
+        "post_votes": (("posts", "/api/v2/community/posts/{id}/votes.json"),),
+        "post_comment_votes": (
+            ("post_comments", "/api/v2/community/posts/{post_id}/comments/{id}/votes.json"),
+        ),
+        "users_identities": (("users", "/api/v2/users/{id}/identities.json"),),
+    }
+    assert {name for name in edges if declared[name].canonical} == {"article_comments"}
+    assert declared["article_comments"].key_scope == "global"
+    assert {name for name in edges if declared[name].key_scope == "local"} == edges.keys() - {
+        "article_comments"
+    }

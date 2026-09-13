@@ -29,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ufo.sdk.sources import (
+    Run,
     StreamFault,
     StreamPage,
     StreamSkipped,
@@ -88,17 +89,12 @@ class GranolaConnector(ToolConnector):
     streams_list = GRANOLA_STREAMS
 
     async def paginate(
-        self,
-        execute: ToolExecutor,
-        stream: StreamSpec,
-        *,
-        cursor: str | None,
-        backfill_after: datetime | None,
+        self, execute: ToolExecutor, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         if stream.name not in (MEETINGS_STREAM, TRANSCRIPTS_STREAM):
             raise NotImplementedError(f"granola_mcp: stream {stream.name!r} has no paginate")
-        floor = _lookback(cursor)
-        listed = await _call(execute, LIST_MEETINGS_TOOL, _range(floor, backfill_after))
+        floor = _lookback(run.cursor)
+        listed = await _call(execute, LIST_MEETINGS_TOOL, _range(floor, run.backfill_after))
         meetings = [meeting for record in _records(listed) if (meeting := _meeting(record))]
         fresh = sorted(
             (meeting for meeting in meetings if floor is None or meeting["created_at"] > floor),

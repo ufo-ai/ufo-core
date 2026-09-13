@@ -7,24 +7,34 @@ revisions synced as recallable metadata.
 token, upserting changed files, tombstoning removed or trashed ones, and advancing the cursor to the
 next page (or the fresh `newStartPageToken` at the end). A `410` on the changes token means it
 expired, so the connector raises `CursorExpired` and core refetches fresh. `shared_drives` re-reads
-the whole set each run; `permissions`, `comments`, and `revisions` fan out over every file to its
-sub-collection. A grant that lacks the Drive scope (`401`/`403`) yields `StreamSkipped` so the run
-records a skip, not a failure; a refusal naming a usage limit instead of the grant raises
-(`ufo_ext_sources.providers.google`). `render` lifts a file's name, mime type, owners, and link
-into a readable body. The credential is resolved through the auth proxy the runner threads — this
-connector holds no token. The write path is intentionally absent — the source seam only reads."""
+the whole set each run; `permissions`, `comments`, and `revisions` each declare one edge under
+`files`. Their ids are unique inside one file and nowhere else — a user's permission id is the same
+value on every file shared with them, a revision numbers from `1` per file. A grant that lacks the
+Drive scope (`401`/`403`) yields `StreamSkipped` so the run records a skip, not a failure; a refusal
+naming a usage limit instead of the grant raises (`ufo_ext_sources.providers.google`). `render`
+lifts a file's name, mime type, owners, and link into a readable body. The credential is resolved
+through the auth proxy the runner threads — this connector holds no token. The write path is
+intentionally absent — the source seam only reads."""
 
 from collections.abc import AsyncIterator
+from functools import partial
 from typing import Any
 
 import httpx
 
 from ufo.sdk.sources import (
     CursorExpired,
+    ParentEdge,
+    Partition,
+    PartitionBound,
+    PartitionSkipped,
     RestConnector,
+    Run,
     StreamPage,
     StreamSkipped,
     StreamSpec,
+    WalkPage,
+    fanned_out,
     list_or_empty,
 )
 from ufo_ext_sources.providers import google
@@ -60,21 +70,26 @@ GOOGLE_DRIVE_STREAMS: list[StreamSpec] = [
         primary_key="id",
         created_at_field="createdTime",
     ),
-    StreamSpec(name="permissions", source_object="permissions", primary_key="id"),
+    StreamSpec(
+        name="permissions",
+        source_object="permissions",
+        primary_key="id",
+        parents=(ParentEdge(stream="files", path="/drive/v3/files/{id}/permissions"),),
+    ),
     StreamSpec(
         name="comments",
         source_object="comments",
         primary_key="id",
-        cursor_field="modifiedTime",
         created_at_field="createdTime",
         updated_at_field="modifiedTime",
+        parents=(ParentEdge(stream="files", path="/drive/v3/files/{id}/comments"),),
     ),
     StreamSpec(
         name="revisions",
         source_object="revisions",
         primary_key="id",
-        cursor_field="modifiedTime",
         updated_at_field="modifiedTime",
+        parents=(ParentEdge(stream="files", path="/drive/v3/files/{id}/revisions"),),
     ),
 ]
 
@@ -86,12 +101,12 @@ class GoogleDriveConnector(RestConnector):
     checkpoint = staticmethod(text_checkpoint)
 
     async def paginate(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
+        self, client: httpx.AsyncClient, stream: StreamSpec, run: Run
     ) -> AsyncIterator[list[dict[str, Any]] | StreamPage]:
         try:
             if stream.name == "files":
-                if cursor:
-                    async for change_page in self._paginate_file_changes(client, cursor=cursor):
+                if run.cursor:
+                    async for change_page in self._paginate_file_changes(client, cursor=run.cursor):
                         yield change_page
                     return
                 async for file_page in self._paginate_files(client, cursor=None):
@@ -104,13 +119,13 @@ class GoogleDriveConnector(RestConnector):
                 async for drive_page in self._paginate_shared_drives(client):
                     yield drive_page
                 return
-            if stream.name in {"permissions", "comments", "revisions"}:
-                async for child_page in self._paginate_file_children(client, stream, cursor=cursor):
-                    yield child_page
-                return
-            raise NotImplementedError(
-                f"googledrive: stream {stream.name!r} has no paginate dispatch"
-            )
+            if not stream.parents:
+                raise NotImplementedError(
+                    f"googledrive: stream {stream.name!r} has no paginate dispatch"
+                )
+            pages = partial(self._child_pages, client, stream)
+            async for page in fanned_out(stream, run, pages):
+                yield page
         except httpx.HTTPStatusError as error:
             if google.refused_for_scope(error):
                 raise StreamSkipped(
@@ -219,45 +234,35 @@ class GoogleDriveConnector(RestConnector):
             if not isinstance(token, str) or not token:
                 return
 
-    async def _paginate_file_children(
-        self, client: httpx.AsyncClient, stream: StreamSpec, *, cursor: str | None
-    ) -> AsyncIterator[list[dict[str, Any]]]:
-        async for files in self._paginate_files(client, cursor=None):
-            for file in files:
-                file_id = file.get("id")
-                if not isinstance(file_id, str) or not file_id:
-                    continue
-                path = f"/drive/v3/files/{file_id}/{stream.source_object}"
-                token: str | None = None
-                while True:
-                    params: dict[str, Any] = {
-                        "pageSize": CHILD_PAGE_SIZE,
-                        "fields": "nextPageToken,*",
-                        "supportsAllDrives": "true",
-                    }
-                    if token:
-                        params["pageToken"] = token
-                    try:
-                        data = await self._get(client, path, params=params)
-                    except httpx.HTTPStatusError as error:
-                        if error.response.status_code in _CHILD_REFUSAL_STATUS:
-                            break
-                        raise
-                    records = list_or_empty(data.get(stream.source_object))
-                    if cursor and stream.cursor_field:
-                        records = [
-                            record
-                            for record in records
-                            if str(record.get(stream.cursor_field) or "") > cursor
-                        ]
-                    if records:
-                        yield [
-                            {**record, "file_id": file_id, "file_name": file.get("name")}
-                            for record in records
-                        ]
-                    token = data.get("nextPageToken")
-                    if not isinstance(token, str) or not token:
-                        break
+    async def _child_pages(
+        self,
+        client: httpx.AsyncClient,
+        stream: StreamSpec,
+        partition: Partition,
+        bound: PartitionBound,
+    ) -> AsyncIterator[WalkPage]:
+        """One file's sub-collection, paged by Drive's own token. A file the grant cannot read into
+        (`403`) or that has gone (`404`) drops out of the pass without failing the run; the other
+        files' rows still land."""
+        token: str | None = None
+        while True:
+            params: dict[str, Any] = {
+                "pageSize": CHILD_PAGE_SIZE,
+                "fields": "nextPageToken,*",
+                "supportsAllDrives": "true",
+            }
+            if token:
+                params["pageToken"] = token
+            try:
+                data = await self._get(client, partition.path, params=params)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code in _CHILD_REFUSAL_STATUS:
+                    raise PartitionSkipped(f"googledrive: {partition.ref} refused") from error
+                raise
+            yield WalkPage(records=list_or_empty(data.get(stream.source_object)))
+            token = data.get("nextPageToken")
+            if not isinstance(token, str) or not token:
+                return
 
     def render(self, record: dict[str, Any], stream: StreamSpec) -> tuple[str, str]:
         if stream.name != "files":
