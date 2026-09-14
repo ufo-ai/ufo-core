@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ufo_ext_sources.pages import PAGE_KIND
 
 from ufo.sdk.context import ExtensionContext, SourceReader
+from ufo.sdk.hub import SourceRef
 from ufo.sdk.index import TextChunker
 from ufo.sdk.jobs import PAGE_CHANGE_CURSOR_KEY, JobSpec, owner_candidates, stored_key_workspaces
 from ufo.sdk.listings import ListingCursor, ListingPage, page_of, page_query
@@ -129,6 +130,7 @@ INTERNAL_ADMISSION = "internal"
 RECALL_SKIP_INTERNAL = "internal_admission"
 RECALL_SOFT_TIMEOUT_SECONDS = 4.0
 RECALL_CONTEXT_PREFIX = "Relevant memory:\n"
+RECALL_SOURCE_TITLE_MAX_CHARS = 80
 RECALL_TOTAL_MAX_CHARS = 8_000
 RECALL_TRUNCATION_MARK = " …[truncated]"
 MEMORY_INDEX_JOB = "memory_index"
@@ -637,9 +639,19 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
             )
         except Exception:
             logger.warning("memory.recall_log_failed", exc_info=True)
-    if error_class is not None:
+    if error_class is not None or not lines:
         return None
-    return InjectContext(RECALL_CONTEXT_PREFIX + "\n".join(lines)) if lines else None
+    return InjectContext(
+        RECALL_CONTEXT_PREFIX + "\n".join(lines),
+        sources=tuple(
+            SourceRef(
+                kind="memory",
+                title=item.body[:RECALL_SOURCE_TITLE_MAX_CHARS],
+                ref=str(ObjectRef(kind=MEMORY_KIND, name=str(item.memory_id))),
+            )
+            for item in kept
+        ),
+    )
 
 
 async def index_memory(ctx: ExtensionContext) -> None:

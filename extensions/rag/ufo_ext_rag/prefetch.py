@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ufo.sdk.context import SourceReader
+from ufo.sdk.hub import SourceRef
 from ufo.sdk.index import TextChunker
 from ufo.sdk.o11y import log
 from ufo.sdk.search import SearchHit, SearchProvider, SearchQuery
@@ -55,10 +56,19 @@ class Passage:
     reference: str
     dated: str
     text: str
+    provider: str = ""
 
     @property
     def key(self) -> str:
         return f"{self.reference}\x00{self.text}"
+
+    @property
+    def source(self) -> SourceRef:
+        if self.origin == EXTERNAL_LABEL:
+            return SourceRef(kind=EXTERNAL_LABEL, title=self.title, url=self.reference)
+        return SourceRef(
+            kind=INTERNAL_LABEL, title=self.title, ref=self.reference, provider=self.provider
+        )
 
     def rendered(self, number: int) -> str:
         """The numbered entry a reply cites: the number, the reference the reader opens — a web
@@ -75,6 +85,15 @@ def _rank(fused: dict[str, float], passage: Passage) -> tuple[float, str]:
 
 
 @dataclass(frozen=True)
+class Grounding:
+    """What one prefetch found: the walled block the model reads, and each place it was drawn from
+    once, in the order the block names them."""
+
+    block: str
+    sources: tuple[SourceRef, ...]
+
+
+@dataclass(frozen=True)
 class Prefetch:
     """Run both legs for one turn's queries and render what they found."""
 
@@ -82,8 +101,9 @@ class Prefetch:
     pages: PageStore | None
     chunker: TextChunker = CHUNKER
 
-    async def passages(self, queries: tuple[str, ...], reader: SourceReader) -> str:
-        """The rendered block for `queries`, or an empty string when neither leg found anything."""
+    async def passages(self, queries: tuple[str, ...], reader: SourceReader) -> Grounding:
+        """The grounding for `queries`: an empty block and no sources when neither leg found
+        anything."""
         ranked = await self._legs(queries, reader)
         chosen = self._chosen(ranked)
         log(
@@ -93,11 +113,13 @@ class Prefetch:
             workspace=sum(1 for passage in chosen if passage.origin == INTERNAL_LABEL),
         )
         if not chosen:
-            return ""
-        return wall(
+            return Grounding(block="", sources=())
+        block = wall(
             WALL_SOURCE,
             "\n\n".join(passage.rendered(number) for number, passage in enumerate(chosen, start=1)),
         )
+        sources = {passage.reference: passage.source for passage in chosen}
+        return Grounding(block=block, sources=tuple(sources.values()))
 
     async def _legs(
         self, queries: tuple[str, ...], reader: SourceReader
@@ -155,6 +177,7 @@ class Prefetch:
             reference=hit.ref,
             dated=hit.dated,
             text=hit.text[:PASSAGE_MAX_CHARS],
+            provider=hit.provider,
         )
 
     def _chosen(self, ranked: tuple[tuple[Passage, ...], ...]) -> tuple[Passage, ...]:

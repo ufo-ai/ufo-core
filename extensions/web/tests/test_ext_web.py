@@ -231,6 +231,8 @@ from ufo.runtime.hub import (
     Parked,
     Reply,
     Resumed,
+    SourceRef,
+    Sources,
     SubagentActivity,
     Terminal,
 )
@@ -416,6 +418,7 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
             conversation_id=uuid4(),
             profile="general_purpose",
         ),
+        Sources: Sources(items=(SourceRef(kind="web", title="t", url="https://ex.test"),)),
     }
     assert set(frames) | {ArtifactsChanged} == set(get_args(LiveFrame))
     named = {
@@ -427,6 +430,7 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
         Resumed: b"event: resumed\n",
         Reply: b"event: reply\n",
         SubagentActivity: b"event: subagent_activity\n",
+        Sources: b"event: sources\n",
     }
     for kind, frame in frames.items():
         event = _sse("7", frame)

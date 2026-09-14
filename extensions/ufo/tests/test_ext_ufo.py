@@ -73,6 +73,8 @@ from ufo.runtime.hub import (
     Parked,
     Reply,
     Resumed,
+    SourceRef,
+    Sources,
     SubagentActivity,
     Terminal,
 )
@@ -141,6 +143,15 @@ def test_frame_map_covers_every_live_frame() -> None:
     assert directives_for(Resumed(attempt="attempt-one"), False) == (
         b"note\tthe service restarted; this turn resumed\n",
     )
+    consulted = Sources(
+        items=(
+            SourceRef(kind="web", title="Pricing", url="https://northwind.example/pricing"),
+            SourceRef(kind="web", title="Support", url="https://northwind.example/support"),
+            SourceRef(kind="workspace", title="Order form", ref="page/2f1c", provider="notion"),
+        )
+    )
+    assert directives_for(consulted, False) == (b"note\tSources: northwind.example, Order form\n",)
+    assert directives_for(Sources(items=()), False) == ()
     run = SubagentActivity(
         turn_id=UUID(int=1),
         parent_turn_id=UUID(int=2),

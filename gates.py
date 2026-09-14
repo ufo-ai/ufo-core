@@ -148,8 +148,8 @@ CONSENT_MARK_NAME = "CONSENT_WINDOW_MARK"
 DEBUGGER_TAIL_MODULE = Path("extensions/debugger/frontend/src/Tail.tsx")
 FRAME_EXEMPTIONS: dict[str, frozenset[str]] = {
     "web _sse": frozenset({"ArtifactsChanged"}),
-    "slack ThreadStatus._follow": frozenset({"ArtifactsChanged", "CostTick", "Reply"}),
-    "slack ThreadProgress._follow": frozenset({"Absorbed", "ArtifactsChanged", "Reply"}),
+    "slack ThreadStatus._follow": frozenset({"ArtifactsChanged", "CostTick", "Reply", "Sources"}),
+    "slack ThreadProgress._follow": frozenset({"Absorbed", "ArtifactsChanged", "Reply", "Sources"}),
 }
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"

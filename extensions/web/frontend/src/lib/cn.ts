@@ -18,7 +18,19 @@ const SPACING = [
   "8xl",
 ];
 
-const RADIUS = ["sm", "control", "row", "answer", "panel", "bubble", "menu", "avatar", "card", "key"];
+const RADIUS = [
+  "sm",
+  "control",
+  "row",
+  "answer",
+  "panel",
+  "bubble",
+  "menu",
+  "avatar",
+  "card",
+  "key",
+  "site-icon",
+];
 
 const TEXT = ["fine", "mono", "small", "label", "ui", "body", "subtitle", "title", "figure"];
 

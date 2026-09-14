@@ -9,6 +9,7 @@ import type {
   ChatQuestion,
   CredentialRequest,
   Message,
+  SourceRef,
   SubagentRun,
   TurnSummary,
 } from "@/lib/types";
@@ -35,6 +36,7 @@ export type LiveTurn = {
   subagents: SubagentRun[];
   files: ChatFile[];
   apps: ChatApp[];
+  sources: SourceRef[];
   reconnecting: boolean;
 };
 
@@ -110,6 +112,7 @@ export function liveTurn(): LiveTurn {
     subagents: [],
     files: [],
     apps: [],
+    sources: [],
     reconnecting: false,
   };
 }

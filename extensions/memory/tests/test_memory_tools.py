@@ -505,6 +505,11 @@ async def test_recall_hook_bounds_injected_bytes(monkeypatch: pytest.MonkeyPatch
     assert isinstance(outcome, InjectContext)
     assert len(outcome.text) <= len(memory.RECALL_CONTEXT_PREFIX) + memory.RECALL_TOTAL_MAX_CHARS
     assert "z" * memory.RECALL_ITEM_MAX_CHARS not in outcome.text
+    assert [source.ref for source in outcome.sources] == [
+        f"memory/{item.memory_id}" for item in items[:3]
+    ]
+    assert all(source.kind == "memory" for source in outcome.sources)
+    assert outcome.sources[0].title == "w" * memory.RECALL_SOURCE_TITLE_MAX_CHARS
 
 
 async def test_recall_hook_omits_a_budget_dropped_item_from_the_event(

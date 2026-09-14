@@ -55,7 +55,9 @@ test("the built page names a hashed module and stylesheet under this surface", (
  *  chokepoint cannot catch: only the page's own policy refuses a load it never minted an element for. */
 test("the page tells the browser images load from this origin alone", () => {
   const meta = /<meta http-equiv="Content-Security-Policy" content="([^"]+)">/.exec(builtPage());
-  expect(meta?.[1]).toBe("img-src 'self' data:");
+  expect(meta?.[1]).toBe(
+    "img-src 'self' data: https://www.google.com/s2/favicons https://*.gstatic.com",
+  );
 });
 
 test("the page loads one script, which is the one this test runs", () => {

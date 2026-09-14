@@ -12,7 +12,7 @@ import {
   type ChatTurn,
   type LiveTurn,
 } from "@/lib/chatStore";
-import type { ChatApp, ChatFile, SubagentRun, Transcript } from "@/lib/types";
+import type { ChatApp, ChatFile, SourceRef, SubagentRun, Transcript } from "@/lib/types";
 
 const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const MALFORMED_REPLY = "Malformed reply — try again.";
@@ -76,6 +76,20 @@ export function resetStreams(): void {
 
 export function eventLabel(event: ActivityEvent, _phase: "active" | "done"): string {
   return event.text || "Completed a step.";
+}
+
+/** What the current step has read, each place once: a frame naming a page the step already drew
+ *  adds nothing. A new tool step or the reply's first words start the list over, so the tiles are
+ *  the step's, never stale. */
+export function consulted(held: SourceRef[], items: SourceRef[]): SourceRef[] {
+  const seen = new Set(held.map((source) => source.url || source.ref));
+  const fresh = items.filter((source) => {
+    const key = source.url || source.ref;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return fresh.length ? held.concat(fresh) : held;
 }
 
 export function latestActivity(events: ActivityEvent[], runs: SubagentRun[]): string {
@@ -281,7 +295,11 @@ function attach(
 
   source.onmessage = (event) => {
     const chunk = JSON.parse(event.data).text as string;
-    onLive((live) => ({ ...live, text: live.text + chunk }));
+    onLive((live) => ({
+      ...live,
+      text: live.text + chunk,
+      sources: live.sources.length ? [] : live.sources,
+    }));
   };
 
   source.addEventListener("files", (event) => {
@@ -387,7 +405,13 @@ function attach(
       ...live,
       events: live.events.concat(entry),
       activity: entry.text,
+      sources: [],
     }));
+  });
+
+  source.addEventListener("sources", (event) => {
+    const items = JSON.parse((event as MessageEvent).data).items as SourceRef[];
+    onLive((live) => ({ ...live, sources: consulted(live.sources, items) }));
   });
 
   source.addEventListener("resumed", () => {

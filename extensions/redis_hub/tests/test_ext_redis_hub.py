@@ -32,6 +32,8 @@ from ufo.runtime.hub import (
     CostTick,
     HubFrame,
     Parked,
+    SourceRef,
+    Sources,
     SubagentActivity,
     Terminal,
 )
@@ -67,6 +69,12 @@ FRAMES: tuple[HubFrame, ...] = (
         profile="general_purpose",
         name="UK sports news",
         activity="Checking the fixtures.",
+    ),
+    Sources(
+        items=(
+            SourceRef(kind="web", title="Fixtures", url="https://fixtures.example/today"),
+            SourceRef(kind="workspace", title="Squad list", ref="page/2f1c", provider="notion"),
+        )
     ),
 )
 

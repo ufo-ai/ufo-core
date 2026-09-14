@@ -179,7 +179,16 @@ from ufo.runtime.ext.manifest import (
     PreToolUse,
     UserPromptSubmit,
 )
-from ufo.runtime.hub import Absorbed, Activity, InProcessHub, LiveFrame, Resumed, Terminal
+from ufo.runtime.hub import (
+    Absorbed,
+    Activity,
+    InProcessHub,
+    LiveFrame,
+    Resumed,
+    SourceRef,
+    Sources,
+    Terminal,
+)
 from ufo.runtime.jobs import TurnDispatcher
 from ufo.runtime.memory import MemoryMatch, MemorySearch
 from ufo.runtime.object_name import ObjectRef
@@ -9806,3 +9815,175 @@ async def test_dispatch_bounds_the_result_when_the_offload_directory_cannot_be_r
     failed = [r.ufo for r in caplog.records if r.getMessage() == "tool.offload_failed"]
     assert len(failed) == 1
     assert failed[0]["error_class"] == "OSError"
+
+
+WEB_SOURCE = SourceRef(
+    kind="web", title="Northwind pricing", url="https://northwind.example/pricing"
+)
+PAGE_SOURCE = SourceRef(
+    kind="workspace", title="Northwind order form", ref="page/2f1c", provider="notion"
+)
+
+
+async def test_a_hook_injection_names_its_sources_before_the_first_round(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+
+    async def ground(ctx: HookContext) -> HookOutcome:
+        return InjectContext(text="[1] grounding", sources=(WEB_SOURCE, PAGE_SOURCE))
+
+    hub = RecordingHub()
+    engine = replace(_engine(turn, CapturingModel(), tmp_path), hub=hub)
+    engine = replace(
+        engine,
+        hooks=HookChain(
+            hooks={
+                "user_prompt_submit": (
+                    BoundHook(
+                        spec=HookSpec(event="user_prompt_submit", handler=ground),
+                        ext=context_for("probe", frozenset(), audience=engine.audience),
+                    ),
+                )
+            },
+            audience=engine.audience,
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    kinds = [type(published) for published in hub.frames]
+    assert kinds.index(Sources) < kinds.index(TextDelta)
+    assert [published for published in hub.frames if isinstance(published, Sources)] == [
+        Sources(items=(WEB_SOURCE, PAGE_SOURCE))
+    ]
+
+
+@dataclass(frozen=True)
+class _SearchThenAnswerModel:
+    """Round one calls the probe search tool; round two, holding its result, answers."""
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="search_probe")
+        yield ToolCallDelta(id="c1", partial_json="{}")
+        yield ToolCallStart(id="c2", name="failing_probe")
+        yield ToolCallDelta(id="c2", partial_json="{}")
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+async def test_a_tool_result_names_its_sources_and_a_failed_one_names_none(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+
+    async def search(ctx: ToolContext, args: _NoArgs) -> ToolResult:
+        return ToolResult(content=(TextContent(text="hits"),), sources=(WEB_SOURCE,))
+
+    async def fail(ctx: ToolContext, args: _NoArgs) -> ToolResult:
+        return ToolResult(content=(TextContent(text="no"),), is_error=True, sources=(PAGE_SOURCE,))
+
+    hub = RecordingHub()
+    engine = replace(
+        _engine(turn, _SearchThenAnswerModel(), tmp_path),
+        hub=hub,
+        tools=ToolRegistry(
+            (
+                ToolDef(name="search_probe", description="d", input_model=_NoArgs, handler=search),
+                ToolDef(name="failing_probe", description="d", input_model=_NoArgs, handler=fail),
+            )
+        ),
+    )
+
+    frame = await engine.run()
+
+    assert frame.status == "done"
+    assert [published for published in hub.frames if isinstance(published, Sources)] == [
+        Sources(items=(WEB_SOURCE,))
+    ]
+
+
+@dataclass
+class _LabelAfterResultModel:
+    """Answers the activity label only once the round holding the tool results has begun, so the
+    label loses the race a fast search wins in production."""
+
+    results_seen: asyncio.Event
+    model = "gpt-5.6-luna"
+
+    async def complete(self, request: ModelRequest) -> str:
+        await self.results_seen.wait()
+        return "Searching the web"
+
+
+@dataclass(frozen=True)
+class _SearchThenSignalModel:
+    """Round one calls the probe search; round two signals it holds the result, then waits for the
+    step's sources to reach the hub before it answers, so the turn cannot end first."""
+
+    results_seen: asyncio.Event
+    sources_seen: asyncio.Event
+
+    async def complete(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        answered = any(
+            isinstance(message.content, tuple)
+            and any(isinstance(block, ToolResultBlock) for block in message.content)
+            for message in request.messages
+        )
+        if answered:
+            self.results_seen.set()
+            await self.sources_seen.wait()
+            yield TextDelta(text="done")
+            yield Usage(input_tokens=1, output_tokens=1)
+            return
+        yield ToolCallStart(id="c1", name="search_probe")
+        yield ToolCallDelta(id="c1", partial_json="{}")
+        yield Usage(input_tokens=2, output_tokens=2)
+
+
+@dataclass
+class _SourcesSignalHub(RecordingHub):
+    sources_seen: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def publish(self, turn_id: UUID, frame: LiveFrame) -> str:
+        if isinstance(frame, Sources):
+            self.sources_seen.set()
+        return await super().publish(turn_id, frame)
+
+
+async def test_a_tool_result_publishes_its_sources_after_its_own_label(
+    db: None, tmp_path: Path
+) -> None:
+    turn = await _seed_turn("queued", None)
+
+    async def search(ctx: ToolContext, args: _NoArgs) -> ToolResult:
+        return ToolResult(content=(TextContent(text="hits"),), sources=(WEB_SOURCE,))
+
+    hub = _SourcesSignalHub()
+    results_seen = asyncio.Event()
+    engine = replace(
+        _engine(turn, _SearchThenSignalModel(results_seen, hub.sources_seen), tmp_path),
+        hub=hub,
+        activity_summarizer=ActivitySummarizer(_LabelAfterResultModel(results_seen)),
+        tools=ToolRegistry(
+            (ToolDef(name="search_probe", description="d", input_model=_NoArgs, handler=search),)
+        ),
+    )
+
+    frame = await asyncio.wait_for(engine.run(), timeout=30)
+
+    assert frame.status == "done"
+    kinds = [type(published) for published in hub.frames]
+    assert kinds.index(Activity) < kinds.index(Sources)
+    assert [published for published in hub.frames if isinstance(published, Sources)] == [
+        Sources(items=(WEB_SOURCE,))
+    ]

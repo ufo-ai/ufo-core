@@ -19,6 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from ufo_ext_memory.manifest import MemorySearchService, match_line
 
+from ufo.sdk.hub import SourceRef
 from ufo.sdk.search import FetchRequest, SearchHit, SearchProvider, SearchQuery
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_research.observations import record_fetched_page, record_search_hits
@@ -144,6 +145,11 @@ def _provider(ctx: ToolContext) -> SearchProvider:
     return ctx.search_provider
 
 
+def _web_sources(hits: list[SearchHit]) -> tuple[SourceRef, ...]:
+    named = {hit.url: SourceRef(kind="web", title=hit.title, url=hit.url) for hit in hits}
+    return tuple(named.values())
+
+
 def _results_json(hits: list[SearchHit], answer: str | None) -> str:
     results = [
         {
@@ -179,7 +185,9 @@ async def _search_web(ctx: ToolContext, args: SearchWebInput) -> ToolResult:
         answer = answer or results.answer
     if ctx.ext is not None:
         await record_search_hits(ctx.ext, ctx.turn.conversation_id, ctx.turn.id, tuple(hits))
-    return ToolResult(content=(TextContent(text=_results_json(hits, answer)),))
+    return ToolResult(
+        content=(TextContent(text=_results_json(hits, answer)),), sources=_web_sources(hits)
+    )
 
 
 async def _fetch_url(ctx: ToolContext, args: FetchUrlInput) -> ToolResult:
@@ -203,7 +211,10 @@ async def _fetch_url(ctx: ToolContext, args: FetchUrlInput) -> ToolResult:
     }
     if page.summary is not None:
         reply["summary"] = page.summary
-    return ToolResult(content=(TextContent(text=json.dumps(reply)),))
+    return ToolResult(
+        content=(TextContent(text=json.dumps(reply)),),
+        sources=(SourceRef(kind="web", title=page.url, url=page.url),),
+    )
 
 
 async def _search_internal(ctx: ToolContext, query: str) -> ToolResult:
@@ -216,8 +227,14 @@ async def _search_internal(ctx: ToolContext, query: str) -> ToolResult:
     matches = await MemorySearchService(ctx.ext).search_pages((query,), ctx.source_reader())
     if not matches:
         return ToolResult(content=(TextContent(text=NO_INTERNAL_MATCHES_MESSAGE),))
+    pages = {
+        str(match.ref): SourceRef(kind="workspace", title=match.text, ref=str(match.ref))
+        for match in matches
+        if match.ref is not None
+    }
     return ToolResult(
-        content=(TextContent(text="\n".join(match_line(match) for match in matches)),)
+        content=(TextContent(text="\n".join(match_line(match) for match in matches)),),
+        sources=tuple(pages.values()),
     )
 
 
@@ -231,7 +248,8 @@ async def _search_vertical(ctx: ToolContext, args: SearchVerticalInput) -> ToolR
     if ctx.ext is not None:
         await record_search_hits(ctx.ext, ctx.turn.conversation_id, ctx.turn.id, results.hits)
     return ToolResult(
-        content=(TextContent(text=_results_json(list(results.hits), results.answer)),)
+        content=(TextContent(text=_results_json(list(results.hits), results.answer)),),
+        sources=_web_sources(list(results.hits)),
     )
 
 

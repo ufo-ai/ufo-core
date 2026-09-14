@@ -39,6 +39,7 @@ from ufo.sdk.hub import (
     Parked,
     Reply,
     Resumed,
+    Sources,
     SubagentActivity,
     Terminal,
     TextDelta,
@@ -212,6 +213,8 @@ def _sse(cursor: str, frame: LiveFrame) -> bytes:
             kind, payload = b"resumed", frame.model_dump_json()
         case Reply():
             kind, payload = b"reply", frame.model_dump_json()
+        case Sources():
+            kind, payload = b"sources", frame.model_dump_json()
         case TextDelta():
             kind, payload = b"text", frame.model_dump_json()
         case _:

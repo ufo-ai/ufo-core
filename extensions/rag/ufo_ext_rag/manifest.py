@@ -91,13 +91,15 @@ async def prefetch_hook(ctx: HookContext) -> HookOutcome:
     )
     try:
         async with asyncio.timeout(PREFETCH_SOFT_TIMEOUT_SECONDS):
-            block = await Prefetch(search=ctx.ext.search, pages=_page_store(ctx)).passages(
+            found = await Prefetch(search=ctx.ext.search, pages=_page_store(ctx)).passages(
                 decision.queries, reader
             )
     except Exception:
         logging.getLogger(__name__).warning("rag.prefetch.degraded", exc_info=True)
         return None
-    return InjectContext(PREFACE + block) if block else None
+    if not found.block:
+        return None
+    return InjectContext(PREFACE + found.block, sources=found.sources)
 
 
 def manifest() -> Manifest:

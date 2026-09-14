@@ -136,6 +136,18 @@ export type ActivityEvent =
   | { kind: "activity"; text: string }
   | { kind: "note"; text: string };
 
+export type SourceKind = "web" | "workspace" | "memory";
+
+/** One place the running turn read: a web page by `url`, a workspace page or memory by `ref`, with
+ *  the provider that feeds a workspace page so its tile draws that provider's mark. */
+export type SourceRef = {
+  kind: SourceKind;
+  title: string;
+  url: string;
+  ref: string;
+  provider: string;
+};
+
 export type SubagentRun = {
   profile: string;
   name?: string;

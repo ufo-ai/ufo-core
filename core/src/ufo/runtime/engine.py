@@ -187,6 +187,8 @@ from ufo.runtime.hub import (
     Parked,
     Reply,
     Resumed,
+    SourceRef,
+    Sources,
     SubagentActivity,
     Terminal,
 )
@@ -713,6 +715,7 @@ class _HandlerOutput:
     images: tuple[ImageBlock, ...]
     outcome: str
     error_class: str | None = None
+    sources: tuple[SourceRef, ...] = ()
 
 
 @dataclass
@@ -776,6 +779,9 @@ class _ActivityState:
     labels: dict[str, str] = field(default_factory=dict)
     results: set[str] = field(default_factory=set)
     ready: dict[int, tuple[str, str | None]] = field(default_factory=dict)
+    started: set[str] = field(default_factory=set)
+    labeled: set[str] = field(default_factory=set)
+    sources: dict[str, tuple[SourceRef, ...]] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -811,6 +817,7 @@ class DispatchResult(BaseModel):
     interrupted: bool = False
     resume_target: ObjectActionTarget | None = None
     question: AskUserInput | None = None
+    sources: tuple[SourceRef, ...] = ()
 
     @model_validator(mode="after")
     def _errors_say_something(self) -> "DispatchResult":
@@ -2265,6 +2272,8 @@ class TurnEngine:
                 Message(role="user", content=founding_denial),
             )
             return _PreparedRun(system, messages, injected)
+        if inbound.sources:
+            await self._publish(Sources(items=inbound.sources))
         messages = await self._load_messages()
         founding = messages[-1].content
         if not isinstance(founding, str):
@@ -3562,6 +3571,8 @@ class TurnEngine:
         self,
         result: DispatchResult,
     ) -> ToolResultBlock:
+        if result.sources:
+            await self._publish_sources(result.tool_use_id, result.sources)
         if not result.image_refs:
             block = ToolResultBlock(
                 tool_use_id=result.tool_use_id,
@@ -3859,6 +3870,7 @@ class TurnEngine:
 
     def _start_activity(self, call: ToolUseBlock, goal: str) -> None:
         self._activity.sequence += 1
+        self._activity.started.add(call.id)
         sequence = self._activity.sequence
         recent = tuple(self._activity.labels.values())[-ACTIVITY_RECENT_LABELS:]
         task = asyncio.create_task(self._generate_activity(call, goal, sequence, recent))
@@ -3879,11 +3891,23 @@ class TurnEngine:
             self._activity.ready[sequence] = (call.id, activity)
             while current := self._activity.ready.pop(self._activity.next_publish, None):
                 self._activity.next_publish += 1
-                _call_id, current_activity = current
-                if current_activity is None:
-                    continue
-                await self._publish(Activity(text=current_activity))
-                await self._publish_run(activity=current_activity)
+                call_id, current_activity = current
+                if current_activity is not None:
+                    await self._publish(Activity(text=current_activity))
+                    await self._publish_run(activity=current_activity)
+                self._activity.labeled.add(call_id)
+                held = self._activity.sources.pop(call_id, None)
+                if held:
+                    await self._publish(Sources(items=held))
+
+    async def _publish_sources(self, call_id: str, sources: tuple[SourceRef, ...]) -> None:
+        # A surface clears the tiles under a step when the next label lands, so a step's sources
+        # wait for its own label, which a fast tool can beat.
+        async with self._activity.lock:
+            if call_id in self._activity.started and call_id not in self._activity.labeled:
+                self._activity.sources[call_id] = sources
+                return
+        await self._publish(Sources(items=sources))
 
     def _stop_activity(self) -> None:
         for task in tuple(self._activity.tasks):
@@ -4476,6 +4500,7 @@ class TurnEngine:
                 tool.untrusted or result.untrusted,
                 tuple(images),
                 "handler_error" if result.is_error else "ok",
+                sources=() if result.is_error else result.sources,
             )
         except TerminalAbsent as error:
             raise TerminalGone(str(error)) from error
@@ -4562,6 +4587,7 @@ class TurnEngine:
             activity=True,
             image_refs=tuple(image_refs),
             usages=tuple(find_usages),
+            sources=handled.sources,
         )
 
     def _redoes_on_replay(self, tool: ToolDef) -> bool:

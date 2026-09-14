@@ -22,6 +22,7 @@ from ufo.runtime.ext.manifest import (
     PostToolUseFailure,
     PreToolUse,
 )
+from ufo.runtime.hub import SourceRef
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience
 from ufo.schema.records import Agent, Turn
 
@@ -76,6 +77,7 @@ class HookResolution:
     tool_input: BaseModel | None = None
     output: str | None = None
     injected: str = ""
+    sources: tuple[SourceRef, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,7 @@ class HookChain:
         tool_input = payload.tool_input if isinstance(payload, PreToolUse) else None
         output = payload.output if isinstance(payload, PostToolUse) else None
         injected: list[str] = []
+        sources: list[SourceRef] = []
         for hook in bound:
             assert self.audience is not None
             current: HookPayload
@@ -169,8 +172,14 @@ class HookChain:
                     tool_input = new_input
                 case ModifyOutput(output=new_output):
                     output = new_output
-                case InjectContext(text=text):
+                case InjectContext(text=text, sources=found):
                     injected.append(text)
+                    sources.extend(found)
                 case None:
                     continue
-        return HookResolution(tool_input=tool_input, output=output, injected="\n".join(injected))
+        return HookResolution(
+            tool_input=tool_input,
+            output=output,
+            injected="\n".join(injected),
+            sources=tuple(sources),
+        )

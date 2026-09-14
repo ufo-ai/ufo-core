@@ -32,6 +32,7 @@ from ufo.sdk.hub import (
     Parked,
     Reply,
     Resumed,
+    Sources,
     SubagentActivity,
     Terminal,
     TextDelta,
@@ -68,6 +69,7 @@ _FRAME_KINDS: tuple[tuple[str, type[BaseModel]], ...] = (
     ("resumed", Resumed),
     ("reply", Reply),
     ("subagent_activity", SubagentActivity),
+    ("sources", Sources),
     ("arrival_queued", ArrivalQueued),
 )
 _KIND_BY_TYPE = {cls: kind for kind, cls in _FRAME_KINDS}

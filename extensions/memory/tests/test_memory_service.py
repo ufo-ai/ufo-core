@@ -124,6 +124,7 @@ class ReclassifyingPage:
                 stream="pull_requests",
                 indexed=True,
                 as_of="2026-03-01",
+                backend="github",
             )
         }
 

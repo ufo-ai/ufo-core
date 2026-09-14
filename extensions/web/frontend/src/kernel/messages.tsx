@@ -9,7 +9,15 @@ import {
   type ReactNode,
 } from "react";
 
-import { IconCheck, IconChevronRight, IconCopy, IconX } from "@tabler/icons-react";
+import {
+  IconBrain,
+  IconCheck,
+  IconChevronRight,
+  IconCopy,
+  IconFileText,
+  IconWorld,
+  IconX,
+} from "@tabler/icons-react";
 
 import {
   Attachment,
@@ -64,7 +72,15 @@ import { formatSize } from "@/lib/size";
 import { turnMeta } from "@/lib/turnMeta";
 import { latestActivity } from "@/lib/turnStream";
 import type { ActivityEvent, Bubble as Spoken, LiveTurn } from "@/lib/chatStore";
-import type { ChatApp, ChatConnect, ChatFile, ChatQuestion, SubagentRun } from "@/lib/types";
+import type {
+  ChatApp,
+  ChatConnect,
+  ChatFile,
+  ChatQuestion,
+  SourceKind,
+  SourceRef,
+  SubagentRun,
+} from "@/lib/types";
 
 /** Judged to the pixel, the jump-to-foot button would flicker the moment a line landed or the
  *  composer grew a row. */
@@ -430,10 +446,11 @@ export function MessageLog({
                 <Activity
                   events={row.live.events}
                   runs={row.live.subagents}
+                  sources={row.live.sources}
                   working={
                     row.live.reconnecting
                       ? "Reconnecting…"
-                      : (row.live.activity ?? (row.live.text ? undefined : "Thinking…"))
+                      : (row.live.activity ?? (row.live.text ? undefined : "Researching…"))
                   }
                 />
                 <Said mine={false} entering>
@@ -1094,30 +1111,127 @@ function runStep(run: SubagentRun): string {
     : "Subagent · " + run.profile;
 }
 
-/** The step a turn is on, and under it the step of each subagent it waits on: a count alone reads as
- *  a stuck turn. A turn holding no running run draws no line — what it did is the reply it wrote. */
+const FAVICON_SERVICE = "https://www.google.com/s2/favicons";
+const FAVICON_SIZE = 32;
+const SOURCE_TILES_PER_ROW = 8;
+const SOURCE_KINDS: readonly SourceKind[] = ["web", "workspace", "memory"];
+const SOURCE_NOUNS: Record<SourceKind, [string, string]> = {
+  web: ["web source", "web sources"],
+  workspace: ["workspace page", "workspace pages"],
+  memory: ["memory", "memories"],
+};
+
+/** The favicon service answers by host, so an address that names none draws the globe instead. */
+export function faviconUrl(url: string): string | null {
+  if (!URL.canParse(url)) return null;
+  const host = new URL(url).hostname;
+  return host ? `${FAVICON_SERVICE}?domain=${encodeURIComponent(host)}&sz=${FAVICON_SIZE}` : null;
+}
+
+function sourceLabel(kind: SourceKind, count: number): string {
+  return count + " " + SOURCE_NOUNS[kind][count === 1 ? 0 : 1];
+}
+
+/** One place the turn read, as a tile: the site's favicon, a workspace page's provider mark, a
+ *  memory's glyph. The title is the tooltip and the accessible name; a web tile opens its address. */
+function SourceTile({ source }: { source: SourceRef }) {
+  const [broken, setBroken] = useState(false);
+  const favicon = source.kind === "web" && !broken ? faviconUrl(source.url) : null;
+  const Glyph =
+    source.kind === "memory" ? IconBrain : source.kind === "web" ? IconWorld : IconFileText;
+  const drawn = favicon ? (
+    <img
+      src={favicon}
+      alt=""
+      onError={() => setBroken(true)}
+      className="block size-(--size-site-icon) rounded-site-icon"
+    />
+  ) : source.kind === "workspace" && source.provider ? (
+    <BrandMark provider={source.provider} className="size-(--size-site-icon)" />
+  ) : (
+    <Glyph className="size-(--size-site-icon) text-ink-soft" aria-hidden />
+  );
+  const tile = (
+    <span
+      data-slot="source-tile"
+      title={source.title}
+      className="grid size-(--size-site-tile) shrink-0 place-items-center rounded-key bg-tile"
+    >
+      {drawn}
+      <span className="sr-only">{source.title}</span>
+    </span>
+  );
+  if (!source.url) return tile;
+  return (
+    <a href={source.url} target="_blank" rel="noreferrer" className="no-underline">
+      {tile}
+    </a>
+  );
+}
+
+/** A web tile stands for its site, so two pages of one host share the first page's tile; every
+ *  other kind is one tile per record. */
+function tiled(items: SourceRef[]): SourceRef[] {
+  const seen = new Set<string>();
+  return items.filter((source) => {
+    const host = URL.canParse(source.url) ? new URL(source.url).hostname : source.url;
+    const key = source.kind === "web" ? host : source.ref;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** What the turn has read so far, one row per kind: a tile per site or record, then how many. */
+function Consulted({ sources }: { sources: SourceRef[] }) {
+  const rows = SOURCE_KINDS.map(
+    (kind) => [kind, sources.filter((source) => source.kind === kind)] as const,
+  ).filter(([, items]) => items.length > 0);
+  return (
+    <>
+      {rows.map(([kind, items]) => (
+        <Marker key={kind} data-slot="sources" data-kind={kind} className="mt-2xs">
+          <span className="flex items-center gap-hair">
+            {tiled(items)
+              .slice(0, SOURCE_TILES_PER_ROW)
+              .map((source) => <SourceTile key={source.url || source.ref} source={source} />)}
+          </span>
+          <MarkerContent>{sourceLabel(kind, items.length)}</MarkerContent>
+        </Marker>
+      ))}
+    </>
+  );
+}
+
+/** The step a turn is on, what it has read, then the step of each subagent it waits on: a count
+ *  alone reads as a stuck turn. A turn holding no running run draws no line — its reply is what it did. */
 function Activity({
   events,
   runs,
   working,
+  sources = [],
 }: {
   events: ActivityEvent[];
   runs: SubagentRun[];
   working?: string;
+  sources?: SourceRef[];
 }) {
   const waiting = runs.filter((run) => run.running);
   const step =
     waiting.length > 0
       ? "Awaiting " + waiting.length + " subagent" + (waiting.length === 1 ? "" : "s")
       : (working ?? latestActivity(events, runs));
-  if (!step) return null;
+  if (!step && sources.length === 0) return null;
   return (
     <>
-      <Marker className="mt-2xs text-label text-ink-soft">
-        <MarkerContent className="shimmer">
-          <DecodeLine text={step} />
-        </MarkerContent>
-      </Marker>
+      {step ? (
+        <Marker className="mt-2xs text-label text-ink-soft">
+          <MarkerContent className="shimmer">
+            <DecodeLine text={step} />
+          </MarkerContent>
+        </Marker>
+      ) : null}
+      <Consulted sources={sources} />
       {waiting.map((run) => (
         <Marker
           key={run.turn_id ?? run.conversation_id}

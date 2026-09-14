@@ -70,6 +70,7 @@ from ufo.runtime.access.grants import ConnectUnavailable, Grant, GrantStore
 from ufo.runtime.access.member_authorization import AuthorizationBinding
 from ufo.runtime.billing.accounting import record_image_usage, record_video_usage
 from ufo.runtime.ext.context import ExtensionContext, SourceReader
+from ufo.runtime.hub import SourceRef
 from ufo.runtime.media.artifact_url import ARTIFACT_KEY_PREFIX, artifact_media_type
 from ufo.runtime.media.image_previews import IMAGE_PREVIEW_MAX_BYTES, raster_image_media_type
 from ufo.runtime.media.previews import StoredPreview
@@ -264,6 +265,7 @@ class ToolResult(BaseModel):
     content: tuple[ContentBlock, ...]
     is_error: bool = False
     untrusted: bool = False
+    sources: tuple[SourceRef, ...] = ()
 
 
 RESULT_CUT_MARKER = "\n…["

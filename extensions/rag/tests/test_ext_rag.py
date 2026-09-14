@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 import ufo_ext_rag.manifest as rag
 from ufo_ext_rag.pages import PageStore
-from ufo_ext_rag.prefetch import TOTAL_MAX_CHARS, Prefetch
+from ufo_ext_rag.prefetch import TOTAL_MAX_CHARS, Grounding, Prefetch
 from ufo_ext_rag.route import route
 
 from ufo.runtime.ext.context import ExtensionContext, PageState, ScopedStore, SourceReader
@@ -14,6 +14,7 @@ from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, Hit, IndexScope, TextCh
 from ufo.runtime.workspace import ws
 from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
 from ufo.sdk.context import CredentialAccess
+from ufo.sdk.hub import SourceRef
 from ufo.sdk.manifest import HookContext, InjectContext, UserPromptSubmit
 from ufo.sdk.search import FetchedPage, FetchRequest, SearchHit, SearchQuery, SearchResults
 from ufo.sdk.surfaces import fence_member_message, mint_marker
@@ -171,6 +172,7 @@ def _store(
                 stream="notes",
                 indexed=True,
                 as_of=as_of,
+                backend="notion",
             )
             for page_id in page_ids
             if page_id in pages and subject in reader.subjects
@@ -290,13 +292,23 @@ async def test_both_legs_reach_the_block_with_their_provenance() -> None:
         pages=_store({ORDER_FORM: ("Northwind order form", ORDER_FORM_BODY)}),
     )
     with ws(WORKSPACE):
-        block = await prefetch.passages(("What does Northwind charge?",), READER)
+        found = await prefetch.passages(("What does Northwind charge?",), READER)
 
+    block = found.block
     assert f"[1] {PRICING_PAGE} — Northwind pricing (2026-02-11)" in block
     assert f"[2] page/{ORDER_FORM} — Northwind order form (2025-03-06)" in block
     assert "Team plan is $30 a seat." in block
     assert "$24 per seat" in block
     assert "<untrusted-content" in block
+    assert found.sources == (
+        SourceRef(kind="web", title="Northwind pricing", url=PRICING_PAGE),
+        SourceRef(
+            kind="workspace",
+            title="Northwind order form",
+            ref=f"page/{ORDER_FORM}",
+            provider="notion",
+        ),
+    )
 
 
 async def test_the_block_numbers_every_entry_from_one() -> None:
@@ -312,9 +324,11 @@ async def test_the_block_numbers_every_entry_from_one() -> None:
         pages=_store({ORDER_FORM: ("Northwind order form", ORDER_FORM_BODY)}),
     )
     with ws(WORKSPACE):
-        block = await prefetch.passages(("What does Northwind charge?",), READER)
+        found = await prefetch.passages(("What does Northwind charge?",), READER)
 
+    block = found.block
     numbers = re.findall(r"\[(\d+)\] \S+ — ", block)
+    assert len(found.sources) == len(numbers)
     assert numbers == [str(number) for number in range(1, len(numbers) + 1)]
     assert len(numbers) >= 3
     assert "numbered entry" in rag.PREFACE
@@ -330,8 +344,8 @@ async def test_a_failed_leg_leaves_the_other_grounding_the_turn() -> None:
         pages=_store({ORDER_FORM: ("Northwind order form", ORDER_FORM_BODY)}, raises=True),
     )
     with ws(WORKSPACE):
-        without_web = await workspace_only.passages(("When is the renewal?",), READER)
-        without_workspace = await web_only.passages(("When is the renewal?",), READER)
+        without_web = (await workspace_only.passages(("When is the renewal?",), READER)).block
+        without_workspace = (await web_only.passages(("When is the renewal?",), READER)).block
         without_either = await Prefetch(search=None, pages=None).passages(
             ("When does it renew?",), READER
         )
@@ -339,7 +353,7 @@ async def test_a_failed_leg_leaves_the_other_grounding_the_turn() -> None:
     assert "renews on 1 July 2026" in without_web
     assert PRICING_PAGE not in without_web
     assert "Renewals run annually." in without_workspace
-    assert without_either == ""
+    assert without_either.block == "" and without_either.sources == ()
 
 
 async def test_selection_seats_each_leg_and_holds_the_budget() -> None:
@@ -356,7 +370,7 @@ async def test_selection_seats_each_leg_and_holds_the_budget() -> None:
         pages=_store({ORDER_FORM: ("Northwind order form", ORDER_FORM_BODY)}),
     )
     with ws(WORKSPACE):
-        block = await prefetch.passages(("What does Northwind charge?",), READER)
+        block = (await prefetch.passages(("What does Northwind charge?",), READER)).block
 
     assert "$24 per seat" in block
     assert len(block) < TOTAL_MAX_CHARS + len(rag.PREFACE) + 1_000
@@ -370,11 +384,13 @@ async def test_a_passage_both_queries_return_outranks_one_only_a_single_query_re
         pages=None,
     )
     with ws(WORKSPACE):
-        block = await prefetch.passages(
+        found = await prefetch.passages(
             ("What does Northwind charge?", "What are the support hours?"), READER
         )
 
+    block = found.block
     assert block.index("Team plan is $30 a seat.") < block.index("Support runs 9 to 5.")
+    assert [source.url for source in found.sources] == [shared.url, single.url]
 
 
 async def test_a_two_word_query_reaches_both_legs() -> None:
@@ -382,10 +398,10 @@ async def test_a_two_word_query_reaches_both_legs() -> None:
     search = RecordingSearch()
     pages = _store({ORDER_FORM: ("Market note", "The S&P 500 closed at 6,120 on 12 September.")})
     with ws(WORKSPACE):
-        block = await Prefetch(search=search, pages=pages).passages(decision.queries, READER)
+        found = await Prefetch(search=search, pages=pages).passages(decision.queries, READER)
 
     assert search.queries == ("s&p close",)
-    assert "The S&P 500 closed at 6,120" in block
+    assert "The S&P 500 closed at 6,120" in found.block
 
 
 async def test_the_hook_injects_for_every_member_turn_and_stays_out_of_an_internal_one() -> None:
@@ -404,6 +420,7 @@ async def test_the_hook_injects_for_every_member_turn_and_stays_out_of_an_intern
     assert isinstance(asked, InjectContext)
     assert asked.text.startswith(rag.PREFACE)
     assert "Team plan is $30." in asked.text
+    assert asked.sources == (SourceRef(kind="web", title="Northwind pricing", url=PRICING_PAGE),)
     assert isinstance(instructed, InjectContext)
     assert instructed.text.startswith(rag.PREFACE)
     assert internal is None
@@ -452,10 +469,10 @@ async def test_the_hook_carries_the_turn_connection_scope(
         search: object
         pages: object
 
-        async def passages(self, queries: tuple[str, ...], reader: SourceReader) -> str:
+        async def passages(self, queries: tuple[str, ...], reader: SourceReader) -> Grounding:
             nonlocal seen
             seen = reader.connections
-            return ""
+            return Grounding(block="", sources=())
 
     monkeypatch.setattr(rag, "Prefetch", RecordingPrefetch)
     connection_scope = (uuid4(),)

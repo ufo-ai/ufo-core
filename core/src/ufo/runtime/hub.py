@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from itertools import islice
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -47,6 +47,27 @@ class Activity(BaseModel):
     """The current one-line summary of a tool step."""
 
     text: str
+
+
+class SourceRef(BaseModel):
+    """One place a turn read while working: a web page by its address, a synced workspace page by
+    its object ref and the provider that feeds it, a memory by its ref. `title` is what a surface
+    names it by; the address or ref is what it opens."""
+
+    kind: Literal["web", "workspace", "memory"]
+    title: str
+    url: str = ""
+    ref: str = ""
+    provider: str = ""
+
+
+class Sources(BaseModel):
+    """What one step of the turn consulted, pushed as the step lands so a live surface draws the
+    places the answer is being drawn from — the prefetch a hook ran before the first model round,
+    or a search a tool ran mid-turn. Non-terminal, and distinguished from the other frames by
+    carrying `items`. Live only: the reply's citations are the durable record."""
+
+    items: tuple[SourceRef, ...]
 
 
 class ArtifactsChanged(BaseModel):
@@ -136,6 +157,7 @@ LiveFrame = (
     | Resumed
     | Reply
     | SubagentActivity
+    | Sources
 )
 HubFrame = LiveFrame | ArrivalQueued
 

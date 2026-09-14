@@ -751,7 +751,10 @@ reads it only under `member_context_read`.
   no-op for a live surface — the efficient downgrade, not a second seam. A marked span reaches a
   live member as a `Reply` frame on that stream and nowhere durable: the portal stores no messages,
   so a page loaded mid-turn draws the transcript without the spans already shown — the accepted
-  gap — and the closing reply carries those words again. The same terminal handoffs
+  gap — and the closing reply carries those words again. What a step read rides the same stream
+  as a `Sources` frame — the web pages, workspace pages and memories a `user_prompt_submit`
+  injection or a tool result names — so the portal draws the places the answer is being drawn
+  from while it waits, and nowhere durable either: the reply's citations are the record. The same terminal handoffs
   ride the live stream that the writeback carries: a turn that ended by asking renders its options
   as the surface's own answer affordance under the same idempotent admit (first answer wins,
   `admitted_body` confirming which landed), credential prompts collect privately through the

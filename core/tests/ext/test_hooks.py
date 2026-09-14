@@ -67,7 +67,7 @@ from ufo.runtime.ext.manifest import (
     PreToolUse,
     UserPromptSubmit,
 )
-from ufo.runtime.hub import Activity, InProcessHub, LiveFrame
+from ufo.runtime.hub import Activity, InProcessHub, LiveFrame, SourceRef
 from ufo.runtime.prompts.render import rendered_prompt
 from ufo.runtime.surfaces.hub_tail import HubTailer
 from ufo.runtime.tools.context import SpawnResult
@@ -813,3 +813,28 @@ async def test_a_tool_outside_the_matcher_is_not_denied(db: None, tmp_path: Path
     frame = await _engine(turn, BashThenAnswerModel(), tmp_path, chain, carrier=carrier).run()
     assert frame.status == "done"
     assert any("echo hi" in " ".join(argv) for argv in carrier.calls)
+
+
+async def test_injections_fold_their_sources_in_hook_order() -> None:
+    web = SourceRef(kind="web", title="Pricing", url="https://northwind.example/pricing")
+    memory = SourceRef(kind="memory", title="Vault code", ref="memory/1")
+
+    async def prefetch(ctx: HookContext) -> HookOutcome:
+        return InjectContext(text="[1] pricing", sources=(web,))
+
+    async def recall(ctx: HookContext) -> HookOutcome:
+        return InjectContext(text="- vault", sources=(memory,))
+
+    async def note(ctx: HookContext) -> HookOutcome:
+        return InjectContext(text="plain")
+
+    chain = _chain(
+        "user_prompt_submit",
+        _ext(),
+        HookSpec(event="user_prompt_submit", handler=prefetch),
+        HookSpec(event="user_prompt_submit", handler=note),
+        HookSpec(event="user_prompt_submit", handler=recall),
+    )
+    resolution = await _fire(chain, "user_prompt_submit", UserPromptSubmit(text="hi"))
+    assert resolution.injected == "[1] pricing\nplain\n- vault"
+    assert resolution.sources == (web, memory)

@@ -167,6 +167,7 @@
   --color-fill-strong: var(--bkgd-300);
   --color-fill-ink: #191A1A;
   --color-scrim: color-mix(in srgb, var(--text-primary) 50%, transparent);
+  --color-tile: color-mix(in srgb, var(--text-primary) 8%, transparent);
 
   --blur-scrim: 3px;
 
@@ -277,6 +278,7 @@
   --radius-avatar: 8px;
   --radius-card: 12px;
   --radius-key: 6px;
+  --radius-site-icon: 3px;
 
   --font-sans: "Inter", system-ui, sans-serif;
   --font-mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -335,6 +337,8 @@
   --size-thumbnail: 88px;
   --size-digest-picture: 96px;
   --size-avatar: 24px;
+  --size-site-tile: 24px;
+  --size-site-icon: 16px;
   --size-band: 128px;
   --size-waiting: max(100%, 128px);
   --size-step-on: 24px;

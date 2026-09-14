@@ -237,14 +237,14 @@ test("a conversation reloaded while its turn runs shows the prompt, says so, and
   open();
 
   expect(await screen.findByText("Review PR 1268.")).toBeTruthy();
-  expect(await screen.findByText("Thinking…")).toBeTruthy();
+  expect(await screen.findByText("Researching…")).toBeTruthy();
   expect(screen.queryByText("No messages in this conversation yet.")).toBeNull();
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
 
   StreamFake.last().emit("activity", { text: "Reviewing the pull request." });
   expect(await screen.findAllByText("Reviewing the pull request.")).toHaveLength(1);
-  expect(screen.queryByText("Thinking…")).toBeNull();
+  expect(screen.queryByText("Researching…")).toBeNull();
 
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -262,7 +262,7 @@ test("the working line is not taken down when the turn's first step lands", asyn
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  const opening = await screen.findByText("Thinking…");
+  const opening = await screen.findByText("Researching…");
   const waiting = opening.closest("[data-slot=marker]")!;
   expect(waiting.querySelector("[data-slot=marker-content]")!.classList).toContain("shimmer");
   const decoded = waiting.querySelector("[data-slot=decode-text]")!;
@@ -457,7 +457,7 @@ test("a message that opens a turn stands above the reply it is waiting for", asy
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
   expect(await screen.findByText("write a poem")).toBeTruthy();
-  expect(order("write a poem", "Thinking…")).toBe(true);
+  expect(order("write a poem", "Researching…")).toBe(true);
 
   land({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "poem" });
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
@@ -808,7 +808,7 @@ test("a settled conversation tails nothing", async () => {
 
   expect(await screen.findByText("The tests pass.")).toBeTruthy();
   expect(StreamFake.opened.length).toBe(0);
-  expect(screen.queryByText("Thinking…")).toBeNull();
+  expect(screen.queryByText("Researching…")).toBeNull();
 });
 
 test("a conversation opens its file changes and returns to chat", async () => {

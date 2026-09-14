@@ -1103,6 +1103,17 @@ class PageState:
     stream: str
     indexed: bool
     as_of: str
+    backend: str
+
+
+def _page_with_source() -> sa.Join:
+    return tables.page.join(
+        tables.source,
+        sa.and_(
+            tables.page.c.workspace_id == tables.source.c.workspace_id,
+            tables.page.c.source_uid == tables.source.c.uid,
+        ),
+    )
 
 
 def _page_as_of(
@@ -2356,22 +2367,27 @@ class ExtensionContext:
         """Current subject and revision for this workspace's live named pages."""
         if not page_ids:
             return {}
-        query = sa.select(
-            tables.page.c.uid,
-            tables.page.c.subject,
-            tables.page.c.revision,
-            tables.page.c.digest,
-            tables.page.c.body_ref,
-            tables.page.c.title,
-            tables.page.c.stream,
-            tables.page.c.indexed,
-            tables.page.c.record_created_at,
-            tables.page.c.record_updated_at,
-            tables.page.c.updated_at,
-        ).where(
-            tables.page.c.workspace_id == self.store.workspace_id,
-            tables.page.c.uid.in_(page_ids),
-            tables.page.c.tombstone.is_(False),
+        query = (
+            sa.select(
+                tables.page.c.uid,
+                tables.page.c.subject,
+                tables.page.c.revision,
+                tables.page.c.digest,
+                tables.page.c.body_ref,
+                tables.page.c.title,
+                tables.page.c.stream,
+                tables.page.c.indexed,
+                tables.page.c.record_created_at,
+                tables.page.c.record_updated_at,
+                tables.page.c.updated_at,
+                tables.source.c.backend,
+            )
+            .select_from(_page_with_source())
+            .where(
+                tables.page.c.workspace_id == self.store.workspace_id,
+                tables.page.c.uid.in_(page_ids),
+                tables.page.c.tombstone.is_(False),
+            )
         )
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
@@ -2385,6 +2401,7 @@ class ExtensionContext:
                 stream=row.stream,
                 indexed=bool(row.indexed),
                 as_of=_page_as_of(row.record_updated_at, row.record_created_at, row.updated_at),
+                backend=row.backend,
             )
             for row in rows
         }
@@ -2407,16 +2424,9 @@ class ExtensionContext:
                 tables.page.c.record_created_at,
                 tables.page.c.record_updated_at,
                 tables.page.c.updated_at,
+                tables.source.c.backend,
             )
-            .select_from(
-                tables.page.join(
-                    tables.source,
-                    sa.and_(
-                        tables.page.c.workspace_id == tables.source.c.workspace_id,
-                        tables.page.c.source_uid == tables.source.c.uid,
-                    ),
-                )
-            )
+            .select_from(_page_with_source())
             .where(
                 tables.page.c.workspace_id == self.store.workspace_id,
                 tables.page.c.uid.in_(page_ids),
@@ -2437,6 +2447,7 @@ class ExtensionContext:
                 stream=row.stream,
                 indexed=bool(row.indexed),
                 as_of=_page_as_of(row.record_updated_at, row.record_created_at, row.updated_at),
+                backend=row.backend,
             )
             for row in rows
         }

@@ -42,6 +42,12 @@ from ufo.runtime.hub import (
     Resumed as Resumed,
 )
 from ufo.runtime.hub import (
+    SourceRef as SourceRef,
+)
+from ufo.runtime.hub import (
+    Sources as Sources,
+)
+from ufo.runtime.hub import (
     SubagentActivity as SubagentActivity,
 )
 from ufo.runtime.hub import (

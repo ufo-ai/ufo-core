@@ -41,7 +41,7 @@ from ufo.runtime.ext.conversation_slots import (
     ConversationSlotProvider,
 )
 from ufo.runtime.ext.surface import SurfaceSpec
-from ufo.runtime.hub import Hub
+from ufo.runtime.hub import Hub, SourceRef
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.agent_setup import AgentSetup
 from ufo.runtime.kinds.agents import AgentSpec
@@ -617,9 +617,10 @@ class ModifyOutput:
 class InjectContext:
     """Append text to the turn's context — after the submitted message in the model context on
     user_prompt_submit, the tool result on post_tool_use (user_prompt_submit and post_tool_use
-    only)."""
+    only). `sources` names what the injection was drawn from, for the live surface to draw."""
 
     text: str
+    sources: tuple[SourceRef, ...] = ()
 
 
 HookOutcome = Deny | ModifyInput | ModifyOutput | InjectContext | None

@@ -47,6 +47,7 @@ class PageHit:
     title: str
     text: str
     dated: str
+    provider: str
 
     @property
     def ref(self) -> str:
@@ -109,7 +110,13 @@ class PageStore:
         page_ids = tuple(dict.fromkeys(UUID(hit.owner_id) for hit in ranked))
         states = await self.readable(page_ids, reader)
         return tuple(
-            PageHit(page_id=page_id, title=state.title, text=hit.text, dated=state.as_of)
+            PageHit(
+                page_id=page_id,
+                title=state.title,
+                text=hit.text,
+                dated=state.as_of,
+                provider=state.backend,
+            )
             for hit in ranked
             if (state := states.get(page_id := UUID(hit.owner_id))) is not None
             and state.subject == hit.subject

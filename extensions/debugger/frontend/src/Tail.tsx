@@ -11,6 +11,7 @@ const EVENT_KINDS = [
   "absorbed",
   "resumed",
   "reply",
+  "sources",
   "parked",
   "terminal",
 ] as const;

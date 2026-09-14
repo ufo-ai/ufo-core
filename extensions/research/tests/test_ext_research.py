@@ -29,6 +29,7 @@ from ufo_ext_research.tools import RESEARCH_TOOLS
 
 from ufo.host.ext.loader import skill_registry, turn_tools
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.hub import SourceRef
 from ufo.runtime.queue import _subagent_actions, _subagent_tools, _with_action_verbs
 from ufo.runtime.search import (
     FetchedPage,
@@ -183,6 +184,10 @@ async def test_search_web_runs_one_provider_search_per_query_and_merges() -> Non
     assert payload["results"][0]["highlights"] == ["h1"]
     assert payload["results"][0]["published_date"] == "2024-01-01"
     assert payload["answer"] == "direct answer"
+    assert result.sources == (
+        SourceRef(kind="web", title="alpha", url="https://alpha.test"),
+        SourceRef(kind="web", title="beta", url="https://beta.test"),
+    )
 
 
 async def test_search_web_omits_answer_when_the_provider_gives_none() -> None:
@@ -219,6 +224,11 @@ async def test_fetch_url_walls_every_page_with_crawler_provenance() -> None:
     provider = _FakeSearchProvider()
     result = await _run("fetch_url", provider, url="https://api.github.com/user")
     assert result.is_error is False
+    assert result.sources == (
+        SourceRef(
+            kind="web", title="https://api.github.com/user", url="https://api.github.com/user"
+        ),
+    )
     reply = json.loads(result.content[0].text)
     assert reply["provenance"] == research_tools.CRAWLER_PROVENANCE
     assert "crawler's own session" in reply["provenance"]
