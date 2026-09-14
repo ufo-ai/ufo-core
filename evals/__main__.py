@@ -337,6 +337,10 @@ def main(argv: list[str] | None = None) -> None:
         type=UUID,
         help="target workspace UUID; eval cases mutate its conversations, memory, and artifacts",
     )
+    parser.add_argument(
+        "--member",
+        help="email of the --workspace member every case speaks as unless the case names one",
+    )
     parser.add_argument("--memory-100", type=Path, metavar="SNAPSHOT")
     parser.add_argument("--memory-100-state", type=Path, metavar="READINESS")
     parser.add_argument("--memory-ingestion", type=Path, metavar="SNAPSHOT")
@@ -897,6 +901,7 @@ def main(argv: list[str] | None = None) -> None:
             environment=args.environment,
             candidate_proposal=args.candidate_from_proposal,
             concurrency=args.concurrency,
+            speaker=args.member,
             budget_micro_usd=(
                 None if args.budget_usd is None else round(args.budget_usd * MICRO_USD_PER_USD)
             ),
@@ -964,6 +969,7 @@ async def _run(
     candidate_proposal: UUID | None = None,
     concurrency: int = 1,
     budget_micro_usd: int | None = None,
+    speaker: str | None = None,
 ) -> tuple[tuple[EvalReport, ...], str]:
     init_db(config.database.url)
     manifests = load_manifests(config.pack.name)
@@ -1063,6 +1069,7 @@ async def _run(
                 workflow_wait_seconds=workflow_wait_seconds,
                 remote=remote_client,
                 environment_document=environment,
+                speaker=speaker,
             )
             ctx = context_for(
                 "evals",

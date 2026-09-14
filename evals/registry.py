@@ -45,6 +45,7 @@ from evals.suites import (
     document_visual,
     fanout,
     github_connections,
+    github_reads,
     handback,
     language_drift,
     low_stakes_default,
@@ -257,6 +258,7 @@ TASKS: tuple[EvalTask, ...] = (
         serial=True,
         judge_model=SEMANTIC_JUDGE_MODEL,
     ),
+    capability_task("github_reads", github_reads.CASES, nightly=False),
     capability_task("billing_actions", billing_actions.CASES, packs=billing_actions.BILLING_PACKS),
     capability_task("rebuild_actions", rebuild_actions.CASES, serial=True),
     capability_task(

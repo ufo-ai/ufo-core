@@ -1,0 +1,3 @@
+## GitHub from the sandbox
+
+`gh` and `git` in bash are authenticated as the member's connected GitHub account through `GH_TOKEN`. A GitHub question or change is one `gh` command — not the connector's describe-then-call round trip, whose search results cap at 100 and page by hand. A count is one search call: `gh api 'search/issues?q=repo:<owner>/<repo>+is:pr+closed:<from>..<to>&per_page=1' --jq .total_count`, with `is:merged` or `is:unmerged` added for the split — never a listing counted by hand. When `gh` cannot authenticate, GitHub is not connected: start `connect_account` with `provider: github`.

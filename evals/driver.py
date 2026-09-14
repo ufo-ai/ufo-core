@@ -670,6 +670,7 @@ class WorkspaceDriver:
     workflow_wait_seconds: float = WORKFLOW_WAIT_SECONDS
     remote: RemoteClient | None = None
     environment_document: Path | None = None
+    speaker: str | None = None
     _environment: _StoredEnvironment = field(default_factory=_StoredEnvironment, init=False)
     _cancelled: _CancelledFrom = field(default_factory=_CancelledFrom, init=False)
 
@@ -684,9 +685,9 @@ class WorkspaceDriver:
         shared: bool = False,
     ) -> UUID:
         """Open one isolated eval conversation, bound to the member who speaks in it. A case names
-        its member by the exact workspace `member.email`; one that names none speaks as the
-        workspace's founding admin, so a case reads to the runtime as the member message it is
-        written as rather than as a background fire.
+        its member by the exact workspace `member.email`; one that names none speaks as the run's
+        `speaker`, else as the workspace's founding admin, so a case reads to the runtime as the
+        member message it is written as rather than as a background fire.
 
         `shared` leaves the conversation unowned, which is what a shared room is: the
         `conversation_audience_member` check holds `member_id` not-null exactly when the audience is
@@ -700,7 +701,7 @@ class WorkspaceDriver:
         at work."""
         conversation_id = uuid4()
         async with workspace_tx() as connection:
-            member_id = await self._speaker(connection, member_key)
+            member_id = await self._speaker(connection, member_key or self.speaker)
             member_email = (
                 None
                 if member_id is None

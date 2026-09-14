@@ -14,8 +14,10 @@ while Pipedream operates its own OAuth client (Ramp, Brex, Xero, DocuSign, Panda
 broker holds managed auth for reaches the agent as a keyed connector instead. Every other account's
 token stays with Pipedream."""
 
+from pathlib import Path
+
 from ufo.sdk.connectors import ConnectorBroker, connect_bridge_workspace
-from ufo.sdk.manifest import ConnectorProvider, Manifest, RouteSpec
+from ufo.sdk.manifest import ConnectorProvider, Manifest, PromptSection, RouteSpec
 from ufo_ext_pipedream.broker import PipedreamBroker
 from ufo_ext_pipedream.client import CONNECTORS, PIPEDREAM_TRANSFER_HOSTS
 from ufo_ext_pipedream.provider import OAUTH_ROUTE_PATH, PipedreamOAuthProvider, oauth_route
@@ -23,6 +25,8 @@ from ufo_ext_pipedream.token import cli_credential
 
 NAME = "pipedream"
 VERSION = "0.1.0"
+SECTION_NAME = "github_cli"
+SECTION_BODY = (Path(__file__).parent / "prompts" / "github_cli_section.md").read_text().strip()
 
 
 def manifest() -> Manifest:
@@ -48,4 +52,5 @@ def manifest() -> Manifest:
                 identify=connect_bridge_workspace,
             ),
         ),
+        prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),
     )

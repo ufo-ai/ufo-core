@@ -33,6 +33,17 @@ from an active failed-action loop; it does not test whether stable successful re
 loop. Run the suite again for each independent loop; do not use case samples, which select the best
 result and can hide a coherence failure.
 
+`github_reads` is explicit-only and needs a workspace whose speaking member holds a connected GitHub
+account that reaches `metalcraftai/ufo`. Each case grades the count and the trajectory together: no
+connector tool, at most three tool calls, and a `gh` command in bash that succeeded. `--member`
+names the workspace member every case speaks as; without it a case that names no member speaks as
+the workspace's founding admin.
+
+```bash
+uv run python -m evals --remote --workspace <workspace-id> --member <email> \
+  --only github_reads --label github-reads
+```
+
 `--remote` admits each case through `ufo --remote --json` at the configured serve URL. The current
 `ufo` must be on `PATH`, and `UFO_TOKEN_SECRET` must match the running serve process. Remote cases
 use the private member audience of the terminal surface; shared-audience cases fail before admission.

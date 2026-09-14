@@ -120,6 +120,21 @@ def test_manifest_declares_the_cli_credential_for_github_alone() -> None:
     assert cli_credential(pipedream.CONNECTORS["gmail"]) is None
 
 
+def test_manifest_tells_the_agent_gh_rides_the_connected_account() -> None:
+    """The CLI credential is only useful if the agent knows it holds one: the section names the
+    variable the sandbox exports, the command that reads it, and the handoff for a sandbox where it
+    cannot authenticate, so a GitHub question is one `gh` call rather than the connector's paged
+    search — the trajectory that spent 26 rounds counting a week of pull requests."""
+    manifest = pipedream_manifest.manifest()
+    assert [section.name for section in manifest.prompt_sections] == [
+        pipedream_manifest.SECTION_NAME
+    ]
+    body = manifest.prompt_sections[0].body
+    assert connector_clis((manifest,))["github"].env in body
+    assert "`gh`" in body
+    assert "connect_account" in body
+
+
 async def test_account_token_reads_the_credential_of_a_workspace_owned_account(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

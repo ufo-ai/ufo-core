@@ -1720,6 +1720,53 @@ async def test_a_cancelled_turn_still_names_the_status_the_wait_expired_on(
     assert driver.cancelled_from(uuid4()) is None
 
 
+async def test_eval_driver_opens_as_the_named_speaker_else_the_founding_admin(
+    db: None, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
+) -> None:
+    """A run against a real workspace speaks as the member running it, never as whichever admin was
+    seated first: `speaker` is the fallback for a case that names no member, and the conversation
+    it opens belongs to that member."""
+    _, _, blob = dbos_runtime
+    runtime = loop_queue._runtime
+    assert runtime is not None
+    seed = await _bootstrap()
+    colleague_id = uuid4()
+    colleague = f"{colleague_id.hex[:8]}@example.com"
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=colleague_id,
+                workspace_id=seed.workspace_id,
+                email=colleague,
+                is_admin=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    driver = WorkspaceDriver(
+        seed.workspace_id,
+        seed.agent_id,
+        "be brief",
+        blob,
+        runtime.dbos,
+        runtime.sandboxes.workspace_root,
+    )
+    with ws(seed.workspace_id):
+        default_conversation = await driver.open("default")
+        named_conversation = await replace(driver, speaker=colleague).open("named")
+    async with workspace_tx() as connection:
+        owners = dict(
+            (
+                await connection.execute(
+                    sa.select(tables.conversation.c.id, tables.conversation.c.member_id).where(
+                        tables.conversation.c.id.in_((default_conversation, named_conversation))
+                    )
+                )
+            ).all()
+        )
+    assert owners == {default_conversation: seed.member_id, named_conversation: colleague_id}
+
+
 async def test_eval_timing_reads_the_engines_own_step_record_for_every_turn(
     db: None, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
 ) -> None:
