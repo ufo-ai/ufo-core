@@ -157,6 +157,25 @@ NODE_INSTALL_COMMAND = (
     'tar -xzf "$archive" -C /usr/local --strip-components=1 --no-same-owner && '
     'rm "$archive"'
 )
+RUST_VERSION = "1.98.1"
+RUST_INSTALL_COMMAND = (
+    'case "$(dpkg --print-architecture)" in '
+    "amd64) rust_arch=x86_64; rust_sha="
+    "24ba1338a2d35c5a3247936546429e163fa674d726102af18bdf624582c57aea ;; "
+    "arm64) rust_arch=aarch64; rust_sha="
+    "f00ba576645cef658e1deed96fab8f707958e9d58808b16343448b5d1c4f7407 ;; "
+    '*) echo "unsupported Rust architecture" >&2; exit 1 ;; esac && '
+    'triple="${rust_arch}-unknown-linux-gnu" && '
+    f'archive=/tmp/rust-{RUST_VERSION}-"$triple".tar.gz && '
+    f"curl -fsSL https://static.rust-lang.org/dist/rust-{RUST_VERSION}-"
+    '"$triple".tar.gz -o "$archive" && '
+    'echo "$rust_sha  $archive" | sha256sum -c - && '
+    "mkdir /tmp/rust && "
+    'tar -xzf "$archive" -C /tmp/rust --strip-components=1 --no-same-owner && '
+    "/tmp/rust/install.sh --prefix=/usr/local --disable-ldconfig "
+    '--components=rustc,cargo,rust-std-"$triple" && '
+    'rm -rf "$archive" /tmp/rust'
+)
 PIP_PACKAGES = (
     "urllib3",
     "brotli",
@@ -199,6 +218,7 @@ command -v ufo >/dev/null
 command -v vite >/dev/null
 command -v rg >/dev/null
 command -v uv >/dev/null
+command -v cargo >/dev/null
 command -v bc >/dev/null
 command -v pdftotext >/dev/null
 command -v pdftoppm >/dev/null
@@ -207,6 +227,7 @@ command -v gh >/dev/null
 python3 -c 'import brotli, docx, fontTools, reportlab'
 test "$(node --version)" = "v{NODE_VERSION}"
 test "$(pnpm --version)" = "{PNPM_VERSION}"
+test "$(rustc --version | cut -d' ' -f2)" = "{RUST_VERSION}"
 test "$(TMPDIR={SANDBOX_TMPDIR} python3 -c 'import tempfile; print(tempfile.gettempdir())')" \\
   = "{SANDBOX_TMPDIR}"
 test -f "{SYSTEM_SKILLS_ROOT}/.system-manifest.json"
@@ -311,6 +332,7 @@ def build_definition_digest(sizing: Sizing | None) -> str:
         "apt_https": APT_HTTPS_COMMAND,
         "gh": GH_INSTALL_COMMAND,
         "node": NODE_INSTALL_COMMAND,
+        "rust": RUST_INSTALL_COMMAND,
         "pip": list(PIP_PACKAGES),
         "npm": list(NPM_PACKAGES),
         "env": SANDBOX_ENV,
@@ -346,6 +368,7 @@ def apply_layers(builder: TemplateBuilder, digest: str) -> TemplateFinal:
     builder.run_cmd("apt-get remove -y sudo || true; rm -rf /etc/sudoers /etc/sudoers.d")
     builder.run_cmd(GH_INSTALL_COMMAND)
     builder.run_cmd(NODE_INSTALL_COMMAND)
+    builder.run_cmd(RUST_INSTALL_COMMAND)
     builder.run_cmd("python3 -m pip install --no-cache-dir " + " ".join(PIP_PACKAGES))
     builder.run_cmd(
         f"npm install -g --prefix /usr/local --no-fund --no-audit {' '.join(NPM_PACKAGES)}"

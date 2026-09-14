@@ -32,6 +32,8 @@ from sandbox.build_template import (
     PNPM_VERSION,
     ROOT,
     RUNTIME_USER,
+    RUST_INSTALL_COMMAND,
+    RUST_VERSION,
     SANDBOX_ENV,
     SANDBOX_MODULES,
     SANDBOX_TEMPLATE_READY_COMMAND,
@@ -189,6 +191,17 @@ def _check_the_sandbox_installs_the_repository_node_and_pnpm_versions() -> None:
     assert f'test "$(pnpm --version)" = "{PNPM_VERSION}"' in SANDBOX_TEMPLATE_READY_COMMAND
 
 
+def _check_the_sandbox_installs_the_pinned_rust_toolchain() -> None:
+    """The client crate is Rust, so a sandbox without cargo cannot build or test it."""
+    dockerfile = pod_dockerfile()
+    assert RUST_INSTALL_COMMAND in dockerfile
+    assert f"https://static.rust-lang.org/dist/rust-{RUST_VERSION}-" in dockerfile
+    assert (
+        "test \"$(rustc --version | cut -d' ' -f2)\" = "
+        f'"{RUST_VERSION}"' in SANDBOX_TEMPLATE_READY_COMMAND
+    )
+
+
 def _check_sandbox_tiers_scale_cpu_and_memory_together() -> None:
     """large sits on E2B's build ceiling (8 vCPU / 8192 MiB); small is the pre-tier template's exact
     size, so an agent that never picks a size runs the sandbox it always ran."""
@@ -230,6 +243,7 @@ def _check_ready_probe_checks_every_baked_entrypoint() -> None:
         "ufo",
         "rg",
         "uv",
+        "cargo",
         "pdftotext",
         "pdftoppm",
         "soffice",
@@ -603,6 +617,6 @@ def test_check_reads_every_tier_against_its_own_digest(monkeypatch) -> None:
 
 def test_sandbox_build_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 23
+    assert len(checks) == 24
     for check in checks:
         check()
