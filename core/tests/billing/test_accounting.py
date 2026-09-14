@@ -829,18 +829,28 @@ async def test_spend_rollup_reads_each_report_in_a_bounded_statement_count(db: N
         sa.event.listen(connection.sync_connection, "before_cursor_execute", record)
         try:
             workspace = await SpendRollup(workspace_id).read(connection, 3600)
+            workspace_queries = tuple(statements)
             workspace_statements = len(statements)
             statements.clear()
             member = await SpendRollup(workspace_id).read_member(connection, member_id, 3600)
+            member_queries = tuple(statements)
             member_statements = len(statements)
             statements.clear()
             all_time = await SpendRollup(workspace_id).read(connection, None)
             all_time_statements = len(statements)
         finally:
             sa.event.remove(connection.sync_connection, "before_cursor_execute", record)
-    assert workspace_statements == 4
-    assert member_statements == 2
+    assert workspace_statements == 5
+    assert member_statements == 3
     assert all_time_statements == 4
+    workspace_rollup = next(query for query in workspace_queries if " AS period" in query)
+    workspace_rollup = " ".join(workspace_rollup.split())
+    workspace_scope = workspace_rollup.rsplit(" WHERE ", 1)[1].split(" GROUP BY ", 1)[0]
+    member_rollup = next(query for query in member_queries if " AS period" in query)
+    member_rollup = " ".join(member_rollup.split())
+    member_scope = member_rollup.rsplit(" WHERE ", 1)[1].split(" GROUP BY ", 1)[0]
+    assert "ledger.created_at >=" in workspace_scope
+    assert "ledger.created_at >=" in member_scope
     assert workspace.usage == member.usage
     assert workspace.usage.selected.tokens == 10_000
     assert workspace.usage.by_execution == (accounting.UsageBreakdown("", 10_000, 96_500),)

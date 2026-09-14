@@ -1054,7 +1054,6 @@ TOKEN_DIMENSIONS = (TOKENS_DIMENSION, SANDBOX_TOKENS_DIMENSION)
 WORKSPACE_JOB_LABEL = "Workspace jobs"
 SELECTED_PERIOD = "selected"
 PREVIOUS_PERIOD = "previous"
-EARLIER_PERIOD = "earlier"
 
 
 def _token_sum() -> sa.ColumnElement[int]:
@@ -1099,8 +1098,7 @@ async def _ledger_rollup(
         if previous_start is None
         else sa.case(
             (selected, SELECTED_PERIOD),
-            (created_at >= previous_start, PREVIOUS_PERIOD),
-            else_=EARLIER_PERIOD,
+            else_=PREVIOUS_PERIOD,
         )
     ).label("period")
     token = tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS).label("token")
@@ -1118,6 +1116,31 @@ async def _ledger_rollup(
             )
         )
     ).label("execution")
+    all_time_tokens = 0
+    all_time_token_cost = 0
+    all_time_cost = 0
+    first_used_at: datetime | None = None
+    detail_scope = scope
+    if previous_start is not None:
+        totals = (
+            await connection.execute(
+                sa.select(
+                    _token_sum().label("tokens"),
+                    _token_cost_sum().label("token_cost"),
+                    sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0).label(
+                        "cost"
+                    ),
+                    sa.func.min(created_at).label("first_used_at"),
+                )
+                .select_from(source)
+                .where(scope)
+            )
+        ).one()
+        all_time_tokens = int(totals.tokens)
+        all_time_token_cost = int(totals.token_cost)
+        all_time_cost = int(totals.cost)
+        first_used_at = totals.first_used_at
+        detail_scope &= created_at >= previous_start
     rows = await connection.execute(
         sa.select(
             period,
@@ -1132,17 +1155,13 @@ async def _ledger_rollup(
             sa.func.min(created_at).label("first_used_at"),
         )
         .select_from(source)
-        .where(scope)
+        .where(detail_scope)
         .group_by(period, token, day, dimension, model, price_digest, execution)
     )
     selected_tokens = 0
     selected_token_cost = 0
     selected_cost = 0
-    all_time_tokens = 0
-    all_time_token_cost = 0
-    all_time_cost = 0
     previous_tokens = 0
-    first_used_at: datetime | None = None
     dimensions: dict[str, tuple[int, int]] = {}
     digests: dict[str, int] = {}
     daily_totals: dict[date, tuple[int, int, int]] = {}
@@ -1152,11 +1171,11 @@ async def _ledger_rollup(
         amount = int(row.amount)
         priced = int(row.priced)
         is_token = bool(row.token)
-        all_time_cost += priced
-        if is_token:
+        all_time_cost += priced if cutoff is None else 0
+        if is_token and cutoff is None:
             all_time_tokens += amount
             all_time_token_cost += priced
-        used_at = row.first_used_at
+        used_at = row.first_used_at if cutoff is None else None
         if used_at is not None and (first_used_at is None or used_at < first_used_at):
             first_used_at = used_at
         if row.period == PREVIOUS_PERIOD:
