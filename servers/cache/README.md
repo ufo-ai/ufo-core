@@ -86,7 +86,7 @@ a store and name it:
 ```bash
 docker run -d --name minio -p 9000:9000 \
   -e MINIO_ROOT_USER=testkey00 -e MINIO_ROOT_PASSWORD=testsecret \
-  quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+  cgr.dev/chainguard/minio:latest \
   server /data
 UFO_TEST_S3_ENDPOINT=http://localhost:9000 AWS_ACCESS_KEY_ID=testkey00 \
   AWS_SECRET_ACCESS_KEY=testsecret AWS_REGION=us-east-1 cargo test

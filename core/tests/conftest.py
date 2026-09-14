@@ -19,9 +19,7 @@ from ufo.blob import S3BlobStore
 from ufo.harness.sandbox.client_binary import client_binary
 from ufo.harness.sandbox.session import SANDBOX_GID, SANDBOX_UID
 
-MINIO_IMAGE = (
-    "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
-)
+MINIO_IMAGE = "cgr.dev/chainguard/minio:latest"
 MINIO_CREDENTIAL = "minioadmin"
 MINIO_OP_TIMEOUT_S = 180
 MINIO_READY_SECONDS = 60.0
@@ -133,7 +131,20 @@ def s3_store() -> Iterator[S3BlobStore]:
         port = probe.getsockname()[1]
     try:
         started = subprocess.run(
-            ["docker", "run", "-d", "-p", f"{port}:9000", MINIO_IMAGE, "server", "/data"],
+            [
+                "docker",
+                "run",
+                "-d",
+                "-p",
+                f"{port}:9000",
+                "-e",
+                f"MINIO_ROOT_USER={MINIO_CREDENTIAL}",
+                "-e",
+                f"MINIO_ROOT_PASSWORD={MINIO_CREDENTIAL}",
+                MINIO_IMAGE,
+                "server",
+                "/data",
+            ],
             capture_output=True,
             text=True,
             check=False,
