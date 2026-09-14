@@ -183,6 +183,25 @@ export function labelOf(cadence: Cadence): string {
   }
 }
 
+/** How often the task fires, as one word beside a clock. An interval longer than an hour, and a
+ *  cron outside these cadences, has no word of its own. */
+export function cadenceWord(cadence: Cadence): string {
+  switch (cadence.mode) {
+    case "interval":
+      return cadence.hours === 1 ? "Hourly" : "";
+    case "daily":
+      return "Daily";
+    case "weekdays":
+      return "Weekdays";
+    case "weekly":
+      return "Weekly";
+    case "monthly":
+      return "Monthly";
+    case "custom":
+      return "";
+  }
+}
+
 export function timeValue(hour: number, minute: number): string {
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }

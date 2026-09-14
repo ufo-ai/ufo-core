@@ -38,6 +38,7 @@ import {
   HOURS_OF_DAY,
   asMode,
   cadenceOf,
+  cadenceWord,
   cronOf,
   dayFromDateValue,
   labelOf,
@@ -405,17 +406,22 @@ function RunMark({ status }: { status: string }) {
   );
 }
 
-/** What wakes the automation, as one mark in the list's own column: the clock a schedule fires on,
- *  or the feed a trigger watches. */
+/** What wakes the automation, as one mark in the list's own column: the clock a schedule fires on
+ *  and how often it fires, or the feed a trigger watches. */
 function EventMark({ entry }: { entry: Entry }) {
-  if (entry.kind === TASK_KIND)
+  if (entry.kind === TASK_KIND) {
+    const word = cadenceWord(cadenceOf(entry.schedule, new Date().getTimezoneOffset()));
     return (
-      <IconClockPlay
-        role="img"
-        aria-label={SCHEDULE}
-        className="size-(--size-glyph) shrink-0 text-ink-soft"
-      />
+      <span className="flex min-w-0 items-center gap-2xs">
+        <IconClockPlay
+          role="img"
+          aria-label={SCHEDULE}
+          className="size-(--size-glyph) shrink-0 text-ink-soft"
+        />
+        {word ? <span className="truncate">{word}</span> : null}
+      </span>
     );
+  }
   return (
     <span role="img" aria-label={entry.watching} className="flex">
       <BrandMark provider={entry.provider} className="size-icon" />

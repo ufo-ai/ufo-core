@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { asMode, cadenceOf, cronOf, labelOf, type Cadence } from "@/lib/cadence";
+import { asMode, cadenceOf, cadenceWord, cronOf, labelOf, type Cadence } from "@/lib/cadence";
 
 /** `getTimezoneOffset`'s sign: minutes to add to a local clock to reach UTC. */
 const CHICAGO = 300;
@@ -109,4 +109,14 @@ test("a cadence read off a cron no offer stands for takes the default hour", () 
   expect(
     asMode({ mode: "custom", cron: "15 2,14 * * *" }, "daily", "15 2,14 * * *", CHICAGO),
   ).toEqual({ mode: "daily", hour: 9, minute: 0 });
+});
+
+test("how often a cadence fires is one word, and a cadence outside those words has none", () => {
+  expect(cadenceWord({ mode: "interval", hours: 1 })).toBe("Hourly");
+  expect(cadenceWord({ mode: "interval", hours: 3 })).toBe("");
+  expect(cadenceWord({ mode: "daily", hour: 9, minute: 0 })).toBe("Daily");
+  expect(cadenceWord({ mode: "weekdays", hour: 9, minute: 0 })).toBe("Weekdays");
+  expect(cadenceWord({ mode: "weekly", weekday: 1, hour: 9, minute: 0 })).toBe("Weekly");
+  expect(cadenceWord({ mode: "monthly", day: 5, hour: 9, minute: 0 })).toBe("Monthly");
+  expect(cadenceWord({ mode: "custom", cron: "15 2,14 * * *" })).toBe("");
 });

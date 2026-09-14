@@ -286,6 +286,25 @@ test("one table lists tasks and triggers, most recently run first, in the member
   expect(screen.getAllByRole("img", { name: "GitHub pull_requests" })).toHaveLength(2);
 });
 
+test("a scheduled row says how often it fires, and a custom cron says nothing", async () => {
+  const CUSTOM = {
+    ...NIGHTLY,
+    name: "odd-hours",
+    schedule: "15 2,14 * * *",
+    description: "Odd hours",
+  };
+  automationsOnWire([NIGHTLY, PAUSED_TASK, CUSTOM, WATCHED_PULL]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByText("Digest the night's changes");
+  const events = screen
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => within(row).getAllByRole("cell")[1]?.textContent);
+  expect(events).toEqual(["Daily", "Weekly", "", ""]);
+});
+
 test("a long automation name is cut to its column rather than stretching the table", async () => {
   automationsOnWire([{ ...NIGHTLY, description: LONG_NAME }]);
   location.hash = automationsHash();
