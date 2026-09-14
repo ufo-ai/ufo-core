@@ -441,7 +441,6 @@ test("the notification page lists the source, state, repeats, and first activity
         ],
         next_cursor: null,
       }),
-    "/objects/conversation": () => json({ objects: [] }),
   });
 
   expect(await screen.findByRole("heading", { name: "Inbox" })).toBeTruthy();
@@ -458,6 +457,7 @@ test("the notification page lists the source, state, repeats, and first activity
   expect(
     calls.some((url) => url.includes("order_by=created_at&order=desc")),
   ).toBe(true);
+  expect(calls.some((url) => url.includes("/objects/conversation"))).toBe(false);
 
   await userEvent.click(row);
   const detail = await screen.findByRole("dialog");

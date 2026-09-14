@@ -2,10 +2,9 @@
 // redeploy to change the page.
 //
 // It renders what agents have raised for the signed-in member, newest first, each row opening its
-// record beside the list, and the conversations the app holds.
+// record beside the list.
 
 import {
-  AppConversations,
   Badge,
   DataTable,
   Header,
@@ -41,8 +40,6 @@ const PURPOSE =
 const KIND = "notification";
 const INBOX = "Inbox";
 const NO_NOTIFICATIONS = "No notifications.";
-const CONVERSATIONS = "Conversations";
-const NO_CONVERSATIONS = "Your chats with this app land here.";
 const COLUMNS = [
   { label: "Subject", fill: true },
   { label: "Agent", fact: true },
@@ -159,13 +156,6 @@ function Home({
           )}
         </Panel>
       </Section>
-      <AppConversations
-        agentId={agentId}
-        title={CONVERSATIONS}
-        blank={NO_CONVERSATIONS}
-        place={place}
-        onPlace={onPlace}
-      />
       {held !== null && at === null ? (
         <Sheet
           open
