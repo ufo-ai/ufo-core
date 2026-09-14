@@ -732,20 +732,25 @@ test("token counts read short enough to re-read every second", () => {
 const PRICING = { kind: "web", title: "Northwind pricing", url: "https://northwind.example/pricing", ref: "", provider: "" };
 const SUPPORT = { kind: "web", title: "Support hours", url: "https://help.northwind.example/hours", ref: "", provider: "" };
 const ORDER_FORM = { kind: "workspace", title: "Northwind order form", url: "", ref: "page/2f1c", provider: "notion" };
-const VAULT = { kind: "memory", title: "The vault code is 4411", url: "", ref: "memory/9a", provider: "" };
+const NOTE = { kind: "workspace", title: "Meeting note", url: "", ref: "page/9a", provider: "" };
+const RENEWALS = {
+  kind: "web",
+  title: "Renewal terms",
+  url: "https://northwind.example/renewals",
+  ref: "",
+  provider: "",
+};
 
-const tiles = (kind: string) =>
-  Array.from(
-    document.querySelectorAll<HTMLElement>(`[data-slot=sources][data-kind=${kind}] [data-slot=source-tile]`),
-  );
+const tiles = () =>
+  Array.from(document.querySelectorAll<HTMLElement>("[data-slot=sources] [data-slot=source-tile]"));
 
-test("the turn opens as researching and a sources frame draws a favicon tile per web page", async () => {
+test("the turn opens as researching and a sources frame draws a favicon tile per web site", async () => {
   const stream = await streaming();
   expect(await screen.findByText("Researching…")).toBeTruthy();
 
   stream.emit("sources", { items: [PRICING, SUPPORT] });
-  expect(await screen.findByText("2 web sources")).toBeTruthy();
-  const drawn = tiles("web");
+  expect(await screen.findByText("2 sources")).toBeTruthy();
+  const drawn = tiles();
   expect(drawn.map((tile) => tile.title)).toEqual([PRICING.title, SUPPORT.title]);
   const pictures = drawn.map((tile) => tile.querySelector("img")!.getAttribute("src"));
   expect(pictures).toEqual([faviconUrl(PRICING.url), faviconUrl(SUPPORT.url)]);
@@ -756,66 +761,58 @@ test("the turn opens as researching and a sources frame draws a favicon tile per
   expect(screen.getByText("Researching…")).toBeTruthy();
 });
 
-test("a workspace page draws its provider's mark and a memory its glyph", async () => {
+test("web and workspace sources share one row, a page drawing its provider's mark or a page glyph", async () => {
   const stream = await streaming();
-  stream.emit("sources", { items: [ORDER_FORM, VAULT] });
-  expect(await screen.findByText("1 workspace page")).toBeTruthy();
-  expect(screen.getByText("1 memory")).toBeTruthy();
-  const [page] = tiles("workspace");
+  stream.emit("sources", { items: [PRICING, ORDER_FORM, NOTE] });
+  expect(await screen.findByText("3 sources")).toBeTruthy();
+  expect(document.querySelectorAll("[data-slot=sources]")).toHaveLength(1);
+  const [site, page, note] = tiles();
+  expect(site.querySelector("img")).toBeTruthy();
   expect(page.querySelector("img")).toBeNull();
   expect(page.querySelector("span[style]")!.getAttribute("style")).toContain("--brand-notion");
   expect(page.closest("a")).toBeNull();
-  const [memory] = tiles("memory");
-  expect(memory.querySelector("svg")).toBeTruthy();
+  expect(note.querySelector("svg")).toBeTruthy();
 });
-
-const RENEWALS = {
-  kind: "web",
-  title: "Renewal terms",
-  url: "https://northwind.example/renewals",
-  ref: "",
-  provider: "",
-};
 
 test("the research tiles clear when a tool step begins, and a step's own tiles stand under it", async () => {
   const stream = await streaming();
   stream.emit("sources", { items: [PRICING] });
-  expect(await screen.findByText("1 web source")).toBeTruthy();
+  expect(await screen.findByText("1 source")).toBeTruthy();
 
   stream.emit("activity", { text: "Checking the pricing page." });
   expect(await screen.findByText("Checking the pricing page.")).toBeTruthy();
   expect(screen.queryByText("Researching…")).toBeNull();
-  await waitFor(() => expect(tiles("web")).toHaveLength(0));
+  await waitFor(() => expect(tiles()).toHaveLength(0));
 
   stream.emit("sources", { items: [PRICING, SUPPORT, RENEWALS] });
-  expect(await screen.findByText("3 web sources")).toBeTruthy();
-  expect(tiles("web").map((tile) => tile.title)).toEqual([PRICING.title, SUPPORT.title]);
+  expect(await screen.findByText("3 sources")).toBeTruthy();
+  expect(tiles().map((tile) => tile.title)).toEqual([PRICING.title, SUPPORT.title]);
   expect(screen.getByText("Checking the pricing page.")).toBeTruthy();
 
   stream.emit("activity", { text: "Reading the order form." });
   expect(await screen.findByText("Reading the order form.")).toBeTruthy();
-  await waitFor(() => expect(tiles("web")).toHaveLength(0));
+  await waitFor(() => expect(tiles()).toHaveLength(0));
 });
 
 test("a page named again adds no second tile, and the tiles leave with the opening line", async () => {
   const stream = await streaming();
   stream.emit("sources", { items: [PRICING] });
   stream.emit("sources", { items: [PRICING, SUPPORT] });
-  expect(await screen.findByText("2 web sources")).toBeTruthy();
-  expect(tiles("web")).toHaveLength(2);
+  expect(await screen.findByText("2 sources")).toBeTruthy();
+  expect(tiles()).toHaveLength(2);
   expect(screen.getByText("Researching…")).toBeTruthy();
 
   stream.emit("message", { text: "The team plan is $30 a seat." });
   expect(await screen.findByText(saying("The team plan is $30 a seat."))).toBeTruthy();
   expect(screen.queryByText("Researching…")).toBeNull();
-  expect(tiles("web")).toHaveLength(0);
+  expect(tiles()).toHaveLength(0);
 });
 
 test("a favicon the service cannot draw falls back to the globe", async () => {
   const stream = await streaming();
   stream.emit("sources", { items: [PRICING] });
   const [tile] = await waitFor(() => {
-    const found = tiles("web");
+    const found = tiles();
     expect(found).toHaveLength(1);
     return found;
   });

@@ -10,7 +10,6 @@ import {
 } from "react";
 
 import {
-  IconBrain,
   IconCheck,
   IconChevronRight,
   IconCopy,
@@ -77,7 +76,6 @@ import type {
   ChatConnect,
   ChatFile,
   ChatQuestion,
-  SourceKind,
   SourceRef,
   SubagentRun,
 } from "@/lib/types";
@@ -1122,12 +1120,6 @@ function runStep(run: SubagentRun): string {
 const FAVICON_SERVICE = "https://www.google.com/s2/favicons";
 const FAVICON_SIZE = 32;
 const SOURCE_TILES_PER_ROW = 8;
-const SOURCE_KINDS: readonly SourceKind[] = ["web", "workspace", "memory"];
-const SOURCE_NOUNS: Record<SourceKind, [string, string]> = {
-  web: ["web source", "web sources"],
-  workspace: ["workspace page", "workspace pages"],
-  memory: ["memory", "memories"],
-};
 
 /** The favicon service answers by host, so an address that names none draws the globe instead. */
 export function faviconUrl(url: string): string | null {
@@ -1136,17 +1128,12 @@ export function faviconUrl(url: string): string | null {
   return host ? `${FAVICON_SERVICE}?domain=${encodeURIComponent(host)}&sz=${FAVICON_SIZE}` : null;
 }
 
-function sourceLabel(kind: SourceKind, count: number): string {
-  return count + " " + SOURCE_NOUNS[kind][count === 1 ? 0 : 1];
-}
-
-/** One place the turn read, as a tile: the site's favicon, a workspace page's provider mark, a
- *  memory's glyph. The title is the tooltip and the accessible name; a web tile opens its address. */
+/** One place the turn read, as a tile: the site's favicon, or a workspace page's provider mark.
+ *  The title is the tooltip and the accessible name; a web tile opens its address. */
 function SourceTile({ source }: { source: SourceRef }) {
   const [broken, setBroken] = useState(false);
   const favicon = source.kind === "web" && !broken ? faviconUrl(source.url) : null;
-  const Glyph =
-    source.kind === "memory" ? IconBrain : source.kind === "web" ? IconWorld : IconFileText;
+  const Glyph = source.kind === "web" ? IconWorld : IconFileText;
   const drawn = favicon ? (
     <img
       src={favicon}
@@ -1190,24 +1177,18 @@ function tiled(items: SourceRef[]): SourceRef[] {
   });
 }
 
-/** What the turn has read so far, one row per kind: a tile per site or record, then how many. */
+/** What the turn has read so far, one row: a tile per site or record, then how many. */
 function Consulted({ sources }: { sources: SourceRef[] }) {
-  const rows = SOURCE_KINDS.map(
-    (kind) => [kind, sources.filter((source) => source.kind === kind)] as const,
-  ).filter(([, items]) => items.length > 0);
+  if (sources.length === 0) return null;
   return (
-    <>
-      {rows.map(([kind, items]) => (
-        <Marker key={kind} data-slot="sources" data-kind={kind} className="mt-2xs">
-          <span className="flex items-center gap-hair">
-            {tiled(items)
-              .slice(0, SOURCE_TILES_PER_ROW)
-              .map((source) => <SourceTile key={source.url || source.ref} source={source} />)}
-          </span>
-          <MarkerContent>{sourceLabel(kind, items.length)}</MarkerContent>
-        </Marker>
-      ))}
-    </>
+    <Marker data-slot="sources" className="mt-2xs">
+      <span className="flex items-center gap-hair">
+        {tiled(sources)
+          .slice(0, SOURCE_TILES_PER_ROW)
+          .map((source) => <SourceTile key={source.url || source.ref} source={source} />)}
+      </span>
+      <MarkerContent>{sources.length + (sources.length === 1 ? " source" : " sources")}</MarkerContent>
+    </Marker>
   );
 }
 

@@ -136,9 +136,9 @@ export type ActivityEvent =
   | { kind: "activity"; text: string }
   | { kind: "note"; text: string };
 
-export type SourceKind = "web" | "workspace" | "memory";
+export type SourceKind = "web" | "workspace";
 
-/** One place the running turn read: a web page by `url`, a workspace page or memory by `ref`, with
+/** One place the running turn read: a web page by `url`, a workspace page by `ref`, with
  *  the provider that feeds a workspace page so its tile draws that provider's mark. */
 export type SourceRef = {
   kind: SourceKind;

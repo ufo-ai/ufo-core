@@ -817,7 +817,7 @@ async def test_a_tool_outside_the_matcher_is_not_denied(db: None, tmp_path: Path
 
 async def test_injections_fold_their_sources_in_hook_order() -> None:
     web = SourceRef(kind="web", title="Pricing", url="https://northwind.example/pricing")
-    memory = SourceRef(kind="memory", title="Vault code", ref="memory/1")
+    memory = SourceRef(kind="workspace", title="Vault code", ref="page/1", provider="notion")
 
     async def prefetch(ctx: HookContext) -> HookOutcome:
         return InjectContext(text="[1] pricing", sources=(web,))

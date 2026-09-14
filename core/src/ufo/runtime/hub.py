@@ -51,10 +51,10 @@ class Activity(BaseModel):
 
 class SourceRef(BaseModel):
     """One place a turn read while working: a web page by its address, a synced workspace page by
-    its object ref and the provider that feeds it, a memory by its ref. `title` is what a surface
-    names it by; the address or ref is what it opens."""
+    its object ref and the provider that feeds it. `title` is what a surface names it by; the
+    address or ref is what it opens."""
 
-    kind: Literal["web", "workspace", "memory"]
+    kind: Literal["web", "workspace"]
     title: str
     url: str = ""
     ref: str = ""
