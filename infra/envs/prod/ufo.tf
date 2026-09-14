@@ -142,6 +142,7 @@ locals {
     ingress_public_url = "https://${module.platform.hostname}"
     ${local.cache_enabled ? "cache_daemon = \"127.0.0.1:9110\"" : ""}
     ${local.preview_enabled ? "preview_service = \"ufo-preview.${local.system_namespace}.svc.cluster.local:8930\"" : ""}
+    ${length(var.residential_hosts) > 0 ? "residential_hosts = ${jsonencode(var.residential_hosts)}" : ""}
 
     [connect]
     public_base_url = "https://${local.shared_host}"
@@ -151,6 +152,18 @@ locals {
     datadog_check_url = "https://api.us5.datadoghq.com/api/v1/check_run"
     datadog_env = "prod"
   TOML
+}
+
+resource "kubernetes_secret_v1" "ufo_egress_residential" {
+  count = var.residential_proxy_url == "" ? 0 : 1
+  metadata {
+    name      = "ufo-egress-residential"
+    namespace = local.system_namespace
+  }
+  data = {
+    UFO_EGRESS_RESIDENTIAL_PROXY = var.residential_proxy_url
+  }
+  depends_on = [kubernetes_namespace_v1.ufo_system]
 }
 
 resource "kubernetes_secret_v1" "ufo_serve" {
@@ -274,6 +287,8 @@ data "kubectl_file_documents" "hosted" {
     preview_enabled   = local.preview_enabled
     cache_s3_role_arn = module.platform.cache_s3_role_arn
 
+    residential_proxy_enabled = var.residential_proxy_url != ""
+
     ses_sender           = var.ses_sender
     ses_region           = var.region
     gateway_ses_role_arn = module.platform.gateway_ses_role_arn
@@ -358,5 +373,9 @@ resource "kubectl_manifest" "ufo" {
   # die at the provider's 10m update timeout first, failing healthy rolls. `await_rollout.sh` is the gate.
   wait_for_rollout = false
 
-  depends_on = [kubectl_manifest.ufo_migrate, module.platform]
+  depends_on = [
+    kubectl_manifest.ufo_migrate,
+    module.platform,
+    kubernetes_secret_v1.ufo_egress_residential,
+  ]
 }

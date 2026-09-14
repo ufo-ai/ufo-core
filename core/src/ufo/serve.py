@@ -116,6 +116,7 @@ from ufo.runtime.access.egress_rules import (
     connector_transfer_hosts,
     derive_artifact_store_rules,
     derive_manifest_rules,
+    derive_residential_rules,
 )
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
 from ufo.runtime.billing.balance import billing_screen_url
@@ -1577,7 +1578,11 @@ def _proxy_endpoint(
         )
     clis = connector_clis(manifests)
     resolver = PerAgentRules(
-        base=(*model_rule_base(config), *_one_shot(derive_artifact_store_rules(blob))),
+        base=(
+            *model_rule_base(config),
+            *_one_shot(derive_artifact_store_rules(blob)),
+            *derive_residential_rules(config.sandbox.residential_hosts),
+        ),
         grants=GrantStore() if credentials is not None else None,
         credentials=credentials,
         slots=workspace_slot_source(manifests),

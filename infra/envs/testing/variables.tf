@@ -65,3 +65,16 @@ variable "signup_key" {
   default     = ""
   description = "The path segment that opens the join door: a member who holds https://<apex>/join/<key> founds their own domain's workspace with nobody to approve them. Empty serves no door, so a deploy never opens signup by leaving it alone."
 }
+
+variable "residential_proxy_url" {
+  type        = string
+  sensitive   = true
+  default     = ""
+  description = "The residential provider's gateway the egress proxy carries residential_hosts through: http://user:password@host:port. Supply via TF_VAR_residential_proxy_url; never commit. Empty configures no exit, and a residential host is then refused rather than leaving on the cluster's own address."
+}
+
+variable "residential_hosts" {
+  type        = list(string)
+  default     = []
+  description = "Hosts every sandbox reaches through residential_proxy_url, for an origin that refuses a datacenter address. A host here opens no egress of its own: the scope or internet rule that already admits it still decides."
+}

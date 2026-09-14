@@ -96,7 +96,20 @@ class MeterRule:
     dimension: str
 
 
-Rule = ScopeRule | InternetRule | InjectionRule | MeterRule | ServiceRule
+@dataclass(frozen=True)
+class ResidentialRule:
+    """Carry `host` out through the residential provider the proxy is configured with, so the
+    request arrives from a consumer address instead of the cluster's.
+
+    It admits nothing of its own: the host reaches the wire through its scope or the public-internet
+    rule exactly as before, and this names only the exit that carries it. The provider's gateway and
+    its credential live in the proxy's boot environment and never in a rule — the wire holds the
+    exit, this plane holds the policy."""
+
+    host: str
+
+
+Rule = ScopeRule | InternetRule | InjectionRule | MeterRule | ServiceRule | ResidentialRule
 
 
 def provider_host(model: str) -> str:
@@ -122,6 +135,14 @@ def derive_model_rules(model: str, real_key: str) -> tuple[Rule, ...]:
         ),
         MeterRule(host=host, dimension="tokens"),
     )
+
+
+def derive_residential_rules(hosts: tuple[str, ...]) -> tuple[Rule, ...]:
+    """The hosts this deploy routes through its residential provider, from `[sandbox]
+    residential_hosts`. Which origins refuse a datacenter address is an operations fact about the
+    deploy, so config names them rather than a workspace; none configured routes every host straight
+    out."""
+    return tuple(ResidentialRule(host=host) for host in dict.fromkeys(hosts))
 
 
 def derive_manifest_rules(manifests: tuple[Manifest, ...]) -> tuple[InternetRule, ...]:

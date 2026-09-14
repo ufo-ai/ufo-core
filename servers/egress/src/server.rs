@@ -19,6 +19,15 @@
 //! answered 502 inside the tunnel the client already opened. Gating on the daemon rather than the
 //! path is what keeps the preview host from becoming a second, ungated route to `github.com`.
 //!
+//! A `Residential` rule's host leaves through the provider gateway `UFO_EGRESS_RESIDENTIAL_PROXY`
+//! names rather than the cluster's own address: the wire opens a CONNECT to the gateway and carries
+//! the tunnel (or the MITM's upstream leg) inside it. The gateway resolves the origin on its own
+//! network, so such a host is pinned to no address here — the private-address check guards a dial
+//! this process makes, and this one leaves through a consumer exit that reaches nothing of ours. A
+//! rule whose deploy configures no gateway is answered 502, as the preview host is: the origin that
+//! refuses a datacenter address is why the rule named the host, so falling back to the direct exit
+//! would send the request from exactly the address it must not come from.
+//!
 //! A sentinel keeps its prefix through the swap only under the schemes `SWAPPABLE_SCHEMES` names,
 //! decided here and never by the sandbox; `keyed_connectors` declares the same set. `Basic` is not
 //! a prefix scheme: a sentinel rides as the password half of the encoded `user:password`, matched
@@ -52,6 +61,7 @@ use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use uuid::Uuid;
 
+use crate::config::ResidentialExit;
 use crate::control::Control;
 use crate::meter::MeterSink;
 use crate::tls::{upstream_client_config, LeafStore};
@@ -126,6 +136,7 @@ pub struct EgressProxy {
     graceful_shutdown: Duration,
     upstream_tls: Arc<ClientConfig>,
     dns: Option<Arc<Dns>>,
+    residential: Option<Arc<ResidentialExit>>,
 }
 
 impl EgressProxy {
@@ -148,7 +159,15 @@ impl EgressProxy {
             graceful_shutdown,
             upstream_tls: upstream_client_config(),
             dns: None,
+            residential: None,
         }
+    }
+
+    /// Carry every `Residential` rule's host through this provider gateway. A deploy that
+    /// configures none leaves it unset, and such a host is refused rather than dialed direct.
+    pub fn through_residential(mut self, exit: ResidentialExit) -> EgressProxy {
+        self.residential = Some(Arc::new(exit));
+        self
     }
 
     /// Point the re-originating (upstream) TLS at a caller-supplied trust root. Tests trust a local
@@ -204,6 +223,7 @@ impl EgressProxy {
             caps: Arc::new(Caps::new()),
             rule_cache: Mutex::new(HashMap::new()),
             call_liveness: Arc::new(CallLivenessRegistry::default()),
+            residential: self.residential.clone(),
         });
         let mut tasks: JoinSet<()> = JoinSet::new();
         tokio::pin!(shutdown);
@@ -247,6 +267,7 @@ struct Shared {
     caps: Arc<Caps>,
     rule_cache: Mutex<HashMap<RuleKey, CachedRules>>,
     call_liveness: Arc<CallLivenessRegistry>,
+    residential: Option<Arc<ResidentialExit>>,
 }
 
 struct CachedRules {
@@ -497,12 +518,29 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
         .collect();
     let exactly_scoped = !scopes.is_empty();
     let pinned_scope = scopes.iter().any(|pinned| *pinned);
-    let mut connect_host = host.clone();
-    if !exactly_scoped || pinned_scope {
-        if !exactly_scoped && !rules.iter().any(|r| matches!(r, Rule::Internet)) {
-            let _ = respond(&mut stream, 403, &refused).await;
+    if !exactly_scoped && !rules.iter().any(|r| matches!(r, Rule::Internet)) {
+        let _ = respond(&mut stream, 403, &refused).await;
+        return;
+    }
+    let residential = rules
+        .iter()
+        .any(|r| matches!(r, Rule::Residential { host: h } if *h == host));
+    let exit = match (residential, &shared.residential) {
+        (false, _) => None,
+        (true, Some(exit)) => Some(exit.clone()),
+        (true, None) => {
+            tracing::warn!(host = %host, "egress.residential_exit_unconfigured");
+            let _ = respond(
+                &mut stream,
+                502,
+                &format!("residential egress for {host} is not configured"),
+            )
+            .await;
             return;
         }
+    };
+    let mut connect_host = host.clone();
+    if (!exactly_scoped || pinned_scope) && exit.is_none() {
         match resolve_public(&shared.dns, &host).await {
             Ok(pinned) => connect_host = pinned,
             Err(ResolveError::Forbidden) => {
@@ -542,6 +580,7 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
         host: &host,
         connect_host: &connect_host,
         port,
+        exit: exit.as_deref(),
     };
 
     if injections.is_empty() && call_liveness.is_none() {
@@ -655,6 +694,66 @@ struct ConnectTarget<'a> {
     host: &'a str,
     connect_host: &'a str,
     port: u16,
+    exit: Option<&'a ResidentialExit>,
+}
+
+/// The upstream socket a tunnel or a MITM carries: the dispatch-vetted address dialed straight out,
+/// or the origin reached by name through the residential gateway, which dials it on its own network.
+async fn dial_upstream(target: ConnectTarget<'_>) -> Option<TcpStream> {
+    let dial = async {
+        match target.exit {
+            None => TcpStream::connect((target.connect_host, target.port))
+                .await
+                .map_err(anyhow::Error::from),
+            Some(exit) => residential_connect(exit, target.host, target.port).await,
+        }
+    };
+    match timeout(CONNECT_UPSTREAM_TIMEOUT, dial).await {
+        Ok(Ok(sock)) => Some(sock),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, host = %target.host, "egress.upstream_dial_failed");
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+async fn residential_connect(
+    exit: &ResidentialExit,
+    host: &str,
+    port: u16,
+) -> anyhow::Result<TcpStream> {
+    let mut sock = TcpStream::connect(exit.address.as_str()).await?;
+    let mut request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+    if let Some(credential) = &exit.credential {
+        request.push_str(&format!("Proxy-Authorization: {credential}\r\n"));
+    }
+    request.push_str("\r\n");
+    sock.write_all(request.as_bytes()).await?;
+    match read_head(&mut sock).await {
+        ReadHead::Ok { line, leftover, .. } => {
+            let answered = String::from_utf8_lossy(&line).to_string();
+            match status_code(&line) {
+                Some(200..=299) if leftover.is_empty() => Ok(sock),
+                Some(200..=299) => Err(anyhow::anyhow!(
+                    "residential proxy sent {} bytes before the tunnel",
+                    leftover.len()
+                )),
+                _ => Err(anyhow::anyhow!("residential proxy answered {answered}")),
+            }
+        }
+        _ => Err(anyhow::anyhow!(
+            "residential proxy closed before it answered the tunnel"
+        )),
+    }
+}
+
+fn status_code(line: &[u8]) -> Option<u16> {
+    String::from_utf8_lossy(line)
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 async fn tunnel(
@@ -665,14 +764,9 @@ async fn tunnel(
     metering: &Metering,
     liveness: Option<CallLiveness>,
 ) {
-    let upstream = match timeout(
-        CONNECT_UPSTREAM_TIMEOUT,
-        TcpStream::connect((target.connect_host, target.port)),
-    )
-    .await
-    {
-        Ok(Ok(sock)) => sock,
-        _ => {
+    let upstream = match dial_upstream(target).await {
+        Some(sock) => sock,
+        None => {
             let _ = respond(&mut stream, 502, &format!("cannot reach {}", target.host)).await;
             return;
         }
@@ -758,14 +852,9 @@ async fn mitm(
     // host, before any usage is teed off the wire.
     emit_metrics(shared, target.host, &metering.metric_dims).await;
 
-    let tcp = match timeout(
-        CONNECT_UPSTREAM_TIMEOUT,
-        TcpStream::connect((target.connect_host, target.port)),
-    )
-    .await
-    {
-        Ok(Ok(sock)) => sock,
-        _ => return,
+    let tcp = match dial_upstream(target).await {
+        Some(sock) => sock,
+        None => return,
     };
     let server_name = match ServerName::try_from(target.host.to_string()) {
         Ok(name) => name,
@@ -2374,5 +2463,19 @@ mod tests {
         );
         assert!(text.contains("content-length: 2"), "{text}");
         assert!(text.ends_with("connection: close\r\n\r\nhi"), "{text}");
+    }
+
+    #[test]
+    fn a_residential_gateway_answer_is_read_off_its_status_line() {
+        assert_eq!(
+            status_code(b"HTTP/1.1 200 Connection established"),
+            Some(200)
+        );
+        assert_eq!(
+            status_code(b"HTTP/1.1 407 Proxy Authentication Required"),
+            Some(407)
+        );
+        assert_eq!(status_code(b"HTTP/1.1"), None);
+        assert_eq!(status_code(b"nonsense"), None);
     }
 }

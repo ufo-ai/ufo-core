@@ -34,6 +34,10 @@
       "kind": "service",
       "host": "registry.npmjs.org",
       "daemon_prefix": "/pkg/registry.npmjs.org"
+    },
+    {
+      "kind": "residential",
+      "host": "news.example.com"
     }
   ]
 }

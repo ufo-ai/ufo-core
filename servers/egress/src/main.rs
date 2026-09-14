@@ -32,7 +32,7 @@ async fn main() {
 
     let control = Arc::new(Control::new(&config.control_url, &config.control_token));
     let meter = Meter::start(control.clone());
-    let proxy = EgressProxy::new(
+    let mut proxy = EgressProxy::new(
         control,
         Arc::new(leaves),
         meter.sink(),
@@ -44,6 +44,10 @@ async fn main() {
         config.public_url.clone(),
         config.graceful_shutdown,
     );
+    if let Some(exit) = config.residential.clone() {
+        tracing::info!(gateway = %exit.address, "ufo-egress residential exit");
+        proxy = proxy.through_residential(exit);
+    }
     tracing::info!(bind = %config.bind, "ufo-egress starting");
     // Kubernetes drains a pod with SIGTERM; a proxy that watched only SIGINT would ignore it and be
     // SIGKILLed after the grace window, cutting live tunnels rather than draining them.

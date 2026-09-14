@@ -3,6 +3,8 @@
 
 use std::net::SocketAddr;
 
+use base64::Engine;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Bind address the proxy listens on (`UFO_EGRESS_BIND`:`UFO_EGRESS_PORT`).
@@ -27,6 +29,22 @@ pub struct Config {
     /// How long a SIGTERM lets live tunnels drain before stragglers are aborted — the deploy's
     /// `[serve] graceful_shutdown_seconds`, passed as `UFO_EGRESS_GRACEFUL_SHUTDOWN_SECONDS`.
     pub graceful_shutdown: std::time::Duration,
+    /// The residential provider a `Residential` rule's host is dialed through. Unset configures no
+    /// residential exit, and such a host is answered 502 rather than leaving on the cluster's own
+    /// address — the origin refusing a datacenter address is why the rule named it.
+    pub residential: Option<ResidentialExit>,
+}
+
+/// The upstream residential proxy this deploy exits through: the provider's gateway and the
+/// credential the hop to it carries. The wire holds the exit and never which hosts take it — that
+/// is a `Residential` rule the control plane resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResidentialExit {
+    /// `host:port` of the gateway, resolved at connect time like a relay daemon's address.
+    pub address: String,
+    /// The complete `Basic …` value the CONNECT to the gateway presents, built from the endpoint's
+    /// userinfo. None for a gateway that authenticates its caller by address alone.
+    pub credential: Option<String>,
 }
 
 const DEFAULT_BIND_HOST: &str = "0.0.0.0";
@@ -60,6 +78,7 @@ impl Config {
             cache_daemon: daemon_address("UFO_EGRESS_CACHE_DAEMON")?,
             preview_daemon: daemon_address("UFO_EGRESS_PREVIEW_DAEMON")?,
             graceful_shutdown: std::time::Duration::from_secs(graceful_shutdown_seconds),
+            residential: residential_exit("UFO_EGRESS_RESIDENTIAL_PROXY")?,
         })
     }
 }
@@ -79,6 +98,42 @@ fn daemon_address(key: &str) -> Result<Option<String>, String> {
         return Err(format!("{key} must be host:port, got {value:?}"));
     }
     Ok(Some(value))
+}
+
+/// The residential endpoint behind `<key>`: `http://user:password@gate.provider.example:7000`.
+/// The credential rides the userinfo, so one secret carries one exit and a rotation replaces one thing.
+fn residential_exit(key: &str) -> Result<Option<ResidentialExit>, String> {
+    let value = match std::env::var(key) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let rest = match value.split_once("://") {
+        Some(("http", rest)) => rest,
+        Some((scheme, _)) => return Err(format!("{key} scheme must be http, got {scheme:?}")),
+        None => value.as_str(),
+    };
+    let (userinfo, authority) = match rest.rsplit_once('@') {
+        Some((userinfo, authority)) => (Some(userinfo), authority),
+        None => (None, rest),
+    };
+    let authority = authority.trim_end_matches('/');
+    let shaped = match authority.rsplit_once(':') {
+        Some((host, port)) => !host.is_empty() && port.parse::<u16>().is_ok(),
+        None => false,
+    };
+    if !shaped || userinfo == Some("") {
+        return Err(format!("{key} must be http://[user:password@]host:port"));
+    }
+    let credential = userinfo.map(basic);
+    Ok(Some(ResidentialExit {
+        address: authority.to_string(),
+        credential,
+    }))
+}
+
+fn basic(credential: &str) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(credential);
+    format!("Basic {encoded}")
 }
 
 fn req(key: &str) -> Result<String, String> {
@@ -131,5 +186,70 @@ mod tests {
         }
         std::env::remove_var(KEY);
         assert!(daemon_address(KEY).unwrap().is_none());
+    }
+
+    const RESIDENTIAL_KEY: &str = "UFO_EGRESS_RESIDENTIAL_PROXY_TEST";
+
+    #[test]
+    fn a_residential_endpoint_carries_its_credential_as_basic_and_refuses_another_scheme() {
+        std::env::set_var(
+            RESIDENTIAL_KEY,
+            "http://user:secret@gate.provider.example:7000",
+        );
+        assert_eq!(
+            residential_exit(RESIDENTIAL_KEY).unwrap(),
+            Some(ResidentialExit {
+                address: "gate.provider.example:7000".to_string(),
+                credential: Some(basic("user:secret")),
+            })
+        );
+
+        std::env::set_var(RESIDENTIAL_KEY, "gate.provider.example:7000");
+        assert_eq!(
+            residential_exit(RESIDENTIAL_KEY).unwrap(),
+            Some(ResidentialExit {
+                address: "gate.provider.example:7000".to_string(),
+                credential: None,
+            })
+        );
+
+        for malformed in [
+            "https://gate.provider.example:7000",
+            "http://gate.provider.example",
+            "http://user:secret@:7000",
+            "http://@gate.provider.example:7000",
+            "http://gate.provider.example:port",
+        ] {
+            std::env::set_var(RESIDENTIAL_KEY, malformed);
+            assert!(
+                residential_exit(RESIDENTIAL_KEY).is_err(),
+                "{malformed} was admitted as a residential endpoint"
+            );
+        }
+
+        std::env::remove_var(RESIDENTIAL_KEY);
+        assert!(residential_exit(RESIDENTIAL_KEY).unwrap().is_none());
+    }
+
+    const RESIDENTIAL_REDACTION_KEY: &str = "UFO_EGRESS_RESIDENTIAL_PROXY_REDACTION_TEST";
+
+    #[test]
+    fn a_refused_residential_endpoint_never_names_the_credential_it_carried() {
+        for malformed in [
+            "https://user:secret@gate.provider.example:7000",
+            "http://user:secret@gate.provider.example",
+            "http://user:secret@gate.provider.example:port",
+            "http://user:secret@:7000",
+            "user:secret",
+        ] {
+            std::env::set_var(RESIDENTIAL_REDACTION_KEY, malformed);
+            let error = residential_exit(RESIDENTIAL_REDACTION_KEY)
+                .expect_err("a malformed residential endpoint was admitted");
+            assert!(
+                !error.contains("secret"),
+                "{malformed} was refused with {error:?}"
+            );
+        }
+        std::env::remove_var(RESIDENTIAL_REDACTION_KEY);
     }
 }

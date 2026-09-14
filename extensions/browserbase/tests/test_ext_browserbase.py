@@ -101,7 +101,7 @@ class _Browserbase:
 
 
 async def _provider(
-    api: _Browserbase, key: str | None = API_KEY
+    api: _Browserbase, key: str | None = API_KEY, proxies: bool = True
 ) -> tuple[browserbase.BrowserbaseCdpProvider, UUID]:
     workspace_id = uuid4()
     async with workspace_tx() as connection:
@@ -116,7 +116,7 @@ async def _provider(
         await store.put(workspace_id, browserbase.API_KEY_SLOT, key)
     credentials = context_for(browserbase.NAME, frozenset({browserbase.API_KEY_SLOT})).credentials
     provider = browserbase.BrowserbaseCdpProvider(
-        credentials=credentials, transport=httpx.MockTransport(api.handle)
+        credentials=credentials, transport=httpx.MockTransport(api.handle), proxies=proxies
     )
     return provider, workspace_id
 
@@ -154,8 +154,34 @@ async def test_lease_mints_a_session_on_a_fresh_context_for_the_run(db: None) ->
     assert json.loads(created.content) == {
         "browserSettings": {"context": {"id": CONTEXT_ID, "persist": True}},
         "timeout": browserbase.SESSION_TIMEOUT_SECONDS,
+        "proxies": True,
     }
     assert api.contexts_created == 1
+
+
+async def test_a_deploy_that_turns_the_proxies_off_mints_the_session_without_them(
+    db: None,
+) -> None:
+    api = _Browserbase()
+    provider, workspace_id = await _provider(api, proxies=False)
+    with ws(workspace_id):
+        await provider.lease(_sandbox(uuid4()))
+    (created,) = api.sent("POST", "/v1/sessions")
+    assert json.loads(created.content)["proxies"] is False
+
+
+def test_residential_proxies_are_on_unless_the_deploy_says_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(browserbase.PROXIES_ENV, raising=False)
+    assert browserbase.residential_proxies() is True
+    monkeypatch.setenv(browserbase.PROXIES_ENV, "FALSE")
+    assert browserbase.residential_proxies() is False
+    monkeypatch.setenv(browserbase.PROXIES_ENV, "true")
+    assert browserbase.residential_proxies() is True
+    monkeypatch.setenv(browserbase.PROXIES_ENV, "0")
+    with pytest.raises(RuntimeError, match=browserbase.PROXIES_ENV):
+        browserbase.residential_proxies()
 
 
 async def test_aclose_releases_the_session_and_deletes_the_runs_context(db: None) -> None:

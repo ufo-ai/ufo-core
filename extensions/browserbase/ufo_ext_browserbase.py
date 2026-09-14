@@ -22,6 +22,11 @@ starts at twenty of them, so an unset timeout would reap the browser mid-run. It
 ceiling `browser_task` accepts, so a run always ends on its own deadline rather than losing its
 browser to a reaped session.
 
+Each session mints with Browserbase's built-in residential proxies, which is what makes the browse
+arrive from a consumer address: the sites a member asks an agent to read refuse a datacenter one,
+and a browse that fails a bot check costs the whole turn. `BROWSERBASE_PROXIES=false` turns them off
+for a deploy that would rather pay in blocked pages than in proxied bandwidth.
+
 The API key is a host-side credential slot read fresh on each call, so a rotated key takes effect on
 the next lease and the key never enters the sandbox. Browserbase infers the project from the key.
 Core ships no cdp provider, so pointing a deploy at Browserbase is this extension plus that one slot
@@ -30,6 +35,7 @@ value."""
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import PurePosixPath
@@ -46,6 +52,8 @@ NAME = "browserbase"
 VERSION = "0.1.0"
 CDP_BACKEND = "browserbase"
 API_KEY_SLOT = "browserbase_api_key"
+PROXIES_ENV = "BROWSERBASE_PROXIES"
+PROXIES_VALUES = {"true": True, "false": False}
 API_BASE_URL = "https://api.browserbase.com"
 API_KEY_HEADER = "X-BB-API-Key"
 SESSIONS_PATH = "/v1/sessions"
@@ -67,6 +75,19 @@ UPLOAD_DIGEST_CHARS = 8
 SESSION_TIMEOUT_SECONDS = 3900
 
 
+def residential_proxies() -> bool:
+    """Whether each hosted session routes through Browserbase's built-in residential proxies. On
+    unless `BROWSERBASE_PROXIES` says `false`; any other value fails loud rather than deciding a
+    deploy's browser egress by typo."""
+    value = os.environ.get(PROXIES_ENV)
+    if value is None:
+        return True
+    selected = PROXIES_VALUES.get(value.strip().lower())
+    if selected is None:
+        raise RuntimeError(f"{PROXIES_ENV} must be true or false, got {value!r}")
+    return selected
+
+
 class BrowserbaseError(RuntimeError):
     """Browserbase answered a non-2xx status or a body missing a field the seam needs — raised so
     the turn reports the transport failing, never a silently browser-less turn."""
@@ -80,6 +101,7 @@ class BrowserbaseApi:
 
     credentials: CredentialAccess
     transport: httpx.AsyncBaseTransport | None = None
+    proxies: bool = True
 
     async def create_session(self, context_id: str) -> tuple[str, str]:
         body = await self._json(
@@ -88,6 +110,7 @@ class BrowserbaseApi:
             json={
                 "browserSettings": {"context": {"id": context_id, "persist": True}},
                 "timeout": SESSION_TIMEOUT_SECONDS,
+                "proxies": self.proxies,
             },
         )
         return _field(body, "id"), _field(body, "connectUrl")
@@ -272,10 +295,12 @@ class BrowserbaseCdpProvider:
     off the turn's sandbox — a subagent turn holds its own conversation, so that is the run —
     gets or creates the run's Context, and mints a session against it. `reattach` yields a lease
     over the session its token names when Browserbase still holds it, else raises `SessionGone` so
-    the caller mints fresh."""
+    the caller mints fresh. `proxies` is the deploy's residential-proxy setting, read once at boot
+    and carried onto every session this provider mints."""
 
     credentials: CredentialAccess
     transport: httpx.AsyncBaseTransport | None = None
+    proxies: bool = True
 
     async def lease(self, sandbox: Sandbox | None = None) -> CdpLease:
         if sandbox is None:
@@ -283,7 +308,9 @@ class BrowserbaseCdpProvider:
                 "the browserbase cdp provider needs the turn's sandbox to name the browser run"
             )
         conversation_id = sandbox.conversation_id
-        api = BrowserbaseApi(credentials=self.credentials, transport=self.transport)
+        api = BrowserbaseApi(
+            credentials=self.credentials, transport=self.transport, proxies=self.proxies
+        )
         store = ScopedStore(extension=NAME)
         context_id = await self._context(api, store, conversation_id)
         session_id, connect_url = await api.create_session(context_id)
@@ -307,7 +334,9 @@ class BrowserbaseCdpProvider:
 
     async def reattach(self, token: str, sandbox: Sandbox | None = None) -> CdpLease:
         conversation_id, session_id, context_id = _parse_token(token)
-        api = BrowserbaseApi(credentials=self.credentials, transport=self.transport)
+        api = BrowserbaseApi(
+            credentials=self.credentials, transport=self.transport, proxies=self.proxies
+        )
         connect_url = await api.live_session(session_id)
         return BrowserbaseLease(
             api=api,
@@ -344,6 +373,9 @@ def manifest() -> Manifest:
             ),
         ),
         cdp_providers=(
-            CdpProviderSpec(backend=CDP_BACKEND, build=lambda creds: BrowserbaseCdpProvider(creds)),
+            CdpProviderSpec(
+                backend=CDP_BACKEND,
+                build=lambda creds: BrowserbaseCdpProvider(creds, proxies=residential_proxies()),
+            ),
         ),
     )

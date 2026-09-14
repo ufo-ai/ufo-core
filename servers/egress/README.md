@@ -10,6 +10,9 @@ connection: refuse the host, tunnel it untouched, or terminate TLS with a certif
 the host and add the credential the caller is entitled to on the way out. It also pins the address
 it dialed, reports the usage back to the control plane for metering, and relays the hosts that
 belong to the cache daemon and the preview service to those programs instead of the public internet.
+A host the control plane marks residential leaves through the configured residential provider's
+gateway instead of the cluster's own address; with no gateway configured that host is answered 502,
+because the origin refusing a datacenter address is why the rule named it.
 
 It holds no customer key, no database, and no policy of its own: every secret and every decision
 stays in the control plane. A proxy request with no valid token is answered 403, anything other than
@@ -60,6 +63,7 @@ that core `serve` hands out.
 | `UFO_EGRESS_PUBLIC_URL` | Address a sandbox outside the cluster dials the proxy on. |
 | `UFO_EGRESS_CACHE_DAEMON` | `host:port` of the cache daemon. Unset sends the cached hosts to their real origins. |
 | `UFO_EGRESS_PREVIEW_DAEMON` | `host:port` of the preview service. Unset answers a render request 502. |
+| `UFO_EGRESS_RESIDENTIAL_PROXY` | `http://[user:password@]host:port` of the residential provider's gateway. The hosts that take it are the control plane's `[sandbox] residential_hosts`. Unset answers such a host 502. |
 | `UFO_EGRESS_GRACEFUL_SHUTDOWN_SECONDS` | How long live tunnels drain on shutdown. Defaults to 30. |
 | `UFO_EGRESS_LOG` | Log filter. Defaults to `info`. Logs are JSON on stdout. |
 

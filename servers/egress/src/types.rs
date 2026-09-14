@@ -62,6 +62,11 @@ pub enum Rule {
         #[serde(default)]
         daemon_prefix: Option<String>,
     },
+    /// Dial `host` through the deploy's residential proxy, so the request arrives from a consumer
+    /// address. It admits nothing: the scope or internet rule that already reached it still decides.
+    Residential {
+        host: String,
+    },
 }
 
 /// One metered event the proxy posts to the meter RPC; `serve` groups, prices, and writes the ledger.

@@ -18,6 +18,7 @@ use tokio::sync::{oneshot, Notify};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use uuid::Uuid;
 
+use ufo_egress::config::ResidentialExit;
 use ufo_egress::control::Control;
 use ufo_egress::meter::Meter;
 use ufo_egress::server::{Dns, EgressProxy, ServiceDaemons};
@@ -213,6 +214,17 @@ async fn start_proxy_pinning(
     daemons: ServiceDaemons,
     pinned: Option<(&str, Ipv4Addr)>,
 ) -> Proxy {
+    start_proxy_exiting(state, upstream_ca_pem, daemons, pinned, None).await
+}
+
+/// `exit` is the residential gateway every `Residential` rule's host is carried through.
+async fn start_proxy_exiting(
+    state: Arc<ControlState>,
+    upstream_ca_pem: Option<String>,
+    daemons: ServiceDaemons,
+    pinned: Option<(&str, Ipv4Addr)>,
+    exit: Option<ResidentialExit>,
+) -> Proxy {
     let control_url = spawn_control(state.clone()).await;
     let (ca_pem, ca_key) = generate_ca().unwrap();
     let leaves = Arc::new(LeafStore::new(&ca_pem, &ca_key).unwrap());
@@ -235,6 +247,9 @@ async fn start_proxy_pinning(
             host.to_string(),
             vec![address],
         )])));
+    }
+    if let Some(exit) = exit {
+        proxy = proxy.through_residential(exit);
     }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -800,6 +815,111 @@ async fn an_internet_rule_refuses_a_private_destination() {
         status_of(&loopback),
         403,
         "loopback literal was admitted: {loopback}"
+    );
+}
+
+/// A stand-in residential gateway: it records the CONNECT head it is given, answers 200, then
+/// relays the tunnel to `origin` — what a provider's endpoint does, on loopback.
+async fn spawn_residential_gateway(origin: SocketAddr) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_task = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let seen = seen_task.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while find(&head, b"\r\n\r\n").is_none() {
+                    match sock.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                seen.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&head).to_string());
+                let mut upstream = match TcpStream::connect(origin).await {
+                    Ok(sock) => sock,
+                    Err(_) => return,
+                };
+                if sock
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                let _ = tokio::io::copy_bidirectional(&mut sock, &mut upstream).await;
+            });
+        }
+    });
+    (addr.to_string(), seen)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_residential_rule_carries_its_host_through_the_provider_gateway() {
+    // The internet rule alone refuses this address, so reaching the echo proves the tunnel left
+    // through the gateway by name rather than being dialed and pinned here.
+    let origin = spawn_echo().await;
+    let (gateway, seen) = spawn_residential_gateway(origin).await;
+    let target = format!("127.0.0.1:{}", origin.port());
+    let rules = r#"[{"kind":"internet"},{"kind":"residential","host":"127.0.0.1"}]"#;
+    let credential = base64::engine::general_purpose::STANDARD.encode("user:secret");
+    let proxy = start_proxy_exiting(
+        ControlState::new(rules),
+        None,
+        ServiceDaemons::default(),
+        None,
+        Some(ResidentialExit {
+            address: gateway,
+            credential: Some(format!("Basic {credential}")),
+        }),
+    )
+    .await;
+    let auth = basic(&run_token(vec![]));
+    let (mut sock, head) = connect(&proxy, &target, Some(&auth)).await;
+    assert_eq!(
+        status_of(&head),
+        200,
+        "residential CONNECT was not established: {head}"
+    );
+
+    sock.write_all(b"ping").await.unwrap();
+    let mut echoed = [0u8; 4];
+    sock.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping", "gateway did not relay the tunnel");
+
+    let asked = seen.lock().unwrap().clone();
+    let request = asked.first().expect("gateway saw no CONNECT");
+    assert!(
+        request.starts_with(&format!("CONNECT {target} HTTP/1.1")),
+        "gateway was asked for the wrong target: {request}"
+    );
+    assert!(
+        request.contains(&format!("Proxy-Authorization: Basic {credential}")),
+        "the hop carried no credential: {request}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_residential_host_is_refused_where_the_deploy_configures_no_gateway() {
+    let origin = spawn_echo().await;
+    let target = format!("127.0.0.1:{}", origin.port());
+    let rules =
+        r#"[{"kind":"scope","hosts":["127.0.0.1"]},{"kind":"residential","host":"127.0.0.1"}]"#;
+    let proxy = start_proxy(ControlState::new(rules)).await;
+    let auth = basic(&run_token(vec![]));
+    let (_sock, head) = connect(&proxy, &target, Some(&auth)).await;
+    assert_eq!(
+        status_of(&head),
+        502,
+        "a residential host left on the cluster's own address: {head}"
     );
 }
 

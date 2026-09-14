@@ -31,6 +31,7 @@ from ufo.runtime.access.egress_rules import (
     InjectionRule,
     InternetRule,
     MeterRule,
+    ResidentialRule,
     ScopeRule,
     ServiceRule,
 )
@@ -265,6 +266,7 @@ def test_rule_json_matches_the_golden_contract() -> None:
         ),
         MeterRule(host="api.anthropic.com", dimension="tokens"),
         ServiceRule(host="registry.npmjs.org", daemon_prefix="/pkg/registry.npmjs.org"),
+        ResidentialRule(host="news.example.com"),
     )
     assert json.loads(CONTRACT.read_text()) == {"rules": [rule_json(rule) for rule in rules]}
 

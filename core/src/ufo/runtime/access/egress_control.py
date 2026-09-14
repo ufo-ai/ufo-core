@@ -28,6 +28,7 @@ from ufo.runtime.access.egress_rules import (
     InjectionRule,
     InternetRule,
     MeterRule,
+    ResidentialRule,
     Rule,
     ScopeRule,
     ServiceRule,
@@ -65,6 +66,8 @@ def rule_json(rule: Rule) -> dict[str, object]:
             return {"kind": "meter", "host": host, "dimension": dimension}
         case ServiceRule(host=host, daemon_prefix=daemon_prefix):
             return {"kind": "service", "host": host, "daemon_prefix": daemon_prefix or None}
+        case ResidentialRule(host=host):
+            return {"kind": "residential", "host": host}
 
 
 class ProxyCapabilities(BaseModel):

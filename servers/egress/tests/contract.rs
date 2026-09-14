@@ -19,7 +19,7 @@ fn python_rule_contract_deserializes_to_the_rust_rule_enum() {
     let fixture: Fixture = serde_json::from_str(&json).expect("deserialize the rule contract");
     assert_eq!(
         fixture.rules.len(),
-        6,
+        7,
         "one of each rule variant, and both scope shapes"
     );
 
@@ -54,5 +54,9 @@ fn python_rule_contract_deserializes_to_the_rust_rule_enum() {
         Rule::Service { host, daemon_prefix }
             if host == "registry.npmjs.org"
                 && daemon_prefix.as_deref() == Some("/pkg/registry.npmjs.org")
+    ));
+    assert!(matches!(
+        &fixture.rules[6],
+        Rule::Residential { host } if host == "news.example.com"
     ));
 }

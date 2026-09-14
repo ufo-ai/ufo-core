@@ -16,6 +16,7 @@ from ufo.runtime.access.egress_rules import (
     InjectionRule,
     InternetRule,
     MeterRule,
+    ResidentialRule,
     ScopeRule,
     connector_transfer_hosts,
     derive_artifact_store_rules,
@@ -23,6 +24,7 @@ from ufo.runtime.access.egress_rules import (
     derive_grant_rules,
     derive_manifest_rules,
     derive_model_rules,
+    derive_residential_rules,
 )
 from ufo.runtime.access.grants import Grant, grant_sentinel
 from ufo.runtime.ext.manifest import ConnectorProvider, Manifest
@@ -33,6 +35,18 @@ def test_manifest_derives_public_internet_only_when_declared() -> None:
     open_ = Manifest(name="open", version="0", sandbox_internet=True)
     assert derive_manifest_rules((closed,)) == ()
     assert derive_manifest_rules((closed, open_)) == (InternetRule(),)
+
+
+def test_residential_hosts_name_the_exit_and_admit_nothing() -> None:
+    """A configured host is carried through the residential provider and scopes nothing: the rule
+    selects the exit, so an unlisted host still reaches the wire the way it did and a listed one
+    needs the scope or the internet rule that already admits it. A repeated host derives one
+    rule."""
+    assert derive_residential_rules(()) == ()
+    assert derive_residential_rules(("news.example.com", "news.example.com", "shop.example")) == (
+        ResidentialRule(host="news.example.com"),
+        ResidentialRule(host="shop.example"),
+    )
 
 
 async def test_artifact_store_rules_scope_the_s3_host_exactly_and_meter_it(

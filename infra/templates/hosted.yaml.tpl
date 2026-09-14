@@ -350,6 +350,14 @@ spec:
             # cluster DNS rather than loopback, so the proxy resolves the address per connect.
             - {name: UFO_EGRESS_PREVIEW_DAEMON, value: "ufo-preview.${namespace}.svc.cluster.local:8930"}
 %{ endif }
+%{ if residential_proxy_enabled }
+            # The residential provider's gateway the hosts in [sandbox] residential_hosts leave
+            # through. The credential rides the endpoint's userinfo, so this one value is the whole
+            # exit; terraform writes it from TF_VAR_residential_proxy_url and no repo file holds it.
+            - name: UFO_EGRESS_RESIDENTIAL_PROXY
+              valueFrom:
+                secretKeyRef: {name: ufo-egress-residential, key: UFO_EGRESS_RESIDENTIAL_PROXY}
+%{ endif }
           resources:
             requests: {cpu: 250m, memory: 384Mi}
             limits: {cpu: "2", memory: 768Mi}

@@ -245,6 +245,12 @@ class SandboxConfig(BaseModel):
     """`host:port` of the preview service the proxy relays the preview host to (RFC 0037). Set
     admits that host for every sandbox, whatever its internet policy. Unset, the host is not
     admitted, document reads are unavailable, and a share carries no rendered preview."""
+    residential_hosts: tuple[str, ...] = ()
+    """Hosts every sandbox reaches through the residential provider the proxy carries
+    (`UFO_EGRESS_RESIDENTIAL_PROXY`) instead of the cluster's own address, for an origin that
+    refuses a datacenter one. A host here opens no egress of its own — it is reached by the scope or
+    the internet rule that already admits it. Empty routes every host straight out; a host here on a
+    proxy with no provider configured is refused rather than dialed direct."""
 
     @model_validator(mode="after")
     def _ingress_base_is_addressable(self) -> "SandboxConfig":
