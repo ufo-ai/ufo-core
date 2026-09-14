@@ -621,7 +621,6 @@ class _BoundToolCall:
     selected_message_ref: UUID | None = None
     selected_message: str = ""
     selected_from_multiple: bool = False
-    selected_from_continuation: bool = False
     authorization_pending: bool = False
     authorization_answer: AuthorizationAnswer | None = None
     authorization_context: AuthorizationContext | None = None
@@ -662,9 +661,7 @@ type _Resolution = EffectiveCall | _RejectedToolCall
 
 def _selected_member_authorization(bound: _BoundToolCall) -> bool:
     return bound.selected_message_ref is not None and (
-        bound.selected_from_multiple
-        or bound.selected_from_continuation
-        or bound.authorization_pending
+        bound.selected_from_multiple or bound.authorization_pending
     )
 
 
@@ -1499,16 +1496,10 @@ class _RuntimeTools:
         )
 
     def parallel_safe(self, call: HarnessToolCall) -> bool:
-        resolved = self._resolve(call)
         return (
-            resolved.parallel_safe
+            self._resolve(call).parallel_safe
             and not self.state.authorization_pending
             and REQUESTED_BY not in call.input
-            and not (
-                isinstance(resolved, EffectiveCall)
-                and resolved.tool.binds_member_authority
-                and any(requester.continued for requester in self.requesters.values())
-            )
         )
 
     async def preflight(self, calls: tuple[HarnessToolCall, ...]) -> None:
@@ -3743,7 +3734,6 @@ class TurnEngine:
         requester: UUID | None = None
         selected_ref: UUID | None = None
         selected_message = ""
-        selected_from_continuation = False
         active_members = self._active_member_ids(requesters)
         sole_member = self._sole_active_member(requesters)
         profile_only = item.tool.profile_only
@@ -3769,7 +3759,6 @@ class TurnEngine:
                 raise SpeakerRequired(f"{REQUESTED_BY} message has no member requester")
             selected_ref = message_id
             selected_message = selected.rendered
-            selected_from_continuation = selected.continued
             newest_ref = self._newest_requester_ref(requesters, requester)
             if selected_ref != newest_ref:
                 raise SpeakerRequired(
@@ -3781,7 +3770,6 @@ class TurnEngine:
             selected_ref = self._newest_requester_ref(requesters, requester)
             selected = requesters[selected_ref]
             selected_message = selected.rendered
-            selected_from_continuation = selected.continued
         causal_ref = selected_ref
         if causal_ref is None and context.requesting_message_ref in requesters:
             causal = requesters[context.requesting_message_ref]
@@ -3811,7 +3799,6 @@ class TurnEngine:
             selected_message_ref=selected_ref,
             selected_message=selected_message,
             selected_from_multiple=selected_ref is not None and sole_member is None,
-            selected_from_continuation=selected_from_continuation,
             authorization_pending=authorization_pending and requester is not None,
             authorization_answer=(
                 None if selected_ref is None else requesters[selected_ref].authorization_answer

@@ -2845,7 +2845,7 @@ async def test_an_omitted_ref_binds_the_only_active_member_in_any_conversation(
     ]
 
 
-async def test_a_spawn_continuation_binds_its_causal_request_and_rechecks_the_effect(
+async def test_a_continuation_binds_its_causal_request_without_asking_again(
     db: None, tmp_path: Path
 ) -> None:
     class StrictInput(BaseModel):
@@ -2865,10 +2865,7 @@ async def test_a_spawn_continuation_binds_its_causal_request_and_rechecks_the_ef
             .values(speaker_member_id=member, inbound="Watch the pull request")
             .where(tables.turn.c.id == request.id)
         )
-    authorized_ref = uuid4()
-    gate = RecordingMemberAuthorization(
-        AuthorizationResolution("allow", requesting_message_ref=authorized_ref)
-    )
+    gate = RecordingMemberAuthorization(AuthorizationResolution("deny", refusal="asked again"))
     seen: list[tuple[UUID | None, UUID | None]] = []
     inherited: list[tuple[UUID | None, UUID | None]] = []
 
@@ -2906,12 +2903,9 @@ async def test_a_spawn_continuation_binds_its_causal_request_and_rechecks_the_ef
         )
 
     assert not result.is_error
-    assert seen == [(member, authorized_ref)]
-    [authorization] = gate.requests
-    assert authorization.member_id == member
-    assert authorization.message_ref == request.id
-    assert authorization.message == "Watch the pull request"
-    assert not authorization.selected_from_multiple
+    assert seen == [(member, request.id)]
+    assert gate.preflight_requests == []
+    assert gate.requests == []
 
     with ws(request.workspace_id):
         delegated = await _dispatch(
@@ -2922,7 +2916,6 @@ async def test_a_spawn_continuation_binds_its_causal_request_and_rechecks_the_ef
         )
     assert not delegated.is_error
     assert inherited == [(None, request.id)]
-    assert len(gate.requests) == 1
 
     newer_ref = uuid4()
     with ws(request.workspace_id):
@@ -2937,7 +2930,7 @@ async def test_a_spawn_continuation_binds_its_causal_request_and_rechecks_the_ef
         )
     assert not newer.is_error
     assert seen[-1] == (member, newer_ref)
-    assert len(gate.requests) == 1
+    assert gate.requests == []
 
 
 async def test_a_member_creates_an_app_in_their_own_conversation_without_the_ref(
