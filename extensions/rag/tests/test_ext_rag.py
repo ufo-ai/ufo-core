@@ -6,7 +6,13 @@ from uuid import UUID, uuid4
 import pytest
 import ufo_ext_rag.manifest as rag
 from ufo_ext_rag.pages import PageStore
-from ufo_ext_rag.prefetch import TOTAL_MAX_CHARS, Grounding, Prefetch
+from ufo_ext_rag.prefetch import (
+    PASSAGE_MAX_CHARS,
+    TOTAL_MAX_CHARS,
+    TRUNCATION_NOTICE,
+    Grounding,
+    Prefetch,
+)
 from ufo_ext_rag.route import route
 
 from ufo.runtime.ext.context import ExtensionContext, PageState, ScopedStore, SourceReader
@@ -295,9 +301,18 @@ async def test_both_legs_reach_the_block_with_their_provenance() -> None:
         found = await prefetch.passages(("What does Northwind charge?",), READER)
 
     block = found.block
-    assert f"[1] {PRICING_PAGE} — Northwind pricing (2026-02-11)" in block
-    assert f"[2] page/{ORDER_FORM} — Northwind order form (2025-03-06)" in block
-    assert "Team plan is $30 a seat." in block
+    assert (
+        "[1] Title: Northwind pricing\n"
+        f"URL: {PRICING_PAGE}\n"
+        "Published: 2026-02-11\n"
+        "Content:\nTeam plan is $30 a seat."
+    ) in block
+    assert (
+        "[2] Title: Northwind order form\n"
+        f"URL: page/{ORDER_FORM}\n"
+        "Published: 2025-03-06\n"
+        "Content:\n"
+    ) in block
     assert "$24 per seat" in block
     assert "<untrusted-content" in block
     assert found.sources == (
@@ -327,11 +342,51 @@ async def test_the_block_numbers_every_entry_from_one() -> None:
         found = await prefetch.passages(("What does Northwind charge?",), READER)
 
     block = found.block
-    numbers = re.findall(r"\[(\d+)\] \S+ — ", block)
+    numbers = re.findall(r"\[(\d+)\] Title: ", block)
     assert len(found.sources) == len(numbers)
     assert numbers == [str(number) for number in range(1, len(numbers) + 1)]
     assert len(numbers) >= 3
     assert "numbered entry" in rag.PREFACE
+
+
+async def test_an_entry_names_no_date_the_source_did_not_carry() -> None:
+    prefetch = Prefetch(
+        search=StubSearch({"northwind": (_hit(PRICING_PAGE, "Northwind pricing", "Undated."),)}),
+        pages=None,
+    )
+    with ws(WORKSPACE):
+        block = (await prefetch.passages(("What does Northwind charge?",), READER)).block
+
+    assert f"[1] Title: Northwind pricing\nURL: {PRICING_PAGE}\nContent:\nUndated." in block
+    assert "Published:" not in block
+
+
+async def test_a_whole_passage_ends_with_its_content() -> None:
+    prefetch = Prefetch(
+        search=StubSearch(
+            {"northwind": (_hit(PRICING_PAGE, "Northwind pricing", "Team plan is $30 a seat."),)}
+        ),
+        pages=None,
+    )
+    with ws(WORKSPACE):
+        block = (await prefetch.passages(("What does Northwind charge?",), READER)).block
+
+    assert "Content:\nTeam plan is $30 a seat." in block
+    assert TRUNCATION_NOTICE not in block
+
+
+async def test_a_cut_passage_ends_with_the_truncation_notice() -> None:
+    long_text = " ".join(["Northwind-seat-pricing-detail"] * 60)
+    prefetch = Prefetch(
+        search=StubSearch({"northwind": (_hit(PRICING_PAGE, "Northwind pricing", long_text),)}),
+        pages=None,
+    )
+    with ws(WORKSPACE):
+        block = (await prefetch.passages(("What does Northwind charge?",), READER)).block
+
+    assert long_text not in block
+    assert block.count(TRUNCATION_NOTICE) == 1
+    assert f"{long_text[:PASSAGE_MAX_CHARS]}{TRUNCATION_NOTICE}" in block
 
 
 async def test_a_failed_leg_leaves_the_other_grounding_the_turn() -> None:

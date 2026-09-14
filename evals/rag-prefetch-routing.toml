@@ -43,8 +43,9 @@ old = '''PREFACE = (
     "for, so the block is no sign that this message wanted a search. Answer from these passages "
     "when they answer the question. Name, in the sentence that states it, where every figure, date "
     "and name came from: a web passage by its address, a workspace passage by the record it names. "
-    "Each passage is one numbered entry — its number, then the address or record it came from, "
-    "then its title — so give that entry's number beside the name, never in place of it. These "
+    "Each passage is one numbered entry — its number and title, then the address or record it "
+    "came from, then its text — so give that entry's number beside the name, never in place of "
+    "it. These "
     "passages replace no tool: when the message asks you to act, act with your tools; when the "
     "answer turns on live state, read that state with your tools; when the passages do not hold "
     "the answer, go and get it or say you do not have it. When two passages disagree, say so, "
@@ -58,13 +59,12 @@ name = "no-tool-clause"
 
 [[arm.replacements]]
 path = "extensions/rag/ufo_ext_rag/manifest.py"
-old = '''    "then its title — so give that entry's number beside the name, never in place of it. These "
+old = '''    "it. These "
     "passages replace no tool: when the message asks you to act, act with your tools; when the "
     "answer turns on live state, read that state with your tools; when the passages do not hold "
     "the answer, go and get it or say you do not have it. When two passages disagree, say so, "
     "name each source with its date, and do not merge them.\n"'''
-new = '''    "then its title — so give that entry's number beside the name, never in place of it. When two "
-    "passages disagree, say so, name each source with its date, and do not merge them.\n"'''
+new = '''    "it. When two passages disagree, say so, name each source with its date, and do not merge them.\n"'''
 
 [[arm]]
 name = "no-conflict-clause"

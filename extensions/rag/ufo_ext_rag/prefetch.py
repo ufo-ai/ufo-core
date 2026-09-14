@@ -42,6 +42,7 @@ TOTAL_MAX_CHARS = 4_000
 MAX_PASSAGES = 8
 CHUNK_TARGET_WORDS = 90
 CHUNK_OVERLAP_WORDS = 15
+TRUNCATION_NOTICE = " [TRUNCATED, call search_web again for full results]"
 WALL_SOURCE = "search run before this turn"
 PREFETCH_EVENT = "rag.prefetch"
 CHUNKER = TextChunker(target_words=CHUNK_TARGET_WORDS, overlap_words=CHUNK_OVERLAP_WORDS)
@@ -57,6 +58,7 @@ class Passage:
     dated: str
     text: str
     provider: str = ""
+    truncated: bool = False
 
     @property
     def key(self) -> str:
@@ -71,10 +73,15 @@ class Passage:
         )
 
     def rendered(self, number: int) -> str:
-        """The numbered entry a reply cites: the number, the reference the reader opens — a web
-        address or a workspace record ref — then the title the reply names the source by."""
-        head = f"[{number}] {self.reference} — {self.title}"
-        return f"{head} ({self.dated})\n{self.text}" if self.dated else f"{head}\n{self.text}"
+        """The numbered entry a reply cites: the number and the title the reply names the source
+        by, the reference the reader opens — a web address or a workspace record ref — the
+        publication date when the source carries one, then the text itself."""
+        lines = [f"[{number}] Title: {self.title}", f"URL: {self.reference}"]
+        if self.dated:
+            lines.append(f"Published: {self.dated}")
+        body = f"{self.text}{TRUNCATION_NOTICE}" if self.truncated else self.text
+        lines.append(f"Content:\n{body}")
+        return "\n".join(lines)
 
 
 def _rank(fused: dict[str, float], passage: Passage) -> tuple[float, str]:
@@ -154,6 +161,7 @@ class Prefetch:
                 reference=hit.url,
                 dated=hit.published_date or "",
                 text=chunk.text[:PASSAGE_MAX_CHARS],
+                truncated=len(chunk.text) > PASSAGE_MAX_CHARS,
             )
             for chunk in chunks
         )
@@ -178,6 +186,7 @@ class Prefetch:
             dated=hit.dated,
             text=hit.text[:PASSAGE_MAX_CHARS],
             provider=hit.provider,
+            truncated=len(hit.text) > PASSAGE_MAX_CHARS,
         )
 
     def _chosen(self, ranked: tuple[tuple[Passage, ...], ...]) -> tuple[Passage, ...]:
