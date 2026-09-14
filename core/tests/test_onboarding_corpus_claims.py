@@ -317,16 +317,25 @@ CLAIMS = (
         ),
     ),
     Claim(
-        claim="a shared source is auto-readable by the workspace's main agent; a specialist agent"
-        " still needs it granted separately",
+        claim="a shared connection is auto-readable by the workspace's main agent; a specialist"
+        " agent still needs it granted separately",
         corpus="references/capabilities.md",
-        phrase="An agent the member built themselves needs\nthe source granted to it separately,"
-        " shared or not",
+        phrase="An agent the member built themselves needs the connection granted to it"
+        " separately, shared or not",
         source=RUNTIME_CONTEXT,
         pattern=(
             r"through its grant, or as the workspace's main agent reading a\s+"
             r"shared connection.*A specialist reads only what it is granted"
         ),
+    ),
+    Claim(
+        claim="a customer connects an account — connect_account — rather than a standalone"
+        " 'source' object",
+        corpus="references/capabilities.md",
+        phrase="A customer can connect an account so its documents and records are synced and"
+        " searchable",
+        source=BUILTIN_TOOLS_SOURCE,
+        pattern=r'name="connect_account"',
     ),
     Claim(
         claim="an externally shared channel reads and writes only itself",

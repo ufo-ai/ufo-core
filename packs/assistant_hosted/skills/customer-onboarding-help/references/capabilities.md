@@ -51,13 +51,13 @@ requested through a private credential prompt that only a workspace admin can fi
 never holds the real secret, so a key cannot be echoed back, read, or written to a file. Never ask
 for a key, token, or secret in a chat message.
 
-## Synced sources
+## Synced accounts
 
-A customer can connect a source so its documents and records are synced and searchable, letting the
-agent answer from the customer's own material. A source registered privately by one member is
-searchable only in that member's own conversation; a source shared to the workspace is searchable by
-the workspace's main agent, which every member reaches. An agent the member built themselves needs
-the source granted to it separately, shared or not.
+A customer can connect an account so its documents and records are synced and searchable, letting
+the agent answer from the customer's own material. A connection made privately by one member is
+searchable only in that member's own conversation; a connection shared with the workspace is
+searchable by the workspace's main agent, which every member reaches. An agent the member built
+themselves needs the connection granted to it separately, shared or not.
 
 ## Memory
 
