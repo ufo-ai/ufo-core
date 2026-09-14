@@ -269,6 +269,22 @@ def _pulls_page(nodes: list[dict[str, Any]], *, end_cursor: str | None = None) -
     }
 
 
+def _pulls(
+    request: httpx.Request,
+    nodes: list[dict[str, Any]],
+    *,
+    end_cursor: str | None = None,
+    remaining: int = 4_000,
+) -> httpx.Response:
+    """GitHub's two answers over one set of pull requests: the index page the walk lists, and the
+    pull request the by-number read asks for."""
+    variables = _variables(request)
+    if "number" in variables:
+        node = next(node for node in nodes if node["number"] == variables["number"])
+        return _answer({"pullRequest": node}, cost=1, remaining=remaining)
+    return _answer(_pulls_page(nodes, end_cursor=end_cursor), cost=1, remaining=remaining)
+
+
 async def test_a_pinned_floor_bounds_commits_server_side(parents_reader: ParentsReader) -> None:
     """`commits` is the one newest-first repo feed GitHub will bound for us: the row's pinned floor
     goes out as `?since`, so a repo with years of history never sends the older commits at all. It
@@ -360,12 +376,15 @@ async def test_a_pull_request_carries_its_checks_reviews_threads_and_files(
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
             posts.append(_variables(request))
-            return _answer(_pulls_page([_pull_node(7, "2026-09-02T00:00:00Z", checks="FAILURE")]))
+            return _pulls(request, [_pull_node(7, "2026-09-02T00:00:00Z", checks="FAILURE")])
         return httpx.Response(404, json={"path": request.url.path})
 
     result = await _fetch("pull_requests", handle, parents=parents_reader(LANDED))
 
-    assert posts == [{"owner": "acme", "name": "repo1", "cursor": None}]
+    assert posts == [
+        {"owner": "acme", "name": "repo1", "cursor": None},
+        {"owner": "acme", "name": "repo1", "number": 7},
+    ]
     (page,) = result.pages
     body = json.loads(page.body.split("\n\n", 1)[1])
     assert body["checks"] == {
@@ -398,7 +417,7 @@ def _mergeable_handler(mergeable: str) -> Callable[[httpx.Request], httpx.Respon
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
             node = _pull_node(7, "2026-09-02T00:00:00Z")
-            return _answer(_pulls_page([{**node, "mergeable": mergeable}]))
+            return _pulls(request, [{**node, "mergeable": mergeable}])
         return httpx.Response(404, json={"path": request.url.path})
 
     return handle
@@ -452,7 +471,7 @@ async def test_the_rollup_and_the_check_run_pages_are_different_pages(
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
-            return _answer(_pulls_page([_pull_node(7, "2026-09-02T00:00:00Z", checks="FAILURE")]))
+            return _pulls(request, [_pull_node(7, "2026-09-02T00:00:00Z", checks="FAILURE")])
         if request.url.path == f"/repos/acme/repo1/commits/{HEAD_SHA}/check-runs":
             return httpx.Response(
                 200, json={"total_count": 1, "check_runs": [{"id": 55, "name": "ci"}]}
@@ -539,7 +558,7 @@ async def test_a_check_run_moves_the_digest_and_the_cursor_alone_does_not(
     def handler(node: dict[str, Any]) -> Callable[[httpx.Request], httpx.Response]:
         def handle(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/graphql":
-                return _answer(_pulls_page([node]))
+                return _pulls(request, [node])
             return httpx.Response(404, json={"path": request.url.path})
 
         return handle
@@ -568,14 +587,17 @@ async def test_pull_requests_walk_newest_first_and_stop_at_the_repo_watermark(
     parents_reader: ParentsReader,
 ) -> None:
     """The walk descends `UPDATED_AT` — the order its cursor is in — and a steady-state pass stops
-    on the first page sitting strictly below the repo's watermark, so re-landing the moved pull
-    requests costs one page and not the repository."""
+    on the first index page sitting strictly below the repo's watermark, so re-landing the moved
+    pull requests costs one index page and one read per moved pull request, not the repository:
+    the pull request below the watermark is listed and never read."""
     posts: list[dict[str, Any]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
             variables = _variables(request)
             posts.append(variables)
+            if "number" in variables:
+                return _pulls(request, [_pull_node(2, "2026-09-02T00:00:00Z")])
             if variables["cursor"] is None:
                 return _answer(
                     _pulls_page([_pull_node(2, "2026-09-02T00:00:00Z")], end_cursor="Y3Vy")
@@ -590,7 +612,11 @@ async def test_pull_requests_walk_newest_first_and_stop_at_the_repo_watermark(
         cursor=json.dumps({_walked(REPO_REF, "/repos/acme/repo1/pulls"): "2026-09-01T00:00:00Z"}),
     )
 
-    assert [post["cursor"] for post in posts] == [None, "Y3Vy"]
+    assert [(post.get("cursor"), post.get("number")) for post in posts] == [
+        (None, None),
+        (None, 2),
+        ("Y3Vy", None),
+    ]
     assert _refs(result) == {f"pull_requests/{REPO_SCOPE}/2"}
     assert _partitions_in(result.next_cursor) == {
         _walked(REPO_REF, "/repos/acme/repo1/pulls"): "2026-09-02T00:00:00Z"
@@ -608,16 +634,16 @@ async def test_a_watched_pull_request_is_read_before_the_repo_walk(
         if request.url.path == "/graphql":
             variables = _variables(request)
             posts.append(variables)
-            if "number" in variables:
+            if variables.get("number") == 3122:
                 return _answer({"pullRequest": _pull_node(3122, "2026-01-05T00:00:00Z")})
-            return _answer(_pulls_page([_pull_node(7, "2026-09-02T00:00:00Z")]))
+            return _pulls(request, [_pull_node(7, "2026-09-02T00:00:00Z")])
         return httpx.Response(404, json={"path": request.url.path})
 
     result = await _fetch(
         "pull_requests", handle, watched=(PULL_3122,), parents=parents_reader(LANDED)
     )
 
-    assert [post.get("number") for post in posts] == [3122, None]
+    assert [post.get("number") for post in posts] == [3122, None, 7]
     assert _refs(result) == {PULL_3122_REF, f"pull_requests/{REPO_SCOPE}/7"}
 
 
@@ -685,21 +711,23 @@ async def test_both_paths_to_one_pull_request_land_one_page(
     }
 
 
-async def test_no_watch_spends_no_per_pull_request_read(
+async def test_the_walk_reads_the_index_then_each_listed_pull_request_by_number(
     parents_reader: ParentsReader,
 ) -> None:
-    """The cost of the mechanism when nobody is watching: nothing."""
+    """The cost of the walk when nobody is watching: one index page a repository and one read per
+    pull request it lists inside the bound — the by-number read is the only read that builds a
+    body, so the walk spends it too rather than landing the index's clipped rows."""
     posts: list[dict[str, Any]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
             posts.append(_variables(request))
-            return _answer(_pulls_page([_pull_node(7, "2026-09-02T00:00:00Z")]))
+            return _pulls(request, [_pull_node(7, "2026-09-02T00:00:00Z")])
         return httpx.Response(404, json={"path": request.url.path})
 
     await _fetch("pull_requests", handle, parents=parents_reader(LANDED))
 
-    assert [post.get("number") for post in posts] == [None]
+    assert [post.get("number") for post in posts] == [None, 7]
 
 
 async def test_a_watched_pull_request_lands_though_the_repo_walk_stops_short_of_it(
@@ -783,13 +811,13 @@ async def test_every_graphql_read_records_what_it_cost(
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
-            if "number" in _variables(request):
+            if _variables(request).get("number") == 3122:
                 return _answer(
                     {"pullRequest": _pull_node(3122, "2026-01-05T00:00:00Z")},
                     cost=1,
                     remaining=4999,
                 )
-            return _answer(_pulls_page([_pull_node(7, "2026-09-02T00:00:00Z")]))
+            return _pulls(request, [_pull_node(7, "2026-09-02T00:00:00Z")], remaining=4998)
         return httpx.Response(404, json={"path": request.url.path})
 
     with caplog.at_level(logging.INFO, logger="ufo"):
@@ -809,42 +837,83 @@ async def test_every_graphql_read_records_what_it_cost(
         },
         {
             "stream": "pull_requests",
-            "cost": "3",
-            "remaining": "4000",
+            "cost": "1",
+            "remaining": "4998",
+            "reset_at": RESET_AT,
+            "watched": "false",
+        },
+        {
+            "stream": "pull_requests",
+            "cost": "1",
+            "remaining": "4998",
             "reset_at": RESET_AT,
             "watched": "false",
         },
     ]
 
 
-async def test_the_walk_stops_before_a_page_the_point_budget_cannot_pay_for(
+async def test_the_walk_stops_before_a_read_the_point_budget_cannot_pay_for(
     parents_reader: ParentsReader,
 ) -> None:
-    """GitHub priced one page of this query at 3 points of an hourly 5,000 against
-    `metalcraftai/ufo` on 2026-09-12, so a repository with pull requests to page through can spend
-    the budget the whole connection shares. The walk reads what the answer reports and stops at its
-    last checkpoint rather than earning the refusal, which GraphQL serves as a 200 carrying no
-    records at all."""
+    """Every read is priced against an hourly 5,000 the whole connection shares, so a repository
+    with pull requests to page through can spend it. The walk reads what the answer reports and
+    stops at its last checkpoint rather than earning the refusal, which GraphQL serves as a 200
+    carrying no records at all: the pull request already read whole lands, its window is stored,
+    and the next index page waits for the refill."""
     posts: list[dict[str, Any]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
             posts.append(_variables(request))
+            if "number" in _variables(request):
+                return _pulls(request, [_pull_node(2, "2026-09-02T00:00:00Z")], remaining=0)
             return _answer(
-                _pulls_page([_pull_node(2, "2026-09-02T00:00:00Z")], end_cursor="Y3Vy"),
-                cost=3,
-                remaining=2,
+                _pulls_page([_pull_node(2, "2026-09-02T00:00:00Z")], end_cursor="Y3Vy"), cost=1
             )
         return httpx.Response(404, json={"path": request.url.path})
 
     result = await _fetch("pull_requests", handle, parents=parents_reader(LANDED))
 
-    assert len(posts) == 1
+    assert [post.get("number") for post in posts] == [None, 2]
     assert result.retry_after_seconds > 0
     assert _refs(result) == {f"pull_requests/{REPO_SCOPE}/2"}
     assert _partitions_in(result.next_cursor) == {
         _walked(REPO_REF, "/repos/acme/repo1/pulls"): {
             "high": "2026-09-02T00:00:00Z",
+            "until": "2026-09-02T00:00:00Z",
+        }
+    }
+
+
+async def test_a_budget_met_between_two_pull_requests_lands_the_whole_ones_and_resumes_at_the_last(
+    parents_reader: ParentsReader,
+) -> None:
+    """An index page lists more pull requests than the budget pays to read whole. The ones already
+    read land, the page's low is the last of them rather than the page's oldest, so the window
+    resumes at it inclusive and the next run reads on downward from there; the ones past it are not
+    asked for at all."""
+    posts: list[dict[str, Any]] = []
+    nodes = [
+        _pull_node(3, "2026-09-03T00:00:00Z"),
+        _pull_node(2, "2026-09-02T00:00:00Z"),
+        _pull_node(1, "2026-09-01T00:00:00Z"),
+    ]
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/graphql":
+            posts.append(_variables(request))
+            remaining = 0 if _variables(request).get("number") == 2 else 4_000
+            return _pulls(request, nodes, remaining=remaining)
+        return httpx.Response(404, json={"path": request.url.path})
+
+    result = await _fetch("pull_requests", handle, parents=parents_reader(LANDED))
+
+    assert [post.get("number") for post in posts] == [None, 3, 2]
+    assert result.retry_after_seconds > 0
+    assert _refs(result) == {f"pull_requests/{REPO_SCOPE}/3", f"pull_requests/{REPO_SCOPE}/2"}
+    assert _partitions_in(result.next_cursor) == {
+        _walked(REPO_REF, "/repos/acme/repo1/pulls"): {
+            "high": "2026-09-03T00:00:00Z",
             "until": "2026-09-02T00:00:00Z",
         }
     }
@@ -856,19 +925,19 @@ async def test_a_repeated_page_cursor_fails_rather_than_spins(
     """A page whose records all sit below the resume bound lands nothing, so the adapter's record
     cap counts nothing and never trips. A provider that keeps saying there is a next page would
     then spin this walk forever, holding the row's claim and committing nothing — so a cursor the
-    walk has already followed fails the run instead."""
+    walk has already followed fails the run instead, before the page's pull requests are read."""
     posts: list[dict[str, Any]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
             posts.append(_variables(request))
-            return _answer(_pulls_page([_pull_node(2, "2020-01-01T00:00:00Z")], end_cursor="Y3Vy"))
+            return _pulls(request, [_pull_node(2, "2020-01-01T00:00:00Z")], end_cursor="Y3Vy")
         return httpx.Response(404, json={"path": request.url.path})
 
     with pytest.raises(StreamFault, match="repeated cursor"):
         await _fetch("pull_requests", handle, parents=parents_reader(LANDED))
 
-    assert len(posts) == 2
+    assert [post.get("number") for post in posts] == [None, 2, None]
 
 
 async def test_a_graphql_error_about_one_repository_drops_only_that_partition(
@@ -887,7 +956,7 @@ async def test_a_graphql_error_about_one_repository_drops_only_that_partition(
                     200,
                     json={"errors": [{"type": "FORBIDDEN", "message": "Resource not accessible"}]},
                 )
-            return _answer(_pulls_page([_pull_node(7, "2026-09-02T00:00:00Z")]))
+            return _pulls(request, [_pull_node(7, "2026-09-02T00:00:00Z")])
         return httpx.Response(404, json={"path": request.url.path})
 
     result = await _fetch("pull_requests", handle, parents=parents_reader(TWO_REPOS))
@@ -925,7 +994,7 @@ async def test_a_repository_graphql_cannot_read_skips_that_partition(
         if request.url.path == "/graphql":
             if _variables(request)["name"] == "repo1":
                 return _answer(None)
-            return _answer(_pulls_page([_pull_node(7, "2026-09-02T00:00:00Z")]))
+            return _pulls(request, [_pull_node(7, "2026-09-02T00:00:00Z")])
         return httpx.Response(404, json={"path": request.url.path})
 
     result = await _fetch("pull_requests", handle, parents=parents_reader(TWO_REPOS))
@@ -954,28 +1023,27 @@ async def test_a_watch_reaches_the_pull_request_walk_and_no_other_streams(
     assert asked == ["/repos/acme/repo1/issues", "/repos/acme/repo1/branches"]
 
 
-async def test_one_repo_of_three_pull_requests_costs_one_read_a_tick_and_two_when_watched(
+async def test_a_first_walk_of_three_pull_requests_costs_four_reads_and_a_watch_one_more(
     parents_reader: ParentsReader,
 ) -> None:
-    """The measurement this unit is bounded by, taken at the transport. GitHub priced one page of
-    this query at 3 points and one pull request at 1 against `metalcraftai/ufo` (3,560 pull
-    requests, 2026-09-12); the request counts here are what those multiply."""
+    """The measurement this unit is bounded by, taken at the transport. GitHub priced one index
+    page and one pull request by number at 1 point each against `metalcraftai/ufo` (3,560 pull
+    requests, 2026-09-14); the request counts here are what those multiply."""
     counted: list[dict[str, Any]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
             variables = _variables(request)
             counted.append(variables)
-            if "number" in variables:
+            if variables.get("number") == 3122:
                 return _answer({"pullRequest": _pull_node(3122, "2026-01-05T00:00:00Z")}, cost=1)
-            return _answer(
-                _pulls_page(
-                    [
-                        _pull_node(3, "2026-09-03T00:00:00Z"),
-                        _pull_node(2, "2026-09-02T00:00:00Z"),
-                        _pull_node(1, "2026-09-01T00:00:00Z"),
-                    ]
-                )
+            return _pulls(
+                request,
+                [
+                    _pull_node(3, "2026-09-03T00:00:00Z"),
+                    _pull_node(2, "2026-09-02T00:00:00Z"),
+                    _pull_node(1, "2026-09-01T00:00:00Z"),
+                ],
             )
         return httpx.Response(404, json={"path": request.url.path})
 
@@ -984,8 +1052,8 @@ async def test_one_repo_of_three_pull_requests_costs_one_read_a_tick_and_two_whe
     counted.clear()
     await _fetch("pull_requests", handle, watched=(PULL_3122,), parents=parents_reader(LANDED))
 
-    assert unwatched == 1
-    assert len(counted) == 2
+    assert unwatched == 4
+    assert len(counted) == 5
 
 
 async def test_review_comments_climb_from_the_floor_on_a_first_pass(
@@ -1497,8 +1565,8 @@ async def test_a_page_keeps_the_address_the_repo_scoped_key_gave_it(
         if request.url.path == "/repos/acme/repo1/branches":
             return httpx.Response(200, json=[{"name": "main"}])
         if request.url.path == "/graphql":
-            return _answer(
-                _pulls_page([_pull_node(3122, "2026-02-04T00:00:00Z", database_id=4515114744)])
+            return _pulls(
+                request, [_pull_node(3122, "2026-02-04T00:00:00Z", database_id=4515114744)]
             )
         return httpx.Response(404, json={"path": request.url.path})
 
@@ -1877,7 +1945,9 @@ def _big_pull_handler(
             else _pulls_page([node] if catalog else [])
         )
         return _answer(
-            _asked(repository, _selection(body["query"])["repository"]), remaining=remaining
+            _asked(repository, _selection(body["query"])["repository"]),
+            cost=1,
+            remaining=remaining if "number" in variables else 4_000,
         )
 
     return handle
@@ -1898,10 +1968,9 @@ def _body(page: Any) -> dict[str, Any]:
 async def test_activity_past_the_clip_moves_the_catalog_page(
     parents_reader: ParentsReader, moved: _BigPull
 ) -> None:
-    """The catalog's page keeps its lists clipped — 30 contexts, 10 threads, 20 files — for the 3
-    points a page costs, and `render` drops `updatedAt`. Without a total beside each list, a check
-    flipping or a comment landing past a clip would move GitHub's timestamp and no byte of the body,
-    and the watch would emit nothing. The totals and the rollup's counts by state are what move."""
+    """The by-number read clips its lists — 30 contexts, 10 threads, 20 files — for the 1 point it
+    prices and pages each to its end before the page lands, and the catalog walk lands nothing but
+    that read, so a check flipping or a comment landing past a clip is in the body that moves."""
     base = await _fetch("pull_requests", _big_pull_handler(BIG, []), parents=parents_reader(LANDED))
     after = await _fetch(
         "pull_requests", _big_pull_handler(moved, []), parents=parents_reader(LANDED)
@@ -1909,9 +1978,9 @@ async def test_activity_past_the_clip_moves_the_catalog_page(
 
     assert base.pages[0].digest != after.pages[0].digest
     body = _body(base.pages[0])
-    assert (len(body["checks"]["contexts"]), body["checks"]["contextsCount"]) == (30, BIG_CHECKS)
-    assert (len(body["reviewThreads"]), body["reviewThreadsCount"]) == (10, BIG_THREADS)
-    assert (len(body["files"]), body["filesCount"]) == (20, BIG_FILES)
+    assert len(body["checks"]["contexts"]) == body["checks"]["contextsCount"] == BIG_CHECKS
+    assert len(body["reviewThreads"]) == body["reviewThreadsCount"] == BIG_THREADS
+    assert len(body["files"]) == body["filesCount"] == BIG_FILES
     assert body["checks"]["checkRunCountsByState"] == [
         {"state": "FAILURE", "count": 0},
         {"state": "SUCCESS", "count": BIG_CHECKS},
@@ -1919,18 +1988,21 @@ async def test_activity_past_the_clip_moves_the_catalog_page(
     assert body["totalCommentsCount"] == 40
 
 
-async def test_a_watched_pull_request_carries_every_thread_check_and_file(
-    parents_reader: ParentsReader,
+@pytest.mark.parametrize(
+    "watched", [pytest.param((PULL_3560,), id="watched"), pytest.param((), id="catalog")]
+)
+async def test_a_pull_request_lands_with_every_thread_check_and_file(
+    parents_reader: ParentsReader, watched: tuple[str, ...]
 ) -> None:
-    """The watched read pages each clipped connection to its end, 100 a page, so the page a member
-    asked to be told about carries all 116 files, 16 threads and 44 checks — one read for the pull
-    request and one more per connection past a clip, as against GitHub."""
+    """Whichever read lands a pull request pages each clipped connection to its end, 100 a page, so
+    the page carries all 116 files, 16 threads and 44 checks — one read for the pull request and
+    one more per connection past a clip, as against GitHub."""
     posts: list[dict[str, Any]] = []
     result = await _fetch(
         "pull_requests",
-        _big_pull_handler(BIG, posts, catalog=False),
+        _big_pull_handler(BIG, posts, catalog=not watched),
         parents=parents_reader(LANDED),
-        watched=(PULL_3560,),
+        watched=watched,
     )
 
     (page,) = result.pages
@@ -1944,21 +2016,41 @@ async def test_a_watched_pull_request_carries_every_thread_check_and_file(
     assert [post.get("after") for post in posts if "number" in post] == [None, "10", "20", "30"]
 
 
-async def test_a_budget_met_mid_tail_lands_no_partial_page(parents_reader: ParentsReader) -> None:
-    """A watched page short of its files would read as files removed, so a read that spends the
-    budget with pages still to fetch raises before anything lands: the run parks until the refill
-    and the next tick reads the pull request whole."""
-    posts: list[dict[str, Any]] = []
+async def test_the_watch_and_the_catalog_land_one_body(parents_reader: ParentsReader) -> None:
+    """The tick that reads a pull request twice — once because it is watched, once because it is new
+    enough for the walk — lands one digest. Two bodies for one page, the watch's whole and the
+    walk's clipped, moved its revision on every pass and woke the watch each time."""
     result = await _fetch(
         "pull_requests",
-        _big_pull_handler(BIG, posts, catalog=False, remaining=1),
+        _big_pull_handler(BIG, []),
         parents=parents_reader(LANDED),
         watched=(PULL_3560,),
     )
 
+    assert {page.source_identity for page in result.pages} == {f"pull_requests/{REPO_SCOPE}/3560"}
+    assert len({page.digest for page in result.pages}) == 1
+
+
+@pytest.mark.parametrize(
+    "watched", [pytest.param((PULL_3560,), id="watched"), pytest.param((), id="catalog")]
+)
+async def test_a_budget_met_mid_tail_lands_no_partial_page(
+    parents_reader: ParentsReader, watched: tuple[str, ...]
+) -> None:
+    """A page short of its files would read as files removed, so a read that spends the budget with
+    pages still to fetch raises before anything lands: the run parks until the refill and the next
+    tick reads the pull request whole."""
+    posts: list[dict[str, Any]] = []
+    result = await _fetch(
+        "pull_requests",
+        _big_pull_handler(BIG, posts, catalog=not watched, remaining=1),
+        parents=parents_reader(LANDED),
+        watched=watched,
+    )
+
     assert result.pages == ()
     assert result.retry_after_seconds is not None
-    assert [post.get("after") for post in posts] == [None]
+    assert [post.get("after") for post in posts] == [None] * (1 if watched else 2)
 
 
 async def test_a_connection_that_never_ends_fails_the_run(
@@ -1979,8 +2071,9 @@ def test_the_rows_a_connection_registers_are_budgeted_under_the_rest_pool() -> N
     """GitHub's REST pool is 5,000 requests an hour — 83 a minute — for the whole connection, and a
     quiet stream spends one request per repository per tick, so the six canonical REST streams under
     a repository carry the budget that keeps them under it beside the catalog rows' own reads.
-    `pull_requests` draws on GraphQL's own pool and carries the budget its 3-point page prices. A
-    stream that registers no row spends nothing and carries none."""
+    `pull_requests` draws on GraphQL's own pool and carries the budget its 1-point index page
+    prices, leaving the minute's other 63 points to the by-number reads. A stream that registers no
+    row spends nothing and carries none."""
     streams = {spec.name: spec for spec in GitHubConnector().streams()}
     syncing = syncing_streams(list(streams.values()))
     rest_children = {
@@ -2006,4 +2099,4 @@ def test_the_rows_a_connection_registers_are_budgeted_under_the_rest_pool() -> N
     assert {streams[name].fetch_budget for name in ("organizations", "repositories")} == {None}
     assert {spec.fetch_budget for name, spec in streams.items() if name not in syncing} == {None}
     assert len(rest_children) * github.REPO_STREAM_FETCH_BUDGET + 2 <= per_minute
-    assert github.PULL_REQUEST_FETCH_BUDGET * 3 + 23 == per_minute
+    assert github.PULL_REQUEST_FETCH_BUDGET + 63 == per_minute

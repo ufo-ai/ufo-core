@@ -1146,8 +1146,9 @@ async def test_a_watched_pull_request_is_read_every_tick_and_wakes_its_conversat
     The pull request's `updatedAt` never moves — a check run does not touch it — so the repository's
     newest-first walk reaches it on no tick. It lands every tick because the trigger pinned it, its
     page takes a new revision when the rollup flips, and that revision is what wakes the
-    conversation. The pass interval holds the catalog walk back on the second tick and the watched
-    read goes out regardless, which is the whole shape of the two together."""
+    conversation. The first tick's walk reads the index and the one pull request it lists by number;
+    the pass interval holds the walk back on the second tick and the watched read goes out
+    regardless, which is the whole shape of the two together."""
     state = await _state()
     seen: list[str] = []
     checks = ["PENDING"]
@@ -1174,7 +1175,7 @@ async def test_a_watched_pull_request_is_read_every_tick_and_wakes_its_conversat
         await listener.wait_closed()
 
     graphql = [path for path in seen if path.startswith("/graphql")]
-    assert graphql == ["/graphql/3122", "/graphql", "/graphql/3122"]
+    assert graphql == ["/graphql/3122", "/graphql", "/graphql/4", "/graphql/3122"]
     assert failed_revision > pending_revision
     assert failed_body != pending_body
 
@@ -1207,15 +1208,15 @@ async def test_a_watched_pull_request_is_read_every_tick_and_wakes_its_conversat
     assert WATCHED_PULL in turns[0]["inbound"]
 
 
-async def test_an_unwatched_connection_reads_no_pull_request_by_number(
+async def test_an_unwatched_connection_reads_the_index_and_each_listed_pull_request_once(
     db: None,
     database_url: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same three rows with no trigger: the pull requests row walks the repository once, waits
-    out its pass interval across the ticks after it, and asks for no pull request by number at
-    all."""
+    """The same three rows with no trigger: the pull requests row reads the repository's index once
+    and the one pull request it lists by number once, then waits out its pass interval across the
+    ticks after it and asks for nothing."""
     state = await _state()
     seen: list[str] = []
     driver, _, listener = await _github_driver(
@@ -1229,7 +1230,7 @@ async def test_an_unwatched_connection_reads_no_pull_request_by_number(
         await listener.wait_closed()
 
     assert seen.count("/graphql") == 1
-    assert [path for path in seen if path.startswith("/graphql/")] == []
+    assert [path for path in seen if path.startswith("/graphql/")] == ["/graphql/4"]
 
 
 async def test_a_child_stream_fans_out_over_the_pages_its_parent_row_landed(

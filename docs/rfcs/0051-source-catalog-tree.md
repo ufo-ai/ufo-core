@@ -211,11 +211,12 @@ target that collides with a provider field on the child is refused at declaratio
 PR's own partition of `pull_requests`, visited every tick. On GitHub that stream is GraphQL-backed:
 one `pullRequest` query returns the object with `statusCheckRollup`, `reviewDecision`, `mergeable`,
 `totalCommentsCount`, reviews, review threads, files, a bounded slice of
-`timelineItems` and the total of every clipped list, and the watched read then pages its threads,
-checks and files to the end (100 a page, 1 point a page) — so the watched page carries every check
-run and status, and the catalog's page, which keeps the clipped lists, still moves on any activity
-past a clip because the totals and the rollup's counts by state move — on GraphQL's own 5,000-point
-budget.
+`timelineItems` and the total of every clipped list, then pages its threads, checks and files to
+the end (100 a page, 1 point a page). It is the one read that builds a body: the catalog walk reads
+an index of `databaseId`, `number` and `updatedAt` (100 a page, 1 point) and reads every pull
+request it lists inside the walk's bound by that same query, so the page carries every check run
+and status under the watch and under the walk alike, one body for one page — on GraphQL's own
+5,000-point budget.
 REST cannot express it: `/issues/{n}/timeline` carries review, comment and merge events and **no
 check or status event at all**, so a REST fan-out over `timeline`/`reviews`/`files` would miss the
 one thing a PR watch is usually for. Bulk incremental streams (`comments`, `review_comments`,
@@ -736,15 +737,21 @@ Member says "watch PR 3122" in a shared conversation.
    already has.
 
    The totals beside every clipped list and the rollup's counts by state add no points — paged 3,
-   single 1, re-measured 2026-09-13 — and a watched pull request past the clips
-   spends 1 more point per clipped connection paged to its end: 3560 (44 checks, 16 threads, 116
-   files) is 4 a tick. Declared the same day: `fetch_budget=12` on each of the six canonical REST
-   streams under a repository — GitHub's REST pool is 5,000 requests an hour, 83 a minute, apart
-   from GraphQL's points (`/rate_limit` reports `core` and `graphql` separately), and a quiet stream
-   spends one request per repository per tick, so `6 × 12` = 72 a minute beside the catalog rows'
-   own reads — and 20 on `pull_requests`: 20 trimmed pages spend 60 of GraphQL's 83 points a minute
-   and leave 23 for the 1-point watched reads that go first. A stream that registers no row carries
-   none.
+   single 1, re-measured 2026-09-13. Landing the 3-point list page was withdrawn on 2026-09-14: a
+   watched pull request past a clip got two bodies, the list page's clipped one and the by-number
+   read's whole one, and the two moved its revision on every pass. The walk now reads an index —
+   `databaseId`, `number`, `updatedAt`, 100 a page for 1 point (measured the same day) — and reads
+   every pull request it lists inside the bound by number, so no page is ever stored clipped and a
+   pull request past the clips spends 1 more point per clipped connection paged to its end: 3560
+   (44 checks, 16 threads, 116 files) is 4. A quiet pass is 1 point a repository; a first walk is
+   1 a pull request, bounded by the budget's own refusal and resumed downward. Declared the same
+   day: `fetch_budget=12` on each of the six canonical REST streams under a repository — GitHub's
+   REST pool is 5,000 requests an hour, 83 a minute, apart from GraphQL's points (`/rate_limit`
+   reports `core` and `graphql` separately), and a quiet stream spends one request per repository
+   per tick, so `6 × 12` = 72 a minute beside the catalog rows' own reads — and 20 on
+   `pull_requests`: 20 index pages spend 20 of GraphQL's 83 points a minute and leave 63 for the
+   1-point reads of the watched pull requests, which go first, and of the pull requests the index
+   lists above the watermark. A stream that registers no row carries none.
 
 4. **Landing.** The PR is one page, `pull_requests/acme/ufo/3122`, re-rendered each tick; a new
    revision only where the digest moved. **A tick that finds nothing new emits no `PageChange` and
@@ -852,8 +859,8 @@ from the path it serves. Dotted placeholders name the fields directly, so a wron
    `check_runs` and `commit_statuses` under each open PR's head ref, and `_with_mergeability`: one
    `GET /pulls/{n}` per open pull request per pass at concurrency 8, merging `mergeable`/
    `mergeable_state` into the PR page. #3573's GraphQL `pull_requests` carries `mergeable`,
-   `reviewDecision` and the whole `statusCheckRollup` in its 3-point page — the same facts with no
-   per-PR read. `_with_mergeability` is therefore superseded outright and **went** when #3573 rebased onto the
+   `reviewDecision` and the whole `statusCheckRollup` in the one by-number read that builds every
+   pull request's page — the same facts, one read a pull request. `_with_mergeability` is therefore superseded outright and **went** when #3573 rebased onto the
    merge: deleted with `_MERGEABILITY_CONCURRENCY`; the fact it recorded is kept in GraphQL's own
    vocabulary — `mergeable` is `MERGEABLE`/`CONFLICTING`/`UNKNOWN`, and `UNKNOWN` (REST's `null`,
    "still being calculated") is dropped from the page for the reason #3568 dropped the null: storing
@@ -1081,4 +1088,4 @@ Every write the new image makes must be one the outgoing image never reads.
 | a snapshot child runs before its parent has produced an empty or non-empty catalog | `source.synced_at` marks a complete run; existing page rows also prove readiness. Until then the parent reader yields `UnreadyParent`, and the snapshot child fails without committing or sweeping |
 | no production stream declared `fetch_budget`, so every tree child was unbounded | the seam bounds every non-snapshot tree child at `DEFAULT_FETCH_BUDGET` partitions per run; a provider declares its own where its rate limit says so; `refan="on_parent_change"` is declared where the provider bumps the parent (Intercom, Freshdesk, …) |
 | budget resume relied on database order and an exact marker | `PartitionWalk` orders every enumerated partition by key; resume skips while `key <= marker`, so a deleted marker resumes at the next key |
-| the watched PR page clips checks, threads and files with no count, so activity past the clip never moves the digest | both reads carry every count (`totalCommentsCount`, `reviewThreads.totalCount`, `files.totalCount`, rollup counts by state, `mergeStateStatus`); the watched read paginates its nested connections to completion |
+| the watched PR page clips checks, threads and files with no count, so activity past the clip never moves the digest | one read builds every pull request's page — by number, carrying every count (`totalCommentsCount`, `reviewThreads.totalCount`, `files.totalCount`, rollup counts by state) and paging every nested connection to completion; the catalog walk reads an index and asks that read for each pull request it lists — a clipped catalog body and a whole watched body for one page flipped its digest every pass |

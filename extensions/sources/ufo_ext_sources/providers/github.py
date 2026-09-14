@@ -38,39 +38,38 @@ the repo boundary only, and re-walked whole on every completed pass.
 request's checks, and REST publishes them nowhere a pull request read reaches: the timeline of
 `metalcraftai/ufo` 3560 answered 19 entries over five event types and not one check-run or status
 event, beside the 44 check runs its head commit carried, so a walk over `/issues/{n}/timeline` sees
-a green branch go red and reports nothing. One GraphQL read answers the rollup, the reviews, the
-unresolved threads, the files and the timeline with the pull request, and `databaseId` is its key,
-so every page settles on the address its REST record already had. The answer's own `rateLimit`
-ends a walk that cannot pay for its next page, because GitHub serves the refusal as a 200 carrying
-no records. The field set clips every nested list — 30 check contexts, 5 reviews, 10 threads, 20
-files — and carries beside each list its total, with the rollup's counts by state and
-`totalCommentsCount`, so the page moves whenever anything on the pull request moves, inside a
-clipped list or past it: 3560 carried 44 checks, 16 threads and 116 files, every one
-past a clip, and a comment in its 15th thread would have moved GitHub's `updatedAt` and no byte of
-the body without the totals. They cost no points — a page of 20 still prices 3 and one pull request
-by number 1 (measured 2026-09-13).
+a green branch go red and reports nothing. One GraphQL read by number answers the rollup, the
+reviews, the unresolved threads, the files and the timeline with the pull request, and `databaseId`
+is its key, so every page settles on the address its REST record already had. The answer's own
+`rateLimit` ends a walk that cannot pay for its next read, because GitHub serves the refusal as a
+200 carrying no records.
 
-**This stream is not deployable at a 60 s tick without a pass interval over the bulk walk.** Every
-limit above and `PULL_REQUEST_PAGE_SIZE` are what GitHub priced, measured against
-`metalcraftai/ufo` (3,560 pull requests, 2026-09-12): one page of 20 costs 3 of the hourly 5,000
-points, 225 KB in 2.8 s, and one pull request by number costs 1 point and 19 KB in 0.8 s. A
-`newest_first` steady state still reads the first page of every repository each tick to see whether
-anything sits above the watermark, so the bulk walk alone costs `3 x repositories x 60` points an
-hour: 3,600 against a 20-repository connection, and past roughly 27 repositories it spends the whole
-budget and takes every watched pull request's 1-point read down with it. The nested limits are what
-hold that price: the same query at 50/20/50/100/30 with a page of 25 priced 14, and `first: 100`
-answers HTTP 504 at either width. What closes the gap is the pass interval — the bulk walk every N
-minutes, watched partitions every tick — which is unit 3.
+Every GraphQL list takes a `first` or `last` of at most 100, and GitHub prices a query by the items
+it could return, so no read answers a whole pull request: the field set clips each list — 30 check
+contexts, 5 reviews, 10 threads, 20 files — for the 1 point it prices, and `_pull_tails` pages each
+clipped list to its end, `PULL_REQUEST_TAIL_PAGE_SIZE` at a time, 1 point a page. The by-number
+read is the one read that builds a body. The repository walk reads an index — `databaseId`,
+`number`, `updatedAt`, 100 a page for 1 point, newest first — and reads whole every pull request
+the index lists inside the walk's bound. A walk that landed the clipped list page itself wrote a
+second body for every watched pull request past a clip, and the two bodies moved the page's
+revision on every pass, waking the watch on a pull request nothing had touched for hours.
+
+**Prices, measured against `metalcraftai/ufo` (3,560 pull requests, 2026-09-14):** an index page
+of 100 costs 1 point and 8 KB; one pull request by number costs 1 point and 19 KB in 0.8 s; a
+clipped list's next page costs 1. A `newest_first` steady state reads the first index page of every
+repository each pass to see whether anything sits above the watermark, then one read per pull
+request that moved — 1 point a repository a pass and 1 a moved pull request, against the hourly
+5,000. A first walk of a repository pays 1 point per pull request it holds, bounded by the budget's
+own refusal and resumed downward. `PULL_REQUEST_PASS_INTERVAL_SECONDS` spaces the passes; a watched
+partition is read every tick.
 
 A pull request a live `source_trigger` watches is a partition of its own, keyed
 `pull_requests/<full_name>/<number>` and read by number ahead of every repo in the walk: a check run
 flips without moving the pull request's `updatedAt`, so the newest-first walk would stop above an
 old pull request and never see it again. The watched partition carries its own watermark, which its
 own record always ties, so it lands every tick; dropping the trigger stops enumerating it and the
-walk's own prune takes the entry with it. It is the one read that pages its threads, checks and
-files to the end — `PULL_REQUEST_TAIL_PAGE_SIZE` at a time past the clip, 1 point a page, so 3560
-spends 4 a tick where a pull request inside the clips spends 1 — and a read that meets the budget
-with pages still to fetch lands nothing that tick, since a page short of its files would read as
+walk's own prune takes the entry with it. A read that meets the budget with pages of a clipped list
+still to fetch lands nothing for that pull request, since a page short of its files would read as
 files removed.
 
 `workflow_runs` is the one unordered stream
@@ -131,18 +130,17 @@ from ufo.sdk.sources import (
 from ufo_ext_sources.watermark import text_checkpoint
 
 PAGE_SIZE = 100
-PULL_REQUEST_PAGE_SIZE = 20
+PULL_REQUEST_INDEX_PAGE_SIZE = 100
 PULL_REQUEST_PASS_INTERVAL_SECONDS = 300
-"""How long the catalog walk of `pull_requests` waits between passes. GitHub priced one page of
-`PULL_REQUEST_PAGE_SIZE` at 3 of the hourly 5,000 GraphQL points and one pull request by number at
-1, measured against `metalcraftai/ufo` (3,560 pull requests, 2026-09-12). A `newest_first` steady
-state reads the first page of every repository each pass to see whether anything sits above the
-watermark, so the walk costs `3 x repositories` points a pass: at every 60 s tick that is 3,600 an
-hour against 20 repositories and the whole budget past 27, which is what makes the interval the
-difference between deployable and not. At 300 s a 100-repository connection spends `3 x 100 x 12` =
-3,600 — under the 5,000 with 1,400 left, which buys 23 watched pull requests at a read a tick each,
-and the pass itself still completes inside one tick where the fetch budget allows. A watched
-partition ignores this and is read every tick, which is the whole reason a member sets a watch."""
+"""How long the catalog walk of `pull_requests` waits between passes. GitHub priced one index page
+of `PULL_REQUEST_INDEX_PAGE_SIZE` at 1 of the hourly 5,000 GraphQL points and one pull request by
+number at 1, measured against `metalcraftai/ufo` (3,560 pull requests, 2026-09-14). A
+`newest_first` steady state reads the first index page of every repository each pass to see whether
+anything sits above the watermark, so a quiet walk costs `repositories` points a pass and a moved
+pull request 1 more: at every 60 s tick a 100-repository connection would spend 6,000 an hour on
+index pages alone. At 300 s it spends 1,200 and leaves 3,800 for the pull requests that moved and
+the watched reads, 23 of which cost a read a tick each. A watched partition ignores this and is read
+every tick, which is the whole reason a member sets a watch."""
 REPO_STREAM_FETCH_BUDGET = 12
 """Repositories one run of a canonical REST stream under a repository may fetch. GitHub's REST pool
 is 5,000 requests an hour per token or installation — 83 a minute, shared by every row of the
@@ -154,9 +152,10 @@ repositories than the budget resumes on the next tick, so a large catalog sweeps
 over the pool. A stream that registers no row spends nothing and carries none."""
 PULL_REQUEST_FETCH_BUDGET = 20
 """Repositories one `pull_requests` run reads. GraphQL's own 5,000 points an hour are 83 a minute
-and a trimmed page prices 3, so 20 pages spend 60 and leave 23 for the 1-point watched reads that
-go first in the budget; `PULL_REQUEST_PASS_INTERVAL_SECONDS` bounds the smaller catalog that
-completes a pass inside one tick."""
+and an index page prices 1, so 20 pages spend 20 and leave 63 for the 1-point reads of the watched
+pull requests, which go first, and of the pull requests the index lists above the watermark;
+`PULL_REQUEST_PASS_INTERVAL_SECONDS` bounds the smaller catalog that completes a pass inside one
+tick."""
 GRAPHQL_PATH = "/graphql"
 MERGEABILITY_PENDING = "UNKNOWN"
 COMMENT_BACKFILL_WINDOW_DAYS = 7
@@ -275,13 +274,13 @@ PULL_REQUEST_TAILS: tuple[_Tail, ...] = (
         landed=lambda record: record["checks"]["contexts"],
     ),
 )
-PULL_REQUESTS_QUERY = f"""
+PULL_REQUEST_INDEX_QUERY = f"""
 query($owner: String!, $name: String!, $cursor: String) {{
   {_RATE_LIMIT_FIELDS}
   repository(owner: $owner, name: $name) {{
-    pullRequests(first: {PULL_REQUEST_PAGE_SIZE},
+    pullRequests(first: {PULL_REQUEST_INDEX_PAGE_SIZE},
       orderBy: {{field: UPDATED_AT, direction: DESC}}, after: $cursor) {{
-      nodes {{ {PULL_REQUEST_FIELDS} }}
+      nodes {{ databaseId number updatedAt }}
       pageInfo {{ hasNextPage endCursor }}
     }}
   }}
@@ -641,23 +640,24 @@ class GitHubConnector(RestConnector):
         tick however long the pull request has been quiet — the row's floor does not bound it,
         because a member watching a two-year-old pull request asked for that one.
 
-        A repository partition pages the connection newest-first until the walk stops it at the
-        watermark or the answer says the point budget cannot pay for the next page. A pull request
-        below the resume bound is dropped here, GraphQL taking no time filter — and a page landing
-        none of its records grows nothing the adapter's record cap counts, so the page count and the
-        repeated cursor are what bound a provider that never drops its next-page signal."""
+        A repository partition pages the index newest-first until the walk stops it at the
+        watermark or the answer says the point budget cannot pay for the next read, and reads whole
+        every pull request the page lists inside the bound before the page lands. GraphQL takes no
+        time filter, so a listed pull request outside the bound is passed over here unread — a tie
+        at the watermark is read, and the driver's digest-skip absorbs it — and a page landing none
+        grows nothing the adapter's record cap counts, so the page count and the repeated cursor are
+        what bound a provider that never drops its next-page signal. A budget met between two reads
+        lands the pull requests already whole and reports the last of them as the page's low, so the
+        window resumes at it."""
         repo = partition.scope or ""
+        variables = _repo_variables(repo)
         if partition.watched:
-            number = partition.path.rsplit("/", 1)[-1]
-            variables = _repo_variables(repo) | {"number": int(number)}
-            data, spent = await self._graphql(
-                client, PULL_REQUEST_QUERY, variables, partition=partition
+            number = int(partition.path.rsplit("/", 1)[-1])
+            record, spent = await self._pull_whole(
+                client, partition, variables | {"number": number}, None
             )
-            node = get_path(data, "repository.pullRequest")
-            if node is None:
+            if record is None:
                 raise PartitionSkipped(f"github: {partition.ref} refused")
-            record = _pull_record(node)
-            spent = await self._pull_tails(client, partition, variables, node, record, spent)
             yield WalkPage(records=[record], high=record["updatedAt"], low=record["updatedAt"])
             if spent is not None:
                 raise ProviderRateLimited(spent)
@@ -667,37 +667,77 @@ class GitHubConnector(RestConnector):
         for _ in range(PULL_REQUEST_MAX_PAGES):
             data, spent = await self._graphql(
                 client,
-                PULL_REQUESTS_QUERY,
-                _repo_variables(repo) | {"cursor": cursor},
+                PULL_REQUEST_INDEX_QUERY,
+                variables | {"cursor": cursor},
                 partition=partition,
             )
             connection = get_path(data, "repository.pullRequests")
             if connection is None:
                 raise PartitionSkipped(f"github: {partition.ref} refused")
-            page = [_pull_record(node) for node in list_or_empty(connection.get("nodes"))]
-            landed = [
-                record
-                for record in page
-                if (bound.before is None or record["updatedAt"] <= bound.before)
-                and (bound.since is None or record["updatedAt"] >= bound.since)
-            ]
-            yield WalkPage(
-                records=landed,
-                high=max((record["updatedAt"] for record in landed), default=None),
-                low=min((record["updatedAt"] for record in page), default=None),
-            )
             info = dict_or_empty(connection.get("pageInfo"))
             cursor = info.get("endCursor") if info.get("hasNextPage") else None
+            if cursor is not None and cursor in seen:
+                raise StreamFault(f"github: {partition.ref} repeated cursor {cursor!r}")
+            listed = list_or_empty(connection.get("nodes"))
+            landed: list[dict[str, Any]] = []
+            whole: list[dict[str, Any]] = []
+            for entry in listed:
+                if not _inside(bound, entry["updatedAt"]):
+                    continue
+                try:
+                    record, spent = await self._pull_whole(
+                        client, partition, variables | {"number": entry["number"]}, spent
+                    )
+                except ProviderRateLimited:
+                    if landed:
+                        yield WalkPage(
+                            records=landed,
+                            high=max(entry["updatedAt"] for entry in listed),
+                            low=whole[-1]["updatedAt"],
+                        )
+                    raise
+                if record is None:
+                    raise StreamFault(
+                        f"github: {partition.ref} listed pull request {entry['number']} and "
+                        "answered none"
+                    )
+                landed.append(record)
+                whole.append(entry)
+            yield WalkPage(
+                records=landed,
+                high=max((entry["updatedAt"] for entry in listed), default=None),
+                low=min((entry["updatedAt"] for entry in listed), default=None),
+            )
             if cursor is None:
                 return
-            if cursor in seen:
-                raise StreamFault(f"github: {partition.ref} repeated cursor {cursor!r}")
             seen.add(cursor)
             if spent is not None:
                 raise ProviderRateLimited(spent)
         raise StreamFault(
             f"github: {partition.ref} paged past {PULL_REQUEST_MAX_PAGES} pages of pull requests"
         )
+
+    async def _pull_whole(
+        self,
+        client: httpx.AsyncClient,
+        partition: Partition,
+        variables: dict[str, Any],
+        spent: float | None,
+    ) -> tuple[dict[str, Any] | None, float | None]:
+        """One pull request by number with every clipped list paged to its end — the one read that
+        builds a body, whichever partition asked for it. `spent` is the wait the caller's last read
+        reported, and a budget already met raises before this read spends past it. None where
+        GitHub answers no pull request under the number."""
+        if spent is not None:
+            raise ProviderRateLimited(spent)
+        data, spent = await self._graphql(
+            client, PULL_REQUEST_QUERY, variables, partition=partition
+        )
+        node = get_path(data, "repository.pullRequest")
+        if node is None:
+            return None, spent
+        record = _pull_record(node)
+        return record, await self._pull_tails(client, partition, variables, node, record, spent)
 
     async def _pull_tails(
         self,
@@ -708,12 +748,12 @@ class GitHubConnector(RestConnector):
         record: dict[str, Any],
         spent: float | None,
     ) -> float | None:
-        """The rest of a watched pull request's threads, checks and files, a page of
+        """The rest of a pull request's threads, checks and files, a page of
         `PULL_REQUEST_TAIL_PAGE_SIZE` at a time until each connection answers no next page. The
-        first read shares the catalog's clipped field set, so a pull request inside the clips spends
-        nothing here. A read that spends the budget while pages remain raises before the page lands:
-        a watched page missing files or checks would read as files removed and checks gone. Returns
-        the wait the last read reported, for the caller to raise once the page has landed."""
+        first read shares the clipped field set, so a pull request inside the clips spends nothing
+        here. A read that spends the budget while pages remain raises before the page lands: a page
+        missing files or checks would read as files removed and checks gone. Returns the wait the
+        last read reported, for the caller to raise once the page has landed."""
         for tail in PULL_REQUEST_TAILS:
             cursor = _next_page(tail.connection(node))
             for _ in range(PULL_REQUEST_TAIL_MAX_PAGES):
@@ -763,8 +803,9 @@ class GitHubConnector(RestConnector):
         `source_sync.graphql_rate_limit` carries what this read cost and what the hour has left, so
         the spend of a connection is readable per read rather than inferred from a refusal. It
         reports and refuses nothing on its own — what closes the loop is a monitor on `remaining`
-        falling under the next pass's projected cost, which is `3 x repositories` for this stream
-        and which nothing here can see, since a row knows only its own connection."""
+        falling under the next pass's projected cost — one point a repository and one a moved pull
+        request for this stream — and which nothing here can see, since a row knows only its own
+        connection."""
         body = await self._post(client, GRAPHQL_PATH, json={"query": query, "variables": variables})
         errors = list_or_empty(body.get("errors"))
         if errors:
@@ -959,12 +1000,22 @@ def _repo_variables(repo: str) -> dict[str, Any]:
     return {"owner": owner, "name": name}
 
 
+def _inside(bound: PartitionBound, updated_at: str) -> bool:
+    """Whether a listed pull request is one the walk lands: at or above a steady-state watermark, at
+    or below a backfill window's edge, and at or above the pinned floor — every edge inclusive, so a
+    tie is re-read and the driver's digest-skip absorbs the repeat."""
+    return (
+        (bound.after is None or updated_at >= bound.after)
+        and (bound.before is None or updated_at <= bound.before)
+        and (bound.since is None or updated_at >= bound.since)
+    )
+
+
 def _pull_record(node: dict[str, Any]) -> dict[str, Any]:
     """One pull request as it lands: every GraphQL connection replaced by the list it wraps with its
     total beside it, and the commit's check rollup lifted to `checks` — the field the walk exists to
-    carry, which GraphQL publishes only under the last commit. The totals and the rollup's counts by
-    state are what make the digest honest where the lists are clipped: a check flipping or a comment
-    landing past the clip moves a count, so the page moves with it.
+    carry, which GraphQL publishes only under the last commit. The lists are the first page of each
+    connection until `_pull_tails` extends them to the end.
 
     A `mergeable` of `UNKNOWN` is dropped rather than stored. GitHub answers it while its background
     merge test runs, so storing it would make one recompute two page changes; `MERGEABLE` and
