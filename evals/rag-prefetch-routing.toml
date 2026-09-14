@@ -38,51 +38,40 @@ name = "bare-preface"
 [[arm.replacements]]
 path = "extensions/rag/ufo_ext_rag/manifest.py"
 old = '''PREFACE = (
-    "A web search and a workspace search ran on this message before you read it; nobody asked for "
-    "them and nothing below is the member's words. They run on every message, whatever it asks "
-    "for, so the block is no sign that this message wanted a search. Answer from these passages "
-    "when they answer the question. Name, in the sentence that states it, where every figure, date "
-    "and name came from: a web passage by its address, a workspace passage by the record it names. "
-    "Each passage is one numbered entry — its number and title, then the address or record it "
-    "came from, then its text — so give that entry's number beside the name, never in place of "
-    "it. These "
-    "passages replace no tool: when the message asks you to act, act with your tools; when the "
-    "answer turns on live state, read that state with your tools; when the passages do not hold "
-    "the answer, go and get it or say you do not have it. When two passages disagree, say so, "
-    "name each source with its date, and do not merge them.\n"
+    "Answer from these passages when they answer the question. Name, in the sentence that states "
+    "it, where every figure, date and name came from: a web passage by its address, a workspace "
+    "passage by the record it names.\n"
 )
 '''
 new = '''PREFACE = "Search results for this message:\n"'''
 
 [[arm]]
-name = "no-tool-clause"
+name = "no-answer-clause"
 
 [[arm.replacements]]
 path = "extensions/rag/ufo_ext_rag/manifest.py"
-old = '''    "it. These "
-    "passages replace no tool: when the message asks you to act, act with your tools; when the "
-    "answer turns on live state, read that state with your tools; when the passages do not hold "
-    "the answer, go and get it or say you do not have it. When two passages disagree, say so, "
-    "name each source with its date, and do not merge them.\n"'''
-new = '''    "it. When two passages disagree, say so, name each source with its date, and do not merge them.\n"'''
-
-[[arm]]
-name = "no-conflict-clause"
-
-[[arm.replacements]]
-path = "extensions/rag/ufo_ext_rag/manifest.py"
-old = '''    "the answer, go and get it or say you do not have it. When two passages disagree, say so, "
-    "name each source with its date, and do not merge them.\n"'''
-new = '''    "the answer, go and get it or say you do not have it.\n"'''
+old = '''PREFACE = (
+    "Answer from these passages when they answer the question. Name, in the sentence that states "
+    "it, where every figure, date and name came from: a web passage by its address, a workspace "
+    "passage by the record it names.\n"
+)
+'''
+new = '''PREFACE = (
+    "Name, in the sentence that states it, where every figure, date and name came from: a web "
+    "passage by its address, a workspace passage by the record it names.\n"
+)
+'''
 
 [[arm]]
 name = "unnamed-source-clause"
 
 [[arm.replacements]]
 path = "extensions/rag/ufo_ext_rag/manifest.py"
-old = '''    "when they answer the question. Name, in the sentence that states it, where every figure, date "
-    "and name came from: a web passage by its address, a workspace passage by the record it names. "'''
-new = '''    "when they answer the question, and name the source you took each fact from. "'''
+old = '''    "Answer from these passages when they answer the question. Name, in the sentence that states "
+    "it, where every figure, date and name came from: a web passage by its address, a workspace "
+    "passage by the record it names.\n"'''
+new = '''    "Answer from these passages when they answer the question, and name the source you took "
+    "each fact from.\n"'''
 
 [[arm]]
 name = "external-only"

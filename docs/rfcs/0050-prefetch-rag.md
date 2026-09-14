@@ -62,10 +62,11 @@ real questions. `s&p close` carries no question mark, no opener and nine charact
 provider at all; a member reported exactly that on the testing cluster.
 
 The two costs are not symmetric. Refusing a real question costs the turn its grounding, and the
-member reads a worse answer. Retrieving for an instruction costs one block the preface tells the
-model to step past, inside a deadline that is bounded whatever the legs do. So the gate is gone,
-and the action turn is guarded by the preface clause instead — measured by the `no-tool-clause` arm
-and by `R05-action-still-uses-tools` and `R06-request-phrased-as-a-question`.
+member reads a worse answer. Retrieving for an instruction costs one block the model steps past on
+its own, inside a deadline that is bounded whatever the legs do. So the gate is gone, and no
+preface clause stands in for it: with the sentence that told the model the block replaces no tool
+removed, `R05-action-still-uses-tools` and `R06-request-phrased-as-a-question` both score 20/20,
+the same as with it.
 
 | inbound | decision |
 |---|---|
@@ -127,23 +128,31 @@ address. A workspace passage therefore cites exactly as a web passage does. The 
 head of each entry and nothing else: `PASSAGE_MAX_CHARS`, `TOTAL_MAX_CHARS` and `MAX_PASSAGES` bound
 the passage text as before.
 
-The preface adds what the wall cannot say: nobody asked for this search, every figure, date and name
-carries its source in the sentence that states it — a web passage by its address, a workspace
-passage by the record it names, with the entry number beside that name and never in place of it —
-the model must still call tools for an action or for live state, and disagreeing passages are
-reported rather than merged.
+The preface is two sentences: answer from these passages when they answer the question, and name in
+the sentence that states it where every figure, date and name came from — a web passage by its
+address, a workspace passage by the record it names. Each clause holds its place on a measurement,
+and every other clause the preface once carried was removed on one.
 
-The number is an addition to the naming clause, not a replacement for it. A first wording that asked
-for "its number and the source in words" measured worse than the wording it replaced: over 5 samples
-it took R02-internal-fact from 5/5 to 0/5 and R05-action-still-uses-tools from 5/5 to 3/5, with
-replies citing "passage 2" or "[2]" and naming no page or record at all. A number is cheaper for a
-model to write than a name, so the clause states that the name is still owed.
+The attribution sentence is what accuracy rests on. Removing it takes `R02-internal-fact` and
+`R03-mixed-sources` from 19/20 to 8/20 (p=0.0004, Fisher exact, 10 samples a case); removing the
+whole preface takes them to 0/20. It names the two source forms because the looser "name the source
+you took each fact from" left both cases split: over 20 samples each it held R02 at 11/20 and R03
+at 17/20, against 17/20 and 19/20 for the wording that names them.
 
-The attribution clause names those two forms because the looser "name the source you took each fact
-from" left two cases split: over 20 samples each it held R02-internal-fact at 11/20 and
-R03-mixed-sources at 17/20, against 17/20 and 19/20 for the wording that names them. Adding "state
-no figure the passages do not state" or "answer only what it asks" on top measured no better and
-cost R05-action-still-uses-tools and R02 respectively.
+The answer-from-the-passages sentence is what saves the round trip the hook exists to save.
+Removing it holds accuracy at 158/170 against 155/170 (p=0.69) and sends 82% of turns back out to a
+tool where 21% go with it, over 150 samples an arm.
+
+Five clauses were removed because their own cases did not move. The searches-ran-unasked sentence
+and the they-run-on-every-message sentence each left the four cases that grade what a reply claims
+about the member's own work at 39/40 against 39/40 and 40/40. The numbered-entry sentence left R02
+and R03 at 19/20 against 19/20: the block numbers its own entries, and replies cite the number
+without being told to. The tool sentence left R05 and R06 at 20/20 and cost re-searching — 56% of
+turns called a tool again with it, 19% without. The conflict sentence measured 53/80 with it against
+59/80 without on the four conflict cases, and the shipped preface scores 67/80 on them (p=0.017
+against the preface that carried every clause): the sentence wins the "name each side" criterion on
+`R15-amendment-supersedes-the-order-form` and loses the "land on one value" criterion on
+`R11-two-workspace-records-disagree`, and the two do not net out in its favour.
 
 ## Doctrine fit / implications
 
@@ -166,10 +175,10 @@ grades five behaviours: the answer comes from the right corpus, a factual questi
 rather than searched again, an action still reaches for tools, disagreeing sources are reported and
 not merged, and several questions in one message are all answered.
 
-`evals/rag-prefetch-routing.toml` is the hill climb. Eight arms run beside the always-run control:
-`no-prefetch`, `question-shaped-only`, `bare-preface`, `no-tool-clause`, `no-conflict-clause`,
-`unnamed-source-clause`, `external-only`, `internal-only`. The first two bound what the router is
-worth, the next four measure each preface clause the AGENTS.md Prompts rule requires ablated —
+`evals/rag-prefetch-routing.toml` is the hill climb. Seven arms run beside the always-run control:
+`no-prefetch`, `question-shaped-only`, `bare-preface`, `no-answer-clause`, `unnamed-source-clause`,
+`external-only`, `internal-only`. The first two bound what the router is worth, the next three
+measure each surviving preface sentence the AGENTS.md Prompts rule requires ablated —
 `unnamed-source-clause` putting the looser attribution wording back — and the last two measure each
 corpus on its own. A GEPA run ([Agrawal et al.](https://arxiv.org/abs/2507.19457)) can then
 search the preface wording against the same suite, with the ablation deciding.

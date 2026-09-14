@@ -346,7 +346,6 @@ async def test_the_block_numbers_every_entry_from_one() -> None:
     assert len(found.sources) == len(numbers)
     assert numbers == [str(number) for number in range(1, len(numbers) + 1)]
     assert len(numbers) >= 3
-    assert "numbered entry" in rag.PREFACE
 
 
 async def test_an_entry_names_no_date_the_source_did_not_carry() -> None:
@@ -558,10 +557,12 @@ async def test_the_hook_calls_no_provider_for_a_message_with_no_content() -> Non
     assert search.queries == ()
 
 
-def test_the_preface_keeps_the_model_reaching_for_its_tools() -> None:
-    assert "These passages replace no tool" in rag.PREFACE
-    assert "act with your tools" in rag.PREFACE
-    assert "read that state with your tools" in rag.PREFACE
+def test_the_preface_is_the_two_sentences_the_arms_kept() -> None:
+    assert rag.PREFACE == (
+        "Answer from these passages when they answer the question. Name, in the sentence that "
+        "states it, where every figure, date and name came from: a web passage by its address, a "
+        "workspace passage by the record it names.\n"
+    )
 
 
 async def test_the_page_leg_serves_only_pages_the_reader_may_read() -> None:

@@ -20,10 +20,17 @@ so the whole of it would stand as the query, and internal task text is not this 
 an external search provider.
 
 It is a `best_effort` user_prompt_submit hook, so a retrieval fault costs the injection and never
-the turn, and the handler holds its own soft timeout under the chain's deadline. The router admits
-every member message, so the preface carries the whole guard against answering an action from a
-passage: it tells the model the block replaces no tool, and a turn that must send, open, or change
-something still reaches for its tools with the block in context."""
+the turn, and the handler holds its own soft timeout under the chain's deadline.
+
+The preface carries the two sentences the arms in `evals/rag-prefetch-routing.toml` measured as
+load-bearing and nothing else. Dropping the attribution sentence takes the sourced-answer cases
+from 19/20 to 8/20 (p=0.0004, n=10 a case); dropping the answer-from-the-passages sentence holds
+accuracy but sends 82% of turns back out to search where 21% do with it, which is the round trip
+this hook exists to save. Telling the model that the searches ran unasked, that they run on every
+message, how the entries are numbered, that a passage replaces no tool, and how to resolve two
+disagreeing passages each moved nothing they protect: the action cases answer with tools at 20/20
+with the tool sentence gone, and the four conflict cases score 67/80 without the conflict sentence
+against 53/80 with it."""
 
 import asyncio
 import logging
@@ -49,18 +56,9 @@ VERSION = "0.1.0"
 PREFETCH_SOFT_TIMEOUT_SECONDS = 4.0
 ROUTE_EVENT = "rag.route"
 PREFACE = (
-    "A web search and a workspace search ran on this message before you read it; nobody asked for "
-    "them and nothing below is the member's words. They run on every message, whatever it asks "
-    "for, so the block is no sign that this message wanted a search. Answer from these passages "
-    "when they answer the question. Name, in the sentence that states it, where every figure, date "
-    "and name came from: a web passage by its address, a workspace passage by the record it names. "
-    "Each passage is one numbered entry — its number and title, then the address or record it "
-    "came from, then its text — so give that entry's number beside the name, never in place of "
-    "it. These "
-    "passages replace no tool: when the message asks you to act, act with your tools; when the "
-    "answer turns on live state, read that state with your tools; when the passages do not hold "
-    "the answer, go and get it or say you do not have it. When two passages disagree, say so, "
-    "name each source with its date, and do not merge them.\n"
+    "Answer from these passages when they answer the question. Name, in the sentence that states "
+    "it, where every figure, date and name came from: a web passage by its address, a workspace "
+    "passage by the record it names.\n"
 )
 
 
