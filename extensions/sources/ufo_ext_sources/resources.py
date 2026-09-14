@@ -28,15 +28,19 @@ class ResourceRules:
     """One provider's resource rules. `canonical` reads a link and answers the one URL the resource
     is stored under, or None for a link that names nothing a trigger narrows to. `aliases` answers
     the URL forms the provider's own records carry for a canonical resource — what a page body is
-    matched on."""
+    matched on. `default_wake` reads a changed page's stream and body and answers whether it is one
+    of the few events a watch on the resource reports when it names no streams of its own."""
 
     canonical: Callable[[str], str | None]
     aliases: Callable[[str], tuple[str, ...]]
+    default_wake: Callable[[str, str], bool]
 
 
 RESOURCE_RULES: dict[str, ResourceRules] = {
     github.GitHubConnector.name: ResourceRules(
-        canonical=github.resource_url, aliases=github.resource_aliases
+        canonical=github.resource_url,
+        aliases=github.resource_aliases,
+        default_wake=github.default_wake,
     ),
 }
 
@@ -58,6 +62,15 @@ def resource_matches(provider: str, resource: str, body: str) -> bool:
         re.search(re.escape(alias) + _ALIAS_END, body, re.IGNORECASE) is not None
         for alias in rules.aliases(resource)
     )
+
+
+def wakes_by_default(provider: str, stream: str, body: str) -> bool:
+    """Whether this changed page wakes a trigger narrowed to a resource that names no streams: the
+    provider's own minimal set, since watching a pull request is about what happens on it and not
+    about every edit that moves its page. A provider with no rules narrows to no resource, so a
+    trigger this answers for never exists."""
+    rules = RESOURCE_RULES.get(provider)
+    return False if rules is None else rules.default_wake(stream, body)
 
 
 def resource_keys(provider: str, resource: str) -> tuple[str, ...]:

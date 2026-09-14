@@ -94,6 +94,7 @@ a failure; every stream below it enumerates no partition and spends no request. 
 intentionally absent — the source seam only reads."""
 
 import asyncio
+import json
 import re
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -1115,3 +1116,63 @@ def resource_aliases(resource: str) -> tuple[str, ...]:
         f"api.github.com/repos/{repo}/pulls/{number}",
         f"api.github.com/repos/{repo}/issues/{number}",
     )
+
+
+_DEFAULT_WAKE_STREAMS = frozenset({"comments", "review_comments"})
+_CLOSED_STATES = frozenset({"closed", "merged"})
+_CHECK_CONCLUSIONS = frozenset({"success", "failure", "error"})
+_RUN_COMPLETED = "completed"
+_RUN_CONCLUSIONS = frozenset({"success", "failure"})
+
+
+def default_wake(stream: str, body: str) -> bool:
+    """Whether this changed page is one of the events a watch on a pull request or an issue reports
+    when it names no streams of its own: a comment, a review comment, a run of the checks that
+    passed or failed, and the pull request or issue reaching a closed or merged state. Everything
+    else about the resource moves its page and reports nothing — a title edit, a label, a draft
+    flip, a review requested, a run still queued.
+
+    A pull request carries its checks on its own page, as the rollup GitHub publishes under the head
+    commit and nowhere a `workflow_runs` row reaches, so a conclusive rollup is how a watch hears
+    that the branch went red.
+
+    A page body is the heading the connector renders over the record's JSON, so the state the record
+    carries is what decides it. A tombstone carries no record and reports nothing."""
+    if stream in _DEFAULT_WAKE_STREAMS:
+        return True
+    record = _page_record(body)
+    match stream:
+        case "pull_requests":
+            return _closed(record) or _concluded(record)
+        case "issues":
+            return _closed(record)
+        case "workflow_runs":
+            conclusion = record.get("conclusion")
+            return (
+                record.get("status") == _RUN_COMPLETED
+                and isinstance(conclusion, str)
+                and conclusion.casefold() in _RUN_CONCLUSIONS
+            )
+        case _:
+            return False
+
+
+def _closed(record: dict[str, Any]) -> bool:
+    state = record.get("state")
+    return isinstance(state, str) and state.casefold() in _CLOSED_STATES
+
+
+def _concluded(record: dict[str, Any]) -> bool:
+    state = dict_or_empty(record.get("checks")).get("state")
+    return isinstance(state, str) and state.casefold() in _CHECK_CONCLUSIONS
+
+
+def _page_record(body: str) -> dict[str, Any]:
+    _, separator, record = body.partition("\n\n")
+    if not separator:
+        return {}
+    try:
+        parsed = json.loads(record)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}

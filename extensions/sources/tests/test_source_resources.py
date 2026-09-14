@@ -24,8 +24,9 @@ from ufo_ext_sources.resources import (
     resource_digest,
     resource_keys,
     resource_matches,
+    wakes_by_default,
 )
-from ufo_ext_sources.tools import _about_resource
+from ufo_ext_sources.tools import _about_resource, _on_streams
 from ufo_ext_sources.triggers import SourceTrigger, SourceTriggerStore, source_trigger
 
 from ufo.db import workspace_tx
@@ -43,7 +44,7 @@ CONNECTION = UUID("2f7c0f5e-1d0a-4c2b-9d3f-6b1f9a0c5e11")
 CONVERSATION = UUID("29c88018-22cd-4e44-bb1e-7eae9cf5bf43")
 
 
-def _trigger(resource: str) -> SourceTrigger:
+def _trigger(resource: str, streams: tuple[str, ...] = ()) -> SourceTrigger:
     now = datetime(2026, 7, 20, tzinfo=UTC)
     return SourceTrigger(
         id=uuid4(),
@@ -51,7 +52,7 @@ def _trigger(resource: str) -> SourceTrigger:
         agent_id=uuid4(),
         connection_id=CONNECTION,
         resource=resource,
-        streams=(),
+        streams=streams,
         delivery="current",
         paused=False,
         created_by_member_id=None,
@@ -186,6 +187,57 @@ def test_a_resource_watch_takes_only_the_changes_about_that_resource() -> None:
     )
     other = _page('{"html_url": "https://github.com/metalcraftai/ufo/pull/1685"}')
     assert _about_resource(GITHUB, _trigger(PR), [watched, other, comment]) == [watched, comment]
+
+
+def _landed(stream: str, record: str) -> str:
+    """One page as the connector renders it: the heading over the record's JSON."""
+    return f"# {GITHUB} {stream}: a page\n\n{record}"
+
+
+def test_the_default_set_is_the_comments_reviews_finished_runs_and_closures() -> None:
+    """What a member watches a pull request for: somebody said something, the checks answered, or
+    it landed."""
+    for stream, record in (
+        ("comments", '{"body": "lgtm"}'),
+        ("review_comments", '{"body": "one nit"}'),
+        ("workflow_runs", '{"status": "completed", "conclusion": "success"}'),
+        ("workflow_runs", '{"status": "completed", "conclusion": "failure"}'),
+        ("pull_requests", '{"state": "OPEN", "checks": {"state": "FAILURE"}}'),
+        ("pull_requests", '{"state": "OPEN", "checks": {"state": "SUCCESS"}}'),
+        ("pull_requests", '{"state": "MERGED"}'),
+        ("pull_requests", '{"state": "CLOSED"}'),
+        ("issues", '{"state": "closed"}'),
+    ):
+        assert wakes_by_default(GITHUB, stream, _landed(stream, record))
+
+
+def test_the_default_set_leaves_every_other_change_about_the_resource() -> None:
+    """An open pull request moves its page on a title edit, a label, a push and a review request,
+    and a run moves its page at every step before it concludes."""
+    for stream, record in (
+        ("pull_requests", '{"state": "OPEN", "isDraft": true}'),
+        ("pull_requests", '{"state": "OPEN", "checks": {"state": "PENDING"}}'),
+        ("pull_requests", '{"state": "OPEN", "checks": null}'),
+        ("issues", '{"state": "open"}'),
+        ("workflow_runs", '{"status": "in_progress", "conclusion": null}'),
+        ("workflow_runs", '{"status": "completed", "conclusion": "skipped"}'),
+        ("releases", '{"tag_name": "v1"}'),
+        ("repositories", '{"full_name": "metalcraftai/ufo"}'),
+        ("organizations", '{"login": "metalcraftai"}'),
+    ):
+        assert not wakes_by_default(GITHUB, stream, _landed(stream, record))
+    assert not wakes_by_default(GITHUB, "pull_requests", "")
+    assert not wakes_by_default("linear", "comments", _landed("comments", '{"body": "lgtm"}'))
+
+
+def test_a_resource_watch_naming_no_streams_takes_the_default_set() -> None:
+    merged = _page(_landed("pull_requests", '{"state": "MERGED"}'))
+    edited = _page(_landed("pull_requests", '{"state": "OPEN"}'))
+    commented = _page(_landed("comments", '{"body": "lgtm"}'), stream="comments")
+    changes = [merged, edited, commented]
+    assert _on_streams(GITHUB, _trigger(PR), changes) == [merged, commented]
+    assert _on_streams(GITHUB, _trigger(""), changes) == changes
+    assert _on_streams(GITHUB, _trigger(PR, ("pull_requests",)), changes) == [merged, edited]
 
 
 def test_a_watch_under_a_provider_without_rules_wakes_nothing() -> None:

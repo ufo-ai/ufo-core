@@ -1530,16 +1530,53 @@ async def test_alert_skipped_when_only_member_private_changes(db: None) -> None:
         assert await _turns(state.conversation_id) == []
 
 
-def _pull_request_page(number: int) -> str:
-    """One GitHub record as the connector lands it — the provider's own JSON, carrying the URL the
-    resource is matched on."""
-    return json.dumps(
+def _pull_request_page(number: int, state: str = "MERGED") -> str:
+    """One GitHub pull request as the connector lands it — the heading over the provider's own JSON,
+    carrying the URL the resource is matched on and the state a default watch reads."""
+    return _github_page(
+        "pull_requests",
         {
             "html_url": f"https://github.com/metalcraftai/ufo/pull/{number}",
             "number": number,
+            "state": state,
             "title": "Watch the pull request a trigger names",
-        }
+        },
     )
+
+
+def _comment_page(identifier: int, path: Literal["issues", "pulls"]) -> str:
+    """One comment or review comment, linked to the pull request the way GitHub links it: a comment
+    under `issues/<number>`, a review comment under `pulls/<number>`."""
+    number = PR_URL.rsplit("/", 1)[1]
+    link = "issue_url" if path == "issues" else "pull_request_url"
+    return _github_page(
+        "comments" if path == "issues" else "review_comments",
+        {
+            "id": identifier,
+            "body": "Looks good.",
+            link: f"https://api.github.com/repos/metalcraftai/ufo/{path}/{number}",
+        },
+    )
+
+
+def _workflow_run_page(identifier: int, *, status: str, conclusion: str | None = None) -> str:
+    number = PR_URL.rsplit("/", 1)[1]
+    return _github_page(
+        "workflow_runs",
+        {
+            "id": identifier,
+            "status": status,
+            "conclusion": conclusion,
+            "pull_requests": [
+                {"url": f"https://api.github.com/repos/metalcraftai/ufo/pulls/{number}"}
+            ],
+        },
+    )
+
+
+def _github_page(stream: str, record: dict[str, object]) -> str:
+    title = record.get("title") or f"{stream}/{record.get('id')}"
+    return f"# {GITHUB} {stream}: {title}\n\n{json.dumps(record, sort_keys=True)}"
 
 
 def _narrowed_manifest(feed: _Feed, conversation_id: UUID, spelled: str, stored: str) -> str:
@@ -1594,6 +1631,75 @@ async def test_a_trigger_narrowed_to_a_link_wakes_on_that_resource_alone(db: Non
     assert f"{PAGE_KIND}/{watched.page_id}" in turn["inbound"]
     assert f"{PAGE_KIND}/{other.page_id}" not in turn["inbound"]
     assert "pull_requests: 1 added on " in turn["inbound"]
+
+
+async def test_a_watch_on_a_pull_request_naming_no_streams_reports_the_minimal_events(
+    db: None,
+) -> None:
+    """A trigger on a pull request that names no streams hears the few events a member watches one
+    for: a comment, a review comment, a workflow run that finished, and the pull request merged.
+    Every other change about it — an edit while it is open, a run still queued — moves a page linked
+    to it and wakes nobody."""
+    state = await _workspace()
+    feed, pulls = await _github_feed(state)
+    comments = await _stream(state, feed, provider=GITHUB, stream="comments")
+    review_comments = await _stream(state, feed, provider=GITHUB, stream="review_comments")
+    runs = await _stream(state, feed, provider=GITHUB, stream="workflow_runs")
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state), _trigger_manifest(feed, state.conversation_id, resource=PR_URL)
+        )
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        edited = _change(pulls, _pull_request_page(1684, state="OPEN"), stream="pull_requests")
+        queued = _change(runs, _workflow_run_page(11, status="queued"), stream="workflow_runs")
+        await on_page_change(
+            HookContext(ext=ext, payload=PageChangeBatch(changes=(edited, queued)))
+        )
+        assert await _turns(state.conversation_id) == []
+
+        commented = _change(comments, _comment_page(21, "issues"), stream="comments")
+        reviewed = _change(review_comments, _comment_page(22, "pulls"), stream="review_comments")
+        failed = _change(
+            runs,
+            _workflow_run_page(12, status="completed", conclusion="failure"),
+            stream="workflow_runs",
+        )
+        merged = _change(pulls, _pull_request_page(1684), stream="pull_requests")
+        await on_page_change(
+            HookContext(
+                ext=ext,
+                payload=PageChangeBatch(changes=(commented, reviewed, failed, merged)),
+            )
+        )
+
+    [turn] = await _turns(state.conversation_id)
+    for change in (commented, reviewed, failed, merged):
+        assert f"{PAGE_KIND}/{change.page_id}" in turn["inbound"]
+
+
+async def test_a_watch_naming_its_streams_hears_every_change_on_them(db: None) -> None:
+    """The minimal set is the default and nothing more: a trigger naming `pull_requests` hears the
+    pull request edited while it is open, and hears nothing on the streams it left out."""
+    state = await _workspace()
+    feed, pulls = await _github_feed(state)
+    comments = await _stream(state, feed, provider=GITHUB, stream="comments")
+    with ws(state.workspace_id), agent(state.agent_id):
+        await _apply(
+            _context(state),
+            _trigger_manifest(
+                feed, state.conversation_id, resource=PR_URL, streams=("pull_requests",)
+            ),
+        )
+        ext = context_for(NAME, DECLARED_PROVIDERS, invoker=_admitting(state.workspace_id))
+        edited = _change(pulls, _pull_request_page(1684, state="OPEN"), stream="pull_requests")
+        commented = _change(comments, _comment_page(21, "issues"), stream="comments")
+        await on_page_change(
+            HookContext(ext=ext, payload=PageChangeBatch(changes=(edited, commented)))
+        )
+
+    [turn] = await _turns(state.conversation_id)
+    assert f"{PAGE_KIND}/{edited.page_id}" in turn["inbound"]
+    assert f"{PAGE_KIND}/{commented.page_id}" not in turn["inbound"]
 
 
 async def test_every_spelling_of_the_link_is_one_trigger(db: None) -> None:

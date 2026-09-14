@@ -8,8 +8,10 @@ pages are disclosed to its owner alone, so the alert filter would drop every cha
 and the `page_change` hook includes only the shared pages the trigger's agent may read.
 
 A trigger narrows to one resource of that feed — a pull request, an issue — named by its URL, and
-then only the changes about that resource wake the conversation. Its name derives from the triple
-it is, so an apply under any other name is refused with the one to use.
+then only the changes about that resource wake the conversation: its comments, its reviews, its
+checks passing or failing, and its merged or closed state, unless the trigger names the streams it
+wants instead. Its name derives from the triple it is, so an apply under any other name
+is refused with the one to use.
 
 The `user_prompt_submit` and `post_tool_use` hooks offer one: a link in a member's message, in a
 spawned coding child's result or in a tool's output that names a resource of a shared connection
@@ -77,6 +79,7 @@ from ufo_ext_sources.resources import (
     resource_digest,
     resource_keys,
     resource_matches,
+    wakes_by_default,
 )
 from ufo_ext_sources.triggers import (
     ListedTrigger,
@@ -210,8 +213,9 @@ class SourceTriggerSpec(BaseModel):
         default="",
         title="Resource",
         description="The URL of one resource of that feed to narrow the trigger to — a GitHub "
-        "pull request or issue. Only the changes about it, on the streams the connection syncs, "
-        "wake the conversation. Leave it empty to watch the whole feed.",
+        "pull request or issue. With no `streams`, the conversation wakes on the comments, the "
+        "reviews, the checks that passed or failed, and the merged or closed state of it, and on "
+        "nothing else about it. Leave it empty to watch the whole feed.",
     )
     streams: tuple[str, ...] = Field(
         default=(),
@@ -568,7 +572,8 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
     Only shared pages that the trigger's agent may read cause a wake.
 
     A trigger narrowed to one resource is woken by the changes about that resource alone, and one
-    narrowed to streams by the changes on those streams alone."""
+    narrowed to streams by the changes on those streams alone. A resource-narrowed trigger naming no
+    stream is woken by the provider's minimal set of them."""
     match ctx.payload:
         case PageChangeBatch(changes=changes):
             pass
@@ -601,8 +606,7 @@ async def on_page_change(ctx: HookContext) -> HookOutcome:
             readable = await ctx.ext.readable_source_ids(_shared_reader(trigger.agent_id))
             authorized = [change for change in shared if change.source_id in readable]
             authorized = _about_resource(feed.provider, trigger, authorized)
-            if trigger.streams:
-                authorized = [change for change in authorized if change.stream in trigger.streams]
+            authorized = _on_streams(feed.provider, trigger, authorized)
             if not authorized:
                 continue
             with suppress(AgentArchived):
@@ -625,6 +629,21 @@ def _about_resource(
     return [
         change for change in changes if resource_matches(provider, trigger.resource, change.body)
     ]
+
+
+def _on_streams(
+    provider: str, trigger: SourceTrigger, changes: list[PageChange]
+) -> list[PageChange]:
+    """The changes one trigger's streams admit: those on the streams it names, and only those. A
+    trigger naming no stream takes the whole feed where it watches the whole feed, and the
+    provider's minimal set where it watches one resource — the comments, reviews, finished checks
+    and closures a member asked about that pull request to hear, rather than every edit that moves a
+    page linked to it."""
+    if trigger.streams:
+        return [change for change in changes if change.stream in trigger.streams]
+    if not trigger.resource:
+        return changes
+    return [change for change in changes if wakes_by_default(provider, change.stream, change.body)]
 
 
 def _trigger_summary(connection: FeedConnection, trigger: SourceTrigger) -> str:
@@ -919,13 +938,16 @@ SOURCE_TRIGGER_OBJECT = ObjectKind(
         "Apply a manifest naming a shared connection with `delivery: current` to wake this "
         "conversation for each batch of "
         "changes. Set `resource` to the URL of one pull request "
-        "or issue of a GitHub connection to be woken only by the changes about it, on the streams "
-        "that connection syncs. Set `streams` to stream names of that connection to be woken by "
-        "the changes on them alone; applying an unsynced name answers with the ones it syncs. "
-        "Leave it empty to wake on every stream, including the ones that carry the comments and "
-        "runs beside what you are watching. "
+        "or issue of a GitHub connection to be woken by its comments, its reviews, its checks "
+        "that passed or failed, and its merged or closed state, and by nothing else about it. "
+        "Set `streams` to stream names of that connection to be woken by "
+        "the changes on them alone, which is how to hear every change about a resource; applying "
+        "an unsynced name answers with the ones it syncs. "
+        "Leave both empty to wake on every stream of the whole feed. "
         f"A {SOURCE_TRIGGER_KIND} IS the connection, resource, streams, and owning conversation "
-        "it names, so its name derives from all of them. Delete it to stop. A private or unknown "
+        "it names, so its name derives from all of them. Delete it to stop, and delete it once the "
+        "pull request or issue it watches is merged or closed — only its creator or a workspace "
+        "admin may. A private or unknown "
         "connection cannot be watched. Disconnecting the account removes every trigger on it. "
         "Applying `paused: true` on a standing trigger stops it waking the conversation and keeps "
         "it; false wakes it again from the next batch. That is the one field an apply may change — "
