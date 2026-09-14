@@ -209,6 +209,7 @@ async def _tool_ctx(
     audience: Audience = SHARED_AUDIENCE,
 ) -> ToolContext:
     """A tool context over a real sandbox, because the arming probe is a real command run in one."""
+    turn_id = uuid4()
     carrier = LocalCarrier()
     handle = await carrier.create(
         SandboxSpec(
@@ -224,7 +225,7 @@ async def _tool_ctx(
         sandbox=SandboxSession(carrier=carrier, handle=handle),
         blob=FilesystemBlobStore(root=root / "blob"),
         turn=Turn(
-            id=uuid4(),
+            id=turn_id,
             workspace_id=workspace_id,
             conversation_id=conversation_id,
             agent_id=agent_id,
@@ -236,6 +237,7 @@ async def _tool_ctx(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id,
+        requesting_message_ref=turn_id if speaker_member_id is not None else None,
         audience=audience,
         artifact_token_secret="",
         ext=context_for(

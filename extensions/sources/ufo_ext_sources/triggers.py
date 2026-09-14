@@ -47,6 +47,7 @@ source_trigger = sa.Table(
     sa.Column("delivery", sa.Text, nullable=False),
     sa.Column("paused", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
+    sa.Column("requesting_message_ref", sa.Uuid, nullable=True),
     sa.Column("internet_access", sa.Boolean, nullable=False),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -69,6 +70,7 @@ _COLUMNS = (
     source_trigger.c.streams,
     source_trigger.c.paused,
     source_trigger.c.created_by_member_id,
+    source_trigger.c.requesting_message_ref,
     source_trigger.c.internet_access,
     source_trigger.c.created_at,
     source_trigger.c.updated_at,
@@ -95,6 +97,7 @@ class SourceTrigger:
     internet_access: Literal[False] | None
     created_at: datetime
     updated_at: datetime
+    requesting_message_ref: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,7 @@ def _trigger(row: sa.RowMapping) -> SourceTrigger:
         delivery="current",
         paused=bool(row["paused"]),
         created_by_member_id=row["created_by_member_id"],
+        requesting_message_ref=row["requesting_message_ref"],
         internet_access=None if row["internet_access"] else False,
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
@@ -151,6 +155,7 @@ class SourceTriggerStore:
         internet_access: Literal[False] | None = None,
         resource: str = "",
         streams: tuple[str, ...] = (),
+        requesting_message_ref: UUID | None = None,
     ) -> SourceTrigger:
         """Create one wake-up on one connection's feed, over the whole feed or over the
         resource and streams of it `resource` and `streams` name. The owning conversation is checked
@@ -174,6 +179,7 @@ class SourceTriggerStore:
             "delivery": delivery,
             "paused": False,
             "created_by_member_id": created_by_member_id,
+            "requesting_message_ref": requesting_message_ref,
             "internet_access": internet_access is not False,
             "created_at": sa.func.now(),
             "updated_at": sa.func.now(),

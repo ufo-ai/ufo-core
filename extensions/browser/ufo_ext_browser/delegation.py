@@ -104,6 +104,7 @@ async def _browser_task(ctx: ToolContext, args: BrowserTaskInput) -> ToolResult:
         {"task": args.task, "url": args.url, "task_name": args.task_name},
         background=True,
         dedup_key=ctx.idempotency_key,
+        requesting_message_ref=ctx.requesting_message_ref,
     )
     timed_out = ToolFailure(
         operation="browser_task",
@@ -181,6 +182,7 @@ async def _wide_browse(ctx: ToolContext, args: WideBrowseInput) -> ToolResult:
                 f"profile:{BROWSER_PROFILE_NAME}",
                 {"task": task, "task_name": entity, "extended_context": False},
                 dedup_key=f"{ctx.idempotency_key}/{entity}",
+                requesting_message_ref=ctx.requesting_message_ref,
             )
             return {
                 "entity": entity,

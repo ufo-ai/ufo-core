@@ -60,7 +60,7 @@ from ufo.runtime.turns.transcript import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import FiredBy, ModelAccountCapability, TurnRuntimeConfig
+from ufo.schema.records import FiredBy, ModelAccountCapability, TurnContext, TurnRuntimeConfig
 from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
 
 MODEL = "claude-opus-4-8"
@@ -161,6 +161,7 @@ class ScriptedWorker:
         message: str,
         idempotency_key: str,
         *,
+        context: TurnContext | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,

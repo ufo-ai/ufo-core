@@ -1,16 +1,19 @@
+import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from ufo_ext_sources.tools import trigger_name
 
 from ufo.db import MIGRATIONS_DIR, workspace_tx
 from ufo.host.ext.loader import migration_locations
 from ufo.schema import tables
+from ufo.sdk.grants import account_object_name
 
 
 def _config(database_path: Path) -> Config:
@@ -31,10 +34,11 @@ def test_existing_trigger_scope_backfills_to_inherit(tmp_path: Path) -> None:
     command.upgrade(config, "0085")
     command.upgrade(config, "sources_0007")
     engine = sa.create_engine(f"sqlite:///{database}")
-    workspace_id, member_id, agent_id, conversation_id, connection_id, trigger_id = (
-        uuid4().hex for _ in range(6)
+    workspace_id, member_id, agent_id, conversation_id, connection_id, trigger_id, turn_id = (
+        uuid4().hex for _ in range(7)
     )
     now = datetime.now(UTC)
+    object_name = trigger_name(account_object_name("hub", "account"), UUID(conversation_id))
     with engine.connect() as connection:
         connection.execute(
             sa.text("insert into workspace (id, created_at, updated_at) values (:id, :now, :now)"),
@@ -84,6 +88,24 @@ def test_existing_trigger_scope_backfills_to_inherit(tmp_path: Path) -> None:
         )
         connection.execute(
             sa.text(
+                "insert into turn "
+                "(id, workspace_id, conversation_id, agent_id, seq, status, inbound, "
+                "admission_source, speaker_member_id, created_refs, created_at, updated_at) values "
+                "(:id, :workspace, :conversation, :agent, 1, 'running', 'watch this feed', "
+                "'member', :member, :created_refs, :now, :now)"
+            ),
+            {
+                "id": turn_id,
+                "workspace": workspace_id,
+                "conversation": conversation_id,
+                "agent": agent_id,
+                "member": member_id,
+                "created_refs": json.dumps([{"kind": "source_trigger", "name": object_name}]),
+                "now": now,
+            },
+        )
+        connection.execute(
+            sa.text(
                 "insert into source_trigger "
                 "(id, workspace_id, conversation_id, agent_id, connection_id, resource, streams, "
                 "delivery, created_by_member_id, created_at, updated_at) values "
@@ -101,12 +123,14 @@ def test_existing_trigger_scope_backfills_to_inherit(tmp_path: Path) -> None:
             },
         )
         connection.commit()
-    command.upgrade(config, "sources_0008")
+    command.upgrade(config, "sources_0009")
     with engine.connect() as connection:
-        internet_access = connection.execute(
-            sa.text("select internet_access from source_trigger where id = :id"),
+        internet_access, requesting_message_ref = connection.execute(
+            sa.text(
+                "select internet_access, requesting_message_ref from source_trigger where id = :id"
+            ),
             {"id": trigger_id},
-        ).scalar_one()
+        ).one()
         with pytest.raises(sa.exc.IntegrityError):
             connection.execute(
                 sa.text(
@@ -129,6 +153,7 @@ def test_existing_trigger_scope_backfills_to_inherit(tmp_path: Path) -> None:
         connection.rollback()
     engine.dispose()
     assert internet_access == 1
+    assert requesting_message_ref == turn_id
 
 
 @pytest.mark.usefixtures("database_url")

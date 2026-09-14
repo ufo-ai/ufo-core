@@ -326,6 +326,7 @@ class AuthorizationResolution:
     decision: Literal["allow", "deny", "ask"]
     question: AskUserInput | None = None
     refusal: str | None = None
+    requesting_message_ref: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -382,6 +383,7 @@ class _AuthorizationState:
     pending: _PendingAuthorization | None
     permission_id: UUID | None
     replay: Literal["allow", "deny", "ask"] | None
+    replay_requesting_message_ref: UUID | None
     consumed: bool
 
 
@@ -452,6 +454,7 @@ class MemberAuthorization:
             return AuthorizationResolution(
                 state.replay,
                 self._question(request, state) if state.replay == "ask" else None,
+                requesting_message_ref=state.replay_requesting_message_ref,
             )
         if request.answer is not None:
             return await self._answer(request, state)
@@ -472,6 +475,7 @@ class MemberAuthorization:
                 return AuthorizationResolution(
                     state.replay,
                     self._question(request, state) if state.replay == "ask" else None,
+                    requesting_message_ref=state.replay_requesting_message_ref,
                 )
             if state.pending is not None:
                 return AuthorizationResolution("ask", self._question(request, state))
@@ -481,7 +485,7 @@ class MemberAuthorization:
             return AuthorizationResolution("deny")
         verdict = await self._verdict(request, prepared, state)
         if verdict is None and not request.selected_from_multiple:
-            return AuthorizationResolution("allow")
+            return AuthorizationResolution("allow", requesting_message_ref=request.message_ref)
         if verdict is None or not self._grounded(verdict, request, state):
             request_summary, scope_summary = self._fallback_summaries(request)
             verdict = AuthorizationVerdict(
@@ -503,6 +507,7 @@ class MemberAuthorization:
                 return AuthorizationResolution(
                     fresh.replay,
                     self._question(request, fresh) if fresh.replay == "ask" else None,
+                    requesting_message_ref=fresh.replay_requesting_message_ref,
                 )
             if fresh.pending is None:
                 return AuthorizationResolution("deny")
@@ -513,11 +518,12 @@ class MemberAuthorization:
                 return AuthorizationResolution(
                     fresh.replay,
                     self._question(request, fresh) if fresh.replay == "ask" else None,
+                    requesting_message_ref=fresh.replay_requesting_message_ref,
                 )
             return AuthorizationResolution("deny")
         if verdict.decision in ("deny", "revoke"):
             return AuthorizationResolution("deny")
-        return AuthorizationResolution("allow")
+        return AuthorizationResolution("allow", requesting_message_ref=request.message_ref)
 
     async def _answer(
         self,
@@ -548,9 +554,13 @@ class MemberAuthorization:
                 return AuthorizationResolution(
                     fresh.replay,
                     self._question(request, fresh) if fresh.replay == "ask" else None,
+                    requesting_message_ref=fresh.replay_requesting_message_ref,
                 )
             return AuthorizationResolution("deny", refusal=MEMBER_AUTHORIZATION_ANSWER_INVALID)
-        return AuthorizationResolution("deny" if answer.choice == "deny" else "allow")
+        return AuthorizationResolution(
+            "deny" if answer.choice == "deny" else "allow",
+            requesting_message_ref=state.pending.requested_by,
+        )
 
     async def _verdict(
         self,
@@ -672,6 +682,7 @@ class MemberAuthorization:
                 )
             ).scalar_one_or_none()
         replay: Literal["allow", "deny", "ask"] | None = None
+        replay_requesting_message_ref: UUID | None = None
         if replayed:
             [recorded] = replayed[:1]
             request_match = (
@@ -685,6 +696,7 @@ class MemberAuthorization:
             if len(replayed) != 1 or not request_match:
                 replay = "deny"
             elif recorded.decision_key == request.dispatch_key:
+                replay_requesting_message_ref = recorded.requested_by
                 replay = (
                     "deny"
                     if recorded.decided_by != request.message_ref
@@ -697,6 +709,7 @@ class MemberAuthorization:
                     else "allow"
                 )
             elif recorded.request_key == request.dispatch_key:
+                replay_requesting_message_ref = recorded.requested_by
                 replay = (
                     "ask"
                     if recorded.requested_by == request.message_ref and recorded.decision is None
@@ -722,6 +735,7 @@ class MemberAuthorization:
             pending_state,
             permission_id,
             replay,
+            replay_requesting_message_ref,
             consumed is not None,
         )
 

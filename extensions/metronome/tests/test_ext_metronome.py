@@ -64,6 +64,7 @@ from ufo.schema.records import (
     ModelAccountCapability,
     TerminalFrame,
     Turn,
+    TurnContext,
     TurnRuntimeConfig,
     Usage,
 )
@@ -616,6 +617,7 @@ class _RecordingInvoker:
         message: str,
         idempotency_key: str,
         *,
+        context: TurnContext | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,

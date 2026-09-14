@@ -612,6 +612,10 @@ class TurnContext(BaseModel):
     authorization_id: UUID | None = None
     authorization_choice: AuthorizationChoice | None = None
     source: str | None = None
+    requesting_message_ref: UUID | None = None
+    """The authenticated member message that selected delayed work. Its continuation remains
+    speakerless and rechecks each member-sensitive follow-up against that message before binding
+    its author."""
     reply_reaches: str | None = None
     """Where this turn's reply goes, stamped by admission: the surface that posts it, or `nobody`
     when nothing does. A turn cannot otherwise tell — the reply of a background turn on an

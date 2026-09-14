@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import BaseModel
@@ -57,6 +57,8 @@ class RecordingSpawn:
         payload: dict[str, object],
         background: bool = False,
         dedup_key: str | None = None,
+        *,
+        requesting_message_ref: UUID | None = None,
     ) -> SpawnResult:
         self.spawned.append((profile, payload, dedup_key))
         objective = str(payload["objective"])

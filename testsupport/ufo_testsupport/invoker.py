@@ -10,7 +10,7 @@ from dbos import DBOSClient
 from ufo.runtime.ext.context import MemberReach, TurnRuntimeConfig
 from ufo.runtime.jobs import InvokerFactory
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
-from ufo.schema.records import FiredBy, ModelAccountCapability
+from ufo.schema.records import FiredBy, ModelAccountCapability, TurnContext
 
 
 def invoker_factory(dbos: DBOSClient) -> InvokerFactory:
@@ -35,6 +35,7 @@ class RecordedTurn:
     idempotency_key: str
     standalone: bool
     runtime_config: TurnRuntimeConfig | None = None
+    context: TurnContext | None = None
 
 
 @dataclass
@@ -56,6 +57,7 @@ class RecordingInvoker:
         message: str,
         idempotency_key: str,
         *,
+        context: TurnContext | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
@@ -73,6 +75,7 @@ class RecordingInvoker:
                 idempotency_key=idempotency_key,
                 standalone=standalone,
                 runtime_config=runtime_config,
+                context=context,
             )
         )
         return uuid4()

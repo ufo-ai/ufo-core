@@ -171,6 +171,20 @@ async def test_member_admission_persists_the_latest_valid_timezone(db: None) -> 
     assert timezone == "America/Los_Angeles"
 
 
+async def test_member_admission_refuses_a_causal_request_override(db: None) -> None:
+    workspace_id, member_id, _agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+
+    with pytest.raises(ValueError, match="cannot carry another requesting message"):
+        await admission.admit_member(
+            workspace_id,
+            conversation_id,
+            "hello",
+            member_id,
+            context=TurnContext(requesting_message_ref=uuid4()),
+        )
+
+
 async def test_each_opening_turn_persists_its_own_runtime_config(db: None) -> None:
     workspace_id, member_id, _agent_id, conversation_id = await _seed()
     admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())

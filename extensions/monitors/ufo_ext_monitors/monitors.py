@@ -53,6 +53,7 @@ monitor = sa.Table(
     sa.Column("metadata", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("user_description", sa.Text, nullable=False),
     sa.Column("created_by_member_id", sa.Uuid, nullable=True),
+    sa.Column("requesting_message_ref", sa.Uuid, nullable=True),
     sa.Column("connections", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("internet_access", sa.Boolean, nullable=False),
     sa.Column("baseline", sa.Text, nullable=False),
@@ -135,6 +136,7 @@ class Monitor:
     updated_at: datetime
     connections: tuple[UUID, ...] = ()
     internet_access: Literal[False] | None = None
+    requesting_message_ref: UUID | None = None
 
 
 def _aware(when: datetime) -> datetime:
@@ -157,6 +159,7 @@ def _row(row: sa.RowMapping) -> Monitor:
         next_steps=row["next_steps"],
         metadata=row["metadata"],
         created_by_member_id=row["created_by_member_id"],
+        requesting_message_ref=row["requesting_message_ref"],
         baseline=row["baseline"],
         probes_run=row["probes_run"],
         quiet_streak=row["quiet_streak"],
@@ -231,6 +234,7 @@ class MonitorStore:
         next_probe_at: datetime,
         connections: tuple[UUID, ...],
         internet_access: Literal[False] | None,
+        requesting_message_ref: UUID | None = None,
     ) -> Monitor:
         async with self.ctx.transaction() as connection:
             row = (
@@ -251,6 +255,7 @@ class MonitorStore:
                             metadata=metadata,
                             user_description=reason,
                             created_by_member_id=created_by_member_id,
+                            requesting_message_ref=requesting_message_ref,
                             connections=[str(connection_id) for connection_id in connections],
                             internet_access=internet_access is not False,
                             baseline=baseline,

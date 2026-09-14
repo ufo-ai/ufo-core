@@ -47,6 +47,8 @@ class RecordingSpawn:
         payload: dict[str, object],
         background: bool = False,
         dedup_key: str | None = None,
+        *,
+        requesting_message_ref: UUID | None = None,
     ) -> SpawnResult:
         self.spawned.append((profile, payload, background, dedup_key))
         name = payload.get("task_name")
@@ -74,7 +76,14 @@ class ScriptedSubagents:
         self.cancelled.append(turn_id)
         return SubagentStatus(turn_id=turn_id, status="cancelled", text="")
 
-    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
+    async def message(
+        self,
+        turn_id: UUID,
+        text: str,
+        dedup_key: str,
+        *,
+        requesting_message_ref: UUID | None = None,
+    ) -> SubagentStatus:
         raise NotImplementedError
 
 
@@ -284,10 +293,18 @@ class FailingSpawn(RecordingSpawn):
         payload: dict[str, object],
         background: bool = False,
         dedup_key: str | None = None,
+        *,
+        requesting_message_ref: UUID | None = None,
     ) -> SpawnResult:
         if payload.get("task_name") == self.fails:
             raise self.error
-        return await super().__call__(profile, payload, background, dedup_key)
+        return await super().__call__(
+            profile,
+            payload,
+            background,
+            dedup_key,
+            requesting_message_ref=requesting_message_ref,
+        )
 
 
 async def test_wide_browse_keeps_the_siblings_of_an_entity_that_raised(tmp_path: Path) -> None:

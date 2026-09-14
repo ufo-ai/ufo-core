@@ -73,6 +73,7 @@ from ufo.schema.records import (
     ModelAccountCapability,
     TerminalFrame,
     Turn,
+    TurnContext,
     TurnRuntimeConfig,
     turn_id_for,
 )
@@ -440,6 +441,7 @@ async def _arrival_rows(conversation_id: UUID) -> list[sa.Row[Any]]:
                     tables.inbound_message.c.idempotency_key,
                     tables.inbound_message.c.consumed_turn_id,
                     tables.inbound_message.c.id,
+                    tables.inbound_message.c.context,
                 )
                 .where(tables.inbound_message.c.conversation_id == conversation_id)
                 .order_by(tables.inbound_message.c.seq)
@@ -481,8 +483,12 @@ async def test_message_to_a_running_child_folds_into_its_live_turn(
     )
     client = _RecordingClient()
     hub = InProcessHub()
+    requesting_message_ref = uuid4()
     status = await _messaging(client, parent, hub).message(
-        child_id, "also summarize the risks", dedup_key="turn-1/message_spawn/call-1"
+        child_id,
+        "also summarize the risks",
+        dedup_key="turn-1/message_spawn/call-1",
+        requesting_message_ref=requesting_message_ref,
     )
     assert (status.turn_id, status.status) == (child_id, "running")
     (arrival,) = await _arrival_rows(child_conversation)
@@ -492,6 +498,9 @@ async def test_message_to_a_running_child_folds_into_its_live_turn(
         child_id,
         "turn-1/message_spawn/call-1",
         None,
+    )
+    assert TurnContext.model_validate(arrival.context).requesting_message_ref == (
+        requesting_message_ref
     )
     stream = hub.subscribe(child_id)
     _cursor, frame = await anext(stream)
@@ -1639,6 +1648,7 @@ async def _delivered_child(
     registry: SubagentRegistry,
     runtime_config: TurnRuntimeConfig | None = None,
     model_accounts: tuple[ModelAccountCapability, ...] = (),
+    context: TurnContext | None = None,
 ) -> UUID:
     child_id, conversation_id = uuid4(), uuid4()
     async with workspace_tx() as connection:
@@ -1665,6 +1675,7 @@ async def _delivered_child(
                 inbound="{}",
                 terminal=terminal.model_dump(mode="json"),
                 parent_turn_id=parent.id,
+                context=None if context is None else context.model_dump(mode="json"),
                 result_delivery="pending",
                 subagent_profile=profile,
                 runtime_config=(
@@ -1714,6 +1725,7 @@ async def test_a_finished_child_delivers_validated_output_as_the_parents_next_tu
     workspace_id, agent_id = await _workspace_agent()
     parent = await _parent_turn(workspace_id, agent_id, "done")
     registry = SubagentRegistry((_profile("plain"),))
+    requesting_message_ref = uuid4()
     child = await _delivered_child(
         workspace_id,
         agent_id,
@@ -1721,6 +1733,7 @@ async def test_a_finished_child_delivers_validated_output_as_the_parents_next_tu
         TerminalFrame(status="done", text='{"finding": "acme ships", "extra": "dropped"}'),
         "plain",
         registry,
+        context=TurnContext(requesting_message_ref=requesting_message_ref),
     )
     turns = await _conversation_turns(parent.conversation_id)
     assert [seq for seq, _ in turns] == [1, 2]
@@ -1731,6 +1744,18 @@ async def test_a_finished_child_delivers_validated_output_as_the_parents_next_tu
     assert '{"finding":"acme ships"}' in body
     assert "dropped" not in body
     assert await _arrival_bodies(parent.conversation_id) == []
+    async with workspace_tx() as connection:
+        delivered_context = (
+            await connection.execute(
+                sa.select(tables.turn.c.context).where(
+                    tables.turn.c.conversation_id == parent.conversation_id,
+                    tables.turn.c.seq == 2,
+                )
+            )
+        ).scalar_one()
+    assert TurnContext.model_validate(delivered_context).requesting_message_ref == (
+        requesting_message_ref
+    )
 
 
 async def test_a_delivery_returns_connection_scope_without_child_model_capabilities(
@@ -2879,6 +2904,7 @@ async def test_agent_spawn_uses_only_the_current_calls_requester(
         update={"speaker_member_id": member}
     )
     spawner = _spawner(workspace_id, parent, "research")
+    request_ref = uuid4()
 
     with pytest.raises(ValueError, match="not yours to spawn"):
         await spawner.spawn("my-triage", {"task": "acme"}, dedup_key="unattributed")
@@ -2888,9 +2914,11 @@ async def test_agent_spawn_uses_only_the_current_calls_requester(
         {"task": "acme"},
         dedup_key="mine",
         requester_member_id=member,
+        requesting_message_ref=request_ref,
     )
     child, _, _ = await _load_turn(spawned.turn_id)
     assert child.speaker_member_id is None
+    assert child.context == TurnContext(requesting_message_ref=request_ref)
 
     workspace_child = await spawner.spawn(
         "support", {"task": "acme"}, background=True, dedup_key="workspace"

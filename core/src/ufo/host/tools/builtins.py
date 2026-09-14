@@ -1045,6 +1045,7 @@ async def spawn_handler(ctx: ToolContext, args: SpawnInput) -> ToolResult:
             detach_on_arrival=True,
             model=args.model,
             requester_member_id=ctx.speaker_member_id,
+            requesting_message_ref=ctx.requesting_message_ref,
         )
     except (
         AmbiguousSpawnTarget,
@@ -1227,7 +1228,10 @@ async def message_spawn_handler(ctx: ToolContext, args: MessageSpawnInput) -> To
     if ctx.idempotency_key is None:
         raise RuntimeError("message_spawn dispatched without its idempotency key")
     status = await ctx.subagents.message(
-        UUID(args.spawn_id), args.message, dedup_key=ctx.idempotency_key
+        UUID(args.spawn_id),
+        args.message,
+        dedup_key=ctx.idempotency_key,
+        requesting_message_ref=ctx.requesting_message_ref,
     )
     return ToolResult(
         content=(

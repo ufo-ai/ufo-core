@@ -73,7 +73,7 @@ def test_scope_backfill_and_outgoing_insert_fail_closed_by_workspace(tmp_path: P
     agent_id, other_agent_id, conversation_id, other_conversation_id = (
         uuid4().hex for _ in range(4)
     )
-    owned_id, memberless_id, other_monitor_id = (uuid4().hex for _ in range(3))
+    owned_id, memberless_id, other_monitor_id, turn_id = (uuid4().hex for _ in range(4))
     own_id, shared_id, private_id, foreign_id = (uuid4().hex for _ in range(4))
     overflow_ids = tuple(uuid4().hex for _ in range(CONNECTION_SCOPE_MAX + 1))
     with engine.connect() as connection:
@@ -130,6 +130,23 @@ def test_scope_backfill_and_outgoing_insert_fail_closed_by_workspace(tmp_path: P
                     "now": NOW,
                 },
             )
+        connection.execute(
+            sa.text(
+                "insert into turn "
+                "(id, workspace_id, conversation_id, agent_id, seq, status, inbound, "
+                "admission_source, speaker_member_id, created_at, updated_at) values "
+                "(:id, :workspace, :conversation, :agent, 1, 'running', 'watch this task', "
+                "'member', :member, :now, :now)"
+            ),
+            {
+                "id": turn_id,
+                "workspace": workspace_id,
+                "conversation": conversation_id,
+                "agent": agent_id,
+                "member": creator_id,
+                "now": NOW,
+            },
+        )
         for connection_id, current_workspace, owner_id, shared, account in (
             (own_id, workspace_id, creator_id, 0, "own"),
             (shared_id, workspace_id, other_id, 1, "shared"),
@@ -241,12 +258,14 @@ def test_scope_backfill_and_outgoing_insert_fail_closed_by_workspace(tmp_path: P
         )
         connection.commit()
 
-    command.upgrade(config, "monitors_0003")
+    command.upgrade(config, "monitors_0004")
     with engine.connect() as connection:
         rows = {
             row.id: row
             for row in connection.execute(
-                sa.text("select id, connections, internet_access from monitor")
+                sa.text(
+                    "select id, connections, internet_access, requesting_message_ref from monitor"
+                )
             ).all()
         }
         with raises(sa.exc.IntegrityError):
@@ -278,6 +297,8 @@ def test_scope_backfill_and_outgoing_insert_fail_closed_by_workspace(tmp_path: P
     )
     assert json.loads(rows[other_monitor_id].connections) == [str(UUID(foreign_id))]
     assert all(row.internet_access == 1 for row in rows.values())
+    assert rows[owned_id].requesting_message_ref == turn_id
+    assert rows[memberless_id].requesting_message_ref is None
 
 
 @pytest.mark.usefixtures("database_url")

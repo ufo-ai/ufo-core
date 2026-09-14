@@ -86,6 +86,7 @@ from ufo.schema.records import (
     ModelAccountCapability,
     TerminalFrame,
     Turn,
+    TurnContext,
     TurnRuntimeConfig,
     turn_id_for,
 )
@@ -259,6 +260,7 @@ class Subagents:
         model: str | None = None,
         *,
         requester_member_id: UUID | None = None,
+        requesting_message_ref: UUID | None = None,
     ) -> SpawnResult:
         """Admit and enqueue a child turn. With `dedup_key`, the child's conversation (and so its
         turn id, the DBOS workflow id) is derived from the parent turn and the key, so a re-run of
@@ -349,6 +351,9 @@ class Subagents:
                         "payload": payload,
                         "delivers_result": delivers_result,
                         "name": name,
+                        "requesting_message_ref": (
+                            None if requesting_message_ref is None else str(requesting_message_ref)
+                        ),
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -368,6 +373,7 @@ class Subagents:
             name=name,
             agent_target=agent_target,
             requester_member_id=requester_member_id,
+            requesting_message_ref=requesting_message_ref,
             runtime_config=runtime_config,
             model_accounts=model_accounts,
             model=(
@@ -509,7 +515,14 @@ class Subagents:
         text = "" if row.terminal is None else TerminalFrame.model_validate(row.terminal).text
         return SubagentStatus(turn_id=turn_id, status=row.status, text=text)
 
-    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
+    async def message(
+        self,
+        turn_id: UUID,
+        text: str,
+        dedup_key: str,
+        *,
+        requesting_message_ref: UUID | None = None,
+    ) -> SubagentStatus:
         """Send a child a follow-up through the same internal admission its own children's results
         ride. A child whose turn is in flight takes `text` as an arrival on its conversation,
         drained before its next model round — the tool-call boundary — so a correction reaches a
@@ -561,6 +574,11 @@ class Subagents:
             child.agent_id,
             text,
             dedup_key,
+            context=(
+                None
+                if requesting_message_ref is None
+                else TurnContext(requesting_message_ref=requesting_message_ref)
+            ),
             runtime_config=runtime_config,
             model_accounts=tuple(
                 ModelAccountCapability.model_validate(account) for account in child.model_accounts
@@ -866,6 +884,7 @@ class Subagents:
         name: str = "",
         agent_target: AgentTarget | None = None,
         requester_member_id: UUID | None = None,
+        requesting_message_ref: UUID | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
         model_accounts: tuple[ModelAccountCapability, ...] = (),
         model: str | None = None,
@@ -923,6 +942,13 @@ class Subagents:
                     inbound=inbound,
                     admission_source=INTERNAL_ADMISSION,
                     speaker_member_id=None,
+                    context=(
+                        None
+                        if requesting_message_ref is None
+                        else TurnContext(requesting_message_ref=requesting_message_ref).model_dump(
+                            mode="json"
+                        )
+                    ),
                     terminal=None,
                     parent_turn_id=self.parent.id,
                     result_delivery=DELIVERY_PENDING if delivers_result else None,
@@ -952,6 +978,7 @@ class Subagents:
                         tables.turn.c.spawn_request_fingerprint,
                         tables.turn.c.subagent_name,
                         tables.turn.c.model_accounts,
+                        tables.turn.c.context,
                     )
                     .where(tables.turn.c.id == turn_id)
                     .with_for_update()
@@ -968,6 +995,14 @@ class Subagents:
                     for account in claimed.model_accounts
                 )
                 != model_accounts
+                or (
+                    None if claimed.context is None else TurnContext.model_validate(claimed.context)
+                )
+                != (
+                    None
+                    if requesting_message_ref is None
+                    else TurnContext(requesting_message_ref=requesting_message_ref)
+                )
                 or (
                     claimed.spawn_delivers_result is not None
                     and claimed.spawn_delivers_result != delivers_result
@@ -1328,6 +1363,11 @@ class SubagentResult:
             f"{SPAWN_RESULT_KEY_PREFIX}{child.id}",
             holds_work_already_done=True,
             runtime_config=returned_runtime,
+            context=(
+                None
+                if child.context is None or child.context.requesting_message_ref is None
+                else TurnContext(requesting_message_ref=child.context.requesting_message_ref)
+            ),
             model_accounts=tuple(
                 ModelAccountCapability.model_validate(account) for account in parent.model_accounts
             ),

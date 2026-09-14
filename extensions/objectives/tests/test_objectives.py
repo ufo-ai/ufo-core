@@ -597,6 +597,8 @@ async def test_a_fan_out_that_stops_part_way_names_the_children_already_running(
         background: bool = False,
         dedup_key: str | None = None,
         delivers_result: bool = False,
+        *,
+        requesting_message_ref: UUID | None = None,
     ) -> SimpleNamespace:
         if len(started) == 2:
             raise RuntimeError("no capacity for another coding child")

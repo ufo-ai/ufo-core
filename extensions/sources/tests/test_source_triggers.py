@@ -58,7 +58,7 @@ from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
+from ufo.schema.records import Agent, Turn, TurnContext, TurnRuntimeConfig
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import SUBAGENT_SURFACE
@@ -197,11 +197,12 @@ def _context(
     agent_id: UUID | None = None,
 ) -> ToolContext:
     speaker = speaker_id or state.owner_id
+    turn_id = uuid4()
     return ToolContext(
         sandbox=None,
         blob=None,
         turn=Turn(
-            id=uuid4(),
+            id=turn_id,
             workspace_id=state.workspace_id,
             conversation_id=state.conversation_id,
             agent_id=agent_id or state.agent_id,
@@ -213,6 +214,7 @@ def _context(
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=None,
         speaker_member_id=speaker,
+        requesting_message_ref=turn_id,
         audience=conversation_audience(speaker),
         artifact_token_secret="",
         grants=None,
@@ -900,6 +902,7 @@ async def test_a_trigger_cannot_land_on_a_connection_disconnected_mid_verb(
         internet_access: Literal[False] | None = None,
         resource: str = "",
         streams: tuple[str, ...] = (),
+        requesting_message_ref: UUID | None = None,
     ) -> SourceTrigger:
         assert await GrantStore().disconnect(connection_id, actor_member_id=state.owner_id) is True
         return await real_create(
@@ -911,6 +914,7 @@ async def test_a_trigger_cannot_land_on_a_connection_disconnected_mid_verb(
             internet_access=internet_access,
             resource=resource,
             streams=streams,
+            requesting_message_ref=requesting_message_ref,
         )
 
     monkeypatch.setattr(SourceTriggerStore, "create", disconnect_before_create)
@@ -949,6 +953,7 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
         assert len(turns) == 2
         turn = next(row for row in turns if feed.name in row["inbound"])
         assert turn["speaker_member_id"] is None
+        assert TurnContext.model_validate(turn["context"]).requesting_message_ref is not None
         assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
             connections=(feed.id,)
         )

@@ -193,6 +193,8 @@ class Admission:
         comment: str | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
     ) -> Admitted:
+        if context is not None and context.requesting_message_ref is not None:
+            raise ValueError("member admission cannot carry another requesting message")
         if intent is not None and speaker_member_id is None:
             raise ValueError("a prepared intent requires a speaking member")
         if intent is not None and body != intent.model_dump_json():
@@ -989,7 +991,16 @@ class Admission:
                 body=inbound.body,
                 admission_source=arrival_source,
                 context=(
-                    None if inbound.context is None else inbound.context.model_dump(mode="json")
+                    None
+                    if inbound.context is None
+                    else inbound.context.model_dump(
+                        mode="json",
+                        exclude=(
+                            {"requesting_message_ref"}
+                            if inbound.context.requesting_message_ref is None
+                            else set()
+                        ),
+                    )
                 ),
                 speaker_member_id=inbound.speaker_member_id,
                 idempotency_key=idempotency_key,
@@ -1350,7 +1361,10 @@ def _reply_context(inbound: _Inbound, surface: str, durable: frozenset[str]) -> 
         else REPLY_REACHES_NOBODY
     )
     context = (inbound.context or TurnContext()).model_copy(update={"reply_reaches": reached})
-    return context.model_dump(mode="json")
+    return context.model_dump(
+        mode="json",
+        exclude=({"requesting_message_ref"} if context.requesting_message_ref is None else set()),
+    )
 
 
 @dataclass(frozen=True)

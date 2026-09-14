@@ -190,6 +190,7 @@ class _WideResearch:
                 f"profile:{RESEARCH_PROFILE_NAME}",
                 {"objective": objective},
                 dedup_key=child_key,
+                requesting_message_ref=self.ctx.requesting_message_ref,
             )
             read = await self.ctx.sandbox.bash(f"cat {shlex.quote(result_path)}")
             if read.exit_code != 0:

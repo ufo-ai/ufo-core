@@ -521,6 +521,7 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
             connection_id=connection.id,
             delivery=spec.delivery,
             created_by_member_id=creating_member_id,
+            requesting_message_ref=ctx.require_requesting_message(),
             internet_access=(
                 None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.internet_access
             ),
@@ -790,6 +791,7 @@ async def _fire_trigger(
         ),
         holds_work_already_done=True,
         standalone=True,
+        requesting_message_ref=trigger.requesting_message_ref,
         fired_by=fired_by,
         runtime_config=TurnRuntimeConfig(
             connections=(trigger.connection_id,),

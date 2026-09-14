@@ -58,6 +58,7 @@ async def _build_website(ctx: ToolContext, args: BuildWebsiteInput) -> ToolResul
         f"profile:{WEBSITE_BUILDING_NAME}",
         args.model_dump(exclude_none=True),
         dedup_key=ctx.idempotency_key,
+        requesting_message_ref=ctx.requesting_message_ref,
     )
     text = "" if result.output is None else result.output.model_dump_json()
     return ToolResult(content=(TextContent(text=text),))

@@ -124,6 +124,7 @@ class MonitorRunner:
                 f"{FIRE_KEY_PREFIX}{row.id}",
                 holds_work_already_done=True,
                 standalone=True,
+                requesting_message_ref=row.requesting_message_ref,
                 runtime_config=TurnRuntimeConfig(
                     connections=row.connections,
                     internet_access=row.internet_access,

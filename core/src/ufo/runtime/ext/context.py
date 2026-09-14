@@ -103,6 +103,7 @@ from ufo.schema.records import (
     FiredBy,
     ModelAccountCapability,
     ProposalRef,
+    TurnContext,
     TurnRuntimeConfig,
     TurnStatus,
     Usage,
@@ -844,6 +845,7 @@ class TurnInvoker(Protocol):
         message: str,
         idempotency_key: str,
         *,
+        context: TurnContext | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
@@ -1989,6 +1991,7 @@ class ExtensionContext:
         message: str,
         idempotency_key: str,
         *,
+        requesting_message_ref: UUID | None = None,
         holds_work_already_done: bool = False,
         as_scheduled: bool = False,
         standalone: bool = False,
@@ -2019,6 +2022,11 @@ class ExtensionContext:
             agent_id,
             message,
             idempotency_key,
+            context=(
+                None
+                if requesting_message_ref is None
+                else TurnContext(requesting_message_ref=requesting_message_ref)
+            ),
             holds_work_already_done=holds_work_already_done,
             as_scheduled=as_scheduled,
             standalone=standalone,

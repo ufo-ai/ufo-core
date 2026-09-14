@@ -40,6 +40,7 @@ from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.turns.audience import SHARED_AUDIENCE
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+from ufo.schema.records import TurnContext
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -168,6 +169,7 @@ async def _arm(
     internet_access: Literal[False] | None = None,
 ) -> Monitor:
     now = datetime.now(UTC)
+    requesting_message_ref = uuid4()
     row = await MonitorStore(ext).arm(
         conversation_id=conversation_id,
         agent_id=agent_id,
@@ -179,6 +181,7 @@ async def _arm(
         next_steps="Read the new status and report it.",
         metadata={"pr": 42},
         created_by_member_id=member_id,
+        requesting_message_ref=requesting_message_ref,
         baseline=baseline,
         next_probe_at=now - timedelta(seconds=1) if due else now + timedelta(minutes=5),
         connections=connections,
@@ -388,6 +391,9 @@ async def test_changed_output_founds_one_turn_and_retires_the_monitor(
     [turn] = turns
     assert dbos.enqueued == [str(turn["id"])]
     assert turn["admission_source"] == "internal"
+    assert TurnContext.model_validate(turn["context"]).requesting_message_ref == (
+        armed.requesting_message_ref
+    )
     body = turn["inbound"]
     assert f'<monitor_fired name="ci-run" cause="{CHANGED}">' in body
     assert "reason: the CI run for pull request 42" in body

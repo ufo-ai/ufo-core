@@ -148,6 +148,7 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
         next_steps=args.next_steps,
         metadata=args.metadata,
         created_by_member_id=ctx.speaker_member_id,
+        requesting_message_ref=ctx.require_requesting_message(),
         baseline=baseline,
         next_probe_at=now + timedelta(minutes=args.interval_minutes),
         connections=args.connections,

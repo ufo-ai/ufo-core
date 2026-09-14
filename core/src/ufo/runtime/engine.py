@@ -482,6 +482,7 @@ class Arrival(BaseModel):
     rendered: str | None = None
     denial: str | None = None
     authorization_answer: AuthorizationAnswer | None = None
+    requesting_message_ref: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -492,6 +493,7 @@ class ActiveMessage:
     authorization_answer: AuthorizationAnswer | None = None
     reply_to_ref: str | None = None
     reply_to_text: str | None = None
+    continued: bool = False
 
 
 def _authorization_message_text(message: Message) -> str:
@@ -619,6 +621,7 @@ class _BoundToolCall:
     selected_message_ref: UUID | None = None
     selected_message: str = ""
     selected_from_multiple: bool = False
+    selected_from_continuation: bool = False
     authorization_pending: bool = False
     authorization_answer: AuthorizationAnswer | None = None
     authorization_context: AuthorizationContext | None = None
@@ -659,7 +662,9 @@ type _Resolution = EffectiveCall | _RejectedToolCall
 
 def _selected_member_authorization(bound: _BoundToolCall) -> bool:
     return bound.selected_message_ref is not None and (
-        bound.selected_from_multiple or bound.authorization_pending
+        bound.selected_from_multiple
+        or bound.selected_from_continuation
+        or bound.authorization_pending
     )
 
 
@@ -1494,10 +1499,16 @@ class _RuntimeTools:
         )
 
     def parallel_safe(self, call: HarnessToolCall) -> bool:
+        resolved = self._resolve(call)
         return (
-            self._resolve(call).parallel_safe
+            resolved.parallel_safe
             and not self.state.authorization_pending
             and REQUESTED_BY not in call.input
+            and not (
+                isinstance(resolved, EffectiveCall)
+                and resolved.tool.binds_member_authority
+                and any(requester.continued for requester in self.requesters.values())
+            )
         )
 
     async def preflight(self, calls: tuple[HarnessToolCall, ...]) -> None:
@@ -1733,6 +1744,7 @@ class TranscriptRepair:
                         ),
                         reply_to_ref=requester.reply_to_ref,
                         reply_to_text=requester.reply_to_text,
+                        continued=requester.continued,
                     )
                     for id_, requester in requesters.items()
                 ),
@@ -2029,6 +2041,14 @@ class TurnEngine:
             speaker_member_id=None,
             audience=self.audience,
             artifact_token_secret=self.artifact_token_secret,
+            requesting_message_ref=(
+                self.turn.id
+                if self.turn.admission_source == MEMBER_ADMISSION
+                and self.turn.speaker_member_id is not None
+                else (
+                    None if self.turn.context is None else self.turn.context.requesting_message_ref
+                )
+            ),
             grants=self.grants,
             granted_actions=self.granted_actions,
             skills=self.skills,
@@ -2225,6 +2245,7 @@ class TurnEngine:
                         ),
                         reply_to_ref=requester.reply_to_ref,
                         reply_to_text=requester.reply_to_text,
+                        continued=requester.continued,
                     )
                     for requester in parked.requesters
                 }
@@ -2278,7 +2299,14 @@ class TurnEngine:
         founding = messages[-1].content
         if not isinstance(founding, str):
             raise RuntimeError("founding inbound did not render as text")
-        if not self.turn.spawned:
+        requesting_message_ref = (
+            None if self.turn.context is None else self.turn.context.requesting_message_ref
+        )
+        if requesting_message_ref is not None:
+            requesters[requesting_message_ref] = await self._continued_requester(
+                requesting_message_ref
+            )
+        elif not self.turn.spawned:
             parent = (
                 _authorization_assistant(self.turn.id, len(messages) - 2, messages[-2])
                 if len(messages) > 1
@@ -2297,6 +2325,51 @@ class TurnEngine:
             rendered = INJECTED_CONTEXT.format(content=founding, injected=injected)
             messages = (*messages[:-1], Message(role="user", content=rendered))
         return _PreparedRun(system, messages, injected)
+
+    async def _continued_requester(self, message_ref: UUID) -> ActiveMessage:
+        async with workspace_tx() as connection:
+            founding = (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.speaker_member_id,
+                        tables.turn.c.inbound,
+                        tables.turn.c.context,
+                        tables.turn.c.admission_source,
+                    ).where(
+                        tables.turn.c.workspace_id == self.turn.workspace_id,
+                        tables.turn.c.id == message_ref,
+                    )
+                )
+            ).one_or_none()
+            arrival = (
+                await connection.execute(
+                    sa.select(
+                        tables.inbound_message.c.speaker_member_id,
+                        tables.inbound_message.c.body.label("inbound"),
+                        tables.inbound_message.c.context,
+                        tables.inbound_message.c.admission_source,
+                    ).where(
+                        tables.inbound_message.c.workspace_id == self.turn.workspace_id,
+                        tables.inbound_message.c.id == message_ref,
+                    )
+                )
+            ).one_or_none()
+        rows = tuple(row for row in (founding, arrival) if row is not None)
+        if len(rows) != 1:
+            raise RuntimeError("requesting message ref does not name exactly one message")
+        row = rows[0]
+        if row.admission_source != MEMBER_ADMISSION or row.speaker_member_id is None:
+            raise RuntimeError(
+                "requesting message ref does not name an authenticated member message"
+            )
+        context = None if row.context is None else TurnContext.model_validate(row.context)
+        return ActiveMessage(
+            member_id=row.speaker_member_id,
+            rendered=row.inbound,
+            admission_source=row.admission_source,
+            authorization_answer=_authorization_answer(context),
+            continued=True,
+        )
 
     async def run_intent(self) -> TerminalFrame | None:
         """Run an intent turn: dispatch its one typed tool call verbatim and commit the result.
@@ -2328,6 +2401,14 @@ class TurnEngine:
             speaker_member_id=None,
             audience=self.audience,
             artifact_token_secret=self.artifact_token_secret,
+            requesting_message_ref=(
+                self.turn.id
+                if self.turn.admission_source == MEMBER_ADMISSION
+                and self.turn.speaker_member_id is not None
+                else (
+                    None if self.turn.context is None else self.turn.context.requesting_message_ref
+                )
+            ),
             grants=self.grants,
             granted_actions=self.granted_actions,
             skills=self.skills,
@@ -2682,14 +2763,19 @@ class TurnEngine:
                     if messages
                     else None
                 )
-                requesters[arrival.id] = ActiveMessage(
-                    member_id=arrival.speaker_member_id,
-                    rendered=member_message_text(arrival.rendered),
-                    admission_source=arrival.admission_source,
-                    authorization_answer=arrival.authorization_answer,
-                    reply_to_ref=None if parent is None else parent.ref,
-                    reply_to_text=None if parent is None else parent.text,
-                )
+                if arrival.requesting_message_ref is None:
+                    requesters[arrival.id] = ActiveMessage(
+                        member_id=arrival.speaker_member_id,
+                        rendered=member_message_text(arrival.rendered),
+                        admission_source=arrival.admission_source,
+                        authorization_answer=arrival.authorization_answer,
+                        reply_to_ref=None if parent is None else parent.ref,
+                        reply_to_text=None if parent is None else parent.text,
+                    )
+                else:
+                    requesters[arrival.requesting_message_ref] = await self._continued_requester(
+                        arrival.requesting_message_ref
+                    )
             message = Message(role="user", content=arrival.rendered)
             arrival_log.append(message)
             messages = (*messages, message)
@@ -2955,6 +3041,9 @@ class TurnEngine:
                     rendered=rendered,
                     denial=denial,
                     authorization_answer=_authorization_answer(context),
+                    requesting_message_ref=(
+                        None if context is None else context.requesting_message_ref
+                    ),
                 )
             )
         if arrivals:
@@ -3165,7 +3254,9 @@ class TurnEngine:
 
     async def _enforce_seats(self, requesters: Mapping[UUID, ActiveMessage]) -> None:
         members = {
-            message.member_id for message in requesters.values() if message.member_id is not None
+            message.member_id
+            for message in requesters.values()
+            if message.member_id is not None and not message.continued
         }
         if members:
             async with workspace_tx() as connection:
@@ -3652,6 +3743,7 @@ class TurnEngine:
         requester: UUID | None = None
         selected_ref: UUID | None = None
         selected_message = ""
+        selected_from_continuation = False
         active_members = self._active_member_ids(requesters)
         sole_member = self._sole_active_member(requesters)
         profile_only = item.tool.profile_only
@@ -3677,11 +3769,8 @@ class TurnEngine:
                 raise SpeakerRequired(f"{REQUESTED_BY} message has no member requester")
             selected_ref = message_id
             selected_message = selected.rendered
-            newest_ref = next(
-                ref
-                for ref, message in reversed(tuple(requesters.items()))
-                if message.member_id == requester
-            )
+            selected_from_continuation = selected.continued
+            newest_ref = self._newest_requester_ref(requesters, requester)
             if selected_ref != newest_ref:
                 raise SpeakerRequired(
                     f"{REQUESTED_BY} must name this member's newest active inbound message: "
@@ -3689,15 +3778,21 @@ class TurnEngine:
                 )
         elif item.tool.binds_member_authority and sole_member is not None:
             requester = sole_member
-            selected_ref, selected = next(
-                (ref, message)
-                for ref, message in reversed(tuple(requesters.items()))
-                if message.member_id == requester
-            )
+            selected_ref = self._newest_requester_ref(requesters, requester)
+            selected = requesters[selected_ref]
             selected_message = selected.rendered
+            selected_from_continuation = selected.continued
+        causal_ref = selected_ref
+        if causal_ref is None and context.requesting_message_ref in requesters:
+            causal = requesters[context.requesting_message_ref]
+            if causal.member_id is not None:
+                causal_ref = self._newest_requester_ref(requesters, causal.member_id)
+        if causal_ref is None and sole_member is not None:
+            causal_ref = self._newest_requester_ref(requesters, sole_member)
         bound_context = replace(
             context,
             speaker_member_id=requester,
+            requesting_message_ref=causal_ref,
             other_members_active=len(active_members) > 1,
             member_messages_active=any(
                 message.admission_source == MEMBER_ADMISSION for message in requesters.values()
@@ -3716,6 +3811,7 @@ class TurnEngine:
             selected_message_ref=selected_ref,
             selected_message=selected_message,
             selected_from_multiple=selected_ref is not None and sole_member is None,
+            selected_from_continuation=selected_from_continuation,
             authorization_pending=authorization_pending and requester is not None,
             authorization_answer=(
                 None if selected_ref is None else requesters[selected_ref].authorization_answer
@@ -3828,6 +3924,17 @@ class TurnEngine:
     def _active_member_ids(self, requesters: Mapping[UUID, ActiveMessage]) -> frozenset[UUID]:
         return frozenset(
             message.member_id for message in requesters.values() if message.member_id is not None
+        )
+
+    def _newest_requester_ref(
+        self, requesters: Mapping[UUID, ActiveMessage], member_id: UUID
+    ) -> UUID:
+        member_messages = tuple(
+            (ref, message) for ref, message in requesters.items() if message.member_id == member_id
+        )
+        return next(
+            (ref for ref, message in reversed(member_messages) if not message.continued),
+            member_messages[-1][0],
         )
 
     def _sole_active_member(self, requesters: Mapping[UUID, ActiveMessage]) -> UUID | None:
@@ -4328,7 +4435,17 @@ class TurnEngine:
                 ),
                 outcome="member_authorization_denied",
             )
-        return _AuthorizedDispatch(context, args)
+        return _AuthorizedDispatch(
+            (
+                context
+                if authorization.requesting_message_ref is None
+                else replace(
+                    context,
+                    requesting_message_ref=authorization.requesting_message_ref,
+                )
+            ),
+            args,
+        )
 
     async def _standing_authorization(
         self, bound: _BoundToolCall, context: ToolContext, args: BaseModel

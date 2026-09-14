@@ -2845,6 +2845,101 @@ async def test_an_omitted_ref_binds_the_only_active_member_in_any_conversation(
     ]
 
 
+async def test_a_spawn_continuation_binds_its_causal_request_and_rechecks_the_effect(
+    db: None, tmp_path: Path
+) -> None:
+    class StrictInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    request = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    async with workspace_tx() as connection:
+        member = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == request.conversation_id
+                )
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(speaker_member_id=member, inbound="Watch the pull request")
+            .where(tables.turn.c.id == request.id)
+        )
+    authorized_ref = uuid4()
+    gate = RecordingMemberAuthorization(
+        AuthorizationResolution("allow", requesting_message_ref=authorized_ref)
+    )
+    seen: list[tuple[UUID | None, UUID | None]] = []
+    inherited: list[tuple[UUID | None, UUID | None]] = []
+
+    async def capture(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        seen.append((ctx.speaker_member_id, ctx.requesting_message_ref))
+        return ToolResult(content=(TextContent(text="watching"),))
+
+    async def delegate(ctx: ToolContext, args: StrictInput) -> ToolResult:
+        inherited.append((ctx.speaker_member_id, ctx.requesting_message_ref))
+        return ToolResult(content=(TextContent(text="delegated"),))
+
+    engine = replace(
+        _engine(request, EchoModel(), tmp_path),
+        member_authorization=gate,
+        tools=ToolRegistry(
+            (
+                ToolDef(name="watch", description="d", input_model=StrictInput, handler=capture),
+                ToolDef(
+                    name="delegate",
+                    description="d",
+                    input_model=StrictInput,
+                    handler=delegate,
+                    binds_member_authority=False,
+                ),
+            )
+        ),
+    )
+    with ws(request.workspace_id):
+        requester = await engine._continued_requester(request.id)
+        result = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(id="watch", name="watch", input={}),
+            {request.id: requester},
+        )
+
+    assert not result.is_error
+    assert seen == [(member, authorized_ref)]
+    [authorization] = gate.requests
+    assert authorization.member_id == member
+    assert authorization.message_ref == request.id
+    assert authorization.message == "Watch the pull request"
+    assert not authorization.selected_from_multiple
+
+    with ws(request.workspace_id):
+        delegated = await _dispatch(
+            engine,
+            replace(_dispatch_context(engine), requesting_message_ref=request.id),
+            ToolUseBlock(id="delegate", name="delegate", input={}),
+            {request.id: requester},
+        )
+    assert not delegated.is_error
+    assert inherited == [(None, request.id)]
+    assert len(gate.requests) == 1
+
+    newer_ref = uuid4()
+    with ws(request.workspace_id):
+        newer = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(id="newer", name="watch", input={}),
+            {
+                request.id: requester,
+                newer_ref: ActiveMessage(member_id=member, rendered="Handle the new request"),
+            },
+        )
+    assert not newer.is_error
+    assert seen[-1] == (member, newer_ref)
+    assert len(gate.requests) == 1
+
+
 async def test_a_member_creates_an_app_in_their_own_conversation_without_the_ref(
     db: None, tmp_path: Path
 ) -> None:

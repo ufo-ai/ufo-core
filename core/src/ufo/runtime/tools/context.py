@@ -448,6 +448,7 @@ class Spawn(Protocol):
         model: str | None = None,
         *,
         requester_member_id: UUID | None = None,
+        requesting_message_ref: UUID | None = None,
     ) -> SpawnResult: ...
 
 
@@ -465,7 +466,14 @@ class SubagentControl(Protocol):
 
     async def cancel(self, turn_id: UUID) -> SubagentStatus: ...
 
-    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus: ...
+    async def message(
+        self,
+        turn_id: UUID,
+        text: str,
+        dedup_key: str,
+        *,
+        requesting_message_ref: UUID | None = None,
+    ) -> SubagentStatus: ...
 
 
 class ContextControl(Protocol):
@@ -619,6 +627,7 @@ class ToolContext:
     speaker_member_id: UUID | None
     audience: Audience
     artifact_token_secret: str
+    requesting_message_ref: UUID | None = None
     other_members_active: bool = False
     """Whether more than one member holds an active message this round — the one fact that says a
     miss on a private account could be corrected by naming another member."""
@@ -889,6 +898,12 @@ class ToolContext:
                 ADMIN_GATE_NEEDS_A_SPEAKER.format(gate=gate) if gate else CALL_NEEDS_A_SPEAKER
             )
         return self.speaker_member_id
+
+    def require_requesting_message(self) -> UUID:
+        """The authenticated message this member-bound call selected."""
+        if self.requesting_message_ref is None:
+            raise RuntimeError("member-bound call has no requesting message")
+        return self.requesting_message_ref
 
     async def require_speaking_admin(self, gate: str) -> bool:
         """The same answer, with the speaker question asked first. `speaker_is_admin` answers False

@@ -398,6 +398,7 @@ async def test_the_selected_member_can_answer_the_pending_question_once(db: None
     repeated = await gate.authorize(_request(ids, "Allow", message_ref=answer_ref, answer=answer))
 
     assert allowed.decision == "allow"
+    assert allowed.requesting_message_ref == first_ref
     assert repeated.decision == "deny"
     [stored] = await _authorizations()
     assert stored["requested_by"] == first_ref

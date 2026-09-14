@@ -147,7 +147,7 @@ class StubSubagentControl:
     statuses: dict[UUID, SubagentStatus] = field(default_factory=dict)
     waited: list[tuple[UUID, ...]] = field(default_factory=list)
     cancelled: list[UUID] = field(default_factory=list)
-    messaged: list[tuple[UUID, str, str]] = field(default_factory=list)
+    messaged: list[tuple[UUID, str, str, UUID | None]] = field(default_factory=list)
 
     async def wait(self, turn_ids: tuple[UUID, ...]) -> tuple[SubagentStatus, ...]:
         self.waited.append(turn_ids)
@@ -162,8 +162,15 @@ class StubSubagentControl:
             turn_id, SubagentStatus(turn_id=turn_id, status="cancelled", text="")
         )
 
-    async def message(self, turn_id: UUID, text: str, dedup_key: str) -> SubagentStatus:
-        self.messaged.append((turn_id, text, dedup_key))
+    async def message(
+        self,
+        turn_id: UUID,
+        text: str,
+        dedup_key: str,
+        *,
+        requesting_message_ref: UUID | None = None,
+    ) -> SubagentStatus:
+        self.messaged.append((turn_id, text, dedup_key, requesting_message_ref))
         return self.statuses.get(turn_id, SubagentStatus(turn_id=turn_id, status="queued", text=""))
 
 
@@ -1041,9 +1048,11 @@ async def test_message_spawn_forwards_the_message_keyed_on_the_call(tmp_path: Pa
     child = uuid4()
     control = StubSubagentControl()
     assert REGISTRY.get("message_spawn").side_effecting is True
+    request_ref = uuid4()
     ctx = replace(
         make_context(FakeSandbox(), tmp_path, subagents=control),
         idempotency_key="turn-1/message_spawn/call-2",
+        requesting_message_ref=request_ref,
     )
     result = await run(
         "message_spawn",
@@ -1051,7 +1060,7 @@ async def test_message_spawn_forwards_the_message_keyed_on_the_call(tmp_path: Pa
         spawn_id=str(child),
         message="also check X",
     )
-    assert control.messaged == [(child, "also check X", "turn-1/message_spawn/call-2")]
+    assert control.messaged == [(child, "also check X", "turn-1/message_spawn/call-2", request_ref)]
     assert json.loads(result.content[0].text) == {"spawn_id": str(child), "status": "queued"}
 
 
@@ -1166,7 +1175,7 @@ async def test_spawn_wrong_payload_is_an_error_naming_the_targets_keys(
 
 
 async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path) -> None:
-    recorded: list[tuple[str | None, bool, UUID | None]] = []
+    recorded: list[tuple[str | None, bool, UUID | None, UUID | None]] = []
 
     async def _record(
         target: str,
@@ -1179,16 +1188,19 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         model: str | None = None,
         *,
         requester_member_id: UUID | None = None,
+        requesting_message_ref: UUID | None = None,
     ) -> SpawnResult:
-        recorded.append((dedup_key, delivers_result, requester_member_id))
+        recorded.append((dedup_key, delivers_result, requester_member_id, requesting_message_ref))
         return SpawnResult(turn_id=uuid4(), conversation_id=uuid4(), output=None)
 
     assert REGISTRY.get("spawn").side_effecting is True
     speaker = uuid4()
+    request_ref = uuid4()
     ctx = replace(
         make_context(FakeSandbox(), tmp_path, spawn=_record),
         idempotency_key="turn-1/spawn/call-1",
         speaker_member_id=speaker,
+        requesting_message_ref=request_ref,
     )
     result = await run(
         "spawn",
@@ -1197,7 +1209,7 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         payload={"task": "x"},
         background=True,
     )
-    assert recorded == [("turn-1/spawn/call-1", True, speaker)]
+    assert recorded == [("turn-1/spawn/call-1", True, speaker, request_ref)]
     assert not result.is_error
 
     await run(
@@ -1206,7 +1218,7 @@ async def test_spawn_keys_the_child_on_the_calls_idempotency_key(tmp_path: Path)
         target="research",
         payload={"task": "x"},
     )
-    assert recorded[1] == ("turn-1/spawn/call-1", False, speaker)
+    assert recorded[1] == ("turn-1/spawn/call-1", False, speaker, request_ref)
 
 
 async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refusal(
@@ -1228,6 +1240,7 @@ async def test_spawn_carries_the_calls_model_to_the_child_and_surfaces_its_refus
         model: str | None = None,
         *,
         requester_member_id: UUID | None = None,
+        requesting_message_ref: UUID | None = None,
     ) -> SpawnResult:
         asked.append((model, requester_member_id))
         if model == "gpt-5.6-sol":

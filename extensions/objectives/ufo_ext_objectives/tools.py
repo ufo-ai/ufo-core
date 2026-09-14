@@ -324,6 +324,7 @@ async def run_independent_steps(ctx: ToolContext, args: RunIndependentStepsInput
                 background=True,
                 dedup_key=f"{args.name}/{step.title}",
                 delivers_result=True,
+                requesting_message_ref=ctx.requesting_message_ref,
             )
         except Exception as error:
             return _dispatch_stopped(step.title, dispatched, error).result()

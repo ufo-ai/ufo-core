@@ -34,6 +34,7 @@ class ParkedRequester(BaseModel):
     authorization_choice: AuthorizationChoice | None = None
     reply_to_ref: str | None = None
     reply_to_text: str | None = None
+    continued: bool = False
 
 
 class ParkedTurn(BaseModel):
