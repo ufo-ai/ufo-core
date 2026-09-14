@@ -462,7 +462,6 @@ def test_notification_runtime_backfill_and_outgoing_writes_fail_closed(tmp_path:
                     "status": "running",
                     "inbound": "scoped",
                     "idempotency_key": None,
-                    "on_behalf_of_member_id": None,
                     "speaker_member_id": member_id,
                     "runtime_config": TurnRuntimeConfig(
                         internet_access=False, connections=(connection_id,)
@@ -479,7 +478,6 @@ def test_notification_runtime_backfill_and_outgoing_writes_fail_closed(tmp_path:
                     "status": "running",
                     "inbound": "ordinary",
                     "idempotency_key": None,
-                    "on_behalf_of_member_id": None,
                     "speaker_member_id": member_id,
                     "runtime_config": None,
                     "created_at": now,
@@ -495,7 +493,6 @@ def test_notification_runtime_backfill_and_outgoing_writes_fail_closed(tmp_path:
                     "inbound": "relay",
                     "runtime_config": None,
                     "speaker_member_id": None,
-                    "on_behalf_of_member_id": member_id,
                     "idempotency_key": f"notify-deliver:{ordinary_turn.hex}",
                     "created_at": now,
                     "updated_at": now,

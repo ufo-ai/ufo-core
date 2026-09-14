@@ -11,9 +11,12 @@ from sqlalchemy.engine import make_url
 
 from ufo.db import MIGRATIONS_DIR
 from ufo.schema.records import ModelAccountCapability, TurnRuntimeConfig
+from ufo.schema.tables import turn as current_turn
 
 BEFORE = "20260913173609"
 REVISION = "20260913183147"
+PRIOR_HEAD = "20260913193910"
+RETIRED_REVISION = "20260913214954"
 NOW = datetime(2026, 9, 13, tzinfo=UTC)
 
 
@@ -378,5 +381,105 @@ def test_turn_capabilities_are_exact_across_the_schema_cutover(
                 "connections": sorted([str(ids["owned"]), str(ids["shared"])])
             }
             assert updated.model_accounts == _accounts(ids["member"])
+            connection.commit()
+    engine.dispose()
+
+
+def test_turn_principal_compatibility_is_removed_after_deploy(
+    migration_urls: tuple[str, str],
+) -> None:
+    migration_url, sync_url = migration_urls
+    postgres = migration_url.startswith("postgresql")
+    config = _alembic(migration_url)
+    command.upgrade(config, BEFORE)
+    engine = sa.create_engine(sync_url)
+    with engine.connect() as connection:
+        ids = _seed(connection)
+    command.upgrade(config, RETIRED_REVISION)
+
+    with engine.connect() as connection:
+        columns = {column["name"] for column in sa.inspect(connection).get_columns("turn")}
+        assert "on_behalf_of_member_id" not in columns
+        turn = sa.Table("turn", sa.MetaData(), autoload_with=connection)
+        row = connection.execute(
+            sa.select(turn.c.runtime_config, turn.c.model_accounts).where(
+                turn.c.id == ids["narrow_turn"]
+            )
+        ).one()
+        assert row.runtime_config == {
+            "internet_access": False,
+            "connections": [str(ids["shared"])],
+        }
+        assert row.model_accounts == _accounts(ids["member"])
+        unscoped = uuid4()
+        connection.execute(
+            current_turn.insert().values(
+                id=unscoped,
+                workspace_id=ids["workspace"],
+                conversation_id=ids["conversation"],
+                agent_id=ids["agent"],
+                seq=4,
+                status="queued",
+                inbound="unscoped",
+                runtime_config=None,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        )
+        assert connection.scalar(
+            sa.select(turn.c.id).where(
+                turn.c.id == unscoped,
+                turn.c.runtime_config.is_(None),
+            )
+        ) == (unscoped if postgres else unscoped.hex)
+        if postgres:
+            assert (
+                connection.scalar(
+                    sa.text("select count(*) from pg_trigger where tgname = :name"),
+                    {"name": "turn_capability_scope"},
+                )
+                == 0
+            )
+            assert (
+                connection.scalar(
+                    sa.text("select count(*) from pg_proc where proname = :name"),
+                    {"name": "ufo_scope_turn_capabilities"},
+                )
+                == 0
+            )
+
+    command.downgrade(config, PRIOR_HEAD)
+    with engine.connect() as connection:
+        turn = sa.Table("turn", sa.MetaData(), autoload_with=connection)
+        assert turn.c.on_behalf_of_member_id is not None
+        if postgres:
+            assert (
+                connection.scalar(
+                    sa.text("select count(*) from pg_trigger where tgname = :name"),
+                    {"name": "turn_capability_scope"},
+                )
+                == 1
+            )
+            restored = uuid4()
+            connection.execute(
+                turn.insert().values(
+                    id=restored,
+                    workspace_id=ids["workspace"],
+                    conversation_id=ids["conversation"],
+                    agent_id=ids["agent"],
+                    seq=4,
+                    status="queued",
+                    inbound="restored compatibility",
+                    on_behalf_of_member_id=ids["member"],
+                    runtime_config={"connections": [str(ids["foreign"]), str(ids["shared"])]},
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            )
+            row = connection.execute(
+                sa.select(turn.c.runtime_config, turn.c.model_accounts).where(turn.c.id == restored)
+            ).one()
+            assert row.runtime_config == {"connections": [str(ids["shared"])]}
+            assert row.model_accounts == _accounts(ids["member"])
             connection.commit()
     engine.dispose()

@@ -82,7 +82,6 @@ ADMISSION_FACTORY = CORE_SRC / "serve.py"
 ADMISSION_FACTORY_NAME = "_admission"
 ADMISSION_HARNESS_ROOT = "evals"
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
-TRIGGER_INPUT_COLUMNS = {("turn", "on_behalf_of_member_id")}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
 AMBIENT_SCHEDULE_METHODS = frozenset({"create", "update", "cancel", "list", "inspect"})
@@ -862,7 +861,7 @@ def _wiring_failures(trees: dict[Path, ast.Module]) -> list[str]:
     for table, column in columns:
         if column in ENVELOPE_COLUMNS:
             continue
-        if column not in write_columns and (table, column) not in TRIGGER_INPUT_COLUMNS:
+        if column not in write_columns:
             failures.append(f"schema: {table}.{column} has no write site")
         if column not in read_columns:
             failures.append(f"schema: {table}.{column} has no read site")

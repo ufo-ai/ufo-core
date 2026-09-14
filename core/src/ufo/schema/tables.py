@@ -385,7 +385,6 @@ turn = sa.Table(
     sa.Column("inbound", sa.Text, nullable=False),
     sa.Column("admission_source", sa.Text, nullable=False, server_default="internal"),
     sa.Column("speaker_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
-    sa.Column("on_behalf_of_member_id", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
     sa.Column("fired_by_kind", sa.Text, nullable=True),
     sa.Column("fired_by_name", sa.Text, nullable=True),
     sa.Column("fired_by_title", sa.Text, nullable=True),
@@ -405,7 +404,7 @@ turn = sa.Table(
     sa.Column("spawn_delivers_result", sa.Boolean, nullable=True),
     sa.Column("spawn_request_fingerprint", sa.Text, nullable=True),
     sa.Column("traceparent", sa.Text, nullable=True),
-    sa.Column("runtime_config", sa.JSON, nullable=True),
+    sa.Column("runtime_config", sa.JSON(none_as_null=True), nullable=True),
     sa.Column(
         "model_accounts",
         sa.JSON().with_variant(JSONB(), "postgresql"),
