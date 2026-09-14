@@ -48,6 +48,7 @@ use crate::ui::toolrender::OpView;
 use crate::wire::{ConversationRow, OpRequest, Target};
 
 pub const PROMPT_IDLE: &str = "›";
+pub const SENT_BY_UFO: &str = "∵ Sent by UFO";
 pub const FOCUS_CARET: &str = "❯";
 const SERVER_PROMPT: &str = ">";
 const READ_ONLY_MESSAGE: &str =
@@ -896,6 +897,12 @@ impl<W: Write> App<W> {
 
     pub fn member_replay(&mut self, text: &str) {
         self.draw_member(text);
+    }
+
+    pub fn fired_replay(&mut self, text: &str) {
+        self.flush_stream();
+        self.retained.push(Entry::Fired(text.to_string()));
+        self.reply_open = false;
     }
 
     pub fn member_echo(&mut self, text: &str) {

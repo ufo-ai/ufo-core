@@ -94,6 +94,7 @@ pub struct AuthorizationAnswer {
 pub enum Directive {
     Say(String),
     You(String),
+    Fired(String),
     Sent {
         turn_id: String,
         opened: bool,
@@ -173,6 +174,7 @@ pub fn parse_line(line: &str) -> Directive {
     match verb {
         "say" => Directive::Say(field(&fields, 0)),
         "you" => Directive::You(field(&fields, 0)),
+        "fired" => Directive::Fired(field(&fields, 0)),
         "sent" if fields.len() >= 2 => Directive::Sent {
             turn_id: fields[0].clone(),
             opened: fields[1] == "1",
@@ -1062,6 +1064,10 @@ mod tests {
             Directive::You("my words".into())
         );
         assert_eq!(
+            parse_line("fired\tgithub: Fix the build updated"),
+            Directive::Fired("github: Fix the build updated".into())
+        );
+        assert_eq!(
             parse_line("sent\tturn-9\t0\tarr-3"),
             Directive::Sent {
                 turn_id: "turn-9".into(),
@@ -1295,6 +1301,7 @@ mod tests {
         match directive {
             Directive::Say(text) => Some(("say", vec![text.clone()])),
             Directive::You(text) => Some(("you", vec![text.clone()])),
+            Directive::Fired(text) => Some(("fired", vec![text.clone()])),
             Directive::Note(text) => Some(("note", vec![text.clone()])),
             Directive::Activity { text, run } => {
                 let mut fields = vec![text.clone(), "activity".to_string()];

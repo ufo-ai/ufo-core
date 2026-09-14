@@ -107,6 +107,7 @@ from ufo.runtime.ext.surface import (
     mint_marker,
     record_transcript_access,
     scheduled_runs,
+    with_agent_detail,
     writeback_says_nothing,
     writeback_workspaces,
 )
@@ -3690,6 +3691,18 @@ def test_member_message_text_strips_the_engine_envelope() -> None:
     )
     assert member_message_text(fenced) == "sup"
     typed = "keep this <context>\nnot the engine's\n</context>\n and this <injected_context> too"
+    assert member_message_text(typed) == typed
+
+
+def test_member_message_text_folds_the_agent_detail() -> None:
+    """An extension's alert states one line for the member and the rest for the agent; the words a
+    projection draws are the line, whether or not the engine appended its recall behind."""
+    tag = _context_tag(uuid4(), None, datetime(2026, 8, 16, 23, 4, tzinfo=UTC))
+    alert = tag + with_agent_detail("github: Fix the build updated", "object_get refs: page/1.")
+    assert member_message_text(alert) == "github: Fix the build updated"
+    recalled = INJECTED_CONTEXT.format(content=alert, injected="Relevant memory:\n- a fact")
+    assert member_message_text(recalled) == "github: Fix the build updated"
+    typed = "keep <agent_detail>\nthis\n</agent_detail>"
     assert member_message_text(typed) == typed
 
 

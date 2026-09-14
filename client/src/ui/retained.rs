@@ -1,7 +1,7 @@
 use ratatui::text::{Line, Span};
 
 use crate::ui::theme::Theme;
-use crate::ui::{markdown, masthead, wrap, PROMPT_IDLE};
+use crate::ui::{markdown, masthead, wrap, PROMPT_IDLE, SENT_BY_UFO};
 
 pub const ENTRY_MAX: usize = 2000;
 const ECHO_INDENT: &str = "  ";
@@ -15,6 +15,7 @@ const RUN_INDENT: &str = "  ";
 
 pub enum Entry {
     Member(String),
+    Fired(String),
     Markdown(String),
     Note(String),
     Steps { steps: Vec<Step>, fold: Fold },
@@ -358,7 +359,7 @@ impl Retained {
         let top = self.total.saturating_sub(self.scroll_back + self.rows);
         let mut target = None;
         for (index, entry) in self.entries.iter().enumerate() {
-            if !matches!(entry, Entry::Member(_)) {
+            if !matches!(entry, Entry::Member(_) | Entry::Fired(_)) {
                 continue;
             }
             let place = self.places[index];
@@ -537,6 +538,7 @@ impl Retained {
 fn render(entry: &Entry, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     match entry {
         Entry::Member(text) => member_lines(text, theme, width),
+        Entry::Fired(text) => fired_lines(text, theme, width),
         Entry::Markdown(source) => markdown::render(source, theme, width),
         Entry::Note(text) => vec![Line::styled(text.clone(), theme.muted)],
         Entry::Steps { steps, fold } => steps_lines(steps, *fold, theme, width),
@@ -667,6 +669,29 @@ fn run_row(label: &str, rows: &[String], opened: bool, fold: Fold) -> String {
 }
 
 fn member_lines(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    let caret = Span::styled(format!("{PROMPT_IDLE} "), theme.prompt);
+    let mut lines = vec![Line::raw("")];
+    lines.extend(said_lines(text, caret, theme, width));
+    lines.push(Line::raw(""));
+    lines
+}
+
+fn fired_lines(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::raw(""),
+        Line::styled(SENT_BY_UFO.to_string(), theme.muted),
+    ];
+    lines.extend(said_lines(
+        text,
+        Span::raw(ECHO_INDENT.to_string()),
+        theme,
+        width,
+    ));
+    lines.push(Line::raw(""));
+    lines
+}
+
+fn said_lines(text: &str, lead: Span<'static>, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     let cap = (width as usize)
         .saturating_sub(wrap::width(ECHO_INDENT))
         .max(1);
@@ -674,18 +699,18 @@ fn member_lines(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     if rows.is_empty() {
         rows.push("");
     }
-    let mut lines = vec![Line::raw("")];
+    let mut lines = Vec::new();
     for row in rows {
         let mut rest = row;
         loop {
             let (head, next) = wrap::wrap_head(rest, cap);
-            let lead = if lines.len() == 1 {
-                Span::styled(format!("{PROMPT_IDLE} "), theme.prompt)
+            let first = if lines.is_empty() {
+                lead.clone()
             } else {
                 Span::raw(ECHO_INDENT.to_string())
             };
             lines.push(Line::from(vec![
-                lead,
+                first,
                 Span::styled(rest[..head].to_string(), theme.member),
             ]));
             if next >= rest.len() {
@@ -694,7 +719,6 @@ fn member_lines(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
             rest = &rest[next..];
         }
     }
-    lines.push(Line::raw(""));
     lines
 }
 
@@ -917,6 +941,22 @@ mod tests {
         let mut retained = Retained::new(40);
         retained.push(Entry::Member("one\ntwo".into()));
         assert_eq!(texts(&retained.document(&theme)), ["› one", "  two", ""]);
+    }
+
+    #[test]
+    fn a_fired_message_stands_under_the_line_saying_ufo_sent_it() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.push(Entry::Fired("github: Fix the build updated\nsecond".into()));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "∵ Sent by UFO",
+                "  github: Fix the build updated",
+                "  second",
+                ""
+            ]
+        );
     }
 
     #[test]

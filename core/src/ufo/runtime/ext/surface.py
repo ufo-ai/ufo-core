@@ -262,6 +262,10 @@ _ATTACHMENTS_TEMPLATE = (
 _CONTEXT_TAG_RE = re.compile(r"\A<context>\n.*?\n</context>\n", re.DOTALL)
 _MESSAGE_REF_RE = re.compile(r"\A\s*<context>\s*message_ref:\s*(?P<ref>[^\n]+)")
 _INJECTED_CONTEXT_RE = re.compile(r"\n\n<injected_context>\n.*\n</injected_context>\Z", re.DOTALL)
+AGENT_DETAIL_ELEMENT = "agent_detail"
+_AGENT_DETAIL_RE = re.compile(
+    rf"\n<{AGENT_DETAIL_ELEMENT}>\n.*\n</{AGENT_DETAIL_ELEMENT}>\Z", re.DOTALL
+)
 
 SILENCE_SENTINEL = "<response></response>"
 """The whole delivery of a turn that has nothing to say: an empty response element, which cannot
@@ -350,18 +354,27 @@ def inbox_name(raw: str, used: set[str]) -> str:
     return name
 
 
+def with_agent_detail(headline: str, detail: str) -> str:
+    """An inbound an extension admits on a conversation no member spoke in: the one line every
+    member's view draws, then the words the agent alone reads. `member_message_said` folds the
+    element away by its anchor at the tail, so the headline is what a bubble, a `you` line and the
+    conversation's name state."""
+    return f"{headline}\n<{AGENT_DETAIL_ELEMENT}>\n{detail}\n</{AGENT_DETAIL_ELEMENT}>"
+
+
 def member_message_text(inbound: str) -> str:
     """The member's own words back out of an inbound, for a projection that renders what the member
     said rather than the prompt the turn ran on.
 
-    Two wrappers come off. The engine's envelope — the <context> tag it writes at the head of every
-    member turn and the <injected_context> recall it appends at the tail — persists into the
+    Three wrappers come off. The engine's envelope — the <context> tag it writes at the head of
+    every member turn and the <injected_context> recall it appends at the tail — persists into the
     transcript, so a projection reading messages back (the terminal's resume replay) strips it by
     its anchors: the head of the text and the tail, positions no member's own words can hold. The
-    surface fence is exact rather than anchored: the element is named with a marker minted for that
-    one message, so the only text that can close it is text `fence_member_message` wrote, and a
-    member who types `</member_message>` closes nothing. An inbound wearing neither — a prepared
-    intent, a subagent payload — is its own text."""
+    agent detail `with_agent_detail` wrote under an extension's headline anchors at the tail the
+    same way. The surface fence is exact rather than anchored: the element is named with a marker
+    minted for that one message, so the only text that can close it is text `fence_member_message`
+    wrote, and a member who types `</member_message>` closes nothing. An inbound wearing none — a
+    prepared intent, a subagent payload — is its own text."""
     return member_message_said(inbound)[0]
 
 
@@ -372,7 +385,7 @@ def member_message_said(inbound: str) -> tuple[str, bool]:
     portal, which admission stores unfenced on the very same conversation. A projection that reads
     a channel's own markup out of the words asks this per message rather than per conversation: a
     Slack thread carries portal comments too, and their `*` is the character the member typed."""
-    said = _INJECTED_CONTEXT_RE.sub("", _CONTEXT_TAG_RE.sub("", inbound))
+    said = _AGENT_DETAIL_RE.sub("", _INJECTED_CONTEXT_RE.sub("", _CONTEXT_TAG_RE.sub("", inbound)))
     found = _MEMBER_MESSAGE_RE.search(said)
     return (said, False) if found is None else (found.group("said"), True)
 

@@ -30,6 +30,9 @@ pub enum Event {
     MemberMessage {
         text: String,
     },
+    FiredMessage {
+        text: String,
+    },
     Note {
         text: String,
     },
@@ -173,6 +176,7 @@ impl Driver {
             Directive::Txt(text) => vec![Event::TextDelta { text: text.clone() }],
             Directive::Say(text) => vec![Event::Message { text: text.clone() }],
             Directive::You(text) => vec![Event::MemberMessage { text: text.clone() }],
+            Directive::Fired(text) => vec![Event::FiredMessage { text: text.clone() }],
             Directive::Note(text) => vec![Event::Note { text: text.clone() }],
             Directive::Activity { text, .. } => vec![Event::Status { text: text.clone() }],
             Directive::Status(text) => vec![Event::Status { text: text.clone() }],

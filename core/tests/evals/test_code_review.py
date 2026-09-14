@@ -654,14 +654,14 @@ def test_current_batch_case_names_both_pages_in_order() -> None:
     first, second = (str(page_id) for page_id in code_review.CURRENT_BATCH_PAGE_IDS)
 
     assert case.message.index(first) < case.message.index(second)
-    assert "pass each ref unchanged to object_get" in case.message
+    assert "object_get refs, in order, unchanged" in case.message
 
 
 def test_change_log_batch_case_names_the_complete_log() -> None:
     case = next(case for case in code_review.CASES if case.name == "code-review-change-log-batch")
 
     assert code_review.CHANGE_LOG_PATH in case.message
-    assert "Every changed page is one JSON line" in case.message
+    assert "One JSON line per changed page" in case.message
     assert len(code_review.CHANGE_LOG_BATCH_PAGE_IDS) == 6
 
 

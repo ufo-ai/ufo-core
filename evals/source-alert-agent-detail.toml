@@ -1,0 +1,112 @@
+name = "source-alert-agent-detail"
+base = "HEAD"
+suites = ["code_review"]
+agent = "code"
+member_model_provider = "anthropic"
+cases = [
+  "code-review-current-batch",
+  "code-review-change-log-batch",
+]
+repeats = 3
+concurrency = 1
+max_stacks = 1
+budget_usd = 8.0
+est_usd_per_case = 0.50
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "prior-alert-wording"
+
+[[arm.replacements]]
+path = "extensions/sources/ufo_ext_sources/tools.py"
+old = '''
+ALERT_CLOSING = (
+    "No member is reading. Do what this conversation set the watch for; write to the member only "
+    "when the change needs them."
+)
+'''
+new = '''
+ALERT_CLOSING = (
+    "No member is reading this turn. Do what this conversation set the watch for, and write to "
+    "the member only when the change needs them."
+)
+'''
+
+[[arm.replacements]]
+path = "extensions/sources/ufo_ext_sources/tools.py"
+old = '''
+    if len(changes) <= ALERT_NAMED_MAX:
+        detail = (
+            "object_get refs, in order, unchanged: "
+            f"{'; '.join(f'{PAGE_KIND}/{change.page_id}' for change in changes)}."
+        )
+    elif log_path is not None:
+        detail = (
+            f"One JSON line per changed page in {log_path}; narrow it with jq or grep, then "
+            "object_get the refs that matter."
+        )
+    else:
+        detail = (
+            "List them with object_list page, filtered on this source and stream, ordered by "
+            "updated_at desc."
+        )
+    feed = f"connection {_feed_name(connection)} ({_feed_summary(connection)})"
+    watched = f"{trigger.resource} on {feed}" if trigger.resource else feed
+    return with_agent_detail(
+        _headline(connection, changes),
+        f"{_stream_counts(changes)} on {watched}.\n{detail}\n{ALERT_CLOSING}",
+    )
+'''
+new = '''
+    if len(changes) <= ALERT_NAMED_MAX:
+        detail = (
+            "Those pages in that order (pass each ref unchanged to object_get): "
+            f"{'; '.join(f'{PAGE_KIND}/{change.page_id}' for change in changes)}."
+        )
+    elif log_path is not None:
+        detail = (
+            f"Every changed page is one JSON line in {log_path} — narrow it with bash (jq, grep) "
+            "or read it with offset/limit, then pass the refs that matter to object_get."
+        )
+    else:
+        detail = (
+            "List them with object_list page, filtered on this source and stream and ordered by "
+            "updated_at desc."
+        )
+    feed = f"{_feed_name(connection)} ({_feed_summary(connection)})"
+    watched = (
+        f"{trigger.resource} on connection {feed}" if trigger.resource else f"Connection {feed}"
+    )
+    return f"{_headline(connection, changes)}\n{watched}.\n{detail}\n{ALERT_CLOSING}"
+'''
+
+[[arm.replacements]]
+path = "extensions/sources/ufo_ext_sources/tools.py"
+old = '''
+    if len(changes) > ALERT_NAMED_MAX:
+        titles = f"{_label(changes[-1])} and {len(changes) - 1} other pages"
+    else:
+        titles = "; ".join(_label(change) for change in changes)
+    happened = {_disposition(change) for change in changes}
+    what = next(iter(happened)) if len(happened) == 1 else "changed"
+    return f"{connection.provider}: {titles} {what}"
+'''
+new = '''
+    if len(changes) == 1:
+        (change,) = changes
+        return f"{connection.provider}: {_label(change)} — {change.stream} {_disposition(change)}."
+    if len(changes) > ALERT_NAMED_MAX:
+        titles = f"{_label(changes[-1])} and {len(changes) - 1} other pages changed"
+    else:
+        titles = "; ".join(_label(change) for change in changes)
+    return f"{connection.provider}: {titles} — {_stream_counts(changes)}."
+'''

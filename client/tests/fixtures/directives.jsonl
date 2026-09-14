@@ -5,6 +5,7 @@
 {"wire": "workspace", "verb": "choose_many", "fields": ["Select services", "Mail", "Calendar"], "line": "choose_many\tSelect services\tMail\tCalendar"}
 {"wire": "workspace", "verb": "exit", "fields": ["0"], "line": "exit\t0"}
 {"wire": "workspace", "verb": "file", "fields": ["quarterly report.pdf", "2048", "https://ws.example/artifacts/a?exp=1&sig=2"], "line": "file\tquarterly report.pdf\t2048\thttps://ws.example/artifacts/a?exp=1&sig=2"}
+{"wire": "workspace", "verb": "fired", "fields": ["github: Fix the build updated"], "line": "fired\tgithub: Fix the build updated"}
 {"wire": "workspace", "verb": "install", "fields": [], "line": "install"}
 {"wire": "workspace", "verb": "listen", "fields": ["2"], "line": "listen\t2"}
 {"wire": "workspace", "verb": "note", "fields": ["Listing files.", "activity"], "line": "note\tListing files.\tactivity"}

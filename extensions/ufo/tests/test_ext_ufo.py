@@ -93,7 +93,7 @@ from ufo.schema.records import (
 )
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
-from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth
+from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth, with_agent_detail
 from ufo.serve import _mount_shared_surfaces
 
 pytestmark = [
@@ -1989,7 +1989,7 @@ def test_history_replays_member_and_agent_lines_leaving_the_tail_its_reply() -> 
             Message(role="assistant", content=(TextBlock(text="the latest reply"),)),
         ),
     )
-    lines = history_directives(conversation, frozenset())
+    lines = history_directives(conversation, frozenset(), frozenset())
     assert lines == (
         b"you\twhat is up\n",
         b"say\tnot much\n",
@@ -2020,7 +2020,7 @@ def test_history_strips_the_prompt_envelope_from_member_lines() -> None:
             Message(role="assistant", content=(TextBlock(text="the latest reply"),)),
         ),
     )
-    lines = history_directives(conversation, frozenset())
+    lines = history_directives(conversation, frozenset(), frozenset())
     assert lines == (
         b"you\tsup\n",
         b"say\tnot much\n",
@@ -2047,7 +2047,7 @@ def test_history_counts_no_step_for_a_call_that_never_dispatched() -> None:
             Message(role="user", content=_framed("understood")),
         ),
     )
-    lines = history_directives(conversation, frozenset())
+    lines = history_directives(conversation, frozenset(), frozenset())
     assert lines == (
         b"you\ttry it\n",
         b"note\tCompleted 1 step\n",
@@ -2063,7 +2063,7 @@ def test_history_budget_keeps_the_newest_messages() -> None:
     old = Message(role="user", content=_framed("a" * 30_000))
     new = Message(role="user", content=_framed("the recent one"))
     conversation = Conversation(seq=1, messages=(old, new))
-    lines = history_directives(conversation, frozenset())
+    lines = history_directives(conversation, frozenset(), frozenset())
     assert lines == (b"you\tthe recent one\n",)
 
 
@@ -2086,7 +2086,7 @@ def test_history_leaves_only_the_latest_reply_to_the_tail() -> None:
             Message(role="assistant", content=(TextBlock(text="Nate owns the pager."),)),
         ),
     )
-    assert history_directives(conversation, frozenset({spawned})) == (
+    assert history_directives(conversation, frozenset({spawned}), frozenset()) == (
         b"you\tlook into the pager rotation\n",
         b"say\tSpawning a look.\n",
     )
@@ -2095,12 +2095,14 @@ def test_history_leaves_only_the_latest_reply_to_the_tail() -> None:
 def test_history_hides_what_no_member_said() -> None:
     """A subagent's result and a scheduled firing are admitted by machines, an interrupted-turn
     notice is written by the engine with no <context> tag at all: none is the member's words, so
-    none draws a `you` line — while the reply each answered still lands before it."""
+    none draws a `you` line — while the reply each answered still lands before it. A source
+    trigger's wake is prose the member reads: it draws as `fired`, its headline alone."""
     from ufo.harness.models.interface import Message, TextBlock
     from ufo.runtime.turns.transcript import Conversation
 
     spawned = "6bff4092-5ffc-55f4-8af1-c34089930bf4"
     fired = "0f3c2a1e-1111-5222-8333-444455556666"
+    woken = "7a1b2c3d-2222-5333-8444-555566667777"
     conversation = Conversation(
         seq=1,
         messages=(
@@ -2127,16 +2129,26 @@ def test_history_hides_what_no_member_said() -> None:
                 ),
             ),
             Message(role="assistant", content=(TextBlock(text="Checked."),)),
+            Message(
+                role="user",
+                content=_framed(
+                    with_agent_detail("github: Fix the build updated", "object_get refs: page/1."),
+                    ref=woken,
+                ),
+            ),
+            Message(role="assistant", content=(TextBlock(text="Reviewed."),)),
             Message(role="user", content=_framed("thanks")),
         ),
     )
-    lines = history_directives(conversation, frozenset({spawned, fired}))
+    lines = history_directives(conversation, frozenset({spawned, fired}), frozenset({woken}))
     assert lines == (
         b"you\tlook into the pager rotation\n",
         b"say\tSpawning a look.\n",
         b"say\tNate owns the pager.\n",
         b"say\tPicking up where it stopped.\n",
         b"say\tChecked.\n",
+        b"fired\tgithub: Fix the build updated\n",
+        b"say\tReviewed.\n",
         b"you\tthanks\n",
     )
 

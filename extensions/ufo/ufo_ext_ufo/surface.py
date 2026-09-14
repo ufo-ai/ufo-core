@@ -198,7 +198,7 @@ HISTORY_CHAR_BUDGET = 20_000
 
 
 def history_directives(
-    conversation: Conversation, agent_origin: frozenset[str]
+    conversation: Conversation, agent_origin: frozenset[str], fired: frozenset[str]
 ) -> tuple[bytes, ...]:
     """The conversation so far, rendered for a fresh resume: the member's messages as `you`, the
     agent's replies as `say`. The last reply is left off — the tail replays the latest turn's
@@ -207,13 +207,44 @@ def history_directives(
     A member's message is one the engine framed with its <context> tag and that no machine
     admitted: a subagent's result, a scheduled firing — `agent_origin` names those by their
     `message_ref` — and a notice the engine wrote into the transcript itself carry no words of the
-    member's, so they draw no `you` line, though the reply before each still lands.
+    member's, so they draw no `you` line, though the reply before each still lands. A turn an
+    object fired — `fired` names those — is prose the member reads and draws as `fired`: the
+    headline ufo sent, not words a member typed.
 
     A turn's steps stand over the reply they produced, as the one `note` line that counts them:
     every text but the turn's last was written between calls, so it is a step of the work rather
     than a reply of its own, and a round that wrote its text and then dispatched work was cut there
     — its text is a step too and the turn states no words. This is the shape the live turn rolled
     up into, so a resume re-reads what the session showed."""
+    kept: list[tuple[str, str, int]] = []
+    budget = HISTORY_CHAR_BUDGET
+    for verb, text, rolled in reversed(_history_said(conversation, agent_origin, fired)):
+        budget -= len(text)
+        if budget < 0 and kept:
+            break
+        kept.append((verb, text, rolled))
+    kept.reverse()
+    lines: list[bytes] = []
+    for verb, text, rolled in kept:
+        if verb == "fired":
+            lines.append(directive("fired", text))
+            continue
+        if verb == "you":
+            lines.append(directive("you", text))
+            continue
+        if rolled:
+            plural = "" if rolled == 1 else "s"
+            lines.append(directive("note", f"Completed {rolled} step{plural}"))
+        if text:
+            lines.append(directive("say", text))
+    return tuple(lines)
+
+
+def _history_said(
+    conversation: Conversation, agent_origin: frozenset[str], fired: frozenset[str]
+) -> list[tuple[str, str, int]]:
+    """What the conversation said, oldest first: a member line under its verb, or a reply under
+    none, over the count of steps that produced it — the last reply left off."""
     active = {
         block.tool_use_id
         for message in conversation.messages
@@ -221,7 +252,7 @@ def history_directives(
         for block in message.content
         if isinstance(block, ToolResultBlock) and block.activity
     }
-    said: list[tuple[bool, str, int]] = []
+    said: list[tuple[str, str, int]] = []
     answer = ""
     steps = 0
     for message in conversation.messages:
@@ -237,35 +268,17 @@ def history_directives(
         if not text.strip():
             continue
         if answer or steps:
-            said.append((False, answer, steps))
+            said.append(("", answer, steps))
         answer, steps = "", 0
         ref = member_message_ref(text)
         if ref is None or ref in agent_origin:
             continue
-        said.append((True, member_message_text(text), 0))
+        said.append(("fired" if ref in fired else "you", member_message_text(text), 0))
     if answer or steps:
-        said.append((False, answer, steps))
+        said.append(("", answer, steps))
     if said and not said[-1][0]:
         said.pop()
-    kept: list[tuple[bool, str, int]] = []
-    budget = HISTORY_CHAR_BUDGET
-    for member, text, rolled in reversed(said):
-        budget -= len(text)
-        if budget < 0 and kept:
-            break
-        kept.append((member, text, rolled))
-    kept.reverse()
-    lines: list[bytes] = []
-    for member, text, rolled in kept:
-        if member:
-            lines.append(directive("you", text))
-            continue
-        if rolled:
-            plural = "" if rolled == 1 else "s"
-            lines.append(directive("note", f"Completed {rolled} step{plural}"))
-        if text:
-            lines.append(directive("say", text))
-    return tuple(lines)
+    return said
 
 
 def _dispatched(message: Message, active: set[str]) -> int:
@@ -1000,8 +1013,12 @@ class _ChannelStream:
         if self.turn.resumed and self.request.headers.get(SINCE_HEADER) is None:
             transcript = await self.ctx.read_transcript(self.conversation_id)
             if transcript is not None:
-                machine = await self.ctx.agent_origin_refs(self.conversation_id)
-                history = history_directives(transcript, machine)
+                machine, turns = await asyncio.gather(
+                    self.ctx.agent_origin_refs(self.conversation_id),
+                    self.ctx.list_turns(self.conversation_id),
+                )
+                fired = frozenset(str(turn.id) for turn in turns if turn.fired_by is not None)
+                history = history_directives(transcript, machine, fired)
         directives = stream_directives(
             self.ctx.tail(self.turn.id, since),
             HOLD_SECONDS,

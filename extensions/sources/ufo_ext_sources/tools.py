@@ -69,6 +69,7 @@ from ufo.sdk.objects import (
 )
 from ufo.sdk.sources import PageChange
 from ufo.sdk.subjects import SHARED_SUBJECT
+from ufo.sdk.surfaces import with_agent_detail
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sources.pages import CONNECTION_OBJECT_KIND, PAGE_KIND
 from ufo_ext_sources.resources import (
@@ -91,8 +92,8 @@ TRIGGER_NAME_HEAD_MAX = OBJECT_NAME_MAX_LENGTH - TRIGGER_NAME_DIGEST_HEX - 1
 ALERT_NAMED_MAX = 5
 ALERT_LABEL_CHARS = 60
 ALERT_CLOSING = (
-    "No member is reading this turn. Do what this conversation set the watch for, and write to "
-    "the member only when the change needs them."
+    "No member is reading. Do what this conversation set the watch for; write to the member only "
+    "when the change needs them."
 )
 WATCH_OFFER_MAX = 4
 """How many links one message or tool result is offered a trigger for. A board of links is not a
@@ -862,45 +863,44 @@ def alert_message(
     changes: list[PageChange],
     log_path: str | None,
 ) -> str:
-    """What one trigger's batch of changes says to the conversation it wakes. Evals that stage a
-    woken turn build their inbound here, so a case reads the words the deploy sends."""
+    """What one trigger's batch of changes says to the conversation it wakes: the headline every
+    member's view draws, then the detail the agent alone reads. Evals that stage a woken turn build
+    their inbound here, so a case reads the words the deploy sends."""
     if len(changes) <= ALERT_NAMED_MAX:
         detail = (
-            "Those pages in that order (pass each ref unchanged to object_get): "
+            "object_get refs, in order, unchanged: "
             f"{'; '.join(f'{PAGE_KIND}/{change.page_id}' for change in changes)}."
         )
     elif log_path is not None:
         detail = (
-            f"Every changed page is one JSON line in {log_path} — narrow it with bash (jq, grep) "
-            "or read it with offset/limit, then pass the refs that matter to object_get."
+            f"One JSON line per changed page in {log_path}; narrow it with jq or grep, then "
+            "object_get the refs that matter."
         )
     else:
         detail = (
-            "List them with object_list page, filtered on this source and stream and ordered by "
+            "List them with object_list page, filtered on this source and stream, ordered by "
             "updated_at desc."
         )
-    feed = f"{_feed_name(connection)} ({_feed_summary(connection)})"
-    watched = (
-        f"{trigger.resource} on connection {feed}" if trigger.resource else f"Connection {feed}"
+    feed = f"connection {_feed_name(connection)} ({_feed_summary(connection)})"
+    watched = f"{trigger.resource} on {feed}" if trigger.resource else feed
+    return with_agent_detail(
+        _headline(connection, changes),
+        f"{_stream_counts(changes)} on {watched}.\n{detail}\n{ALERT_CLOSING}",
     )
-    return f"{_headline(connection, changes)}\n{watched}.\n{detail}\n{ALERT_CLOSING}"
 
 
 def _headline(connection: FeedConnection, changes: list[PageChange]) -> str:
-    """The words the alert opens on. A conversation an alert opens carries them as its name for
-    good — nothing but the payload names a conversation no member spoke in — and a member scanning
-    a list reads these characters and no others. So a changed page's own title leads and the
-    per-stream counts follow it: under counts alone every batch of one feed reads alike. The feed
-    replays in revision order, so the last change of a long batch is its newest. One page states
-    its stream and what happened to it instead of counting itself."""
-    if len(changes) == 1:
-        (change,) = changes
-        return f"{connection.provider}: {_label(change)} — {change.stream} {_disposition(change)}."
+    """The one line a member reads of the alert, and the name a conversation it opens carries for
+    good — nothing but the payload names a conversation no member spoke in. A changed page's own
+    title leads: under counts alone every batch of one feed reads alike. The feed replays in
+    revision order, so the last change of a long batch is its newest."""
     if len(changes) > ALERT_NAMED_MAX:
-        titles = f"{_label(changes[-1])} and {len(changes) - 1} other pages changed"
+        titles = f"{_label(changes[-1])} and {len(changes) - 1} other pages"
     else:
         titles = "; ".join(_label(change) for change in changes)
-    return f"{connection.provider}: {titles} — {_stream_counts(changes)}."
+    happened = {_disposition(change) for change in changes}
+    what = next(iter(happened)) if len(happened) == 1 else "changed"
+    return f"{connection.provider}: {titles} {what}"
 
 
 def _label(change: PageChange) -> str:

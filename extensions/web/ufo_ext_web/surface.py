@@ -2317,6 +2317,7 @@ class _TranscriptRenderer:
     subagents: SubagentRuns
     turn_ids: frozenset[str]
     agent_origin: frozenset[str]
+    fired: frozenset[str]
     speakers: Mapping[str, str] | None
     questions: Mapping[str, dict[str, object]]
     asked: Mapping[str, str]
@@ -2396,6 +2397,8 @@ class _TranscriptRenderer:
         label = None if self.speakers is None or turn_id is None else self.speakers.get(turn_id)
         if label is not None:
             bubble["speaker"] = label
+        if turn_id in self.fired:
+            bubble["fired"] = True
         answered = None if turn_id is None else self.asked.get(turn_id)
         if answered is not None:
             bubble["asked"] = answered
@@ -2472,6 +2475,7 @@ def _rendered_messages(
     spoken_at: Mapping[str, str] | None = None,
     answered_at: Mapping[str, str] | None = None,
     summaries: Mapping[str, dict[str, object]] | None = None,
+    fired: frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
     """The transcript as the portal draws it. A user-role message is the member's own bubble, so
     one no member spoke never becomes one: a scheduled task's firing carries its cron envelope and a
@@ -2486,7 +2490,9 @@ def _rendered_messages(
     markdown.
 
     `speakers` names who spoke each turn — the bubble carries the label so a conversation more
-    members than the viewer are in reads as who said what.
+    members than the viewer are in reads as who said what. `fired` names the turns an object's
+    fire admitted — a source trigger's wake — and the bubble carries the mark, so its headline
+    reads as sent by ufo rather than typed by a member.
 
     `questions` names what a turn asked of the member, keyed by the turn that asked: the reply
     carries it, so the portal draws the question under the words that asked it rather than at the
@@ -2539,6 +2545,7 @@ def _rendered_messages(
         subagents=subagents or {},
         turn_ids=turn_ids,
         agent_origin=agent_origin,
+        fired=fired,
         speakers=speakers,
         questions=questions or {},
         asked=asked or {},
@@ -2625,6 +2632,7 @@ class _TranscriptAids:
     subagents: SubagentRuns
     turn_ids: frozenset[str]
     agent_origin: frozenset[str]
+    fired: frozenset[str]
     speakers: dict[str, str]
     asked: dict[str, str]
     asks: _Asks
@@ -2656,6 +2664,7 @@ class _TranscriptAids:
             self.spoken_at,
             self.answered_at,
             self.summaries,
+            self.fired,
         )
         if self.run_conversation:
             for reply in rendered:
@@ -2708,6 +2717,7 @@ async def _transcript_aids(
         subagents=await _subagent_nodes(ctx, spawned),
         turn_ids=frozenset(str(turn.id) for turn in turns),
         agent_origin=agent_origin,
+        fired=frozenset(str(turn.id) for turn in turns if turn.fired_by is not None),
         speakers=speakers
         | {
             str(turn.id): turn.context.sender
@@ -2926,6 +2936,8 @@ async def _conversation_messages(
     ):
         prompt = _member_bubble(detail.turn.inbound, member_rows, slack=slack)
         prompt["turn"] = str(detail.turn.id)
+        if detail.turn.fired_by is not None:
+            prompt["fired"] = True
         if (
             detail.turn.context is not None
             and detail.turn.context.sender is not None

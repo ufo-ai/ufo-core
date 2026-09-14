@@ -317,6 +317,26 @@ test("a bubble another member spoke names them, and the viewer's own carries no 
   expect(own && within(own as HTMLElement).queryByText("Sam Frost")).toBeNull();
 });
 
+test("a bubble an object's fire admitted says ufo sent it", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "github: Fix the build updated", fired: true },
+        { role: "assistant", text: "Reviewed." },
+        { role: "user", text: "thanks" },
+      ],
+    }),
+  );
+  open();
+
+  const sent = (await screen.findByText("github: Fix the build updated")).closest(
+    "[data-slot=message]",
+  );
+  expect(sent && within(sent as HTMLElement).getByText("Sent by UFO")).toBeTruthy();
+  const own = screen.getByText("thanks").closest("[data-slot=message]");
+  expect(own && within(own as HTMLElement).queryByText("Sent by UFO")).toBeNull();
+});
+
 test("a bubble marked markdown draws the emphasis, and one that is not draws the characters", async () => {
   wire(
     transcript({

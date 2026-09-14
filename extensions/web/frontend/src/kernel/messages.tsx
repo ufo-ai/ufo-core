@@ -206,6 +206,9 @@ function spoken(message: Spoken) {
   return message.markdown ? <Markdown text={message.text} /> : <Linked text={message.text} />;
 }
 
+const UFO_MARK = "ufo";
+const SENT_BY_UFO = "Sent by UFO";
+
 /** The member moving, in every way a browser reports it. A scroll is not among them: the mark
  *  scrolls the transcript itself, and a mark that cleared on its own scroll would never be seen. */
 const MEMBER_ACTS = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
@@ -383,7 +386,12 @@ export function MessageLog({
           {message.subagents?.some((run) => run.running) ? (
             <Activity events={message.events ?? []} runs={message.subagents} />
           ) : null}
-          {message.role === "user" && message.speaker ? (
+          {message.role === "user" && message.fired ? (
+            <MessageHeader className="gap-xs">
+              <AgentIcon name={UFO_MARK} className="size-(--size-icon)" />
+              {SENT_BY_UFO}
+            </MessageHeader>
+          ) : message.role === "user" && message.speaker ? (
             <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
           ) : null}
           {message.role === "user" ? (

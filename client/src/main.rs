@@ -1614,6 +1614,7 @@ fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
     match directive {
         Directive::Say(text) => app.say(&text),
         Directive::You(text) => app.member_replay(&text),
+        Directive::Fired(text) => app.fired_replay(&text),
         Directive::Absorbed(arrival_ids) => app.absorbed(&arrival_ids),
         Directive::Note(text) => app.note(&text),
         Directive::Activity { text, run } => app.activity(&text, run.as_deref()),
@@ -1716,6 +1717,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
             WireEvent::Dir(directive) => match directive {
                 Directive::Say(text) => out.say(&text),
                 Directive::You(text) => out.member(&text),
+                Directive::Fired(text) => out.fired(&text),
                 Directive::Absorbed(_) | Directive::Sent { .. } => {}
                 Directive::Note(text) => out.note(&text),
                 Directive::Activity { text, run } => out.activity(&text, run.as_deref()),

@@ -184,6 +184,9 @@ export type Message = {
   markdown?: boolean;
   at?: string;
   speaker?: string;
+  /** An object's fire admitted the turn these words founded — a source trigger's wake — so no
+   *  member spoke them, and the header says ufo sent them. */
+  fired?: boolean;
   asked?: string;
   arrival_id?: string;
   /** The turn this message belongs to — the run a member presses in a listing of runs: the turn

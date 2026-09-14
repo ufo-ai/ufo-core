@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::io::{self, BufRead, Write};
 
 use crate::ui::retained::rollup_line;
-use crate::ui::{narrates_activity, run_label};
+use crate::ui::{narrates_activity, run_label, SENT_BY_UFO};
 
 pub struct Plain {
     open: bool,
@@ -62,6 +62,14 @@ impl Plain {
             } else {
                 println!("  {row}");
             }
+        }
+    }
+
+    pub fn fired(&mut self, text: &str) {
+        self.line_break();
+        println!("{SENT_BY_UFO}");
+        for row in text.lines() {
+            println!("  {row}");
         }
     }
 

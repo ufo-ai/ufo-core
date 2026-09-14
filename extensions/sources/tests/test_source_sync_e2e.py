@@ -1202,7 +1202,8 @@ async def test_a_watched_pull_request_is_read_every_tick_and_wakes_its_conversat
             .all()
         )
     assert len(turns) == 1
-    assert turns[0]["inbound"].startswith("github: Add retry to egress dial — pull_requests")
+    assert turns[0]["inbound"].startswith("github: Add retry to egress dial ")
+    assert "pull_requests: 1 " in turns[0]["inbound"]
     assert WATCHED_PULL in turns[0]["inbound"]
 
 

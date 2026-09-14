@@ -287,6 +287,7 @@ from ufo.sdk.manifest import (
     SetupSchedule,
     SubagentProfile,
 )
+from ufo.sdk.surfaces import with_agent_detail
 from ufo.serve import FOREIGN_HANDSHAKE, _mount_shared_surfaces
 
 SECRET = "artifact-signing-secret"
@@ -1713,6 +1714,60 @@ async def test_a_pending_subagent_result_is_no_member_bubble(
             },
         ],
         "turn": str(running),
+    }
+
+
+async def test_a_fired_turns_prompt_states_its_headline_as_sent_by_ufo(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A source trigger's wake runs on the inbound the trigger wrote. The live prompt draws its
+    headline alone, marked fired since no member spoke it, and the detail under the headline never
+    reaches the member."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, _first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Looked."),
+    )
+    woken = uuid4()
+    admitted = datetime.now(UTC) - timedelta(minutes=8)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=woken,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound=with_agent_detail(
+                    "github: Fix the build updated", "object_get refs: page/1."
+                ),
+                fired_by_kind="source_trigger",
+                fired_by_name="github-acct-one",
+                fired_by_title="github-acct-one (github account acct-one)",
+                created_at=admitted,
+                updated_at=admitted,
+            )
+        )
+
+    reloaded = await client.get(
+        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        headers=cookie,
+    )
+
+    assert reloaded.status_code == 200
+    body = reloaded.json()
+    assert datetime.fromisoformat(body.pop("turn_started_at")) == admitted
+    body["messages"] = _worded(body["messages"])
+    assert body == {
+        "messages": [{"role": "user", "text": "github: Fix the build updated", "fired": True}],
+        "turn": str(woken),
     }
 
 
@@ -12501,6 +12556,29 @@ def test_projection_draws_no_member_bubble_for_a_scheduled_firing() -> None:
     )
     assert rendered == [
         {"role": "assistant", "text": "Nothing new since yesterday.", "turn": fired}
+    ]
+
+
+def test_projection_marks_a_fired_turns_headline_as_sent_by_ufo() -> None:
+    """A source trigger's wake is prose the member reads, so it draws — marked fired, since no
+    member spoke it — and only its headline: the detail under it is the agent's alone."""
+    woken = "33333333-3333-3333-3333-333333333333"
+    rendered = _rendered_messages(
+        (
+            Message(
+                role="user",
+                content=f"<context>\nmessage_ref: {woken}\n</context>\n"
+                + with_agent_detail("github: Fix the build updated", "object_get refs: page/1."),
+            ),
+            Message(role="assistant", content="Reviewed."),
+        ),
+        None,
+        frozenset({woken}),
+        fired=frozenset({woken}),
+    )
+    assert rendered == [
+        {"role": "user", "text": "github: Fix the build updated", "turn": woken, "fired": True},
+        {"role": "assistant", "text": "Reviewed.", "turn": woken},
     ]
 
 

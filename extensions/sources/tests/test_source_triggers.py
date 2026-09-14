@@ -72,6 +72,7 @@ from ufo.sdk.manifest import (
     UserPromptSubmit,
 )
 from ufo.sdk.sources import ConnectorSourceConfig, PageChange
+from ufo.sdk.surfaces import member_message_text
 from ufo.sdk.tools import SpeakerRequired, ToolContext
 
 pytestmark = [
@@ -954,7 +955,7 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
         assert turn["fired_by_kind"] == SOURCE_TRIGGER_KIND
         assert turn["fired_by_name"] == trigger_name(feed.name, state.conversation_id)
         assert turn["fired_by_title"].startswith(feed.name)
-        assert "tasks: 2 added" in turn["inbound"]
+        assert "tasks: 2 added on connection" in turn["inbound"]
         assert f"{PAGE_KIND}/{shipped.page_id}" in turn["inbound"]
         assert f"{PAGE_KIND}/{legal.page_id}" in turn["inbound"]
 
@@ -963,10 +964,10 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
 
 
 async def test_alert_opens_on_what_changed_and_asks_for_no_member_report(db: None) -> None:
-    """The first line names the provider, the counts and the changed pages' own titles — a member
-    reading a conversation list sees the alert's opening characters and nothing else, and the
-    connection name, the refs and the machine detail follow underneath. Nothing on the woken turn
-    asks for a report: no member is reading it."""
+    """The headline names the provider, the changed pages' own titles and what happened to them,
+    and is all a member's view draws: the counts, the connection, the refs and the closing stand in
+    the element every projection folds away. Nothing on the woken turn asks for a report: no member
+    is reading it."""
     state = await _workspace()
     feed, source_id = await _feed_with_stream(state)
     with ws(state.workspace_id), agent(state.agent_id):
@@ -979,12 +980,13 @@ async def test_alert_opens_on_what_changed_and_asks_for_no_member_report(db: Non
         )
 
         (turn,) = await _turns(state.conversation_id)
-        headline, connection_line, refs, closing = turn["inbound"].splitlines()
+        headline, opened, counts, refs, closing, closed = turn["inbound"].splitlines()
         assert headline == (
-            f"{ASANA}: asana tasks: Ship the launch list; asana tasks: Follow up with legal "
-            "— tasks: 2 added."
+            f"{ASANA}: asana tasks: Ship the launch list; asana tasks: Follow up with legal added"
         )
-        assert connection_line.startswith(f"Connection {feed.name} ")
+        assert member_message_text(turn["inbound"]) == headline
+        assert (opened, closed) == ("<agent_detail>", "</agent_detail>")
+        assert counts.startswith(f"tasks: 2 added on connection {feed.name} ")
         assert refs.endswith(f"{PAGE_KIND}/{shipped.page_id}; {PAGE_KIND}/{legal.page_id}.")
         assert closing == ALERT_CLOSING
         assert "tell the member" not in turn["inbound"]
@@ -1418,7 +1420,7 @@ async def test_alert_never_surfaces_a_member_private_page(db: None) -> None:
             HookContext(ext=ext, payload=PageChangeBatch(changes=(shared, private)))
         )
         (turn,) = await _turns(state.conversation_id)
-        assert "— tasks added." in turn["inbound"]
+        assert "tasks: 1 added on connection" in turn["inbound"]
         assert f"{PAGE_KIND}/{shared.page_id}" in turn["inbound"]
         assert str(private.page_id) not in turn["inbound"]
 
@@ -1451,10 +1453,8 @@ async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) ->
 
         (turn,) = await _turns(state.conversation_id)
         headline, *_ = turn["inbound"].splitlines()
-        assert headline == (
-            f"{ASANA}: gone 1 and 8 other pages changed "
-            "— projects: 2 removed; tasks: 3 added, 4 updated."
-        )
+        assert headline == f"{ASANA}: gone 1 and 8 other pages changed"
+        assert "projects: 2 removed; tasks: 3 added, 4 updated on connection" in turn["inbound"]
         assert "more" not in turn["inbound"]
         assert not any(str(change.page_id) in turn["inbound"] for change in changes)
 
@@ -1593,7 +1593,7 @@ async def test_a_trigger_narrowed_to_a_link_wakes_on_that_resource_alone(db: Non
     assert PR_URL in turn["inbound"]
     assert f"{PAGE_KIND}/{watched.page_id}" in turn["inbound"]
     assert f"{PAGE_KIND}/{other.page_id}" not in turn["inbound"]
-    assert "— pull_requests added." in turn["inbound"]
+    assert "pull_requests: 1 added on " in turn["inbound"]
 
 
 async def test_every_spelling_of_the_link_is_one_trigger(db: None) -> None:
