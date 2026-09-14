@@ -97,6 +97,7 @@ async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
                         tables.agent.c.name,
                         tables.agent.c.prompt,
                         tables.agent.c.model,
+                        tables.agent.c.reasoning,
                         tables.agent.c.is_main,
                         tables.agent.c.visibility,
                     ).where(tables.agent.c.workspace_id == workspace_id)
@@ -106,7 +107,14 @@ async def test_seat_creates_the_workspace_its_member_and_its_main_agent(
     # `visibility` is stated rather than defaulted: the column defaults to `private`, and a main
     # agent owned by nobody would then be invisible to every non-admin member of its own workspace.
     assert agents == [
-        (DEFAULT_AGENT_NAME, DEFAULT_AGENT_PROMPT, DEFAULT_AGENT_MODEL, True, "workspace")
+        (
+            DEFAULT_AGENT_NAME,
+            DEFAULT_AGENT_PROMPT,
+            DEFAULT_AGENT_MODEL,
+            "medium",
+            True,
+            "workspace",
+        )
     ]
 
 

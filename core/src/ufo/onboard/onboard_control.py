@@ -35,7 +35,11 @@ from sqlalchemy.dialects.postgresql import insert
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.o11y import warn
 from ufo.harness.untrusted import wall
-from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
+from ufo.onboard.onboarding import (
+    DEFAULT_AGENT_MODEL,
+    DEFAULT_AGENT_PROMPT,
+    DEFAULT_AGENT_REASONING,
+)
 from ufo.runtime.access.credentials import member_slot
 from ufo.runtime.billing.balance import credit, set_reserve
 from ufo.runtime.seats import create_member, email_domain, signup_workspace_id, workspace_subject
@@ -377,6 +381,7 @@ class OnboardControl:
                         name=DEFAULT_AGENT_NAME,
                         prompt=agent_prompt(request.profile),
                         model=DEFAULT_AGENT_MODEL,
+                        reasoning=DEFAULT_AGENT_REASONING,
                         is_main=True,
                         # `visibility` is stated, not defaulted: the column defaults to `private`,
                         # hiding the main agent from every non-admin member.

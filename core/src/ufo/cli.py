@@ -54,7 +54,13 @@ from ufo.harness.models.pricing import MICRO_USD_PER_USD
 from ufo.harness.sandbox.ingress_serve import run as ingress_run
 from ufo.host.ext.loader import load_manifests, lockfile_path
 from ufo.host.ext.store import ExtensionStore, read_catalog
-from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, AlreadyInitialized, Onboarded, Onboarding
+from ufo.onboard.onboarding import (
+    DEFAULT_AGENT_MODEL,
+    DEFAULT_AGENT_REASONING,
+    AlreadyInitialized,
+    Onboarded,
+    Onboarding,
+)
 from ufo.onboard.seed import KitchenSink
 from ufo.proxy_serve import OWNER_DSN_ENV
 from ufo.runtime.access.credentials import CredentialStore, deploy_env, member_slot
@@ -69,7 +75,6 @@ from ufo.runtime.workspace import MEMBER_ROUTED_SLOTS, ws
 from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_AGENT_NAME,
-    DEFAULT_REASONING_EFFORT,
     ReasoningEffort,
 )
 from ufo.serve import FLEETS, WHOLE_FLEET, home_surface
@@ -212,7 +217,7 @@ def _one_address(_ctx: click.Context, _param: click.Parameter, value: str) -> st
 @click.option(
     "--reasoning",
     type=click.Choice(REASONING_EFFORTS),
-    default=DEFAULT_REASONING_EFFORT,
+    default=DEFAULT_AGENT_REASONING,
     show_default=True,
 )
 @click.option(

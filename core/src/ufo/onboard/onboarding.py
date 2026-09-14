@@ -33,13 +33,13 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
     DEFAULT_AGENT_NAME,
-    DEFAULT_REASONING_EFFORT,
     MAIN_AGENT_ICON,
     ReasoningEffort,
 )
 
 DEFAULT_AGENT_PROMPT = "You are a helpful assistant."
 DEFAULT_AGENT_MODEL = AUTO_MODEL
+DEFAULT_AGENT_REASONING: ReasoningEffort = "medium"
 
 
 class AlreadyInitialized(RuntimeError):
@@ -108,7 +108,7 @@ class Onboarding:
     model: str
     credentials: CredentialStore | None
     manifests: tuple[Manifest, ...]
-    reasoning: ReasoningEffort = DEFAULT_REASONING_EFFORT
+    reasoning: ReasoningEffort = DEFAULT_AGENT_REASONING
 
     async def run(self) -> Onboarded:
         onboarded = await self.create()

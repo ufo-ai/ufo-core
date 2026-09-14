@@ -27,6 +27,7 @@ from ufo.host.ext.loader import load_manifests
 from ufo.onboard.onboarding import (
     DEFAULT_AGENT_MODEL,
     DEFAULT_AGENT_PROMPT,
+    DEFAULT_AGENT_REASONING,
     AlreadyInitialized,
     Onboarding,
 )
@@ -48,7 +49,7 @@ def _onboarding(
     tmp_path: Path,
     credentials: CredentialStore | None = None,
     manifests: tuple = (),
-    reasoning: ReasoningEffort = "auto",
+    reasoning: ReasoningEffort = DEFAULT_AGENT_REASONING,
 ) -> Onboarding:
     return Onboarding(
         config=Config(
@@ -355,6 +356,9 @@ def test_cold_start_mints_the_credential_key_for_onboarding(
         )
         first = runner.invoke(cli.main, ["init", "--email", OWNER_EMAIL])
         assert first.exit_code == 0, first.output
+        assert "medium reasoning" in first.output
+        with sqlite3.connect("ufo.db") as connection:
+            assert connection.execute("select reasoning from agent").fetchone() == ("medium",)
         env = Path(".env").read_text()
         minted = next(
             line.split("=", 1)[1].strip()
