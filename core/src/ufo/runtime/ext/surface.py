@@ -193,7 +193,6 @@ from ufo.schema.records import (
     TurnAdmissionSource,
     TurnContext,
     TurnRuntimeConfig,
-    Usage,
 )
 from ufo.sdk.http import cookie_secure
 
@@ -1870,9 +1869,7 @@ class TurnStep(BaseModel):
     what the step's recorded output rebuilds — a model round as the assistant message it produced,
     a tool dispatch as its result — so a reader sees the turn's actual trajectory, uncompacted, and
     not only the timeline. A step whose output carries no window (a rollover, a claimed arrival, a
-    round that only errored) contributes none. `usage` is the metered tokens the step's recorded
-    output preserved — a model round's own call, a tool dispatch's embedded find calls — summed,
-    or None when the output carries none."""
+    round that only errored) contributes none."""
 
     number: int = Field(ge=1)
     kind: Literal["model", "tool", "workflow"]
@@ -1882,7 +1879,6 @@ class TurnStep(BaseModel):
     completed_at: datetime | None
     duration_ms: int | None = Field(ge=0)
     messages: tuple[Message, ...] = ()
-    usage: Usage | None = None
 
     @field_validator("started_at", "completed_at")
     @classmethod

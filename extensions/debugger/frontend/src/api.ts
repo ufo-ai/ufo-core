@@ -58,16 +58,6 @@ export type TurnStep = {
   completed_at: string | null;
   duration_ms: number | null;
   messages: TranscriptMessage[];
-  usage: StepUsage | null;
-};
-
-export type StepUsage = {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_write_5m_tokens: number;
-  cache_write_30m_tokens: number;
-  cache_write_1h_tokens: number;
 };
 
 export type TurnDetail = {

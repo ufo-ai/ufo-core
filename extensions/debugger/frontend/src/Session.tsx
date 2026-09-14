@@ -8,7 +8,6 @@ import {
   Turn,
   TurnDetail,
   TurnStep,
-  StepUsage,
   when,
 } from "./api";
 import { Loading } from "./Loading";
@@ -327,13 +326,6 @@ function TurnBody(props: {
   );
 }
 
-function usageLabel(usage: StepUsage | null): string {
-  if (usage === null) return "";
-  const parts = [`${usage.input_tokens.toLocaleString()} in`, `${usage.output_tokens.toLocaleString()} out`];
-  if (usage.cache_read_tokens > 0) parts.push(`${usage.cache_read_tokens.toLocaleString()} cached`);
-  return parts.join(" · ");
-}
-
 function Steps(props: { turnId: string }) {
   const [steps, setSteps] = useState<TurnStep[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -362,7 +354,6 @@ function Steps(props: { turnId: string }) {
           <tr>
             <th>started</th>
             <th>duration</th>
-            <th>tokens</th>
             <th>kind</th>
             <th>step</th>
           </tr>
@@ -373,7 +364,6 @@ function Steps(props: { turnId: string }) {
               <tr>
                 <td>{timestamp(step.started_at)}</td>
                 <td className="step-duration">{duration(step.duration_ms)}</td>
-                <td className="step-usage">{usageLabel(step.usage)}</td>
                 <td>{step.kind}</td>
                 <td>
                   {step.name} <code>{step.function_name}</code>
