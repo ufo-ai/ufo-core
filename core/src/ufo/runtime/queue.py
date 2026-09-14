@@ -1185,7 +1185,11 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
                 reasoning=profile.reasoning or agent.reasoning,
                 internet_access_allowed=internet_access_allowed,
             )
-            max_rounds = MAIN_ROUND_LIMIT if payload.get("extended_context") else profile.max_rounds
+            max_rounds = (
+                max(MAIN_ROUND_LIMIT, profile.max_rounds)
+                if payload.get("extended_context")
+                else profile.max_rounds
+            )
             output_model = profile.output_model
             connector_read_only = profile.connector_read_only
         grants = GrantStore() if runtime.credentials is not None else None

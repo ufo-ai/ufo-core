@@ -845,11 +845,6 @@ PROGRESS_CAP_SECONDS = 1_800.0
 PROGRESS_ACTIVITY_LIMIT = 200
 PROGRESS_LINE = "{activity} · {elapsed} in"
 PROGRESS_PREPARING_RESPONSE = "Preparing the response"
-RESUME_NOTICE_GRACE_SECONDS = 15.0
-RESUME_NOTICE_LINE = (
-    "The service restarted during this turn. The work resumed from where it stopped."
-)
-
 ASK_BLOCK_ID_PREFIX = "ask:"
 ASK_SUBMIT_ACTION_ID = "ask_submit"
 ASK_SUBMIT_TEXT = "Submit"
@@ -3314,9 +3309,9 @@ class ThreadProgress:
     end. Bounded like the thread status: the tail ends on the durable terminal state (its own poll,
     not the lossy hub), so the task always ends within a second of the commit.
 
-    A turn the fleet resumed after the process running it died posts one line saying so, off the
-    ladder and once per adopting attempt, held back by a short grace so a resume that lands its
-    answer immediately stays silent.
+    A resume posts nothing. The turn is durable and carries on from where it stopped, so one
+    deploy that interrupts many long turns would otherwise burst a restart line into every one of
+    their threads.
 
     The turn's first post carries the standard footer, so the member reaches the conversation on the
     web from the first thing the turn says rather than only from its reply. Every later checkpoint
@@ -3348,23 +3343,15 @@ class ThreadProgress:
         deadline = next(checkpoints)
         activity = TurnActivity()
         spend: CostTick | None = None
-        resume_due: float | None = None
-        announced: set[str] = set()
         async with self.ctx.tail(self.turn_id) as frames:
             upcoming = asyncio.ensure_future(anext(frames))
             try:
                 while True:
-                    due = deadline if resume_due is None else min(deadline, resume_due)
-                    waiting = max(due - self._elapsed(), 0.0)
+                    waiting = max(deadline - self._elapsed(), 0.0)
                     done, _pending = await asyncio.wait([upcoming], timeout=waiting)
                     if not done:
                         if await self.ctx.turn_is_terminal(self.turn_id):
                             return
-                        if resume_due is not None and self._elapsed() >= resume_due:
-                            resume_due = None
-                            posted = await self._post_resumed(client, bot_token, spend, first)
-                            first = first and not posted
-                            continue
                         posted = await self._post(
                             client, bot_token, activity, self._elapsed(), spend, first
                         )
@@ -3381,9 +3368,6 @@ class ThreadProgress:
                             return
                         case Activity(text=text) if text:
                             activity.update(text)
-                        case Resumed(attempt=attempt) if attempt not in announced:
-                            announced.add(attempt)
-                            resume_due = self._elapsed() + RESUME_NOTICE_GRACE_SECONDS
                         case SubagentActivity() if frame.activity:
                             label = frame.name or frame.profile
                             activity.update(f"{label}: {frame.activity}")
@@ -3425,19 +3409,6 @@ class ThreadProgress:
             )
             return False
         return await self._say(client, bot_token, text, elapsed_seconds, spend, first)
-
-    async def _post_resumed(
-        self, client: httpx.AsyncClient, bot_token: str, spend: CostTick | None, first: bool
-    ) -> bool:
-        """The one line a resumed turn owes the member. A turn the fleet picked back up after the
-        process running it died looks from the thread exactly like a turn that died — the same
-        stopped output, the same standing status — so the wait is named rather than left to be
-        read as a failure.
-
-        Posted on the grace, not on the frame: a turn that reaches its terminal state within
-        seconds of the resume says nothing, because a notice landing after the answer describes a
-        problem the member no longer has."""
-        return await self._say(client, bot_token, RESUME_NOTICE_LINE, self._elapsed(), spend, first)
 
     async def _say(
         self,

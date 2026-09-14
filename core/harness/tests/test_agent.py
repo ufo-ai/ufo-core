@@ -218,6 +218,21 @@ async def test_round_budget_exhausts_after_a_tool_or_recoverable_error() -> None
 
 
 @pytest.mark.asyncio
+async def test_a_spent_round_budget_is_told_to_the_model_and_not_to_the_member() -> None:
+    """The budget is the deploy's business. The prompt that ends the run rides the model request,
+    and the member hears only what that round addressed to them."""
+    call = ToolCall("one", "echo", {"value": "one"})
+    model = ScriptedModel([round_("", call), round_("forced")])
+    events = Events()
+
+    result = await AgentEngine(definition(max_rounds=1), model, Tools(), events=events).run(())
+
+    assert Message("user", "finish without tools") in model.requests[-1].messages
+    assert result.answer == "forced"
+    assert events.spoken == []
+
+
+@pytest.mark.asyncio
 async def test_structured_finish_accepts_valid_and_returns_invalid_feedback() -> None:
     call = ToolCall("done", "finish", {"result": "result"})
     model = ScriptedModel([round_("", call)])

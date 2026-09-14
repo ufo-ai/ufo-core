@@ -29,7 +29,7 @@ locals {
   system_namespace          = module.platform.system_namespace
   prestop_seconds           = 10
   request_shutdown_seconds  = 30
-  graceful_shutdown_seconds = 600
+  graceful_shutdown_seconds = 120
 
   datadog_site = "us5.datadoghq.com"
   datadog_env  = "prod"

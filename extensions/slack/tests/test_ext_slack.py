@@ -6170,8 +6170,9 @@ async def test_a_resumed_turn_says_so_in_the_thread_status_too(
 ) -> None:
     """The status is the standing answer to "is anything happening", and a resumed turn's is the
     line the dead process left behind. It is restated the moment the turn is picked back up, so the
-    member's first read of the thread is current — the in-thread post is the durable half, and this
-    is the half they see without scrolling."""
+    member's first read of the thread is current. It is also all the member is told: the status
+    clears itself, where a posted line would stay in the thread for a wait that still ends in an
+    answer."""
     workspace_id, _ = await _seed()
     monkeypatch.setattr(slack, "STATUS_UPDATE_MIN_SECONDS", 0.0)
     recorder: list[httpx.Request] = []
@@ -6211,19 +6212,12 @@ async def test_a_resumed_turn_says_so_in_the_thread_status_too(
     assert _sent()[-1] == slack.STATUS_CLEAR_TEXT
 
 
-async def test_a_resumed_turn_says_so_once_for_the_attempt_that_picked_it_up(
-    db: None, tmp_path, monkeypatch
-) -> None:
-    """The member is told the wait survived a restart, and told once. The frame is republished to
-    every reader the hub serves and an execution can adopt a turn more than once, so the notice
-    keys on the attempt that adopted it: the same attempt seen twice is the same resume, and a
-    second attempt is a second interruption the member also waited through.
-
-    It rides no checkpoint. The ladder measures the whole wait, so on a turn interrupted an hour in
-    the next mark can be another hour away — long past the point the silence needed explaining."""
+async def test_a_resumed_turn_posts_nothing_in_the_thread(db: None, tmp_path, monkeypatch) -> None:
+    """The turn is durable: it carries on from where it stopped and lands its answer in the thread,
+    so a line about the restart tells the member about a wait they are already through. One deploy
+    interrupts every long turn at once, which is the burst this must not produce — a resume posts
+    nothing, on any attempt, and the thread holds the reply alone."""
     workspace_id, _ = await _seed()
-    monkeypatch.setattr(slack, "RESUME_NOTICE_GRACE_SECONDS", 0.05)
-    monkeypatch.setattr(slack, "PROGRESS_BASE_SECONDS", 600.0)
     recorder: list[httpx.Request] = []
     hub = InProcessHub()
     _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
@@ -6245,58 +6239,7 @@ async def test_a_resumed_turn_says_so_once_for_the_attempt_that_picked_it_up(
     task = slack._PROGRESS_TASKS[turn_id]
 
     await hub.publish(turn_id, Resumed(attempt="attempt-one"))
-    await hub.publish(turn_id, Resumed(attempt="attempt-one"))
-    deadline = time.monotonic() + 10
-    while not [p for p in _progress_posts(recorder) if slack.RESUME_NOTICE_LINE in p["text"]]:
-        assert time.monotonic() < deadline, "the resumed turn never said so in the thread"
-        await asyncio.sleep(0.01)
-
     await hub.publish(turn_id, Resumed(attempt="attempt-two"))
-    while len([p for p in _progress_posts(recorder) if slack.RESUME_NOTICE_LINE in p["text"]]) < 2:
-        assert time.monotonic() < deadline, "the second interruption was never named"
-        await asyncio.sleep(0.01)
-
-    await _finish_turn(turn_id, "migrated")
-    await asyncio.wait_for(task, timeout=10)
-
-    notices = [p for p in _progress_posts(recorder) if slack.RESUME_NOTICE_LINE in p["text"]]
-    assert len(notices) == 2
-    assert all(p["thread_ts"] == "100.5" for p in notices)
-
-
-async def test_a_resume_that_ends_inside_the_grace_says_nothing(
-    db: None, tmp_path, monkeypatch
-) -> None:
-    """A recovery whose answer lands seconds later describes a problem the member no longer has.
-    The notice waits out a grace, and a turn that reaches its terminal state first says nothing at
-    all — the thread holds the reply and no account of how it got there.
-
-    The frame itself must therefore post nothing. That is asserted before the turn ends, because a
-    notice written the moment the frame arrives would beat every fast recovery to the thread and no
-    later check could take it back."""
-    workspace_id, _ = await _seed()
-    monkeypatch.setattr(slack, "RESUME_NOTICE_GRACE_SECONDS", 30.0)
-    recorder: list[httpx.Request] = []
-    hub = InProcessHub()
-    _, client, _ = await _mount(monkeypatch, workspace_id, tmp_path, recorder, hub=hub)
-    mention = _event_body(
-        type="app_mention", user="U1", channel="C1", ts="100.5", text="<@UBOT00000> migrate"
-    )
-    async with client:
-        response = await client.post(
-            EVENTS_PATH, content=mention, headers=_sign(mention, int(time.time()))
-        )
-    assert response.status_code == 200
-    async with workspace_tx() as connection:
-        turn_id = (
-            await connection.execute(
-                sa.select(tables.turn.c.id).where(tables.turn.c.workspace_id == workspace_id)
-            )
-        ).scalar_one()
-    await _arm_followers(workspace_id, turn_id, hub)
-    task = slack._PROGRESS_TASKS[turn_id]
-
-    await hub.publish(turn_id, Resumed(attempt="attempt-one"))
     await asyncio.sleep(RESUME_FRAME_SETTLE_SECONDS)
 
     assert not _requests_to(recorder, slack.SLACK_CHAT_POST_MESSAGE_URL)

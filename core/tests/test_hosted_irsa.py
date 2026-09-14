@@ -291,11 +291,11 @@ def _check_hosted_shutdown_grace_matches_across_environments() -> None:
     from both sequential shutdown phases — so no value can drift from its enforcement. Prod holds a
     rolling pod open for the in-flight turn, which is what carries the member's model round; testing
     cancels instead and lets peer recovery resume each PENDING turn, trading ~15s of stale-out for
-    the 600s every deploy otherwise waits out."""
+    the 120s every deploy otherwise waits out."""
     testing = TESTING_CONFIG.read_text()
     prod = PROD_CONFIG.read_text()
     assert "  graceful_shutdown_seconds = 0\n" in testing
-    assert "  graceful_shutdown_seconds = 600\n" in prod
+    assert "  graceful_shutdown_seconds = 120\n" in prod
     for config in (testing, prod):
         assert "  prestop_seconds           = 10\n" in config
         assert "  request_shutdown_seconds  = 30\n" in config
