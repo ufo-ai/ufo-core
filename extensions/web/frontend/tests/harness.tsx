@@ -386,7 +386,7 @@ export const chatsOnWire = (rows: Conversation[]): Record<string, Route> => ({
 export const RADAR_TOUR = "What this workspace can do";
 export const NO_TASKS = "No scheduled task is visible to you.";
 export const NO_TRIGGERS = "No source trigger is visible to you.";
-export const NO_ARTIFACTS = "A file or site an app makes in a conversation is listed here.";
+export const NO_ARTIFACTS = "A file or site made in conversation is listed here.";
 
 export const TASK_KIND = {
   kind: "scheduled_task",

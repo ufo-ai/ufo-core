@@ -515,7 +515,7 @@ CLAIMS = (
         corpus="references/capabilities.md",
         phrase="Artifacts lists shared files and hosted sites",
         source=ARTIFACTS_VIEW,
-        pattern=r"A file or site an app makes in a conversation is listed here",
+        pattern=r"A file or site made in conversation is listed here",
     ),
     Claim(
         claim="Automations lists every scheduled task and source trigger, and their runs",

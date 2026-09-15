@@ -108,7 +108,7 @@ type Card = {
 type Shelf = { cards: Card[]; files: FilesPayload; bare: boolean };
 
 /** What the shelf states where the workspace has shared nothing yet. */
-const NOTHING_SHARED = "A file or site an app makes in a conversation is listed here.";
+const NOTHING_SHARED = "A file or site made in conversation is listed here.";
 
 const NO_FILES: PanelState<FilesPayload> = { phase: "ready", payload: { objects: [] } };
 const NO_SITES: PanelState<SitesPayload> = { phase: "ready", payload: { objects: [] } };
