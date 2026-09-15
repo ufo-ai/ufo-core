@@ -157,13 +157,20 @@ class JobSpec:
     `models.background_jobs_model` every other job's seam resolves through. A job declares it when
     one of its calls carries a payload only the deploy default's context window holds — a whole
     archived transcript, say, which was compacted against that window and which nothing bounds
-    again."""
+    again.
+
+    `spends_the_balance` drops from `candidates` every workspace the balance gate would refuse, so
+    a job whose work costs money never opens one. The extension declares that its work spends; core
+    owns which workspaces are short, and keeps the gate's own-key exemption. A job that fires into a
+    refusing workspace does not merely waste the tick — a scheduled task advances past its
+    occurrence on any fire, so the run is lost rather than deferred."""
 
     name: str
     schedule: str | None
     handler: Callable[[ExtensionContext], Awaitable[None]]
     candidates: WorkspaceCandidates
     needs_deploy_model: bool = False
+    spends_the_balance: bool = False
 
 
 @dataclass(frozen=True)

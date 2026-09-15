@@ -116,6 +116,17 @@ async def _workspace() -> UUID:
     return workspace_id
 
 
+DOLLAR = 1_000_000
+OWN_KEY_SLOT = "anthropic_api_key"
+
+
+def _registry_keyed_on() -> ModelRegistry:
+    """A deploy whose every model keys from one slot, so the gate's own-key exemption has a slot to
+    read the workspace's credential under."""
+    specs = {spec.id: replace(spec, key_slot=OWN_KEY_SLOT) for spec in CORE_MODEL_SPECS}
+    return ModelRegistry(specs=specs, pricing=CORE_PRICING, auto_model=next(iter(specs)))
+
+
 def _runner(core_jobs: tuple[JobSpec, ...]) -> JobRunner:
     return JobRunner(bindings=bindings_from((), core_jobs), manifests=())
 
@@ -1724,3 +1735,60 @@ async def test_the_onboarding_census_sees_only_the_workspace_it_is_bound_to(
     assert {step for step, _status, _surface, _provider in _counted_steps(reader)} == {
         WORKSPACE_CREATED_STEP
     }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_spending_job_names_no_workspace_the_balance_gate_would_refuse(db: None) -> None:
+    """A job whose work costs money is held back from a workspace the gate would refuse, the way
+    the page jobs already are: the work stays due and the tick after the credit lands finds it.
+    Firing instead would spend the occurrence on a turn admission cancels — a scheduled task
+    advances `next_run_at` on a fire whatever the turn's outcome, so the run is lost, not deferred.
+
+    The own-key exemption travels with it, because that workspace's turns run."""
+    refused = await _workspace()
+    funded_above = await _workspace()
+    own_key = await _workspace()
+    async with workspace_tx() as connection:
+        for workspace_id, balance in ((refused, DOLLAR), (own_key, DOLLAR)):
+            await connection.execute(
+                sa.insert(tables.workspace_balance).values(
+                    workspace_id=workspace_id,
+                    balance_micro_usd=balance,
+                    reserve_micro_usd=10 * DOLLAR,
+                    created_at=sa.func.now(),
+                    updated_at=sa.func.now(),
+                )
+            )
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=own_key,
+                slot=OWN_KEY_SLOT,
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    spends = JobSpec(
+        name="spends",
+        schedule=DORMANT_CRON,
+        handler=_write_marker,
+        candidates=_every_workspace(),
+        spends_the_balance=True,
+    )
+    free = JobSpec(
+        name="free",
+        schedule=DORMANT_CRON,
+        handler=_write_marker,
+        candidates=_every_workspace(),
+    )
+    runner = JobRunner(
+        bindings=bindings_from((), (spends, free)), manifests=(), registry=_registry_keyed_on()
+    )
+
+    held = await runner.candidates(f"{CORE_EXTENSION}:spends")
+    assert refused not in held
+    assert funded_above in held
+    assert own_key in held
+
+    assert refused in await runner.candidates(f"{CORE_EXTENSION}:free")

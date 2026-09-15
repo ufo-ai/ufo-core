@@ -23,7 +23,7 @@ from ufo_ext_memory.store import memory_item
 from ufo_ext_scheduled_tasks import tools as scheduled_tools
 from ufo_ext_scheduled_tasks.conversation_slot import AUTOMATIONS_SLOT
 from ufo_ext_scheduled_tasks.cron import next_fire
-from ufo_ext_scheduled_tasks.manifest import NAME, manifest
+from ufo_ext_scheduled_tasks.manifest import NAME, PAUSE_RUNNER_JOB, RUNNER_JOB, manifest
 from ufo_ext_scheduled_tasks.runner import (
     FINAL_FIRE_INSTRUCTION,
     REPORT_INSTRUCTION,
@@ -3315,3 +3315,15 @@ async def test_a_workspace_authority_task_fires_with_its_runtime_scope(db: None)
         connections=(), internet_access=False
     )
     assert dbos.enqueued == [str(turn["id"])]
+
+
+def test_both_fires_declare_that_they_spend_the_balance() -> None:
+    """A fire admits a turn, and a turn the balance refuses is cancelled rather than parked — an
+    internal admission takes no park arm. Neither runner survives that: the task runner advances
+    `next_run_at` past the occurrence it just lost, and the pause runner retires the row outright.
+    So both are held back from a workspace the gate would refuse rather than firing into it."""
+    jobs = {job.name: job for job in manifest().jobs}
+    assert {name: job.spends_the_balance for name, job in jobs.items()} == {
+        RUNNER_JOB: True,
+        PAUSE_RUNNER_JOB: True,
+    }

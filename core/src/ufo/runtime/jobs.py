@@ -1114,7 +1114,21 @@ class JobRunner:
                     warn("jobs.tick_skipped", key=key, workspace_id=str(workspace_id))
 
     async def candidates(self, key: str) -> tuple[UUID, ...]:
-        return await self._binding(key).spec.candidates()
+        spec = self._binding(key).spec
+        named = await spec.candidates()
+        if not spec.spends_the_balance or not named:
+            return named
+        async with owner_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(tables.workspace.c.id).where(
+                        tables.workspace.c.id.in_(named),
+                        funded(tables.workspace.c.id, model_key_slots(self.registry)),
+                    )
+                )
+            ).all()
+        solvent = {row.id for row in rows}
+        return tuple(workspace_id for workspace_id in named if workspace_id in solvent)
 
     async def fire(self, key: str, workspace_id: UUID) -> None:
         binding = self._binding(key)
