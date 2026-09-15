@@ -3833,6 +3833,40 @@ const SLATE = {
   },
 };
 
+test("the starters hold their rows' place while the ranking is read", async () => {
+  let rank: (() => void) | null = null;
+  const ranked = new Promise<void>((settle) => {
+    rank = settle;
+  });
+  wire({
+    ...transcript(),
+    "/workspace/starters": async () => {
+      await ranked;
+      return json(SLATE);
+    },
+  });
+  location.hash = newChatHash(AGENT_ID);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const start = await screen.findByTestId("start");
+  const waiting = [...start.querySelectorAll('[data-part="starter-waiting"]')];
+  expect(waiting).toHaveLength(3);
+  expect(waiting[0].querySelectorAll("[data-part=skeleton]")).toHaveLength(2);
+  expect(waiting[0].className).toContain("pointer-events-none");
+  expect(waiting[0].className).not.toContain("hover:bg-fill");
+  expect(screen.queryByText(SLATE.starters[0].line)).toBeNull();
+  expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
+
+  rank!();
+
+  const settled = (await screen.findByText(SLATE.starters[0].line)).closest("button")!;
+  for (const held of ["h-(--size-row)", "w-full", "items-center", "gap-sm", "px-lg"]) {
+    expect(waiting[0].className).toContain(held);
+    expect(settled.className).toContain(held);
+  }
+  expect(start.querySelector('[data-part="starter-waiting"]')).toBeNull();
+});
+
 test("a workspace with nothing ranked reads the rows the screen ships with", async () => {
   wire({
     ...transcript(),
@@ -3865,10 +3899,14 @@ test("no connect act is drawn while the ranking is read", async () => {
   location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const rows = (await screen.findByRole("button", { name: /competitors you name/ }))
-    .parentElement!;
+  const waiting = await waitFor(() => {
+    const held = [...document.querySelectorAll('[data-part="starter-waiting"]')];
+    expect(held).toHaveLength(3);
+    return held;
+  });
+  const rows = waiting[0].parentElement!;
   expect(screen.queryByRole("link", { name: /Connect more accounts/ })).toBeNull();
-  expect(rows.querySelectorAll("[data-part=skeleton]")).toHaveLength(2);
+  expect(rows.querySelectorAll("[data-part=skeleton]")).toHaveLength(8);
 
   rank!();
 

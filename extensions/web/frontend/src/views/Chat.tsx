@@ -913,6 +913,7 @@ type StartersPayload = { starters: StarterRow[]; unlock: UnlockRow | null };
 
 const STARTERS_READ = "/workspace/starters";
 const STARTERS_EVERY_MS = 300_000;
+const STARTER_PLACES = ["w-4/5", "w-3/5", "w-2/3"];
 
 const STARTERS: { mark: string; line: string; ask: string }[] = [
   {
@@ -953,6 +954,23 @@ function StarterMark({ row }: { row: StarterRow }) {
   return <AgentIcon name={row.mark} className="size-(--size-glyph) shrink-0" />;
 }
 
+function StarterWaiting({ width }: { width: string }) {
+  return (
+    <div
+      data-part="starter-waiting"
+      className={cn(PRESS_ROW, "pointer-events-none hover:bg-transparent")}
+      aria-hidden
+    >
+      <Skeleton className="size-(--size-glyph) shrink-0 rounded-full" />
+      <span className="relative min-w-0 flex-1">
+        {"\u00a0"}
+        <Skeleton className={cn("absolute inset-y-0 left-0", width)} />
+      </span>
+      <span className="size-(--size-glyph) shrink-0" />
+    </div>
+  );
+}
+
 function Starters({ agentId }: { agentId: string }) {
   const read = usePanelRead<StartersPayload>(STARTERS_READ, 0, STARTERS_EVERY_MS);
   const answered = read.phase === "ready" ? read.payload : null;
@@ -965,14 +983,18 @@ function Starters({ agentId }: { agentId: string }) {
   };
   return (
     <div className="mt-2xl flex flex-col">
-      {rows.map((row) => (
-        <PressRow
-          key={row.agent_id ?? `${row.kind}:${row.ask}`}
-          glyph={<StarterMark row={row} />}
-          line={row.line}
-          onPress={() => start(row.agent_id, row.ask, row.kind)}
-        />
-      ))}
+      {read.phase === "loading" ? (
+        STARTER_PLACES.map((width) => <StarterWaiting key={width} width={width} />)
+      ) : (
+        rows.map((row) => (
+          <PressRow
+            key={row.agent_id ?? `${row.kind}:${row.ask}`}
+            glyph={<StarterMark row={row} />}
+            line={row.line}
+            onPress={() => start(row.agent_id, row.ask, row.kind)}
+          />
+        ))
+      )}
       {read.phase === "loading" ? (
         <ConnectWaiting />
       ) : unlock ? (
