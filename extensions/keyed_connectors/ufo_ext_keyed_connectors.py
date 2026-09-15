@@ -225,6 +225,22 @@ KEYED_PROVIDERS: tuple[KeyedProvider, ...] = (
         ),
     ),
     KeyedProvider(
+        provider="railway",
+        label="Railway",
+        host="backboard.railway.com",
+        secrets=(
+            KeyedSecret(
+                key="api_token",
+                header="Authorization",
+                scheme="Bearer",
+                env="RAILWAY_API_TOKEN",
+                description="Railway API token (Account Settings → Tokens). The whole API is one "
+                "GraphQL endpoint at /graphql/v2, so every read and deploy goes through POST; a "
+                "team token reads that team's projects only, and a personal token reads yours.",
+            ),
+        ),
+    ),
+    KeyedProvider(
         provider="apollo",
         label="Apollo",
         host="api.apollo.io",

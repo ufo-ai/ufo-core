@@ -47,8 +47,10 @@ its first provider.
 | `datadog` | one of nine published sites | `DD-API-KEY` plus `DD-APPLICATION-KEY` |
 | `posthog` | `us.posthog.com` or `eu.posthog.com` | `Authorization: Bearer <key>` |
 | `mercury` | `api.mercury.com` | `Authorization: Bearer <token>` |
+| `metronome` | `api.metronome.com` | `Authorization: Bearer <token>` |
 | `apollo` | `api.apollo.io` | `X-Api-Key` |
 | `pandadoc` | `api.pandadoc.com` | `Authorization: API-Key <key>` |
+| `railway` | `backboard.railway.com` | `Authorization: Bearer <token>` |
 
 Mercury, Apollo and PandaDoc issue no managed OAuth either broker can host: Composio asks for your
 own credentials for all three, Mercury and Apollo's search surface are key-only on Pipedream too, and
