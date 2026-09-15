@@ -34,7 +34,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Literal, TypedDict
+from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
@@ -136,8 +136,10 @@ from ufo.sdk.objects import (
     ObjectRef,
     ObjectRow,
 )
+from ufo.sdk.record import ActivityEvent, SubagentRun
 from ufo.sdk.sandbox import shipped_app_slug
 from ufo.sdk.surfaces import (
+    AGENT_DETAIL_ELEMENT,
     MEMBER_ADMISSION,
     WORKSPACE_WRITE_MAX_BYTES,
     AgentSummary,
@@ -282,6 +284,9 @@ LAST_RUN_FIELD = "last_run_at"
 TASK_LANE_SEPARATOR = "|"
 COMMENT_SURFACES = frozenset({"slack", "ufo"})
 SUBAGENT_ACTIVITY_LIMIT = 40
+# The engine's envelope stands on every member message and names nothing; an extension's fold
+# is the one a bubble reports.
+HIDDEN_ELEMENTS = frozenset({AGENT_DETAIL_ELEMENT})
 SUBAGENT_EVENT_LIMIT = 100
 HISTORY_PAGE_MESSAGE_LIMIT = 100
 HISTORY_PAGE_BYTE_LIMIT = 64 * 1024
@@ -1711,12 +1716,12 @@ def _member_bubble(
     the bubble is marked so the portal draws it as the member saw it. A comment the same member
     typed into the portal of that conversation admits unfenced, so their `#` and `*` stay the
     characters they typed."""
-    said, fenced = member_message_said(inbound)
-    if fenced:
-        words, paths = said, member_message_attachments(inbound)
+    parts = member_message_said(inbound)
+    if parts.fenced:
+        words, paths = parts.said, member_message_attachments(inbound)
     else:
-        words, paths = _member_attachments(said)
-    mrkdwn = slack and fenced
+        words, paths = _member_attachments(parts.said)
+    mrkdwn = slack and parts.fenced
     bubble: dict[str, object] = {"role": "user", "text": as_markdown(words) if mrkdwn else words}
     if mrkdwn:
         bubble["markdown"] = True
@@ -1724,6 +1729,9 @@ def _member_bubble(
         bubble["files"] = [
             attached.get(PurePosixPath(path).name) or _note_card(path) for path in paths
         ]
+    hidden = [element for element in parts.folded if element in HIDDEN_ELEMENTS]
+    if hidden:
+        bubble["hidden"] = hidden
     return bubble
 
 
@@ -2101,26 +2109,7 @@ def _stored_activity(block: ToolUseBlock, result: ToolResultBlock) -> str | None
     return block.name
 
 
-class SubagentNode(TypedDict):
-    """One spawned run as the conversation shows it: the display name its spawn gave it (empty
-    when it gave none — the row states the target then), the qualified target (`agent:<name>` for
-    an agent child, the bare profile otherwise), the conversation that holds the whole record,
-    the work it did, what it answered, the runs it spawned in turn, and whether it is still going —
-    a spawn whose wait a member's message ended keeps running after the turn that opened it has
-    answered, so the chat states that wait against that turn until the run itself ends. A profile
-    run links to its own conversation page; an agent run has no such page — the portal derives that
-    from the target's prefix, shows its work inline, and mints no link."""
-
-    profile: str
-    name: str
-    conversation_id: str
-    events: list[dict[str, str]]
-    output: str
-    subagents: list["SubagentNode"]
-    running: bool
-
-
-SubagentRuns = dict[str, list[SubagentNode]]
+SubagentRuns = dict[str, list[SubagentRun]]
 
 
 def _subagent_activity(messages: tuple[Message, ...]) -> list[dict[str, str]]:
@@ -2216,7 +2205,7 @@ async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> Subag
     bounded and concurrently, so a conversation that spawned hundreds still answers in one round
     trip; a run past the bound, and one still going, carries the conversation link that holds it."""
     spawned: list[Turn] = []
-    nodes: dict[UUID, SubagentNode] = {}
+    profiles: dict[UUID, str] = {}
     agent_names: dict[UUID, str] | None = None
     for turn in turns:
         if turn.parent_turn_id is None:
@@ -2227,28 +2216,39 @@ async def _subagent_nodes(ctx: SurfaceContext, turns: tuple[Turn, ...]) -> Subag
                 agent_names = {agent.id: agent.name for agent in await ctx.list_agents()}
             profile = f"agent:{agent_names.get(turn.agent_id, '')}"
         spawned.append(turn)
-        nodes[turn.id] = SubagentNode(
-            profile=profile,
-            name=turn.subagent_name or "",
-            conversation_id=str(turn.conversation_id),
-            events=[],
-            output=_run_answer("" if turn.terminal is None else turn.terminal.text),
-            subagents=[],
-            running=turn.terminal is None,
-        )
+        profiles[turn.id] = profile
     read = sorted(spawned, key=lambda turn: turn.created_at, reverse=True)[:SUBAGENT_ACTIVITY_LIMIT]
     recorded = await asyncio.gather(*(ctx.read_transcript(turn.conversation_id) for turn in read))
-    for turn, work in zip(read, recorded, strict=True):
-        if work is not None:
-            nodes[turn.id]["events"] = _subagent_activity(work.messages)
-    runs: SubagentRuns = {}
+    work = {
+        turn.id: _subagent_activity(held.messages)
+        for turn, held in zip(read, recorded, strict=True)
+        if held is not None
+    }
+    children: dict[UUID, list[Turn]] = {}
     for turn in spawned:
-        parent = nodes.get(turn.parent_turn_id) if turn.parent_turn_id else None
-        if parent is None:
-            runs.setdefault(str(turn.parent_turn_id), []).append(nodes[turn.id])
-        else:
-            parent["subagents"].append(nodes[turn.id])
-    return runs
+        if turn.parent_turn_id is not None:
+            children.setdefault(turn.parent_turn_id, []).append(turn)
+
+    def node(turn: Turn) -> SubagentRun:
+        return SubagentRun(
+            profile=profiles[turn.id],
+            name=turn.subagent_name or "",
+            conversation_id=turn.conversation_id,
+            events=tuple(ActivityEvent.model_validate(event) for event in work.get(turn.id, [])),
+            output=_run_answer("" if turn.terminal is None else turn.terminal.text),
+            subagents=tuple(node(child) for child in children.get(turn.id, [])),
+            running=turn.terminal is None,
+        )
+
+    return {
+        str(parent): [node(turn) for turn in held]
+        for parent, held in children.items()
+        if parent not in profiles
+    }
+
+
+def _run_payload(run: SubagentRun) -> dict[str, object]:
+    return run.model_dump(mode="json", exclude_none=True)
 
 
 @dataclass(frozen=True)
@@ -2394,7 +2394,7 @@ class _TranscriptRenderer:
         if state.pending:
             reply["events"] = list(state.pending)
         if runs:
-            reply["subagents"] = runs
+            reply["subagents"] = [_run_payload(run) for run in runs]
         if question is not None:
             reply["question"] = question
         if shared:
@@ -4806,7 +4806,7 @@ async def _events(
                             mine.append(spawn)
                     nodes = await _subagent_nodes(ctx, tuple(mine))
                     for run in nodes.get(str(turn_id), []):
-                        yield _event("subagent", dict(run))
+                        yield _event("subagent", _run_payload(run))
                 request = frame.frame.connect_request
                 if (
                     request is not None

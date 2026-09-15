@@ -362,5 +362,9 @@ member's browser instead of in CI.
 
 `gates.py` owns this one: generated fixtures plus an equality check already hold the SSE event
 names identical across the two languages, and the same shape extends to the JSON reads and to the
-bridge's reply. One hole is left for a reviewer to remember — `.pre-commit-config.yaml` has no
-frontend hook, so `make check` says nothing about a TypeScript change.
+bridge's reply. The turn record is the model of it: `src/lib/contract.ts` is rendered from core's
+pydantic models by `uv run python -m ufo_testsupport.contract` together with
+`tests/fixtures/record.json`, `test_contract.py` fails when either is stale, and `turnRecord.ts`
+imports its types from there rather than spelling them. One hole is left for a reviewer to
+remember — `.pre-commit-config.yaml` has no frontend hook, so `make check` says nothing about a
+TypeScript change.

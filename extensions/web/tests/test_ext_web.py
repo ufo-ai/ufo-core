@@ -128,8 +128,8 @@ from ufo_ext_web.surface import (
     SESSION_FAULT_HEADER,
     SIDEBAR_FILE,
     SUBAGENT_EVENT_LIMIT,
-    SubagentNode,
     _answer_key,
+    _member_bubble,
     _rendered_messages,
     _run_answer,
     _sse,
@@ -221,7 +221,7 @@ from ufo.runtime.access.grants import (
 )
 from ufo.runtime.agent_scope import agent as bind_agent
 from ufo.runtime.billing.accounting import record_egress_request, record_turn_usage
-from ufo.runtime.engine import FINISH_PROMPT
+from ufo.runtime.engine import FINISH_PROMPT, _context_tag
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT,
@@ -299,6 +299,7 @@ from ufo.sdk.manifest import (
     SetupSchedule,
     SubagentProfile,
 )
+from ufo.sdk.record import SubagentRun
 from ufo.sdk.surfaces import PORTAL_SURFACE, with_agent_detail
 from ufo.serve import FOREIGN_HANDSHAKE, _mount_shared_surfaces
 
@@ -808,14 +809,14 @@ def test_transcript_projection_keeps_generated_activity_labels() -> None:
     }
 
 
-def _node(profile: str, conversation_id: UUID) -> SubagentNode:
-    return SubagentNode(
+def _node(profile: str, conversation_id: UUID) -> SubagentRun:
+    return SubagentRun(
         profile=profile,
         name="",
-        conversation_id=str(conversation_id),
-        events=[],
+        conversation_id=conversation_id,
+        events=(),
         output="",
-        subagents=[],
+        subagents=(),
         running=False,
     )
 
@@ -1785,6 +1786,7 @@ async def test_a_fired_turns_prompt_states_its_headline_as_sent_by_ufo(
                 "role": "user",
                 "text": "GitHub update: Fix the build",
                 "fired": {"provider": "github"},
+                "hidden": ["agent_detail"],
             }
         ],
         "turn": str(woken),
@@ -6348,6 +6350,19 @@ async def test_composer_files_land_in_the_workspace_before_the_turn(
     inbox = sandboxes.workspace_root / str(row.conversation_id) / "web-inbox"
     assert (inbox / "notes.txt").read_bytes() == b"hello"
     assert (inbox / "notes-1.txt").read_bytes() == b"again"
+
+
+def test_a_member_bubble_names_the_detail_folded_off_an_alert() -> None:
+    """The engine's envelope comes off every member message and is nobody's news; the element an
+    extension folded its agent-only words into is, and the bubble says so."""
+    alert = with_agent_detail("GitHub update: Fix the build", "object_get refs: page/1.")
+    assert _member_bubble(alert, {}) == {
+        "role": "user",
+        "text": "GitHub update: Fix the build",
+        "hidden": ["agent_detail"],
+    }
+    tagged = _context_tag(uuid4(), None, datetime(2026, 9, 15, 12, 0, tzinfo=UTC)) + "Hello"
+    assert _member_bubble(tagged, {}) == {"role": "user", "text": "Hello"}
 
 
 def test_a_members_bubble_carries_what_they_attached_rather_than_the_note() -> None:
@@ -13007,6 +13022,7 @@ def test_projection_marks_a_fired_turns_headline_as_sent_by_ufo() -> None:
             "text": "GitHub update: Fix the build",
             "turn": woken,
             "fired": {"provider": "github"},
+            "hidden": ["agent_detail"],
         },
         {"role": "assistant", "text": "Reviewed.", "turn": woken},
     ]

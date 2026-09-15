@@ -1,3 +1,13 @@
+import type { ActivityEvent, AskQuestion, SubagentRun } from "@/lib/contract";
+
+export type {
+  ActivityEvent,
+  AskQuestion as QuestionEntry,
+  QuestionOption,
+  SourceRef,
+  SubagentRun,
+} from "@/lib/contract";
+
 /** It rides the agent object, so opening an app paints from the boot read. `deploy_generation` changes
  *  with the page's deployment, so a fresh answer remounts it. */
 export type Homepage =
@@ -123,23 +133,11 @@ export type ChatApp = {
   icon: string;
 };
 
-export type QuestionOption = { label: string; description?: string };
-
-export type QuestionEntry = {
-  question: string;
-  header?: string;
-  options?: QuestionOption[];
-  multi_select?: boolean;
-  free_text_only?: boolean;
-  allow_attachments?: boolean;
-  chosen?: string;
-};
-
 export type ChatQuestion = {
   turn_id: string;
   title?: string;
-  icon?: string;
-  questions: QuestionEntry[];
+  icon?: string | null;
+  questions: AskQuestion[];
   answered?: Record<number, string>;
   closed?: boolean;
 };
@@ -152,36 +150,6 @@ export type CredentialRequest = {
   prompts: CredentialPrompt[];
 };
 
-export type ActivityEvent =
-  | { kind: "activity"; text: string }
-  | { kind: "note"; text: string };
-
-export type SourceKind = "web" | "workspace";
-
-/** One place the running turn read: a web page by `url`, a workspace page by `ref`, with
- *  the provider that feeds a workspace page so its tile draws that provider's mark. */
-export type SourceRef = {
-  kind: SourceKind;
-  title: string;
-  url: string;
-  ref: string;
-  provider: string;
-};
-
-export type SubagentRun = {
-  profile: string;
-  name?: string;
-  conversation_id: string;
-  events: ActivityEvent[];
-  output: string;
-  subagents: SubagentRun[];
-  turn_id?: string;
-  parent_turn_id?: string;
-  running?: boolean;
-  current?: string;
-  at?: number;
-};
-
 /** What a settled turn spent and how long it took, carried on the reply it produced. The transcript
  *  draws it from here, so the line stands after a reload and for a member who watched no stream. */
 export type TurnSummary = {
@@ -192,6 +160,8 @@ export type TurnSummary = {
   cost_micro_usd?: number;
   duration_ms?: number;
 };
+
+export type HiddenElement = "agent_detail";
 
 /** `arrival_id` names the inbound-queue row a message admitted mid-turn landed on, carried only while
  *  that turn has not taken the message up. `at` is when the message landed: the member's words as
@@ -208,6 +178,9 @@ export type Message = {
    *  member spoke them: the header says ufo sent them, and the provider's mark heads the words. */
   fired?: { provider: string | null };
   asked?: string;
+  /** The elements the server folded off a member's words before they reached this page: an
+   *  extension's alert states one line for the member and keeps the rest for the agent. */
+  hidden?: HiddenElement[];
   arrival_id?: string;
   /** The turn this message belongs to — the run a member presses in a listing of runs: the turn
    *  that wrote a reply, and the turn the words that woke it founded. */

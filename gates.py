@@ -139,7 +139,9 @@ WEB_SURFACE_MODULE = Path("extensions/web/ufo_ext_web/surface.py")
 DEBUGGER_SURFACE_MODULE = Path("extensions/debugger/ufo_ext_debugger/surface.py")
 SLACK_SURFACE_MODULE = Path("extensions/slack/ufo_ext_slack/surface.py")
 REDIS_HUB_MODULE = Path("extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py")
-TURNSTREAM_MODULE = Path("extensions/web/frontend/src/lib/turnStream.ts")
+TURN_RECORD_MODULE = Path("extensions/web/frontend/src/lib/turnRecord.ts")
+CORE_SURFACE_MODULE = Path("core/src/ufo/runtime/ext/surface.py")
+SILENCE_SENTINEL_NAME = "SILENCE_SENTINEL"
 CALLBACK_PAGE_MODULE = Path("core/src/ufo/sdk/callback_page.py")
 CONSENT_MODULES = (Path("extensions/web/frontend/src/lib/consent.tsx"),)
 CONSENT_MARK_NAME = "CONSENT_WINDOW_MARK"
@@ -873,19 +875,17 @@ def _sse_listener_failures(web: ast.Module, debugger: ast.Module) -> list[str]:
         and isinstance(node.args[0], ast.Constant)
         and isinstance(node.args[0].value, str)
     }
-    stream_source = _required_text(TURNSTREAM_MODULE, failures)
-    if stream_source is not None:
-        listeners = set(re.findall(r'addEventListener\("(\w+)"', stream_source)) - {"open"}
-        if ".onmessage" in stream_source:
-            listeners.add("message")
+    record_source = _required_text(TURN_RECORD_MODULE, failures)
+    if record_source is not None:
+        declared = _declared_event_kinds(record_source)
         expected = web_events | {"message"}
         failures.extend(
-            f"sse: turnStream.ts does not listen for event {name!r}"
-            for name in sorted(expected - listeners)
+            f"sse: turnRecord.ts does not declare event {name!r}"
+            for name in sorted(expected - declared)
         )
         failures.extend(
-            f"sse: turnStream.ts listens for event {name!r} that the web surface never sends"
-            for name in sorted(listeners - expected)
+            f"sse: turnRecord.ts declares event {name!r} that the web surface never sends"
+            for name in sorted(declared - expected)
         )
 
     debugger_sse = _function_scope(debugger, "_sse")
@@ -900,8 +900,7 @@ def _sse_listener_failures(web: ast.Module, debugger: ast.Module) -> list[str]:
         }
     tail_source = _required_text(DEBUGGER_TAIL_MODULE, failures)
     if tail_source is not None:
-        array = re.search(r"EVENT_KINDS = \[(.*?)\]", tail_source, re.S)
-        tail_kinds = set(re.findall(r'"(\w+)"', array.group(1))) if array else set()
+        tail_kinds = _declared_event_kinds(tail_source)
         failures.extend(
             f"sse: debugger Tail.tsx does not listen for event {name!r}"
             for name in sorted(debugger_kinds - tail_kinds)
@@ -909,6 +908,44 @@ def _sse_listener_failures(web: ast.Module, debugger: ast.Module) -> list[str]:
         failures.extend(
             f"sse: debugger Tail.tsx listens for event {name!r} that its surface never sends"
             for name in sorted(tail_kinds - debugger_kinds)
+        )
+    return failures
+
+
+def _declared_event_kinds(source: str) -> set[str]:
+    """The SSE event names a frontend module declares in its `EVENT_KINDS` array — the one list
+    its listeners and its decoder are both spelled from."""
+    array = re.search(r"EVENT_KINDS = \[(.*?)\]", source, re.S)
+    return set(re.findall(r'"(\w+)"', array.group(1))) if array else set()
+
+
+def _silence_sentinel_failures(trees: dict[Path, ast.Module]) -> list[str]:
+    """The silence sentinel is one string in two languages: the engine's surfaces read it off a
+    terminal frame to post nothing, and the portal reads it off the same frame to draw no row. A
+    sentinel spelled differently on either side draws the sentinel to the member as text."""
+    failures: list[str] = []
+    core = trees.get(CORE_SURFACE_MODULE)
+    if core is None:
+        return [f"silence: {CORE_SURFACE_MODULE} not found"]
+    spelled = {
+        node.value.value
+        for node in ast.walk(core)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == SILENCE_SENTINEL_NAME for t in node.targets)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
+    if len(spelled) != 1:
+        return [f"silence: {CORE_SURFACE_MODULE} does not assign {SILENCE_SENTINEL_NAME} a string"]
+    sentinel = spelled.pop()
+    source = _required_text(TURN_RECORD_MODULE, failures)
+    if source is None:
+        return failures
+    written = re.findall(rf'{SILENCE_SENTINEL_NAME} = "([^"]*)"', source)
+    if written != [sentinel]:
+        failures.append(
+            f"silence: {TURN_RECORD_MODULE} spells {SILENCE_SENTINEL_NAME} {written!r}, "
+            f"and core reads {sentinel!r}"
         )
     return failures
 
@@ -2336,6 +2373,7 @@ def main() -> int:
     failures.extend(_live_frame_consumer_failures(trees))
     failures.extend(_directive_wire_failures(trees))
     failures.extend(_consent_mark_failures(trees))
+    failures.extend(_silence_sentinel_failures(trees))
     failures.extend(_drawn_mark_failures())
     failures.extend(_to_thread_failures(trees))
     failures.extend(_log_field_failures(trees))

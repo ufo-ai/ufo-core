@@ -4,7 +4,8 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { wakeAppStatus } from "@/lib/appStatusStore";
-import { liveTurn, resetChatStore } from "@/lib/chatStore";
+import { resetChatStore } from "@/lib/chatStore";
+import { liveTurn } from "@/lib/turnRecord";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import { resetStreams } from "@/lib/turnStream";

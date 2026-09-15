@@ -63,7 +63,14 @@ import { useAppStatus } from "@/lib/appStatusStore";
 import { useMe } from "@/lib/audience";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
-import { chatState, clearChat, updateChat, useChat, type ChatTurn } from "@/lib/chatStore";
+import {
+  attachedTurn,
+  chatState,
+  clearChat,
+  updateChat,
+  useChat,
+  type ChatTurn,
+} from "@/lib/chatStore";
 import {
   clearDraft,
   flushDrafts,
@@ -215,7 +222,8 @@ export function Chat({
     settling.current = window.setTimeout(() => setAnimate(false), SEND_SCROLL_MS);
   };
   const stalled = messages === null ? state.fault : null;
-  const credentials = state.handoffs.credentials;
+  const credentials = state.credentials;
+  const watched = attachedTurn(state);
   const held = state.busy || state.messages === null;
   /* A card stops asking three ways: the transcript closes it, the member answers it, or they say
      something else instead — an ask the member spoke past is a choice they no longer have. */
@@ -280,18 +288,15 @@ export function Chat({
                     prompt={prompt}
                     onStored={(slot) =>
                       updateChat(chatKey, (current) => {
-                        const request = current.handoffs.credentials;
+                        const request = current.credentials;
                         if (!request) return current;
                         return {
                           ...current,
-                          handoffs: {
-                            ...current.handoffs,
-                            credentials: {
-                              ...request,
-                              prompts: request.prompts.map((entry) =>
-                                entry.slot === slot ? { ...entry, stored: true } : entry,
-                              ),
-                            },
+                          credentials: {
+                            ...request,
+                            prompts: request.prompts.map((entry) =>
+                              entry.slot === slot ? { ...entry, stored: true } : entry,
+                            ),
                           },
                         };
                       })
@@ -322,8 +327,8 @@ export function Chat({
         </TranscriptPane>
       )}
       {readOnly ? (
-        state.turn && state.turn.id === stops ? (
-          <Watching target={target} turnId={state.turn.id} />
+        watched !== null && watched === stops ? (
+          <Watching target={target} turnId={watched} />
         ) : null
       ) : (
         <Composer
@@ -624,7 +629,7 @@ function Question({
           }}
         >
           {steppable.map(({ entry, index }) => (
-            <QuestionnaireItem key={index} name={String(index)} multiple={entry.multi_select}>
+            <QuestionnaireItem key={index} name={String(index)} multiple={entry.multi_select ?? undefined}>
               <QuestionnaireTitle>{entry.question}</QuestionnaireTitle>
               <QuestionnaireChoices>
                 {choosable(entry)
@@ -767,7 +772,7 @@ function Composer({
   const { outOfCredit } = useAppStatus();
   const admin = useMe()?.admin === true;
   const showsEyebrow = addressed !== null && !dismissed;
-  const running = state.turn;
+  const running = attachedTurn(state);
   const disabled = state.messages === null || (target.conversationId === null && state.busy);
 
   const drafted = useRef(draftKey);
@@ -894,7 +899,7 @@ function Composer({
             disabled={disabled}
             onStop={() => {
               if (stopping || !running) return;
-              void stop(running.id);
+              void stop(running);
             }}
           />
         </div>

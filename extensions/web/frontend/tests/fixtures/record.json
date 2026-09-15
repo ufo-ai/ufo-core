@@ -1,0 +1,147 @@
+{
+  "id": "33333333-3333-4333-8333-333333333333",
+  "steps": [
+    {
+      "kind": "text",
+      "text": "Reading the changelog first.",
+      "open": false
+    },
+    {
+      "kind": "tool",
+      "label": "Reading the changelog.",
+      "sources": [
+        {
+          "kind": "web",
+          "title": "Docs",
+          "url": "https://docs.example/a",
+          "ref": "",
+          "provider": ""
+        }
+      ],
+      "open": false
+    },
+    {
+      "kind": "reply",
+      "id": "66666666-6666-4666-8666-666666666666",
+      "text": "Filed the launch issue as metalcraftai/ufo#1801."
+    },
+    {
+      "kind": "comment",
+      "id": "88888888-8888-4888-8888-888888888888",
+      "text": "A comment landed on Slack."
+    },
+    {
+      "kind": "drain",
+      "arrivals": [
+        "88888888-8888-4888-8888-888888888888"
+      ]
+    },
+    {
+      "kind": "resumed",
+      "attempt": "44444444444444444444444444444444"
+    },
+    {
+      "kind": "tool",
+      "label": null,
+      "sources": [
+        {
+          "kind": "web",
+          "title": "Docs",
+          "url": "https://docs.example/a",
+          "ref": "",
+          "provider": ""
+        }
+      ],
+      "open": false
+    },
+    {
+      "kind": "text",
+      "text": "It shipped Tuesday.",
+      "open": false
+    }
+  ],
+  "runs": [
+    {
+      "profile": "deep_research",
+      "name": "Calendar check",
+      "conversation_id": "77777777-7777-4777-8777-777777777777",
+      "events": [
+        {
+          "kind": "activity",
+          "text": "Reading the calendar."
+        }
+      ],
+      "output": "found it",
+      "subagents": [
+        {
+          "profile": "general_purpose",
+          "name": "",
+          "conversation_id": "77777777-7777-4777-8777-777777777777",
+          "events": [],
+          "output": "",
+          "subagents": [],
+          "running": true,
+          "turn_id": "99999999-9999-4999-8999-999999999999",
+          "parent_turn_id": "33333333-3333-4333-8333-333333333333",
+          "current": "Looking up info"
+        }
+      ],
+      "running": false,
+      "turn_id": null,
+      "parent_turn_id": null,
+      "current": null
+    }
+  ],
+  "meter": {
+    "tokens": 12,
+    "cost_micro_usd": 110
+  },
+  "end": {
+    "kind": "terminal",
+    "frame": {
+      "status": "done",
+      "text": "It shipped Tuesday.",
+      "incomplete_reason": null,
+      "error_class": null,
+      "error_message": null,
+      "tokens": 12,
+      "cost_micro_usd": 110,
+      "cache_percent": 40,
+      "model": "claude-opus-4-8",
+      "reasoning": null,
+      "environment": null,
+      "question": {
+        "title": "One question",
+        "questions": [
+          {
+            "question": "Which calendar?",
+            "options": [
+              {
+                "label": "Work",
+                "description": null,
+                "authorization_choice": null
+              },
+              {
+                "label": "Home",
+                "description": null,
+                "authorization_choice": null
+              }
+            ],
+            "multi_select": null,
+            "free_text_only": null,
+            "header": null,
+            "allow_attachments": null,
+            "chosen": null
+          }
+        ],
+        "icon": null,
+        "target_member_id": null,
+        "authorization_id": null
+      },
+      "credential_request": null,
+      "connect_request": null,
+      "created": []
+    },
+    "at": "2026-09-15T12:00:00Z"
+  }
+}

@@ -47,6 +47,7 @@ their reasoning intact — nothing is deleted. Start from [`0000-template.md`](0
 | [0049](0049-selfhosted-inference.md) | Self-hosted inference for the agent fleet — GLM-5.3-Flash and DeepSeek-V4.1-Flash on AWS | proposed |
 | [0050](0050-prefetch-rag.md) | Prefetch RAG — retrieve both corpora before the first model round | implemented |
 | [0051](0051-source-catalog-tree.md) | The source catalog is a tree — a stream's partitions are its parent's records | proposed |
+| [0055](0055-turn-record.md) | The turn record — one typed fold of a turn's frames, drawn by one layout | proposed |
 
 `0006` shipped and `0019` replaced its member-facing surface with `memory_search`; the record stays
 for its reasoning. `0010` is an audit, not a proposal — `accepted` marks its findings as the working

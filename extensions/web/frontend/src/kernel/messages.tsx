@@ -69,8 +69,14 @@ import { fullMoment, stampMoment } from "@/lib/moments";
 import { agentHash } from "@/lib/route";
 import { formatSize } from "@/lib/size";
 import { turnMeta } from "@/lib/turnMeta";
-import { latestActivity } from "@/lib/turnStream";
-import type { ActivityEvent, Bubble as Spoken, LiveTurn } from "@/lib/chatStore";
+import {
+  answerOf,
+  latestActivity,
+  layout,
+  type Bubble as Spoken,
+  type LiveTurn,
+  type Row,
+} from "@/lib/turnRecord";
 import type {
   ChatApp,
   ChatConnect,
@@ -275,14 +281,14 @@ function useMarkedTurn(
 
 /** The row a run is marked on: the last reply the turn spoke, else the words that woke it. A
  *  source trigger's alert says no member is reading the run, so such a run often writes no reply. */
-function markedRow(rows: Row[], turn: string | null): number | null {
+function markedRow(rows: Row[], turn: string | null): string | null {
   if (turn === null) return null;
-  let reply: number | null = null;
-  let woke: number | null = null;
+  let reply: string | null = null;
+  let woke: string | null = null;
   for (const row of rows) {
-    if (row.said === undefined || row.said.turn !== turn) continue;
-    if (row.said.role === "assistant") reply = row.at;
-    else woke = row.at;
+    if (row.kind !== "said" || row.message.turn !== turn) continue;
+    if (row.message.role === "assistant") reply = row.key;
+    else woke = row.key;
   }
   return reply ?? woke;
 }
@@ -333,21 +339,12 @@ export function MessageLog({
     openedReport.current = report;
     setOpened({ files: [file], at: 0 });
   }, [report, messages, live]);
-  const waiting = messages.findIndex(
-    (message) => message.arrival_id !== undefined || message.queued === true,
-  );
-  const settled = waiting === -1 ? messages : messages.slice(0, waiting);
-  const queued = waiting === -1 ? [] : messages.slice(waiting);
-  const rows: Row[] = [
-    ...settled.map((said, at) => ({ at, said })),
-    ...(live ? [{ at: settled.length, live }] : []),
-    ...queued.map((said, index) => ({ at: settled.length + (live ? 1 : 0) + index, said })),
-  ];
+  const rows = layout(messages, live);
   const still = useReducedMotion();
   const spoke = markedRow(rows, focus);
   const { letting, markedKey, land } = useMarkedTurn(
     focus,
-    focus === null ? null : spoke === null ? earlierKey(earlier, focus) : "m" + String(spoke),
+    focus === null ? null : spoke === null ? earlierKey(earlier, focus) : spoke,
   );
   const bubble = (message: Spoken, key: string, last = false) => {
     if (message.role === "error")
@@ -357,6 +354,7 @@ export function MessageLog({
         </MessageScrollerItem>
       );
     const mine = message.role === "user";
+    const answer = mine ? null : answerOf(message.text);
     const stamp = mine && message.at ? stampMoment(message.at) : null;
     const meta = mine
       ? stamp
@@ -374,6 +372,7 @@ export function MessageLog({
         ref={standing ? land : undefined}
         data-highlight={standing || undefined}
         data-letting-go={(standing && letting) || undefined}
+        data-hidden={message.hidden?.join(" ") || undefined}
         className={cn(
           standing && MARKED,
           standing && !letting && !still && THROB,
@@ -382,7 +381,7 @@ export function MessageLog({
       >
         <Speech mine={mine} at={message.at}>
           {message.subagents?.some((run) => run.running) ? (
-            <Activity events={message.events ?? []} runs={message.subagents} />
+            <Activity working={null} runs={message.subagents} />
           ) : null}
           {message.role === "user" && message.fired ? (
             <MessageHeader className="gap-xs">
@@ -399,7 +398,8 @@ export function MessageLog({
               onOpen={setOpened}
             />
           ) : null}
-          {message.role === "user" && !message.text && !message.asked ? null : (
+          {(message.role === "user" && !message.text && !message.asked) ||
+          answer?.kind === "silence" ? null : (
             <Said mine={message.role === "user"}>
               {message.role === "user" && message.asked ? (
                 <div className="text-small text-ink-soft">{message.asked}</div>
@@ -428,7 +428,7 @@ export function MessageLog({
               last={last}
               mine={mine}
               model={mine ? null : message.summary?.model}
-              copy={message.text}
+              copy={mine ? message.text : answer?.kind === "words" ? answer.text : undefined}
             >
               {meta.map((part, index) => (
                 <span key={index}>{part}</span>
@@ -451,31 +451,26 @@ export function MessageLog({
           page.messages.map((said, at) => bubble(said, "h" + page.cursor + ":" + at)),
         )}
         {rows.map((row, index) =>
-          row.live ? (
-            <MessageScrollerItem key={"m" + String(row.at)} messageId={"m" + String(row.at)}>
+          row.kind === "live" ? (
+            <MessageScrollerItem
+              key={row.key}
+              messageId={row.key}
+              data-folded={row.folded.length || undefined}
+            >
               <Speech mine={false}>
-                <Activity
-                  events={row.live.events}
-                  runs={row.live.subagents}
-                  sources={row.live.sources}
-                  working={
-                    row.live.reconnecting
-                      ? "Reconnecting…"
-                      : (row.live.activity ?? (row.live.text ? undefined : "Researching…"))
-                  }
-                />
+                <Activity working={row.working} runs={row.waiting} sources={row.sources} />
                 <Said mine={false} entering>
-                  <StreamingBody text={row.live.text} />
+                  <StreamingBody text={row.body} />
                 </Said>
-                {row.live.files.length ? (
-                  <Files files={row.live.files} onOpen={setOpened} />
+                {row.record.files.length ? (
+                  <Files files={row.record.files} onOpen={setOpened} />
                 ) : null}
-                {row.live.apps.length ? <Apps apps={row.live.apps} /> : null}
-                {row.live.connect ? <ConnectLink connect={row.live.connect} /> : null}
+                {row.record.apps.length ? <Apps apps={row.record.apps} /> : null}
+                {row.record.connect ? <ConnectLink connect={row.record.connect} /> : null}
               </Speech>
             </MessageScrollerItem>
           ) : (
-            bubble(row.said, "m" + String(row.at), index === rows.length - 1)
+            bubble(row.message, row.key, index === rows.length - 1)
           ),
         )}
         {children}
@@ -492,10 +487,6 @@ export function MessageLog({
 }
 
 type Opened = { files: ChatFile[]; at: number };
-
-type Row =
-  | { at: number; said: Spoken; live?: undefined }
-  | { at: number; said?: undefined; live: LiveTurn };
 
 /** The moment a message landed reaches the member under the pointer, never as a line of its own:
  *  a transcript reads as words rather than as a log. */
@@ -1137,7 +1128,7 @@ export function faviconUrl(url: string): string | null {
  *  The title is the tooltip and the accessible name; a web tile opens its address. */
 function SourceTile({ source }: { source: SourceRef }) {
   const [broken, setBroken] = useState(false);
-  const favicon = source.kind === "web" && !broken ? faviconUrl(source.url) : null;
+  const favicon = source.kind === "web" && !broken ? faviconUrl(source.url ?? "") : null;
   const Glyph = source.kind === "web" ? IconWorld : IconFileText;
   const drawn = favicon ? (
     <img
@@ -1174,8 +1165,9 @@ function SourceTile({ source }: { source: SourceRef }) {
 function tiled(items: SourceRef[]): SourceRef[] {
   const seen = new Set<string>();
   return items.filter((source) => {
-    const host = URL.canParse(source.url) ? new URL(source.url).hostname : source.url;
-    const key = source.kind === "web" ? host : source.ref;
+    const url = source.url ?? "";
+    const host = URL.canParse(url) ? new URL(url).hostname : url;
+    const key = source.kind === "web" ? host : (source.ref ?? "");
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -1200,21 +1192,19 @@ function Consulted({ sources }: { sources: SourceRef[] }) {
 /** The step a turn is on, what it has read, then the step of each subagent it waits on: a count
  *  alone reads as a stuck turn. A turn holding no running run draws no line — its reply is what it did. */
 function Activity({
-  events,
-  runs,
   working,
+  runs,
   sources = [],
 }: {
-  events: ActivityEvent[];
+  working: string | null;
   runs: SubagentRun[];
-  working?: string;
   sources?: SourceRef[];
 }) {
   const waiting = runs.filter((run) => run.running);
   const step =
     waiting.length > 0
       ? "Awaiting " + waiting.length + " subagent" + (waiting.length === 1 ? "" : "s")
-      : (working ?? latestActivity(events, runs));
+      : working;
   if (!step && sources.length === 0) return null;
   return (
     <>

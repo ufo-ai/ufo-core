@@ -235,7 +235,7 @@ test("the turn that opened a run gives the line back when the run itself ends", 
   await waitFor(() => expect(stepLine()).toBeNull());
 });
 
-test("an activity survives the drain that ends its round", async () => {
+test("a drain closes the round: its step settles behind it and no label carries into the next", async () => {
   const stream = await streaming();
   stream.emit("message", { text: "Reading the changelog first." });
   stream.emit("activity", { text: "Reading the changelog." });
@@ -243,7 +243,10 @@ test("an activity survives the drain that ends its round", async () => {
 
   stream.emit("absorbed", { arrivals: [ARRIVAL_ID] });
   stream.emit("message", { text: "It shipped Tuesday." });
-  expect(await screen.findByText("Reading the changelog.")).toBeTruthy();
+  expect(await screen.findByText(saying("It shipped Tuesday."))).toBeTruthy();
+  await waitFor(() => expect(stepLine()).toBeNull());
+  expect(screen.queryByText("Reading the changelog.")).toBeNull();
+  expect(screen.queryByText(saying("Reading the changelog first."))).toBeNull();
 
   stream.emit("terminal", {
     status: "done",
@@ -254,7 +257,28 @@ test("an activity survives the drain that ends its round", async () => {
   });
 
   expect(await screen.findByText("It shipped Tuesday.")).toBeTruthy();
+  expect(stepLine()).toBeNull();
+});
+
+test("a turn with nothing to say draws no row: no words and no meta line", async () => {
+  const stream = await streaming();
+  stream.emit("activity", { text: "Checking the inbox." });
+  expect(await screen.findByText("Checking the inbox.")).toBeTruthy();
+  stream.emit("terminal", {
+    status: "done",
+    text: "<response></response>",
+    model: "opus",
+    tokens: 800,
+    cost_micro_usd: 12_000,
+  });
+
   await waitFor(() => expect(stepLine()).toBeNull());
+  expect(screen.queryByText("<response></response>")).toBeNull();
+  expect(screen.queryByText("800 tok")).toBeNull();
+  expect(document.querySelectorAll("[data-role=agent]")).toHaveLength(0);
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Send" }).hasAttribute("disabled")).toBe(false),
+  );
 });
 
 test("a reloaded turn draws the reply alone, and none of the thoughts behind it", async () => {
@@ -520,8 +544,8 @@ test("a cancelled turn reads as the member's own word for it", async () => {
 
 test("a terminal that is not done and names no error class states the status alone", async () => {
   const stream = await streaming();
-  stream.emit("terminal", { status: "refused" });
-  expect(await screen.findByText("(refused)")).toBeTruthy();
+  stream.emit("terminal", { status: "failed" });
+  expect(await screen.findByText("(failed)")).toBeTruthy();
 });
 
 test("a parked turn states why it stopped and closes the stream", async () => {

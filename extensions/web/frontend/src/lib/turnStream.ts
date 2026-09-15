@@ -1,25 +1,27 @@
 import { BASE, getJson } from "@/lib/api";
 import { holdTurn, moveTurnHold, releaseTurn } from "@/lib/appStatusStore";
-import { money } from "@/lib/money";
-import { tokens } from "@/lib/turnMeta";
 import {
+  attachedTurn,
   chatState,
-  liveTurn,
   migrateChat,
   updateChat,
-  type ActivityEvent,
-  type Bubble,
   type ChatTurn,
-  type LiveTurn,
 } from "@/lib/chatStore";
-import type { ChatApp, ChatFile, SourceRef, SubagentRun, Transcript } from "@/lib/types";
+import {
+  EVENT_KINDS,
+  decodeFrame,
+  fold,
+  land,
+  liveTurn,
+  lost,
+  type Bubble,
+  type EventKind,
+} from "@/lib/turnRecord";
+import type { Transcript } from "@/lib/types";
 
 const REATTACH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const MALFORMED_REPLY = "Malformed reply — try again.";
-const RESUMED_NOTE = "Resumed after a restart";
-const CANCELLED = "cancelled";
-const STOPPED = "Stopped.";
-const AUTO_MODEL = "auto";
+const CONNECTION_LOST = "Connection lost — reload to see the reply.";
 const MODEL_HEADER = "x-ufo-model";
 const CLICK_HEADER = "x-ufo-click";
 const CLICK_KIND_HEADER = "x-ufo-click-kind";
@@ -78,113 +80,14 @@ export function resetStreams(): void {
   reattachTimer = NATIVE_TIMER;
 }
 
-export function eventLabel(event: ActivityEvent, _phase: "active" | "done"): string {
-  return event.text || "Completed a step.";
-}
-
-/** What the current step has read, each place once: a frame naming a page the step already drew
- *  adds nothing. A new tool step or the reply's first words start the list over, so the tiles are
- *  the step's, never stale. */
-export function consulted(held: SourceRef[], items: SourceRef[]): SourceRef[] {
-  const seen = new Set(held.map((source) => source.url || source.ref));
-  const fresh = items.filter((source) => {
-    const key = source.url || source.ref;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-  return fresh.length ? held.concat(fresh) : held;
-}
-
-export function latestActivity(events: ActivityEvent[], runs: SubagentRun[]): string {
-  const run = runs.at(-1);
-  if (run) return latestActivity(run.events, run.subagents) || "Subagent · " + run.profile;
-  const event = events.at(-1);
-  return event ? eventLabel(event, "done") : "";
-}
-
-type RunFrame = {
-  turn_id: string;
-  parent_turn_id: string;
-  conversation_id: string;
-  profile: string;
-  name: string;
-  activity: string;
-  status: string;
-};
-
-function runEvent(frame: RunFrame): ActivityEvent | null {
-  return frame.activity ? { kind: "activity", text: frame.activity } : null;
-}
-
-function holdsRun(runs: SubagentRun[], turnId: string): boolean {
-  return runs.some((run) => run.turn_id === turnId || holdsRun(run.subagents, turnId));
-}
-
-function advanceRun(run: SubagentRun, frame: RunFrame): SubagentRun {
-  const event = runEvent(frame);
-  return {
-    ...run,
-    ...(event ? { events: run.events.concat(event), current: event.text } : {}),
-    ...(frame.status ? { running: false, current: undefined } : {}),
-  };
-}
-
-export function applyRunFrame(
-  runs: SubagentRun[],
-  frame: RunFrame,
-  ownerTurnId: string,
-  ownerEvents: number,
-): SubagentRun[] {
-  if (frame.parent_turn_id !== ownerTurnId && holdsRun(runs, frame.parent_turn_id)) {
-    return runs.map((run) =>
-      run.turn_id === frame.parent_turn_id || holdsRun(run.subagents, frame.parent_turn_id)
-        ? {
-            ...run,
-            subagents: applyRunFrame(
-              run.subagents,
-              frame,
-              run.turn_id ?? "",
-              run.events.length,
-            ),
-          }
-        : run,
-    );
-  }
-  if (!runs.some((run) => run.turn_id === frame.turn_id)) {
-    const fresh: SubagentRun = {
-      profile: frame.profile,
-      name: frame.name,
-      conversation_id: frame.conversation_id,
-      events: [],
-      output: "",
-      subagents: [],
-      turn_id: frame.turn_id,
-      parent_turn_id: frame.parent_turn_id,
-      running: true,
-      at: ownerEvents,
-    };
-    return runs.concat(advanceRun(fresh, frame));
-  }
-  return runs.map((run) => (run.turn_id === frame.turn_id ? advanceRun(run, frame) : run));
-}
-
 /** A source opens with no cursor, so the turn's retained frames arrive from the first of them: whatever
  *  the chat had drawn belongs to the tail this one replaces, and holding it would glue two turns into one.
- *  The clock belongs to the turn rather than to the source, so a tail reopened on the same turn keeps it.
  *  The runs it left going are not that draft: they outlive their turn, so they stay as its own row. */
-export function streamTurn(
-  chatKey: string,
-  turnId: string,
-  answering: boolean,
-  agentModel: string,
-): void {
+export function streamTurn(chatKey: string, turnId: string, agentModel: string): void {
   REATTACHES.delete(chatKey);
-  const leaving = chatState(chatKey).turn;
+  const leaving = chatState(chatKey).live;
   const held =
-    leaving && leaving.id !== turnId
-      ? (chatState(chatKey).live?.subagents ?? []).filter((run) => run.running)
-      : [];
+    leaving !== null && leaving.id !== turnId ? leaving.runs.filter((run) => run.running) : [];
   updateChat(chatKey, (state) => ({
     ...state,
     ...(held.length
@@ -196,32 +99,18 @@ export function streamTurn(
           }),
         }
       : {}),
-    live: liveTurn(),
-    turn: { id: turnId, answering },
+    live: liveTurn(turnId, agentModel),
   }));
-  attach(chatKey, turnId, answering, false, agentModel);
+  attach(chatKey, turnId, false, agentModel);
 }
 
 function tailed(chatKey: string, turnId: string): boolean {
-  return chatState(chatKey).turn?.id === turnId && SOURCES.has(chatKey);
-}
-
-function withoutWait(messages: Bubble[] | null): Bubble[] | null {
-  if (messages === null) return null;
-  return messages.map((message) =>
-    message.arrival_id === undefined ? message : { ...message, arrival_id: undefined },
-  );
+  return attachedTurn(chatState(chatKey)) === turnId && SOURCES.has(chatKey);
 }
 
 /** One tail per chat, newest attach the writer. Two sources on one chat double every delta between
  *  them, and a reattach firing behind a live source opens a third. */
-function attach(
-  chatKey: string,
-  turnId: string,
-  answering: boolean,
-  reattach: boolean,
-  agentModel: string,
-): void {
+function attach(chatKey: string, turnId: string, reattach: boolean, agentModel: string): void {
   const pending = TIMERS.get(chatKey);
   if (pending !== undefined) clearTimeout(pending);
   TIMERS.delete(chatKey);
@@ -230,319 +119,84 @@ function attach(
   const source = new EventSource(BASE + "/turns/" + turnId + "/stream");
   SOURCES.set(chatKey, source);
 
-  const onLive = (change: (live: LiveTurn) => LiveTurn) =>
-    updateChat(chatKey, (state) => ({ ...state, live: change(state.live ?? liveTurn()) }));
-
-  const record = () =>
-    updateChat(chatKey, (state) => {
-      const live = state.live;
-      const asked = state.handoffs.question;
-      const question = asked && asked.turn_id === turnId ? asked : null;
-      if (
-        !live ||
-        (!live.text &&
-          !live.connect &&
-          !live.subagents.length &&
-          !live.files.length &&
-          !live.apps.length &&
-          question === null)
-      ) {
-        return state;
-      }
-      return {
-        ...state,
-        messages: (state.messages ?? []).concat({
-          role: "assistant",
-          text: live.text,
-          ...(live.at ? { at: live.at } : {}),
-          ...(live.summary ? { summary: live.summary } : {}),
-          ...(live.connect ? { connect: live.connect } : {}),
-          ...(live.events.length ? { events: live.events } : {}),
-          ...(live.subagents.length ? { subagents: live.subagents } : {}),
-          ...(live.files.length ? { files: live.files } : {}),
-          ...(live.apps.length ? { apps: live.apps } : {}),
-          ...(question ? { question } : {}),
-        }),
-      };
-    });
-
   const release = () => {
     source.close();
     if (SOURCES.get(chatKey) === source) SOURCES.delete(chatKey);
   };
 
-  const close = (ended: ChatTurn | null) => {
+  const close = (ended: ChatTurn | null, note: Bubble | null = null) => {
     release();
     releaseTurn(chatKey);
+    updateChat(chatKey, (state) => {
+      const landed =
+        state.live === null ? (state.messages ?? []) : land(state.messages ?? [], state.live);
+      return {
+        ...state,
+        busy: false,
+        live: null,
+        ended,
+        messages: note === null ? landed : landed.concat(note),
+      };
+    });
+  };
+
+  const reconnecting = (value: boolean) =>
     updateChat(chatKey, (state) => ({
       ...state,
-      busy: false,
-      live: null,
-      turn: null,
-      ended,
-      messages: withoutWait(state.messages),
+      live: { ...(state.live ?? liveTurn(turnId, agentModel)), reconnecting: value },
     }));
-  };
 
   source.addEventListener("open", () => {
     REATTACHES.delete(chatKey);
     if (redrawOnOpen) {
       redrawOnOpen = false;
-      updateChat(chatKey, (state) => ({
-        ...state,
-        live: liveTurn(),
-      }));
+      updateChat(chatKey, (state) => ({ ...state, live: liveTurn(turnId, agentModel) }));
     } else {
-      onLive((live) => ({ ...live, reconnecting: false }));
+      reconnecting(false);
     }
   });
 
-  source.onmessage = (event) => {
-    const chunk = JSON.parse(event.data).text as string;
-    onLive((live) => ({
-      ...live,
-      text: live.text + chunk,
-      sources: live.sources.length ? [] : live.sources,
-    }));
-  };
-
-  source.addEventListener("files", (event) => {
-    const files = JSON.parse((event as MessageEvent).data).files as ChatFile[];
-    onLive((live) => ({ ...live, files }));
-  });
-
-  source.addEventListener("apps", (event) => {
-    const apps = JSON.parse((event as MessageEvent).data).apps as ChatApp[];
-    onLive((live) => ({ ...live, apps }));
-  });
-
-  source.addEventListener("credentials", (event) => {
-    const credentials = JSON.parse((event as MessageEvent).data);
+  const take = (kind: EventKind) => (event: Event) => {
+    if (SOURCES.get(chatKey) !== source) return;
+    const frame = decodeFrame(kind, (event as MessageEvent).data);
+    if (frame === null) return;
+    if (frame.kind === "credentials") {
+      updateChat(chatKey, (state) => ({ ...state, credentials: frame.request }));
+      return;
+    }
     updateChat(chatKey, (state) => ({
       ...state,
-      handoffs: { ...state.handoffs, credentials },
+      live: fold(state.live ?? liveTurn(turnId, agentModel), frame),
     }));
-  });
-
-  /** A frame whose id was already drawn is a replay after a reconnect, or a recovered turn republishing a
-   *  round it recorded, and states its reply once. */
-  source.addEventListener("reply", (event) => {
-    const frame = JSON.parse((event as MessageEvent).data) as { id: string; text: string };
-    updateChat(chatKey, (state) => {
-      if (state.spoken.includes(frame.id) || !frame.text) return state;
-      const messages = state.messages ?? [];
-      const cut = messages.findIndex(
-        (message) => message.arrival_id !== undefined || message.queued === true,
-      );
-      const at = cut === -1 ? messages.length : cut;
-      const bubble: Bubble = { role: "assistant", text: frame.text };
-      return {
-        ...state,
-        spoken: state.spoken.concat(frame.id),
-        messages: [...messages.slice(0, at), bubble, ...messages.slice(at)],
-      };
-    });
-  });
-
-  source.addEventListener("comment", () => undefined);
-
-  /** A drain that beats the send's response names a row no bubble is stamped with yet, so a bubble still
-   *  `sending` clears the same way, and the drain consumes one marker per such row, in order. */
-  source.addEventListener("absorbed", (event) => {
-    const arrivals = JSON.parse((event as MessageEvent).data).arrivals as string[];
-    updateChat(chatKey, (state) => {
-      const fresh = arrivals.filter((id) => !state.absorbed.includes(id));
-      const live = state.live;
-      const steps: Bubble[] =
-        fresh.length && live && live.events.length
-          ? [
-              {
-                role: "assistant",
-                text: "",
-                ...(live.connect ? { connect: live.connect } : {}),
-                events: live.events,
-              },
-            ]
-          : [];
-      const messages = state.messages ?? [];
-      const cut = messages.findIndex(
-        (message) =>
-          (message.arrival_id !== undefined && arrivals.includes(message.arrival_id)) ||
-          message.queued === true,
-      );
-      const at = cut === -1 ? messages.length : cut;
-      let inFlight = fresh.filter(
-        (id) => !messages.some((message) => message.arrival_id === id),
-      ).length;
-      const folded = (message: Bubble): Bubble => {
-        if (message.arrival_id !== undefined && arrivals.includes(message.arrival_id)) {
-          return { ...message, arrival_id: undefined };
-        }
-        if (message.queued === true && inFlight > 0) {
-          inFlight -= 1;
-          return { ...message, queued: undefined };
-        }
-        return message;
-      };
-      return {
-        ...state,
-        absorbed: state.absorbed.concat(fresh),
-        messages: [...messages.slice(0, at), ...steps, ...messages.slice(at).map(folded)],
-        live:
-          live === null
-            ? null
-            : {
-                ...liveTurn(),
-                meter: live.meter,
-                reconnecting: live.reconnecting,
-                subagents: live.subagents.map((run) => ({ ...run, at: 0 })),
-                files: live.files,
-              },
-      };
-    });
-  });
-
-  source.addEventListener("activity", (event) => {
-    const frame = JSON.parse((event as MessageEvent).data);
-    const entry: ActivityEvent = { kind: "activity", text: frame.text };
-    onLive((live) => ({
-      ...live,
-      events: live.events.concat(entry),
-      activity: entry.text,
-      sources: [],
-    }));
-  });
-
-  source.addEventListener("sources", (event) => {
-    const items = JSON.parse((event as MessageEvent).data).items as SourceRef[];
-    onLive((live) => ({ ...live, sources: consulted(live.sources, items) }));
-  });
-
-  source.addEventListener("resumed", () => {
-    const entry: ActivityEvent = { kind: "note", text: RESUMED_NOTE };
-    onLive((live) => {
-      const text = live.text.trim();
-      return {
-        ...live,
-        text: "",
-        events: text
-          ? live.events.concat({ kind: "note", text }, entry)
-          : live.events.concat(entry),
-        activity: eventLabel(entry, "active"),
-      };
-    });
-  });
-
-  /** A background run publishes onto this stream while the parent writes its closing answer, and taking
-   *  that answer into a step would leave the reply wordless until the terminal frame restored it. */
-  source.addEventListener("subagent_activity", (event) => {
-    const frame = JSON.parse((event as MessageEvent).data) as RunFrame;
-    onLive((live) => ({
-      ...live,
-      subagents: applyRunFrame(live.subagents, frame, turnId, live.events.length),
-    }));
-  });
-
-  source.addEventListener("subagent", (event) => {
-    const run = JSON.parse((event as MessageEvent).data) as SubagentRun;
-    onLive((live) => {
-      const index = live.subagents.findIndex(
-        (entry) => entry.conversation_id === run.conversation_id,
-      );
-      if (index === -1) return { ...live, subagents: live.subagents.concat(run) };
-      const kept = live.subagents[index];
-      const settled = kept.at === undefined ? run : { ...run, at: kept.at };
-      return {
-        ...live,
-        subagents: [
-          ...live.subagents.slice(0, index),
-          settled,
-          ...live.subagents.slice(index + 1),
-        ],
-      };
-    });
-  });
-
-  source.addEventListener("cost", (event) => {
-    const frame = JSON.parse((event as MessageEvent).data);
-    onLive((live) => ({
-      ...live,
-      meter: [tokens(frame.tokens) + " tok", money(frame.cost_micro_usd)],
-    }));
-  });
-
-  source.addEventListener("connect", (event) => {
-    const frame = JSON.parse((event as MessageEvent).data);
-    onLive((live) => ({ ...live, connect: frame }));
-  });
-
-  source.addEventListener("terminal", (event) => {
-    const frame = JSON.parse((event as MessageEvent).data);
-    updateChat(chatKey, (state) => {
-      const live = state.live ?? liveTurn();
-      const handoffs = { ...state.handoffs };
-      let text = live.text;
-      let summary = live.summary;
-      if (frame.status === "done") {
-        if (frame.text) text = frame.text;
-        summary = {
-          ...(agentModel === AUTO_MODEL ? {} : { model: frame.model }),
-          tokens: frame.tokens,
-          cost_micro_usd: frame.cost_micro_usd,
-        };
-        if (frame.question) {
-          handoffs.question = { turn_id: turnId, ...frame.question };
-        } else if (!answering) {
-          handoffs.question = null;
-        }
-      } else {
-        const fallback =
-          frame.text ||
-          (frame.status === CANCELLED
-            ? STOPPED
-            : "(" + frame.status + (frame.error_class ? ": " + frame.error_class : "") + ")");
-        text = text ? text + "\n" + fallback : fallback;
-        if (!answering) handoffs.question = null;
-      }
-      const at = frame.status === "done" ? new Date().toISOString() : live.at;
-      return { ...state, handoffs, live: { ...live, text, summary, at } };
-    });
-    record();
-    close("idle");
-  });
-
-  source.addEventListener("parked", (event) => {
-    const message = JSON.parse((event as MessageEvent).data).message as string;
-    onLive((live) => ({ ...live, text: live.text ? live.text + "\n" + message : message }));
-    record();
-    close("parked");
-  });
+    if (frame.kind === "terminal") close("idle");
+    else if (frame.kind === "parked") close("parked");
+  };
+  source.onmessage = take("message");
+  for (const kind of EVENT_KINDS) {
+    if (kind !== "message") source.addEventListener(kind, take(kind));
+  }
 
   source.onerror = () => {
     if (source.readyState !== EventSource.CLOSED) {
-      onLive((live) => ({ ...live, reconnecting: true }));
+      reconnecting(true);
       return;
     }
     release();
     const attempts = (REATTACHES.get(chatKey) ?? 0) + 1;
     if (attempts > REATTACH_DELAYS_MS.length) {
-      record();
       updateChat(chatKey, (state) => ({
         ...state,
-        messages: (state.messages ?? []).concat({
-          role: "error",
-          text: "Connection lost — reload to see the reply.",
-        }),
+        live: state.live === null ? null : lost(state.live),
       }));
-      close(null);
+      close(null, { role: "error", text: CONNECTION_LOST });
       return;
     }
     REATTACHES.set(chatKey, attempts);
-    onLive((live) => ({ ...live, reconnecting: true }));
+    reconnecting(true);
     TIMERS.set(
       chatKey,
       reattachTimer(
-        () => attach(chatKey, turnId, answering, true, agentModel),
+        () => attach(chatKey, turnId, true, agentModel),
         REATTACH_DELAYS_MS[attempts - 1],
       ),
     );
@@ -552,10 +206,11 @@ function attach(
 export function resyncChat(target: ChatTarget): void {
   const chatKey = target.key;
   const state = chatState(chatKey);
-  if (state.turn) {
+  const streaming = attachedTurn(state);
+  if (streaming !== null) {
     const source = SOURCES.get(chatKey);
     if (source && source.readyState !== EventSource.CLOSED) return;
-    attach(chatKey, state.turn.id, state.turn.answering, true, target.agentModel);
+    attach(chatKey, streaming, true, target.agentModel);
     return;
   }
   if (state.busy || state.messages === null) return;
@@ -581,7 +236,7 @@ export async function refreshTranscript(
     updateChat(chatKey, (current) => {
       if (onlyIfEmpty && current.messages !== null) return current;
       if ((RESYNC_EPOCH.get(chatKey) ?? 0) !== epoch) return current;
-      if (!onlyIfEmpty && (current.busy || current.turn)) return current;
+      if (!onlyIfEmpty && (current.busy || current.live !== null)) return current;
       return {
         ...current,
         fault: {
@@ -596,8 +251,7 @@ export async function refreshTranscript(
   updateChat(chatKey, (current) => {
     if (onlyIfEmpty && current.messages !== null) return { ...current, fault: null };
     if ((RESYNC_EPOCH.get(chatKey) ?? 0) !== epoch) return current;
-    if (!onlyIfEmpty && (current.busy || current.turn)) return current;
-    const question = current.handoffs.question ?? null;
+    if (!onlyIfEmpty && (current.busy || current.live !== null)) return current;
     const running = ("turn" in payload && payload.turn) || null;
     return {
       ...current,
@@ -605,17 +259,17 @@ export async function refreshTranscript(
       earlierCursor: payload.earlier_cursor ?? null,
       fault: null,
       busy: running ? true : current.busy,
-      turn: running ? { id: running, answering: false } : current.turn,
-      live: running ? (current.live ?? liveTurn()) : current.live,
-      handoffs: {
-        question,
-        credentials: ("credentials" in payload && payload.credentials) || null,
-      },
+      live: running
+        ? current.live !== null && current.live.id === running
+          ? current.live
+          : liveTurn(running, target.agentModel)
+        : current.live,
+      credentials: ("credentials" in payload && payload.credentials) || null,
     };
   });
-  const streaming = chatState(chatKey).turn;
-  if (streaming && !SOURCES.has(chatKey) && !TIMERS.has(chatKey)) {
-    streamTurn(chatKey, streaming.id, streaming.answering, target.agentModel);
+  const streaming = attachedTurn(chatState(chatKey));
+  if (streaming !== null && !SOURCES.has(chatKey) && !TIMERS.has(chatKey)) {
+    streamTurn(chatKey, streaming, target.agentModel);
   }
 }
 
@@ -682,16 +336,18 @@ export async function sendMessage(
     ...state,
     busy: true,
     ended: null,
-    live: state.live ?? liveTurn(),
+    live: state.live ?? liveTurn(null, pinned ?? target.agentModel),
     messages: (state.messages ?? []).concat({
       role: "user",
       text: shown,
       at: new Date().toISOString(),
       sending: token,
       ...(attached.length ? { attached } : {}),
-      ...(state.turn !== null ? { queued: true } : {}),
+      ...(attachedTurn(state) !== null ? { queued: true } : {}),
     }),
   }));
+  /** A row the turn has already taken up waits on nothing, and a turn that has ended drains nothing
+   *  more, so the row is stamped only while a turn stands to take it. */
   const settled = (key: string, arrivalId: string | null) =>
     updateChat(key, (state) => ({
       ...state,
@@ -701,9 +357,7 @@ export async function sendMessage(
               ...message,
               sending: undefined,
               queued: undefined,
-              ...(arrivalId !== null && !state.absorbed.includes(arrivalId)
-                ? { arrival_id: arrivalId }
-                : {}),
+              ...(arrivalId !== null && state.live !== null ? { arrival_id: arrivalId } : {}),
             }
           : message,
       ),
@@ -767,7 +421,7 @@ export async function sendMessage(
   settled(streamKey, arrivalId);
   const joined = arrivalId !== null && accepted.opened_run === false;
   if (joined && tailed(streamKey, accepted.turn_id)) return "accepted";
-  streamTurn(streamKey, accepted.turn_id, false, pinned ?? target.agentModel);
+  streamTurn(streamKey, accepted.turn_id, pinned ?? target.agentModel);
   return "accepted";
 }
 
@@ -781,7 +435,12 @@ export async function answerQuestions(
   if (!answers.length || state.busy || state.messages === null) return;
   bumpEpoch(chatKey);
   holdTurn(chatKey, target.agentId);
-  updateChat(chatKey, (current) => ({ ...current, busy: true, ended: null, live: liveTurn() }));
+  updateChat(chatKey, (current) => ({
+    ...current,
+    busy: true,
+    ended: null,
+    live: liveTurn(null, target.agentModel),
+  }));
   for (const { index, body, picked } of answers) {
     let res: Response;
     try {
@@ -823,7 +482,7 @@ export async function answerQuestions(
       messages: markAnswered(current.messages, turnId, index, landed),
     }));
     const joined = arrivalId !== null && payload.opened_run === false;
-    if (!(joined && tailed(chatKey, turn))) streamTurn(chatKey, turn, true, target.agentModel);
+    if (!(joined && tailed(chatKey, turn))) streamTurn(chatKey, turn, target.agentModel);
   }
 }
 
@@ -837,7 +496,7 @@ export async function stopTurn(target: ChatTarget, turnId: string): Promise<void
     });
     if (res.ok) {
       const outcome = (await res.json()) as { stopped: boolean; turn_id?: string };
-      if (outcome.turn_id) streamTurn(target.key, outcome.turn_id, false, target.agentModel);
+      if (outcome.turn_id) streamTurn(target.key, outcome.turn_id, target.agentModel);
       return;
     }
     description = "Error " + res.status + " — try again.";
@@ -851,16 +510,14 @@ export async function stopTurn(target: ChatTarget, turnId: string): Promise<void
 }
 
 function failTurn(chatKey: string, message: string): void {
-  if (!(chatState(chatKey).turn !== null && SOURCES.has(chatKey))) releaseTurn(chatKey);
-  updateChat(chatKey, (state) => {
-    const tailing = state.turn !== null && SOURCES.has(chatKey);
-    return {
-      ...state,
-      busy: tailing ? state.busy : false,
-      live: tailing ? state.live : null,
-      messages: (state.messages ?? []).concat({ role: "error", text: message }),
-    };
-  });
+  const tailing = attachedTurn(chatState(chatKey)) !== null && SOURCES.has(chatKey);
+  if (!tailing) releaseTurn(chatKey);
+  updateChat(chatKey, (state) => ({
+    ...state,
+    busy: tailing ? state.busy : false,
+    live: tailing ? state.live : null,
+    messages: (state.messages ?? []).concat({ role: "error", text: message }),
+  }));
 }
 
 function markAnswered(

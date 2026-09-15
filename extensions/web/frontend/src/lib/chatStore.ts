@@ -1,51 +1,8 @@
 import { useSyncExternalStore } from "react";
 
 import type { ToastState } from "@/components/ui/toast";
-import type {
-  ActivityEvent,
-  ChatApp,
-  ChatConnect,
-  ChatFile,
-  ChatQuestion,
-  CredentialRequest,
-  Message,
-  SourceRef,
-  SubagentRun,
-  TurnSummary,
-} from "@/lib/types";
-
-export type { ActivityEvent } from "@/lib/types";
-
-export type Bubble = Message & {
-  /** How long the turn that spoke this ran, in milliseconds, as the portal watching it measured.
-   *  A bubble read back from a transcript carries none: its summary holds the duration instead. */
-  connect?: ChatConnect;
-  sending?: string;
-  attached?: File[];
-  queued?: boolean;
-};
-
-export type LiveTurn = {
-  text: string;
-  activity: string | null;
-  meter: string[];
-  summary: TurnSummary | null;
-  at: string | null;
-  connect: ChatConnect | null;
-  events: ActivityEvent[];
-  subagents: SubagentRun[];
-  files: ChatFile[];
-  apps: ChatApp[];
-  sources: SourceRef[];
-  reconnecting: boolean;
-};
-
-export type Handoffs = {
-  question?: ChatQuestion | null;
-  credentials?: CredentialRequest | null;
-};
-
-export type StreamingTurn = { id: string; answering: boolean };
+import type { Bubble, LiveTurn } from "@/lib/turnRecord";
+import type { CredentialRequest } from "@/lib/types";
 
 /** What a conversation's turn is doing, as a screen outside the chat reads it. */
 export type ChatTurn = "running" | "idle" | "parked";
@@ -56,13 +13,10 @@ export type ChatState = {
   messages: Bubble[] | null;
   earlierCursor: string | null;
   busy: boolean;
+  /** The turn this page is watching: the record its stream builds, or the placeholder a send holds
+   *  until the surface names the turn it opened. */
   live: LiveTurn | null;
-  turn: StreamingTurn | null;
-  /** A drain can be published before the send that admitted the row has its response back, so the ids are
-   *  kept rather than only cleared off the bubbles they name. */
-  absorbed: string[];
-  spoken: string[];
-  handoffs: Handoffs;
+  credentials: CredentialRequest | null;
   fault: ToastState | null;
   founded: Founding | null;
   closed: boolean;
@@ -76,10 +30,7 @@ const EMPTY: ChatState = {
   earlierCursor: null,
   busy: false,
   live: null,
-  turn: null,
-  absorbed: [],
-  spoken: [],
-  handoffs: {},
+  credentials: null,
   fault: null,
   founded: null,
   closed: false,
@@ -93,28 +44,15 @@ export function chatState(chatKey: string): ChatState {
   return states.get(chatKey) ?? EMPTY;
 }
 
+/** The turn whose stream this chat tails, or null while none is named: a send in flight holds a
+ *  record with no id yet, and that is not a turn a second send can join. */
+export function attachedTurn(state: ChatState): string | null {
+  return state.live?.id ?? null;
+}
+
 export function updateChat(chatKey: string, change: (state: ChatState) => ChatState): void {
   states.set(chatKey, change(chatState(chatKey)));
   for (const listener of listeners) listener();
-}
-
-/** A redraw of a turn already running hands back the start it opened with: the clock counts the turn,
- *  not the source drawing it. */
-export function liveTurn(): LiveTurn {
-  return {
-    text: "",
-    activity: null,
-    meter: [],
-    summary: null,
-    at: null,
-    connect: null,
-    events: [],
-    subagents: [],
-    files: [],
-    apps: [],
-    sources: [],
-    reconnecting: false,
-  };
 }
 
 export function migrateChat(fromKey: string, toKey: string, title: string): void {

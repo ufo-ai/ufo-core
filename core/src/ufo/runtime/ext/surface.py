@@ -262,12 +262,21 @@ _ATTACHMENTS_TEMPLATE = (
     rf"\n<{ATTACHMENTS_ELEMENT}_{{marker}}>\n"
     rf"(?P<delivered>.*)\n</{ATTACHMENTS_ELEMENT}_{{marker}}>"
 )
-_CONTEXT_TAG_RE = re.compile(r"\A<context>\n.*?\n</context>\n", re.DOTALL)
-_MESSAGE_REF_RE = re.compile(r"\A\s*<context>\s*message_ref:\s*(?P<ref>[^\n]+)")
-_INJECTED_CONTEXT_RE = re.compile(r"\n\n<injected_context>\n.*\n</injected_context>\Z", re.DOTALL)
+CONTEXT_ELEMENT = "context"
+INJECTED_CONTEXT_ELEMENT = "injected_context"
 AGENT_DETAIL_ELEMENT = "agent_detail"
+_CONTEXT_TAG_RE = re.compile(rf"\A<{CONTEXT_ELEMENT}>\n.*?\n</{CONTEXT_ELEMENT}>\n", re.DOTALL)
+_MESSAGE_REF_RE = re.compile(rf"\A\s*<{CONTEXT_ELEMENT}>\s*message_ref:\s*(?P<ref>[^\n]+)")
+_INJECTED_CONTEXT_RE = re.compile(
+    rf"\n\n<{INJECTED_CONTEXT_ELEMENT}>\n.*\n</{INJECTED_CONTEXT_ELEMENT}>\Z", re.DOTALL
+)
 _AGENT_DETAIL_RE = re.compile(
     rf"\n<{AGENT_DETAIL_ELEMENT}>\n.*\n</{AGENT_DETAIL_ELEMENT}>\Z", re.DOTALL
+)
+_FOLDS = (
+    (CONTEXT_ELEMENT, _CONTEXT_TAG_RE),
+    (INJECTED_CONTEXT_ELEMENT, _INJECTED_CONTEXT_RE),
+    (AGENT_DETAIL_ELEMENT, _AGENT_DETAIL_RE),
 )
 
 SILENCE_SENTINEL = "<response></response>"
@@ -380,19 +389,38 @@ def member_message_text(inbound: str) -> str:
     minted for that one message, so the only text that can close it is text `fence_member_message`
     wrote, and a member who types `</member_message>` closes nothing. An inbound wearing none — a
     prepared intent, a subagent payload — is its own text."""
-    return member_message_said(inbound)[0]
+    return member_message_said(inbound).said
 
 
-def member_message_said(inbound: str) -> tuple[str, bool]:
-    """The member's own words back out of an inbound, and whether a surface fenced them.
+@dataclass(frozen=True)
+class MemberSaid:
+    """A member's own words back out of an inbound, whether a surface fenced them, and the
+    elements folded off them in the order they stood."""
+
+    said: str
+    fenced: bool
+    folded: tuple[str, ...]
+
+
+def member_message_said(inbound: str) -> MemberSaid:
+    """The member's own words back out of an inbound, whether a surface fenced them, and what came
+    off on the way.
 
     The fence is what tells words a member spoke over a channel from words they typed into the
     portal, which admission stores unfenced on the very same conversation. A projection that reads
     a channel's own markup out of the words asks this per message rather than per conversation: a
     Slack thread carries portal comments too, and their `*` is the character the member typed."""
-    said = _AGENT_DETAIL_RE.sub("", _INJECTED_CONTEXT_RE.sub("", _CONTEXT_TAG_RE.sub("", inbound)))
+    said = inbound
+    folded: list[str] = []
+    for element, pattern in _FOLDS:
+        stripped = pattern.sub("", said)
+        if stripped != said:
+            folded.append(element)
+        said = stripped
     found = _MEMBER_MESSAGE_RE.search(said)
-    return (said, False) if found is None else (found.group("said"), True)
+    if found is None:
+        return MemberSaid(said, False, tuple(folded))
+    return MemberSaid(found.group("said"), True, tuple(folded))
 
 
 def member_message_attachments(inbound: str) -> tuple[str, ...]:

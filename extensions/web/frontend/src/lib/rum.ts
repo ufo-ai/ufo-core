@@ -59,3 +59,10 @@ export function identifyRum(email: string): void {
   named = email;
   void recording?.then((rum) => rum.setUser({ id: email, email }));
 }
+
+/** A state the page's model cannot hold — a frame after its turn ended, a run naming a parent no
+ *  record holds — said where a developer reads and where the fleet counts. */
+export function fault(kind: string, detail: Record<string, unknown>): void {
+  console.error("ufo: " + kind, detail);
+  void recording?.then((rum) => rum.addError(new Error(kind), detail));
+}

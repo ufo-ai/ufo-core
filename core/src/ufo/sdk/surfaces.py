@@ -28,6 +28,9 @@ from ufo.runtime.access.grants import (
     ConnectRequestInvalid as ConnectRequestInvalid,
 )
 from ufo.runtime.ext.surface import (
+    AGENT_DETAIL_ELEMENT as AGENT_DETAIL_ELEMENT,
+)
+from ufo.runtime.ext.surface import (
     AMBIENT_CONTEXT_ELEMENT as AMBIENT_CONTEXT_ELEMENT,
 )
 from ufo.runtime.ext.surface import (
