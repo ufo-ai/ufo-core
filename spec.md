@@ -809,11 +809,11 @@ extension's own store, granted and revoked in chat
 (`grant_web_access`/`revoke_web_access`, admin-only actions on the member object, binding the
 agent the call names or, unnamed, the conversation's own). A
 member-private extension conversation is listed as a chat and admits that member's replies, but
-does not grant another conversation or an agent panel. A readable Slack or terminal conversation
-whose audience is the workspace or the signed-in member admits portal comments through the same
-chat transport; an admin disclosure of another member's private conversation never does. The
-admission publishes the linked comment to a live terminal and records it for Slack's durable
-delivery. A workspace admin reaches and administers every agent. A subagent profile is deploy
+does not grant another conversation or an agent panel. A member speaks in any conversation whose
+audience is the workspace or themselves, whatever surface holds it, through the same chat
+transport; a Slack or terminal thread also receives the comment notice, which the admission
+publishes to a live terminal and records for Slack's durable delivery; an admin disclosure of
+another member's private conversation never admits a message. A workspace admin reaches and administers every agent. A subagent profile is deploy
 shape, not an agent — no identity, no audience, no page
 of its own: a run's work is read inline under the reply that spawned it, and the topology graph
 draws the profile roster as one tile. An out-of-audience agent is not-found on
@@ -851,9 +851,9 @@ binding admitted through the sites surface's per-visit agent-visibility gate, or
 page whose public immutable code is routed to a workspace-specific origin — inside the portal's
 sandboxed iframe, with its settings and a chat toggle that opens the conversation beside the page.
 That conversation column
-opens on the conversation that moved last and carries the composer where the portal founded that
-conversation or where Slack or terminal holds a commentable one, a read-only transcript for every
-other readable conversation, and the acknowledgement gate where the member has not opened it;
+opens on the conversation that moved last and carries the composer wherever the member may speak,
+a read-only transcript for a conversation they may only read, and the acknowledgement gate where
+the member has not opened it;
 every one of the app's conversations stands in an index lane
 beside it, and pressing one opens it. The homepage read has three states, so the page a
 member is waiting for is not the page that is not there: `building` while the seed run that builds
@@ -923,12 +923,10 @@ conversation a workspace already held took a seeded cursor at its own activity m
 thread carrying none is one opened since. Slack holds a per-user read state of its own and no
 token this deploy carries may ask for it. A conversation no member spoke in is an extension's
 errand and is in neither. A
-`#/c/<conversation_id>` permalink opens a web chat normally, opens a
-member-private extension conversation for replies, opens the signed-in member's and workspace's
-Slack and terminal conversations for comments, and opens every other surface's readable
-conversation in that same conversation view read-only — headed the way a chat is, by the agent it
-ran under and the model it ran on, with the surface holding it marked at the far end of that header,
-that mark the way out to it where the surface reported one. A link into the portal from another
+`#/c/<conversation_id>` permalink opens one conversation view for every conversation the member
+may read — with the composer where they may speak, read-only where they may not — headed the way
+a chat is, by the agent it ran under and the model it ran on, with the surface holding it marked at
+the far end of that header, that mark the way out to it where the surface reported one. A link into the portal from another
 surface names its target as `?c=<conversation_id>`,
 because a fragment never reaches the server: the sign-in redirect and the sign-in form carry that
 target, so a signed-out click lands on the conversation rather than a new chat, and a permalink

@@ -147,7 +147,7 @@ class Seeded:
 
     async def transcript(self, conversation_id: UUID) -> tuple[int, dict]:
         answer = await self.client.get(
-            f"/surface/web/agents/{self.agent_id}/transcript?conversation={conversation_id}",
+            f"/surface/web/agents/{self.agent_id}/conversations/{conversation_id}/transcript",
             headers=self.headers,
         )
         return answer.status_code, (answer.json() if answer.status_code == 200 else {})

@@ -863,7 +863,7 @@ test("a chat lane's history lists the member's own conversations and groups coll
             last_turn_at: "2026-08-01T09:00:00",
             readable: false,
             disclosable: true,
-            commentable: false,
+            speakable: false,
           },
         ],
         more: false,

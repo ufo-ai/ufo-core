@@ -32,7 +32,7 @@ from httpx import ASGITransport, AsyncClient, Response
 from openfeature import api
 from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from PIL import Image
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from ufo_ext_app_chat.manifest import manifest as app_chat_manifest
 from ufo_ext_app_code.manifest import manifest as app_code_manifest
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
@@ -288,7 +288,7 @@ from ufo.sdk.manifest import (
     SetupSchedule,
     SubagentProfile,
 )
-from ufo.sdk.surfaces import with_agent_detail
+from ufo.sdk.surfaces import PORTAL_SURFACE, with_agent_detail
 from ufo.serve import FOREIGN_HANDSHAKE, _mount_shared_surfaces
 
 SECRET = "artifact-signing-secret"
@@ -1618,7 +1618,7 @@ async def test_an_agent_origin_arrival_states_its_prompt_and_claims_no_wait_of_t
     )
 
     reloaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
 
@@ -1698,7 +1698,7 @@ async def test_a_pending_subagent_result_is_no_member_bubble(
     arrival_id = folded.json()["arrival_id"]
 
     reloaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
 
@@ -1760,7 +1760,7 @@ async def test_a_fired_turns_prompt_states_its_headline_as_sent_by_ufo(
         )
 
     reloaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
 
@@ -1857,8 +1857,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
     assert admitted.status_code == 200
     await _consume(client, token, admitted.json()["turn_id"])
     reachable = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation="
-        + admitted.json()["conversation_id"],
+        f"/surface/web/agents/{agent_id}/conversations/{admitted.json()['conversation_id']}/transcript",
         headers=cookie,
     )
     assert reachable.status_code == 200
@@ -1867,8 +1866,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
         assert denied.status_code == 404
         assert denied.text == "no such agent"
     transcript = await client.get(
-        f"/surface/web/agents/{second_agent}/transcript?conversation="
-        + admitted.json()["conversation_id"],
+        f"/surface/web/agents/{second_agent}/conversations/{admitted.json()['conversation_id']}/transcript",
         headers=cookie,
     )
     assert transcript.status_code == 404
@@ -1976,12 +1974,6 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         (str(second_agent), True),
     ]
     assert all("web_audience" not in agent for agent in member_view.json()["agents"])
-    reachable = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript",
-        headers={"cookie": f"{SESSION_COOKIE}={member_token}"},
-    )
-    assert reachable.status_code == 400
-    assert reachable.text == "conversation is required"
 
 
 @pytest.fixture
@@ -3800,7 +3792,7 @@ async def test_a_rail_row_reads_unread_until_the_member_reads_the_transcript(
     assert [row["unread"] for row in await _rail_rows(client, cookie)] == [True]
 
     read = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}", headers=cookie
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript", headers=cookie
     )
     assert read.status_code == 200
     assert [row["unread"] for row in await _rail_rows(client, cookie)] == [False]
@@ -3988,7 +3980,7 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
     reached = await client.get(
         f"/surface/web/api/chats?conversation={conversation_id}", headers=cookie
     )
-    assert [row["conversation_id"] for row in reached.json()["chats"]] == [str(conversation_id)]
+    assert reached.json()["conversation"]["id"] == str(conversation_id)
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert str(review_agent) not in {agent["id"] for agent in index.json()["agents"]}
     settings = await client.get(f"/surface/web/agents/{review_agent}/settings", headers=cookie)
@@ -4000,7 +3992,7 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
     )
     assert new_chat.status_code == 404
     transcript = await client.get(
-        f"/surface/web/agents/{review_agent}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{review_agent}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
     assert transcript.status_code == 200
@@ -4020,12 +4012,12 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
         ).scalar_one()
     assert speaker == member_id
     foreign = await client.get(
-        f"/surface/web/agents/{review_agent}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{review_agent}/conversations/{conversation_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={other_token}"},
     )
     assert foreign.status_code == 404
     shared_transcript = await client.get(
-        f"/surface/web/agents/{review_agent}/transcript?conversation={shared_id}",
+        f"/surface/web/agents/{review_agent}/conversations/{shared_id}/transcript",
         headers=cookie,
     )
     shared_reply = await client.post(
@@ -4039,7 +4031,7 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
     )
     assert shared_transcript.status_code == 404
     assert shared_reply.status_code == 404
-    assert shared_permalink.json() == {"chats": []}
+    assert shared_permalink.status_code == 404
 
 
 @pytest.mark.usefixtures("database_url")
@@ -4235,8 +4227,8 @@ async def test_an_answer_into_a_fresh_conversation_is_refused(
 async def test_a_parameterless_call_is_refused_before_anything_opens(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """Every chat call names its conversation — `new` or an id. A bare POST or transcript GET is
-    refused before any conversation, chat row, or turn exists."""
+    """Every chat POST names its conversation — `new` or an id. A bare one is refused before any
+    conversation, chat row, or turn exists."""
     client, workspace_id, agent_id = web
     _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -4245,9 +4237,6 @@ async def test_a_parameterless_call_is_refused_before_anything_opens(
     )
     assert refused.status_code == 400
     assert refused.text == "conversation is required"
-    bare = await client.get(f"/surface/web/agents/{agent_id}/transcript", headers=cookie)
-    assert bare.status_code == 400
-    assert bare.text == "conversation is required"
     async with workspace_tx() as connection:
         conversations = (
             await connection.execute(sa.select(sa.func.count()).select_from(tables.conversation))
@@ -4278,10 +4267,8 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An emitted `#/c/<id>` link outlives the rail's bound: with the bound at one, the displaced
-    older conversation still answers `api/chats?conversation=` with its one row, another member's
-    id answers empty, and a malformed id answers empty. The resolved row states every field the
-    rail's own listing row states, so a row merged in from a permalink draws its opening line and
-    its way back out like the rows it lands beside."""
+    older conversation still answers `api/chats?conversation=` as the conversation it is, while
+    another member's id and a malformed id are not found."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
@@ -4312,28 +4299,22 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
         newer.json()["conversation_id"]
     ]
     resolved = await client.get(f"/surface/web/api/chats?conversation={older_id}", headers=cookie)
-    rows = resolved.json()["chats"]
-    assert [row["conversation_id"] for row in rows] == [str(older_id)]
-    # Compared as key sets rather than field by field: a listing field the resolve does not carry
-    # reaches the rail as `undefined`, which reads as neither the value nor its absence.
-    listed = (await _rail_rows(client, cookie))[0]
-    carried = {key for key in listed if key not in {"name", "summary", "portal"}}
-    assert carried <= set(rows[0]), f"the resolve drops {sorted(carried - set(rows[0]))}"
-    assert rows[0]["title"] == "Displaced but linked"
-    assert rows[0]["agent_name"] == "assistant"
-    assert rows[0]["audience"] == f"member:{member_id}"
-    assert rows[0]["member_email"] == "owner@example.com"
-    assert rows[0]["last_at"] is not None
-    assert rows[0]["opening"] == "ask"
-    assert rows[0]["source"] is None
-    assert rows[0]["turn"] == "idle"
+    row = resolved.json()["conversation"]
+    assert row["id"] == str(older_id)
+    assert row["agent"] == {"id": str(agent_id), "name": "assistant"}
+    assert row["description"] == "Displaced but linked"
+    assert row["audience"] == f"member:{member_id}"
+    assert row["member_email"] == "owner@example.com"
+    assert row["last_turn_at"] is not None
+    assert row["source"] is None
+    assert (row["mine"], row["readable"], row["speakable"]) == (True, True, True)
     crossed = await client.get(
         f"/surface/web/api/chats?conversation={older_id}",
         headers={"cookie": f"{SESSION_COOKIE}={peer_token}"},
     )
-    assert crossed.json() == {"chats": []}
+    assert crossed.status_code == 404
     malformed = await client.get("/surface/web/api/chats?conversation=not-a-uuid", headers=cookie)
-    assert malformed.json() == {"chats": []}
+    assert malformed.status_code == 404
 
 
 @pytest.mark.usefixtures("database_url")
@@ -4378,15 +4359,14 @@ async def test_a_permalink_resolves_with_the_viewers_own_admin_flag(
     )
     walled = await client.get(f"/surface/web/api/chats?conversation={room}", headers=admin_cookie)
 
-    assert private.json()["chats"] == []
     assert private.json()["conversation"]["id"] == str(theirs)
     assert private.json()["conversation"]["member_email"] == "owner@example.com"
     assert private.json()["conversation"]["readable"] is False
     assert private.json()["conversation"]["disclosable"] is True
-    assert private.json()["conversation"]["commentable"] is False
+    assert private.json()["conversation"]["speakable"] is False
     assert walled.json()["conversation"]["readable"] is False
     assert walled.json()["conversation"]["disclosable"] is False
-    assert walled.json()["conversation"]["commentable"] is False
+    assert walled.json()["conversation"]["speakable"] is False
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation={theirs}",
         content=b"not mine",
@@ -4397,43 +4377,54 @@ async def test_a_permalink_resolves_with_the_viewers_own_admin_flag(
         unprivileged = await client.get(
             f"/surface/web/api/chats?conversation={conversation_id}", headers=peer_cookie
         )
-        assert unprivileged.json() == {"chats": []}, conversation_id
+        assert unprivileged.status_code == 404, conversation_id
 
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_malformed_chat_row_is_a_fault_not_a_missing_conversation(
+async def test_a_colleague_reads_and_replies_in_a_workspace_shared_web_chat(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """A chat row that fails validation raises — the chat POST and the permalink resolve both
-    surface the fault instead of degrading to not-found or silently dropping the row."""
     client, workspace_id, agent_id = web
-    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    founder_id, _founder_token = await _seed_member(workspace_id, "founder@example.com")
+    colleague_id, colleague_token = await _seed_member(workspace_id, "colleague@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={colleague_token}"}
     conversation_id, _turn = await _seed_web_turn(
         workspace_id,
         agent_id,
-        member_id,
-        "owner@example.com",
-        TerminalFrame(status="done", text="hi"),
+        founder_id,
+        "founder@example.com",
+        TerminalFrame(status="done", text="Shipped."),
+        title="Release notes",
+        audience=str(SHARED_AUDIENCE),
     )
+
+    read = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers=cookie,
+    )
+    resolved = await client.get(
+        f"/surface/web/api/chats?conversation={conversation_id}", headers=cookie
+    )
+    reply = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
+        content=b"Add the migration note.",
+        headers=cookie,
+    )
+
+    assert read.status_code == 200
+    row = resolved.json()["conversation"]
+    assert (row["mine"], row["readable"], row["speakable"]) == (False, True, True)
+    assert reply.status_code == 200
     async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.ext_store)
-            .where(
-                tables.ext_store.c.extension == "web",
-                tables.ext_store.c.key == f"chat/{conversation_id}",
+        speaker = (
+            await connection.execute(
+                sa.select(tables.turn.c.speaker_member_id).where(
+                    tables.turn.c.id == UUID(reply.json()["turn_id"])
+                )
             )
-            .values(value={"agent_id": "not-a-uuid", "email": 7})
-        )
-    with pytest.raises(ValidationError):
-        await client.post(
-            f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
-            content=b"hello",
-            headers=cookie,
-        )
-    with pytest.raises(ValidationError):
-        await client.get(f"/surface/web/api/chats?conversation={conversation_id}", headers=cookie)
+        ).scalar_one()
+    assert speaker == colleague_id
 
 
 @pytest.mark.usefixtures("database_url")
@@ -4475,7 +4466,7 @@ async def test_a_conversation_is_walled_to_its_member_and_its_agent(
     )
     assert crossed.status_code == 404
     read_across = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation}/transcript",
         headers=peer_cookie,
     )
     assert read_across.status_code == 404
@@ -5190,9 +5181,7 @@ async def test_the_portal_publishes_its_assets_at_boot_and_not_on_a_page(
     )
     monkeypatch.setattr(web_surface, "APPS", bundle)
     blob = FleetBlobStore(backend=FilesystemBlobStore(root=tmp_path))
-    boot = next(
-        spec.boot for spec in web_manifest().surfaces if spec.name == web_surface.PORTAL_SURFACE
-    )
+    boot = next(spec.boot for spec in web_manifest().surfaces if spec.name == PORTAL_SURFACE)
     assert boot is not None
 
     boot(blob)
@@ -5680,7 +5669,7 @@ async def test_only_the_target_reads_a_targeted_question_live_and_after_a_later_
             ),
         ),
     )
-    path = f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}"
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript"
     target_transcript = await client.get(
         path, headers={"cookie": f"{SESSION_COOKIE}={target_token}"}
     )
@@ -5824,7 +5813,7 @@ async def test_credential_prompts_stream_pending_and_fulfill_privately(
     events = dict(await _collect_events(client, token, turn_id))
     assert [p["slot"] for p in events["credentials"]["prompts"]] == ["acme_signing_key"]
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
     assert [p["slot"] for p in loaded.json()["credentials"]["prompts"]] == ["acme_signing_key"]
@@ -5887,7 +5876,7 @@ async def test_transcript_reload_draws_the_standing_connect_without_minting(
     try:
         streamed = dict(await _collect_events(client, token, turn_id))
         loaded = await client.get(
-            f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+            f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
             headers=cookie,
         )
     finally:
@@ -5898,7 +5887,7 @@ async def test_transcript_reload_draws_the_standing_connect_without_minting(
     assert streamed["connect"] == control
     assert "oauth.example.test" not in loaded.text
     unbrokered = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
     assert unbrokered.status_code == 200
@@ -6049,7 +6038,7 @@ async def test_transcript_reply_keeps_its_files_after_a_later_turn(
         ),
     )
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
     payload = loaded.json()
@@ -6120,7 +6109,7 @@ async def test_a_file_the_reply_carried_rides_the_reply_and_stays_out_of_the_art
     headers = {"cookie": f"{SESSION_COOKIE}={token}"}
 
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=headers,
     )
     (reply,) = [m for m in loaded.json()["messages"] if m["role"] == "assistant"]
@@ -6216,7 +6205,7 @@ async def test_a_settled_reply_states_what_the_turn_spent_and_how_long_it_took(
     )
 
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
 
@@ -6276,7 +6265,7 @@ async def test_a_settled_reply_names_no_model_for_an_agent_on_auto(
     )
 
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
 
@@ -6546,10 +6535,10 @@ async def test_the_transcript_reads_slack_words_as_markdown_and_portal_words_as_
     await _seed_running_turn(workspace_id, typed, agent_id, member_id, 2, "*ship it* today")
 
     from_slack = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={threaded}", headers=cookie
+        f"/surface/web/agents/{agent_id}/conversations/{threaded}/transcript", headers=cookie
     )
     from_portal = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={typed}", headers=cookie
+        f"/surface/web/agents/{agent_id}/conversations/{typed}/transcript", headers=cookie
     )
 
     assert _worded(from_slack.json()["messages"]) == [
@@ -6780,7 +6769,7 @@ async def test_an_attached_picture_draws_inline_and_a_document_cards_by_name(
     assert admitted.status_code == 200
     conversation_id = admitted.json()["conversation_id"]
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
     (said,) = [row for row in loaded.json()["messages"] if row["role"] == "user"]
@@ -6820,7 +6809,7 @@ async def test_an_attached_document_on_a_presignless_store_shows_no_cover(
     assert admitted.status_code == 200
     conversation_id = admitted.json()["conversation_id"]
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
     (said,) = [row for row in loaded.json()["messages"] if row["role"] == "user"]
@@ -6869,7 +6858,7 @@ async def test_an_attached_file_is_an_artifact_of_the_turn_that_carried_it(
     assert "lights.png" in [item["filename"] for item in listed.json()["artifacts"]]
 
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
     (said,) = [row for row in loaded.json()["messages"] if row["role"] == "user"]
@@ -6924,7 +6913,7 @@ async def test_an_attachment_folded_into_a_running_turn_survives_the_reload(
     await _consume(client, token, opened.json()["turn_id"])
 
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
     said = [row for row in loaded.json()["messages"] if row["role"] == "user"][-1]
@@ -6981,7 +6970,7 @@ async def test_a_presigned_upload_is_delivered_and_recorded(
     inbox = sandboxes.workspace_root / str(row.conversation_id) / "web-inbox"
     assert (inbox / "report.pdf").read_bytes() == b"%PDF-1.7 stored"
     loaded = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers=cookie,
     )
     (said,) = [row for row in loaded.json()["messages"] if row["role"] == "user"]
@@ -12604,7 +12593,7 @@ async def test_an_agents_own_reply_is_never_read_as_a_payload(
     )
 
     read = await client.get(
-        f"/surface/web/agents/{agent_id}/transcript?conversation={conversation_id}",
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
         headers={"cookie": f"{SESSION_COOKIE}={token}"},
     )
 

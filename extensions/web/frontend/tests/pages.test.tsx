@@ -18,6 +18,7 @@ import {
   SECOND_ID,
   TURN_ID,
   json,
+  linked,
   wire,
   type Route,
 } from "./harness";
@@ -483,19 +484,13 @@ test("the chat page opens a conversation without re-listing, and switching opens
   const A = CONVO_ID;
   const B = ARRIVAL_ID;
   const conversationRow = (id: string, title: string) => chatListRow(id, title);
-  const resolvedChat = (id: string, title: string) => ({
-    conversation_id: id,
-    agent_id: AGENT.id,
-    agent_name: AGENT.name,
-    title,
-    surface: "web",
-    last_at: "2026-08-01T09:00:00.000Z",
-  });
+  const resolvedChat = (id: string, title: string) =>
+    linked({ ...CHAT_ROW, conversation_id: id, title });
   const { calls } = await runPage("chat", {
     "/objects/conversation": () =>
       json({ objects: [conversationRow(A, "Alpha"), conversationRow(B, "Bravo")], next_cursor: null }),
     "/api/chats": (url) =>
-      json({ chats: [url.includes(B) ? resolvedChat(B, "Bravo") : resolvedChat(A, "Alpha")] }),
+      json({ conversation: url.includes(B) ? resolvedChat(B, "Bravo") : resolvedChat(A, "Alpha") }),
     "/transcript": () => json({ messages: [] }),
   });
   const listReads = () => calls.filter((url) => url.includes("/objects/conversation")).length;
@@ -523,7 +518,7 @@ test("the chat page heads one conversation under the crumb the shell handed it",
     "chat",
     {
       "/api/chats": () =>
-        json({ chats: [{ ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "second" }] }),
+        json({ conversation: linked({ ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "second" }) }),
       "/transcript": () => json({ messages: [] }),
       "/slots": () => json({ slots: [] }),
     },
@@ -567,11 +562,11 @@ test("the chat page opens a Slack or terminal conversation for comments", async 
     last_turn_at: "2026-08-01T09:00:01",
     readable: true,
     disclosable: false,
-    commentable: true,
+    speakable: true,
   };
   const { calls } = await runPage("chat", {
     "/objects/conversation": () => json({ objects: [], next_cursor: null }),
-    "/api/chats": () => json({ chats: [], conversation: slackConversation }),
+    "/api/chats": () => json({ conversation: slackConversation }),
     "/transcript": () => json({ messages: [] }),
   });
 
@@ -579,7 +574,6 @@ test("the chat page opens a Slack or terminal conversation for comments", async 
   window.postMessage({ ufo: "place", place: { opens: [SLACK] } }, "*");
 
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
-  expect(screen.queryByText(/read-only here/)).toBeNull();
   expect(screen.queryByText("This conversation is not available here.")).toBeNull();
   await vi.waitFor(() =>
     expect(calls.some((url) => url.includes("transcript") && url.includes(SLACK))).toBe(true),
@@ -800,19 +794,7 @@ test("the chat page answers an emptied track with its conversation list", async 
     {
       "/objects/conversation$": () =>
         json({ objects: [row(CONVO_ID, "Alpha"), row(ARRIVAL_ID, "Bravo")], next_cursor: null }),
-      "/api/chats": () =>
-        json({
-          chats: [
-            {
-              conversation_id: CONVO_ID,
-              agent_id: AGENT.id,
-              agent_name: AGENT.name,
-              title: "Alpha",
-              surface: "web",
-              last_at: "2026-08-01T09:00:00.000Z",
-            },
-          ],
-        }),
+      "/api/chats": () => json({ conversation: linked({ ...CHAT_ROW, title: "Alpha" }) }),
       "/transcript": () => json({ messages: [] }),
     },
     { place: { opens: [CONVO_ID] } },

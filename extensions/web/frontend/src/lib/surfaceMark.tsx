@@ -9,7 +9,7 @@ import {
   slackLink,
   surfaceWord,
 } from "@/lib/audience";
-import type { OwnedConversation } from "@/lib/types";
+import type { Conversation } from "@/lib/types";
 
 const SURFACE_GLYPH = "size-(--size-glyph) shrink-0 text-ink-faint";
 
@@ -46,7 +46,7 @@ function surfaceMark(surface: string): ReactNode {
   return null;
 }
 
-export function SurfaceMark({ conversation }: { conversation: OwnedConversation }) {
+export function SurfaceMark({ conversation }: { conversation: Conversation }) {
   const mark = surfaceMark(conversation.surface);
   if (mark === null) return null;
   const where = origin(conversation);

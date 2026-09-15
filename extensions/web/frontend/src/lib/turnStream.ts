@@ -42,7 +42,7 @@ function chatUrl(target: Pick<ChatTarget, "agentId" | "conversationId">): string
 
 function transcriptPath(target: ChatTarget): string | null {
   if (!target.conversationId) return null;
-  return "/agents/" + target.agentId + "/transcript?conversation=" + target.conversationId;
+  return "/agents/" + target.agentId + "/conversations/" + target.conversationId + "/transcript";
 }
 
 const RESYNC_EPOCH = new Map<string, number>();

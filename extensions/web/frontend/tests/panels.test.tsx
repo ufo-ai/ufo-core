@@ -466,7 +466,7 @@ test("a workspace-shared conversation names its audience and surface in its band
             last_turn_at: null,
             readable: true,
             disclosable: false,
-            commentable: true,
+            speakable: true,
           },
         ],
       }),
@@ -501,7 +501,7 @@ test("a conversation the address names is opened, and named by what it is about"
             last_turn_at: "2026-08-07T11:00:00",
             readable: true,
             disclosable: false,
-            commentable: true,
+            speakable: true,
           },
         ],
       }),
@@ -540,7 +540,7 @@ test("a Slack conversation names its channel in its heading, and those words are
             last_turn_at: "2026-08-07T11:00:00",
             readable: true,
             disclosable: false,
-            commentable: true,
+            speakable: true,
           },
         ],
       }),
@@ -565,7 +565,6 @@ test("a Slack conversation names its channel in its heading, and those words are
   expect(drawn).not.toContain("text-link");
   expect(within(out).getByText("↗").className).toContain("text-ink-soft");
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
-  expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
 test("a conversation opened here reads as chat, and a settled reply keeps no activity behind it", async () => {
@@ -607,7 +606,7 @@ test("a conversation opened here reads as chat, and a settled reply keeps no act
             created_at: "2026-07-30T10:00:00",
             last_turn_at: "2026-07-30T10:00:01",
             readable: true,
-            commentable: false,
+            speakable: false,
           },
         ],
       }),
@@ -644,7 +643,7 @@ test("a Slack transcript heads itself with its channel, and those words are the 
     last_turn_at: "2026-07-30T10:00:01",
     readable: true,
     disclosable: false,
-    commentable: surface === "slack",
+    speakable: surface === "slack",
   });
   wire({
     ["/conversations/" + thread + "/transcript"]: () =>
@@ -712,7 +711,7 @@ test("a conversation nobody shared is never named, and the half stands on the co
             created_at: "2026-07-30T10:00:00",
             last_turn_at: null,
             readable: false,
-            commentable: false,
+            speakable: false,
           },
           {
             id: "31bd9f77-0000-4000-8000-000000000002",
@@ -726,7 +725,7 @@ test("a conversation nobody shared is never named, and the half stands on the co
             created_at: "2026-07-30T11:00:00",
             last_turn_at: null,
             readable: false,
-            commentable: false,
+            speakable: false,
           },
         ],
       }),
@@ -920,7 +919,7 @@ test("an app opens on the conversation that moved last, and an address names ano
     last_turn_at: "2026-07-30T10:00:01",
     readable: true,
     disclosable: false,
-    commentable: false,
+    speakable: false,
   });
   location.hash = "#/agents/" + AGENT_ID;
   wire({
@@ -1028,7 +1027,7 @@ test("New starts a fresh conversation while the address still names one", async 
             last_turn_at: "2026-08-07T11:00:00",
             readable: true,
             disclosable: false,
-            commentable: false,
+            speakable: false,
           },
         ],
       }),
@@ -1079,7 +1078,7 @@ test("a conversation the member may not read says so instead of reporting a stat
             created_at: "2026-07-30T12:00:00",
             last_turn_at: "2026-07-30T12:00:00",
             readable: true,
-            commentable: false,
+            speakable: false,
           },
         ],
       }),
@@ -1319,7 +1318,7 @@ function appConversation(id: string, description: string, surface = "web") {
     last_turn_at: "2026-07-30T10:00:01",
     readable: true,
     disclosable: false,
-    commentable: false,
+    speakable: false,
   };
 }
 

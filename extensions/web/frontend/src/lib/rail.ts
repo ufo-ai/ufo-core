@@ -24,7 +24,7 @@ export type ChatRow = {
   speaker: string | null;
 };
 
-export type ChatsPayload = { chats: ChatRow[]; conversation?: OwnedConversation };
+export type ChatsPayload = { conversation: OwnedConversation };
 
 export type ConversationRow = {
   name: string;

@@ -33,7 +33,7 @@ const PRIVATE = {
   last_turn_at: "2026-07-30T11:00:00",
   readable: false,
   disclosable: true,
-  commentable: false,
+  speakable: false,
 };
 
 const WALLED = {
@@ -196,10 +196,7 @@ test("a permalink to another member's conversation offers the listing's acknowle
   location.hash = "#/c/" + CONVO_ID;
   const linked = { ...PRIVATE, id: CONVO_ID, agent: { id: AGENT.id, name: AGENT.name } };
   const { calls } = wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=")
-        ? json({ chats: [], conversation: linked })
-        : json({ chats: [] }),
+    "/api/chats": () => json({ conversation: linked }),
     "/read_private_transcript": () => json({ applied: true, message: "Recorded." }),
     "/actions/conversation/": () => json({ actions: [OPEN_TRANSCRIPT(CONVO_ID)] }),
     "/transcript": () => json({ messages: [] }),
@@ -211,19 +208,14 @@ test("a permalink to another member's conversation offers the listing's acknowle
   await userEvent.click(screen.getByRole("button", { name: "Open transcript" }));
 
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
-  expect(
-    screen.getByText("This conversation is read-only here. Reply in Slack to continue it."),
-  ).toBeTruthy();
+  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
 });
 
 test("a permalink to a conversation naming no member is unshared, not missing", async () => {
   location.hash = "#/c/" + CONVO_ID;
   const linked = { ...WALLED, id: CONVO_ID, agent: { id: AGENT.id, name: AGENT.name }, member_email: null };
   wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=")
-        ? json({ chats: [], conversation: linked })
-        : json({ chats: [] }),
+    "/api/chats": () => json({ conversation: linked }),
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 

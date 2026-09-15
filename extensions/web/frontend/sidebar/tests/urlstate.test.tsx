@@ -104,7 +104,7 @@ function serve() {
       }
       if (url.includes("/workspace/usage")) return json(NO_USAGE);
       if (url.includes("/objects/conversation")) return json({ objects: [] });
-      if (url.includes("/api/chats")) return json({ chats: [] });
+      if (url.includes("/api/chats")) return new Response("no such conversation", { status: 404 });
       if (url.includes("/transcript")) return json({ messages: [] });
       return new Response("file body");
     }),
@@ -643,7 +643,7 @@ test("a refused memory cursor leaves a way back to the first page", async () => 
       }
       if (url.includes("/workspace/surfaces")) return json({ surfaces: [] });
       if (url.includes("/objects/conversation")) return json({ objects: [] });
-      if (url.includes("/api/chats")) return json({ chats: [] });
+      if (url.includes("/api/chats")) return new Response("no such conversation", { status: 404 });
       return json({ messages: [] });
     }),
   );

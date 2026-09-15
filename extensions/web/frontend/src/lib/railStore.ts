@@ -2,7 +2,6 @@ import { useSyncExternalStore } from "react";
 
 import type { ToastState } from "@/components/ui/toast";
 import { getJson, type IntentOutcome } from "@/lib/api";
-import { isPortalChat } from "@/lib/audience";
 import type { ChatTurn } from "@/lib/chatStore";
 import {
   bumpChat,
@@ -20,8 +19,9 @@ import type { OwnedConversation } from "@/lib/types";
 
 export type RailPhase = "loading" | "failed" | "ready";
 
+/** A refusal the resolve answered, read where no record of the conversation is held. */
 export type Sought =
-  | { kind: "answered" }
+  | { kind: "absent" }
   | { kind: "signed-out" }
   | { kind: "failed"; message: string };
 
@@ -54,9 +54,20 @@ type VisibilityState = { audience: string; member_email: string | null };
 type VisibilityChange = VisibilityState & { previous: VisibilityState };
 const visibilityChanges = new Map<string, VisibilityChange>();
 
-function applyVisibility(row: ChatRow): ChatRow {
-  const change = visibilityChanges.get(row.conversation_id);
-  return change ? { ...row, audience: change.audience, member_email: change.member_email } : row;
+function applyVisibility<Held extends VisibilityState>(conversationId: string, held: Held): Held {
+  const change = visibilityChanges.get(conversationId);
+  return change ? { ...held, audience: change.audience, member_email: change.member_email } : held;
+}
+
+function withVisibility(held: RailState, conversationId: string, next: VisibilityState): RailState {
+  const linked = held.linked[conversationId];
+  return {
+    ...held,
+    rows: held.rows.map((entry) =>
+      entry.conversation_id === conversationId ? { ...entry, ...next } : entry,
+    ),
+    linked: linked ? { ...held.linked, [conversationId]: { ...linked, ...next } } : held.linked,
+  };
 }
 
 export function railState(): RailState {
@@ -111,7 +122,9 @@ async function walkRail(read: number): Promise<void> {
       }));
       return;
     }
-    gathered.push(...chatRows(result.payload).map(applyVisibility));
+    gathered.push(
+      ...chatRows(result.payload).map((row) => applyVisibility(row.conversation_id, row)),
+    );
     update((held) => ({
       ...held,
       phase: "ready" as const,
@@ -124,35 +137,41 @@ async function walkRail(read: number): Promise<void> {
 
 const seeking = new Set<string>();
 
+/** Every visit reads the conversation again, so its title line follows a rename or a change of
+ *  audience made since the last one; the record held meanwhile stands until the answer lands. */
 export function seekChat(conversationId: string): void {
-  const held = railState();
-  if (seeking.has(conversationId) || conversationId in held.sought) return;
-  if (held.rows.some((row) => row.conversation_id === conversationId && isPortalChat(row.surface))) {
-    return;
-  }
+  if (seeking.has(conversationId)) return;
   seeking.add(conversationId);
   void getJson<ChatsPayload>("/api/chats?conversation=" + conversationId).then((result) => {
     seeking.delete(conversationId);
-    const outcome: Sought = result.ok
-      ? { kind: "answered" }
-      : result.status === 401
-        ? { kind: "signed-out" }
-        : { kind: "failed", message: result.message };
-    update((current) => ({
-      ...current,
-      sought: { ...current.sought, [conversationId]: outcome },
-      ...(result.ok && result.payload.chats.length
-        ? { rows: mergeChats(current.rows, result.payload.chats.map(applyVisibility)) }
-        : {}),
-      ...(result.ok && result.payload.conversation
-        ? { linked: { ...current.linked, [conversationId]: result.payload.conversation } }
-        : {}),
-    }));
+    if (result.ok) {
+      update((current) => ({
+        ...current,
+        linked: {
+          ...current.linked,
+          [conversationId]: applyVisibility(conversationId, result.payload.conversation),
+        },
+      }));
+      return;
+    }
+    const outcome: Sought =
+      result.status === 404
+        ? { kind: "absent" }
+        : result.status === 401
+          ? { kind: "signed-out" }
+          : { kind: "failed", message: result.message };
+    update((current) => ({ ...current, sought: { ...current.sought, [conversationId]: outcome } }));
   });
 }
 
-export function railFounded(row: ChatRow): void {
-  update((held) => ({ ...held, rows: mergeChats(held.rows, [row]) }));
+/** The founding client holds every fact the listing row and the resolved projection would carry, so
+ *  both stand at once and the conversation opens without a read of what it just wrote. */
+export function railFounded(row: ChatRow, conversation: OwnedConversation): void {
+  update((held) => ({
+    ...held,
+    rows: mergeChats(held.rows, [row]),
+    linked: { ...held.linked, [conversation.id]: conversation },
+  }));
 }
 
 export function changeRailVisibility(
@@ -160,21 +179,19 @@ export function changeRailVisibility(
   audience: string,
   memberEmail: string | null,
 ): boolean {
-  const row = railState().rows.find((entry) => entry.conversation_id === conversationId);
-  if (!row || visibilityChanges.has(conversationId) || row.audience === audience) return false;
+  const held = railState();
+  const current =
+    held.linked[conversationId] ??
+    held.rows.find((entry) => entry.conversation_id === conversationId);
+  if (!current || visibilityChanges.has(conversationId) || current.audience === audience) {
+    return false;
+  }
+  const next = { audience, member_email: memberEmail };
   visibilityChanges.set(conversationId, {
-    audience,
-    member_email: memberEmail,
-    previous: { audience: row.audience, member_email: row.member_email },
+    ...next,
+    previous: { audience: current.audience, member_email: current.member_email },
   });
-  update((held) => ({
-    ...held,
-    rows: held.rows.map((entry) =>
-      entry.conversation_id === conversationId
-        ? { ...entry, audience, member_email: memberEmail }
-        : entry,
-    ),
-  }));
+  update((state) => withVisibility(state, conversationId, next));
   return true;
 }
 
@@ -183,18 +200,7 @@ export function settleRailVisibility(conversationId: string, outcome: IntentOutc
   if (!change) return;
   visibilityChanges.delete(conversationId);
   update((held) => ({
-    ...held,
-    rows: outcome.applied
-      ? held.rows
-      : held.rows.map((entry) =>
-          entry.conversation_id === conversationId
-            ? {
-                ...entry,
-                audience: change.previous.audience,
-                member_email: change.previous.member_email,
-              }
-            : entry,
-        ),
+    ...(outcome.applied ? held : withVisibility(held, conversationId, change.previous)),
     ...(outcome.applied || !outcome.message
       ? {}
       : {

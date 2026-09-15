@@ -31,7 +31,7 @@ const LISTED = {
   last_turn_at: "2026-08-01T09:00:01",
   readable: true,
   disclosable: false,
-  commentable: false,
+  speakable: false,
 };
 
 beforeEach(() => {
@@ -334,7 +334,7 @@ test("the chat toggle opens a rail chat the app's index does not answer", async 
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   await waitFor(() =>
-    expect(calls.some((url) => url.includes("/transcript?conversation=" + CONVO_ID))).toBe(true),
+    expect(calls.some((url) => url.includes("/conversations/" + CONVO_ID + "/transcript"))).toBe(true),
   );
 });
 
@@ -350,7 +350,7 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
   ).toBe("true");
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
   await waitFor(() =>
-    expect(calls.some((url) => url.includes("/transcript?conversation=" + CONVO_ID))).toBe(true),
+    expect(calls.some((url) => url.includes("/conversations/" + CONVO_ID + "/transcript"))).toBe(true),
   );
 
   const sent: unknown[] = [];

@@ -749,18 +749,6 @@ two lanes are two partitions — a queued arm could then apply after the delete 
 leave the task armed and firing."""
 
 PORTAL_LANE_PREFIX = "intent/"
-SPOKEN_ROOM_PREFIXES = ("homepage/",)
-"""The portal rooms a member may speak in, by the key they are opened under.
-
-A member speaks where the app answers, and the homepage room is where it does: the sweep builds the
-app's page there, and the member reads what it did and says what the page should hold instead. It
-takes their message safely because a build is an ordinary turn — a message folded onto a live one is
-read by the rounds it is already running.
-
-The prepared-intent lane takes none, and that is the whole of the rest of the rule. An intent turn
-dispatches its one tool call and runs no model round, so it claims no arrivals: a message folded
-onto a live one is a message no round ever reads, and the member waits for a reply that is not
-coming. A member reads that room and speaks to the app in their own chat with it."""
 
 
 async def offered_models(models: Iterable[str], keep: str | None = None) -> list[str]:

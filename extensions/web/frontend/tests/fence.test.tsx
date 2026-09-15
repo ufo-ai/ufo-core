@@ -48,7 +48,7 @@ test("leaving a view discards the read left behind rather than painting it", asy
       if (url.includes("/objects/scheduled_task")) return objectIndex(TASK_KIND, []);
       if (url.includes("/objects/source_trigger")) return objectIndex(TRIGGER_KIND, []);
       if (url.includes("/objects/conversation")) return json({ objects: [] });
-      if (url.includes("/api/chats")) return json({ chats: [] });
+      if (url.includes("/api/chats")) return new Response("no such conversation", { status: 404 });
       if (url.includes("/api/agents/status")) return json({ statuses: [] });
       return json({ messages: [] });
     }),

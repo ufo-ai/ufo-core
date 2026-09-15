@@ -3,7 +3,6 @@ import {
   Button,
   COLUMN,
   ChatPane,
-  ConversationDetail,
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
@@ -17,7 +16,6 @@ import {
   IMESSAGE_SURFACE,
   IconFilter2,
   Moment,
-  Page,
   PageToolbar,
   Pane,
   PaneNote,
@@ -155,25 +153,12 @@ function bucketed(rows: ConversationRow[], category: string, now: Date): Run[] {
   return order.map((run) => ({ label: run, rows: buckets.get(run) ?? [] }));
 }
 
-type ResolvedChat = {
-  conversation_id: string;
-  agent_id: string;
-  agent_name: string;
-  title: string;
-  surface: string;
-  surface_label: string | null;
-  mine: boolean;
-  speaker: string | null;
-  last_at: string;
-};
-
 type Shown =
   | { kind: "loading" }
   | { kind: "missing" }
   | { kind: "compose" }
   | { kind: "list"; rows: ConversationRow[]; walk: string | null }
-  | { kind: "open"; row: ConversationRow }
-  | { kind: "reading"; conversation: Conversation };
+  | { kind: "open"; conversation: Conversation };
 
 type Listing =
   | { kind: "loading" }
@@ -253,67 +238,42 @@ function ChatApp({
 
   const [shown, setShown] = useState<Shown>({ kind: "loading" });
   useEffect(() => {
+    if (wanted !== null) return;
+    setShown((held) =>
+      list.kind === "ready" || list.kind === "refresh"
+        ? { kind: "list", rows: list.rows, walk: list.walk }
+        : list.kind === "failed"
+          ? { kind: "missing" }
+          : held.kind === "list"
+            ? held
+            : { kind: "loading" },
+    );
+  }, [wanted, list]);
+  useEffect(() => {
+    if (wanted === null) return;
     if (wanted === COMPOSE) {
       setShown({ kind: "compose" });
       return;
     }
-    if (wanted === null) {
-      setShown((held) =>
-        list.kind === "ready" || list.kind === "refresh"
-          ? { kind: "list", rows: list.rows, walk: list.walk }
-          : list.kind === "failed"
-            ? { kind: "missing" }
-            : held.kind === "list"
-              ? held
-              : { kind: "loading" },
-      );
-      return;
-    }
-    if (list.kind === "loading") {
-      setShown((held) => (held.kind === "open" && held.row.name === wanted ? held : { kind: "loading" }));
-      return;
-    }
-    const carried =
-      list.kind === "ready" || list.kind === "refresh"
-        ? list.rows.find((row) => row.name === wanted)
-        : undefined;
-    if (carried) {
-      setShown({ kind: "open", row: carried });
-      return;
-    }
     let live = true;
-    setShown((held) => (held.kind === "open" && held.row.name === wanted ? held : { kind: "loading" }));
-    void getJson<{ chats: ResolvedChat[]; conversation?: Conversation }>(
-      "/api/chats?conversation=" + wanted,
-    ).then((sought) => {
-      if (!live) return;
-      const chat = sought.ok ? sought.payload.chats[0] : undefined;
-      const reading = sought.ok ? sought.payload.conversation : undefined;
-      setShown(
-        chat
-          ? {
-              kind: "open",
-              row: {
-                name: chat.conversation_id,
-                agent_id: chat.agent_id,
-                agent_name: chat.agent_name,
-                title: chat.title,
-                surface: chat.surface,
-                surface_label: chat.surface_label,
-                mine: chat.mine,
-                speaker: chat.speaker,
-                last_at: chat.last_at,
-              },
-            }
-          : reading
-            ? { kind: "reading", conversation: reading }
+    setShown((held) =>
+      held.kind === "open" && held.conversation.id === wanted ? held : { kind: "loading" },
+    );
+    void getJson<{ conversation: Conversation }>("/api/chats?conversation=" + wanted).then(
+      (sought) => {
+        if (!live) return;
+        const conversation = sought.ok ? sought.payload.conversation : null;
+        setShown(
+          conversation && (conversation.readable || conversation.disclosable)
+            ? { kind: "open", conversation }
             : { kind: "missing" },
-      );
-    });
+        );
+      },
+    );
     return () => {
       live = false;
     };
-  }, [wanted, list]);
+  }, [wanted]);
   useEffect(() => onPlaced(setAt), []);
   const step = useCallback(
     (patch: WorkspacePlace) => {
@@ -481,55 +441,20 @@ function ChatApp({
     );
   }
   if (shown.kind === "open") {
-    const agent =
-      agents.find((entry) => entry.id === shown.row.agent_id) ??
-      ({ id: shown.row.agent_id, name: shown.row.agent_name, model: "" } as Agent);
-    return (
-      <ChatPane
-        key={shown.row.name}
-        agent={agent}
-        member={member}
-        conversationId={shown.row.name}
-        title={shown.row.title}
-        crumb={crumb}
-        onActivity={() => {}}
-      />
-    );
-  }
-  if (shown.kind === "reading") {
     const convo = shown.conversation;
     const agent =
       agents.find((entry) => entry.id === convo.agent?.id) ??
       ({ id: convo.agent?.id ?? "", name: convo.agent?.name ?? "", model: "" } as Agent);
-    if (convo.commentable) {
-      return (
-        <ChatPane
-          key={convo.id}
-          agent={agent}
-          member={member}
-          conversationId={convo.id}
-          title={convo.description}
-          crumb={crumb}
-          onActivity={() => {}}
-        />
-      );
-    }
     return (
-      <Pane>
-        <Header pinned heading={1} title={convo.description} />
-        <Page>
-          <div className={COLUMN}>
-            <ConversationDetail agent={agent} conversation={convo} headed />
-            <p className="m-0 max-w-hint text-ink-soft">
-              {isPortalChat(convo.surface)
-                ? "This conversation is read-only."
-                : "This conversation is read-only here. Reply in " +
-                  surfaceWord(convo.surface) +
-                  " to continue it."}
-            </p>
-          </div>
-        </Page>
-      </Pane>
+      <ChatPane
+        key={convo.id}
+        agent={agent}
+        member={member}
+        conversationId={convo.id}
+        conversation={convo}
+        crumb={crumb}
+        onActivity={() => {}}
+      />
     );
   }
   if (!mainAgent) return <PaneNote>No such app.</PaneNote>;

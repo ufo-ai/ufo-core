@@ -7,7 +7,7 @@ import { chatHash, newChatHash, type Route } from "@/lib/route";
 import { pageCrumb, pageTitle } from "@/lib/title";
 import type { OwnedConversation } from "@/lib/types";
 
-import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, SECOND, SECOND_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, linked, MEMBER, SECOND, SECOND_ID, useStreamFake, wire } from "./harness";
 
 const PLACE = { place: {} };
 
@@ -27,14 +27,16 @@ const LINKED: OwnedConversation = {
   last_turn_at: "2026-07-30T11:00:00",
   readable: true,
   disclosable: false,
-  commentable: false,
+  speakable: false,
 };
 
-const titled = (route: Route, linked: Record<string, OwnedConversation> = {}) =>
-  pageTitle(route, [AGENT, SECOND], [CHAT_ROW], linked);
+const HELD = { [CONVO_ID]: linked(CHAT_ROW) };
 
-const crumbed = (route: Route, linked: Record<string, OwnedConversation> = {}) =>
-  pageCrumb(route, [AGENT, SECOND], [CHAT_ROW], linked);
+const titled = (route: Route, held: Record<string, OwnedConversation> = HELD) =>
+  pageTitle(route, [AGENT, SECOND], held);
+
+const crumbed = (route: Route, held: Record<string, OwnedConversation> = HELD) =>
+  pageCrumb(route, [AGENT, SECOND], held);
 
 beforeEach(() => {
   useStreamFake();
@@ -91,9 +93,9 @@ test("home is named for itself, whatever its track holds", () => {
 });
 
 test("a step no roster row reaches is the app's name and nothing to press", () => {
-  const held = { ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "daily-brief" };
+  const held = linked({ ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "daily-brief" });
   const route: Route = { kind: "chat", conversationId: CONVO_ID };
-  expect(pageCrumb(route, [AGENT], [held], {})).toEqual({ label: "Daily-Brief" });
+  expect(pageCrumb(route, [AGENT], { [CONVO_ID]: held })).toEqual({ label: "Daily-Brief" });
 });
 
 test("the tab follows the hash the member opens", async () => {

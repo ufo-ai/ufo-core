@@ -34,7 +34,7 @@ import {
   WORKSPACE_VIEWS,
   type PaneView,
 } from "@/views/registry";
-import { MEMBER_SUBJECT, Me, WEB_SURFACE, isPortalChat, Viewer, WorkspaceId } from "@/lib/audience";
+import { MEMBER_SUBJECT, Me, WEB_SURFACE, Viewer, WorkspaceId } from "@/lib/audience";
 import { SIGN_OUT_PATH } from "@/lib/api";
 import { AppsProvider } from "@/lib/apps";
 import { useAppStatus } from "@/lib/appStatusStore";
@@ -130,9 +130,6 @@ const FirstRun = lazy(() =>
   import("@/views/FirstRun").then((module) => ({ default: module.FirstRun })),
 );
 const Home = lazy(() => import("@/views/Home").then((module) => ({ default: module.Home })));
-const LinkedPane = lazy(() =>
-  import("@/views/ChatPane").then((module) => ({ default: module.LinkedPane })),
-);
 
 function PaneLoading() {
   return (
@@ -238,16 +235,17 @@ export function App({
   }, [narrow]);
 
   useEffect(() => {
-    document.title = pageTitle(route, agents, rail.rows, rail.linked);
-  }, [route, agents, rail.rows, rail.linked]);
+    document.title = pageTitle(route, agents, rail.linked);
+  }, [route, agents, rail.linked]);
 
   useEffect(() => {
     if (route.kind === "first-run" && !mainAgent) openHome();
   }, [mainAgent, route.kind]);
 
+  const opened = route.kind === "chat" ? route.conversationId : null;
   useEffect(() => {
-    if (route.kind === "chat" && rail.phase === "ready") seekChat(route.conversationId);
-  }, [route, rail]);
+    if (opened !== null) seekChat(opened);
+  }, [opened]);
 
   /** The wizard mounts only behind a member's press or a run already in flight: its address alone
    *  must not found a conversation, or Back and reload would send model turns nobody asked for. */
@@ -393,19 +391,41 @@ export function App({
 
 function founded(agent: Agent, member: Member, conversationId: string, title: string): void {
   if (member.id === undefined) throw new Error("member id missing");
-  railFounded({
-    conversation_id: conversationId,
-    agent_id: agent.id,
-    agent_name: agent.name,
-    title,
-    last_at: stampIso(new Date()),
-    surface: WEB_SURFACE,
-    surface_label: null,
-    audience: MEMBER_SUBJECT + member.id,
-    member_email: member.email,
-    mine: true,
-    speaker: null,
-  });
+  const at = stampIso(new Date());
+  const audience = MEMBER_SUBJECT + member.id;
+  railFounded(
+    {
+      conversation_id: conversationId,
+      agent_id: agent.id,
+      agent_name: agent.name,
+      title,
+      last_at: at,
+      surface: WEB_SURFACE,
+      surface_label: null,
+      audience,
+      member_email: member.email,
+      mine: true,
+      speaker: null,
+    },
+    {
+      id: conversationId,
+      agent: { id: agent.id, name: agent.name },
+      surface: WEB_SURFACE,
+      surface_label: null,
+      audience,
+      member_email: member.email,
+      mine: true,
+      description: title,
+      source: null,
+      speakers: [member.email],
+      turn_count: 1,
+      created_at: at,
+      last_turn_at: at,
+      readable: true,
+      disclosable: false,
+      speakable: true,
+    },
+  );
   const seen = heldRoute();
   if (seen.kind === "new-chat" && seen.agentId === agent.id) openChat(conversationId);
 }
@@ -818,7 +838,7 @@ function RoutedPane({
   const rail = useRail();
   const tabs = useOfferedTabs();
   const surfaces = useSurfaces();
-  const crumb = pageCrumb(route, agents, rail.rows, rail.linked);
+  const crumb = pageCrumb(route, agents, rail.linked);
   const appIndex =
     route.kind === "builder" || (route.kind === "workspace" && route.view === "apps");
   if (appIndex && !surfaces.apps) return <PaneNote>This link is not valid.</PaneNote>;
@@ -943,40 +963,11 @@ function RoutedPane({
       );
     }
     case "chat": {
-      const row = rail.rows.find(
-        (entry) => entry.conversation_id === route.conversationId && isPortalChat(entry.surface),
-      );
-      const linkedConversation = rail.linked[route.conversationId];
-      if (!row && linkedConversation) {
-        const linkedAgent = agents.find((entry) => entry.id === linkedConversation.agent.id);
-        if (!linkedAgent) return <PaneNote>No such app.</PaneNote>;
-        if (!linkedConversation.readable && !linkedConversation.disclosable) return <NotShared />;
-        return (
-          <LinkedPane
-            key={linkedConversation.id}
-            agent={linkedAgent}
-            conversation={linkedConversation}
-            member={member}
-            crumb={crumb}
-            slot={route.slot}
-            onActivity={railActivity}
-            onSelectSlot={(slot) => openSlot(route.conversationId, slot)}
-          />
-        );
-      }
-      const listedAgent = row ? agents.find((entry) => entry.id === row.agent_id) : undefined;
-      const agent =
-        listedAgent ??
-        (row && row.surface.startsWith("extension:")
-          ? { id: row.agent_id, name: row.agent_name, model: "" }
-          : undefined);
-      if (!row || !agent) {
-        if (rail.phase === "loading")
-          return <PaneLoading />;
-        if (rail.phase === "failed") return <PaneNote>Couldn't load conversations.</PaneNote>;
+      const conversation = rail.linked[route.conversationId];
+      if (!conversation) {
         const outcome = rail.sought[route.conversationId];
-        if (!outcome)
-          return <PaneLoading />;
+        if (!outcome) return <PaneLoading />;
+        if (outcome.kind === "absent") return <NotShared />;
         if (outcome.kind === "signed-out") {
           return (
             <Pane className={COLUMN}>
@@ -986,18 +977,24 @@ function RoutedPane({
             </Pane>
           );
         }
-        if (outcome.kind === "failed") return <PaneNote>{outcome.message}</PaneNote>;
-        return <NotShared />;
+        return <PaneNote>{outcome.message}</PaneNote>;
       }
+      if (!conversation.readable && !conversation.disclosable) return <NotShared />;
+      const listedAgent = agents.find((entry) => entry.id === conversation.agent.id);
+      const agent =
+        listedAgent ??
+        (conversation.surface.startsWith("extension:")
+          ? { id: conversation.agent.id, name: conversation.agent.name, model: "" }
+          : undefined);
+      if (!agent) return <PaneNote>No such app.</PaneNote>;
       return (
         <ChatPane
-          key={row.conversation_id}
+          key={conversation.id}
           agent={agent}
           member={member}
-          conversationId={row.conversation_id}
-          audience={row}
+          conversationId={conversation.id}
+          conversation={conversation}
           onActivity={railActivity}
-          title={row.title}
           conversationOnly={!listedAgent}
           crumb={crumb}
           slot={route.slot}

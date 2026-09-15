@@ -4197,15 +4197,12 @@ const SLACK_THREAD = {
   last_turn_at: "2026-08-01T09:05:00Z",
   readable: true,
   disclosable: false,
-  commentable: false,
+  speakable: false,
 };
 
 test("a thread that arrived on Slack draws the slot chips and the shell beside its channel link", async () => {
   wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=")
-        ? json({ chats: [], conversation: SLACK_THREAD })
-        : json({ chats: [] }),
+    "/api/chats": () => json({ conversation: SLACK_THREAD }),
     "/transcript": () => json({ messages: [] }),
     "/slots": () =>
       json({

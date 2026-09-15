@@ -48,7 +48,7 @@ export type Conversation = {
   last_turn_at: string | null;
   readable: boolean;
   disclosable: boolean;
-  commentable: boolean;
+  speakable: boolean;
 };
 
 export type OwnedConversation = Conversation & { agent: ConversationAgent };

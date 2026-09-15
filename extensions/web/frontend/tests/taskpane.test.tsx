@@ -9,7 +9,7 @@ import { Viewer } from "@/lib/audience";
 import { chatHash } from "@/lib/route";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { AGENT, AGENT_ID, CONVO_ID, MEMBER, json, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CONVO_ID, MEMBER, json, linked, useStreamFake, wire } from "./harness";
 
 const AFTER_SETTLE = { timeout: 3000 };
 
@@ -310,7 +310,7 @@ test("the conversation the task belongs to stands in the pane by its title", asy
     "/objects/scheduled_task/daily-brief": () =>
       json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
   });
-  railFounded({
+  const nightly = {
     conversation_id: CONVO_ID,
     agent_id: AGENT_ID,
     agent_name: "assistant",
@@ -322,7 +322,8 @@ test("the conversation the task belongs to stands in the pane by its title", asy
     member_email: "member@example.com",
     mine: true,
     speaker: null,
-  });
+  };
+  railFounded(nightly, linked(nightly));
   mount();
 
   const link = await screen.findByRole("link", { name: "Ship the nightly" });
@@ -370,7 +371,6 @@ test("a conversation the wire names with a projection alone is titled by its des
       json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
     "/api/chats": () =>
       json({
-        chats: [],
         conversation: {
           id: CONVO_ID,
           agent: { id: AGENT_ID, name: "assistant", icon: "spark" },
@@ -386,7 +386,7 @@ test("a conversation the wire names with a projection alone is titled by its des
           last_turn_at: "2026-07-30T10:00:01",
           readable: true,
           disclosable: false,
-          commentable: false,
+          speakable: false,
         },
       }),
   });
@@ -402,19 +402,19 @@ test("a conversation the rail never gathered is sought, so an app page names it 
       json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
     "/api/chats": () =>
       json({
-        chats: [
-          {
-            conversation_id: CONVO_ID,
-            agent_id: AGENT_ID,
-            agent_name: "assistant",
-            title: "Ship the nightly",
-            last_at: "2026-08-01T09:00:00.000Z",
-            surface: "web",
-            surface_label: null,
-            mine: true,
-            speaker: null,
-          },
-        ],
+        conversation: linked({
+          conversation_id: CONVO_ID,
+          agent_id: AGENT_ID,
+          agent_name: "assistant",
+          title: "Ship the nightly",
+          last_at: "2026-08-01T09:00:00.000Z",
+          surface: "web",
+          surface_label: null,
+          audience: "member:m1",
+          member_email: "member@example.com",
+          mine: true,
+          speaker: null,
+        }),
       }),
   });
   mount();

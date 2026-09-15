@@ -32,7 +32,7 @@ export type ChatRow = {
   unread: boolean;
 };
 
-export type ChatsPayload = { chats: ChatRow[]; conversation?: OwnedConversation };
+export type ChatsPayload = { conversation: OwnedConversation };
 
 export type ConversationRow = {
   name: string;

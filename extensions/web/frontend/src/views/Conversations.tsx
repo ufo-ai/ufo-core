@@ -80,7 +80,7 @@ export function Disclose({
   onBack,
   onOpened,
 }: {
-  agent: Agent;
+  agent: Pick<Agent, "id">;
   conversation: Conversation;
   onBack?: () => void;
   onOpened: () => void;

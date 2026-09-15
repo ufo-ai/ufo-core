@@ -17,8 +17,9 @@ import {
   type WorkspaceTab,
   WORKSPACE_TABS,
 } from "@/lib/route";
-import { WorkspaceId } from "@/lib/audience";
+import { MEMBER_SUBJECT, SHARED_SUBJECT, WorkspaceId } from "@/lib/audience";
 import type { ChatRow } from "@/lib/rail";
+import type { OwnedConversation } from "@/lib/types";
 
 export const WORKSPACE_ID = "31b26b98-0000-4000-8000-000000000031";
 
@@ -165,7 +166,7 @@ export type Route = (url: string, init?: RequestInit) => Response | Promise<Resp
 export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
   const fallbacks: Record<string, Route> = {
-    "/api/chats": () => json({ chats: [] }),
+    "/api/chats": () => NO_SUCH_CONVERSATION(),
     "/objects/conversation$": () => json({ objects: [] }),
     "/api/agents/status": () => json({ statuses: [], out_of_credit: false }),
     "/connector-catalog": () => json({ providers: [], after: null }),
@@ -312,6 +313,37 @@ export const conversationObject = ({ conversation_id, ...row }: RailRow) => ({
   ...row,
 });
 
+/** The resolve's projection of a listing row, as the server derives it: the member reads what the
+ *  listing returned them, and speaks where the audience is the workspace or their own. */
+export const linked = (row: RailRow): OwnedConversation => ({
+  id: row.conversation_id,
+  agent: { id: row.agent_id, name: row.agent_name },
+  surface: row.surface,
+  surface_label: row.surface_label,
+  audience: row.audience,
+  member_email: row.member_email,
+  mine: row.mine,
+  description: row.title,
+  source: null,
+  speakers: [],
+  turn_count: 1,
+  created_at: row.last_at,
+  last_turn_at: row.last_at,
+  readable: true,
+  disclosable: false,
+  speakable: row.audience === SHARED_SUBJECT || row.audience === MEMBER_SUBJECT + MEMBER.id,
+});
+
+export const NO_SUCH_CONVERSATION = () => new Response("no such conversation", { status: 404 });
+
+const resolveOnWire =
+  (rows: RailRow[]): Route =>
+  (url) => {
+    const id = new URLSearchParams(url.split("?")[1] ?? "").get("conversation");
+    const row = rows.find((entry) => entry.conversation_id === id);
+    return row ? json({ conversation: linked(row) }) : NO_SUCH_CONVERSATION();
+  };
+
 /** The listing searches on the server, scanning a row's string fields the way `object_page` does,
  *  so a test's wire narrows where the real read narrows rather than answering every row to every
  *  query. */
@@ -325,7 +357,7 @@ export const chatsOnWire = (rows: RailRow[]): Record<string, Route> => ({
     );
     return json({ objects: found.map(conversationObject) });
   },
-  "/api/chats": () => json({ chats: rows }),
+  "/api/chats": resolveOnWire(rows),
 });
 
 export const RADAR_TOUR = "What this workspace can do";

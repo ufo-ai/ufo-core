@@ -51,7 +51,7 @@ const FOUND_CONVERSATION = {
   last_turn_at: "2026-07-30T11:00:00",
   readable: true,
   disclosable: false,
-  commentable: false,
+  speakable: false,
 };
 
 const FOUND_OWN_CONVERSATION = {

@@ -65,7 +65,7 @@ test("the endpoint table admits its rows and their fills, and nothing else", () 
   expect(endpointFor("GET", "api/agents")).toBeTruthy();
   expect(endpointFor("GET", "objects/scheduled_task")).toBeTruthy();
   expect(endpointFor("GET", "objects/scheduled_task?paused=false")).toBeTruthy();
-  expect(endpointFor("GET", "/agents/" + AGENT_ID + "/transcript")).toBeTruthy();
+  expect(endpointFor("GET", "/agents/" + AGENT_ID + "/transcript")).toBeNull();
   expect(
     endpointFor(
       "GET",

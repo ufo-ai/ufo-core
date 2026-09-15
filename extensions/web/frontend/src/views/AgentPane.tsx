@@ -227,7 +227,7 @@ export function AgentPane({
     !gated &&
     live !== null &&
     !live.has(opened.id) &&
-    !opened.commentable;
+    !opened.speakable;
 
   const url = home.state === "set" ? home.url : null;
   const generation = home.state === "set" ? (home.deploy_generation ?? 0) : 0;
@@ -255,7 +255,7 @@ export function AgentPane({
           heading={2}
           title={
             opened
-              ? opened.commentable
+              ? opened.speakable
                 ? conversationTitle(opened, viewer)
                 : subject(opened, viewer)
               : (railHeld?.title ?? NEW_CONVERSATION)
@@ -295,13 +295,7 @@ export function AgentPane({
       ) : reading ? (
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl">
           <ConversationDetail agent={agent} conversation={opened} />
-          <p className="mt-2xl max-w-hint text-ink-soft">
-            {isPortalChat(opened.surface)
-              ? "This conversation is read-only."
-              : "This conversation is read-only here. Reply in " +
-                surfaceWord(opened.surface) +
-                " to continue it."}
-          </p>
+          <p className="mt-2xl max-w-hint text-ink-soft">This conversation is read-only.</p>
         </div>
       ) : (
         <Chat

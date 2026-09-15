@@ -27,7 +27,7 @@ import {
 import { pickAppsExpanded, pickRailShown, railState, resetRailStore } from "@/lib/railStore";
 import type { Agent } from "@/lib/types";
 
-import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, linked, MEMBER, objectIndex, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -199,7 +199,6 @@ test("the rail walks the listing to its far page", async () => {
           : { objects: [conversationObject(older)], next_cursor: null },
       );
     },
-    "/api/chats": () => json({ chats: [] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -228,7 +227,6 @@ test("the rail draws its first page while the walk is still reading", async () =
       await held;
       return json({ objects: [conversationObject(older)], next_cursor: null });
     },
-    "/api/chats": () => json({ chats: [] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -486,10 +484,10 @@ test("merging keeps held rows the fetch does not know and prefers fetched rows i
   expect(merged[1].title).toBe("fetched copy");
 });
 
-test("a deep link waits while the rail loads instead of denying the conversation", async () => {
+test("a deep link waits while its resolve is in flight instead of denying the conversation", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/objects/conversation$": () =>
+    "/api/chats": () =>
       new Promise<Response>(() => {
         return;
       }),
@@ -817,7 +815,7 @@ test("a rail row opens its conversation's transcript", async () => {
   expect(await screen.findByText("earlier words")).toBeTruthy();
   expect(
     calls.some((url) =>
-      url.includes("/agents/" + AGENT_ID + "/transcript?conversation=" + CONVO_ID),
+      url.includes("/agents/" + AGENT_ID + "/conversations/" + CONVO_ID + "/transcript"),
     ),
   ).toBe(true);
   expect(location.hash).toBe("#/c/" + CONVO_ID);
@@ -999,7 +997,7 @@ test("an origin rail row opens a live comment chat", async () => {
     surface_label: "DM",
     title: "Slack question",
   };
-  const linked = {
+  const resolved = {
     id: CONVO_ID,
     surface: "slack",
     surface_label: "DM",
@@ -1012,13 +1010,13 @@ test("an origin rail row opens a live comment chat", async () => {
     last_turn_at: "2026-07-30T11:00:00",
     readable: true,
     disclosable: false,
-    commentable: true,
+    speakable: true,
     agent: { id: AGENT.id, name: AGENT.name },
   };
   holdRailShown(EVERY_SURFACE);
   const { calls } = wire({
     ...chatsOnWire([slack]),
-    "/api/chats": () => json({ chats: [slack], conversation: linked }),
+    "/api/chats": () => json({ conversation: resolved }),
     "/transcript": () => json({ messages: [{ role: "user", text: "slack words" }] }),
     "/chat": () =>
       json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Slack question" }),
@@ -1029,7 +1027,6 @@ test("an origin rail row opens a live comment chat", async () => {
 
   expect(await screen.findByText("slack words")).toBeTruthy();
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
-  expect(screen.queryByText(/read-only here/)).toBeNull();
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "from the portal");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -1067,7 +1064,6 @@ test("a private extension conversation opens the live chat", async () => {
   expect(crumb.getByText("Daily-Brief")).toBeTruthy();
   expect(crumb.queryByRole("link")).toBeNull();
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
-  expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
 test("a conversation no read of this account's answers is named unshared, not missing", async () => {
@@ -1081,10 +1077,7 @@ test("a conversation no read of this account's answers is named unshared, not mi
 test("a permalink read refused for the session offers sign-in rather than a denial", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=")
-        ? new Response("missing or unknown session cookie", { status: 401 })
-        : json({ chats: [] }),
+    "/api/chats": () => new Response("missing or unknown session cookie", { status: 401 }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -1096,8 +1089,7 @@ test("a permalink read refused for the session offers sign-in rather than a deni
 test("a permalink read the server faults on states the fault rather than a denial", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=") ? new Response("boom", { status: 500 }) : json({ chats: [] }),
+    "/api/chats": () => new Response("boom", { status: 500 }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -1122,7 +1114,7 @@ function slackConversation(fields: Record<string, unknown> = {}) {
     last_turn_at: "2026-08-01T08:01:00Z",
     readable: true,
     disclosable: false,
-    commentable: true,
+    speakable: true,
     ...fields,
   };
 }
@@ -1130,10 +1122,7 @@ function slackConversation(fields: Record<string, unknown> = {}) {
 test("a Slack conversation permalink opens a live comment chat", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=")
-        ? json({ chats: [], conversation: slackConversation() })
-        : json({ chats: [] }),
+    "/api/chats": () => json({ conversation: slackConversation() }),
     "/transcript": () =>
       json({
         messages: [
@@ -1147,7 +1136,6 @@ test("a Slack conversation permalink opens a live comment chat", async () => {
   expect(await screen.findByText("from Slack")).toBeTruthy();
   expect(screen.getByText("reply in Slack")).toBeTruthy();
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
-  expect(screen.queryByText(/read-only here/)).toBeNull();
   expect(screen.getByText("from Slack").closest("main")).not.toBeNull();
   expect(
     within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByText(
@@ -1159,10 +1147,7 @@ test("a Slack conversation permalink opens a live comment chat", async () => {
 test("a Slack conversation is headed like a web thread, marked with its way out to Slack", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=")
-        ? json({ chats: [], conversation: slackConversation() })
-        : json({ chats: [] }),
+    "/api/chats": () => json({ conversation: slackConversation() }),
     "/transcript": () =>
       json({ messages: [{ role: "user", text: "from Slack" }] }),
   });
@@ -1197,10 +1182,7 @@ test("a terminal conversation is marked with its surface and no way out", async 
     description: "Deploy the branch",
   });
   wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=")
-        ? json({ chats: [], conversation: terminal })
-        : json({ chats: [] }),
+    "/api/chats": () => json({ conversation: terminal }),
     "/transcript": () =>
       json({ messages: [{ role: "user", text: "from the CLI" }] }),
   });
@@ -1212,7 +1194,6 @@ test("a terminal conversation is marked with its surface and no way out", async 
   expect(header.getByText("Terminal")).toBeTruthy();
   expect(header.getByText("Terminal").closest("a")).toBeNull();
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
-  expect(screen.queryByText(/read-only here/)).toBeNull();
 });
 
 test("a markdown file in a Slack conversation opens the attachment sheet", async () => {
@@ -1260,29 +1241,26 @@ test("a markdown file in a Slack conversation opens the attachment sheet", async
           { id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifacts", count: 1 },
         ],
       }),
-    "/api/chats": (url) =>
-      url.includes("conversation=")
-        ? json({
-            chats: [],
-            conversation: {
-              id: CONVO_ID,
-              agent: { id: AGENT_ID, name: AGENT.name },
-              surface: "slack",
-              surface_label: "#ops-warehouse",
-              audience: "shared",
-              member_email: null,
-              owner_email: null,
-              owner_name: null,
-              source: "https://acme.slack.com/archives/C1/p1700000000000100",
-              turn_count: 1,
-              created_at: "2026-08-01T08:00:00Z",
-              last_turn_at: "2026-08-01T08:01:00Z",
-              readable: true,
-              disclosable: false,
-              commentable: true,
-            },
-          })
-        : json({ chats: [] }),
+    "/api/chats": () =>
+      json({
+        conversation: {
+          id: CONVO_ID,
+          agent: { id: AGENT_ID, name: AGENT.name },
+          surface: "slack",
+          surface_label: "#ops-warehouse",
+          audience: "shared",
+          member_email: null,
+          owner_email: null,
+          owner_name: null,
+          source: "https://acme.slack.com/archives/C1/p1700000000000100",
+          turn_count: 1,
+          created_at: "2026-08-01T08:00:00Z",
+          last_turn_at: "2026-08-01T08:01:00Z",
+          readable: true,
+          disclosable: false,
+          speakable: true,
+        },
+      }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -1402,11 +1380,15 @@ test("the chat header names the agent holding the conversation and what it is ca
 
 test("a deep link is not blamed while the rail is the thing that failed", async () => {
   location.hash = "#/c/" + CONVO_ID;
-  wire({ "/objects/conversation$": () => new Response("nope", { status: 500 }) });
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/objects/conversation$": () => new Response("nope", { status: 500 }),
+    "/transcript": () => json({ messages: [{ role: "user", text: "linked words" }] }),
+  });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const notes = await screen.findAllByText("Couldn't load conversations.");
-  expect(notes.length).toBe(2);
+  expect(await screen.findByText("linked words")).toBeTruthy();
+  expect(await screen.findAllByText("Couldn't load conversations.")).toHaveLength(1);
   expect(screen.queryByText(NOT_SHARED)).toBeNull();
 });
 
@@ -1437,14 +1419,16 @@ test("a failed send neither bumps the rail nor reorders it", async () => {
 test("a linked conversation past the rail's bound resolves by id", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": (url) =>
-      url.includes("conversation=") ? json({ chats: [CHAT_ROW] }) : json({ chats: [] }),
+    "/api/chats": () => json({ conversation: linked(CHAT_ROW) }),
     "/transcript": () => json({ messages: [{ role: "user", text: "linked words" }] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("linked words")).toBeTruthy();
-  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+  expect(
+    within(screen.getByRole("navigation", { name: "Breadcrumb" })).getByText(CHAT_ROW.title),
+  ).toBeTruthy();
+  expect(railState().rows).toEqual([]);
 });
 
 test("a hash naming an agent this member cannot reach reports it", async () => {
@@ -1665,4 +1649,53 @@ test("priority leads with what is held, then what is working, then the rest by r
 
   const recent = railRows(rows, PORTAL_ONLY, RECENCY);
   expect(recent.map((entry) => entry.conversation_id)).toEqual(rows.map((r) => r.conversation_id));
+});
+
+test("a permalink the resolve refuses is unshared, whatever the rail lists", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/api/chats": () => new Response("no such conversation", { status: 404 }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText(NOT_SHARED)).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
+});
+
+test("a permalink to a conversation an admin may only disclose offers the acknowledgement first", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  const { calls } = wire({
+    "/api/chats": () =>
+      json({
+        conversation: slackConversation({
+          audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
+          member_email: "mel@example.com",
+          readable: false,
+          disclosable: true,
+          speakable: false,
+        }),
+      }),
+    "/actions/conversation/": () => json({ actions: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
+
+  expect(await screen.findByText(/private to mel@example.com/)).toBeTruthy();
+  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
+  expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
+});
+
+test("a conversation the member reads but may not speak in draws no composer", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    "/api/chats": () => json({ conversation: slackConversation({ speakable: false }) }),
+    "/transcript": () => json({ messages: [{ role: "user", text: "from Slack" }] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("from Slack")).toBeTruthy();
+  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 });

@@ -630,18 +630,14 @@ function ConversationLane({
 }) {
   const rail = useRail();
   const [history, setHistory] = useState(false);
-  const row = rail.rows.find((held) => held.conversation_id === conversationId);
   const linked = rail.linked[conversationId];
-  const agentId = row?.agent_id ?? linked?.agent?.id ?? null;
-  const agent = agents.find((entry) => entry.id === agentId);
+  const agent = linked ? agents.find((entry) => entry.id === linked.agent.id) : undefined;
   const sought = rail.sought[conversationId];
   useEffect(() => {
-    if (!row && !linked && rail.phase === "ready" && sought === undefined) {
-      seekChat(conversationId);
-    }
-  }, [row, linked, rail.phase, sought, conversationId]);
-  if (!agent) {
-    const resolving = rail.phase !== "ready" || (!row && !linked && sought === undefined);
+    if (!linked && sought === undefined) seekChat(conversationId);
+  }, [linked, sought, conversationId]);
+  if (!linked || !agent) {
+    const resolving = !linked && sought === undefined;
     return (
       <Lane
         lane={lane}
@@ -656,15 +652,14 @@ function ConversationLane({
       />
     );
   }
-  const title = row?.title || linked?.description || agentName(agent.name);
-  const audience = row ?? linked;
+  const title = linked.description || agentName(agent.name);
   return (
     <Lane
       lane={lane}
       opens={opens}
       title={history ? HISTORY : title}
       glyph={<AgentIcon name={agent.icon} />}
-      note={history || !audience ? null : <AudienceMark entry={audience} />}
+      note={history ? null : <AudienceMark entry={linked} />}
       acts={
         <HistoryAct agent={agent} pressed={history} onPress={() => setHistory((held) => !held)} />
       }
@@ -685,6 +680,7 @@ function ConversationLane({
               agent={agent}
               member={member}
               conversationId={conversationId}
+              readOnly={!linked.speakable}
               onActivity={onActivity}
             />
           </div>

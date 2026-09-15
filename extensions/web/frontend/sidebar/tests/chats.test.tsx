@@ -491,7 +491,6 @@ test("a listing the workspace holds more than says so rather than truncating in 
   wire({
     "/objects/conversation$": () =>
       json({ objects: [CHAT_ROW].map((row) => ({ name: row.conversation_id, ...row })), cut: true }),
-    "/api/chats": () => json({ chats: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/chats";
@@ -518,7 +517,6 @@ test("a search reaches past the bound, so it never reports a chat it did not loo
         cut: !said,
       });
     },
-    "/api/chats": () => json({ chats: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/chats";
@@ -548,7 +546,6 @@ test("a search that matches more than one page offers the step to the rest", asy
         cut: false,
       });
     },
-    "/api/chats": () => json({ chats: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/chats?q=thread";
@@ -575,7 +572,6 @@ test("a search the rows do not exhaust still says so when the listing was cut", 
         next_cursor: null,
         cut: true,
       }),
-    "/api/chats": () => json({ chats: [] }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/chats?q=thread";
@@ -583,4 +579,25 @@ test("a search the rows do not exhaust still says so when the listing was cut", 
 
   const home = await screen.findByRole("region", { name: "Home" });
   expect(await within(home).findByText(CUT_NOTICE)).toBeTruthy();
+});
+
+test("a row a colleague founded opens their conversation, with the composer to speak in it", async () => {
+  const { calls } = wire({
+    ...chatsOnWire([CHAT_ROW, COLLEAGUE]),
+    "/transcript": () => json({ messages: [{ role: "user", text: "Dana asked first" }] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await userEvent.click(within(home).getByRole("row", { name: /Deploy question/ }));
+
+  expect(location.hash).toBe("#/c/" + COLLEAGUE_ID);
+  expect(await screen.findByText("Dana asked first")).toBeTruthy();
+  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
+  expect(
+    calls.some((url) =>
+      url.includes("/agents/" + AGENT_ID + "/conversations/" + COLLEAGUE_ID + "/transcript"),
+    ),
+  ).toBe(true);
 });

@@ -12,7 +12,7 @@ import {
 import { Sheet } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Chat, type ChatProps } from "@/views/Chat";
-import { ConversationDetail, Disclose } from "@/views/Conversations";
+import { Disclose } from "@/views/Conversations";
 import { COLUMN, Header, Pane } from "@/kernel/pane";
 import { Loading, usePanelRead } from "@/kernel/panel";
 import { postObjectAction, shellPath } from "@/lib/api";
@@ -24,17 +24,14 @@ import {
   audienceLabel,
   isMemberAudience,
   subject,
-  surfaceWord,
   useViewer,
 } from "@/lib/audience";
 import { AudienceMark } from "@/lib/audienceMark";
-import { agentName } from "@/lib/agentName";
 import { cn } from "@/lib/cn";
-import type { ChatRow } from "@/lib/rail";
 import { changeRailVisibility, settleRailVisibility } from "@/lib/railStore";
 import { SurfaceMark } from "@/lib/surfaceMark";
 import type { Crumb } from "@/lib/title";
-import type { Agent, ConversationAgent, Member, OwnedConversation } from "@/lib/types";
+import type { Conversation, ConversationAgent, Member } from "@/lib/types";
 import {
   ConversationSlotPane,
   SlotIcon,
@@ -50,10 +47,9 @@ const ShellPane = lazy(() =>
 );
 
 export type ChatPaneProps = ChatProps & {
-  /** Who reads the open conversation, as the rail row that named it carries it. A conversation the
-   *  member has not founded yet has no audience to state, and the title line states none. */
-  audience?: ChatRow;
-  title?: string;
+  /** The open conversation as its resolve carried it. A chat the member has not founded yet, and a
+   *  run watched from its automation, have none, and the pane draws no title line. */
+  conversation?: Conversation;
   conversationOnly?: boolean;
   slot?: string;
   onSelectSlot?: (slot: string | null) => void;
@@ -70,12 +66,13 @@ const VISIBILITY_ACTIONS: Record<Visibility, string> = {
   [PRIVATE]: "make_conversation_private",
 };
 
-function visibilityOwned(row: ChatRow, member: Member): boolean {
+function visibilityOwned(conversation: Conversation, member: Member): boolean {
   return (
     member.id !== undefined &&
-    row.surface === WEB_SURFACE &&
-    row.mine &&
-    (row.audience === SHARED_SUBJECT || row.audience === MEMBER_SUBJECT + member.id)
+    conversation.surface === WEB_SURFACE &&
+    conversation.mine &&
+    (conversation.audience === SHARED_SUBJECT ||
+      conversation.audience === MEMBER_SUBJECT + member.id)
   );
 }
 
@@ -83,17 +80,16 @@ function visibilityOwned(row: ChatRow, member: Member): boolean {
  *  prepared intent — the dispatch `DiscloseBand` makes — and the rail re-reads once it applied. */
 function VisibilityControl({
   agentId,
-  conversationId,
-  row,
+  conversation,
   member,
 }: {
   agentId: string;
-  conversationId: string;
-  row: ChatRow;
+  conversation: Conversation;
   member: Member;
 }) {
   const viewer = useViewer();
-  const current: Visibility = isMemberAudience(row.audience) ? PRIVATE : WORKSPACE;
+  const conversationId = conversation.id;
+  const current: Visibility = isMemberAudience(conversation.audience) ? PRIVATE : WORKSPACE;
   const [changing, setChanging] = useState(false);
 
   async function change(next: Visibility) {
@@ -125,13 +121,13 @@ function VisibilityControl({
               size="icon"
               busy={changing}
               aria-label={VISIBILITY_LABEL + current}
-              title={audienceDetail(row, viewer)}
+              title={audienceDetail(conversation, viewer)}
             >
               {current === PRIVATE ? <IconLock aria-hidden /> : <IconUsers aria-hidden />}
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
-        <TooltipContent side="bottom">{audienceLabel(row, viewer)}</TooltipContent>
+        <TooltipContent side="bottom">{audienceLabel(conversation, viewer)}</TooltipContent>
       </Tooltip>
       <DropdownMenuContent align="start">
         <DropdownMenuRadioGroup
@@ -264,162 +260,78 @@ export function ChatPane({
   agent,
   member,
   conversationId,
-  audience,
+  conversation,
   focusComposer,
   readOnly,
   stops,
   focusRun,
   onCreated,
   onActivity,
-  title,
   conversationOnly = false,
   slot,
   onSelectSlot,
   crumb,
 }: ChatPaneProps) {
+  const [disclosed, setDisclosed] = useState(false);
+  const viewer = useViewer();
+  const gate = conversation && !conversation.readable && !disclosed ? conversation : null;
   const { acts, selected, settled, shell } = useThreadActs({
     agent,
     conversationId,
-    enabled: !conversationOnly,
+    enabled: gate === null && !conversationOnly,
     slot,
     onSelectSlot,
   });
-  const header =
-    conversationId && !readOnly ? (
-      <Header
-        crumb={crumb}
-        title={title ?? agentName(agent.name)}
-        note={
-          audience && conversationId ? (
-            visibilityOwned(audience, member) ? (
-              <VisibilityControl
-                agentId={agent.id}
-                conversationId={conversationId}
-                row={audience}
-                member={member}
-              />
-            ) : (
-              <AudienceMark entry={audience} />
-            )
-          ) : null
-        }
-        acts={acts}
-        pinned
-      />
-    ) : null;
   return (
     <Pane>
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {header}
-        <Chat
-          agent={agent}
-          member={member}
-          conversationId={conversationId}
-          focusComposer={focusComposer}
-          readOnly={readOnly}
-          stops={stops}
-          focusRun={focusRun}
-          onCreated={onCreated}
-          onActivity={onActivity}
-          onSettled={settled}
-        />
+        {conversation ? (
+          <Header
+            crumb={crumb}
+            title={subject(conversation, viewer)}
+            note={
+              visibilityOwned(conversation, member) ? (
+                <VisibilityControl agentId={agent.id} conversation={conversation} member={member} />
+              ) : (
+                <AudienceMark entry={conversation} />
+              )
+            }
+            acts={
+              <>
+                <SurfaceMark conversation={conversation} />
+                {acts}
+              </>
+            }
+            pinned
+          />
+        ) : null}
+        {gate === null ? (
+          <Chat
+            agent={agent}
+            member={member}
+            conversationId={conversationId}
+            focusComposer={focusComposer}
+            readOnly={readOnly || (conversation !== undefined && !conversation.speakable)}
+            stops={stops}
+            focusRun={focusRun}
+            onCreated={onCreated}
+            onActivity={onActivity}
+            onSettled={settled}
+          />
+        ) : (
+          <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
+            <Disclose agent={agent} conversation={gate} onOpened={() => setDisclosed(true)} />
+          </div>
+        )}
       </div>
       {shell}
-      {conversationId && slot ? (
+      {gate === null && conversationId && slot ? (
         <ConversationSlot
           agent={agent}
           conversationId={conversationId}
           slot={slot}
           summary={selected}
           onClose={() => onSelectSlot?.(null)}
-        />
-      ) : null}
-    </Pane>
-  );
-}
-
-export function LinkedPane({
-  agent,
-  conversation,
-  member,
-  crumb,
-  slot,
-  onActivity,
-  onSelectSlot,
-}: {
-  agent: Agent;
-  conversation: OwnedConversation;
-  member: Member;
-  crumb?: Crumb;
-  slot?: string;
-  onActivity: NonNullable<ChatProps["onActivity"]>;
-  onSelectSlot: (slot: string | null) => void;
-}) {
-  const [disclosed, setDisclosed] = useState(false);
-  const viewer = useViewer();
-  const readable = conversation.readable || disclosed;
-  const { acts, selected, settled, shell } = useThreadActs({
-    agent,
-    conversationId: conversation.id,
-    enabled: readable,
-    slot,
-    onSelectSlot,
-  });
-  return (
-    <Pane>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <Header
-          crumb={crumb}
-          title={subject(conversation, viewer)}
-          note={<AudienceMark entry={conversation} />}
-          acts={
-            <>
-              <SurfaceMark conversation={conversation} />
-              {acts}
-            </>
-          }
-          pinned
-        />
-        {readable ? (
-          conversation.commentable ? (
-            <Chat
-              agent={agent}
-              member={member}
-              conversationId={conversation.id}
-              onActivity={onActivity}
-              onSettled={settled}
-            />
-          ) : (
-            <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-              <ConversationDetail
-                agent={agent}
-                conversation={conversation}
-                headed
-              />
-              <p className="max-w-hint text-ink-soft">
-                This conversation is read-only here. Reply in {surfaceWord(conversation.surface)} to
-                continue it.
-              </p>
-            </div>
-          )
-        ) : (
-          <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-            <Disclose
-              agent={agent}
-              conversation={conversation}
-              onOpened={() => setDisclosed(true)}
-            />
-          </div>
-        )}
-      </div>
-      {shell}
-      {readable && slot ? (
-        <ConversationSlot
-          agent={agent}
-          conversationId={conversation.id}
-          slot={slot}
-          summary={selected}
-          onClose={() => onSelectSlot(null)}
         />
       ) : null}
     </Pane>
