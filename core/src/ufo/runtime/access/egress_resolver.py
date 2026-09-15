@@ -43,11 +43,24 @@ other."""
 
 @dataclass(frozen=True, slots=True)
 class _Scope:
-    """The agent, internet policy, and exact resolved connection capabilities."""
+    """The agent, internet policy, and exact resolved connection capabilities. `running` is
+    whether a turn is still executing: a run token also answers for the detached commands a turn
+    left behind until its `detached_until`, and those keep the turn's network but never the
+    deployment's model key or the tool bridge, which only a live turn can hold."""
 
     agent_id: UUID
     internet_access_allowed: bool
     connections: tuple[UUID, ...]
+    running: bool
+
+
+def _turn_answers(now: datetime) -> sa.ColumnElement[bool]:
+    """The rows a run token still speaks for: a turn the DB reports running, or one whose detached
+    commands the deploy follows until `detached_until`."""
+    return sa.or_(
+        tables.turn.c.status == RUNNING,
+        tables.turn.c.detached_until > now,
+    )
 
 
 @dataclass(frozen=True)
@@ -135,7 +148,7 @@ class PerAgentRules:
                             scope.connections,
                         ),
                     )
-                if isinstance(principal, ProbeToken):
+                if not scope.running:
                     return self._without_the_model_key(rules)
                 return rules
 
@@ -190,7 +203,7 @@ class PerAgentRules:
             scope = await self._turn_of(run)
         return (
             None
-            if scope is None
+            if scope is None or not scope.running
             else ToolBridgePrincipal(run.workspace_id, run.turn_id, scope.connections)
         )
 
@@ -201,6 +214,7 @@ class PerAgentRules:
                 tables.turn.c.agent_id,
                 tables.turn.c.runtime_config,
                 tables.agent.c.internet_access_allowed,
+                (tables.turn.c.status == RUNNING).label("running"),
             )
             .select_from(
                 tables.turn.join(
@@ -211,7 +225,7 @@ class PerAgentRules:
             .where(
                 tables.turn.c.id == run.turn_id,
                 tables.turn.c.workspace_id == run.workspace_id,
-                tables.turn.c.status == RUNNING,
+                _turn_answers(datetime.now(UTC)),
                 tables.agent.c.workspace_id == run.workspace_id,
             )
         )
@@ -251,6 +265,7 @@ class PerAgentRules:
             row.agent_id,
             internet_access_allowed,
             connections,
+            running=bool(row.running),
         )
 
     async def _conversation_of(self, probe: ProbeToken) -> _Scope | None:
@@ -285,6 +300,7 @@ class PerAgentRules:
             row.agent_id,
             row.internet_access_allowed and probe.internet_access is None,
             probe.connections,
+            running=False,
         )
 
     def _without_the_model_key(self, rules: tuple[Rule, ...]) -> tuple[Rule, ...]:
@@ -311,7 +327,6 @@ class PerAgentRules:
         with ws(run.workspace_id):
             query = (
                 sa.select(
-                    tables.turn.c.status,
                     tables.workspace.c.egress_rules_generation,
                 )
                 .select_from(
@@ -323,6 +338,7 @@ class PerAgentRules:
                 .where(
                     tables.turn.c.id == run.turn_id,
                     tables.turn.c.workspace_id == run.workspace_id,
+                    _turn_answers(datetime.now(UTC)),
                 )
             )
             if run.capability_id is not None:
@@ -337,7 +353,7 @@ class PerAgentRules:
                 )
             async with workspace_tx() as connection:
                 row = (await connection.execute(query)).one_or_none()
-        if row is None or row.status != RUNNING:
+        if row is None:
             return None
         return row.egress_rules_generation
 

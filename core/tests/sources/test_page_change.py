@@ -38,7 +38,9 @@ from ufo.harness.models.catalog import CORE_MODEL_SPECS, CORE_PRICING
 from ufo.harness.models.interface import Message, ModelEvent, ModelRequest, TextDelta
 from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.o11y import BACKGROUND_PROFILE
+from ufo.harness.sandbox.session import ExecResult
 from ufo.host.ext.loader import load_manifests
+from ufo.runtime.background_tasks import BackgroundTaskSweep
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import ScopedStore
 from ufo.runtime.ext.manifest import (
@@ -335,6 +337,11 @@ async def _raise(ctx: HookContext) -> HookOutcome:
     raise RuntimeError("page_change consumer exploded")
 
 
+class _NoProbes:
+    async def run(self, conversation_id: UUID, command: str, timeout_s: int) -> ExecResult:
+        raise AssertionError("no probe expected")
+
+
 def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) -> None:
     """core_jobs fans a `page_change:<ext>:<hook>` job out per registered consumer, so the memory
     page indexer and fact deriver are independent DBOS workflows — each keyed in the core namespace
@@ -353,6 +360,7 @@ def test_each_page_change_consumer_registers_as_its_own_job(tmp_path: object) ->
         TurnDispatcher(client=None),
         runner,
         DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
+        BackgroundTaskSweep(probes=_NoProbes(), invoker_for=lambda _: None),
         None,
     )
     page_change = [spec.name for spec in specs if spec.name.startswith(f"{PAGE_CHANGE_JOB}:")]

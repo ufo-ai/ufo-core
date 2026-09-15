@@ -349,6 +349,7 @@ FINISH_SCHEMA_ERROR = (
 class SandboxAccess:
     sandbox: Sandbox
     revoke: Callable[[], Awaitable[None]] | None = None
+    capability_id: UUID | None = None
 
 
 SandboxFor = Callable[[tuple[UUID, ...], str], Awaitable[SandboxAccess]]
@@ -4550,6 +4551,7 @@ class TurnEngine:
             authorized = replace(
                 context,
                 sandbox=sandbox_access.sandbox,
+                sandbox_capability_id=sandbox_access.capability_id,
                 spawn=spawn,
                 subagents=subagents,
             )

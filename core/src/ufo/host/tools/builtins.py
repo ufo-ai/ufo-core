@@ -69,6 +69,7 @@ from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.host.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.runtime.access.credentials import declared_slot_fingerprint
 from ufo.runtime.access.grants import installed_connect_flow
+from ufo.runtime.background_tasks import mark_detached
 from ufo.runtime.kinds.agents import RESTORE_APPLICATION_TOOL_DEF
 from ufo.runtime.media.artifact_url import (
     ARTIFACT_KEY_PREFIX,
@@ -154,8 +155,8 @@ class BashInput(BaseModel):
     background: bool = Field(
         default=False,
         description="Run the command detached and return at once with its task id, log path, and "
-        "pid instead of waiting for it. It keeps network only until this turn ends, and stops "
-        "advancing whenever the sandbox pauses between turns.",
+        "pid instead of waiting for it. Its exit code and the tail of its log reach this "
+        "conversation as a message when it ends.",
     )
 
 
@@ -437,6 +438,7 @@ async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
             content=(TextContent(text=started.stderr or "the command did not detach"),),
             is_error=True,
         )
+    await mark_detached(ctx.turn, task, display_base, ctx.sandbox_capability_id)
     return ToolResult(
         content=(TextContent(text=task_handles(task, started.stdout.strip(), display_base)),)
     )

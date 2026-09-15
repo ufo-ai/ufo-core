@@ -416,6 +416,7 @@ turn = sa.Table(
     sa.Column("dispatch_enqueued_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("retry_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("external_retry_count", sa.Integer, nullable=False, server_default="0"),
+    sa.Column("detached_until", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("conversation_id", "seq"),
@@ -438,6 +439,12 @@ turn = sa.Table(
     sa.CheckConstraint("result_delivery in ('pending', 'delivered')", name="turn_result_delivery"),
     sa.CheckConstraint("external_retry_count >= 0", name="turn_external_retry_count"),
     sa.Index("turn_idempotency_key", "workspace_id", "idempotency_key", unique=True),
+    sa.Index(
+        "turn_detached",
+        "workspace_id",
+        postgresql_where=sa.text("detached_until is not null"),
+        sqlite_where=sa.text("detached_until is not null"),
+    ),
     sa.Index("turn_conversation_activity", "conversation_id", "updated_at"),
     sa.Index(
         "turn_fired",
@@ -496,6 +503,34 @@ turn = sa.Table(
         sqlite_where=sa.text("terminal is null"),
     ),
     sa.Index("turn_agent_activity", "agent_id", "updated_at", "id"),
+)
+
+detached_task = sa.Table(
+    "detached_task",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("turn_id", sa.Uuid, sa.ForeignKey("turn.id", ondelete="CASCADE"), nullable=False),
+    sa.Column("conversation_id", sa.Uuid, sa.ForeignKey("conversation.id"), nullable=False),
+    sa.Column(
+        "sandbox_conversation_id",
+        sa.Uuid,
+        sa.ForeignKey("conversation.id"),
+        nullable=False,
+    ),
+    sa.Column("task", sa.Text, nullable=False),
+    sa.Column("runtime_base", sa.Text, nullable=False),
+    sa.Column(
+        "capability_id",
+        sa.Uuid,
+        sa.ForeignKey("sandbox_call_capability.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    sa.Column("follow_until", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint("turn_id", "task"),
+    sa.CheckConstraint("task <> ''", name="detached_task_task_nonempty"),
+    sa.CheckConstraint("runtime_base <> ''", name="detached_task_runtime_base_nonempty"),
+    sa.Index("detached_task_workspace", "workspace_id"),
 )
 
 sandbox_call_capability = sa.Table(

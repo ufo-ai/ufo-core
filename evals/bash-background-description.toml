@@ -1,5 +1,5 @@
 name = "bash-background-description"
-base = "501c0290e"
+base = "87c38e506"
 suites = ["bash_waiting"]
 cases = [
   "bash-wait-foreground",
@@ -10,7 +10,7 @@ cases = [
 ]
 repeats = 6
 concurrency = 2
-max_stacks = 2
+max_stacks = 1
 budget_usd = 40.0
 est_usd_per_case = 0.10
 
@@ -26,17 +26,30 @@ research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
 
 [[arm]]
-name = "prior-wording"
+name = "sandbox-wording"
 
 [[arm.replacements]]
 path = "core/src/ufo/host/tools/builtins.py"
 old = '''        description="Run the command detached and return at once with its task id, log path, and "
+        "pid instead of waiting for it. Its exit code and the tail of its log reach this "
+        "conversation as a message when it ends.",
+'''
+new = '''        description="Run the command detached and return at once with its task id, log path, and "
         "pid instead of waiting for it. It keeps network only until this turn ends, and stops "
         "advancing whenever the sandbox pauses between turns.",
 '''
-new = '''        description="Run the command detached and return at once with its task id, log path, and "
-        "pid instead of waiting for it. The result names its log, pid, and exit files under "
-        "`$UFO_HOME/runs/<id>/tasks`. The command's network egress ends with this turn, "
-        "and a sandbox that suspends between turns advances it only while awake — use background "
-        "for compute that needs no network past this turn: builds, test runs, data processing.",
+
+[[arm.replacements]]
+path = "core/src/ufo/runtime/tools/tasks.py"
+old = '''BACKGROUND_DIRECTIVE = (
+    "`read` on `log` shows the output so far. `exit_file` appears exactly once, with the exit "
+    "code, and this conversation receives a message when it does; `stop` ends the command and "
+    "still writes `exit_file`."
+)
+'''
+new = '''BACKGROUND_DIRECTIVE = (
+    "`read` on `log` shows the output so far. `exit_file` appears exactly once, with the exit "
+    "code — `watch` is empty until then, so a monitor on it fires at completion; `stop` ends the "
+    "command and still writes `exit_file`."
+)
 '''

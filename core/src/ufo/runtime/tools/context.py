@@ -637,6 +637,7 @@ class ToolContext:
     subagents: SubagentControl | None = None
     touched_paths: set[str] = field(default_factory=set)
     idempotency_key: str | None = None
+    sandbox_capability_id: UUID | None = None
     target: ObjectActionTarget | None = None
     granted_actions: frozenset[str] = frozenset()
     skills: SkillRegistry = CORE_SKILL_REGISTRY

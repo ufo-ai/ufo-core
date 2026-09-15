@@ -28,11 +28,13 @@ from ufo.blob import FilesystemBlobStore
 from ufo.config import SourceConfig, SourceEntry
 from ufo.db import workspace_tx
 from ufo.harness import o11y
+from ufo.harness.sandbox.session import ExecResult
 from ufo.product import PRODUCT_CENSUS_JOB
 from ufo.runtime import jobs
 from ufo.runtime.access.connectors import Credential
 from ufo.runtime.access.grants import INDEX_REAP_KEY_PREFIX, GrantStore
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.background_tasks import BACKGROUND_TASKS_JOB, BackgroundTaskSweep
 from ufo.runtime.billing.balance import credit, set_reserve
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import (
@@ -5284,6 +5286,11 @@ async def test_telemetry_that_raises_never_breaks_the_sync_run(
     assert submitted == [o11y.SERVICE_CHECK_CRITICAL, o11y.SERVICE_CHECK_OK]
 
 
+class _NoProbes:
+    async def run(self, conversation_id: UUID, command: str, timeout_s: int) -> ExecResult:
+        raise AssertionError("no probe expected")
+
+
 def test_source_sync_and_turn_dispatch_register_as_core_jobs(
     database_url: str, tmp_path: Path
 ) -> None:
@@ -5301,12 +5308,14 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         TurnDispatcher(client=None),
         runner,
         DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
+        BackgroundTaskSweep(probes=_NoProbes(), invoker_for=lambda _: None),
         None,
     )
     assert [spec.name for spec in specs] == [
         SOURCE_SYNC_JOB,
         TURN_DISPATCH_JOB,
         RESULT_DELIVERY_JOB,
+        BACKGROUND_TASKS_JOB,
         INDEX_REAP_JOB,
         PRODUCT_CENSUS_JOB,
     ]
@@ -5316,6 +5325,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         f"{CORE_EXTENSION}:{SOURCE_SYNC_JOB}",
         f"{CORE_EXTENSION}:{TURN_DISPATCH_JOB}",
         f"{CORE_EXTENSION}:{RESULT_DELIVERY_JOB}",
+        f"{CORE_EXTENSION}:{BACKGROUND_TASKS_JOB}",
         f"{CORE_EXTENSION}:{INDEX_REAP_JOB}",
         f"{CORE_EXTENSION}:{PRODUCT_CENSUS_JOB}",
     }

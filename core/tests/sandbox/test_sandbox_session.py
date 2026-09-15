@@ -12,9 +12,11 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
+import sqlalchemy as sa
 
 import ufo.runtime.tools.tasks as tasks_module
 from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
 from ufo.harness.auth.token_signing import sign_token
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF
 from ufo.harness.sandbox.local import LocalCarrier
@@ -63,6 +65,7 @@ from ufo.runtime.tools.tasks import (
     TASK_PROBE,
 )
 from ufo.runtime.turns.audience import conversation_audience
+from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 
 RUN_TOKENS = RunTokenCodec(b"run-token-test-secret")
@@ -392,6 +395,7 @@ async def _live_ctx(
     tmp_path: Path,
     idempotency_key: str | None = None,
     conversation_id: UUID | None = None,
+    turn: Turn | None = None,
 ) -> ToolContext:
     """A live local sandbox whose workspace root holds a space, so every shell string a
     background task builds is exercised against the rewrite the terminal carrier performs on a
@@ -399,14 +403,82 @@ async def _live_ctx(
     carrier = LocalCarrier()
     handle = await carrier.create(
         SandboxSpec(
-            conversation_id=conversation_id or uuid4(),
+            conversation_id=(
+                turn.conversation_id if turn is not None else conversation_id or uuid4()
+            ),
             image_ref=SANDBOX_IMAGE_REF,
             workspace_host_path=str(tmp_path / "my ws"),
             proxy=ProxyEndpoint(port=0, ca_cert="test-ca"),
             run_token="off-turn-test",
         )
     )
-    return _tool_ctx(SandboxSession(carrier=carrier, handle=handle), tmp_path, idempotency_key)
+    return _tool_ctx(
+        SandboxSession(carrier=carrier, handle=handle), tmp_path, idempotency_key, turn=turn
+    )
+
+
+async def _seeded_turn() -> Turn:
+    turn = Turn(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=1,
+        status="running",
+        inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=turn.workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=turn.agent_id,
+                workspace_id=turn.workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=turn.conversation_id,
+                workspace_id=turn.workspace_id,
+                agent_id=turn.agent_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn.id,
+                workspace_id=turn.workspace_id,
+                conversation_id=turn.conversation_id,
+                agent_id=turn.agent_id,
+                seq=turn.seq,
+                status=turn.status,
+                inbound=turn.inbound,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn
+
+
+async def _detached_until(turn: Turn) -> datetime | None:
+    async with workspace_tx() as connection:
+        return (
+            await connection.execute(
+                sa.select(tables.turn.c.detached_until).where(tables.turn.c.id == turn.id)
+            )
+        ).scalar_one()
 
 
 async def _wait_for_file(session: SandboxSession, path: str) -> str:
@@ -419,13 +491,17 @@ async def _wait_for_file(session: SandboxSession, path: str) -> str:
 
 
 def _tool_ctx(
-    session: SandboxSession, tmp_path: Path, idempotency_key: str | None = None
+    session: SandboxSession,
+    tmp_path: Path,
+    idempotency_key: str | None = None,
+    turn: Turn | None = None,
 ) -> ToolContext:
     return ToolContext(
         idempotency_key=idempotency_key,
         sandbox=session,
         blob=FilesystemBlobStore(root=tmp_path),
-        turn=Turn(
+        turn=turn
+        or Turn(
             id=uuid4(),
             workspace_id=uuid4(),
             conversation_id=uuid4(),
@@ -989,10 +1065,11 @@ def _task_payload(text: str) -> dict[str, str]:
     return payload
 
 
-async def test_background_bash_detaches_and_signals_completion(tmp_path: Path) -> None:
-    """The handler returns before the command ends, and the directive's own probe line — clean
-    exit, empty output — stays quiet until the exit file appears exactly once with the code."""
-    ctx = await _live_ctx(tmp_path)
+async def test_background_bash_detaches_and_signals_completion(tmp_path: Path, db: None) -> None:
+    """The handler returns before the command ends, stamps the turn as holding detached work, and
+    the exit file stays absent until it appears exactly once with the code."""
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
     gate = "/workspace/release-the-background-task"
     result = await bash_handler(
         ctx,
@@ -1003,17 +1080,21 @@ async def test_background_bash_detaches_and_signals_completion(tmp_path: Path) -
     )
     assert not result.is_error
     task = _task_payload(result.content[0].text)
-    probe = await ctx.sandbox.bash(task["watch"])
+    probe = await ctx.sandbox.bash(f'cat "{task["exit_file"]}" || true')
     assert probe.exit_code == 0
     assert probe.stdout == ""
+    stamped = await _detached_until(turn)
+    assert stamped is not None
+    assert stamped.replace(tzinfo=UTC) > datetime.now(UTC)
     await ctx.sandbox.bash(f'touch "{gate}"')
     assert await _wait_for_file(ctx.sandbox, task["exit_file"]) == "0"
     log = await ctx.sandbox.bash(f'cat "{task["log"]}"')
     assert "finished-marker" in log.stdout
 
 
-async def test_background_bash_records_a_failing_exit_code(tmp_path: Path) -> None:
-    ctx = await _live_ctx(tmp_path)
+async def test_background_bash_records_a_failing_exit_code(tmp_path: Path, db: None) -> None:
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
     result = await bash_handler(
         ctx,
         BashInput(command="echo boom >&2; exit 7", background=True),
@@ -1024,10 +1105,11 @@ async def test_background_bash_records_a_failing_exit_code(tmp_path: Path) -> No
     assert "boom" in log.stdout
 
 
-async def test_background_bash_carries_the_commands_own_quoting(tmp_path: Path) -> None:
+async def test_background_bash_carries_the_commands_own_quoting(tmp_path: Path, db: None) -> None:
     """The command travels as its own argv element: one containing the launcher's delimiter must run
     verbatim rather than break out of the wrapper."""
-    ctx = await _live_ctx(tmp_path)
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
     result = await bash_handler(
         ctx,
         BashInput(command='echo "x\'y"', background=True),
@@ -1038,11 +1120,14 @@ async def test_background_bash_carries_the_commands_own_quoting(tmp_path: Path) 
     assert log.stdout.strip() == "x'y"
 
 
-async def test_background_bash_rewrites_workspace_paths_inside_the_command(tmp_path: Path) -> None:
+async def test_background_bash_rewrites_workspace_paths_inside_the_command(
+    tmp_path: Path, db: None
+) -> None:
     """The command travels as an argv element precisely so the carrier's /workspace rewrite
     reaches its text: an absolute workspace path inside the command must land under the real
     root, exactly as it would in the foreground."""
-    ctx = await _live_ctx(tmp_path)
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
     result = await bash_handler(
         ctx,
         BashInput(
@@ -1056,11 +1141,14 @@ async def test_background_bash_rewrites_workspace_paths_inside_the_command(tmp_p
     assert written.stdout.strip() == "rewritten"
 
 
-async def test_the_advertised_stop_line_ends_the_command_and_signals(tmp_path: Path) -> None:
+async def test_the_advertised_stop_line_ends_the_command_and_signals(
+    tmp_path: Path, db: None
+) -> None:
     """The result's own stop line — reading the pid back from the id-keyed file — must end the
     work AND still write the exit file, so a task is stoppable from a later turn that holds only
-    the id, and a stopped task's watch fires once instead of waiting forever."""
-    ctx = await _live_ctx(tmp_path)
+    the id, and a stopped task is reported once instead of never."""
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
     result = await bash_handler(
         ctx,
         BashInput(command="sleep 30", background=True),
@@ -1071,11 +1159,12 @@ async def test_the_advertised_stop_line_ends_the_command_and_signals(tmp_path: P
     assert await _wait_for_file(ctx.sandbox, task["exit_file"]) != "0"
 
 
-async def test_the_stop_line_reaches_the_commands_descendants(tmp_path: Path) -> None:
+async def test_the_stop_line_reaches_the_commands_descendants(tmp_path: Path, db: None) -> None:
     """A command whose work runs in a descendant of its shell — a build's compilers, a runner's
     workers — must die with the stop, not outlive an exit file that claims it ended: the wrapper
     signals the command's whole process group, never just the shell in front of the work."""
-    ctx = await _live_ctx(tmp_path)
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
     result = await bash_handler(
         ctx,
         BashInput(
@@ -1117,12 +1206,13 @@ async def test_a_command_inside_its_budget_answers_as_itself(tmp_path: Path) -> 
     assert failed.content[0].text == "out-line\n\nexit code: 7"
 
 
-async def test_a_finished_task_is_swept_a_window_after_it_ended(tmp_path: Path) -> None:
+async def test_a_finished_task_is_swept_a_window_after_it_ended(tmp_path: Path, db: None) -> None:
     """A finished command keeps its files past its result: they are the journal a dispatch step
     re-running after a crash reads the result from, so sweeping them at completion would hand the
     replay a fresh launch instead. The sweep window outlives any recovery, and the next launch is
     where old completed tasks go — while a task still running keeps its files whatever its age."""
-    ctx = await _live_ctx(tmp_path)
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
     tasks_dir = await ctx.sandbox.runtime_path(BACKGROUND_TASKS_DIR)
     await bash_handler(ctx, BashInput(command="echo done"))
     finished = (await ctx.sandbox.bash(f'ls "{tasks_dir}"')).stdout.split()
@@ -1161,19 +1251,19 @@ async def test_a_replayed_call_reattaches_and_reads_the_first_run(tmp_path: Path
     assert replayed.content[0].text == "ran\n"
 
 
-async def test_a_replayed_call_picks_up_a_command_still_running(tmp_path: Path) -> None:
+async def test_a_replayed_call_picks_up_a_command_still_running(tmp_path: Path, db: None) -> None:
     """The reattached wrapper belongs to an exec that died with the crashed process, so the re-run
     cannot `wait` on it as a child — it watches for the exit file instead, and still answers as the
     command: the results land with the recovered turn, not lost with the process that asked."""
     key = f"{uuid4()}/bash/call_2"
-    conversation_id = uuid4()
+    turn = await _seeded_turn()
     command = "sleep 1; echo finished"
     await bash_handler(
-        await _live_ctx(tmp_path, idempotency_key=key, conversation_id=conversation_id),
+        await _live_ctx(tmp_path, idempotency_key=key, turn=turn),
         BashInput(command=command, background=True),
     )
     picked = await bash_handler(
-        await _live_ctx(tmp_path, idempotency_key=key, conversation_id=conversation_id),
+        await _live_ctx(tmp_path, idempotency_key=key, turn=turn),
         BashInput(command=command),
     )
     assert not picked.is_error
@@ -1210,13 +1300,14 @@ async def test_a_foreground_command_carries_its_quoting_and_workspace_paths(
     assert result.content[0].text.strip() == "x'y"
 
 
-async def test_a_command_that_outgrows_its_budget_keeps_running(tmp_path: Path) -> None:
+async def test_a_command_that_outgrows_its_budget_keeps_running(tmp_path: Path, db: None) -> None:
     """The budget is how long the caller waits, not how long the work may take. A command still
     running when it expires is handed back as a task rather than killed — the carrier ends the
     exec by killing its whole process group, so the wrapper holding the command must sit in a group
     of its own to survive it — and the work goes on: the log grows after the tool answered and the
     exit code lands later."""
-    ctx = await _live_ctx(tmp_path)
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
 
     result = await bash_handler(
         ctx,
@@ -1236,13 +1327,14 @@ async def test_a_command_that_outgrows_its_budget_keeps_running(tmp_path: Path) 
     assert "tick 8" in after.stdout
 
 
-async def test_a_moved_command_is_reported_as_any_detached_one(tmp_path: Path) -> None:
+async def test_a_moved_command_is_reported_as_any_detached_one(tmp_path: Path, db: None) -> None:
     """A command detached on request and one that outgrew its wait are the same thing by the time
     they are reported, so they are reported the same way: the same handles under the same names,
     and the same standing directive. Only the lead sentence differs, and only the moved one names
     the seconds that expired — an agent handed two shapes for one state would need two ways to
     watch it."""
-    ctx = await _live_ctx(tmp_path)
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
 
     asked = await bash_handler(ctx, BashInput(command="sleep 30", background=True))
     moved = await bash_handler(
@@ -1261,10 +1353,11 @@ async def test_a_moved_command_is_reported_as_any_detached_one(tmp_path: Path) -
     await ctx.sandbox.bash(_task_payload(moved.content[0].text)["stop"])
 
 
-async def test_a_moved_commands_stop_line_reaches_its_descendants(tmp_path: Path) -> None:
+async def test_a_moved_commands_stop_line_reaches_its_descendants(tmp_path: Path, db: None) -> None:
     """A moved command is a task like any other: the stop it is handed back with ends the work
     itself, not just the shell in front of it."""
-    ctx = await _live_ctx(tmp_path)
+    turn = await _seeded_turn()
+    ctx = await _live_ctx(tmp_path, turn=turn)
 
     result = await bash_handler(
         ctx,

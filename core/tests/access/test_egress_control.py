@@ -2,7 +2,7 @@ import base64
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -136,6 +136,7 @@ async def _seed_turn(
     status: str = "running",
     internet_access_allowed: bool = True,
     runtime_config: TurnRuntimeConfig | None = None,
+    detached_until: datetime | None = None,
 ) -> _Seeded:
     workspace_id, member_id, agent_id, conversation_id, turn_id = (uuid4() for _ in range(5))
     await connection.execute(
@@ -191,6 +192,7 @@ async def _seed_turn(
             runtime_config=(
                 None if runtime_config is None else runtime_config.model_dump(mode="json")
             ),
+            detached_until=detached_until,
             created_at=sa.func.now(),
             updated_at=sa.func.now(),
         )
@@ -301,6 +303,76 @@ async def test_authorize_admits_a_running_turn_and_refuses_an_ended_one(db: None
     assert live.json() == {"authorized": True, "generation": 0}
     assert dead.json() == {"authorized": False, "generation": None}
     assert forged.json() == {"authorized": False, "generation": None}
+
+
+async def test_an_ended_turn_answers_for_its_detached_commands_until_the_stamp(db: None) -> None:
+    async with workspace_tx() as connection:
+        followed = await _seed_turn(
+            connection, status="done", detached_until=datetime.now(UTC) + timedelta(hours=1)
+        )
+        lapsed = await _seed_turn(
+            connection, status="done", detached_until=datetime.now(UTC) - timedelta(seconds=1)
+        )
+    resolver = PerAgentRules(
+        base=(
+            ScopeRule(allowed_hosts=frozenset({HOST})),
+            InjectionRule(
+                host=HOST,
+                header="authorization",
+                sentinel=SENTINEL_MODEL_KEY,
+                real="deployment-model-key",
+            ),
+        ),
+        grants=None,
+    )
+    followed_run = RunToken(followed.workspace_id, followed.turn_id)
+    lapsed_run = RunToken(lapsed.workspace_id, lapsed.turn_id)
+    async with _client(_control(resolver)) as client:
+        admitted = await client.post(
+            "/internal/egress/authorize",
+            headers=_auth(),
+            json={"proxy_auth": _basic(RUN_TOKENS.encode(followed_run))},
+        )
+        refused = await client.post(
+            "/internal/egress/authorize",
+            headers=_auth(),
+            json={"proxy_auth": _basic(RUN_TOKENS.encode(lapsed_run))},
+        )
+        resolved = await client.post(
+            "/internal/egress/resolve",
+            headers=_auth(),
+            json={"proxy_auth": _basic(RUN_TOKENS.encode(followed_run))},
+        )
+    assert admitted.json() == {"authorized": True, "generation": 0}
+    assert refused.json() == {"authorized": False, "generation": None}
+    rules = resolved.json()["rules"]
+    assert any(rule["kind"] == "scope" for rule in rules)
+    assert not any(rule.get("sentinel") == SENTINEL_MODEL_KEY for rule in rules)
+    assert await resolver.live_bridge_principal(followed_run) is None
+
+
+async def test_an_ended_turn_answers_for_its_detached_call_capability(db: None) -> None:
+    capability_id = uuid4()
+    async with workspace_tx() as connection:
+        followed = await _seed_turn(
+            connection, status="done", detached_until=datetime.now(UTC) + timedelta(hours=1)
+        )
+        await connection.execute(
+            sa.insert(tables.sandbox_call_capability).values(
+                id=capability_id,
+                workspace_id=followed.workspace_id,
+                turn_id=followed.turn_id,
+                call="bash/scoped",
+                connections=[],
+                created_at=sa.func.now(),
+            )
+        )
+    run = RunToken(followed.workspace_id, followed.turn_id, capability_id=capability_id)
+    resolver = PerAgentRules(base=(ScopeRule(allowed_hosts=frozenset({HOST})),), grants=None)
+
+    assert await resolver.turn_live(run) == 0
+    assert ScopeRule(allowed_hosts=frozenset({HOST})) in await resolver.resolve(run)
+    assert await resolver.live_bridge_principal(run) is None
 
 
 async def test_call_capability_requires_a_liveness_proxy_and_dies_with_its_row(db: None) -> None:

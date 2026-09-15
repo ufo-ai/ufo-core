@@ -61,6 +61,7 @@ from ufo.runtime.access.egress_rules import ScopeRule
 from ufo.runtime.access.grants import CommitIdentity, GrantStore, grant_sentinel
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
+from ufo.runtime.background_tasks import mark_detached
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.runtime.queue import (
@@ -658,6 +659,79 @@ async def test_sandbox_authorizer_binds_run_token_and_cli_env_to_exact_capabilit
     )
     assert RUN_TOKENS.from_proxy_auth(durable_basic).capability_id is None
     assert durable_access.revoke is None
+
+
+async def test_a_detached_task_retains_and_recovers_its_exact_capability(db: None) -> None:
+    workspace_id, conversation_id = await _conversation()
+    agent_id, _member_id, connection_id = await _seed_grant(
+        workspace_id, conversation_id, shared=False
+    )
+    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
+    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
+    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
+    authorizer = SandboxAuthorizer(
+        sandbox=SandboxSession(
+            carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
+            handle=SandboxHandle(
+                conversation_id=conversation_id,
+                container_id="sbx-1",
+                run_token=common_token,
+                egress_env={
+                    "HTTP_PROXY": proxy,
+                    "HTTPS_PROXY": proxy,
+                    "http_proxy": proxy,
+                    "https_proxy": proxy,
+                },
+            ),
+        ),
+        run_tokens=RUN_TOKENS,
+        grants=GrantStore(),
+        clis={"hub": HUB_CLI},
+        turn=turn,
+    )
+    await _store_turn(turn)
+
+    with ws(workspace_id), agent(agent_id):
+        access = await authorizer.authorize((connection_id,), "hub/request")
+        token = access.sandbox.handle.run_token
+        assert token is not None
+        capability_id = RUN_TOKENS.from_proxy_auth(
+            "Basic " + base64.b64encode(f"{token}:{PROXY_PASSWORD}".encode()).decode()
+        ).capability_id
+        assert capability_id is not None
+        await mark_detached(
+            turn,
+            "abcdef12",
+            "$UFO_HOME/runs/terminal-runtime/tasks/abcdef12",
+            capability_id,
+        )
+        assert access.revoke is not None
+        await access.revoke()
+        recovered = await authorizer.authorize((connection_id,), "hub/request")
+
+    recovered_token = recovered.sandbox.handle.run_token
+    assert recovered_token is not None
+    recovered_id = RUN_TOKENS.from_proxy_auth(
+        "Basic " + base64.b64encode(f"{recovered_token}:{PROXY_PASSWORD}".encode()).decode()
+    ).capability_id
+    assert recovered_id == capability_id
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.detached_task).where(
+                tables.detached_task.c.turn_id == turn.id,
+                tables.detached_task.c.task == "abcdef12",
+            )
+        )
+    assert recovered.revoke is not None
+    await recovered.revoke()
+    async with workspace_tx() as connection:
+        assert (
+            await connection.execute(
+                sa.select(tables.sandbox_call_capability.c.id).where(
+                    tables.sandbox_call_capability.c.id == capability_id
+                )
+            )
+        ).scalar_one_or_none() is None
 
 
 async def test_open_sandbox_exports_the_conversation_identity_stable_across_turns(

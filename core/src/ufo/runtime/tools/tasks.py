@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from ufo.harness.o11y import log, turn_profile
 from ufo.harness.sandbox.session import ExecResult
+from ufo.runtime.background_tasks import mark_detached
 from ufo.runtime.tools.context import ToolContext
 
 MAX_COMMAND_TIMEOUT_MS = 600_000
@@ -60,8 +61,8 @@ DETACHED_LEAD = "The command runs detached."
 MOVED_LEAD = "The command did not complete within its {applied_s}s timeout and continues detached."
 BACKGROUND_DIRECTIVE = (
     "`read` on `log` shows the output so far. `exit_file` appears exactly once, with the exit "
-    "code — `watch` is empty until then, so a monitor on it fires at completion; `stop` ends the "
-    "command and still writes `exit_file`."
+    "code, and this conversation receives a message when it does; `stop` ends the command and "
+    "still writes `exit_file`."
 )
 """What holds of a detached command however it got there, so the lead sentence is the only thing
 that differs between a command detached on request and one that outgrew its wait. The log is the
@@ -128,7 +129,9 @@ async def run_task(
         )
     probe = await ctx.sandbox.sh(TASK_PROBE, base, timeout_s=TASK_PROBE_TIMEOUT_SECONDS)
     pid = probe.stdout.strip() if probe.exit_code == 0 else ""
-    if not pid:
+    if pid:
+        await mark_detached(ctx.turn, task, display_base, ctx.sandbox_capability_id)
+    else:
         await _record_exec_timeout(ctx, command, result.timed_out_after_s, requested_s)
     return TaskRun(
         task_id=task,
@@ -166,7 +169,6 @@ def task_handles(
         "pid": pid,
         "log": f"{display_base}.log",
         "exit_file": f"{display_base}.exit",
-        "watch": f'cat "{display_base}.exit" || true',
         "stop": f'kill "$(cat "{display_base}.pid")"',
     }
     said = " ".join(part for part in (lead, note, BACKGROUND_DIRECTIVE) if part)

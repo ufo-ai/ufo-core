@@ -1727,44 +1727,73 @@ class SandboxAuthorizer:
             if self.turn.runtime_config is None or self.turn.runtime_config.connections is None
             else self.turn.runtime_config.connections
         )
-        capability_id = uuid4() if connections != runtime_connections else None
+        capability_id: UUID | None = None
+        if connections != runtime_connections:
+            async with workspace_tx() as connection:
+                retained = sa.exists(
+                    sa.select(tables.detached_task.c.turn_id).where(
+                        tables.detached_task.c.capability_id == tables.sandbox_call_capability.c.id
+                    )
+                )
+                capability_id = (
+                    await connection.execute(
+                        sa.select(tables.sandbox_call_capability.c.id).where(
+                            tables.sandbox_call_capability.c.workspace_id == self.turn.workspace_id,
+                            tables.sandbox_call_capability.c.turn_id == self.turn.id,
+                            tables.sandbox_call_capability.c.call == call,
+                            retained,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if capability_id is None:
+                    capability_id = uuid4()
+                    await connection.execute(
+                        sa.delete(tables.sandbox_call_capability).where(
+                            tables.sandbox_call_capability.c.workspace_id == self.turn.workspace_id,
+                            tables.sandbox_call_capability.c.turn_id == self.turn.id,
+                            tables.sandbox_call_capability.c.call == call,
+                        )
+                    )
+                    await connection.execute(
+                        sa.insert(tables.sandbox_call_capability).values(
+                            id=capability_id,
+                            workspace_id=self.turn.workspace_id,
+                            turn_id=self.turn.id,
+                            call=call,
+                            connections=[str(connection) for connection in connections],
+                            created_at=datetime.now(UTC),
+                        )
+                    )
         run = RunToken(
             workspace_id=self.turn.workspace_id,
             turn_id=self.turn.id,
             capability_id=capability_id,
         )
-        run_token = self.run_tokens.encode(run)
         sandbox = self.sandbox.authorize(
-            run_token, frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV, env
+            self.run_tokens.encode(run),
+            frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV,
+            env,
         )
         if capability_id is None:
             return SandboxAccess(sandbox)
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.delete(tables.sandbox_call_capability).where(
-                    tables.sandbox_call_capability.c.workspace_id == self.turn.workspace_id,
-                    tables.sandbox_call_capability.c.turn_id == self.turn.id,
-                    tables.sandbox_call_capability.c.call == call,
-                )
-            )
-            await connection.execute(
-                sa.insert(tables.sandbox_call_capability).values(
-                    id=capability_id,
-                    workspace_id=self.turn.workspace_id,
-                    turn_id=self.turn.id,
-                    call=call,
-                    connections=[str(connection) for connection in connections],
-                    created_at=datetime.now(UTC),
-                )
-            )
-        return SandboxAccess(sandbox, partial(self._revoke, capability_id))
+        return SandboxAccess(
+            sandbox,
+            partial(self._revoke, capability_id),
+            capability_id,
+        )
 
     async def _revoke(self, capability_id: UUID) -> None:
         async with workspace_tx() as connection:
+            retained = sa.exists(
+                sa.select(tables.detached_task.c.turn_id).where(
+                    tables.detached_task.c.capability_id == capability_id
+                )
+            )
             await connection.execute(
                 sa.delete(tables.sandbox_call_capability).where(
                     tables.sandbox_call_capability.c.id == capability_id,
                     tables.sandbox_call_capability.c.workspace_id == self.turn.workspace_id,
                     tables.sandbox_call_capability.c.turn_id == self.turn.id,
+                    ~retained,
                 )
             )

@@ -1498,12 +1498,15 @@ async def test_multi_speaker_selection_is_authorized_before_member_access(
 
     events: list[str] = []
     seen: list[UUID | None] = []
+    seen_capabilities: list[UUID | None] = []
     authorized: list[tuple[UUID, ...]] = []
     scoped: list[tuple[UUID, ...]] = []
+    capability_id = uuid4()
 
     async def capture(ctx: ToolContext, args: Input) -> ToolResult:
         events.append("handler")
         seen.append(ctx.speaker_member_id)
+        seen_capabilities.append(ctx.sandbox_capability_id)
         return ToolResult(content=(TextContent(text=args.path),))
 
     turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
@@ -1536,7 +1539,7 @@ async def test_multi_speaker_selection_is_authorized_before_member_access(
         async def revoke() -> None:
             events.append("revoke")
 
-        return SandboxAccess(engine.sandbox, revoke)
+        return SandboxAccess(engine.sandbox, revoke, capability_id)
 
     def subagents_for(
         connections: tuple[UUID, ...],
@@ -1566,6 +1569,7 @@ async def test_multi_speaker_selection_is_authorized_before_member_access(
     assert not result.is_error
     assert events == ["authorization", "subagents", "sandbox", "handler", "revoke"]
     assert seen == [second]
+    assert seen_capabilities == [capability_id]
     assert authorized == [(second_connection,)]
     assert scoped == authorized
     [request] = gate.requests

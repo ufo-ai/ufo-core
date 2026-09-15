@@ -44,6 +44,7 @@ from ufo.product import (
     product_census,
 )
 from ufo.runtime.access.grants import INDEX_REAP_EXTENSION, INDEX_REAP_KEY_PREFIX
+from ufo.runtime.background_tasks import BACKGROUND_TASKS_JOB, BACKGROUND_TASKS_SCHEDULE
 from ufo.runtime.billing.accounting import (
     ALLOW,
     BalanceGate,
@@ -107,6 +108,15 @@ class ResultDeliverer(Protocol):
     """The subagent hand-back sweep as this role sees it. The work is the turn loop's — it reads a
     finished child and posts its arrival — so it lives there, and the jobs role names and schedules
     it through this structural type rather than importing across the boundary."""
+
+    async def run(self) -> None: ...
+
+    async def candidate_workspaces(self) -> tuple[UUID, ...]: ...
+
+
+class BackgroundTaskFollower(Protocol):
+    """The detached-command sweep as this role sees it: it probes each conversation's task journal
+    and posts what ended, so it lives with the turn loop and is named here structurally."""
 
     async def run(self) -> None: ...
 
@@ -851,6 +861,7 @@ def core_jobs(
     turn_dispatcher: TurnDispatcher,
     page_change_runner: PageChangeRunner,
     delivery_sweep: ResultDeliverer,
+    background_tasks: BackgroundTaskFollower,
     preview_renderer: PreviewRenderer | None,
 ) -> tuple[JobSpec, ...]:
     """The jobs a deploy always runs, before any extension's — all core because the source pipeline,
@@ -860,7 +871,9 @@ def core_jobs(
     consumer's hook off its own cursor as its own workflow (the memory page indexer and fact deriver
     among them); the turn dispatcher recovers queued outbox rows and re-admits parked turns their
     caps now allow; the delivery sweep hands back the delegated children whose own execution could
-    not — a cancelled one above all, whose terminal is committed from outside it; the product census
+    not — a cancelled one above all, whose terminal is committed from outside it; the background
+    task sweep follows the commands a turn detached, keeping their sandbox awake and posting each
+    one's end into its conversation; the product census
     counts each workspace's place in the funnel, and is core because it reads nearly the whole core
     schema to do it — an SDK seam wide enough to count `member`, `agent`, `connector_grant`,
     `connection`, `credential`, `surface_installation`, `surface_address`, `turn` and
@@ -878,6 +891,9 @@ def core_jobs(
 
     async def _deliver_results(context: ExtensionContext) -> None:
         await delivery_sweep.run()
+
+    async def _follow_background_tasks(context: ExtensionContext) -> None:
+        await background_tasks.run()
 
     async def _census_product(context: ExtensionContext) -> None:
         await product_census()
@@ -943,6 +959,12 @@ def core_jobs(
             schedule=RESULT_DELIVERY_SCHEDULE,
             handler=_deliver_results,
             candidates=delivery_sweep.candidate_workspaces,
+        ),
+        JobSpec(
+            name=BACKGROUND_TASKS_JOB,
+            schedule=BACKGROUND_TASKS_SCHEDULE,
+            handler=_follow_background_tasks,
+            candidates=background_tasks.candidate_workspaces,
         ),
         JobSpec(
             name=INDEX_REAP_JOB,

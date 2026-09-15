@@ -5,7 +5,7 @@ returns the service's contractual reply so core's query → mint → post → pa
 against a real database and a real S3 presign."""
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -13,6 +13,8 @@ import sqlalchemy as sa
 
 from ufo.blob import S3BlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
+from ufo.harness.sandbox.session import ExecResult
+from ufo.runtime.background_tasks import BackgroundTaskSweep
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.jobs import RENDER_PREVIEWS_JOB, core_jobs
 from ufo.runtime.media.preview_renderer import PreviewRenderer
@@ -20,6 +22,11 @@ from ufo.runtime.sources.sync import FolderSource, SyncDriver
 from ufo.runtime.subagents import SubagentRegistry
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
+
+
+class _NoProbes:
+    async def run(self, conversation_id: UUID, command: str, timeout_s: int) -> ExecResult:
+        raise AssertionError("no probe expected")
 
 
 def _renderer(blob: WorkspaceBlobStore) -> PreviewRenderer:
@@ -32,6 +39,7 @@ def _specs_with(preview_renderer: PreviewRenderer | None) -> list[str]:
         _dispatcher(),
         _runner(),
         DeliverySweep(invoker_for=lambda _: None, registry=SubagentRegistry(())),
+        BackgroundTaskSweep(probes=_NoProbes(), invoker_for=lambda _: None),
         preview_renderer,
     )
     return [spec.name for spec in specs]

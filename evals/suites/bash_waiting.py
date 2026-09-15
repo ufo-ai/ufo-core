@@ -28,8 +28,9 @@ BACKGROUND_WORKLOAD = (
 
 def waiting_scorer(marker: str, workload_token: str, async_ok: bool = False) -> Grader:
     """`async_ok` accepts the detached shape: the workload started with `background: true` and the
-    turn answered without its content — delivery then rides the task journal and monitors, proven
-    in their own suites. A blocking shape must carry the marker in the answer either way."""
+    turn answered without its content — delivery then rides the task journal and the background
+    task sweep, proven in their own suites. A blocking shape must carry the marker in the answer
+    either way."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         ran_workload = False

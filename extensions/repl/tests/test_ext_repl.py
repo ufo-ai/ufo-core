@@ -7,11 +7,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import sqlalchemy as sa
 import ufo_ext_repl.manifest as repl
 from ufo_ext_repl.manifest import JsReplInput, XlsxReplInput
 
 import ufo.runtime.tools.tasks as tasks
 from ufo.blob import FilesystemBlobStore
+from ufo.db import workspace_tx
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import (
     ExecResult,
@@ -22,6 +24,7 @@ from ufo.harness.sandbox.session import (
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.tools.tasks import MAX_COMMAND_TIMEOUT_MS
+from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 
@@ -128,6 +131,65 @@ async def _unavailable_spawn(profile: str, payload: dict, background: bool = Fal
     raise AssertionError("repl tools must not spawn")
 
 
+def _turn() -> Turn:
+    return Turn(
+        id=uuid4(),
+        workspace_id=uuid4(),
+        conversation_id=uuid4(),
+        agent_id=uuid4(),
+        seq=1,
+        status="running",
+        inbound="hi",
+        created_at=datetime(2026, 7, 9, tzinfo=UTC),
+    )
+
+
+async def _seeded_turn() -> Turn:
+    turn = _turn()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace).values(
+                id=turn.workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=turn.agent_id,
+                workspace_id=turn.workspace_id,
+                name="assistant",
+                prompt="p",
+                model="claude-opus-4-8",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=turn.conversation_id,
+                workspace_id=turn.workspace_id,
+                agent_id=turn.agent_id,
+                surface="cli",
+                queue_key=uuid4().hex,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn.id,
+                workspace_id=turn.workspace_id,
+                conversation_id=turn.conversation_id,
+                agent_id=turn.agent_id,
+                seq=turn.seq,
+                status=turn.status,
+                inbound=turn.inbound,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return turn
+
+
 @dataclass
 class _StubMemory:
     async def recall(self, query: str, subjects: frozenset[str], limit: int) -> tuple:
@@ -137,21 +199,13 @@ class _StubMemory:
         return None
 
 
-def _context(sandbox: FakeSandbox | SandboxSession, tmp_path: Path) -> ToolContext:
-    turn = Turn(
-        id=uuid4(),
-        workspace_id=uuid4(),
-        conversation_id=uuid4(),
-        agent_id=uuid4(),
-        seq=0,
-        status="running",
-        inbound="hi",
-        created_at=datetime(2026, 7, 9, tzinfo=UTC),
-    )
+def _context(
+    sandbox: FakeSandbox | SandboxSession, tmp_path: Path, turn: Turn | None = None
+) -> ToolContext:
     return ToolContext(
         sandbox=sandbox,
         blob=FilesystemBlobStore(root=tmp_path),
-        turn=turn,
+        turn=turn or _turn(),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=None,
@@ -199,7 +253,9 @@ async def test_repl_timeout_is_milliseconds_capped_and_converted(tmp_path: Path)
     assert sandbox.timeouts == [5, 600, None, 600]
 
 
-async def test_an_expired_cell_keeps_running_and_hands_back_its_handles(tmp_path: Path) -> None:
+async def test_an_expired_cell_keeps_running_and_hands_back_its_handles(
+    tmp_path: Path, db: None
+) -> None:
     """The budget is how long the caller waits, not how long the work may take: an interpreter still
     running when it expires is handed back as the task it now is, under the same handle names bash
     reports, and the result says the state did not advance."""
@@ -207,7 +263,7 @@ async def test_an_expired_cell_keeps_running_and_hands_back_its_handles(tmp_path
         node_result=ExecResult(stdout="", stderr="", exit_code=124, timed_out_after_s=120),
         probe_pid="4321",
     )
-    ctx = _context(sandbox, tmp_path)
+    ctx = _context(sandbox, tmp_path, turn=await _seeded_turn())
 
     result = await repl.js_repl(ctx, JsReplInput(code="await hang()"))
 
@@ -217,7 +273,7 @@ async def test_an_expired_cell_keeps_running_and_hands_back_its_handles(tmp_path
     assert repl.STATE_UNCHANGED in text
     handles = json.loads(text.splitlines()[-1])
     assert handles["pid"] == "4321"
-    assert set(handles) == {"task", "pid", "log", "exit_file", "watch", "stop"}
+    assert set(handles) == {"task", "pid", "log", "exit_file", "stop"}
     assert repl.JS_REPL_PATH not in sandbox.files
 
 
@@ -400,7 +456,7 @@ async def test_js_repl_removes_the_emit_file_it_read(tmp_path: Path) -> None:
 
 
 async def test_a_js_cell_over_its_budget_survives_in_the_real_local_carrier(
-    tmp_path: Path,
+    tmp_path: Path, db: None
 ) -> None:
     """The whole point of the journal, against a real process group: the carrier ends the expired
     exec by killing the launcher's group, and the node process sits outside it, so the work goes
@@ -417,7 +473,7 @@ async def test_a_js_cell_over_its_budget_survives_in_the_real_local_carrier(
         )
     )
     session = SandboxSession(carrier=carrier, handle=handle)
-    ctx = _context(session, tmp_path)
+    ctx = _context(session, tmp_path, turn=await _seeded_turn())
     state_dir = Path(handle.runtime_root) / repl.REPL_STATE_DIR
     code = (
         "for (let tick = 1; tick <= 8; tick++) {\n"
@@ -445,7 +501,7 @@ async def test_a_js_cell_over_its_budget_survives_in_the_real_local_carrier(
 
 
 async def test_an_expired_cell_emitting_on_leaves_the_next_calls_images_alone(
-    tmp_path: Path,
+    tmp_path: Path, db: None
 ) -> None:
     """Against real node processes: the cell that outgrew its budget goes on emitting an image every
     100ms, and the next call emits one of its own and then waits, so the survivor writes several
@@ -460,7 +516,9 @@ async def test_an_expired_cell_emitting_on_leaves_the_next_calls_images_alone(
             run_token="run-token-abc",
         )
     )
-    ctx = _context(SandboxSession(carrier=carrier, handle=handle), tmp_path)
+    ctx = _context(
+        SandboxSession(carrier=carrier, handle=handle), tmp_path, turn=await _seeded_turn()
+    )
     survivor = (
         "for (let tick = 1; tick <= 40; tick++) {\n"
         '  emitImage(Buffer.from([9, 9, 9]), "image/png");\n'

@@ -119,6 +119,7 @@ from ufo.runtime.access.egress_rules import (
     derive_residential_rules,
 )
 from ufo.runtime.access.grants import ConnectFlow, GrantStore, OAuthProvider, install_connect_flow
+from ufo.runtime.background_tasks import BackgroundTaskSweep
 from ufo.runtime.billing.balance import billing_screen_url
 from ufo.runtime.context_boundary import (
     CORE_FLAGS,
@@ -706,6 +707,7 @@ def _launch_jobs(
             TurnDispatcher(client=runtime.dbos, key_slot_for=runtime.registry.key_slot_for),
             page_change_runner,
             DeliverySweep(invoker_for=invoker_for, registry=runtime.subagents),
+            BackgroundTaskSweep(probes=probes, invoker_for=invoker_for),
             preview_renderer,
         ),
         disabled=frozenset(runtime.config.serve.disabled_jobs),
