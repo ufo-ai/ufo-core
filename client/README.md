@@ -6,9 +6,10 @@ with syntax colors, and tool activity. Left, on an empty entry bar, lists every 
 open — from the terminal, the portal, or Slack — under the mark, with the entry bar still at the
 bottom: typing there and pressing Enter starts a new chat, Up reaches the search line and then the
 list, and Enter on a row opens it. A click opens a row too, Esc returns to the conversation you
-left, and the list refreshes every five seconds while it is up, with a row drawn bold once its
-conversation moves. The page opens on the list as it last stood, kept under `$UFO_HOME`, and
-refreshes behind it.
+left, and the list refreshes every five seconds while it is up. Each row leads with its state: a
+spinner while the agent works, a green dot where the conversation moved since you last read it, an
+amber one where it waits on you. The page opens on the list as it last stood, kept under
+`$UFO_HOME`, and refreshes behind it.
 
 The client is also the assistant's hands on your machine. When the assistant needs to read a file,
 write one, edit one, search a tree, or run a command, the request arrives over the same connection

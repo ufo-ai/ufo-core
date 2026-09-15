@@ -4,7 +4,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 
 use ufo::ui::conversations::row_text;
-use ufo::wire::ConversationRow;
+use ufo::wire::{ConversationRow, Turn};
 
 fn main() {
     divan::main();
@@ -55,6 +55,8 @@ fn listed(rows: usize) -> Vec<ConversationRow> {
             last_at: 1_699_000_000.0 + row as f64,
             postable: true,
             channel: None,
+            turn: Turn::Idle,
+            unread: false,
         })
         .collect()
 }

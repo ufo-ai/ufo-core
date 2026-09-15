@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -8,10 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::CONVERSATIONS_FILE;
 use crate::ui::picker::{PickKey, PickOutcome, Picker};
+use crate::ui::status::SPINNER_FRAMES;
 use crate::ui::theme::Theme;
 use crate::ui::wrap;
 use crate::ui::{FOCUS_CARET, PROMPT_IDLE};
-use crate::wire::{ConversationRow, Target};
+use crate::wire::{ConversationRow, Turn};
 
 pub const TITLE: &str = "UFO Chats";
 const INDENT: &str = "  ";
@@ -20,6 +20,7 @@ pub const SEARCH_LABEL: &str = "Search";
 const LOADING: &str = "Loading…";
 const NOTHING_MATCHES: &str = "Nothing matches.";
 const NOTHING_YET: &str = "No conversations yet.";
+const STATUS_DOT: &str = "●";
 const ORIGIN_WIDTH: usize = 16;
 const AGE_WIDTH: usize = 3;
 const GAP: &str = "  ";
@@ -100,25 +101,17 @@ pub struct Conversations {
     asked: String,
     typed_at: Option<Instant>,
     fetched_at: Instant,
-    loads: u32,
     slot: Slot,
     top: usize,
     list: usize,
     back: bool,
+    tick: usize,
 }
 
 impl Conversations {
-    pub fn new(
-        back: bool,
-        rows: Vec<ConversationRow>,
-        seen: &HashMap<String, f64>,
-    ) -> Conversations {
+    pub fn new(back: bool, rows: Vec<ConversationRow>) -> Conversations {
         let now = now_seconds();
-        let mut picker = Picker::new(rows.iter().map(|row| row_text(row, now)).collect());
-        for (index, row) in rows.iter().enumerate() {
-            let moved = seen.get(&row.id).is_some_and(|&stamp| row.last_at > stamp);
-            picker.set_bold(index, moved);
-        }
+        let picker = Picker::new(rows.iter().map(|row| row_text(row, now)).collect());
         Conversations {
             rows,
             picker,
@@ -128,11 +121,11 @@ impl Conversations {
             asked: String::new(),
             typed_at: None,
             fetched_at: Instant::now(),
-            loads: 0,
             slot: Slot::Entry,
             top: 0,
             list: 1,
             back,
+            tick: 0,
         }
     }
 
@@ -165,8 +158,6 @@ impl Conversations {
         &mut self,
         generation: u32,
         result: Result<Vec<ConversationRow>, String>,
-        seen: &mut HashMap<String, f64>,
-        current: Option<&Target>,
     ) -> bool {
         if generation != self.generation {
             return false;
@@ -175,8 +166,6 @@ impl Conversations {
         match result {
             Ok(rows) => {
                 self.error = None;
-                let first = self.loads == 0;
-                self.loads += 1;
                 let filter = self.picker.filter.clone();
                 let kept = self
                     .picker
@@ -189,18 +178,6 @@ impl Conversations {
                 self.picker = Picker::new(items);
                 self.picker.set_page(self.list);
                 self.picker.set_filter(&filter);
-                for (index, row) in self.rows.iter().enumerate() {
-                    let behind = current.is_some_and(|target| is_current(row, target));
-                    let fresh = match seen.get(&row.id) {
-                        Some(&stamp) if !(first && behind) => row.last_at > stamp,
-                        Some(_) => false,
-                        None => !first,
-                    };
-                    if first && !fresh {
-                        seen.insert(row.id.clone(), row.last_at);
-                    }
-                    self.picker.set_bold(index, fresh);
-                }
                 if let Some(index) =
                     kept.and_then(|id| self.rows.iter().position(|row| row.id == id))
                 {
@@ -213,6 +190,10 @@ impl Conversations {
                 false
             }
         }
+    }
+
+    pub fn on_tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
     }
 
     pub fn set_layout(&mut self, top: usize, rows: usize) {
@@ -368,10 +349,16 @@ impl Conversations {
         };
         match state {
             Some(line) => lines.push(line),
-            None if self.slot == Slot::List => {
-                lines.extend(self.picker.render(theme, cols, self.list))
+            None => {
+                let status = |index: usize| status_mark(&self.rows[index], self.tick, theme);
+                lines.extend(self.picker.render_status(
+                    theme,
+                    cols,
+                    self.list,
+                    self.slot == Slot::List,
+                    &status,
+                ));
             }
-            None => lines.extend(self.picker.render_unmarked(theme, cols, self.list)),
         }
         lines.truncate(rows.max(1));
         while lines.len() < rows {
@@ -404,10 +391,16 @@ pub fn labeled(label: &str, focused: bool) -> String {
     format!("{label} {caret}")
 }
 
-fn is_current(row: &ConversationRow, target: &Target) -> bool {
-    match target {
-        Target::Channel(channel) => row.channel.as_deref() == Some(channel.as_str()),
-        Target::Conversation(id) => &row.id == id,
+/// The portal's status column: a working turn outranks what stands unread, and a turn waiting on
+/// the member outranks both.
+fn status_mark(row: &ConversationRow, tick: usize, theme: &Theme) -> Span<'static> {
+    match (row.turn, row.unread) {
+        (Turn::Running | Turn::Queued, _) => {
+            Span::styled(SPINNER_FRAMES[tick % SPINNER_FRAMES.len()], theme.muted)
+        }
+        (Turn::Parked, _) => Span::styled(STATUS_DOT, theme.warning),
+        (Turn::Idle, true) => Span::styled(STATUS_DOT, theme.live),
+        (Turn::Idle, false) => Span::styled(STATUS_DOT, theme.muted),
     }
 }
 
@@ -473,7 +466,7 @@ fn now_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::style::Modifier;
+    use ratatui::style::Style;
 
     use super::*;
     use crate::ui::theme::{ColorMode, Scheme};
@@ -492,6 +485,8 @@ mod tests {
             last_at: now_seconds() as f64 - 2.0 * HOUR as f64,
             postable: true,
             channel: None,
+            turn: Turn::Idle,
+            unread: false,
         }
     }
 
@@ -500,7 +495,7 @@ mod tests {
     }
 
     fn fresh(back: bool) -> Conversations {
-        Conversations::new(back, Vec::new(), &HashMap::new())
+        Conversations::new(back, Vec::new())
     }
 
     fn loaded(rows: Vec<ConversationRow>) -> Conversations {
@@ -515,26 +510,21 @@ mod tests {
         generation: u32,
         result: Result<Vec<ConversationRow>, String>,
     ) {
-        let mut seen = HashMap::new();
-        page.loaded(generation, result, &mut seen, None);
+        page.loaded(generation, result);
     }
 
     fn text(lines: &[Line<'static>]) -> Vec<String> {
         lines.iter().map(Line::to_string).collect()
     }
 
-    fn bold_rows(page: &mut Conversations) -> Vec<bool> {
+    fn marks(page: &mut Conversations) -> Vec<(String, Style)> {
         let was = page.slot;
         page.slot = Slot::Entry;
         let lines = page.render(&theme(), 80, ROWS);
         page.slot = was;
         lines[HEAD_ROWS..HEAD_ROWS + page.rows.len()]
             .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
-            })
+            .map(|line| (line.spans[1].content.to_string(), line.spans[1].style))
             .collect()
     }
 
@@ -782,15 +772,12 @@ mod tests {
     }
 
     #[test]
-    fn a_page_opens_on_the_rows_it_is_given_bold_where_they_moved_since_seen() {
-        let mut seen = HashMap::new();
-        let moved = row("c1", "Who owns the pager", "slack", "assistant");
-        seen.insert("c1".to_string(), moved.last_at - 60.0);
-        let still = row("c2", "Deploy plan", "web", "assistant");
-        seen.insert("c2".to_string(), still.last_at);
-        let unmet = row("c3", "Ping", "web", "assistant");
-        let rows = vec![moved, still, unmet];
-        let mut page = Conversations::new(true, rows.clone(), &seen);
+    fn a_page_opens_on_the_rows_it_is_given_and_a_search_answer_is_not_the_list() {
+        let rows = vec![
+            row("c1", "Who owns the pager", "slack", "assistant"),
+            row("c2", "Deploy plan", "web", "assistant"),
+        ];
+        let mut page = Conversations::new(true, rows.clone());
         page.set_layout(0, ROWS);
         let lines = text(&page.render(&theme(), 80, ROWS));
         assert!(lines[1].contains("Who owns the pager"), "{lines:?}");
@@ -798,17 +785,13 @@ mod tests {
             !lines.iter().any(|line| line.contains(LOADING)),
             "{lines:?}"
         );
-        assert_eq!(bold_rows(&mut page), vec![true, false, false]);
-        assert!(
-            page.loaded(1, Ok(rows.clone()), &mut seen, None),
-            "the whole list landed"
-        );
+        assert!(page.loaded(1, Ok(rows.clone())), "the whole list landed");
         page.key(PickKey::Char('p'));
         let fetch = page
             .due_fetch(Instant::now() + REQUERY_AFTER)
             .expect("the typed word is asked");
         assert!(
-            !page.loaded(fetch.generation, Ok(rows), &mut seen, None),
+            !page.loaded(fetch.generation, Ok(rows)),
             "a search's answer is not the list"
         );
     }
@@ -834,68 +817,36 @@ mod tests {
     }
 
     #[test]
-    fn a_row_that_moved_since_the_member_saw_it_is_bold_until_opened() {
-        let mut seen = HashMap::new();
-        let current = Target::Channel("abc".to_string());
-        let mut mine = row("c1", "list files", "ufo", "assistant");
-        mine.channel = Some("abc".to_string());
-        mine.last_at = 100.0;
-        let mut theirs = row("c2", "Who owns the pager", "slack", "assistant");
-        theirs.last_at = 200.0;
-        seen.insert("c1".to_string(), 50.0);
-        let mut page = fresh(true);
-        page.set_layout(0, ROWS);
-        page.loaded(
-            1,
-            Ok(vec![mine.clone(), theirs.clone()]),
-            &mut seen,
-            Some(&current),
-        );
+    fn a_row_leads_with_its_state_and_a_tick_turns_the_spinner() {
+        let mut working = row("c1", "list files", "ufo", "assistant");
+        working.turn = Turn::Running;
+        let mut queued = row("c2", "Deploy plan", "web", "assistant");
+        queued.turn = Turn::Queued;
+        queued.unread = true;
+        let mut waiting = row("c3", "Ledger", "web", "assistant");
+        waiting.turn = Turn::Parked;
+        waiting.unread = true;
+        let mut moved = row("c4", "Who owns the pager", "slack", "assistant");
+        moved.unread = true;
+        let idle = row("c5", "Ping", "web", "assistant");
+        let mut page = loaded(vec![working, queued, waiting, moved, idle]);
+        let theme = theme();
         assert_eq!(
-            bold_rows(&mut page),
-            vec![false, false],
-            "first sight is seen as it stands"
+            marks(&mut page),
+            vec![
+                (SPINNER_FRAMES[0].to_string(), theme.muted),
+                (SPINNER_FRAMES[0].to_string(), theme.muted),
+                (STATUS_DOT.to_string(), theme.warning),
+                (STATUS_DOT.to_string(), theme.live),
+                (STATUS_DOT.to_string(), theme.muted),
+            ]
         );
-        assert_eq!(
-            seen["c1"], 100.0,
-            "the conversation behind the page is seen where it is"
-        );
-        assert_eq!(seen["c2"], 200.0);
-
-        mine.last_at = 150.0;
-        let arrived = row("c3", "new thread", "web", "assistant");
-        page.due_fetch(Instant::now() + REFRESH_EVERY);
-        page.loaded(
-            2,
-            Ok(vec![mine.clone(), arrived, theirs.clone()]),
-            &mut seen,
-            Some(&current),
-        );
-        assert_eq!(bold_rows(&mut page), vec![true, true, false]);
+        page.on_tick();
+        assert_eq!(marks(&mut page)[0].0, SPINNER_FRAMES[1]);
+        let drawn = text(&page.render(&theme, 80, ROWS));
         assert!(
-            !seen.contains_key("c3"),
-            "a fresh row stays fresh until opened"
-        );
-
-        seen.insert("c1".to_string(), 150.0);
-        let mut reopened = fresh(true);
-        reopened.set_layout(0, ROWS);
-        reopened.loaded(1, Ok(vec![mine, theirs]), &mut seen, Some(&current));
-        assert_eq!(bold_rows(&mut reopened), vec![false, false]);
-
-        let mut stale = HashMap::from([("c2".to_string(), 100.0)]);
-        let mut later = fresh(true);
-        later.set_layout(0, ROWS);
-        later.loaded(
-            1,
-            Ok(vec![row("c2", "Who owns the pager", "slack", "assistant")]),
-            &mut stale,
-            None,
-        );
-        assert_eq!(
-            bold_rows(&mut later),
-            vec![true],
-            "a thread that moved since it was last opened is bold on a later page too"
+            drawn[1].starts_with(&format!("  {} ", SPINNER_FRAMES[1])),
+            "{drawn:?}"
         );
     }
 

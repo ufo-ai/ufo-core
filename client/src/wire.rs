@@ -322,6 +322,16 @@ impl Target {
     }
 }
 
+/// The liveest turn a conversation holds, `Idle` where it holds none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Turn {
+    Running,
+    Queued,
+    Parked,
+    Idle,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversationRow {
     pub id: String,
@@ -334,6 +344,8 @@ pub struct ConversationRow {
     pub last_at: f64,
     pub postable: bool,
     pub channel: Option<String>,
+    pub turn: Turn,
+    pub unread: bool,
 }
 
 #[derive(Deserialize)]
@@ -1489,7 +1501,7 @@ mod tests {
     fn a_conversation_list_parses_its_rows() {
         let body = r#"{"conversations":[{"id":"c1","title":"Deploy plan","surface":"web",
             "surface_label":null,"speaker":null,"agent":"assistant","main":true,
-            "last_at":1700000000.5,"postable":true,"channel":null}]}"#;
+            "last_at":1700000000.5,"postable":true,"channel":null,"turn":"queued","unread":true}]}"#;
         let listed: ConversationList = serde_json::from_str(body).expect("rows");
         assert_eq!(
             listed.conversations,
@@ -1504,6 +1516,8 @@ mod tests {
                 last_at: 1_700_000_000.5,
                 postable: true,
                 channel: None,
+                turn: Turn::Queued,
+                unread: true,
             }]
         );
     }

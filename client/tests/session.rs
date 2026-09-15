@@ -3503,9 +3503,9 @@ const SLACK_THREAD: &str = "5b1e4c1a-9c1e-4f3a-8f1e-0d2b3c4d5e6f";
 const TEXTS_THREAD: &str = "7d3a6e3c-be3a-4b5c-ab3a-2f4d5e6f7081";
 #[cfg(unix)]
 const LISTING: &str = r##"{"conversations":[
-{"id":"5b1e4c1a-9c1e-4f3a-8f1e-0d2b3c4d5e6f","title":"Who owns the pager","surface":"slack","surface_label":"#eng","speaker":"Nate Ford","agent":"assistant","main":true,"last_at":1700000000.0,"postable":true,"channel":null},
-{"id":"6c2f5d2b-ad2f-4a4b-9a2f-1e3c4d5e6f70","title":"list files","surface":"ufo","surface_label":null,"speaker":null,"agent":"assistant","main":true,"last_at":1699990000.0,"postable":true,"channel":"abc123"},
-{"id":"7d3a6e3c-be3a-4b5c-ab3a-2f4d5e6f7081","title":"remind me at 5","surface":"imessage","surface_label":null,"speaker":null,"agent":"assistant","main":true,"last_at":1699980000.0,"postable":false,"channel":null}
+{"id":"5b1e4c1a-9c1e-4f3a-8f1e-0d2b3c4d5e6f","title":"Who owns the pager","surface":"slack","surface_label":"#eng","speaker":"Nate Ford","agent":"assistant","main":true,"last_at":1700000000.0,"postable":true,"channel":null,"turn":"idle","unread":true},
+{"id":"6c2f5d2b-ad2f-4a4b-9a2f-1e3c4d5e6f70","title":"list files","surface":"ufo","surface_label":null,"speaker":null,"agent":"assistant","main":true,"last_at":1699990000.0,"postable":true,"channel":"abc123","turn":"running","unread":false},
+{"id":"7d3a6e3c-be3a-4b5c-ab3a-2f4d5e6f7081","title":"remind me at 5","surface":"imessage","surface_label":null,"speaker":null,"agent":"assistant","main":true,"last_at":1699980000.0,"postable":false,"channel":null,"turn":"idle","unread":false}
 ]}"##;
 
 #[cfg(unix)]
@@ -3546,6 +3546,10 @@ fn the_conversation_page_joins_a_thread_by_id_and_posts_into_it() {
     let mut session = run_home_on_pty(&served.url, &home, Some(&served.url), SCREEN);
     let page = wait_for(&session, "Who owns the pager");
     assert!(page.contains("UFO Chats"), "{page}");
+    assert!(
+        page.contains('\u{25cf}'),
+        "a row leads with its dot: {page}"
+    );
     assert!(page.contains("#eng"), "{page}");
     assert!(
         !page.contains("Slack #eng"),

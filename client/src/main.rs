@@ -1084,7 +1084,7 @@ fn open_conversation(
     workspace_url: Option<&str>,
 ) -> Live {
     let _ = live.cmd.send(WireCmd::Shutdown);
-    app.reset_conversation(&opening.target, opening.label.clone(), opening.read_only);
+    app.reset_conversation(opening.label.clone(), opening.read_only);
     if !first.is_empty() {
         app.begin_turn();
     }
@@ -1161,7 +1161,6 @@ fn run_tty(
         Live::unwired(&evt_tx)
     } else {
         let first = std::mem::take(&mut pending_first);
-        app.set_live_target(seed.target.clone());
         app.masthead();
         if !first.is_empty() {
             app.begin_turn();
@@ -1310,7 +1309,6 @@ fn run_tty(
                     }
                     Reply::CloseConversations => {}
                     Reply::Open(row) => {
-                        app.mark_seen(&row);
                         live = open_conversation(
                             &mut app,
                             Opening::listed(&row),
@@ -1382,10 +1380,7 @@ fn run_tty(
             }
             LoopEvent::Term(TermEvent::Mouse(mouse)) => {
                 let opening = match app.on_mouse(mouse) {
-                    Reply::Open(row) => {
-                        app.mark_seen(&row);
-                        Some(Opening::listed(&row))
-                    }
+                    Reply::Open(row) => Some(Opening::listed(&row)),
                     Reply::OpenConversations => {
                         show_page(&mut app, lister.as_ref(), live.wired, &evt_tx);
                         None

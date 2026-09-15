@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -20,6 +20,8 @@ const SEGMENT_MARKS: [char; 5] = [' ', '/', '-', '_', '.'];
 
 const MARKER: &str = "❯ ";
 const INDENT: &str = "  ";
+const STATUS_GAP: &str = " ";
+const STATUS_COLS: usize = 2;
 const ELLIPSIS: &str = "…";
 const PAGE_ROWS: usize = 10;
 
@@ -48,7 +50,6 @@ pub enum PickKey {
 
 pub struct Picker {
     items: Vec<String>,
-    bold: Vec<bool>,
     pub filter: String,
     pub selected: usize,
     visible: Vec<usize>,
@@ -59,18 +60,11 @@ impl Picker {
     pub fn new(items: Vec<String>) -> Picker {
         let visible = (0..items.len()).collect();
         Picker {
-            bold: vec![false; items.len()],
             items,
             filter: String::new(),
             selected: 0,
             visible,
             page: PAGE_ROWS,
-        }
-    }
-
-    pub fn set_bold(&mut self, index: usize, bold: bool) {
-        if let Some(slot) = self.bold.get_mut(index) {
-            *slot = bold;
         }
     }
 
@@ -190,7 +184,7 @@ impl Picker {
     }
 
     pub fn render(&self, theme: &Theme, width: u16, max_rows: usize) -> Vec<Line<'static>> {
-        self.draw(theme, width, max_rows, true)
+        self.draw(theme, width, max_rows, true, None)
     }
 
     pub fn render_unmarked(
@@ -199,16 +193,36 @@ impl Picker {
         width: u16,
         max_rows: usize,
     ) -> Vec<Line<'static>> {
-        self.draw(theme, width, max_rows, false)
+        self.draw(theme, width, max_rows, false, None)
     }
 
-    fn draw(&self, theme: &Theme, width: u16, max_rows: usize, marked: bool) -> Vec<Line<'static>> {
+    /// Every row leads with the one-cell status `status` draws for its item.
+    pub fn render_status(
+        &self,
+        theme: &Theme,
+        width: u16,
+        max_rows: usize,
+        marked: bool,
+        status: &dyn Fn(usize) -> Span<'static>,
+    ) -> Vec<Line<'static>> {
+        self.draw(theme, width, max_rows, marked, Some(status))
+    }
+
+    fn draw(
+        &self,
+        theme: &Theme,
+        width: u16,
+        max_rows: usize,
+        marked: bool,
+        status: Option<&dyn Fn(usize) -> Span<'static>>,
+    ) -> Vec<Line<'static>> {
         if self.visible.is_empty() || max_rows == 0 {
             return Vec::new();
         }
         let overflow = self.visible.len() > max_rows;
         let (start, rows) = self.window(max_rows);
-        let budget = (width as usize).saturating_sub(MARKER.width());
+        let budget =
+            (width as usize).saturating_sub(MARKER.width() + status.map_or(0, |_| STATUS_COLS));
         let mut lines = Vec::new();
         for (row, &index) in self.visible.iter().enumerate().skip(start).take(rows) {
             let item = &self.items[index];
@@ -216,14 +230,15 @@ impl Picker {
                 .map(|(_, at)| at)
                 .unwrap_or_default();
             let selected = marked && row == self.selected;
-            let mut base = if selected { theme.selected } else { theme.text };
-            if self.bold[index] {
-                base = base.add_modifier(Modifier::BOLD);
-            }
+            let base = if selected { theme.selected } else { theme.text };
             let mut spans = vec![Span::styled(
                 if selected { MARKER } else { INDENT }.to_string(),
                 base,
             )];
+            if let Some(status) = status {
+                spans.push(status(index));
+                spans.push(Span::styled(STATUS_GAP.to_string(), base));
+            }
             spans.extend(row_spans(
                 item,
                 &hits,
@@ -492,32 +507,41 @@ mod tests {
     }
 
     #[test]
-    fn a_bold_item_is_drawn_bold_wherever_the_window_puts_it() {
-        let items: Vec<String> = (0..20).map(|n| format!("item {n:02}")).collect();
+    fn a_status_leads_each_row_wherever_the_window_puts_it_and_the_text_yields_its_cells() {
+        let items: Vec<String> = (0..20)
+            .map(|n| format!("item {n:02} {}", "x".repeat(40)))
+            .collect();
         let mut picker = Picker::new(items);
-        picker.set_bold(2, true);
-        picker.set_bold(9, true);
-        picker.set_bold(99, true);
-        let emphasized = |lines: &[Line<'static>]| -> Vec<bool> {
+        let status =
+            |index: usize| Span::styled(if index == 9 { "●" } else { "·" }, Style::default());
+        let leads = |lines: &[Line<'static>]| -> Vec<String> {
             lines
                 .iter()
-                .map(|line| {
-                    line.spans
-                        .iter()
-                        .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
-                })
+                .map(|line| line.spans[1].content.to_string())
                 .collect()
         };
-        assert_eq!(
-            emphasized(&picker.render_unmarked(&theme(), 40, 5)),
-            vec![false, false, true, false, false],
-            "rows 0..4 and the (i/n) line"
+        let drawn = picker.render_status(&theme(), 20, 5, false, &status);
+        assert_eq!(leads(&drawn[..4]), vec!["·"; 4]);
+        assert!(drawn[0].to_string().starts_with("  · item 00"), "{drawn:?}");
+        assert!(
+            drawn.iter().all(|line| line.width() <= 20),
+            "the status takes its cells from the text: {drawn:?}"
         );
-        let marked = emphasized(&picker.render(&theme(), 40, 5));
-        assert_eq!(marked[1..], [false, true, false, false], "{marked:?}");
         picker.selected = 9;
-        let window = emphasized(&picker.render_unmarked(&theme(), 40, 5));
-        assert_eq!(window.iter().filter(|bold| **bold).count(), 1, "{window:?}");
+        let window = picker.render_status(&theme(), 20, 5, true, &status);
+        assert_eq!(
+            leads(&window[..4])
+                .iter()
+                .filter(|lead| *lead == "●")
+                .count(),
+            1
+        );
+        assert!(
+            window
+                .iter()
+                .any(|line| line.to_string().starts_with("❯ ● item 09")),
+            "{window:?}"
+        );
     }
 
     #[test]

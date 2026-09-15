@@ -82,6 +82,7 @@ from ufo.sdk.surfaces import (
     CredentialPrompt,
     CredentialRequestInvalid,
     ListedConversation,
+    ListedTurn,
     RuntimeAttestation,
     RuntimeIdentity,
     SurfaceAuth,
@@ -1008,6 +1009,7 @@ class _ChannelStream:
             if self.member_id is None
             else partial(self.ctx.connect_url, self.turn.id, self.member_id)
         )
+        await self._read()
         since = _resumed_from(self.request, self.turn.id)
         history: tuple[bytes, ...] = ()
         if self.turn.resumed and self.request.headers.get(SINCE_HEADER) is None:
@@ -1047,6 +1049,12 @@ class _ChannelStream:
             media_type="text/plain",
         )
 
+    async def _read(self) -> None:
+        # The unread mark compares this cursor with the turn row's moved-at, which the reply moves
+        # after the stream opened, so a cursor left at the open draws the read row unread.
+        if self.member_id is not None:
+            await self.ctx.mark_conversation_read(self.conversation_id, self.member_id)
+
     async def _moved_on(self) -> bool:
         latest = await self.ctx.latest_turn(self.conversation_id)
         return (
@@ -1070,6 +1078,7 @@ class _ChannelStream:
                 yield self.turn.note
             async for line in directives:
                 yield line
+            await self._read()
         finally:
             if self.cwd:
                 self.ctx.terminal_disconnect(self.conversation_id)
@@ -1242,7 +1251,8 @@ class ConversationRow(BaseModel):
     somebody else; `main` says the conversation runs with the workspace's main agent, so the client
     names the agent only where it is another; `channel` is set for the member's own terminal
     conversations, which the client resumes on their channel rather than joining by id, so the
-    terminal it stands in is the sandbox again."""
+    terminal it stands in is the sandbox again. `turn` and `unread` are what the row's status mark
+    draws, as the portal's rail draws them."""
 
     id: UUID
     title: str
@@ -1254,6 +1264,8 @@ class ConversationRow(BaseModel):
     last_at: float
     postable: bool
     channel: str | None
+    turn: ListedTurn
+    unread: bool
 
 
 class ConversationList(BaseModel):
@@ -1322,6 +1334,8 @@ def _conversation_row(
         last_at=(entry.summary.last_turn_at or entry.summary.created_at).timestamp(),
         postable=not isinstance(_posting(entry, member_id, email), _ReadOnly),
         channel=channel,
+        turn=entry.turn,
+        unread=entry.unread,
     )
 
 

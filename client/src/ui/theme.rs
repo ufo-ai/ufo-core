@@ -24,6 +24,7 @@ pub struct Theme {
     pub member: Style,
     pub error: Style,
     pub warning: Style,
+    pub live: Style,
     pub heading: Style,
     pub code: Style,
     pub code_block: Style,
@@ -50,6 +51,7 @@ struct Palette {
     prompt: Rgb,
     error: Rgb,
     warning: Rgb,
+    live: Rgb,
     code: Rgb,
     link: Rgb,
     pr: Rgb,
@@ -67,6 +69,7 @@ const DARK: Palette = Palette {
     prompt: (0xff, 0x87, 0xff),
     error: (0xff, 0x6b, 0x6b),
     warning: (0xff, 0xd7, 0x5f),
+    live: (0x4a, 0xde, 0x80),
     code: (0xff, 0xb8, 0x6c),
     link: (0x82, 0xaa, 0xff),
     pr: (0xbd, 0x93, 0xf9),
@@ -84,6 +87,7 @@ const LIGHT: Palette = Palette {
     prompt: (0xa2, 0x1c, 0xaf),
     error: (0xb9, 0x1c, 0x1c),
     warning: (0xa1, 0x62, 0x07),
+    live: (0x16, 0xa3, 0x4a),
     code: (0x9a, 0x34, 0x12),
     link: (0x1d, 0x4e, 0xd8),
     pr: (0x6d, 0x28, 0xd9),
@@ -148,6 +152,7 @@ impl Theme {
                 _ => hue(palette.error),
             },
             warning: hue(palette.warning),
+            live: hue(palette.live),
             heading: plain.add_modifier(Modifier::BOLD),
             code: hue(palette.code),
             code_block: plain,
@@ -290,12 +295,13 @@ pub fn scheme_from_colorfgbg(value: &str) -> Option<Scheme> {
 mod tests {
     use super::*;
 
-    const TEXT_ROLES: [fn(&Palette) -> Rgb; 12] = [
+    const TEXT_ROLES: [fn(&Palette) -> Rgb; 13] = [
         |p| p.muted,
         |p| p.accent,
         |p| p.prompt,
         |p| p.error,
         |p| p.warning,
+        |p| p.live,
         |p| p.code,
         |p| p.link,
         |p| p.quote,
@@ -383,6 +389,7 @@ mod tests {
                 theme.prompt,
                 theme.error,
                 theme.warning,
+                theme.live,
                 theme.heading,
                 theme.code,
                 theme.code_block,

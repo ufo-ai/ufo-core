@@ -15,7 +15,7 @@ pub mod theme;
 pub mod toolrender;
 mod wrap;
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -45,7 +45,7 @@ use crate::ui::status::{Activity, Progress, Signals, StatusRow};
 use crate::ui::term::AltScreen;
 use crate::ui::theme::{ColorMode, Theme};
 use crate::ui::toolrender::OpView;
-use crate::wire::{ConversationRow, OpRequest, Target};
+use crate::wire::{ConversationRow, OpRequest};
 
 pub const PROMPT_IDLE: &str = "›";
 pub const SENT_BY_UFO: &str = "∵ Sent by UFO";
@@ -211,8 +211,6 @@ pub struct App<W: Write = io::Stdout> {
     cached: Vec<ConversationRow>,
     page_draft: AskState,
     page_hit: Option<(u16, Range<u16>)>,
-    seen: HashMap<String, f64>,
-    live_target: Option<Target>,
     read_only: Option<String>,
     retained: Retained,
     reply_open: bool,
@@ -279,8 +277,6 @@ impl<W: Write> App<W> {
             cached,
             page_draft: AskState::default(),
             page_hit: None,
-            seen: HashMap::new(),
-            live_target: None,
             read_only: None,
             retained: Retained::new(cols),
             reply_open: false,
@@ -313,24 +309,10 @@ impl<W: Write> App<W> {
 
     pub fn set_endpoint(&mut self, host: String, channel: String) {
         self.host = host;
-        self.live_target = Some(Target::Channel(channel.clone()));
         self.channel = channel;
     }
 
-    pub fn set_live_target(&mut self, target: Target) {
-        self.live_target = Some(target);
-    }
-
-    pub fn mark_seen(&mut self, row: &ConversationRow) {
-        self.seen.insert(row.id.clone(), row.last_at);
-    }
-
-    pub fn reset_conversation(
-        &mut self,
-        target: &Target,
-        channel: String,
-        read_only: Option<String>,
-    ) {
+    pub fn reset_conversation(&mut self, channel: String, read_only: Option<String>) {
         self.stream = markdown::StreamRenderer::default();
         self.ask = AskState::default();
         self.prompt = PROMPT_IDLE.to_string();
@@ -344,7 +326,6 @@ impl<W: Write> App<W> {
         self.conversations = None;
         self.page_draft = AskState::default();
         self.page_hit = None;
-        self.live_target = Some(target.clone());
         self.read_only = read_only;
         self.retained = Retained::new(self.cols);
         self.reply_open = false;
@@ -368,7 +349,7 @@ impl<W: Write> App<W> {
     }
 
     pub fn open_conversations(&mut self, back: bool) -> Fetch {
-        let page = Conversations::new(back, self.cached.clone(), &self.seen);
+        let page = Conversations::new(back, self.cached.clone());
         let fetch = page.first_fetch();
         self.conversations = Some(page);
         if self.focus != Focus::Conversations {
@@ -407,12 +388,7 @@ impl<W: Write> App<W> {
         let Some(page) = self.conversations.as_mut() else {
             return;
         };
-        let whole = page.loaded(
-            generation,
-            result,
-            &mut self.seen,
-            self.live_target.as_ref(),
-        );
+        let whole = page.loaded(generation, result);
         if whole && page.rows() != self.cached.as_slice() {
             self.cached = page.rows().to_vec();
             self.cache.store(&self.cached);
@@ -756,6 +732,9 @@ impl<W: Write> App<W> {
             self.flash = None;
         }
         self.status.on_tick();
+        if let Some(page) = self.conversations.as_mut() {
+            page.on_tick();
+        }
         if self.working {
             let keepalive = self.progress.tick(&self.signals, Instant::now());
             self.splice_raw(&keepalive);
@@ -1909,6 +1888,8 @@ pub fn decode_key(key: KeyEvent) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::status::SPINNER_FRAMES;
+    use crate::wire::Turn;
 
     fn shared_line() -> Line<'static> {
         let open = osc::link_open("https://ufo.test/artifacts/abc?exp=1&sig=2");
@@ -2666,13 +2647,14 @@ mod tests {
             last_at: 0.0,
             postable,
             channel: None,
+            turn: Turn::Idle,
+            unread: false,
         }
     }
 
     #[test]
     fn a_turn_ending_under_the_page_waits_behind_it() {
         let mut app = app_on_memory();
-        app.set_live_target(Target::Channel("host.1".to_string()));
         app.begin_turn();
         app.open_conversations(true);
         app.conversations_loaded(1, Ok(vec![listed("c1", "Who owns the pager", true)]));
@@ -2789,36 +2771,22 @@ mod tests {
         );
     }
 
-    fn first_row_bold(app: &mut App<Vec<u8>>) -> bool {
-        let page = app.conversations.as_ref().expect("the page is up");
-        let lines = page.render(&app.theme, 80, 24);
-        lines[1]
-            .spans
-            .iter()
-            .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
-    }
-
     #[test]
-    fn a_reply_landing_behind_the_page_makes_its_row_bold() {
+    fn a_tick_under_the_page_turns_a_working_rows_spinner() {
         let mut app = app_on_memory();
-        app.set_live_target(Target::Channel("abc".to_string()));
         app.open_conversations(true);
-        let mut mine = listed("c1", "list files", true);
-        mine.channel = Some("abc".to_string());
-        mine.last_at = 100.0;
-        let other = listed("c2", "Who owns the pager", true);
-        app.conversations_loaded(1, Ok(vec![mine.clone(), other.clone()]));
-        assert!(!first_row_bold(&mut app), "nothing bold at first sight");
-        mine.last_at = 200.0;
-        let fetch = app.conversations_due_fetch(Instant::now() + std::time::Duration::from_secs(6));
-        assert_eq!(fetch.map(|fetch| fetch.generation), Some(2));
-        app.conversations_loaded(2, Ok(vec![mine.clone(), other.clone()]));
-        assert!(first_row_bold(&mut app), "the moved row is bold");
-        app.mark_seen(&mine);
-        app.close_conversations();
-        app.open_conversations(true);
-        app.conversations_loaded(1, Ok(vec![mine, other]));
-        assert!(!first_row_bold(&mut app), "opened rows are seen");
+        let mut working = listed("c1", "list files", true);
+        working.turn = Turn::Running;
+        app.conversations_loaded(1, Ok(vec![working]));
+        let frame = |app: &App<Vec<u8>>| {
+            let page = app.conversations.as_ref().expect("the page is up");
+            page.render(&app.theme, 80, 24)[1].spans[1]
+                .content
+                .to_string()
+        };
+        assert_eq!(frame(&app), SPINNER_FRAMES[0]);
+        app.tick();
+        assert_eq!(frame(&app), SPINNER_FRAMES[1]);
     }
 
     #[test]
@@ -2971,11 +2939,7 @@ mod tests {
         app.txt("an old reply");
         app.end_turn(false);
         typed(&mut app, "half a thought");
-        app.reset_conversation(
-            &Target::Conversation("c1".to_string()),
-            "#eng".to_string(),
-            Some("Slack".to_string()),
-        );
+        app.reset_conversation("#eng".to_string(), Some("Slack".to_string()));
         assert_eq!(app.channel, "#eng");
         assert!(app.ask.text.is_empty());
         assert!(!transcript(&mut app).contains("an old reply"));
@@ -2992,7 +2956,7 @@ mod tests {
             "{painted}"
         );
         assert_eq!(app.on_key(key(KeyCode::Left)), Reply::OpenConversations);
-        app.reset_conversation(&Target::Channel("abc".to_string()), "abc".to_string(), None);
+        app.reset_conversation("abc".to_string(), None);
         typed(&mut app, "hello");
         assert_eq!(
             app.on_key(key(KeyCode::Enter)),

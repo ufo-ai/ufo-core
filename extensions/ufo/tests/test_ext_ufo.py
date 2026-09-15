@@ -103,6 +103,7 @@ pytestmark = [
 
 SECRET = "ufo-token-secret"
 STREAM_TIMEOUT_SECONDS = 30
+HELD_STREAM_SECONDS = 3.0
 STREAM_GATE = StreamGate()
 
 
@@ -2725,10 +2726,13 @@ async def test_conversations_lists_every_surface_and_agent_the_member_reaches(
         "last_at": rows[str(web)]["last_at"],
         "postable": True,
         "channel": None,
+        "turn": "idle",
+        "unread": False,
     }
     assert rows[str(slack)]["speaker"] == "Nate Ford"
     assert rows[str(slack)]["surface_label"] == "#eng"
     assert rows[str(slack)]["postable"] is True
+    assert rows[str(slack)]["unread"] is True
     assert rows[str(terminal)]["channel"] == "abc123"
     assert rows[str(texts)]["postable"] is False
     assert rows[str(notes)]["agent"] == "notes"
@@ -2800,6 +2804,11 @@ async def test_a_conversation_opened_by_id_replays_then_admits_a_comment(
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     bearer = {"authorization": f"Bearer {token}"}
 
+    async def unread() -> bool:
+        listed = await client.get("/surface/ufo/conversations", headers=bearer)
+        return {row["id"]: row["unread"] for row in listed.json()["conversations"]}[str(slack)]
+
+    assert await unread() is True
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
         opened = await client.post(
             f"/surface/ufo/conversation/{slack}", content=b"", headers=bearer
@@ -2809,6 +2818,7 @@ async def test_a_conversation_opened_by_id_replays_then_admits_a_comment(
     assert replayed[0] == ["you", "Who owns the pager"]
     assert ["say", "Nate does."] in replayed
     assert ["ask", ">"] in replayed
+    assert await unread() is False, "holding the stream read the conversation"
 
     async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
         posted = await client.post(
@@ -2840,6 +2850,60 @@ async def test_a_conversation_opened_by_id_replays_then_admits_a_comment(
         "owner@example.com commented: I do, this week.",
         -1,
     )
+
+
+async def test_a_held_stream_reads_the_conversation_again_when_it_ends(
+    ufo: tuple[AsyncClient, UUID], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cursor the list draws unread against moves twice on one stream: when the member opens it
+    and again when its last line is rendered. The turn row moves as the agent replies, so a cursor
+    left at the open stands before the reply the stream showed the member."""
+    client, workspace_id = ufo
+    owner = await _seed_member(workspace_id, "owner@example.com")
+    main = await _main_agent_id(workspace_id)
+    web = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="web",
+        queue_key=f"{main}/owner@example.com/1",
+        audience=str(conversation_audience(owner)),
+        member_id=owner,
+        title="Deploy plan",
+    )
+    turn = await _seed_running_turn(workspace_id, web, owner)
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    bearer = {"authorization": f"Bearer {token}"}
+    monkeypatch.setattr("ufo_ext_ufo.surface.HOLD_SECONDS", HELD_STREAM_SECONDS)
+
+    async def read_at() -> datetime:
+        async with workspace_tx() as connection:
+            cursor: datetime = (
+                await connection.execute(
+                    sa.select(tables.conversation_read.c.read_at).where(
+                        tables.conversation_read.c.conversation_id == web,
+                        tables.conversation_read.c.member_id == owner,
+                    )
+                )
+            ).scalar_one()
+        return cursor if cursor.tzinfo is not None else cursor.replace(tzinfo=UTC)
+
+    held = asyncio.ensure_future(
+        client.post(f"/surface/ufo/conversation/{web}", content=b"", headers=bearer)
+    )
+    await asyncio.sleep(HELD_STREAM_SECONDS / 3)
+    opened = await read_at()
+    moved = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == turn).values(updated_at=moved)
+        )
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        assert (await held).status_code == 200
+
+    assert opened < moved, "the turn moved after the stream opened"
+    listed = await client.get("/surface/ufo/conversations", headers=bearer)
+    rows = {row["id"]: row for row in listed.json()["conversations"]}
+    assert rows[str(web)]["unread"] is False, "the ended stream read what it rendered"
 
 
 async def test_a_conversation_opened_by_id_admits_plainly_into_the_members_own_web_chat(
