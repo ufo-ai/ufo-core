@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 
+use crate::cmd::run;
 use crate::ops::{OP_EXEC, OP_FILE, OP_READ, OP_WRITE};
 use crate::ui::theme::Theme;
 use crate::wire::OpRequest;
@@ -127,8 +128,17 @@ fn command_display(command: &str) -> String {
         return "list files".to_string();
     }
     let flat: Vec<&str> = command.split_whitespace().collect();
-    let mut tokens = flat.as_slice();
-    if let ["sh" | "bash" | "zsh", "-c", rest @ ..] = tokens {
+    let run_call = match flat.as_slice() {
+        ["ufo", "run", rest @ ..] => {
+            run::parse(&rest.iter().map(|word| word.to_string()).collect::<Vec<_>>()).ok()
+        }
+        _ => None,
+    };
+    let command: Vec<&str> = run_call
+        .as_ref()
+        .map_or(flat, |call| call.argv.iter().map(String::as_str).collect());
+    let mut tokens = command.as_slice();
+    if let ["sh" | "bash" | "zsh", "-c" | "-lc", rest @ ..] = tokens {
         tokens = rest;
     }
     while let [first, rest @ ..] = tokens {
@@ -366,6 +376,17 @@ mod tests {
             "exec make test"
         );
         assert_eq!(command_display("make\ntest"), "exec make test");
+        assert_eq!(
+            command_display(
+                "ufo run --task $UFO_HOME/runs/5507ff70/tasks/f38ff7fd -- bash -lc gh issue view 818 -R metalcraftai/ufo"
+            ),
+            "exec gh issue view 818 -R metalcraftai/ufo"
+        );
+        assert_eq!(
+            command_display("ufo run --task /t --detach -- bash -lc make test"),
+            "exec make test"
+        );
+        assert_eq!(command_display("bash -lc make test"), "exec make test");
         assert_eq!(command_display("sh -c FOO=1"), "exec FOO=1");
         assert_eq!(command_display("a=b echo hi"), "exec echo hi");
         assert_eq!(command_display("ls 1=2"), "exec ls 1=2");

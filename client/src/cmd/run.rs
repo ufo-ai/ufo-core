@@ -22,10 +22,10 @@ enum Mode {
 }
 
 #[derive(Debug, PartialEq)]
-struct Call {
+pub(crate) struct Call {
     mode: Mode,
     detach: bool,
-    argv: Vec<String>,
+    pub(crate) argv: Vec<String>,
 }
 
 pub fn main(args: &[String]) -> i32 {
@@ -54,7 +54,7 @@ pub fn main(args: &[String]) -> i32 {
     }
 }
 
-fn parse(args: &[String]) -> Result<Call, String> {
+pub(crate) fn parse(args: &[String]) -> Result<Call, String> {
     let mut task = None;
     let mut supervise = None;
     let mut detach = false;

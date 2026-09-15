@@ -16,6 +16,7 @@ mod command_safety;
 
 use command_safety::dangerous_command_match;
 
+use crate::cmd::run;
 use crate::config::Home;
 
 const CA_CERT_ENV: &str = "UFO_EGRESS_CA_CERT";
@@ -272,6 +273,9 @@ fn is_ufo_run(argv: &[String]) -> bool {
 }
 
 fn invokes_gh(argv: &[String]) -> bool {
+    if is_ufo_run(argv) {
+        return run::parse(&argv[2..]).is_ok_and(|call| invokes_gh(&call.argv));
+    }
     let Some(program) = argv.first() else {
         return false;
     };
@@ -590,6 +594,30 @@ mod tests {
             "echo /usr/local/bin/gh".to_string()
         ]));
         assert!(!invokes_gh(&["rg".to_string(), "gh".to_string()]));
+    }
+
+    #[test]
+    fn finds_gh_behind_the_shared_run_verb() {
+        let wrapped = |command: &str| -> Vec<String> {
+            [
+                "ufo",
+                "run",
+                "--task",
+                "$UFO_HOME/runs/5507ff70/tasks/f38ff7fd",
+                "--detach",
+                "--",
+                "bash",
+                "-lc",
+                command,
+            ]
+            .iter()
+            .map(|word| word.to_string())
+            .collect()
+        };
+        assert!(invokes_gh(&wrapped(
+            "gh issue view 818 -R metalcraftai/ufo"
+        )));
+        assert!(!invokes_gh(&wrapped("git status")));
     }
 
     #[test]
