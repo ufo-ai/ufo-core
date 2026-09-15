@@ -927,7 +927,7 @@ test("the table states a floor covering every track it declares", async () => {
     </DataTable>,
   );
   expect(declaredFloor(screen.getByRole("table"))).toBe(
-    "calc(3 * var(--size-fact-column) + 3 * var(--size-prose-column) + 0 * var(--size-act))",
+    "calc(3 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 3 * var(--size-prose-column) + 0 * var(--size-act))",
   );
   unmount();
 
@@ -943,7 +943,7 @@ test("the table states a floor covering every track it declares", async () => {
     </DataTable>,
   );
   expect(declaredFloor(screen.getByRole("table"))).toBe(
-    "calc(1 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
+    "calc(1 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
   );
 });
 
@@ -987,8 +987,35 @@ test("a table the member chose over cards holds its tracks at every width", () =
   expect(table.getAttribute("data-stacks")).toBeNull();
   expect(table.style.getPropertyValue("--table-label-1")).toBe("");
   expect(declaredFloor(table)).toBe(
-    "calc(1 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
+    "calc(1 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
   );
+});
+
+test("a stamp column takes the narrow track, so a filled table of five still fits its section", () => {
+  render(
+    <DataTable
+      columns={[
+        { label: "Name", fill: true },
+        { label: "Creator", stamp: true },
+        { label: "Events", stamp: true },
+        { label: "Next run", stamp: true },
+        { label: "Last run", stamp: true },
+      ]}
+      rows={[{ name: "one" }]}
+      rowKey={() => "one"}
+      empty="none"
+    >
+      {() => <Td />}
+    </DataTable>,
+  );
+
+  const table = screen.getByRole("table");
+  expect(declaredFloor(table)).toBe(
+    "calc(0 * var(--size-fact-column) + 4 * var(--size-stamp-column) + 1 * var(--size-prose-column) + 0 * var(--size-act))",
+  );
+  const heads = screen.getAllByRole("columnheader");
+  expect(heads[0].className).toContain("w-full");
+  for (const head of heads.slice(1)) expect(head.className).toContain("w-(--size-stamp-column)");
 });
 
 test("a table with a whole column measures it and holds the tracks beside it", () => {

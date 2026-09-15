@@ -58,7 +58,7 @@ const DISABLED_LEAD = {
 };
 
 const FLOOR =
-  "calc(2 * var(--size-fact-column) + 2 * var(--size-prose-column) + 0 * var(--size-act))";
+  "calc(2 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 2 * var(--size-prose-column) + 0 * var(--size-act))";
 
 beforeEach(() => {
   location.hash = "#/workspace/team";

@@ -407,10 +407,10 @@ test("an index fits the desktop it is read on, so the row's act never scrolls of
   const across = declaredFloor(screen.getByRole("table"));
   expect(pageFits(across)).toBe(true);
   expect(across).toBe(
-    "calc(3 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
+    "calc(3 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
   );
   expect(
-    pageFits("calc(1 * var(--size-fact-column) + 5 * var(--size-prose-column) + 1 * var(--size-act))"),
+    pageFits("calc(1 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 5 * var(--size-prose-column) + 1 * var(--size-act))"),
   ).toBe(false);
 });
 
@@ -422,7 +422,7 @@ test("one agent's index fits that same desktop", async () => {
   const across = declaredFloor(screen.getByRole("table"));
   expect(pageFits(across)).toBe(true);
   expect(across).toBe(
-    "calc(3 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
+    "calc(3 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
   );
 });
 

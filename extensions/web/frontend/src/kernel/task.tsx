@@ -140,7 +140,7 @@ export function SelfSaving({
   return (
     <div className="flex flex-col gap-2xs">
       <div className="flex items-center gap-sm">
-        <Label htmlFor={id} className="min-w-0 flex-1 truncate font-normal text-ink-soft">
+        <Label htmlFor={id} className="min-w-0 flex-1 truncate font-normal text-small text-ink-quiet">
           {label}
         </Label>
         <span aria-live="polite" className="shrink-0 text-small text-ink-soft">

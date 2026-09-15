@@ -11,7 +11,7 @@ export const OPEN = "Open";
 
 export type Column =
   | string
-  | { label: string; sort?: string; fact?: boolean; whole?: boolean; fill?: boolean };
+  | { label: string; sort?: string; fact?: boolean; stamp?: boolean; whole?: boolean; fill?: boolean };
 
 export type Sort = { by: string; descending: boolean; onSort: (key: string) => void };
 
@@ -23,6 +23,7 @@ function label(column: Column): string {
  *  the column. A filled table runs auto, where the fill claim leaves the rest what it holds. */
 function width(column: Column, measured: boolean, filled: boolean): string | undefined {
   if (isFill(column)) return "w-full";
+  if (isStamp(column)) return "w-(--size-stamp-column)";
   if (isFact(column)) return filled ? undefined : "w-(--size-fact-column)";
   if (!measured || isWhole(column)) return undefined;
   return "w-(--size-prose-column)";
@@ -30,6 +31,10 @@ function width(column: Column, measured: boolean, filled: boolean): string | und
 
 function isFact(column: Column): boolean {
   return typeof column !== "string" && Boolean(column.fact);
+}
+
+function isStamp(column: Column): boolean {
+  return typeof column !== "string" && Boolean(column.stamp);
 }
 
 function isWhole(column: Column): boolean {
@@ -113,6 +118,10 @@ function Act({ verb }: { verb: string | null }) {
  *  alone rather than stacking every column under it, because a stack of five labelled lines per
  *  record is a page of labels the member scrolls past to reach the next name.
  *
+ *  `bare` drops the head row, for a listing whose panel already names what it holds. The tracks then
+ *  come off the body cells rather than the heads, so a bare table's columns must state their own
+ *  width — `TdFill` and `TdStamp` carry theirs.
+ *
  *  `current` names the row whose contents are standing in the column beside the table, and the mark
  *  is the `tr` itself: `aria-current` on the row a reader already navigates as a row, and the same
  *  fill the row takes under the pointer, so the band reaches the rules that divide the records
@@ -131,6 +140,7 @@ export function DataTable<Row>({
   pager,
   stacks = true,
   lede = false,
+  bare = false,
   children,
 }: {
   columns: Column[];
@@ -145,11 +155,13 @@ export function DataTable<Row>({
   pager?: Paging;
   stacks?: boolean;
   lede?: boolean;
+  bare?: boolean;
   children: (row: Row) => ReactNode;
 }) {
   if (!rows.length && !note) return <PanelBlank body={empty} />;
   const span = columns.length + (act ? 1 : 0);
   const facts = columns.filter(isFact).length;
+  const stamps = columns.filter(isStamp).length;
   const filled = columns.some(isFill);
   const measured = filled || columns.some(isWhole);
   return (
@@ -158,25 +170,28 @@ export function DataTable<Row>({
       measured={measured}
       lede={lede}
       floor={tableFloor({
-        prose: columns.length - facts,
+        prose: columns.length - facts - stamps,
         fact: facts,
+        stamp: stamps,
         act: Boolean(act),
       })}
     >
-      <thead>
-        <tr>
-          {columns.map((column, index) => (
-            <Head
-              key={label(column) + index}
-              column={column}
-              sort={sort}
-              measured={measured}
-              filled={filled}
-            />
-          ))}
-          {act ? <Th className="w-(--size-act)">{""}</Th> : null}
-        </tr>
-      </thead>
+      {bare ? null : (
+        <thead>
+          <tr>
+            {columns.map((column, index) => (
+              <Head
+                key={label(column) + index}
+                column={column}
+                sort={sort}
+                measured={measured}
+                filled={filled}
+              />
+            ))}
+            {act ? <Th className="w-(--size-act)">{""}</Th> : null}
+          </tr>
+        </thead>
+      )}
       <tbody>
         {rows.length ? (
           rows.map((row) => {

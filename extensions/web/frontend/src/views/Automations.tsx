@@ -1,16 +1,32 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { IconClockPlay, IconLock, IconPlayerPause, IconPlus } from "@tabler/icons-react";
+import {
+  IconAlertTriangle,
+  IconCheck,
+  IconDots,
+  IconHistory,
+  IconLoader,
+  IconLock,
+  IconPlayerPause,
+  IconPlus,
+  IconX,
+} from "@tabler/icons-react";
 
-import { Button, ConfirmButton } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Field, Input, Textarea } from "@/components/ui/field";
 import { MarkTile } from "@/components/ui/item";
 import { Sheet } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Td, TdFact, TdFill } from "@/components/ui/table";
+import { TdFill, TdStamp } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { rowControl } from "@/kernel/row";
 import type { ObjectRow, ObjectValue } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
-import { Pager } from "@/kernel/pager";
 import { PageToolbar } from "@/kernel/pane";
 import {
   OutcomeNotice,
@@ -24,14 +40,12 @@ import {
   type NoticeState,
 } from "@/kernel/panel";
 import type { SpecValue } from "@/kernel/form";
-import { RowLines } from "@/kernel/rows";
 import { closed, opened } from "@/kernel/slots";
 import { DataTable } from "@/kernel/table";
 import { Pill, SelfSaving } from "@/kernel/task";
 import { getJson, postIntent } from "@/lib/api";
 import { AgentIcon } from "@/lib/agentIcon";
 import { automationId, automationLane, type AutomationLane } from "@/lib/automationLane";
-import { useMe } from "@/lib/audience";
 import { BrandMark } from "@/lib/brandMark";
 import { ConversationLink } from "@/lib/conversationLink";
 import {
@@ -51,11 +65,11 @@ import {
 import { cn } from "@/lib/cn";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
 import { Moment } from "@/lib/moments";
+import { OwnerMark } from "@/lib/ownerMark";
 import { setPendingAsk } from "@/lib/pendingAsk";
-import { newChatHash } from "@/lib/route";
+import { chatHash, newChatHash } from "@/lib/route";
 import { navigate } from "@/lib/router";
 import type { SpecSchema } from "@/lib/types";
-import { ChatPane } from "@/views/ChatPane";
 import { DiscloseBand } from "@/views/Conversations";
 
 const TURN_KIND = "turn";
@@ -63,7 +77,6 @@ const TASK_KIND = "scheduled_task";
 const TRIGGER_KIND = "source_trigger";
 const AUTOMATIONS_READ = "/automations";
 const HEROES_READ = "/workspace/automations";
-const RUN_PREFIX = "run/";
 const PART = "/";
 const DETAILS = "Details";
 const NAME = "Name";
@@ -85,6 +98,15 @@ const CREATE = "Create";
 const PAUSE = "Pause";
 const RESUME = "Resume";
 const DELETE = "Delete";
+const CONFIRM_DELETE = "Confirm delete";
+const MORE = "More";
+const SAID_APART = " · ";
+const NO_RUNS = "No run yet.";
+/** The run history states what it holds in the label above it, so its columns are drawn unnamed. */
+const RUN_COLUMNS = [
+  { label: "", fill: true },
+  { label: "", stamp: true },
+];
 const NAME_FIELD = "automation-name";
 const INSTRUCTIONS_FIELD = "automation-instructions";
 const DEFAULT_SCHEDULE = "0 9 * * *";
@@ -101,7 +123,6 @@ const ANOTHER_MEMBER = "another member";
 const EVERY_STREAM = "Every stream synced from ";
 const WHOLE_FEED = "the whole feed of ";
 const ON = " on ";
-const NEVER_RAN = "No run yet";
 /** The surface a connection card draws, which these cards share: one radius, one hairline, one
  *  ground, so the two grids read as one product. */
 const HERO_CARD = "flex flex-col gap-2xl rounded-card border border-edge bg-raised p-2xl";
@@ -113,8 +134,6 @@ const BLANK = "\u00a0";
 const NO_RUNS_FOR_ONE = "No run yet. It will report into ";
 const NO_AUTOMATIONS = "No automation yet.";
 const NOT_ON_PAGE = "That item is not on this page.";
-const NO_AGENT = "The app that ran this is not listed for you.";
-const RUN = "Run";
 /** The cadences this screen offers. A cron outside them keeps its own words on the control and is
  *  rewritten in the automation's settings. */
 const EVERY_OPTIONS: { mode: CadenceMode; label: string }[] = [
@@ -126,10 +145,21 @@ const EVERY_OPTIONS: { mode: CadenceMode; label: string }[] = [
 ];
 const COLUMNS = [
   { label: "Name", fill: true },
-  { label: "Events", fact: true },
-  { label: "Next run", fact: true },
-  { label: "Last run", fact: true },
+  { label: "Creator", stamp: true },
+  { label: "Events", stamp: true },
+  { label: "Next run", stamp: true },
+  { label: "Last run", stamp: true },
 ];
+/** Sized to the circle a member is drawn in beside it, so the two marks down the row are one size. */
+const CHIP =
+  "flex size-(--size-avatar) shrink-0 items-center justify-center rounded-control border border-edge bg-fill";
+/** Every cell but the two run times states a fact the member came to read, so the table is drawn in
+ *  the page's own ink and the stamps alone recede. */
+const FACT = "text-ink";
+/** A paused row recedes but keeps every word it holds. The dimming rides the cells rather than the
+ *  row, so the fill under the pointer and the band on the standing row stay at full strength. */
+const RESTING = "opacity-(--opacity-muted-strong)";
+const MARK = "size-3.5 shrink-0 text-ink-soft";
 const LIVE = new Set(["queued", "running", "parked"]);
 const STATUS_WORDS: Record<string, string> = {
   queued: "Queued",
@@ -225,7 +255,6 @@ type ConnectionsPayload = {
   connection_scope: string[];
 };
 type RunsPayload = { objects: IndexRow[]; next_cursor: string | null };
-type RunPayload = { name: string; status: Record<string, ObjectValue> };
 
 function said(value: ObjectValue | undefined): string {
   return typeof value === "string" ? value : "";
@@ -314,6 +343,12 @@ function entriesOf(payload: AutomationsPayload): Entry[] {
   return payload.objects.map((row) => (row.kind === TASK_KIND ? taskEntry(row) : triggerEntry(row)));
 }
 
+/** A paused automation runs next at no time at all, so it sits under the ones that do. A sort holds
+ *  equal keys in the order it was given them, so each run keeps the order the read answered in. */
+function resting(entries: Entry[]): Entry[] {
+  return [...entries].sort((one, two) => Number(one.paused) - Number(two.paused));
+}
+
 function listPath(query: string | undefined, after: string | undefined): string {
   const params = new URLSearchParams();
   if (query) params.set("q", query);
@@ -363,15 +398,6 @@ async function freeName(said: string, agent: string): Promise<string | null> {
   return null;
 }
 
-function runId(agent: string, run: string): string {
-  return RUN_PREFIX + [agent, run].join(PART);
-}
-
-function runAt(id: string): { agent: string; name: string } {
-  const [agent = "", name = ""] = id.slice(RUN_PREFIX.length).split(PART);
-  return { agent, name };
-}
-
 /** The streams that wake a trigger and the resource they are watched on — every stream the
  *  connection syncs, or its whole feed, where the trigger narrows to neither. */
 function watchedLine(entry: Entry): string {
@@ -387,44 +413,93 @@ function streamWords(stream: string): string {
 }
 
 function RunMark({ status }: { status: string }) {
-  const live = LIVE.has(status);
+  const says = STATUS_WORDS[status] ?? status;
+  const glyph = "size-(--size-glyph) shrink-0";
+  if (LIVE.has(status)) {
+    return (
+      <IconLoader
+        role="img"
+        aria-label={says}
+        className={cn(glyph, "animate-spin text-ink-soft motion-reduce:animate-none")}
+      />
+    );
+  }
+  if (status === "failed") {
+    return <IconAlertTriangle role="img" aria-label={says} className={cn(glyph, "text-blocked")} />;
+  }
+  if (status === "cancelled") {
+    return <IconX role="img" aria-label={says} className={cn(glyph, "text-ink-quiet")} />;
+  }
+  return <IconCheck role="img" aria-label={says} className={cn(glyph, "text-ink-soft")} />;
+}
+
+/** What a run says it did, as one line: how it ended, then the first line it wrote. A run that filed
+ *  nothing still says so, which is the answer a member opened the history for. */
+function RunSaid({ run }: { run: Run }) {
+  const word = STATUS_WORDS[run.status] ?? run.status;
+  const said = firstLine(run.text);
   return (
-    <span
-      role="img"
-      aria-label={STATUS_WORDS[status] ?? status}
-      className={cn(
-        "mt-xs size-sm shrink-0 rounded-full",
-        live
-          ? "bg-live animate-pulse motion-reduce:animate-none"
-          : status === "failed"
-            ? "bg-blocked"
-            : status === "cancelled"
-              ? "bg-ink-faint"
-              : "bg-edge",
-      )}
-    />
+    <span className="flex min-w-0 items-center gap-sm">
+      <RunMark status={run.status} />
+      <span className="truncate">{said ? word + SAID_APART + said : word}</span>
+    </span>
   );
 }
 
-/** What wakes the automation, as one mark in the list's own column: the clock a schedule fires on
- *  and how often it fires, or the feed a trigger watches. */
+/** One tile for whatever wakes the automation, so a clock and a brand read as one set and a
+ *  provider the portal holds no mark for still lands on a tile the size of every other. */
+function EventTile({ says, children }: { says: string; children: ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span role="img" aria-label={says} className={CHIP}>
+          {children}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">{says}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** What wakes the automation, as the mark of the thing that fires it and nothing else: the column is
+ *  64px, and how often a schedule fires is the tooltip rather than a word the track cannot hold. */
 function EventMark({ entry }: { entry: Entry }) {
-  if (entry.kind === TASK_KIND) {
-    const word = cadenceWord(cadenceOf(entry.schedule, new Date().getTimezoneOffset()));
+  if (entry.kind !== TASK_KIND) {
     return (
-      <span className="flex min-w-0 items-center gap-2xs">
-        <IconClockPlay
-          role="img"
-          aria-label={SCHEDULE}
-          className="size-(--size-glyph) shrink-0 text-ink-soft"
-        />
-        {word ? <span className="truncate">{word}</span> : null}
-      </span>
+      <EventTile says={entry.watching}>
+        <BrandMark provider={entry.provider} className="size-(--size-glyph)" />
+      </EventTile>
     );
   }
+  const word = cadenceWord(cadenceOf(entry.schedule, new Date().getTimezoneOffset())) || SCHEDULE;
   return (
-    <span role="img" aria-label={entry.watching} className="flex">
-      <BrandMark provider={entry.provider} className="size-icon" />
+    <EventTile says={word}>
+      <IconHistory className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />
+    </EventTile>
+  );
+}
+
+/** The marks stand at the row's end rather than before the name, which slid every name in the
+ *  column left by whichever marks the row above it happened to hold. */
+function AutomationMarks({ entry }: { entry: Entry }) {
+  return (
+    <span className="ml-auto flex shrink-0 items-center gap-2xs">
+      {entry.readable ? null : (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <IconLock className={MARK} role="img" aria-label={PRIVATE_AUTOMATION} />
+          </TooltipTrigger>
+          <TooltipContent side="top">{PRIVATE_AUTOMATION}</TooltipContent>
+        </Tooltip>
+      )}
+      {entry.paused ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <IconPlayerPause className={MARK} role="img" aria-label={PAUSED} />
+          </TooltipTrigger>
+          <TooltipContent side="top">{PAUSED}</TooltipContent>
+        </Tooltip>
+      ) : null}
     </span>
   );
 }
@@ -521,24 +596,16 @@ function everyLabel(cadence: Cadence): string {
  *  so the pane is the one place the automation's own words are written. */
 function TaskFields({
   entry,
-  deletes,
   onApply,
-  onDelete,
 }: {
   entry: Entry;
-  deletes: boolean;
   onApply: (spec: Record<string, SpecValue>) => Promise<NoticeState>;
-  onDelete: () => Promise<NoticeState>;
 }) {
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   async function save(spec: Record<string, SpecValue>): Promise<NoticeState> {
     const outcome = await onApply(spec);
     setNotice(outcome.refused ? outcome : QUIET);
     return outcome;
-  }
-  async function remove(): Promise<void> {
-    const outcome = await onDelete();
-    setNotice(outcome.refused ? outcome : QUIET);
   }
   return (
     <div className="flex shrink-0 flex-col gap-2xl">
@@ -562,71 +629,17 @@ function TaskFields({
         readOnly={!entry.scheduleEditable}
         onSave={(schedule) => save({ schedule })}
       />
-      <div className="flex flex-wrap gap-sm">
-        <Button
-          variant="row"
-          disabled={entry.paused ? !entry.resumable : !entry.pausable}
-          onClick={() => void save({ paused: !entry.paused })}
-        >
-          {entry.paused ? RESUME : PAUSE}
-        </Button>
-        {deletes ? (
-          <ConfirmButton
-            verb={DELETE}
-            variant="row"
-            disabled={!entry.deletable}
-            onClick={() => void remove()}
-          />
-        ) : null}
-      </div>
     </div>
   );
 }
 
-/** What wakes the trigger, then the two acts a standing one takes. What it watches is its
- *  identity, so nothing here edits it. */
-function TriggerInfo({
-  entry,
-  applies,
-  deletes,
-  onPause,
-  onDelete,
-}: {
-  entry: Entry;
-  applies: boolean;
-  deletes: boolean;
-  onPause: (paused: boolean) => Promise<NoticeState>;
-  onDelete: () => Promise<NoticeState>;
-}) {
-  const [notice, setNotice] = useState<NoticeState>(QUIET);
-  async function act(run: Promise<NoticeState>): Promise<void> {
-    const outcome = await run;
-    setNotice(outcome.refused ? outcome : QUIET);
-  }
+/** What the trigger watches, which is its identity, so nothing here edits it. Its acts stand at the
+ *  head of the sheet beside a task's. */
+function TriggerInfo({ entry }: { entry: Entry }) {
   return (
     <div className="flex shrink-0 flex-col gap-2xl">
-      <OutcomeNotice state={notice} />
       <h3 className="m-0 text-subtitle font-medium">{entry.label}</h3>
       <Stated label={WHEN_TO_RUN}>{watchedLine(entry)}</Stated>
-      <div className="flex flex-wrap gap-sm">
-        {applies ? (
-          <Button
-            variant="row"
-            disabled={entry.paused ? !entry.resumable : !entry.pausable}
-            onClick={() => void act(onPause(!entry.paused))}
-          >
-            {entry.paused ? RESUME : PAUSE}
-          </Button>
-        ) : null}
-        {deletes ? (
-          <ConfirmButton
-            verb={DELETE}
-            variant="row"
-            disabled={!entry.deletable}
-            onClick={() => void act(onDelete())}
-          />
-        ) : null}
-      </div>
     </div>
   );
 }
@@ -646,7 +659,6 @@ function RunHistory({
   opens: string[];
   onPlace: (place: Placement) => void;
 }) {
-  const id = automationId(lane);
   const [working, setWorking] = useState(false);
   const state = usePanelRead<RunsPayload>(
     runsPath(lane, after),
@@ -681,20 +693,35 @@ function RunHistory({
             );
           return (
             <>
-              <RowLines
+              <DataTable
+                columns={RUN_COLUMNS}
+                bare
+                stacks={false}
                 rows={runs}
                 rowKey={(run) => run.name}
-                mark={(run) => <RunMark status={run.status} />}
-                primary={(run) => <Moment at={run.createdAt} />}
-                meta={(run) => [STATUS_WORDS[run.status] ?? run.status, firstLine(run.text)]}
-                open={(run) => () =>
-                  onPlace({ opens: opened(opens, runId(lane.agent, run.name), id) })
+                empty={NO_RUNS}
+                open={(run) =>
+                  run.conversation
+                    ? () => navigate(chatHash(run.conversation, undefined, undefined, run.name))
+                    : null
                 }
-              />
-              <Pager
-                payload={{ older: held.next_cursor }}
-                onPlace={(stepped) => onPlace({ runs: stepped.after, opens })}
-              />
+                pager={{
+                  payload: { older: held.next_cursor },
+                  after,
+                  onPlace: (stepped) => onPlace({ runs: stepped.after, opens }),
+                }}
+              >
+                {(run) => (
+                  <>
+                    <TdFill className={FACT}>
+                      <RunSaid run={run} />
+                    </TdFill>
+                    <TdStamp className="text-right">
+                      <Moment at={run.createdAt} />
+                    </TdStamp>
+                  </>
+                )}
+              </DataTable>
             </>
           );
         }}
@@ -703,52 +730,56 @@ function RunHistory({
   );
 }
 
-/** `stops` names this run, so a sheet standing on an older run cannot end the conversation's newest
- *  turn, and `focusRun` names it again: the transcript opens on this run's own words, marked. */
-function RunSheet({
-  id,
-  opens,
-  onPlace,
+/** `ConfirmButton` cannot serve here: the press that arms it is the press that shuts the menu, so
+ *  the Delete item arms itself and holds the menu open instead. */
+function ActsMenu({
+  entry,
+  pauses,
+  deletes,
+  onPause,
+  onDelete,
 }: {
-  id: string;
-  opens: string[];
-  onPlace: (place: Placement) => void;
+  entry: Entry;
+  pauses: boolean;
+  deletes: boolean;
+  onPause: () => void;
+  onDelete: () => void;
 }) {
-  const { agent: agentId, name: run } = runAt(id);
-  const agents = useAgents();
-  const member = useMe();
-  const shut = () => onPlace({ opens: closed(opens, id) });
-  const [working, setWorking] = useState(true);
-  const state = usePanelRead<RunPayload>(
-    "/objects/" + TURN_KIND + "/" + run + "?agent=" + agentId,
-    0,
-    working ? WORKING_MS : RESTING_MS,
-  );
-  const status = state.phase === "ready" ? said(state.payload.status.status) : null;
-  useEffect(() => {
-    if (status !== null) setWorking(LIVE.has(status));
-  }, [status]);
-  const agent = agents.find((entry) => entry.id === agentId);
+  const [armed, setArmed] = useState(false);
+  if (!pauses && !deletes) return null;
   return (
-    <Sheet open title={RUN} onClose={shut}>
-      {agent === undefined || member === null ? (
-        <PanelEmpty>{NO_AGENT}</PanelEmpty>
-      ) : (
-        <Panel state={state}>
-          {(held) => (
-            <ChatPane
-              agent={agent}
-              member={member}
-              conversationId={said(held.status.conversation)}
-              readOnly
-              stops={run}
-              focusRun={run}
-              conversationOnly
-            />
-          )}
-        </Panel>
-      )}
-    </Sheet>
+    <DropdownMenu onOpenChange={(open) => !open && setArmed(false)}>
+      <DropdownMenuTrigger asChild>
+        <Button variant="quiet" size="icon" aria-label={MORE}>
+          <IconDots aria-hidden />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {pauses ? (
+          <DropdownMenuItem
+            disabled={entry.paused ? !entry.resumable : !entry.pausable}
+            onSelect={onPause}
+          >
+            {entry.paused ? RESUME : PAUSE}
+          </DropdownMenuItem>
+        ) : null}
+        {deletes ? (
+          <DropdownMenuItem
+            disabled={!entry.deletable}
+            onSelect={(event) => {
+              if (armed) {
+                onDelete();
+                return;
+              }
+              event.preventDefault();
+              setArmed(true);
+            }}
+          >
+            {armed ? CONFIRM_DELETE : DELETE}
+          </DropdownMenuItem>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -781,13 +812,41 @@ function DetailsSheet({
   onDisclosed: () => void;
 }) {
   const shut = () => onPlace({ opens: closed(opens, automationId(lane)), runs: undefined });
-  const ended = async (entry: Entry) => {
-    const outcome = await onDelete(entry);
-    if (!outcome.refused) shut();
-    return outcome;
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
+  const acted = async (run: Promise<NoticeState>) => {
+    const outcome = await run;
+    setNotice(outcome.refused ? outcome : QUIET);
   };
+  const ended = async (held: Entry) => {
+    const outcome = await onDelete(held);
+    setNotice(outcome.refused ? outcome : QUIET);
+    if (!outcome.refused) shut();
+  };
+  const standing = entry !== null && entry.readable ? entry : null;
   return (
-    <Sheet open title={DETAILS} onClose={shut}>
+    <Sheet
+      open
+      title={DETAILS}
+      onClose={shut}
+      actions={
+        standing === null ? null : (
+          <ActsMenu
+            entry={standing}
+            pauses={standing.kind === TASK_KIND || triggerApplies}
+            deletes={standing.kind === TASK_KIND ? deletes : triggerDeletes}
+            onPause={() =>
+              void acted(
+                standing.kind === TASK_KIND
+                  ? onApply(standing, { paused: !standing.paused })
+                  : onPause(standing, !standing.paused),
+              )
+            }
+            onDelete={() => void ended(standing)}
+          />
+        )
+      }
+    >
+      <OutcomeNotice state={notice} />
       {entry === null ? (
         <PanelEmpty>{NOT_ON_PAGE}</PanelEmpty>
       ) : !entry.readable ? (
@@ -799,20 +858,9 @@ function DetailsSheet({
           onOpened={onDisclosed}
         />
       ) : entry.kind === TASK_KIND ? (
-        <TaskFields
-          entry={entry}
-          deletes={deletes}
-          onApply={(spec) => onApply(entry, spec)}
-          onDelete={() => ended(entry)}
-        />
+        <TaskFields entry={entry} onApply={(spec) => onApply(entry, spec)} />
       ) : (
-        <TriggerInfo
-          entry={entry}
-          applies={triggerApplies}
-          deletes={triggerDeletes}
-          onPause={(paused) => onPause(entry, paused)}
-          onDelete={() => ended(entry)}
-        />
+        <TriggerInfo entry={entry} />
       )}
       {entry !== null && !entry.readable ? null : (
         <RunHistory
@@ -995,12 +1043,8 @@ function HeroWaiting() {
   );
 }
 
-/** The workspace's scheduled tasks and source triggers as one table, most recently run first,
- *  headed by three automations the member can start. One row is one automation: what it is called,
- *  what wakes it, when it runs next and when it last ran. A row opens the Details column beside the
- *  list — that automation's own fields, then its runs; pressing a run opens that run's transcript,
- *  read-only. The table pages on `after` and the open automation's runs page on `runs`, so one
- *  listing's step never moves the other's. */
+/** The workspace's scheduled tasks and source triggers as one table. It pages on `after` and the
+ *  open automation's runs page on `runs`, so one listing's step never moves the other's. */
 export function Automations({
   place,
   onPlace,
@@ -1045,58 +1089,54 @@ export function Automations({
         <Panel state={state}>
           {() =>
             entries.length ? (
-              <>
-                <DataTable
-                  columns={COLUMNS}
-                  rows={entries}
-                  rowKey={(entry) => entry.agent + PART + entry.kind + PART + entry.name}
-                  empty={NO_AUTOMATIONS}
-                  open={(entry) => () =>
-                    onPlace({ opens: opened(opens, automationId(entry)), runs: undefined })
-                  }
-                  current={(entry) =>
-                    standing !== null &&
-                    standing.agent === entry.agent &&
-                    standing.kind === entry.kind &&
-                    standing.name === entry.name
-                  }
-                >
-                  {(entry) => (
+              <DataTable
+                columns={COLUMNS}
+                rows={resting(entries)}
+                rowKey={(entry) => entry.agent + PART + entry.kind + PART + entry.name}
+                empty={NO_AUTOMATIONS}
+                lede
+                pager={{
+                  payload: { older: payload?.next_cursor },
+                  after: place.after,
+                  onPlace: (stepped) =>
+                    onPlace({ after: stepped.after, opens: [], runs: undefined }),
+                }}
+                open={(entry) => () =>
+                  onPlace({ opens: opened(opens, automationId(entry)), runs: undefined })
+                }
+                current={(entry) =>
+                  standing !== null &&
+                  standing.agent === entry.agent &&
+                  standing.kind === entry.kind &&
+                  standing.name === entry.name
+                }
+              >
+                {(entry) => {
+                  const rested = entry.paused ? RESTING : undefined;
+                  return (
                     <>
-                      <TdFill>
+                      <TdFill className={cn(FACT, rested)}>
                         <span className="flex min-w-0 items-center gap-sm">
-                          {!entry.readable ? (
-                            <IconLock
-                              role="img"
-                              aria-label="Private"
-                              className="size-(--size-glyph) shrink-0 text-ink-soft"
-                            />
-                          ) : null}
-                          {entry.paused ? (
-                            <IconPlayerPause
-                              role="img"
-                              aria-label={PAUSED}
-                              className="size-(--size-glyph) shrink-0 text-ink-soft"
-                            />
-                          ) : null}
                           <span className="truncate">{entry.label}</span>
+                          <AutomationMarks entry={entry} />
                         </span>
                       </TdFill>
-                      <Td>
+                      <TdStamp className={cn(FACT, rested)}>
+                        <OwnerMark email={entry.owner} />
+                      </TdStamp>
+                      <TdStamp className={cn(FACT, rested)}>
                         <EventMark entry={entry} />
-                      </Td>
-                      <TdFact>{entry.nextRunAt ? <Moment at={entry.nextRunAt} /> : ""}</TdFact>
-                      <TdFact>{entry.lastRunAt ? <Moment at={entry.lastRunAt} /> : NEVER_RAN}</TdFact>
+                      </TdStamp>
+                      <TdStamp className={rested}>
+                        {entry.nextRunAt ? <Moment at={entry.nextRunAt} /> : ""}
+                      </TdStamp>
+                      <TdStamp className={rested}>
+                        {entry.lastRunAt ? <Moment at={entry.lastRunAt} /> : ""}
+                      </TdStamp>
                     </>
-                  )}
-                </DataTable>
-                <Pager
-                  payload={{ older: payload?.next_cursor }}
-                  onPlace={(stepped) =>
-                    onPlace({ after: stepped.after, opens: [], runs: undefined })
-                  }
-                />
-              </>
+                  );
+                }}
+              </DataTable>
             ) : null
           }
         </Panel>
@@ -1145,8 +1185,6 @@ export function Automations({
           }
           onDisclosed={() => setReloads((count) => count + 1)}
         />
-      ) : top.startsWith(RUN_PREFIX) ? (
-        <RunSheet key={top} id={top} opens={opens} onPlace={onPlace} />
       ) : null}
     </>
   );

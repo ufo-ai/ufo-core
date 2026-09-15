@@ -50,16 +50,20 @@ function labelProperties(columns: string[] | undefined): Record<string, string> 
 export function tableFloor({
   prose,
   fact = 0,
+  stamp = 0,
   act = false,
 }: {
   prose: number;
   fact?: number;
+  stamp?: number;
   act?: boolean;
 }): string {
   return (
     "calc(" +
     fact +
     " * var(--size-fact-column) + " +
+    stamp +
+    " * var(--size-stamp-column) + " +
     prose +
     " * var(--size-prose-column) + " +
     (act ? 1 : 0) +
@@ -123,6 +127,18 @@ export function Clip({ children }: { children: ReactNode }) {
  *  the two flexible columns beside it take whatever is left. */
 export function TdFact({ className, ...props }: ComponentProps<"td">) {
   return <Td className={cn("w-(--size-fact-column)", className)} {...props} />;
+}
+
+/** A cell in the narrow fixed track: the mark or the short age a row ends on. The track is stated
+ *  rather than measured, so five columns still sum to less than the section they sit in. */
+export function TdStamp({ className, ...props }: ComponentProps<"td">) {
+  return (
+    <td
+      data-slot="table-cell"
+      className={cn(CELL, "w-(--size-stamp-column) truncate", className)}
+      {...props}
+    />
+  );
 }
 
 /** It drops `truncate` rather than overriding it, because `overflow-visible` beside `truncate` is

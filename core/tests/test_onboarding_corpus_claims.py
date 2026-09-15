@@ -528,11 +528,11 @@ CLAIMS = (
         ),
     ),
     Claim(
-        claim="a run opens its transcript read-only",
+        claim="a run opens its transcript",
         corpus="references/capabilities.md",
         phrase="a run opens its transcript",
         source=AUTOMATIONS_VIEW,
-        pattern=r"<ChatPane\n(?:.*\n){0,5}?\s+readOnly\n\s+stops=\{run\}",
+        pattern=r"navigate\(chatHash\(run\.conversation",
     ),
     Claim(
         claim="Automations can pause or resume a scheduled task",
@@ -568,12 +568,11 @@ CLAIMS = (
         phrase="its own Details pane still pauses, resumes or deletes it",
         source=AUTOMATIONS_VIEW,
         pattern=(
-            r"function TriggerInfo\(\{\n"
-            r"(?:.*\n){0,30}?"
+            r"function ActsMenu\(\{\n"
+            r"(?:.*\n){0,40}?"
             r"\s+\{entry\.paused \? RESUME : PAUSE\}\n"
-            r"(?:.*\n){0,10}?"
-            r"\s+<ConfirmButton\n"
-            r"\s+verb=\{DELETE\}"
+            r"(?:.*\n){0,20}?"
+            r"\s+\{armed \? CONFIRM_DELETE : DELETE\}"
         ),
     ),
     Claim(

@@ -458,7 +458,7 @@ test("the agent's own edges fit that same desktop", async () => {
   const across = declaredFloor((await screen.findByText("github")).closest("table")!);
   expect(pageFits(across)).toBe(true);
   expect(across).toBe(
-    "calc(2 * var(--size-fact-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
+    "calc(2 * var(--size-fact-column) + 0 * var(--size-stamp-column) + 1 * var(--size-prose-column) + 1 * var(--size-act))",
   );
 });
 

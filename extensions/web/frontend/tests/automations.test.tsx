@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -33,6 +33,7 @@ function mine(row: object) {
   return owned({
     ...row,
     mine: true,
+    owner_email: MEMBER.email,
     content_editable: true,
     schedule_editable: true,
     pausable: true,
@@ -189,6 +190,21 @@ const FAILED_RUN = {
 
 const RUNS_CURSOR = "older-runs";
 
+/** The acts stand behind the sheet's own glyph, so reaching one is a press on the menu first. The
+ *  menu renders in a portal, so it is found on the screen rather than inside the sheet. */
+async function openActs(scope: HTMLElement): Promise<HTMLElement> {
+  await userEvent.click(within(scope).getByRole("button", { name: "More" }));
+  return await screen.findByRole("menu");
+}
+
+/** Radix marks a disabled menu item with `aria-disabled`, never the DOM property a button carries. */
+const blocked = (item: HTMLElement) => item.getAttribute("aria-disabled") === "true";
+
+/** A run row states its stamp on the `time` it carries, which is the wire's own value and so does
+ *  not move with the zone the suite runs in. */
+const runStamps = (scope: HTMLElement) =>
+  [...scope.querySelectorAll("tbody time[datetime]")].map((node) => node.getAttribute("datetime"));
+
 const REFUSED_EDIT = "Only the member who wrote this task can change it.";
 
 const HEROES = [
@@ -285,7 +301,7 @@ test("one table lists tasks and triggers, most recently run first, in the member
 
   expect(await screen.findByText("Digest the night's changes")).toBeTruthy();
   const heads = screen.getAllByRole("columnheader").map((head) => head.textContent);
-  expect(heads).toEqual(["Name", "Events", "Next run", "Last run"]);
+  expect(heads).toEqual(["Name", "Creator", "Events", "Next run", "Last run"]);
   const names = screen
     .getAllByRole("row")
     .slice(1)
@@ -299,11 +315,103 @@ test("one table lists tasks and triggers, most recently run first, in the member
   expect(screen.queryByText("nightly-digest")).toBeNull();
   expect(screen.queryByText(/github-9f2c1a/)).toBeNull();
   expect(screen.getByRole("img", { name: "Paused" })).toBeTruthy();
-  expect(screen.getAllByRole("img", { name: "Schedule" })).toHaveLength(2);
+  expect(screen.getByRole("img", { name: "Daily" })).toBeTruthy();
+  expect(screen.getByRole("img", { name: "Weekly" })).toBeTruthy();
   expect(screen.getAllByRole("img", { name: "GitHub pull_requests" })).toHaveLength(2);
 });
 
-test("a scheduled row says how often it fires, and a custom cron says nothing", async () => {
+const LIST_CURSOR = "older-automations";
+
+test("the owner column is the monogram alone, and the address is under the pointer", async () => {
+  automationsOnWire([NIGHTLY, PRIVATE_TASK]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByText("Digest the night's changes");
+  const owners = screen
+    .getAllByRole("row")
+    .slice(1)
+    .map((held) => within(held).getAllByRole("cell")[1].textContent);
+  expect(owners).toEqual(["M", "O"]);
+  expect(screen.queryByText("owner@example.com")).toBeNull();
+
+  await userEvent.hover(screen.getByLabelText("owner@example.com"));
+  const tip = await screen.findByRole("tooltip");
+  expect(tip.getAttribute("data-side")).toBe("top");
+  expect(tip.textContent).toBe("owner@example.com");
+});
+
+test("a row's marks stand after its name, and name what they mark under the pointer", async () => {
+  automationsOnWire([PAUSED_TASK, PRIVATE_TASK]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const paused = await screen.findByRole("img", { name: "Paused" });
+  const named = screen.getByText("Round up the week");
+  expect(named.closest("td")?.contains(paused)).toBe(true);
+  expect(named.compareDocumentPosition(paused) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  await userEvent.hover(screen.getByRole("img", { name: "Private automation" }));
+  expect((await screen.findByRole("tooltip")).textContent).toBe("Private automation");
+});
+
+test("a paused automation sinks under the running ones, and its cells recede", async () => {
+  automationsOnWire([PAUSED_TASK, NIGHTLY, WATCHED_PULL]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByText("Digest the night's changes");
+  const rows = screen.getAllByRole("row").slice(1);
+  const names = rows.map((row) => within(row).getAllByRole("cell")[0]?.textContent);
+  expect(names).toEqual([
+    "Digest the night's changes",
+    "Watching " + PULL_REQUEST,
+    "Round up the week",
+  ]);
+
+  const rested = rows[2];
+  for (const cell of within(rested).getAllByRole("cell")) {
+    expect(cell.className).toContain("opacity-(--opacity-muted-strong)");
+  }
+  expect(rested.className).not.toContain("opacity-(--opacity-muted-strong)");
+  for (const cell of within(rows[0]).getAllByRole("cell")) {
+    expect(cell.className).not.toContain("opacity-(--opacity-muted-strong)");
+  }
+  expect(within(rested).getByRole("img", { name: "Paused" })).toBeTruthy();
+});
+
+test("the table pages from its own footer, and a listing on one page draws no step", async () => {
+  automationsOnWire();
+  location.hash = automationsHash();
+  const { unmount } = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByText("Digest the night's changes");
+  expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "First" })).toBeNull();
+  unmount();
+
+  wire({
+    "/workspace/automations": () => json({ heroes: HEROES }),
+    "/automations": (url: string) =>
+      url.includes("cursor=" + LIST_CURSOR)
+        ? automationsIndex([PAUSED_TASK])
+        : automationsIndex([NIGHTLY], LIST_CURSOR),
+    "/objects/turn": () => json({ ...TURN_INDEX, objects: [], next_cursor: null }),
+  });
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const table = (await screen.findByText("Digest the night's changes")).closest("table")!;
+  expect(within(table).getByRole("button", { name: "First" })).toHaveProperty("disabled", true);
+  await userEvent.click(within(table).getByRole("button", { name: "Next" }));
+
+  expect(await screen.findByText("Round up the week")).toBeTruthy();
+  expect(decodeURIComponent(location.hash)).toContain("after=" + LIST_CURSOR);
+  expect(screen.getByRole("button", { name: "First" })).toHaveProperty("disabled", false);
+  expect(screen.getByRole("button", { name: "Next" })).toHaveProperty("disabled", true);
+});
+
+test("a scheduled row names how often it fires on its mark, and a custom cron says Schedule", async () => {
   const CUSTOM = {
     ...NIGHTLY,
     name: "odd-hours",
@@ -318,8 +426,10 @@ test("a scheduled row says how often it fires, and a custom cron says nothing", 
   const events = screen
     .getAllByRole("row")
     .slice(1)
-    .map((row) => within(row).getAllByRole("cell")[1]?.textContent);
-  expect(events).toEqual(["Daily", "Weekly", "", ""]);
+    .map((row) =>
+      within(row).getAllByRole("cell")[2]?.querySelector("[role=img]")?.getAttribute("aria-label"),
+    );
+  expect(events).toEqual(["Daily", "Schedule", "GitHub pull_requests", "Weekly"]);
 });
 
 test("a long automation name is cut to its column rather than stretching the table", async () => {
@@ -358,7 +468,7 @@ test("a task pauses, resumes and deletes from its own Details", async () => {
   await userEvent.click(await screen.findByText("Digest the night's changes"));
   const details = await screen.findByRole("dialog", { name: "Details" });
 
-  await userEvent.click(within(details).getByRole("button", { name: "Pause" }));
+  await userEvent.click(within(await openActs(details)).getByRole("menuitem", { name: "Pause" }));
   await vi.waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toEqual({
     verb: "apply",
@@ -366,10 +476,11 @@ test("a task pauses, resumes and deletes from its own Details", async () => {
     name: "nightly-digest",
     spec: { paused: true },
   });
-  await within(details).findByRole("button", { name: "Resume" });
 
-  await userEvent.click(within(details).getByRole("button", { name: "Delete" }));
-  await userEvent.click(within(details).getByRole("button", { name: "Confirm delete" }));
+  const acts = await openActs(details);
+  expect(within(acts).getByRole("menuitem", { name: "Resume" })).toBeTruthy();
+  await userEvent.click(within(acts).getByRole("menuitem", { name: "Delete" }));
+  await userEvent.click(within(acts).getByRole("menuitem", { name: "Confirm delete" }));
 
   await vi.waitFor(() => expect(posted.length).toBe(2));
   expect(posted[1]).toEqual({ verb: "delete", kind: "scheduled_task", name: "nightly-digest" });
@@ -383,12 +494,13 @@ test("a paused task offers Resume, and so does a paused trigger", async () => {
 
   await userEvent.click(await screen.findByText("Round up the week"));
   const paused = await screen.findByRole("dialog", { name: "Details" });
-  expect(within(paused).getByRole("button", { name: "Resume" })).toBeTruthy();
+  expect(within(await openActs(paused)).getByRole("menuitem", { name: "Resume" })).toBeTruthy();
+  await userEvent.keyboard("{Escape}");
 
   await userEvent.click(within(paused).getByRole("button", { name: "Close" }));
   await userEvent.click(await screen.findByText("Watching GitHub pull_requests"));
   const stopped = await screen.findByRole("dialog", { name: "Details" });
-  expect(within(stopped).getByRole("button", { name: "Resume" })).toBeTruthy();
+  expect(within(await openActs(stopped)).getByRole("menuitem", { name: "Resume" })).toBeTruthy();
 });
 
 test("a trigger pauses and deletes from its own Details, and never edits what it watches", async () => {
@@ -401,7 +513,7 @@ test("a trigger pauses and deletes from its own Details, and never edits what it
   const watched = await screen.findByRole("dialog", { name: "Details" });
   expect(within(watched).queryByLabelText("Name")).toBeNull();
 
-  await userEvent.click(within(watched).getByRole("button", { name: "Pause" }));
+  await userEvent.click(within(await openActs(watched)).getByRole("menuitem", { name: "Pause" }));
   await vi.waitFor(() => expect(posted.length).toBe(1));
   expect(posted[0]).toEqual({
     verb: "apply",
@@ -414,10 +526,10 @@ test("a trigger pauses and deletes from its own Details, and never edits what it
       paused: true,
     },
   });
-  await within(watched).findByRole("button", { name: "Resume" });
-
-  await userEvent.click(within(watched).getByRole("button", { name: "Delete" }));
-  await userEvent.click(within(watched).getByRole("button", { name: "Confirm delete" }));
+  const watchedActs = await openActs(watched);
+  expect(within(watchedActs).getByRole("menuitem", { name: "Resume" })).toBeTruthy();
+  await userEvent.click(within(watchedActs).getByRole("menuitem", { name: "Delete" }));
+  await userEvent.click(within(watchedActs).getByRole("menuitem", { name: "Confirm delete" }));
 
   await vi.waitFor(() => expect(posted.length).toBe(2));
   expect(posted[1]).toEqual({ verb: "delete", kind: "source_trigger", name: TRIGGER_NAME });
@@ -439,8 +551,9 @@ test("a trigger another member wrote stands its acts disabled", async () => {
 
   await userEvent.click(await screen.findByText("Watching " + PULL_REQUEST));
   const watched = await screen.findByRole("dialog", { name: "Details" });
-  expect(within(watched).getByRole("button", { name: "Pause" })).toHaveProperty("disabled", true);
-  expect(within(watched).getByRole("button", { name: "Delete" })).toHaveProperty("disabled", true);
+  const theirActs = await openActs(watched);
+  expect(blocked(within(theirActs).getByRole("menuitem", { name: "Pause" }))).toBe(true);
+  expect(blocked(within(theirActs).getByRole("menuitem", { name: "Delete" }))).toBe(true);
 });
 
 test("a trigger states the streams it watches and the resource it watches them on", async () => {
@@ -501,12 +614,13 @@ test("an automation opens Details: the fields it runs under, with its runs under
     automationsHash() + "?open=automation/" + AGENT.id + "/scheduled_task/nightly-digest",
   );
   expect(within(details).getByLabelText("Instructions").tagName).toBe("TEXTAREA");
-  expect(await within(details).findByText(/Nothing changed overnight/)).toBeTruthy();
+  expect(await within(details).findByRole("img", { name: "Done" })).toBeTruthy();
+  expect(runStamps(details)).toEqual(["2026-08-27T09:00:00+00:00"]);
   expect(within(details).queryByRole("button", { name: "Next" })).toBeNull();
   expect(within(details).queryByRole("heading", { name: "Digest the night's changes" })).toBeNull();
 });
 
-test("the automation's Details carry its own fields, and a run there opens its transcript read-only", async () => {
+test("the automation's Details carry its own fields, and a run there opens its own chat", async () => {
   const { calls } = automationsOnWire(
     undefined,
     [],
@@ -524,17 +638,14 @@ test("the automation's Details carry its own fields, and a run there opens its t
   expect(within(pane).getByLabelText("Instructions")).toHaveProperty("value", "digest the night");
   expect(within(pane).getByRole("button", { name: "When to run" })).toBeTruthy();
   expect(within(pane).getByText("Run history")).toBeTruthy();
-  expect(await within(pane).findByText(/The feed 502ed\./)).toBeTruthy();
+  expect(await within(pane).findByRole("img", { name: "Failed" })).toBeTruthy();
   const read = calls.find((url) => url.includes("/objects/turn?"));
   expect(read).toContain("fired=true");
   expect(read).toContain("source_name=nightly-digest");
 
-  await userEvent.click((await within(pane).findByRole("img", { name: "Running" })).closest("li")!);
+  await userEvent.click((await within(pane).findByRole("img", { name: "Running" })).closest("tr")!);
 
-  const run = await screen.findByRole("dialog", { name: "Run" });
-  expect(await within(run).findByRole("button", { name: "Stop" })).toBeTruthy();
-  expect(within(run).queryByRole("textbox")).toBeNull();
-  expect(decodeURIComponent(location.hash)).toContain("run/" + AGENT.id + "/" + TURN_ID);
+  expect(decodeURIComponent(location.hash)).toBe("#/c/" + CONVO_ID + "?run=" + TURN_ID);
   expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
 });
 
@@ -637,26 +748,44 @@ test("a monthly frequency is picked as a start date and fires on that day of the
   expect(posted[1]).toMatchObject({ spec: { schedule: "0 9 12 * *" } });
 });
 
-test("a run listed in Details opens its transcript read-only, beside the automation it ran for", async () => {
+/** The run's own words are marked by the chat the address lands on, which `tests/chat.test.tsx`
+ *  holds; what this screen owes is the address. */
+test("a run leaves the sheet for the conversation it ran in, standing on its own turn", async () => {
   automationsOnWire();
   location.hash = automationsHash();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByText("Digest the night's changes"));
   const details = await screen.findByRole("dialog", { name: "Details" });
-  await userEvent.click((await within(details).findByRole("img", { name: "Done" })).closest("li")!);
+  await userEvent.click((await within(details).findByRole("img", { name: "Done" })).closest("tr")!);
 
-  const run = await screen.findByRole("dialog", { name: "Run" });
-  expect(await within(run).findByText("No messages in this conversation yet.")).toBeTruthy();
-  expect(within(run).queryByRole("button", { name: "Send" })).toBeNull();
-  expect(decodeURIComponent(location.hash)).toBe(
-    automationsHash() +
-      "?open=" +
-      [
-        "automation/" + AGENT.id + "/scheduled_task/nightly-digest",
-        "run/" + AGENT.id + "/" + TURN_ID,
-      ].join("~"),
-  );
+  expect(decodeURIComponent(location.hash)).toBe("#/c/" + CONVO_ID + "?run=" + TURN_ID);
+  expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
+  expect(screen.queryByRole("dialog", { name: "Run" })).toBeNull();
+});
+
+test("a run states how it ended and what it said, with its age alone on the right", async () => {
+  automationsOnWire(undefined, [], null, { messages: [] }, [RUN, FAILED_RUN]);
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByText("Digest the night's changes"));
+  const details = await screen.findByRole("dialog", { name: "Details" });
+  await within(details).findByRole("img", { name: "Done" });
+
+  const table = within(details).getByRole("table");
+  expect(within(table).queryAllByRole("columnheader")).toEqual([]);
+  const rows = [...table.querySelectorAll("tbody tr")];
+  expect(rows.map((row) => row.querySelectorAll("td")[0].textContent)).toEqual([
+    "Done · Nothing changed overnight.",
+    "Failed · The feed 502ed.",
+  ]);
+  // The age reads off the clock, so the row is pinned by the stamp the wire sent rather than by the
+  // distance from today, which moves every day the suite runs.
+  expect(
+    rows.map((row) => row.querySelectorAll("td")[1].querySelector("time")?.getAttribute("datetime")),
+  ).toEqual(["2026-08-27T09:00:00+00:00", "2026-08-26T09:00:00+00:00"]);
+  expect(within(table).getByRole("img", { name: "Failed" })).toBeTruthy();
 });
 
 test("the run history pages on its own cursor, and the automations list stays where it stands", async () => {
@@ -666,11 +795,12 @@ test("the run history pages on its own cursor, and the automations list stays wh
 
   await userEvent.click(await screen.findByText("Digest the night's changes"));
   const details = await screen.findByRole("dialog", { name: "Details" });
-  expect(await within(details).findByText(/Nothing changed overnight/)).toBeTruthy();
+  await within(details).findByRole("img", { name: "Done" });
+  expect(runStamps(details)).toEqual(["2026-08-27T09:00:00+00:00"]);
 
   await userEvent.click(await within(details).findByRole("button", { name: "Next" }));
 
-  expect(await within(details).findByText(/The night before was quiet too/)).toBeTruthy();
+  await waitFor(() => expect(runStamps(details)).toEqual(["2026-08-26T09:00:00+00:00"]));
   expect(decodeURIComponent(location.hash)).toContain("runs=" + RUNS_CURSOR);
   expect(
     calls.some((url) => url.includes("/objects/turn?") && url.includes("cursor=" + RUNS_CURSOR)),
@@ -723,8 +853,9 @@ test("a task another member wrote states the refusal and stands its cadence disa
     true,
   );
   expect(within(details).getByLabelText("Name")).toHaveProperty("readOnly", true);
-  expect(within(details).getByRole("button", { name: "Pause" })).toHaveProperty("disabled", true);
-  expect(within(details).getByRole("button", { name: "Delete" })).toHaveProperty("disabled", true);
+  const lockedActs = await openActs(details);
+  expect(blocked(within(lockedActs).getByRole("menuitem", { name: "Pause" }))).toBe(true);
+  expect(blocked(within(lockedActs).getByRole("menuitem", { name: "Delete" }))).toBe(true);
 
   fireEvent.change(within(details).getByLabelText("Name"), { target: { value: "Theirs" } });
   fireEvent.blur(within(details).getByLabelText("Name"));
@@ -758,20 +889,14 @@ test("an admin may stop or delete another member's task but cannot resume or rew
     "disabled",
     true,
   );
-  expect(within(details).getByRole("button", { name: "Pause" })).toHaveProperty(
-    "disabled",
-    false,
-  );
-  expect(within(details).getByRole("button", { name: "Delete" })).toHaveProperty(
-    "disabled",
-    false,
-  );
+  const adminActs = await openActs(details);
+  expect(blocked(within(adminActs).getByRole("menuitem", { name: "Pause" }))).toBe(false);
+  expect(blocked(within(adminActs).getByRole("menuitem", { name: "Delete" }))).toBe(false);
 
-  await userEvent.click(within(details).getByRole("button", { name: "Pause" }));
+  await userEvent.click(within(adminActs).getByRole("menuitem", { name: "Pause" }));
   await vi.waitFor(() => expect(posted).toHaveLength(1));
   expect(posted[0]).toMatchObject({ spec: { paused: true } });
-  expect(await within(details).findByRole("button", { name: "Resume" })).toHaveProperty(
-    "disabled",
+  expect(blocked(within(await openActs(details)).getByRole("menuitem", { name: "Resume" }))).toBe(
     true,
   );
 });
@@ -803,7 +928,7 @@ test("a private task another member wrote opens the acknowledgement instead of i
   location.hash = automationsHash();
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findByRole("img", { name: "Private" })).toBeTruthy();
+  expect(await screen.findByRole("img", { name: "Private automation" })).toBeTruthy();
   await userEvent.click(await screen.findByText("morning-brief"));
   const details = await screen.findByRole("dialog", { name: "Details" });
   expect(within(details).getByText(/private to owner@example.com/).textContent).toContain(
@@ -1105,34 +1230,8 @@ test("a scheduled task states its next run and a trigger leaves that column blan
       .map((cell) => cell.textContent);
   };
 
-  expect((await cells("Digest the night's changes"))[2]).toBeTruthy();
-  expect((await cells("Watching " + PULL_REQUEST))[2]).toBe("");
-  expect((await cells("Round up the week"))[2]).toBe("");
+  expect((await cells("Digest the night's changes"))[3]).toBeTruthy();
+  expect((await cells("Watching " + PULL_REQUEST))[3]).toBe("");
+  expect((await cells("Round up the week"))[3]).toBe("");
 });
 
-test("a run opened from its automation stands on the words that run wrote", async () => {
-  const scrolled = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
-  automationsOnWire(undefined, [], null, {
-    messages: [
-      { role: "assistant", text: "The night before was quiet too.", turn: ARRIVAL_ID },
-      { role: "assistant", text: "Nothing changed overnight.", turn: TURN_ID },
-    ],
-  });
-  location.hash = automationsHash();
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-
-  await userEvent.click(await screen.findByText("Digest the night's changes"));
-  const details = await screen.findByRole("dialog", { name: "Details" });
-  await userEvent.click((await within(details).findByRole("img", { name: "Done" })).closest("li")!);
-
-  const run = await screen.findByRole("dialog", { name: "Run" });
-  await within(run).findByText("Nothing changed overnight.");
-  const standing = await vi.waitFor(() => {
-    const found = run.querySelector("[data-highlight]");
-    expect(found).not.toBeNull();
-    return found!;
-  });
-  expect(standing.textContent).toContain("Nothing changed overnight.");
-  expect(standing.textContent).not.toContain("The night before was quiet too.");
-  expect(scrolled).toHaveBeenCalled();
-});

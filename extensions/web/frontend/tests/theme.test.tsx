@@ -570,5 +570,9 @@ test("muted text is the palette's second tone, never ink held back by opacity", 
     .filter((name) => name.endsWith(".tsx") || name.endsWith(".ts"))
     .filter((name) => /opacity-\(--opacity-muted/.test(readFileSync(join(src, name), "utf8")));
 
-  expect(dimmed.sort()).toEqual(["components/ui/button.tsx", "kernel/table.tsx"]);
+  expect(dimmed.sort()).toEqual([
+    "components/ui/button.tsx",
+    "kernel/table.tsx",
+    "views/Automations.tsx",
+  ]);
 });

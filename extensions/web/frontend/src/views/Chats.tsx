@@ -1,10 +1,8 @@
 import { useEffect, useState } from "react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Search } from "@/components/ui/field";
 import { Segmented } from "@/components/ui/filter";
 import { TdFact, TdFill, TdWhole } from "@/components/ui/table";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { BANDS, COLUMN, FacetMenu, Header, Page, PageToolbar, Pane } from "@/kernel/pane";
 import type { FacetGroup } from "@/kernel/pane";
 import { Notice, PanelEmpty, PanelSkeleton, Section, usePanelRead } from "@/kernel/panel";
@@ -20,6 +18,7 @@ import {
 } from "@/lib/chatMark";
 import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
+import { OwnerMark } from "@/lib/ownerMark";
 import {
   CHAT_STATE_RANK,
   chatRows,
@@ -65,28 +64,6 @@ const SCOPE_SEGMENTS: { label: string; value: Scope }[] = [
 
 function asScope(value: string | undefined): Scope {
   return value === "mine" || value === "workspace" ? value : "all";
-}
-
-function owner(row: Conversation): string {
-  return row.owner_name || row.owner_email || "";
-}
-
-/** One letter, because a second initial is a name the portal does not hold; one ink, because a
- *  column of tinted circles reads as a status the owner does not have. */
-function Owner({ row }: { row: Conversation }) {
-  if (!row.owner_email) return null;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Avatar aria-label={owner(row)}>
-          <AvatarFallback>{owner(row).slice(0, 1).toUpperCase()}</AvatarFallback>
-        </Avatar>
-      </TooltipTrigger>
-      <TooltipContent side="top">
-        {row.owner_name ? row.owner_name + " · " + row.owner_email : row.owner_email}
-      </TooltipContent>
-    </Tooltip>
-  );
 }
 
 function scoped(row: Conversation, scope: Scope): boolean {
@@ -304,7 +281,7 @@ function Listing({
             </span>
           </TdFill>
           <TdWhole className={FACT}>
-            <Owner row={row} />
+            <OwnerMark name={row.owner_name} email={row.owner_email} />
           </TdWhole>
           <TdFact>
             <Moment at={row.last_at} />
