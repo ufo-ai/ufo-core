@@ -9,12 +9,14 @@ export function Table({
   columns,
   floor,
   measured,
+  lede,
   style,
   ...props
 }: ComponentProps<"table"> & {
   columns?: string[];
   floor?: string;
   measured?: boolean;
+  lede?: boolean;
 }) {
   return (
     <div data-slot="table-container" className="shrink-0 overflow-x-auto">
@@ -22,6 +24,7 @@ export function Table({
         data-slot="table"
         data-stacks={columns ? "" : undefined}
         data-measured={measured ? "" : undefined}
+        data-lede={lede ? "" : undefined}
         style={{ ...labelProperties(columns), "--table-floor": floor, ...style } as CSSProperties}
         className={cn(
           "w-full min-w-(--table-floor) border-collapse [&_tr]:h-(--size-record)",

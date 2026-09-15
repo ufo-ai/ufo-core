@@ -42,8 +42,8 @@ const NOT_SHARED = "This conversation is not shared with this account.";
 
 const RECENCY: RailSort = "recency";
 
-const PORTAL_ONLY = { terminal: false, slack: false, imessage: false };
-const EVERY_SURFACE = { terminal: true, slack: true, imessage: true };
+const PORTAL_ONLY = { terminal: false, slack: false, imessage: false, automations: true };
+const EVERY_SURFACE = { terminal: true, slack: true, imessage: true, automations: true };
 
 async function hoverCard(): Promise<HTMLElement> {
   return await waitFor(() => {
@@ -77,10 +77,15 @@ function row(id: string, last_at: string): ChatRow {
     surface_label: null,
     audience: "member:m1",
     member_email: "member@example.com",
+    owner_email: "member@example.com",
+    owner_name: null,
     mine: true,
     speaker: null,
     source: null,
     turn: "idle",
+    automation_kind: null,
+    automation_name: null,
+    automation_title: null,
     unread: false,
   };
 }
@@ -132,12 +137,12 @@ test("the rail holds portal conversations until the filter names another surface
 
   expect(railGroups(rows, PORTAL_ONLY, RECENCY)).toEqual([{ label: null, rows: [rows[0]] }]);
 
-  const withSlack = railGroups(rows, { terminal: false, slack: true, imessage: false }, RECENCY);
+  const withSlack = railGroups(rows, { terminal: false, slack: true, imessage: false, automations: true }, RECENCY);
   expect(withSlack.map((group) => group.label)).toEqual([null, "Other members"]);
   expect(withSlack[0].rows.map((entry) => entry.conversation_id)).toEqual(["a", "s1"]);
   expect(withSlack[1].rows.map((entry) => entry.conversation_id)).toEqual(["s2"]);
 
-  const withTerminal = railGroups(rows, { terminal: true, slack: false, imessage: false }, RECENCY);
+  const withTerminal = railGroups(rows, { terminal: true, slack: false, imessage: false, automations: true }, RECENCY);
   expect(withTerminal.map((group) => group.rows.map((entry) => entry.conversation_id))).toEqual([
     ["a", "u1"],
   ]);
@@ -149,8 +154,8 @@ test("the rail holds portal conversations until the filter names another surface
 test("a browser holding no filter admits every surface, and holds what a member names", () => {
   expect(heldRailShown()).toEqual(EVERY_SURFACE);
 
-  holdRailShown({ terminal: true, slack: false, imessage: false });
-  expect(heldRailShown()).toEqual({ terminal: true, slack: false, imessage: false });
+  holdRailShown({ terminal: true, slack: false, imessage: false, automations: true });
+  expect(heldRailShown()).toEqual({ terminal: true, slack: false, imessage: false, automations: true });
 
   holdRailShown(EVERY_SURFACE);
   expect(heldRailShown()).toEqual(EVERY_SURFACE);
@@ -243,6 +248,18 @@ test("the rail draws its first page while the walk is still reading", async () =
     await held;
   });
   expect(await screen.findByRole("button", { name: /Second page thread/ })).toBeTruthy();
+});
+
+/** A comma list written for the surface-only option set carries no name for automations, and a
+ *  read of it cannot tell a member's choice from the option's absence. */
+test("a filter choice held before automations were filterable hides no automation", async () => {
+  localStorage.setItem("rail-shown", "terminal,slack");
+  const run = { ...CHAT_ROW, conversation_id: SECOND_ID, title: "Nightly digest", automation_kind: "scheduled_task", automation_name: "nightly-digest", automation_title: "Nightly digest" };
+  wire({ ...chatsOnWire([CHAT_ROW, run]) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByRole("button", { name: /Nightly digest/ })).toBeTruthy();
+  expect(heldRailShown().automations).toBe(true);
 });
 
 test("the filter admits a surface into the rail and the browser keeps the choice", async () => {
@@ -1184,6 +1201,8 @@ function slackConversation(fields: Record<string, unknown> = {}) {
     surface_label: "#ops-warehouse",
     audience: "shared",
     member_email: null,
+    owner_email: null,
+    owner_name: null,
     description: "Warehouse restock plan",
     source: "https://acme.slack.com/archives/C1/p1700000000000100",
     turn_count: 1,
@@ -1340,6 +1359,8 @@ test("a markdown file in a Slack conversation opens the attachment sheet", async
               surface_label: "#ops-warehouse",
               audience: "shared",
               member_email: null,
+              owner_email: null,
+              owner_name: null,
               source: "https://acme.slack.com/archives/C1/p1700000000000100",
               turn_count: 1,
               created_at: "2026-08-01T08:00:00Z",
@@ -1566,8 +1587,8 @@ test("a failed rail read states it and retries on demand", async () => {
 test("a browser holding no filter admits every surface, and holds what a member names", () => {
   expect(heldRailShown()).toEqual(EVERY_SURFACE);
 
-  holdRailShown({ terminal: true, slack: false, imessage: false });
-  expect(heldRailShown()).toEqual({ terminal: true, slack: false, imessage: false });
+  holdRailShown({ terminal: true, slack: false, imessage: false, automations: true });
+  expect(heldRailShown()).toEqual({ terminal: true, slack: false, imessage: false, automations: true });
 
   holdRailShown(EVERY_SURFACE);
   expect(heldRailShown()).toEqual(EVERY_SURFACE);

@@ -7,6 +7,8 @@ import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 
 export const APP_STORE_TITLE = "App Store";
 
+export const HOME_TITLE = "Home";
+
 const PRODUCT = "ufo";
 const TRAIL = " · ";
 const NEW_CONVERSATION = "New conversation";
@@ -104,6 +106,8 @@ function where(
       return [{ label: APPS }];
     case "store":
       return [{ label: APP_STORE_TITLE }];
+    case "chats":
+      return [{ label: HOME_TITLE }];
     case "agent":
       return [named(route.agentId)];
     case "agent-setup":

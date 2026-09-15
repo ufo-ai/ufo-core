@@ -932,7 +932,19 @@ that mark the way out to it where the surface reported one. A link into the port
 surface names its target as `?c=<conversation_id>`,
 because a fragment never reaches the server: the sign-in redirect and the sign-in form carry that
 target, so a signed-out click lands on the conversation rather than a new chat, and a permalink
-whose id is not a conversation id reports the bad link rather than opening one. The
+whose id is not a conversation id reports the bad link rather than opening one. **Home** is that same projection as a table at `#/chats`, every conversation the member reaches in
+one listing rather than the rail's grouped column. Its first cell leads with the chat's state — the
+agent working, a turn held for an answer only they can give, a thread that moved while they were
+away, or one at rest — and the table stands in that order, recency inside each state, so what wants
+the member is what they read first. Two fields of the projection answer the columns beside it.
+`automated` is whether an automation ever fired a turn in the conversation: every turn records what
+fired it and only a scheduled task's run and a source trigger's delivery ever do, so the column's
+presence is the fact and core states it without naming a kind an extension owns. `owner_email` is
+whose the conversation is — the member it is bound to, and for a workspace conversation, which
+`conversation_audience_member` leaves bound to nobody, whoever spoke first; a member listing carries
+only conversations their own message opened, so every row has an owner and none is owned by the
+workspace. The scope and the search ride the address, and below the narrow breakpoint the table
+draws that first cell alone rather than stacking every column under each record. The
 conversations view lists the member's own plus the workspace-shared ones and opens each as its
 turns, the turns those spawned nested beneath them (a subagent runs in its own
 conversation carrying the parent's audience, in the spawning turn's sandbox); an admin lists every

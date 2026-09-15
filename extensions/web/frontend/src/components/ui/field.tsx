@@ -1,4 +1,5 @@
 import * as LabelPrimitive from "@radix-ui/react-label";
+import { IconX } from "@tabler/icons-react";
 import type { ComponentProps, ReactNode } from "react";
 
 import { cn } from "@/lib/cn";
@@ -81,14 +82,21 @@ export function Input({
   );
 }
 
+export const CLEAR_SEARCH = "Clear search";
+
+/** `onClear` is what empties the field and the read behind it in one press, so a member is never
+ *  left deleting a query by hand to see everything again. Escape clears it from the keys, which is
+ *  what the native `type=search` control does in the browsers that draw one. */
 export function Search({
   label,
   onSubmit,
+  onClear,
   className,
   ...props
 }: Omit<ComponentProps<"input">, "type"> & {
   label: string;
   onSubmit?: () => void;
+  onClear?: () => void;
 }) {
   return (
     <form
@@ -114,12 +122,29 @@ export function Search({
       <input
         type="search"
         aria-label={label}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && onClear) onClear();
+        }}
         className={cn(
           "min-w-0 flex-1 self-stretch border-0 bg-transparent p-0 font-sans text-label",
           "placeholder:text-ink-faint focus-visible:outline-none",
+          "[&::-webkit-search-cancel-button]:hidden",
         )}
         {...props}
       />
+      {onClear && props.value ? (
+        <button
+          type="button"
+          aria-label={CLEAR_SEARCH}
+          onClick={onClear}
+          className={cn(
+            "flex shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0",
+            "text-ink-soft hover:text-ink",
+          )}
+        >
+          <IconX className="size-(--size-glyph) shrink-0" aria-hidden />
+        </button>
+      ) : null}
     </form>
   );
 }

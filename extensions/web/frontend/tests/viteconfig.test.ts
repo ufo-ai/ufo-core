@@ -58,6 +58,7 @@ test("the sidebar shell contains only its entry, navigation, and route seams", a
   ).toEqual([
     "App.tsx",
     "components/Sidebar.tsx",
+    "lib/chatMark.tsx",
     "lib/rail.ts",
     "lib/railStore.ts",
     "lib/route.ts",
@@ -66,6 +67,7 @@ test("the sidebar shell contains only its entry, navigation, and route seams", a
     "main.tsx",
     "views/Agents.tsx",
     "views/Apps.tsx",
+    "views/Chats.tsx",
     "views/FirstRun.tsx",
     "views/Spotlight.tsx",
     "views/Store.tsx",

@@ -8,7 +8,7 @@ turn, on the subjects their own conversation carries. Surfaces create conversati
 mutation is refused."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 from uuid import UUID
 
@@ -119,7 +119,15 @@ class ConversationObjects:
         `CONVERSATION_OTHERS_LIMIT` rows whatever the workspace holds. Both sides are one member's
         wait, so they read together rather than one behind the other. `source` is the link the
         admitting surface reported for the message that opened the row, so a rail row leads back
-        out to the thread it came in on; a portal row's source is no link out and answers None."""
+        out to the thread it came in on; a portal row's source is no link out and answers None.
+
+        A search runs in the directory read rather than over the rows it returns, for the reason
+        `portal` does: searched after the bound, a query for an older conversation answers nothing
+        while the conversation stands. It runs there and nowhere else — the page is ordered and cut
+        by the term but never narrowed by it a second time, because two narrowings over two field
+        sets leave the page their intersection, and a term either of them alone would match then
+        answers nothing. A side that comes back full is a side the workspace holds more of, so the
+        page states `cut` and the screen drawing it says so."""
         directory = ConversationDirectory(ws_current().workspace_id)
         agent_id = object_agent_id()
         sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
@@ -137,12 +145,15 @@ class ConversationObjects:
                     participation=participation,
                     member_admitted=True,
                     portal=portal if isinstance(portal, bool) else None,
+                    search=query.query or None,
                 )
                 for participation, limit in sides
             )
         )
         rows = tuple(_member_row(entry) for side in listed for entry in side if entry.title)
-        return object_page(rows, query)
+        cut = any(len(side) >= limit for side, (_, limit) in zip(listed, sides, strict=True))
+        page = object_page(rows, replace(query, query=""))
+        return replace(page, cut=cut)
 
     async def member_detail(
         self,
@@ -330,10 +341,15 @@ def _member_row(entry: ListedConversation) -> ObjectRow:
             "surface_label": entry.surface_label,
             "audience": entry.audience,
             "member_email": entry.summary.member_email,
+            "owner_email": entry.owner_email,
+            "owner_name": entry.owner_name,
             "portal": portal,
             "source": None if portal else entry.source,
             "last_at": stamp.isoformat(),
             "turn": entry.turn,
+            "automation_kind": None if entry.automation is None else entry.automation.kind,
+            "automation_name": None if entry.automation is None else entry.automation.name,
+            "automation_title": None if entry.automation is None else entry.automation.title,
             "unread": entry.unread,
         },
     )
@@ -396,8 +412,12 @@ CONVERSATION_OBJECT = ObjectKind(
         "A readable conversation carries `title`, what its members call it, once it has been "
         "named; search on it to find the conversation a member names. "
         "A member listing also carries `mine`, `speaker`, `audience`, `member_email`, "
+        "`owner_email` — whose the conversation is, the member it is bound to or whoever spoke "
+        "first in a workspace one — and `owner_name` where a surface reported them under a name, "
         "`last_at`, `turn` — the liveest turn the conversation holds as `running`, `queued` or "
-        "`parked`, and `idle` where it holds none — and `unread`, whether it moved after the "
+        "`parked`, and `idle` where it holds none — `automation_kind`, `automation_name` and "
+        "`automation_title`, naming what last fired a turn in it where an automation did, and "
+        "`unread`, whether it moved after the "
         "member last read it and last spoke in it. Order by "
         "`last_at` desc for the newest activity first. "
         "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
@@ -416,9 +436,14 @@ CONVERSATION_OBJECT = ObjectKind(
             "portal",
             "audience",
             "member_email",
+            "owner_email",
+            "owner_name",
             "source",
             "last_at",
             "turn",
+            "automation_kind",
+            "automation_name",
+            "automation_title",
             "unread",
             "private",
         }

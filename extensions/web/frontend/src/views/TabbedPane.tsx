@@ -118,6 +118,10 @@ function PaneSearch({
       value={typed}
       onChange={(event) => setTyped(event.target.value)}
       onSubmit={() => onSearch(typed.trim())}
+      onClear={() => {
+        setTyped("");
+        onSearch("");
+      }}
     />
   );
 }

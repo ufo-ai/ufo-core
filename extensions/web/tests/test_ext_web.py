@@ -4314,6 +4314,11 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     resolved = await client.get(f"/surface/web/api/chats?conversation={older_id}", headers=cookie)
     rows = resolved.json()["chats"]
     assert [row["conversation_id"] for row in rows] == [str(older_id)]
+    # Compared as key sets rather than field by field: a listing field the resolve does not carry
+    # reaches the rail as `undefined`, which reads as neither the value nor its absence.
+    listed = (await _rail_rows(client, cookie))[0]
+    carried = {key for key in listed if key not in {"name", "summary", "portal"}}
+    assert carried <= set(rows[0]), f"the resolve drops {sorted(carried - set(rows[0]))}"
     assert rows[0]["title"] == "Displaced but linked"
     assert rows[0]["agent_name"] == "assistant"
     assert rows[0]["audience"] == f"member:{member_id}"

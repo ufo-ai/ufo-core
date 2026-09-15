@@ -4238,6 +4238,7 @@ async def _rail_conversation(
     source: str | None = None,
     opening: str | None = None,
     turn_status: str = "running",
+    fired_by_kind: str | None = None,
 ) -> UUID:
     conversation_id = uuid4()
     async with workspace_tx() as connection:
@@ -4273,7 +4274,268 @@ async def _rail_conversation(
                 updated_at=moved_at,
             )
         )
+        if fired_by_kind is not None:
+            await connection.execute(
+                sa.insert(tables.turn).values(
+                    id=uuid4(),
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    agent_id=agent_id,
+                    seq=2,
+                    status="done",
+                    terminal={"status": "done"},
+                    inbound="report",
+                    admission_source="scheduled",
+                    fired_by_kind=fired_by_kind,
+                    fired_by_name="nightly-digest",
+                    created_at=moved_at,
+                    updated_at=moved_at,
+                )
+            )
     return conversation_id
+
+
+async def test_conversation_kind_states_an_automation_fired_the_work(db: None) -> None:
+    """A conversation an automation has fired a turn in reports `automated`; one a member only
+    talked in does not. Every turn records what fired it and only an automation ever does, so the
+    rail separates the work that runs without the member from the work they are in without core
+    naming a kind an extension owns."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        asked_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Ship the plan",
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        run_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Digest the night's changes",
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 2, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+            fired_by_kind=SCHEDULED_TASK_OBJECT.name,
+        )
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=alice,
+                admin=False,
+                query=ObjectListQuery(
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+
+    assert {row.name: row.fields["automation_kind"] for row in page.rows} == {
+        str(run_id): SCHEDULED_TASK_OBJECT.name,
+        str(asked_id): None,
+    }
+    fired = next(row for row in page.rows if row.name == str(run_id))
+    assert fired.fields["automation_name"] == "nightly-digest"
+    assert fired.fields["automation_title"] == "nightly-digest"
+
+
+async def test_conversation_kind_searches_past_its_own_bound_and_says_when_it_cut(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member listing is bounded before it is paged, so it states `cut` when the workspace holds
+    more — a screen drawing the whole page has still not drawn everything. A search runs in the
+    directory read rather than over the rows it returned, so a query for a conversation past the
+    bound answers it instead of answering nothing."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        for index in range(3):
+            await _rail_conversation(
+                workspace_id,
+                agent_id,
+                title=f"Newer thread {index}",
+                audience=conversation_audience(alice),
+                member_id=alice,
+                speaker_member_id=alice,
+                admission="member",
+                moved_at=datetime(2026, 8, 2 + index, tzinfo=UTC),
+                surface="web",
+                turn_status="done",
+            )
+        older_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Displaced by the bound",
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        monkeypatch.setattr(conversations, "CONVERSATION_MINE_LIMIT", 2)
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=alice,
+                admin=False,
+                query=ObjectListQuery(
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+            found = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=alice,
+                admin=False,
+                query=ObjectListQuery(
+                    query="Displaced",
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+
+    assert page.cut is True
+    assert str(older_id) not in {row.name for row in page.rows}
+    assert [row.name for row in found.rows] == [str(older_id)]
+    assert found.cut is False
+
+
+async def test_conversation_kind_searches_one_field_set_and_finds_a_reported_name(
+    db: None,
+) -> None:
+    """A member searches for what the listing draws, so a speaker answers to the name the admitting
+    surface reported as well as to their address. One narrowing does it: narrowed again over the
+    row's own fields, the page would be the intersection of two field sets and a term either alone
+    would match would answer nothing."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        bob_email = f"{bob.hex[:8]}@x.test"
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        spoken_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Standup notes",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=bob,
+            admission="member",
+            moved_at=datetime(2026, 8, 2, tzinfo=UTC),
+            surface="slack",
+            surface_label="#eng",
+            turn_status="done",
+        )
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.turn)
+                .where(tables.turn.c.conversation_id == spoken_id)
+                .values(context=TurnContext(sender="Dana Reed").model_dump(mode="json"))
+            )
+        await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Ship the plan",
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+
+        async def found(said: str) -> list[str]:
+            with agent(agent_id):
+                page = await CONVERSATION_OBJECT.store.member_page(
+                    None,
+                    member_id=alice,
+                    admin=False,
+                    query=ObjectListQuery(
+                        query=said,
+                        order_by="last_at",
+                        order="desc",
+                        supported_fields=CONVERSATION_OBJECT.list_fields,
+                    ),
+                )
+            return [row.name for row in page.rows]
+
+        by_name = await found("Dana")
+        by_address = await found(bob_email)
+        by_title = await found("Ship")
+        by_room = await found("#eng")
+
+    assert by_name == [str(spoken_id)]
+    assert by_address == [str(spoken_id)]
+    assert by_title != []
+    assert by_room == [str(spoken_id)]
+
+
+async def test_conversation_kind_names_an_owner_for_a_workspace_conversation(db: None) -> None:
+    """Whose a conversation is, for both shapes a listing carries: the member a private one is
+    bound to, and for a workspace one — which `conversation_audience_member` leaves bound to
+    nobody — whoever spoke first, under the name the surface reported them by. No row a member
+    reaches is owned by the workspace itself."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        alice_email = f"{alice.hex[:8]}@x.test"
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        mine_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Ship the plan",
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        shared_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Standup notes",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 2, tzinfo=UTC),
+            surface="slack",
+            surface_label="#eng",
+            turn_status="done",
+        )
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=alice,
+                admin=False,
+                query=ObjectListQuery(
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+
+    owners = {row.name: row.fields["owner_email"] for row in page.rows}
+    assert owners == {str(shared_id): alice_email, str(mine_id): alice_email}
 
 
 async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:

@@ -108,6 +108,10 @@ function Act({ verb }: { verb: string | null }) {
  *  `act` names the verb a row's own act commits, and the head above it is blank because the column
  *  holds acts rather than a fact the records share.
  *
+ *  `lede` is for a table whose first cell already names the record whole: a phone draws that cell
+ *  alone rather than stacking every column under it, because a stack of five labelled lines per
+ *  record is a page of labels the member scrolls past to reach the next name.
+ *
  *  `current` names the row whose contents are standing in the column beside the table, and the mark
  *  is the `tr` itself: `aria-current` on the row a reader already navigates as a row, and the same
  *  fill the row takes under the pointer, so the band reaches the rules that divide the records
@@ -124,6 +128,7 @@ export function DataTable<Row>({
   current,
   act,
   stacks = true,
+  lede = false,
   children,
 }: {
   columns: Column[];
@@ -136,6 +141,7 @@ export function DataTable<Row>({
   current?: (row: Row) => boolean;
   act?: (row: Row) => string | null;
   stacks?: boolean;
+  lede?: boolean;
   children: (row: Row) => ReactNode;
 }) {
   if (!rows.length && !note) return <PanelBlank body={empty} />;
@@ -145,8 +151,9 @@ export function DataTable<Row>({
   const measured = filled || columns.some(isWhole);
   return (
     <Table
-      columns={stacks ? [...columns.map(label), ...(act ? [""] : [])] : undefined}
+      columns={stacks && !lede ? [...columns.map(label), ...(act ? [""] : [])] : undefined}
       measured={measured}
+      lede={lede}
       floor={tableFloor({
         prose: columns.length - facts,
         fact: facts,

@@ -1398,6 +1398,13 @@ class ListedConversation(BaseModel):
     state a bot token may ask for. Like `turn` it is the shape of the conversation's work rather
     than a word of its content, so an unreadable row states it too.
 
+    `automation` is what last fired a turn here — a scheduled task's run, a source trigger's
+    delivery — which is what separates a conversation the agent drives on its own schedule from one
+    a member is talking in, and names the object whose screen the row leads to. It is stamped at
+    admission and never rewritten, so it keeps naming what fired after the object is edited or
+    gone. Like `turn` it is the shape of the conversation's work rather than a word of its content,
+    so an unreadable row states it too.
+
     `speakers` runs in order of first appearance and stops at `MAX_CONVERSATION_SPEAKERS`.
 
     `mine` is whether this viewer is in the conversation — bound to it, or a speaker of a turn of
@@ -1415,6 +1422,7 @@ class ListedConversation(BaseModel):
     audience: str
     surface_label: str | None
     turn: ListedTurn
+    automation: FiredBy | None
     unread: bool
     readable: bool
     disclosable: bool
@@ -1422,6 +1430,21 @@ class ListedConversation(BaseModel):
     source: str | None
     speakers: tuple[ConversationSpeaker, ...]
     mine: bool
+
+    @property
+    def owner_email(self) -> str | None:
+        """Whose the conversation is: the member it is bound to, and for a workspace conversation,
+        which `conversation_audience_member` leaves bound to nobody, whoever spoke first. Every
+        surface that lists a conversation reads it here, so no two derive it apart."""
+        return self.summary.member_email or next((who.email for who in self.speakers), None)
+
+    @property
+    def owner_name(self) -> str | None:
+        """The name the admitting surface reported the owner under, where it reported one."""
+        owner = self.owner_email
+        return next(
+            (who.sender for who in self.speakers if who.email == owner and who.sender), None
+        )
 
 
 @dataclass(frozen=True)
@@ -1551,7 +1574,10 @@ class ConversationDirectory:
             return ()
         readable = readable_audiences(member_id)
         content = [row.id for row in rows if row.audience in readable]
-        openings, speakers = await asyncio.gather(self.openings(content), self.speakers(content))
+        every = [row.id for row in rows]
+        openings, speakers, automations = await asyncio.gather(
+            self.openings(content), self.speakers(content), self.automations(every)
+        )
         mine = str(conversation_audience(member_id))
         return tuple(
             ListedConversation(
@@ -1568,6 +1594,7 @@ class ConversationDirectory:
                 audience=row.audience,
                 surface_label=row.surface_label,
                 turn=row.live_turn,
+                automation=automations.get(row.id),
                 unread=_unread(row.last_turn_at, row.read_at, row.spoke_at),
                 readable=row.audience in readable,
                 disclosable=admin
@@ -1669,6 +1696,56 @@ class ConversationDirectory:
                     set_={"read_at": read_at},
                 )
             )
+
+    async def automations(self, listed: Sequence[UUID]) -> dict[UUID, FiredBy]:
+        """What last fired a turn in each listed conversation. Every turn records what fired it and
+        only an automation ever does — the scheduled task's runner and the source trigger's
+        delivery are the two writers of `fired_by` — so core reads the stamp without naming a kind
+        an extension owns. One read over the page's ids, like the openings and the speakers, rather
+        than a subquery per row per column."""
+        if not listed:
+            return {}
+        fired = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                sa.func.max(tables.turn.c.seq).label("seq"),
+            )
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id.in_(listed),
+                tables.turn.c.fired_by_kind.is_not(None),
+            )
+            .group_by(tables.turn.c.conversation_id)
+            .subquery()
+        )
+        query = (
+            sa.select(
+                tables.turn.c.conversation_id,
+                tables.turn.c.fired_by_kind,
+                tables.turn.c.fired_by_name,
+                tables.turn.c.fired_by_title,
+            )
+            .select_from(
+                tables.turn.join(
+                    fired,
+                    sa.and_(
+                        tables.turn.c.conversation_id == fired.c.conversation_id,
+                        tables.turn.c.seq == fired.c.seq,
+                    ),
+                )
+            )
+            .where(tables.turn.c.workspace_id == self.workspace_id)
+        )
+        async with workspace_tx() as connection:
+            rows = (await connection.execute(query)).all()
+        return {
+            row.conversation_id: FiredBy(
+                kind=row.fired_by_kind,
+                name=row.fired_by_name or "",
+                title=row.fired_by_title or row.fired_by_name or "",
+            )
+            for row in rows
+        }
 
     async def openings(self, listed: Sequence[UUID]) -> dict[UUID, ConversationOpening]:
         """Each listed conversation's opening turn: the link the admitting surface reported for the
@@ -1842,7 +1919,13 @@ class ConversationDirectory:
         named, and the member it belongs to. What the conversation holds — what it is called, and
         who has spoken in it — is matched only where this member may read that content, the same
         gate `readable` puts on carrying it. Otherwise an admin's search would answer which words
-        stand in another member's private thread, which reading it would have audited."""
+        stand in another member's private thread, which reading it would have audited.
+
+        A speaker answers to the address the workspace knows them by and to the name the admitting
+        surface reported them under, because a listing draws the reported name and a member
+        searches for what they are reading. The two are one predicate for the same reason the
+        search runs here at all: narrowed twice over two field sets, a page is the intersection of
+        them, and a term matching either alone answers nothing."""
         speaker = tables.member.alias("search_speaker")
         spoke = (
             sa.select(sa.literal(1))
@@ -1850,7 +1933,10 @@ class ConversationDirectory:
             .where(
                 tables.turn.c.workspace_id == self.workspace_id,
                 tables.turn.c.conversation_id == tables.conversation.c.id,
-                speaker.c.email.icontains(search, autoescape=True),
+                sa.or_(
+                    speaker.c.email.icontains(search, autoescape=True),
+                    tables.turn.c.context["sender"].as_string().icontains(search, autoescape=True),
+                ),
             )
             .correlate(tables.conversation)
             .exists()

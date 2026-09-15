@@ -47,6 +47,7 @@ export type RailState = {
   sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, OwnedConversation>>;
   fault: ToastState | null;
+  cut: boolean;
   shown: RailShown;
   sort: RailSort;
   shut: string[] | null;
@@ -63,6 +64,7 @@ function fresh(): RailState {
     sought: {},
     linked: {},
     fault: null,
+    cut: false,
     shown: heldRailShown(),
     sort: heldRailSort(),
     shut: heldRailShut(),
@@ -140,6 +142,7 @@ async function walkRail(read: number): Promise<void> {
     update((held) => ({
       ...held,
       phase: "ready" as const,
+      cut: result.payload.cut === true,
       rows: mergeChats(gathered, held.rows),
     }));
     cursor = result.payload.next_cursor ?? "";

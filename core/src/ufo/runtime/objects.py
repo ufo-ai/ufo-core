@@ -181,10 +181,15 @@ class ObjectListQuery:
 @dataclass(frozen=True)
 class ObjectPage:
     """One page of a kind's instances. `next_cursor` is an opaque continuation token for the
-    caller; None means the listing is complete."""
+    caller; None means the listing is complete.
+
+    `cut` is for a kind whose rows are bounded before they are paged: the continuation runs out
+    while the workspace still holds more, so a screen that draws the whole page has still not
+    drawn everything. A listing that cannot page says so rather than truncating in silence."""
 
     rows: tuple[ObjectRow, ...]
     next_cursor: str | None = None
+    cut: bool = False
 
 
 class _ObjectCursor(BaseModel):

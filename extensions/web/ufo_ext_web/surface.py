@@ -3292,6 +3292,13 @@ async def _resolve_chat(
                         "surface_label": own.surface_label,
                         "audience": own.audience,
                         "member_email": own.summary.member_email,
+                        "owner_email": own.owner_email,
+                        "owner_name": own.owner_name,
+                        "automation_kind": None if own.automation is None else own.automation.kind,
+                        "automation_name": None if own.automation is None else own.automation.name,
+                        "automation_title": (
+                            None if own.automation is None else own.automation.title
+                        ),
                         # A chat row is reached for a portal conversation alone, and a portal
                         # source names the portal rather than a thread to open outside it.
                         "source": None,
@@ -5251,9 +5258,11 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
     rows: list[dict[str, object]] = []
     walk: str | None = None
     walking: dict[str, str] = {}
+    cut = False
     for agent, page in zip(agents, pages, strict=True):
         if page is None:
             return Response(f"{kind.kind} does not list in the portal", status_code=404)
+        cut = cut or page.cut
         rows.extend(
             {
                 "name": row.name,
@@ -5276,6 +5285,7 @@ async def object_index(ctx: SurfaceContext, request: Request) -> Response:
             **_kind_payload(kind),
             "objects": rows,
             "next_cursor": walk,
+            "cut": cut,
         }
     )
 

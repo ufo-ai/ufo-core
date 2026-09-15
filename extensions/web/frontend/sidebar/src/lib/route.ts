@@ -48,6 +48,7 @@ export type Route =
       rootConversationId?: string;
     }
   | { kind: "new-chat"; agentId: string }
+  | { kind: "chats"; place: WorkspacePlace }
   | { kind: "agents"; build?: boolean }
   | { kind: "store" }
   | { kind: "automations"; place: WorkspacePlace }
@@ -180,6 +181,8 @@ export const BUILDER_HASH = AGENTS_HASH + "/builder";
 
 export const STORE_HASH = AGENTS_HASH + "/store";
 
+const CHATS_HASH = "#/chats";
+
 const AUTOMATIONS_HASH = "#/automations";
 
 export const FIRST_RUN_HASH = "#/first-run";
@@ -267,6 +270,16 @@ const STORE = row(
   bare(STORE_HASH),
   () => ({ kind: "store" }),
   () => STORE_HASH,
+);
+
+const CHATS = row<"chats", [WorkspacePlace?]>(
+  "chats",
+  new RegExp(`^${CHATS_HASH}${PLACE_TAIL}`),
+  (match) => {
+    const place = parsePlace(match[1]);
+    return place && { kind: "chats", place };
+  },
+  (place: WorkspacePlace = {}) => CHATS_HASH + serializePlace(place),
 );
 
 const AUTOMATIONS = row<"automations", [WorkspacePlace?]>(
@@ -392,6 +405,7 @@ const ROUTES: readonly RouteReader[] = [
   BUILDER,
   STORE,
   AGENTS,
+  CHATS,
   AUTOMATIONS,
   CHAT,
   CONVERSATION_SLOT,
@@ -424,6 +438,7 @@ const FRAMED: { [Kind in RouteKind]: boolean } = {
   "first-run": false,
   agents: false,
   store: false,
+  chats: false,
   automations: false,
   chat: true,
   "conversation-slot": false,
@@ -444,6 +459,7 @@ export type Stand =
   | `open:${string}`
   | "workspace"
   | "automations"
+  | "chats"
   | "store"
   | `section:${Section}`;
 
@@ -472,6 +488,8 @@ function stands(route: Route): Stand[] {
       return ["automations"];
     case "store":
       return ["store"];
+    case "chats":
+      return ["chats"];
     case "section":
       return [`section:${route.section}`];
     case "agents":
@@ -510,6 +528,8 @@ export const agentHash = AGENT.write;
 export const agentSetupHash = AGENT_SETUP.write;
 export const workspaceHash = WORKSPACE.write;
 export const sectionHash = SECTION.write;
+/** The address of the chats screen, optionally at a place. */
+export const chatsHash = CHATS.write;
 /** The address of the automations screen, optionally at a place. */
 export const automationsHash = AUTOMATIONS.write;
 export const firstRunHash = FIRST_RUN.write;

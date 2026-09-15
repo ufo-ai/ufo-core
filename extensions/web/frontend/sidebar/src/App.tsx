@@ -12,7 +12,6 @@ import {
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconBook,
-  IconBrandSlack,
   IconChevronRight,
   IconCirclePlusFilled,
   IconClockPlay,
@@ -20,18 +19,16 @@ import {
   IconDotsVertical,
   IconFile,
   IconFilter2,
+  IconHome,
   IconLayoutSidebarRight,
-  IconLoader2,
   IconLogout,
   IconMenu2,
-  IconMessageCircle,
   IconMoon,
   IconPencilPlus,
   IconPlug,
   IconRadar,
   IconSettings,
   IconSun,
-  IconTerminal2,
   IconX,
 } from "@tabler/icons-react";
 
@@ -70,11 +67,8 @@ import {
   type PaneView,
 } from "@/views/registry";
 import {
-  IMESSAGE_SURFACE,
   Me,
   MEMBER_SUBJECT,
-  SLACK_SURFACE,
-  UFO_SURFACE,
   WEB_SURFACE,
   isPortalChat,
   Viewer,
@@ -92,11 +86,12 @@ import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kerne
 import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
 import { Loading } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
+import { ChatMark } from "./lib/chatMark";
 import { MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { rowMoment } from "@/lib/moments";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
-import { SETUP, pageCrumb, pageTitle } from "@/lib/title";
+import { HOME_TITLE, SETUP, pageCrumb, pageTitle } from "@/lib/title";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -144,7 +139,9 @@ import {
   openAgents,
   openBuilder,
   openChat,
+  openChats,
   openHome,
+  placeChats,
   openNewChat,
   openSlot,
   openAutomations,
@@ -192,6 +189,7 @@ const LinkedPane = lazy(() =>
   import("@/views/ChatPane").then((module) => ({ default: module.LinkedPane })),
 );
 const Store = lazy(() => import("./views/Store").then((module) => ({ default: module.Store })));
+const Chats = lazy(() => import("./views/Chats").then((module) => ({ default: module.Chats })));
 function PaneLoading() {
   return (
     <Pane className={COLUMN}>
@@ -382,10 +380,15 @@ function founded(agent: Agent, member: Member, conversationId: string, title: st
     surface_label: null,
     audience: MEMBER_SUBJECT + member.id,
     member_email: member.email,
+    owner_email: member.email,
+    owner_name: null,
     mine: true,
     speaker: null,
     source: null,
     turn: "running",
+    automation_kind: null,
+    automation_name: null,
+    automation_title: null,
     unread: false,
   });
   const seen = heldRoute();
@@ -801,6 +804,13 @@ function WorkspaceSidebar({
           />
         ) : null}
         <NavRow
+          icon={<IconHome className={GLYPH} aria-hidden />}
+          current={standing(route, "chats")}
+          collapsed={collapsed}
+          label={HOME_TITLE}
+          onClick={openChats}
+        />
+        <NavRow
           icon={<IconClockPlay className={GLYPH} aria-hidden />}
           current={standing(route, "automations")}
           collapsed={collapsed}
@@ -896,6 +906,16 @@ function RoutedPane({
       return <PaneNote>This link is not valid.</PaneNote>;
     case "store":
       return <Store member={member} onBuild={openBuilder} />;
+    case "chats":
+      return (
+        <Chats
+          place={route.place}
+          onPlace={placeChats}
+          onOpen={(row) =>
+            openRailRow(agents, chatSurface(agents), row.conversation_id, row.agent_id)
+          }
+        />
+      );
     case "automations":
       return (
         <TabbedPane
@@ -1267,6 +1287,7 @@ function RailList({
             surfaceLabel={row.surface_label}
             source={row.source}
             turn={row.turn}
+            automated={row.automation_name !== null}
             unread={row.unread}
             when={row.last_at}
             onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
@@ -1333,6 +1354,7 @@ function RailRow({
   surfaceLabel,
   source,
   turn,
+  automated,
   unread,
   when,
   onClick,
@@ -1346,6 +1368,7 @@ function RailRow({
   surfaceLabel: string | null;
   source: string | null;
   turn: RailTurn;
+  automated: boolean;
   unread: boolean;
   when: string;
   onClick: () => void;
@@ -1364,19 +1387,13 @@ function RailRow({
       onFocus={() => setAsks((asked) => asked + 1)}
       onBlur={() => setAsks(0)}
       glyph={
-        <span
-          aria-hidden
-          data-turn={turn}
-          className="me-2xs flex size-(--size-glyph) shrink-0 items-center justify-center"
-        >
-          {turn === "running" || turn === "queued" ? (
-            <IconLoader2
-              className="size-(--size-glyph) shrink-0 animate-spin text-primary motion-reduce:animate-none"
-            />
-          ) : (
-            <RailOrigin surface={surface} ink={unread ? UNREAD_INK : RAIL_TURN_INK[turn]} />
-          )}
-        </span>
+        <ChatMark
+          surface={surface}
+          turn={turn}
+          automated={automated}
+          unread={unread}
+          className="me-2xs"
+        />
       }
     >
       <Ticker asks={asks + (acts ? 1 : 0)} className={cn("flex-1", reached && "me-6xl")}>
@@ -1477,21 +1494,3 @@ function RailRowActs({
 function threadLink(conversationId: string): string {
   return window.location.origin + window.location.pathname + chatHash(conversationId);
 }
-/** The portal takes a bullet where a trailing glyph drew nothing, so every row keeps the column
- *  and the list reads down one left edge. */
-function RailOrigin({ surface, ink }: { surface: string; ink: string }) {
-  const drawn = cn("size-3.5 shrink-0", ink);
-  if (surface === SLACK_SURFACE) return <IconBrandSlack className={drawn} aria-hidden />;
-  if (surface === UFO_SURFACE) return <IconTerminal2 className={drawn} aria-hidden />;
-  if (surface === IMESSAGE_SURFACE) return <IconMessageCircle className={drawn} aria-hidden />;
-  return <span aria-hidden className={cn("size-sm rounded-full bg-current", ink)} />;
-}
-
-const RAIL_TURN_INK: Record<Exclude<RailTurn, "running" | "queued">, string> = {
-  parked: "text-blocked",
-  idle: "text-ink-quiet",
-};
-
-/** A running turn keeps its spinner instead: what the agent is doing right now outranks what
- *  stands unread above it. */
-const UNREAD_INK = "text-live";

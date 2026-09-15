@@ -9,6 +9,7 @@ import {
   artifactTarget,
   bootRoute,
   chatHash,
+  chatsHash,
   firstRunHash,
   newChatHash,
   parseHash,
@@ -209,6 +210,14 @@ export function openBuilder(): void {
 
 export function openStore(): void {
   navigate(STORE_HASH);
+}
+
+export function openChats(): void {
+  navigate(chatsHash());
+}
+
+export function placeChats(place: WorkspacePlace, step: PlaceStep): void {
+  stepPlace(step, heldRoute().kind === "chats", () => chatsHash(place));
 }
 
 export function openAutomations(): void {

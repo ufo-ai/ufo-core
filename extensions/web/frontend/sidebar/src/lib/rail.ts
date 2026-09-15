@@ -20,10 +20,15 @@ export type ChatRow = {
   surface_label: string | null;
   audience: string;
   member_email: string | null;
+  owner_email: string | null;
+  owner_name: string | null;
   mine: boolean;
   speaker: string | null;
   source: string | null;
   turn: RailTurn;
+  automation_kind: string | null;
+  automation_name: string | null;
+  automation_title: string | null;
   unread: boolean;
 };
 
@@ -40,14 +45,24 @@ export type ConversationRow = {
   surface_label: string | null;
   audience: string;
   member_email: string | null;
+  owner_email: string | null;
+  owner_name: string | null;
   mine: boolean;
   speaker: string | null;
   source: string | null;
   turn: RailTurn;
+  automation_kind: string | null;
+  automation_name: string | null;
+  automation_title: string | null;
   unread: boolean;
 };
 
-export type ConversationsPayload = { objects: ConversationRow[]; next_cursor?: string | null };
+export type ConversationsPayload = {
+  objects: ConversationRow[];
+  next_cursor?: string | null;
+  /** The workspace holds more than the read was allowed to build, so the rows are not all of them. */
+  cut?: boolean;
+};
 
 export function chatRows(payload: ConversationsPayload): ChatRow[] {
   return payload.objects.map((row) => ({
@@ -61,10 +76,15 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
     surface_label: row.surface_label,
     audience: row.audience,
     member_email: row.member_email,
+    owner_email: row.owner_email,
+    owner_name: row.owner_name,
     mine: row.mine,
     speaker: row.speaker,
     source: row.source,
     turn: row.turn,
+    automation_kind: row.automation_kind,
+    automation_name: row.automation_name,
+    automation_title: row.automation_title,
     unread: row.unread,
   }));
 }
@@ -82,7 +102,12 @@ export function railAudience(
 
 export type RailGroup = { label: string | null; rows: ChatRow[] };
 
-export type RailShown = { terminal: boolean; slack: boolean; imessage: boolean };
+export type RailShown = {
+  terminal: boolean;
+  slack: boolean;
+  imessage: boolean;
+  automations: boolean;
+};
 
 export type RailSort = "recency" | "priority";
 
@@ -105,20 +130,24 @@ export const RAIL_SHOWN_OPTIONS: { surface: keyof RailShown; label: string }[] =
   { surface: "terminal", label: "Terminal" },
   { surface: "slack", label: "Slack" },
   { surface: "imessage", label: "iMessage" },
+  { surface: "automations", label: "Automations" },
 ];
 
-const HELD_SHOWN = "rail-shown";
+/** The key names the option set it spells: a comma list written for a shorter set cannot say
+ *  what a member chose about an option that set did not hold, so it is not read. */
+const HELD_SHOWN = "rail-shown-with-automations";
 
 /** A browser holding nothing has never opened the filter, and the rail it draws is every
  *  conversation the member has; an empty set is a member who switched them all off. */
 export function heldRailShown(): RailShown {
   const held = localStorage.getItem(HELD_SHOWN);
-  if (held === null) return { terminal: true, slack: true, imessage: true };
+  if (held === null) return { terminal: true, slack: true, imessage: true, automations: true };
   const named = held.split(",");
   return {
     terminal: named.includes("terminal"),
     slack: named.includes("slack"),
     imessage: named.includes("imessage"),
+    automations: named.includes("automations"),
   };
 }
 
@@ -228,7 +257,10 @@ export function holdAppsExpanded(expanded: boolean): void {
   localStorage.setItem(HELD_APPS_EXPANDED, expanded ? "expanded" : "collapsed");
 }
 
+/** An automation's conversation is admitted on that alone: what drove it is the thing a member
+ *  filters it out for, and the surface it reported on is beside the point. */
 function admits(row: ChatRow, shown: RailShown): boolean {
+  if (row.automation_name !== null) return shown.automations;
   if (row.surface === UFO_SURFACE) return shown.terminal;
   if (row.surface === SLACK_SURFACE) return shown.slack;
   if (row.surface === IMESSAGE_SURFACE) return shown.imessage;

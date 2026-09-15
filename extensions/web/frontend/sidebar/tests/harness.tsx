@@ -291,10 +291,15 @@ export const CHAT_ROW: ChatRow = {
   surface_label: null,
   audience: "member:m1",
   member_email: "member@example.com",
+  owner_email: "member@example.com",
+  owner_name: null,
   mine: true,
   speaker: null,
   source: null,
   turn: "idle",
+  automation_kind: null,
+  automation_name: null,
+  automation_title: null,
   unread: false,
 };
 
@@ -307,8 +312,19 @@ export const conversationObject = ({ conversation_id, ...row }: RailRow) => ({
   ...row,
 });
 
+/** The listing searches on the server, scanning a row's string fields the way `object_page` does,
+ *  so a test's wire narrows where the real read narrows rather than answering every row to every
+ *  query. */
 export const chatsOnWire = (rows: RailRow[]): Record<string, Route> => ({
-  "/objects/conversation$": () => json({ objects: rows.map(conversationObject) }),
+  "/objects/conversation$": (url) => {
+    const said = new URLSearchParams(url.split("?")[1] ?? "").get("q")?.toLowerCase() ?? "";
+    const found = rows.filter((row) =>
+      Object.values(conversationObject(row)).some(
+        (value) => typeof value === "string" && value.toLowerCase().includes(said),
+      ),
+    );
+    return json({ objects: found.map(conversationObject) });
+  },
   "/api/chats": () => json({ chats: rows }),
 });
 
