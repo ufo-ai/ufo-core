@@ -80,10 +80,7 @@ const PROSE = "font-sans text-subtitle narrow:text-ui";
 const COMMUNITY = "community";
 const INSTALLED = "installed";
 
-const ORIGINS: { label: string; value: string }[] = [
-  { label: "Custom", value: "member" },
-  { label: "Built-in", value: "deploy" },
-];
+const BUILTIN = "deploy";
 
 const NARROWINGS = [
   { label: "Community", value: COMMUNITY },
@@ -98,21 +95,8 @@ function installsLabel(installs: number): string {
   return installs + (installs === 1 ? " install" : " installs");
 }
 
-const ORIGIN_ORDER = ORIGINS.map((entry) => entry.value);
-
-function origin(skill: Skill): string {
-  return ORIGINS.find((entry) => entry.value === skill.origin)?.label ?? skill.origin;
-}
-
 function ordered(skills: Skill[]): Skill[] {
-  return [...skills].sort((left, right) => {
-    const leftRank = ORIGIN_ORDER.indexOf(left.origin);
-    const rightRank = ORIGIN_ORDER.indexOf(right.origin);
-    const normalizedLeft = leftRank === -1 ? ORIGIN_ORDER.length : leftRank;
-    const normalizedRight = rightRank === -1 ? ORIGIN_ORDER.length : rightRank;
-    if (normalizedLeft !== normalizedRight) return normalizedLeft - normalizedRight;
-    return left.name.localeCompare(right.name);
-  });
+  return [...skills].sort((left, right) => left.name.localeCompare(right.name));
 }
 
 const NAME_PATTERN = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
@@ -213,7 +197,6 @@ export function WorkspaceSkills({
   );
   const [narrowed, setNarrowed] = useState(offered[0]?.value ?? COMMUNITY);
   const [toast, setToast] = useState<ToastState>(SILENT);
-  const [viewing, setViewing] = useState<Skill | null>(null);
   const [adding, setAdding] = useState<CommunityDocument | null>(null);
   const [addNotice, setAddNotice] = useState<NoticeState>(QUIET);
   const state = usePanelRead<{ skills: Skill[] }>(
@@ -327,18 +310,13 @@ export function WorkspaceSkills({
     return ordered(skills).map((skill) => ({
       key: skill.name,
       name: skill.name,
-      body: origin(skill),
-      open: () => (skill.origin === "member" ? void write(skill) : setViewing(skill)),
-      action:
-        skill.origin === "member" ? (
-          <Button variant="outline" disabled={busy} onClick={() => void write(skill)}>
-            Edit
-          </Button>
-        ) : (
-          <Button variant="outline" disabled>
-            Installed
-          </Button>
-        ),
+      body: skill.description,
+      open: () => void write(skill),
+      action: (
+        <Button variant="outline" disabled={busy} onClick={() => void write(skill)}>
+          Edit
+        </Button>
+      ),
     }));
   }
 
@@ -519,8 +497,9 @@ export function WorkspaceSkills({
         ) : (
           <Panel state={state} shape="table">
             {(payload) => {
-              if (!payload.skills.length) return <PanelBlank body={NO_SKILLS} />;
-              const matched = payload.skills.filter((skill) =>
+              const own = payload.skills.filter((skill) => skill.origin !== BUILTIN);
+              if (!own.length) return <PanelBlank body={NO_SKILLS} />;
+              const matched = own.filter((skill) =>
                 (skill.name + " " + skill.description).toLowerCase().includes(query.toLowerCase()),
               );
               if (!matched.length) return <PanelBlank body="No skill matches this search." />;
@@ -529,37 +508,6 @@ export function WorkspaceSkills({
           </Panel>
         )}
       </Section>
-
-      {viewing ? (
-        <Dialog open onOpenChange={(next) => (next ? undefined : setViewing(null))}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle>{viewing.name}</DialogTitle>
-            </DialogHeader>
-            <div className="flex flex-col gap-xl">
-              <Field label="Description" htmlFor="skill-view-description">
-                <Textarea
-                  id="skill-view-description"
-                  readOnly
-                  rows={3}
-                  className={PROSE}
-                  value={viewing.description}
-                />
-              </Field>
-              <Field label="Instructions" htmlFor="skill-view-instructions">
-                <Textarea
-                  id="skill-view-instructions"
-                  readOnly
-                  rows={12}
-                  className={PROSE}
-                  value={viewing.instructions}
-                />
-              </Field>
-            </div>
-            <DialogFooter leave="Close" />
-          </DialogContent>
-        </Dialog>
-      ) : null}
 
       {adding ? (
         <Dialog open onOpenChange={(next) => (next ? undefined : setAdding(null))}>

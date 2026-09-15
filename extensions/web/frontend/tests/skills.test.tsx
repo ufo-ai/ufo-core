@@ -64,7 +64,10 @@ async function openInstalled() {
 }
 
 test("the workspace skills page renders items as a list, without a picker or a table's chrome", async () => {
-  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }) });
+  wire({
+    ...NO_COMMUNITY,
+    "/skills": () => json({ skills: [...SKILLS, { ...SKILLS[0], name: "second" }] }),
+  });
   renderSkills();
   await openInstalled();
 
@@ -125,20 +128,12 @@ test("the settings form states the workspace-skill setting and saves it", async 
   });
 });
 
-test("a custom skill opens as an editable record, and a built-in one read-only", async () => {
+test("a custom skill opens as an editable record", async () => {
   wire({ ...NO_COMMUNITY, ...MINE_OBJECT, "/skills": () => json({ skills: SKILLS }) });
   renderSkills();
   await openInstalled();
 
-  await userEvent.click(await screen.findByText("shipped"));
-  const dialog = await screen.findByRole("dialog", { name: "shipped" });
-  const shipped = within(dialog).getByLabelText("Instructions") as HTMLTextAreaElement;
-  expect(shipped.value).toBe("Read the tree first.");
-  expect(shipped.readOnly).toBe(true);
-  expect(within(dialog).queryByRole("button", { name: "Save" })).toBeNull();
-  await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
-
-  await userEvent.click(screen.getByText("mine"));
+  await userEvent.click(await screen.findByText("mine"));
   const form = await screen.findByRole("dialog", { name: "mine" });
   expect(within(form).getByLabelText("Description")).toHaveProperty("value", "member skill");
   expect((within(form).getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe(
@@ -149,7 +144,7 @@ test("a custom skill opens as an editable record, and a built-in one read-only",
   expect(within(form).getAllByRole("button", { name: "Close" }).length).toBe(1);
 });
 
-test("items sort custom ahead of built-in and state where each came from", async () => {
+test("the list holds the member's skills and leaves the built-in ones out", async () => {
   wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: SKILLS }) });
   renderSkills();
   await openInstalled();
@@ -158,10 +153,18 @@ test("items sort custom ahead of built-in and state where each came from", async
   const names = [...document.querySelectorAll('[data-part="primary"]')].map(
     (node) => node.textContent,
   );
-  expect(names).toEqual(["mine", "shipped"]);
-  expect(screen.getByText("mine").closest("li")?.textContent).toContain("Custom");
-  expect(screen.getByText("shipped").closest("li")?.textContent).toContain("Built-in");
+  expect(names).toEqual(["mine"]);
+  expect(screen.getByText("mine").closest("li")?.textContent).toContain("member skill");
   expect(within(screen.getByRole("main")).getByRole("tab", { name: "Community" })).toBeTruthy();
+});
+
+test("a workspace of built-in skills alone draws the blank", async () => {
+  wire({ ...NO_COMMUNITY, "/skills": () => json({ skills: [SKILLS[1]] }) });
+  renderSkills();
+  await openInstalled();
+
+  expect(await screen.findByText("No skill has been saved onto this workspace yet.")).toBeTruthy();
+  expect(screen.queryByText("shipped")).toBeNull();
 });
 
 test("New skill posts the prepared skill intent for the main agent", async () => {
@@ -286,11 +289,11 @@ test("the page's search narrows the skills the workspace holds", async () => {
   renderSkills();
   await openInstalled();
 
-  expect(await screen.findByText("shipped")).toBeTruthy();
-  await userEvent.type(await screen.findByLabelText("Search skills"), "mine{enter}");
-
   expect(await screen.findByText("mine")).toBeTruthy();
-  expect(screen.queryByText("shipped")).toBeNull();
+  await userEvent.type(await screen.findByLabelText("Search skills"), "absent{enter}");
+
+  expect(await screen.findByText("No skill matches this search.")).toBeTruthy();
+  expect(screen.queryByText("mine")).toBeNull();
 });
 
 test("the writing form opens in the shared sheet, and the address carries no half-written skill", async () => {
