@@ -97,6 +97,166 @@ async function sendingMidTurn(chat: Route): Promise<void> {
   expect(await screen.findByText("and again")).toBeTruthy();
 }
 
+const SPOKEN = [
+  { role: "user", text: "What did Acme say?" },
+  { role: "assistant", text: "They asked for the revised terms.", turn: TURN_ID },
+];
+
+const ROWS = [
+  {
+    kind: "ask",
+    hook: "Draft the Acme reply",
+    prompt: "Draft the reply to Acme and hold it for my read before it goes.",
+  },
+  { kind: "share", hook: "Post the terms to #sales", prompt: "Post the revised terms to #sales." },
+];
+
+const OFFERED = { "/follow-ups": () => json({ offers: ROWS, ranking: false }) };
+
+test("a settled thread ends on its rows, and pressing one sends the prompt behind it", async () => {
+  const said: string[] = [];
+  wire({
+    ...transcript({ messages: SPOKEN }),
+    ...OFFERED,
+    "/chat": (_url, init) => {
+      said.push(String(init?.body));
+      return json({ turn_id: REPLY_ID, conversation_id: CONVO_ID, title: "drafting" });
+    },
+  });
+  open();
+
+  const rows = await screen.findByTestId("follow-ups");
+  expect([...rows.querySelectorAll("button")].map((row) => row.textContent)).toEqual([
+    "Draft the Acme reply",
+    "Post the terms to #sales",
+  ]);
+
+  await userEvent.click(screen.getByText("Draft the Acme reply"));
+
+  expect(said).toEqual(["Draft the reply to Acme and hold it for my read before it goes."]);
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+});
+
+test("a read that says the rows are being written asks again, and stops once they land", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  let asks = 0;
+  wire({
+    ...transcript({ messages: SPOKEN }),
+    "/follow-ups": () => {
+      asks += 1;
+      return json(asks === 1 ? { offers: [], ranking: true } : { offers: ROWS, ranking: false });
+    },
+  });
+  open();
+
+  await vi.waitFor(() => expect(asks).toBe(1));
+  expect(screen.queryByTestId("follow-ups")).toBeNull();
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_100);
+  });
+
+  expect(await screen.findByText("Draft the Acme reply")).toBeTruthy();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+  expect(asks).toBe(2);
+  vi.useRealTimers();
+});
+
+test("the rows land on the turn the member just watched, with no transcript read between", async () => {
+  wire({
+    ...transcript(),
+    ...OFFERED,
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "acme" }),
+  });
+  open();
+
+  await screen.findByText("No messages in this conversation yet.");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "What did Acme say?");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("message", { text: "They asked for the revised terms." });
+  expect(screen.queryByTestId("follow-ups")).toBeNull();
+
+  StreamFake.last().emit("terminal", { status: "done" });
+
+  expect(await screen.findByText("Draft the Acme reply")).toBeTruthy();
+});
+
+test("a thread waiting on an answer offers no rows, and neither does one still working", async () => {
+  wire({
+    ...transcript({
+      messages: [
+        SPOKEN[0],
+        {
+          ...SPOKEN[1],
+          question: {
+            turn_id: TURN_ID,
+            questions: [{ question: "Which terms?", options: [{ label: "The revised ones" }] }],
+          },
+        },
+      ],
+    }),
+    ...OFFERED,
+  });
+  open();
+
+  expect(await screen.findByText("Which terms?")).toBeTruthy();
+  expect(screen.queryByTestId("follow-ups")).toBeNull();
+
+  cleanup();
+  resetChatStore();
+  resetStreams();
+  useStreamFake();
+  wire({ ...transcript({ messages: SPOKEN, turn: TURN_ID }), ...OFFERED });
+  open();
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  expect(screen.queryByTestId("follow-ups")).toBeNull();
+});
+
+test("a card answered in the tab lets the rows back, with no transcript read between", async () => {
+  /* Nothing on the live path writes `closed`, so a foot reading it alone stayed shut for the
+     session once a member answered a card where they stood. */
+  wire({
+    ...transcript({
+      messages: [
+        SPOKEN[0],
+        {
+          ...SPOKEN[1],
+          question: {
+            turn_id: TURN_ID,
+            questions: [
+              {
+                question: "Which terms?",
+                options: [{ label: "The revised ones" }, { label: "The original ones" }],
+              },
+            ],
+          },
+        },
+      ],
+    }),
+    ...OFFERED,
+    "/chat": () =>
+      json({ turn_id: REPLY_ID, opened_run: true, body: "The revised ones · Which terms?" }),
+  });
+  open();
+
+  expect(await screen.findByText("Which terms?")).toBeTruthy();
+  expect(screen.queryByTestId("follow-ups")).toBeNull();
+
+  await userEvent.click(await screen.findByRole("radio", { name: "The revised ones" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("message", { text: "The revised ones, then." });
+  StreamFake.last().emit("terminal", { status: "done" });
+
+  expect(await screen.findByText("Draft the Acme reply")).toBeTruthy();
+});
+
 test("an empty conversation states it, and the composer sends a message and streams the reply", async () => {
   wire({
     ...transcript(),
@@ -4153,6 +4313,33 @@ test("the model chip picks out of a provider flyout, and the pick rides the mess
 
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
   await say("hello");
+
+  expect(sent).toEqual(["gpt-5.6-sol"]);
+});
+
+test("a row pressed under the thread rides the model the composer pinned", async () => {
+  /* The pick stands for the thread, so the rows send on it too: a press that dropped it ran the
+     turn on the agent's own model while the chip still named the member's. */
+  const sent: (string | null)[] = [];
+  wire({
+    ...picking(sent),
+    ...transcript({ messages: SPOKEN }),
+    ...OFFERED,
+    "/chat": (_url, init) => {
+      sent.push(pinned(init));
+      return json({ turn_id: REPLY_ID, conversation_id: CONVO_ID, title: "go" });
+    },
+  });
+  render(
+    <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Model: Opus 4.8" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "GPT" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "GPT-5.6 Sol" }));
+  expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
+
+  await userEvent.click(await screen.findByText("Draft the Acme reply"));
 
   expect(sent).toEqual(["gpt-5.6-sol"]);
 });

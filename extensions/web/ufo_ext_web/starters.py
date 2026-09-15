@@ -17,16 +17,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
 
-from ufo.sdk.context import JsonValue, ScopedStore
+from ufo.sdk.context import ScopedStore
 from ufo.sdk.models import Message, ModelRequest, ToolSchema, ToolUseBlock
 from ufo.sdk.o11y import warn
 from ufo.sdk.subjects import member_subject
 from ufo.sdk.surfaces import SurfaceModel
+from ufo_ext_web.claim import Claim
 from ufo_ext_web.panels import UNLOCKS, UNLOCKS_BY_NAME
 
 STARTERS_TTL = timedelta(minutes=30)
-CLAIM_LEASE = timedelta(minutes=2)
-COOLDOWN_AFTER_FAILURE = timedelta(minutes=15)
 
 MEMORY_LIMIT = 60
 MEMORY_TEXT_CHARS = 400
@@ -117,18 +116,6 @@ def cooldown_key(prompt: SlatePrompt, member_id: UUID) -> str:
     return f"{prompt.key}-cooldown:{member_subject(member_id)}"
 
 
-def _stamped(held: object, key: str) -> datetime | None:
-    """The moment a stamp records, or None where it records nothing readable. A value written by an
-    older shape, or half-written, reads as absent rather than raising — the caller's answer to that
-    is to do the work again, which is always safe here."""
-    if not isinstance(held, dict) or not isinstance(held.get(key), str):
-        return None
-    try:
-        return datetime.fromisoformat(held[key])
-    except ValueError:
-        return None
-
-
 @dataclass(frozen=True)
 class StarterCache:
     """What the start screen reads, generated where it is read and cached for `STARTERS_TTL`.
@@ -160,12 +147,11 @@ class StarterCache:
         try:
             made = await self._rank(now)
         except Exception:
-            cooled: JsonValue = {"failed_at": now.isoformat()}
-            await self.store.put(cooldown_key(self.prompt, self.member_id), cooled)
+            await self._claim().cool(now)
             warn("web.starters_failed", member_id=str(self.member_id), slate=self.prompt.key)
             return held
         finally:
-            await self.store.delete(claim_key(self.prompt, self.member_id))
+            await self._claim().release()
         await self.store.put(
             starters_key(self.prompt, self.member_id), made.model_dump(mode="json")
         )
@@ -183,34 +169,18 @@ class StarterCache:
     async def _may_generate(self, now: datetime) -> bool:
         """Whether this read is the one that regenerates. It is not when there is no model or no
         memory to rank, when the balance is refusing — a workspace that cannot run turns must not
-        be spending on suggestions it cannot act on — when a failure is still cooling off, or when
-        another read already holds the claim."""
+        be spending on suggestions it cannot act on — and not when the claim says another read is
+        already on it or that the last one failed."""
         if self.model is None or not self.recalled or not self.solvent:
             return False
-        cooled = await self.store.get(cooldown_key(self.prompt, self.member_id))
-        failed = _stamped(cooled, "failed_at")
-        if failed is not None and now - failed < COOLDOWN_AFTER_FAILURE:
-            return False
-        return await self._claim(now)
+        return await self._claim().take(now)
 
-    async def _claim(self, now: datetime) -> bool:
-        """One reader generates. The pane re-reads on its interval and again whenever the tab is
-        looked at, and two tabs are ordinary, so without this a member could pay for the same slate
-        several times over.
-
-        `put_if` with `expected=None` inserts only where no claim stands. A claim left behind by a
-        reader that died is taken over once it is older than `CLAIM_LEASE`, by comparing against the
-        exact value read — there is no primitive that displaces a live row, so the stale value is
-        the token."""
-        key = claim_key(self.prompt, self.member_id)
-        mine: JsonValue = {"claimed_at": now.isoformat()}
-        if await self.store.put_if(key, mine, expected=None):
-            return True
-        standing = await self.store.get(key)
-        claimed = _stamped(standing, "claimed_at")
-        if claimed is not None and now - claimed < CLAIM_LEASE:
-            return False
-        return await self.store.put_if(key, mine, expected=standing)
+    def _claim(self) -> Claim:
+        return Claim(
+            store=self.store,
+            claim=claim_key(self.prompt, self.member_id),
+            cooldown=cooldown_key(self.prompt, self.member_id),
+        )
 
     async def _rank(self, now: datetime) -> Slate:
         assert self.model is not None

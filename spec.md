@@ -911,6 +911,20 @@ like every other row — the member says the build, the agent asks for what it f
 connect control rides its reply. A slot the read cannot fill is drawn from the screen's own
 constants, so a workspace whose memory says nothing yet still reads as a screen.
 
+`agents/{id}/conversations/{id}/follow-ups` answers a settled thread the next turns it offers: up to
+four rows, each in two texts — the few words the member reads, and the prompt pressing it sends,
+which states the work in full. A row has a line to read in and a turn has none, so the words that
+fit are not the words that have to say everything; the hook is the prompt in short and never a
+promise the prompt does not make, and the transcript records the prompt. Written where they are read, by the read that finds none for the thread's newest turn, and
+kept under that turn's id — a thread nobody has open is never ranked, a turn's end fires nothing,
+and the next turn replaces what the last one offered. Rows written for an earlier turn are never
+answered: they offer work the thread has moved past, and the read that writes the next ones answers
+them itself, so a member waits once rather than reading a row that asks for what was just done. A
+thread whose newest turn is still running answers none. Which kinds of row the workspace can take is
+not kept with them — a `share` is a row only while Slack is installed, answered on every read — and
+a conversation a member may only read answers none at all, because a row there would send words they
+cannot send. A thread that supports no honest row draws nothing.
+
 `api/chats` lists the conversations this member is in across their audience agents — bound to them
 or holding a turn they spoke — and, under a bound of its own, the readable ones a colleague is in
 and they are not: the rail's projection, each row titled the way the title job named it, flagged

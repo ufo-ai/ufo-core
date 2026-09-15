@@ -3,7 +3,10 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 import {
   IconCheck,
   IconChevronRight,
+  IconClock,
+  IconCornerDownRight,
   IconCreditCardOff,
+  IconFileText,
   IconMessage,
   IconPlug,
 } from "@tabler/icons-react";
@@ -195,6 +198,15 @@ export function Chat({
   const bare = starting && unsaid === undefined;
   const showEmpty = messages !== null && !messages.length && settled;
   const [animate, setAnimate] = useState(false);
+  /* The pick is this thread's — it stands while the agent's own model moves under it, and the rows
+     under the thread send on it as the composer does, so it lives above both rather than in one. */
+  const [picked, setPicked] = useState<string | null>(null);
+  const pinned = useRef(agent.id);
+  useEffect(() => {
+    if (pinned.current === agent.id) return;
+    pinned.current = agent.id;
+    setPicked(null);
+  }, [agent.id]);
   const settling = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(settling.current), []);
   const animateTheSend = () => {
@@ -205,6 +217,15 @@ export function Chat({
   const stalled = messages === null ? state.fault : null;
   const credentials = state.handoffs.credentials;
   const held = state.busy || state.messages === null;
+  /* Only the newest committed turn's ask is still open — an earlier one is a choice the member no
+     longer has — and it is open only while the card is still waiting on an entry. */
+  const asked = [...(messages ?? [])].reverse().find((said) => said.question)?.question;
+  const asking = asked !== undefined && openEntries(asked).length > 0;
+  /* The rows answer the thread's newest turn, which the surface reads for itself — so what asks for
+     them again is a message landing, not a turn id the live path has yet to learn. */
+  const said = messages?.length ?? 0;
+  const offering =
+    !readOnly && conversationId !== null && settled && !credentials && !asking && said > 0;
 
   return (
     <TranscriptScroll>
@@ -282,6 +303,17 @@ export function Chat({
               </Empty>
             ) : null}
             {showEmpty ? <Empty>No messages in this conversation yet.</Empty> : null}
+            {offering ? (
+              <FollowUps
+                key={said}
+                agentId={agent.id}
+                conversationId={conversationId}
+                onPress={(prompt) => {
+                  animateTheSend();
+                  void sendMessage(live.current, prompt, prompt, [], picked);
+                }}
+              />
+            ) : null}
           </MessageLog>
         </TranscriptPane>
       )}
@@ -296,6 +328,12 @@ export function Chat({
           draftKey={draftKey}
           input={composer}
           starting={bare}
+          picked={picked}
+          /* A turn pins a concrete id, so the Auto row carries no pin and leaves the agent's own
+             model to resolve per turn. */
+          onPick={(chosen) =>
+            setPicked(chosen === AUTO_MODEL || chosen === agent.model ? null : chosen)
+          }
           onSent={animateTheSend}
           placeholder={conversationId !== null ? FOLLOW_UP_PLACEHOLDER : NEW_CHAT_PLACEHOLDER}
         />
@@ -361,6 +399,7 @@ export function FoundingChat({
   children: ReactNode;
 }) {
   const composer = useRef<HTMLTextAreaElement>(null);
+  const [picked, setPicked] = useState<string | null>(null);
   const chatKey = "new:" + agent.id;
   const draftKey = member.id + "/" + chatKey;
   useEffect(() => readyToFound(chatKey), [chatKey]);
@@ -384,6 +423,10 @@ export function FoundingChat({
         input={composer}
         starting={false}
         placeholder={NEW_CHAT_PLACEHOLDER}
+        picked={picked}
+        onPick={(chosen) =>
+          setPicked(chosen === AUTO_MODEL || chosen === agent.model ? null : chosen)
+        }
       />
     </TranscriptScroll>
   );
@@ -477,6 +520,17 @@ function Settled({ rows, restated }: { rows: SettledRow[]; restated: boolean }) 
   );
 }
 
+/* The card draws these and the thread's foot withholds its rows while any stand. Only the
+   transcript read writes `closed`, so a foot reading it alone stayed shut for the session. */
+function openEntries(question: ChatQuestion): { entry: QuestionEntry; index: number }[] {
+  const landed = question.answered ?? {};
+  return question.closed
+    ? []
+    : (question.questions ?? [])
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ index }) => landed[index] === undefined);
+}
+
 function Question({
   target,
   question,
@@ -491,11 +545,7 @@ function Question({
   const asked: QuestionEntry[] = question.questions ?? [];
   const toTheFoot = useTakeMeToTheFoot();
   const landed = question.answered ?? {};
-  const open = question.closed
-    ? []
-    : asked
-        .map((entry, index) => ({ entry, index }))
-        .filter(({ index }) => landed[index] === undefined);
+  const open = openEntries(question);
   const settled = asked
     .map((entry, index) => ({ entry, answer: landed[index] }))
     .filter((row): row is SettledRow => row.answer !== undefined);
@@ -672,6 +722,8 @@ function Composer({
   input,
   starting,
   placeholder,
+  picked,
+  onPick,
   onSent,
 }: {
   agent: ChatAgent;
@@ -680,6 +732,8 @@ function Composer({
   input: RefObject<HTMLTextAreaElement | null>;
   starting: boolean;
   placeholder: string;
+  picked: string | null;
+  onPick: (chosen: string) => void;
   onSent?: () => void;
 }) {
   const state = useChat(target.key);
@@ -696,7 +750,6 @@ function Composer({
   });
   const [stopping, setStopping] = useState(false);
   const [dismissed, setDismissed] = useState(false);
-  const [picked, setPicked] = useState<string | null>(null);
   const model = picked ?? agent.model;
   /** A conversation's agent reaches this box as a `ConversationAgent`, which carries no `app`, so the
    *  chat surface arrives named but unclassed. */
@@ -706,15 +759,6 @@ function Composer({
   const showsEyebrow = addressed !== null && !dismissed;
   const running = state.turn;
   const disabled = state.messages === null || (target.conversationId === null && state.busy);
-
-  /** The pick is this thread's, so it stands while the agent's own model moves under it — and it
-   *  goes where the pane keeps this box across an agent change. */
-  const held = useRef(agent.id);
-  useEffect(() => {
-    if (held.current === agent.id) return;
-    held.current = agent.id;
-    setPicked(null);
-  }, [agent.id]);
 
   const drafted = useRef(draftKey);
   useEffect(() => {
@@ -751,12 +795,6 @@ function Composer({
     setStopping(true);
     await stopTurn(target, turnId);
     setStopping(false);
-  }
-
-  /** A turn pins a concrete id, so the Auto row carries no pin and leaves the agent's own model
-   *  to resolve per turn. */
-  function pick(chosen: string) {
-    setPicked(chosen === AUTO_MODEL || chosen === agent.model ? null : chosen);
   }
 
   async function send(attached: File[]): Promise<boolean> {
@@ -839,7 +877,7 @@ function Composer({
       <PromptInputToolbar>
         <PromptInputAttach />
         <div className="flex items-center gap-sm">
-          <PromptInputModel model={model} onPick={pick} />
+          <PromptInputModel model={model} onPick={onPick} />
           <PromptInputSubmit
             stops={Boolean(running && state.busy && !text.trim())}
             busy={stopping}
@@ -879,6 +917,58 @@ function Composer({
         {box}
         {starting ? <Starters agentId={target.agentId} /> : null}
       </div>
+    </div>
+  );
+}
+
+type OfferKind = "ask" | "keep" | "share" | "watch";
+type Offer = { kind: OfferKind; hook: string; prompt: string };
+type OffersPayload = { offers: Offer[]; ranking: boolean };
+
+/* Nothing but a new turn changes what this read says, and a new turn mounts a pane of its own, so
+   the interval is the tab's long stop rather than how the rows arrive. */
+const FOLLOW_UPS_EVERY_MS = 600_000;
+/* Except while another read is writing this turn's rows, which is over in a second or two. */
+const FOLLOW_UPS_RANKING_MS = 2_000;
+
+function OfferMark({ kind }: { kind: OfferKind }) {
+  if (kind === "share")
+    return <BrandMark provider="slack" className="size-(--size-glyph) shrink-0" />;
+  const Glyph = kind === "keep" ? IconFileText : kind === "watch" ? IconClock : IconCornerDownRight;
+  return <Glyph className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />;
+}
+
+/* A row reads as the few words of its hook and sends the prompt behind it, which states the work in
+   full; the rule says the words under it are the member's rather than the agent's. */
+function FollowUps({
+  agentId,
+  conversationId,
+  onPress,
+}: {
+  agentId: string;
+  conversationId: string;
+  onPress: (prompt: string) => void;
+}) {
+  const [ranking, setRanking] = useState(false);
+  const answered = usePanelRead<OffersPayload>(
+    "/agents/" + agentId + "/conversations/" + conversationId + "/follow-ups",
+    0,
+    ranking ? FOLLOW_UPS_RANKING_MS : FOLLOW_UPS_EVERY_MS,
+  );
+  const read = answered.phase === "ready" ? answered.payload : null;
+  useEffect(() => setRanking(read?.ranking ?? false), [read]);
+  const offers = read?.offers ?? [];
+  if (!offers.length) return null;
+  return (
+    <div data-testid="follow-ups" className="mt-2xl flex flex-col border-t border-edge pt-lg">
+      {offers.map((offer) => (
+        <PressRow
+          key={offer.hook}
+          glyph={<OfferMark kind={offer.kind} />}
+          line={offer.hook}
+          onPress={() => onPress(offer.prompt)}
+        />
+      ))}
     </div>
   );
 }

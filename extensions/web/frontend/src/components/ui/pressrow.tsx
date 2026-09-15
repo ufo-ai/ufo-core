@@ -8,7 +8,10 @@ import { Age } from "@/lib/moments";
 const ROW = cn(
   "group flex h-(--size-row) w-full items-center gap-sm border-0 bg-transparent",
   "px-lg text-start text-ui text-inherit no-underline hover:bg-fill",
+  "max-narrow:h-auto max-narrow:min-h-(--size-row) max-narrow:py-md",
 );
+
+const LINE = "min-w-0 flex-1 max-narrow:whitespace-normal";
 
 const CHEVRON = cn(
   "size-(--size-glyph) shrink-0 text-ink-soft opacity-0 -translate-x-xs",
@@ -25,9 +28,11 @@ const STAMP = "shrink-0 text-ink-soft tabular-nums";
  *  `line` is what the row says: one sentence that reads on its own, cut to the measure the row
  *  leaves it and travelling out to its last word while the pointer or the keyboard is on the row —
  *  the way a name in the sidebar states its tail, so a lane too narrow for a title is not where the
- *  title goes unread. `note` is the trailing detail a few rows carry — what a listed row costs, or
- *  when it last moved — and it is set in the same type as the line, because a row drawn in two
- *  registers is a row the eye assembles out of two pieces rather than reads as one thing.
+ *  title goes unread. At phone widths it wraps and the row grows to hold it instead: there is no
+ *  pointer there to travel a cut line with, so a cut line is words the member cannot reach at all.
+ *  `note` is the trailing detail a few rows carry — what a listed row costs, or when it last
+ *  moved — and it is set in the same type as the line, because a row drawn in two registers is a
+ *  row the eye assembles out of two pieces rather than reads as one thing.
  *
  *  `when` is the moment the record last moved, as the stamp it was sent in: a list of one kind of
  *  record scans that column down. It stands at the row's own end, muted, as the distance from now
@@ -67,7 +72,7 @@ export function PressRow({
   const inside = (
     <>
       {glyph}
-      <Ticker asks={asks} className="min-w-0 flex-1">
+      <Ticker asks={asks} className={LINE}>
         {says}
       </Ticker>
       {when ? (

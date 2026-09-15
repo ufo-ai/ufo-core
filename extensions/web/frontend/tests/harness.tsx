@@ -188,6 +188,7 @@ export function wire(routes: Record<string, Route>) {
     "/github/coverage": () => json({ api: false, sources: false }),
     "/homepage": () => json({ state: "none" }),
     "/conversations$": () => json({ conversations: [] }),
+    "/follow-ups": () => json({ offers: [] }),
   };
   /* Order is load-bearing: a longer path must be matched before the prefix it shares, so a named
      fallback keeps its place and only a differently anchored twin is dropped. */

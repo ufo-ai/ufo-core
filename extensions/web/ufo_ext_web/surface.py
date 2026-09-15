@@ -202,6 +202,12 @@ from ufo_ext_web.audience import (
     web_extension,
 )
 from ufo_ext_web.community import COMMUNITY, CommunityUnavailable
+from ufo_ext_web.followups import (
+    TAIL_MESSAGES,
+    TAIL_TEXT_CHARS,
+    FollowUpCache,
+    Reading,
+)
 from ufo_ext_web.openai_login import (
     DEVICE_COOKIE,
     DEVICE_PATH,
@@ -3614,6 +3620,91 @@ async def conversation_transcript(ctx: SurfaceContext, request: Request) -> Resp
     return JSONResponse(payload)
 
 
+FOLLOW_UPS_DRAWN = 4
+ALWAYS_OFFERED = frozenset({"ask", "keep", "watch"})
+SAID_ROLES = frozenset({"user", "assistant"})
+
+
+def _follow_ups(reading: Reading, kinds: frozenset[str] = frozenset()) -> Response:
+    """One answer shape on every path, so a page never has to read a missing field as a state."""
+    drawn = tuple(row for row in reading.offers if row.kind in kinds)
+    return JSONResponse(
+        {
+            "offers": [row.model_dump(mode="json") for row in drawn[:FOLLOW_UPS_DRAWN]],
+            "ranking": reading.ranking,
+        }
+    )
+
+
+def _thread_tail(rendered: list[dict[str, object]]) -> tuple[tuple[str, str], ...]:
+    """The end of the thread as the ranking reads it — what the member and the agent said, oldest
+    first, bounded next to the call that sends it. A file card and a fold of detail carry no words a
+    row could follow from.
+
+    A message past the bound keeps its last characters rather than its first. What a row follows
+    from is where the words were going — the conclusion a long reply reaches, the question it ends
+    on — and a head-first cut takes exactly that and leaves the preamble."""
+    said = [
+        (str(row["role"]), str(row["text"])[-TAIL_TEXT_CHARS:])
+        for row in rendered
+        if row.get("role") in SAID_ROLES and isinstance(row.get("text"), str) and row["text"]
+    ]
+    return tuple(said[-TAIL_MESSAGES:])
+
+
+async def conversation_follow_ups(ctx: SurfaceContext, request: Request) -> Response:
+    """The rows the chat draws under a settled thread: up to four next turns, each a few words the
+    member reads over the prompt pressing it sends.
+
+    Written where they are read, for the turn they answer, by the read that finds none for it — a
+    thread nobody has open is never ranked, and the turn's end fires nothing. A thread whose newest
+    turn is still running answers none: the work the rows would follow from is not finished, and
+    the member is watching it rather than choosing what comes next. The transcript is projected only
+    by the read that ranks: every open tab asks this on its every mount, and the rows it is usually
+    answered from were written for the turn it already holds.
+
+    Which kinds of row this workspace can take is answered here rather than kept with them: `share`
+    is a row only while Slack is installed, so a workspace that removed it stops offering the send
+    on the next read with no new ranking.
+
+    Admitted by the gate every other content read enters through, never a narrower one of its own:
+    an agent a member reaches only through a member-private conversation is outside `allows` and
+    inside `allows_chat`, so a second gate spelled here refused a thread the same screen draws and
+    the member speaks in — and a first read that fails is never asked again.
+
+    An empty answer is ordinary — a thread that supports no honest row draws nothing — and the page
+    asks again when the next turn settles. `ranking` separates that from the other empty answer:
+    another read holds the claim and is writing this turn's rows now, which is a reason to ask again
+    in a moment rather than to wait out the page's own long interval."""
+    authorized = await _readable_conversation(ctx, request)
+    if isinstance(authorized, Response):
+        return authorized
+    agent_id, conversation_id, viewer = authorized
+    latest = await ctx.latest_turn(conversation_id)
+    detail = None if latest is None else await ctx.turn_detail(latest)
+    if detail is None or detail.turn.terminal is None:
+        return _follow_ups(Reading())
+
+    async def thread() -> tuple[tuple[str, str], ...]:
+        rendered, _turn, _earlier = await _conversation_messages(
+            ctx, agent_id, conversation_id, viewer.member_id, viewer.opens
+        )
+        return _thread_tail(rendered)
+
+    installed = {entry.surface for entry in await ctx.list_installations()}
+    kinds = ALWAYS_OFFERED | ({"share"} if SURFACE_SLACK in installed else frozenset())
+    reading = await FollowUpCache(
+        store=web_extension().store,
+        conversation_id=conversation_id,
+        turn_id=detail.turn.id,
+        thread=thread,
+        kinds=kinds,
+        model=ctx.model,
+        solvent=await _solvent(ctx),
+    ).read()
+    return _follow_ups(reading, kinds)
+
+
 async def _conversation_history(ctx: SurfaceContext, request: Request, cursor: str) -> Response:
     """One earlier page of a conversation whose transcript has compacted. The transcript's cursor
     names the bounded page above its tail and each page's cursor the one above it, so the pane
@@ -5735,6 +5826,11 @@ ROUTES = (
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/transcript",
         handler=conversation_transcript,
+    ),
+    SurfaceRoute(
+        method="GET",
+        path="agents/{agent_id}/conversations/{conversation_id}/follow-ups",
+        handler=conversation_follow_ups,
     ),
     SurfaceRoute(
         method="GET",

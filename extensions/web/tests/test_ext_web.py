@@ -62,6 +62,7 @@ from ufo_ext_slack.surface import (
     SLACK_CLIENT_ID_ENV,
     SLACK_CLIENT_SECRET_ENV,
     SLACK_OAUTH_AUTHORIZE_URL,
+    SURFACE_SLACK,
 )
 from ufo_ext_sources.manifest import manifest as sources_manifest
 from ufo_ext_sources.tools import SOURCE_TRIGGER_OBJECT
@@ -84,6 +85,14 @@ from ufo_ext_web.anthropic_login import (
     PendingAuthorization as AnthropicPending,
 )
 from ufo_ext_web.audience import AUDIENCE_PREFIX, EXTENSION_WEB, web_extension
+from ufo_ext_web.followups import (
+    FOLLOW_UPS_DIGEST,
+    TAIL_MESSAGES,
+    TAIL_TEXT_CHARS,
+    Offer,
+    Offers,
+    offers_key,
+)
 from ufo_ext_web.manifest import manifest as web_manifest
 from ufo_ext_web.openai_login import (
     DEVICE_COOKIE,
@@ -125,6 +134,7 @@ from ufo_ext_web.surface import (
     _run_answer,
     _sse,
     _subagent_activity,
+    _thread_tail,
     load_assets,
     portal_shell,
     rum_config,
@@ -9995,6 +10005,187 @@ async def test_only_required_setup_blocks_readiness(
         "issues": False,
         "metrics": False,
     }
+
+
+def test_the_ranking_reads_the_end_of_a_long_thread_and_the_end_of_a_long_message() -> None:
+    """What a row follows from is where the words were going, so a message past the bound keeps its
+    last characters and a thread past the bound keeps its last messages. A card and a fold of detail
+    carry no words and are not read at all."""
+    spoken = [{"role": "user", "text": f"turn {index}"} for index in range(TAIL_MESSAGES + 3)]
+    report = "preamble " * 400 + "So the answer is net-45."
+    rendered: list[dict[str, object]] = [
+        *spoken,
+        {"role": "file", "text": "acme.md"},
+        {"role": "assistant", "text": report},
+    ]
+
+    tail = _thread_tail(rendered)
+
+    assert len(tail) == TAIL_MESSAGES
+    assert tail[0] == ("user", "turn 4")
+    assert tail[-1][0] == "assistant"
+    assert tail[-1][1].endswith("So the answer is net-45.")
+    assert len(tail[-1][1]) == TAIL_TEXT_CHARS
+    assert all(role != "file" for role, _said in tail)
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_follow_ups_answer_a_thread_reached_through_its_conversation_alone(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """An agent a member reaches only through a member-private extension conversation is outside
+    `allows` and inside `allows_chat`. A gate of its own spelled here refused the thread the same
+    screen draws and the member speaks in, and a first read that fails is never asked again — so
+    this read enters through the gate every other content read enters through."""
+    client, workspace_id, _agent_id = web
+    member_id, token = await _seed_member(workspace_id, "member@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    private = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.agent).values(
+                id=private,
+                workspace_id=workspace_id,
+                name="code-review",
+                prompt="Answer briefly.",
+                model="claude-opus-4-8",
+                is_main=False,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    conversation_id = await _seed_agent_conversation(
+        workspace_id,
+        private,
+        queue_key=f"code-review:{member_id}:42",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface="extension:coding",
+    )
+    turn_id = await _seed_listed_turn(
+        workspace_id, conversation_id, private, seq=1, inbound="Review pull request 42."
+    )
+    drafted = {
+        "kind": "ask",
+        "hook": "Draft the review summary.",
+        "prompt": "Draft the summary of the review for pull request 42.",
+    }
+    with ws(workspace_id):
+        await web_extension().store.put(
+            offers_key(conversation_id),
+            Offers(
+                turn=str(turn_id),
+                prompt=FOLLOW_UPS_DIGEST,
+                offers=(Offer.model_validate(drafted),),
+            ).model_dump(mode="json"),
+        )
+
+    read = await client.get(
+        f"/surface/web/agents/{private}/conversations/{conversation_id}/follow-ups", headers=cookie
+    )
+
+    assert read.status_code == 200
+    assert read.json() == {"offers": [drafted], "ranking": False}
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_follow_ups_draw_the_rows_a_settled_turn_ends_on(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The rows stand under the turn they were written for: a `share` only while Slack is installed,
+    none at all while the newest turn is still running, and none for a conversation this member may
+    not speak in."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="They asked for the revised terms."),
+    )
+    drafted = {
+        "kind": "ask",
+        "hook": "Draft the Acme reply",
+        "prompt": "Draft the reply to Acme and hold it for my read.",
+    }
+    posted = {
+        "kind": "share",
+        "hook": "Post the terms to #sales",
+        "prompt": "Post the revised terms to #sales.",
+    }
+    with ws(workspace_id):
+        await web_extension().store.put(
+            offers_key(conversation_id),
+            Offers(
+                turn=str(turn_id),
+                prompt=FOLLOW_UPS_DIGEST,
+                offers=(Offer.model_validate(drafted), Offer.model_validate(posted)),
+            ).model_dump(mode="json"),
+        )
+    path = f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/follow-ups"
+
+    read = await client.get(path, headers=cookie)
+    assert read.status_code == 200
+    assert read.json() == {"offers": [drafted], "ranking": False}
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.surface_installation).values(
+                workspace_id=workspace_id,
+                surface=SURFACE_SLACK,
+                installation_id="T0001",
+                agent_id=agent_id,
+                routes_ingress=True,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    installed = await client.get(path, headers=cookie)
+    assert installed.json()["offers"] == [drafted, posted]
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound="draft it",
+                admission_source="member",
+                speaker_member_id=member_id,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    running = await client.get(path, headers=cookie)
+    assert running.json() == {"offers": [], "ranking": False}
+
+    stranger, _theirs = await _seed_member(workspace_id, "stranger@example.com")
+    private, _turn = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        stranger,
+        "stranger@example.com",
+        TerminalFrame(status="done", text="mine"),
+    )
+    hidden = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{private}/follow-ups", headers=cookie
+    )
+    assert hidden.status_code == 404
+    denied = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{uuid4()}/follow-ups", headers=cookie
+    )
+    assert denied.status_code == 404
+    malformed = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/not-a-uuid/follow-ups", headers=cookie
+    )
+    assert malformed.status_code == 404
 
 
 @pytest.mark.usefixtures("database_url")
