@@ -1296,18 +1296,19 @@ test("a markdown file in a Slack conversation opens the attachment sheet", async
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
-test("a rail row lands in the chat app when one is shipped", async () => {
+test("a rail row opens its conversation, never the page of the agent holding it", async () => {
   location.hash = "#/";
-  wire({ ...chatsOnWire([CHAT_ROW]) });
+  const chatted = { ...CHAT_ROW, agent_id: CHAT_APP_ID, agent_name: "chat" };
+  wire({ ...chatsOnWire([chatted]), "/transcript": () => json({ messages: [] }) });
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
 
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   await userEvent.click(await rail.findByRole("button", { name: /Pick one thread/ }));
 
-  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=" + CONVO_ID);
+  expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
-test("a rail row of an app's own conversation opens the conversation, not the app's page", async () => {
+test("an app's own conversation opens the same way", async () => {
   location.hash = "#/";
   const radar = { ...SECOND, name: "radar", app: "radar" };
   const alert = { ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "radar", title: "Deploy alert" };
@@ -1320,7 +1321,7 @@ test("a rail row of an app's own conversation opens the conversation, not the ap
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
-test("the ask row opens the chat app at its start screen when one is shipped", async () => {
+test("the ask row starts a conversation with the main agent, whatever page it carries", async () => {
   location.hash = "#/";
   wire({});
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
@@ -1328,7 +1329,7 @@ test("the ask row opens the chat app at its start screen when one is shipped", a
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   await userEvent.click(rail.getAllByRole("button", { name: "New chat" })[0]);
 
-  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
+  expect(location.hash).toBe("#/new/" + AGENT_ID);
 });
 
 test("the chord the row prints starts the conversation the row would", async () => {
@@ -1342,7 +1343,7 @@ test("the chord the row prints starts the conversation the row would", async () 
 
   await userEvent.keyboard("{Meta>}{Shift>}O{/Shift}{/Meta}");
 
-  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
+  expect(location.hash).toBe("#/new/" + AGENT_ID);
 });
 
 test("the ask control targets the main agent, and offers no other", async () => {

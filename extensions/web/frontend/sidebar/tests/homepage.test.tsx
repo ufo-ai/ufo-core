@@ -367,9 +367,9 @@ test("a link to a rail chat the app's index does not answer opens it beside the 
   expect(init.place.opens).toBeUndefined();
 });
 
-test("a sidebar chat on the chat app stands in the page's column alone", async () => {
+test("a sidebar chat on the chat app opens as a conversation, never inside the app's page", async () => {
   location.hash = "#/";
-  const { calls } = wire({
+  wire({
     "/transcript": () => json({ messages: [] }),
     "/homepage": () => json(SET),
     ...chatsOnWire([CHAT_ROW]),
@@ -382,26 +382,9 @@ test("a sidebar chat on the chat app stands in the page's column alone", async (
   const rail = within(screen.getByRole("navigation", { name: "Workspace" }));
   fireEvent.click(await rail.findByRole("button", { name: /Pick one thread/ }));
 
-  expect(location.hash).toBe("#/agents/" + AGENT_ID + "?open=" + CONVO_ID);
-  const frame = (await screen.findByTitle("Assistant homepage")) as HTMLIFrameElement;
-  expect(screen.queryByRole("region", { name: "Pick one thread" })).toBeNull();
-  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
-  expect(screen.queryByRole("button", { name: "Edit Assistant" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "Close edit of Assistant" })).toBeNull();
-  expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(false);
-
-  const sent: unknown[] = [];
-  vi.spyOn(frame, "contentWindow", "get").mockReturnValue({
-    postMessage: (message: unknown) => void sent.push(message),
-  } as unknown as Window);
-  fireEvent(
-    window,
-    new MessageEvent("message", { data: { ufo: "ready" }, source: frame.contentWindow }),
-  );
-  const init = sent.find((message) => (message as { ufo?: string }).ufo === "init") as {
-    place: { opens?: string[] };
-  };
-  expect(init.place.opens).toEqual([CONVO_ID]);
+  expect(location.hash).toBe("#/c/" + CONVO_ID);
+  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
+  expect(document.querySelector("iframe")).toBeNull();
 });
 
 test("an app whose first page arrives shows it without a reload", async () => {

@@ -3255,7 +3255,7 @@ test("a thread pressed in the rail lands the cursor in the composer of the pane 
 
   await userEvent.click(await screen.findByRole("button", { name: /Pick one thread/ }));
 
-  await waitFor(() => expect(location.hash).toContain("open=" + CONVO_ID));
+  await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
   const box = await screen.findByLabelText("Ask UFO");
   await waitFor(() => expect(document.activeElement).toBe(box));
 });
@@ -3271,7 +3271,7 @@ test("a thread pressed in the rail at a phone width leaves the composer alone", 
   const drawer = await screen.findByRole("dialog");
   await userEvent.click(await within(drawer).findByRole("button", { name: /Pick one thread/ }));
 
-  await waitFor(() => expect(location.hash).toContain("open=" + CONVO_ID));
+  await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
   const box = await screen.findByLabelText("Ask UFO");
   expect(document.activeElement).not.toBe(box);
 });

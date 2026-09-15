@@ -80,7 +80,7 @@ import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
 import { Loading } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { ChatMark } from "./lib/chatMark";
-import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
+import { MainAgentProvider } from "@/lib/mainAgent";
 import { rowMoment } from "@/lib/moments";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
@@ -146,7 +146,6 @@ import {
 } from "@/lib/router";
 import {
   chatHash,
-  COMPOSE,
   COMPOSING,
   CONNECTION_TABS,
   connectionTab,
@@ -731,12 +730,9 @@ function WorkspaceSidebar({
   const tabs = useOfferedTabs();
   const surfaces = useSurfaces();
   const collapsed = rail.collapsed && !narrow;
-  const chatApp = chatSurface(agents);
   const startChat = useCallback(() => {
-    if (!mainAgent) return;
-    if (chatApp) openAgentPlace(chatApp.id, { opens: [COMPOSE] });
-    else openNewChat(mainAgent.id);
-  }, [chatApp, mainAgent]);
+    if (mainAgent) openNewChat(mainAgent.id);
+  }, [mainAgent]);
   useEffect(() => {
     const chord = (event: KeyboardEvent) => {
       if (event.defaultPrevented || !event.metaKey || !event.shiftKey) return;
@@ -837,7 +833,7 @@ function WorkspaceSidebar({
       <div className={cn("flex min-h-0 flex-1 flex-col gap-px", collapsed && "hidden")}>
         <RailSettingsFlyout onCompose={startChat} />
         <div className="flex min-h-0 flex-1 flex-col gap-sm overflow-y-auto">
-          <RailList route={route} agents={agents} mainAgent={mainAgent} chatApp={chatApp} />
+          <RailList route={route} mainAgent={mainAgent} />
         </div>
       </div>
       <footer className="mt-auto shrink-0">
@@ -901,9 +897,7 @@ function RoutedPane({
         <Chats
           place={route.place}
           onPlace={placeChats}
-          onOpen={(row) =>
-            openRailRow(agents, chatSurface(agents), row.conversation_id, row.agent_id)
-          }
+          onOpen={(row) => openRailRow(row.conversation_id)}
         />
       );
     case "automations":
@@ -1205,19 +1199,11 @@ function useScrollMark(): void {
   }, []);
 }
 
-/** An app's own conversation opened in its app stood the app's page in front of the transcript,
- *  and one from Slack drew no transcript at all; it opens as the conversation it is. */
-function openRailRow(
-  agents: Agent[],
-  chatApp: Agent | null,
-  conversationId: string,
-  agentId: string,
-): void {
+/** Routed through an agent's page, a conversation landed on whatever site the workspace had bound
+ *  as that page — a member-built homepage with no transcript on it — so it opens as itself. */
+function openRailRow(conversationId: string): void {
   railRead(conversationId);
-  const app = agents.find((agent) => agent.id === agentId)?.app ?? null;
-  const own = app !== null && app !== CHAT_SURFACE;
-  if (own || chatApp === null) openChat(conversationId);
-  else openAgentPlace(chatApp.id, { opens: [conversationId] });
+  openChat(conversationId);
 }
 
 const RAIL_SKELETON_TITLES = ["w-4/5", "w-3/5", "w-3/4", "w-1/2", "w-2/3", "w-2/5"];
@@ -1239,17 +1225,7 @@ function RailSkeleton() {
   );
 }
 
-function RailList({
-  route,
-  agents,
-  mainAgent,
-  chatApp,
-}: {
-  route: Route;
-  agents: Agent[];
-  mainAgent: Agent | null;
-  chatApp: Agent | null;
-}) {
+function RailList({ route, mainAgent }: { route: Route; mainAgent: Agent | null }) {
   const rail = useRail();
   const rows = railRows(rail.rows, rail.shown, rail.sort);
   const list = (
@@ -1275,7 +1251,7 @@ function RailList({
             automated={row.automation_name !== null}
             unread={row.unread}
             when={row.last_at}
-            onClick={() => openRailRow(agents, chatApp, row.conversation_id, row.agent_id)}
+            onClick={() => openRailRow(row.conversation_id)}
           />
         );
       })}
