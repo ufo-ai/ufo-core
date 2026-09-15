@@ -37,7 +37,8 @@ MEMBER_AUTHORIZATION_ACTIVE_MESSAGES = 8
 MEMBER_AUTHORIZATION_RECENT_MESSAGES = 12
 MEMBER_AUTHORIZATION_CONTEXT_CHARS = 8_000
 MEMBER_AUTHORIZATION_EFFECT_CHARS = 8_000
-MEMBER_AUTHORIZATION_QUESTION_CHARS = 1_200
+MEMBER_AUTHORIZATION_FACT_VALUE_CHARS = 80
+MEMBER_AUTHORIZATION_FACT_CHARS = 1_200
 MEMBER_AUTHORIZATION_EVIDENCE_CHARS = 500
 MEMBER_AUTHORIZATION_SUMMARY_CHARS = 240
 MEMBER_AUTHORIZATION_TIMEOUT_SECONDS = 12
@@ -65,6 +66,62 @@ MEMBER_AUTHORIZATION_SECRET_MARKERS = (
 MEMBER_AUTHORIZATION_SYSTEM = (
     (Path(__file__).parent.parent / "prompts" / "member_authorization.md").read_text().strip()
 )
+
+
+def _fact_lines(values: dict[str, JsonValue], prefix: str = "") -> list[str]:
+    """One labeled line per leaf field, nested objects flattened under their path — a connector
+    write keeps its provider payload under `arguments`, and the recipient inside it is the fact the
+    member is approving. A key the model supplied renders as words only while it is plain text;
+    otherwise it renders quoted with its control characters escaped, so no key or value can break
+    a line and forge a fact beside the real one."""
+    lines: list[str] = []
+    for key, value in values.items():
+        words = key.replace("_", " ")
+        label = prefix + (words if _plain(words) else json.dumps(key)[:_QUOTED_LABEL_CHARS])
+        match value:
+            case dict() if value:
+                lines.extend(_fact_lines(value, f"{label} "))
+            case list() if value and all(isinstance(item, dict) for item in value):
+                for index, item in enumerate(value, 1):
+                    match item:
+                        case dict():
+                            lines.extend(_fact_lines(item, f"{label} {index} "))
+            case _:
+                lines.append(f"{label[:1].upper()}{label[1:]}: {_fact_value(value)}")
+    return lines
+
+
+_QUOTED_LABEL_CHARS = MEMBER_AUTHORIZATION_FACT_VALUE_CHARS + 2
+
+
+def _plain(text: str) -> bool:
+    """Short text that renders as one line everywhere: no control character, and neither
+    U+2028 nor U+2029, which `str.splitlines` and browsers break on while Unicode files them under
+    separators rather than controls."""
+    return len(text) <= MEMBER_AUTHORIZATION_FACT_VALUE_CHARS and not any(
+        category(character)[0] == "C" or category(character) in ("Zl", "Zp") for character in text
+    )
+
+
+def _fact_value(value: JsonValue) -> str:
+    match value:
+        case None | [] | {}:
+            return "none"
+        case bool():
+            return "true" if value else "false"
+        case int() | float():
+            return str(value)
+        case str() if _plain(value):
+            return value
+        case str():
+            return f"{len(value):,} characters"
+        case list() if all(not isinstance(item, dict | list) for item in value):
+            joined = ", ".join(_fact_value(item) for item in value)
+            return joined if _plain(joined) else f"{len(value)} items"
+        case list():
+            return f"{len(value)} items"
+        case dict():
+            return f"{len(value)} fields"
 
 
 def _disclose_value(value: JsonValue) -> tuple[JsonValue, bool]:
@@ -424,14 +481,14 @@ class MemberAuthorization:
             )
 
     async def preflight(self, request: AuthorizationRequest) -> AuthorizationAttempt:
-        effect_json = self._effect_json(request.effect)
-        if effect_json is None:
+        effect = self._effect_json(request.effect)
+        if effect is None:
             return AuthorizationAttempt(
                 request=request,
                 refusal=MEMBER_AUTHORIZATION_UNDISCLOSABLE,
             )
         state = await self._state(request)
-        verdict = await self._candidate(request, state, effect_json)
+        verdict = await self._candidate(request, state, effect)
         return AuthorizationAttempt(
             request=request,
             verdict=verdict,
@@ -747,31 +804,17 @@ class MemberAuthorization:
             and state.pending.binding_digest == self._binding_digest(request)
         )
 
-    def _effect_json(self, effect: AuthorizationEffect) -> str | None:
+    def _effect_json(self, effect: AuthorizationEffect) -> tuple[str, bool] | None:
+        """The disclosed effect as the classifier reads it, clipped to
+        `MEMBER_AUTHORIZATION_EFFECT_CHARS` with the flag that says whether it saw all of it — the
+        prompt answers `ask` to an incomplete request. None where a value cannot be disclosed."""
         disclosed, complete = effect.disclosure()
         if not complete:
             return None
-        effect_json = json.dumps(
-            disclosed,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        details_json = json.dumps(
-            {
-                "arguments": disclosed["arguments"],
-                "target": disclosed["target"],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        if (
-            len(effect_json) > MEMBER_AUTHORIZATION_EFFECT_CHARS
-            or len(details_json) > MEMBER_AUTHORIZATION_QUESTION_CHARS
-        ):
-            return None
-        return effect_json
+        text = json.dumps(disclosed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        if len(text) <= MEMBER_AUTHORIZATION_EFFECT_CHARS:
+            return text, True
+        return text[:MEMBER_AUTHORIZATION_EFFECT_CHARS], False
 
     def _digest(self, effect: AuthorizationEffect) -> str:
         return effect.digest(self.digest_key)
@@ -783,7 +826,7 @@ class MemberAuthorization:
         self,
         request: AuthorizationRequest,
         state: _AuthorizationState,
-        effect_json: str,
+        effect: tuple[str, bool],
     ) -> AuthorizationVerdict | None:
         if (
             state.replay is not None
@@ -801,14 +844,15 @@ class MemberAuthorization:
             or (not request.selected_from_multiple and state.pending is None)
         ):
             return None
-        return await self._classify(request, state, effect_json)
+        return await self._classify(request, state, effect)
 
     async def _classify(
         self,
         request: AuthorizationRequest,
         state: _AuthorizationState,
-        effect_json: str,
+        effect: tuple[str, bool],
     ) -> AuthorizationVerdict:
+        effect_json, effect_complete = effect
         packet = redact_value(
             {
                 "member": state.email,
@@ -820,7 +864,7 @@ class MemberAuthorization:
                     None if request.scope is None else request.scope.model_dump(mode="json")
                 ),
                 "request": effect_json,
-                "request_complete": True,
+                "request_complete": effect_complete,
             }
         )
         assert isinstance(packet, dict)
@@ -1155,6 +1199,10 @@ class MemberAuthorization:
         return inserted.rowcount == 1
 
     def _question(self, request: AuthorizationRequest, state: _AuthorizationState) -> AskUserInput:
+        """What the member reads: the classifier's one-line summary of the effect, the account
+        facts the decision binds, and one labeled line per argument and target field read off the
+        effect itself — a short value verbatim, a long one by its length — so the sentence a model
+        wrote from untrusted text sits beside facts nothing but the bound bytes can move."""
         effect = request.effect.stored() if state.pending is None else state.pending.effect
         call = request.effect.call if state.pending is None else state.pending.call
         fallback_request, fallback_scope = self._fallback_summaries(request)
@@ -1168,30 +1216,32 @@ class MemberAuthorization:
             if state.pending is None or state.pending.scope_summary is None
             else state.pending.scope_summary
         )
-        details = json.dumps(
-            {
-                "arguments": effect["arguments"],
-                "target": effect["target"],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        if len(details) > MEMBER_AUTHORIZATION_QUESTION_CHARS:
-            raise ValueError("pending authorization disclosure exceeds its question bound")
         scope = request.scope
         if scope is None:
             header = "Account request"
-            facts = f"Operation: {call}\nDetails: {details}"
+            lines = [f"Operation: {call}"]
         else:
             provider = scope.provider.replace("_", " ").title()
             header = f"{provider} account"
-            facts = (
-                f"Account: {scope.account_id}\n"
-                f"Operation: {scope.operation}\n"
-                f"Access: {scope.access}\n"
-                f"Details: {details}"
-            )
+            lines = [
+                f"Account: {scope.account_id}",
+                f"Operation: {scope.operation}",
+                f"Access: {scope.access}",
+            ]
+        arguments = effect["arguments"]
+        target = effect["target"]
+        assert isinstance(arguments, dict)
+        fields = _fact_lines(arguments)
+        if isinstance(target, dict):
+            fields.extend(_fact_lines(target, "Target "))
+        used = 0
+        for index, field in enumerate(fields):
+            if used + len(field) + 1 > MEMBER_AUTHORIZATION_FACT_CHARS:
+                lines.append(f"And {len(fields) - index} more fields.")
+                break
+            lines.append(field)
+            used += len(field) + 1
+        facts = "\n".join(lines)
         options = [
             QuestionOption(
                 label="Allow once",

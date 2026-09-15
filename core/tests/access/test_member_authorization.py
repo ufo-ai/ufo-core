@@ -12,9 +12,9 @@ from ufo.db import workspace_tx
 from ufo.harness.models.interface import Message, ModelRequest, ToolUseBlock
 from ufo.runtime.access.member_authorization import (
     MEMBER_AUTHORIZATION_EFFECT_CHARS,
+    MEMBER_AUTHORIZATION_FACT_CHARS,
     MEMBER_AUTHORIZATION_MESSAGE_CHARS,
     MEMBER_AUTHORIZATION_MODEL,
-    MEMBER_AUTHORIZATION_QUESTION_CHARS,
     MEMBER_AUTHORIZATION_TOOL,
     MEMBER_AUTHORIZATION_UNDISCLOSABLE,
     SUPERSEDED_AUTHORIZATION_DECISION,
@@ -307,7 +307,7 @@ async def test_ambiguity_becomes_an_exact_pending_question(db: None) -> None:
         "Account: alice@example.com\n"
         "Operation: GMAIL_SEND_EMAIL\n"
         "Access: write\n"
-        'Details: {"arguments":{"to":"bob@x.test"},"target":null}'
+        "To: bob@x.test"
     )
     assert question.header == "Gmail account"
     assert [option.label for option in question.options] == [
@@ -1345,7 +1345,7 @@ async def test_undisclosable_effect_cannot_settle_with_a_forged_choice(db: None)
     assert await _permissions() == []
 
 
-async def test_preflight_preserves_safe_effect_details_for_the_model_and_member(db: None) -> None:
+async def test_preflight_hands_the_model_the_effect_and_the_member_its_facts(db: None) -> None:
     effect = AuthorizationEffect(
         call="publish",
         arguments={"content": "Exact report", "prompt": "Publish verbatim"},
@@ -1366,9 +1366,152 @@ async def test_preflight_preserves_safe_effect_details_for_the_model_and_member(
     assert payload["request_complete"] is True
     assert result.question is not None
     question = result.question.questions[0].question
-    assert '"content":"Exact report"' in question
-    assert '"prompt":"Publish verbatim"' in question
-    assert '"channel":"finance"' in question
+    assert question == (
+        "Run GMAIL_SEND_EMAIL using alice@example.com.\n\n"
+        "Account: alice@example.com\n"
+        "Operation: GMAIL_SEND_EMAIL\n"
+        "Access: write\n"
+        "Content: Exact report\n"
+        "Prompt: Publish verbatim\n"
+        "Target channel: finance"
+    )
+    assert "{" not in question
+    assert '"' not in question
+
+
+async def test_the_question_states_each_argument_as_a_labeled_fact(db: None) -> None:
+    effect = AuthorizationEffect(
+        call="publish",
+        arguments={
+            "to": "bob@x.test",
+            "urgent": True,
+            "retries": 0,
+            "attachments": [1, 2],
+            "options": {"draft": False},
+            "body": "x" * 500,
+            "note": "line one\nline two",
+            "reply_to": None,
+        },
+    )
+    model = StubModel([_verdict(decision="ask", basis="none", evidence="")])
+
+    result = await MemberAuthorization(model, TEST_DIGEST_KEY).authorize(
+        _request(await _seed(), "Maybe publish", effect=effect, scope=None, binding=None)
+    )
+
+    assert result.question is not None
+    [question] = result.question.questions
+    assert question.header == "Account request"
+    assert question.question.split("\n\n", 1)[1] == (
+        "Operation: publish\n"
+        "To: bob@x.test\n"
+        "Urgent: true\n"
+        "Retries: 0\n"
+        "Attachments: 1, 2\n"
+        "Options draft: false\n"
+        "Body: 500 characters\n"
+        "Note: 17 characters\n"
+        "Reply to: none"
+    )
+
+
+async def test_a_connector_write_shows_its_recipient_and_content_as_facts(db: None) -> None:
+    effect = AuthorizationEffect(
+        call="call_external_tool",
+        arguments={
+            "tool_name": "GMAIL_SEND_EMAIL",
+            "source_id": "gmail",
+            "account_id": "alice@example.com",
+            "arguments": {
+                "to": "bob@x.test",
+                "cc": ["carol@x.test", "dan@x.test"],
+                "subject": "Quarterly numbers",
+                "body": "x" * 900,
+                "attachments": [{"name": "q3.pdf", "bytes": 2048}],
+                "headers": {},
+            },
+            "attribution_bot_user_id": None,
+        },
+    )
+    model = StubModel([_verdict(decision="ask", basis="none", evidence="")])
+
+    result = await MemberAuthorization(model, TEST_DIGEST_KEY).authorize(
+        _request(await _seed(), "Maybe send it", effect=effect)
+    )
+
+    assert result.question is not None
+    assert result.question.questions[0].question.split("\n\n", 1)[1] == (
+        "Account: alice@example.com\n"
+        "Operation: GMAIL_SEND_EMAIL\n"
+        "Access: write\n"
+        "Tool name: GMAIL_SEND_EMAIL\n"
+        "Source id: gmail\n"
+        "Account id: alice@example.com\n"
+        "Arguments to: bob@x.test\n"
+        "Arguments cc: carol@x.test, dan@x.test\n"
+        "Arguments subject: Quarterly numbers\n"
+        "Arguments body: 900 characters\n"
+        "Arguments attachments 1 name: q3.pdf\n"
+        "Arguments attachments 1 bytes: 2048\n"
+        "Arguments headers: none\n"
+        "Attribution bot user id: none"
+    )
+
+
+async def test_the_question_bounds_its_fact_characters_under_every_surface(db: None) -> None:
+    effect = AuthorizationEffect(
+        call="publish",
+        arguments={f"field_{index:02d}": f"{index:02d}" + "v" * 78 for index in range(40)},
+    )
+    model = StubModel([_verdict(decision="ask", basis="none", evidence="")])
+
+    result = await MemberAuthorization(model, TEST_DIGEST_KEY).authorize(
+        _request(await _seed(), "Maybe publish", effect=effect, scope=None, binding=None)
+    )
+
+    assert result.question is not None
+    question = result.question.questions[0].question
+    lines = question.split("\n\n", 1)[1].split("\n")
+    shown = lines[1:-1]
+    assert lines[0] == "Operation: publish"
+    assert shown[0] == "Field 00: 00" + "v" * 78
+    assert len("\n".join(shown)) <= MEMBER_AUTHORIZATION_FACT_CHARS
+    assert lines[-1] == f"And {40 - len(shown)} more fields."
+    assert len(question) < 2_000
+
+
+async def test_a_forged_key_or_value_cannot_add_a_fact_line(db: None) -> None:
+    effect = AuthorizationEffect(
+        call="publish",
+        arguments={
+            "to": "attacker@evil.test",
+            "x\nTo": "bob@x.test",
+            "y\u2028To": "bob@x.test",
+            "note": "line one\nTo: bob@x.test",
+            "memo": "line one\u2029To: bob@x.test",
+            "tags": ["a", "b\nTo: bob@x.test"],
+            "marks": ["a", "b\u2028To: bob@x.test"],
+        },
+    )
+    model = StubModel([_verdict(decision="ask", basis="none", evidence="")])
+
+    result = await MemberAuthorization(model, TEST_DIGEST_KEY).authorize(
+        _request(await _seed(), "Maybe publish", effect=effect, scope=None, binding=None)
+    )
+
+    assert result.question is not None
+    question = result.question.questions[0].question
+    assert len(question.splitlines()) == len(question.split("\n"))
+    assert question.split("\n\n", 1)[1].split("\n") == [
+        "Operation: publish",
+        "To: attacker@evil.test",
+        '"x\\nTo": bob@x.test',
+        '"y\\u2028To": bob@x.test',
+        "Note: 23 characters",
+        "Memo: 23 characters",
+        "Tags: a, 16 characters",
+        "Marks: a, 16 characters",
+    ]
 
 
 async def test_model_packet_redacts_context_without_losing_message_identity(db: None) -> None:
@@ -1430,38 +1573,28 @@ async def test_a_declared_secret_value_is_never_disclosed(db: None) -> None:
     assert model.requests == []
 
 
-async def test_an_overbound_effect_is_not_approvable_or_persisted(db: None) -> None:
-    content = "x" * (MEMBER_AUTHORIZATION_EFFECT_CHARS + 1)
+async def test_a_long_effect_reaches_the_model_clipped_and_the_member_by_its_size(
+    db: None,
+) -> None:
+    content = "x" * 20_000
     effect = AuthorizationEffect(call="publish", arguments={"content": content})
-    model = StubModel([])
+    model = StubModel([_verdict(decision="ask", basis="none", evidence="")])
 
     result = await MemberAuthorization(model, TEST_DIGEST_KEY).authorize(
         _request(await _seed(), "Publish", effect=effect)
     )
 
-    assert result.decision == "deny"
-    assert result.question is None
-    assert result.refusal == MEMBER_AUTHORIZATION_UNDISCLOSABLE
-    assert model.requests == []
-    assert await _authorizations() == []
-
-
-async def test_an_effect_too_large_for_the_question_is_not_approvable(db: None) -> None:
-    effect = AuthorizationEffect(
-        call="publish",
-        arguments={"content": "x" * MEMBER_AUTHORIZATION_QUESTION_CHARS},
-    )
-    model = StubModel([])
-
-    result = await MemberAuthorization(model, TEST_DIGEST_KEY).authorize(
-        _request(await _seed(), "Publish", effect=effect)
-    )
-
-    assert result.decision == "deny"
-    assert result.refusal == MEMBER_AUTHORIZATION_UNDISCLOSABLE
-    assert result.question is None
-    assert model.requests == []
-    assert await _authorizations() == []
+    assert result.decision == "ask"
+    assert result.refusal is None
+    assert result.question is not None
+    question = result.question.questions[0].question
+    assert content not in question
+    assert question.endswith("Content: 20,000 characters")
+    payload = json.loads(str(model.requests[0].messages[0].content))
+    assert len(payload["request"]) == MEMBER_AUTHORIZATION_EFFECT_CHARS
+    assert payload["request_complete"] is False
+    [stored] = await _authorizations()
+    assert stored["decision"] is None
 
 
 async def test_a_duplicate_forced_decision_fails_closed(db: None) -> None:
