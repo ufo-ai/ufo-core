@@ -106,6 +106,10 @@ RESULT_INVALID = (
     "The spawn's final answer does not match its output schema, so it was dropped rather than "
     "delivered. Failures: {faults}"
 )
+RESULT_SCOPE_EXCEEDED = (
+    "The spawn used a connection outside the parent scope, so its answer was withheld."
+)
+RESULT_SCOPE_EXCEEDED_ERROR = "ConnectionScopeExceeded"
 AGENT_SPAWN_REFUSAL = (
     "agent {name!r} is not yours to spawn — spawn an agent you own, or have a workspace admin "
     "run it"
@@ -1305,7 +1309,8 @@ class SubagentResult:
     The arrival carries the child's exact connection scope back into the spawning turn's other
     runtime settings. A parent holding no live turn takes this arrival as a whole new turn, so the
     child-only model and model-account pins stay behind while its causal connector scope does not
-    widen."""
+    widen. A child outside its parent's connection scope returns a failure with no output and only
+    the parent's scope."""
 
     invoker: TurnInvoker
     registry: SubagentRegistry
@@ -1345,6 +1350,7 @@ class SubagentResult:
             if parent.runtime_config is None
             else TurnRuntimeConfig.model_validate(parent.runtime_config)
         )
+        delivered_child = child
         returned_runtime = parent_runtime
         if child.runtime_config is not None and child.runtime_config.connections is not None:
             if (
@@ -1352,14 +1358,28 @@ class SubagentResult:
                 and parent_runtime.connections is not None
                 and not set(child.runtime_config.connections).issubset(parent_runtime.connections)
             ):
-                raise RuntimeError("spawn result connection scope exceeds its parent")
-            returned = {} if parent_runtime is None else parent_runtime.model_dump(mode="json")
-            returned["connections"] = child.runtime_config.connections
-            returned_runtime = TurnRuntimeConfig.model_validate(returned)
+                log(
+                    "subagent.result_scope_refused",
+                    turn_id=str(child.id),
+                    parent_turn_id=str(child.parent_turn_id),
+                )
+                delivered_child = child.model_copy(
+                    update={
+                        "terminal": TerminalFrame(
+                            status="failed",
+                            error_class=RESULT_SCOPE_EXCEEDED_ERROR,
+                            error_message=RESULT_SCOPE_EXCEEDED,
+                        )
+                    }
+                )
+            else:
+                returned = {} if parent_runtime is None else parent_runtime.model_dump(mode="json")
+                returned["connections"] = child.runtime_config.connections
+                returned_runtime = TurnRuntimeConfig.model_validate(returned)
         await self.invoker.invoke(
             parent.conversation_id,
             parent.agent_id,
-            self._body(child, child_agent),
+            self._body(delivered_child, child_agent),
             f"{SPAWN_RESULT_KEY_PREFIX}{child.id}",
             holds_work_already_done=True,
             runtime_config=returned_runtime,
