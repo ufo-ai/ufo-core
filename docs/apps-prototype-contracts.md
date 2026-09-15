@@ -44,7 +44,7 @@ the frame's requests under the viewer's own session with NO per-message gate (de
 | `data` | `id` (echoes the request), `ok` (bool), `body` (any) or `error` (string) | reply to a `read`/`write` |
 
 **Read allowlist** (the existing portal GET reads the shell forwards; extend only by adding here):
-`api/chats`, `api/agents`, `api/agents/status`, `workspace/radar`, `workspace/artifacts`,
+`api/agents`, `api/agents/status`, `workspace/radar`, `workspace/artifacts`,
 `workspace/memory`, `workspace/team`, `objects/{kind}`, `objects/{kind}/{name}`,
 `agents/{id}/conversations`. A `path` is allowed if it equals one of these or matches a
 `{...}`-templated one after segment substitution. No query-string restriction in the prototype.
@@ -120,7 +120,7 @@ Apps and their pages (prototype):
 
 | App | Page reads | Page acts |
 |---|---|---|
-| app_chat | `api/chats`, the transcript read, the turn stream | one conversation whole — composer, streamed replies, starters; click → `navigate #/c/<id>` |
+| app_chat | `objects/conversation` and `objects/conversation/<id>`, the transcript read, the turn stream | one conversation whole — composer, streamed replies, starters; click → `navigate #/c/<id>` |
 | app_wiki | `workspace/memory`, `objects/member` | list memory + roster; click a member → navigate |
 
 `app_chat` ships its homepage skill and the page source. Its provision names the workspace's main agent (`AgentProvision.main`) rather than shipping a second agent, so the chat screen is the page of the agent every unbound surface already routes to.

@@ -22,13 +22,12 @@ import {
   railRows,
   type RailSort,
   stampIso,
-  type ChatRow,
 } from "@/lib/rail";
 import { pickAppsExpanded, pickRailShown, railState, resetRailStore } from "@/lib/railStore";
 import { newChatHash } from "@/lib/route";
-import type { Agent } from "@/lib/types";
+import type { Agent, Conversation } from "@/lib/types";
 
-import { AGENT, AGENT_ID, atPhoneWidth, audienceMark, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, linked, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, atPhoneWidth, audienceMark, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationDetail, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -61,35 +60,11 @@ async function settle(ms: number): Promise<void> {
   });
 }
 
-function row(id: string, last_at: string): ChatRow {
-  return {
-    conversation_id: id,
-    agent_id: AGENT_ID,
-    agent_name: "assistant",
-    title: "chat " + id,
-    opening: null,
-    last_at,
-    surface: "web",
-    surface_label: null,
-    audience: "member:m1",
-    member_email: "member@example.com",
-    owner_email: "member@example.com",
-    owner_name: null,
-    mine: true,
-    speaker: null,
-    source: null,
-    turn: "idle",
-    automation_kind: null,
-    automation_name: null,
-    automation_title: null,
-    unread: false,
-    archived: false,
-    deleted: false,
-    pinned: false,
-  };
+function row(id: string, last_at: string): Conversation {
+  return { ...CHAT_ROW, conversation_id: id, title: "chat " + id, last_at };
 }
 
-function theirs(id: string, last_at: string, speaker: string): ChatRow {
+function theirs(id: string, last_at: string, speaker: string): Conversation {
   return { ...row(id, last_at), mine: false, speaker };
 }
 
@@ -121,7 +96,7 @@ test("a conversation the member is not in is not in the rail, whoever shared it"
   );
 });
 
-function elsewhere(id: string, surface: string): ChatRow {
+function elsewhere(id: string, surface: string): Conversation {
   return { ...row(id, hoursAgo(1)), surface, title: surface + " " + id };
 }
 
@@ -369,7 +344,7 @@ test("merging keeps held rows the fetch does not know and prefers fetched rows i
 test("a deep link waits while its resolve is in flight instead of denying the conversation", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () =>
+    "/objects/conversation/": () =>
       new Promise<Response>(() => {
         return;
       }),
@@ -602,24 +577,19 @@ test("an origin conversation opens a live comment chat", async () => {
     title: "Slack question",
   };
   const resolved = {
-    id: CONVO_ID,
-    surface: "slack",
-    surface_label: "DM",
+    ...slack,
+    agent_id: AGENT.id,
+    agent_name: AGENT.name,
     audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
     member_email: MEMBER.email,
-    description: "",
-    speakers: [],
-    turn_count: 1,
-    created_at: "2026-07-30T10:00:00",
-    last_turn_at: "2026-07-30T11:00:00",
+    title: "",
     readable: true,
     disclosable: false,
     speakable: true,
-    agent: { id: AGENT.id, name: AGENT.name },
   };
   const { calls } = wire({
     ...chatsOnWire([slack]),
-    "/api/chats": () => json({ conversation: resolved }),
+    "/objects/conversation/": () => json(conversationDetail(resolved)),
     "/transcript": () => json({ messages: [{ role: "user", text: "slack words" }] }),
     "/chat": () =>
       json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Slack question" }),
@@ -678,7 +648,7 @@ test("a conversation no read of this account's answers is named unshared, not mi
 test("a permalink read refused for the session offers sign-in rather than a denial", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () => new Response("missing or unknown session cookie", { status: 401 }),
+    "/objects/conversation/": () => new Response("missing or unknown session cookie", { status: 401 }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -690,7 +660,7 @@ test("a permalink read refused for the session offers sign-in rather than a deni
 test("a permalink read the server faults on states the fault rather than a denial", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () => new Response("boom", { status: 500 }),
+    "/objects/conversation/": () => new Response("boom", { status: 500 }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -698,24 +668,33 @@ test("a permalink read the server faults on states the fault rather than a denia
   expect(screen.queryByText(NOT_SHARED)).toBeNull();
 });
 
-function slackConversation(fields: Record<string, unknown> = {}) {
+test("a resolve the server faults on keeps the conversation the rail already holds drawn", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/objects/conversation/": () => new Response("boom", { status: 500 }),
+    "/transcript": () => json({ messages: [{ role: "assistant", text: "Work to finish" }] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("Work to finish")).toBeTruthy();
+  expect(screen.queryByText("Error 500 — reload to retry.")).toBeNull();
+  expect(screen.queryByText(NOT_SHARED)).toBeNull();
+});
+
+function slackConversation(fields: Partial<Conversation> = {}): Conversation {
   return {
-    id: CONVO_ID,
-    agent: { id: AGENT_ID, name: AGENT.name },
+    ...CHAT_ROW,
     surface: "slack",
     surface_label: "#ops-warehouse",
     audience: "shared",
     member_email: null,
     owner_email: null,
     owner_name: null,
-    description: "Warehouse restock plan",
+    mine: false,
+    title: "Warehouse restock plan",
     source: "https://acme.slack.com/archives/C1/p1700000000000100",
-    turn_count: 1,
-    created_at: "2026-08-01T08:00:00Z",
-    last_turn_at: "2026-08-01T08:01:00Z",
-    readable: true,
-    disclosable: false,
-    speakable: true,
+    last_at: "2026-08-01T08:01:00Z",
     ...fields,
   };
 }
@@ -723,7 +702,7 @@ function slackConversation(fields: Record<string, unknown> = {}) {
 test("a Slack conversation permalink opens a live comment chat", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () => json({ conversation: slackConversation() }),
+    "/objects/conversation/": () => json(conversationDetail(slackConversation())),
     "/transcript": () =>
       json({
         messages: [
@@ -748,7 +727,7 @@ test("a Slack conversation permalink opens a live comment chat", async () => {
 test("a Slack conversation is headed like a web thread, marked with its way out to Slack", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () => json({ conversation: slackConversation() }),
+    "/objects/conversation/": () => json(conversationDetail(slackConversation())),
     "/transcript": () =>
       json({ messages: [{ role: "user", text: "from Slack" }] }),
   });
@@ -780,10 +759,10 @@ test("a terminal conversation is marked with its surface and no way out", async 
     surface: "ufo",
     surface_label: null,
     source: null,
-    description: "Deploy the branch",
+    title: "Deploy the branch",
   });
   wire({
-    "/api/chats": () => json({ conversation: terminal }),
+    "/objects/conversation/": () => json(conversationDetail(terminal)),
     "/transcript": () =>
       json({ messages: [{ role: "user", text: "from the CLI" }] }),
   });
@@ -801,7 +780,7 @@ test("a read-only conversation is headed by who reads it, as its projection carr
   location.hash = "#/c/" + CONVO_ID;
   const readOnly = slackConversation({ speakable: false });
   wire({
-    "/api/chats": () => json({ conversation: readOnly }),
+    "/objects/conversation/": () => json(conversationDetail(readOnly)),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -824,7 +803,7 @@ test("a conversation an admin opened states the member it is private to", async 
     member_email: "mel@example.com",
   });
   wire({
-    "/api/chats": () => json({ conversation: other }),
+    "/objects/conversation/": () => json(conversationDetail(other)),
     "/transcript": () => json({ messages: [] }),
   });
   render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
@@ -884,11 +863,12 @@ test("a markdown file in a Slack conversation opens the attachment sheet", async
           { id: "artifacts", label: "Artifacts", icon: "artifact", kind: "artifacts", count: 1 },
         ],
       }),
-    "/api/chats": () =>
-      json({
-        conversation: {
-          id: CONVO_ID,
-          agent: { id: AGENT_ID, name: AGENT.name },
+    "/objects/conversation/": () =>
+      json(conversationDetail({
+          ...CHAT_ROW,
+          conversation_id: CONVO_ID,
+          agent_id: AGENT_ID,
+          agent_name: AGENT.name,
           surface: "slack",
           surface_label: "#ops-warehouse",
           audience: "shared",
@@ -896,14 +876,11 @@ test("a markdown file in a Slack conversation opens the attachment sheet", async
           owner_email: null,
           owner_name: null,
           source: "https://acme.slack.com/archives/C1/p1700000000000100",
-          turn_count: 1,
-          created_at: "2026-08-01T08:00:00Z",
-          last_turn_at: "2026-08-01T08:01:00Z",
+          last_at: "2026-08-01T08:01:00Z",
           readable: true,
           disclosable: false,
           speakable: true,
-        },
-      }),
+        })),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -1045,7 +1022,7 @@ test("a failed send neither bumps the rail nor reorders it", async () => {
 test("a linked conversation past the rail's bound resolves by id", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () => json({ conversation: linked(CHAT_ROW) }),
+    "/objects/conversation/": () => json(conversationDetail(CHAT_ROW)),
     "/transcript": () => json({ messages: [{ role: "user", text: "linked words" }] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -1140,7 +1117,7 @@ test("a permalink the resolve refuses is unshared, whatever the rail lists", asy
   location.hash = "#/c/" + CONVO_ID;
   wire({
     ...chatsOnWire([CHAT_ROW]),
-    "/api/chats": () => new Response("no such conversation", { status: 404 }),
+    "/objects/conversation/": () => new Response("no such conversation", { status: 404 }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
@@ -1154,16 +1131,18 @@ test("a permalink the resolve refuses is unshared, whatever the rail lists", asy
 test("a permalink to a conversation an admin may only disclose offers the acknowledgement first", async () => {
   location.hash = "#/c/" + CONVO_ID;
   const { calls } = wire({
-    "/api/chats": () =>
-      json({
-        conversation: slackConversation({
-          audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
-          member_email: "mel@example.com",
-          readable: false,
-          disclosable: true,
-          speakable: false,
-        }),
-      }),
+    "/objects/conversation/": () =>
+      json(
+        conversationDetail(
+          slackConversation({
+            audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
+            member_email: "mel@example.com",
+            readable: false,
+            disclosable: true,
+            speakable: false,
+          }),
+        ),
+      ),
     "/actions/conversation/": () => json({ actions: [] }),
     "/transcript": () => json({ messages: [] }),
   });
@@ -1177,7 +1156,8 @@ test("a permalink to a conversation an admin may only disclose offers the acknow
 test("a conversation the member reads but may not speak in draws no composer", async () => {
   location.hash = "#/c/" + CONVO_ID;
   wire({
-    "/api/chats": () => json({ conversation: slackConversation({ speakable: false }) }),
+    "/objects/conversation/": () =>
+      json(conversationDetail(slackConversation({ speakable: false }))),
     "/transcript": () => json({ messages: [{ role: "user", text: "from Slack" }] }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);

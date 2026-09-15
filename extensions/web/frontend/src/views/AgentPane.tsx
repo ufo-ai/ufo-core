@@ -18,7 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { PressRow } from "@/components/ui/pressrow";
-import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
+import { Panel, PanelEmpty, usePanelRead, type PanelState } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
 import { isPortalChat, subject, surfaceWord, useViewer } from "@/lib/audience";
 import { AudienceMark } from "@/lib/audienceMark";
@@ -27,7 +27,7 @@ import { BUILD_ASK, setPendingAsk } from "@/lib/pendingAsk";
 import { CHAT_SURFACE, useAgents } from "@/lib/mainAgent";
 import { cn } from "@/lib/cn";
 import { useNarrow } from "@/lib/narrow";
-import type { ChatRow } from "@/lib/rail";
+import { chatRows, type ConversationsPayload } from "@/lib/rail";
 import type { SetupState } from "@/views/AgentSetup";
 import { ChatPane } from "@/views/ChatPane";
 import { agentSetupHash, mergePlace, type PlaceStep, type WorkspacePlace } from "@/lib/route";
@@ -104,12 +104,22 @@ function AppMenu({
   );
 }
 
+/** The kind's listing for one agent; an admin reads the rows they may not read beside it under the
+ *  declared `readable=false`, so a private conversation they were offered opens on its acknowledgement. */
+function agentConversationsPath(agentId: string): string {
+  return "/objects/conversation?agent=" + agentId + "&order_by=last_at&order=desc";
+}
+
+function listedRows(state: PanelState<ConversationsPayload>): Conversation[] {
+  return state.phase === "ready" ? chatRows(state.payload) : [];
+}
+
 export type AgentPaneProps = {
   agent: Agent;
   member: Member;
   /** Null is not the empty list: a conversation the member owns would otherwise read as one they may not
    *  continue for as long as the rail takes to arrive. */
-  chats: ChatRow[] | null;
+  chats: Conversation[] | null;
   place: WorkspacePlace;
   onSettings: (tab: SettingsTab) => void;
   onCreated: (conversationId: string, title: string) => void;
@@ -151,13 +161,16 @@ export function AgentPane({
   useEffect(() => {
     if (built) onAgents();
   }, [built, onAgents]);
-  const listed = usePanelRead<{ conversations: Conversation[]; more: boolean }>(
-    !speaks && (target !== undefined || home.state !== "set")
-      ? "/agents/" + agent.id + "/conversations"
-      : null,
+  const indexed = !speaks && (target !== undefined || home.state !== "set");
+  const listed = usePanelRead<ConversationsPayload>(
+    indexed ? agentConversationsPath(agent.id) : null,
     settles,
   );
-  const rows = listed.phase === "ready" ? (listed.payload.conversations ?? []) : [];
+  const unreadable = usePanelRead<ConversationsPayload>(
+    indexed && member.admin ? agentConversationsPath(agent.id) + "&readable=false" : null,
+    settles,
+  );
+  const rows = listedRows(listed).concat(listedRows(unreadable));
   const directives =
     chats === null
       ? null
@@ -166,24 +179,28 @@ export function AgentPane({
   const editing =
     directives === null
       ? null
-      : directives.reduce<ChatRow | null>(
+      : directives.reduce<Conversation | null>(
           (newest, row) => (newest === null || row.last_at > newest.last_at ? row : newest),
           null,
         );
   // The two reads are bounded differently — the index answers one page of 100 rows over every surface
   // the app has spoken on, while the rail bounds the member's own chats — so a row can fall outside it.
   const railHeld =
-    target !== undefined && !rows.some((entry) => entry.id === target)
+    target !== undefined && !rows.some((entry) => entry.conversation_id === target)
       ? (directives?.find((row) => row.conversation_id === target) ?? null)
       : null;
   const conversational =
     !speaks &&
     target !== undefined &&
-    (target === FRESH || rows.some((entry) => entry.id === target) || railHeld !== null);
+    (target === FRESH ||
+      rows.some((entry) => entry.conversation_id === target) ||
+      railHeld !== null);
   const held = conversational ? target : undefined;
   const wanted = held === FRESH;
   const named =
-    held !== undefined && !wanted ? (rows.find((entry) => entry.id === held) ?? null) : null;
+    held !== undefined && !wanted
+      ? (rows.find((entry) => entry.conversation_id === held) ?? null)
+      : null;
   const start = () => onPlace({ ...place, opens: [FRESH] }, "push");
   const buildPage = () => {
     setPendingAsk(agent.id, BUILD_ASK, false);
@@ -198,8 +215,8 @@ export function AgentPane({
       : (named ??
         (live === null
           ? null
-          : (rows.find((entry) => entry.id === editing?.conversation_id) ??
-            rows.find((entry) => live.has(entry.id)) ??
+          : (rows.find((entry) => entry.conversation_id === editing?.conversation_id) ??
+            rows.find((entry) => live.has(entry.conversation_id)) ??
             null)));
   const settling =
     opened === null &&
@@ -234,7 +251,7 @@ export function AgentPane({
     slotted !== null && slotted.conversationId === conversationId ? slotted.slot : undefined;
   const selectSlot = (conversationId: string | null, next: string | null) =>
     setSlotted(next !== null && conversationId !== null ? { conversationId, slot: next } : null);
-  const chatting = opened?.id ?? railHeld?.conversation_id ?? null;
+  const chatting = opened?.conversation_id ?? railHeld?.conversation_id ?? null;
 
   const acts = (
     <>
@@ -286,20 +303,20 @@ export function AgentPane({
       <Panel
         state={listed}
         shape="table"
-        empty={(payload) => ((payload.conversations ?? []).length ? null : NO_HISTORY)}
+        empty={(payload) => (payload.objects.length ? null : NO_HISTORY)}
       >
         {(payload) => (
           <div className="flex flex-col">
-            {(payload.conversations ?? []).map((row) => (
+            {chatRows(payload).map((row) => (
               <PressRow
-                key={row.id}
+                key={row.conversation_id}
                 line={subject(row, viewer)}
                 note={isPortalChat(row.surface) ? undefined : surfaceWord(row.surface)}
-                when={row.last_turn_at ?? undefined}
-                onPress={() => onPlace({ ...place, opens: [row.id] }, "push")}
+                when={row.last_at}
+                onPress={() => onPlace({ ...place, opens: [row.conversation_id] }, "push")}
               />
             ))}
-            {payload.more ? (
+            {payload.cut || payload.next_cursor ? (
               <p className="m-0 px-lg py-lg text-label text-ink-soft">{HISTORY_BOUND}</p>
             ) : null}
           </div>
@@ -372,7 +389,10 @@ export function AgentPane({
                 onClick={() =>
                   held === undefined
                     ? onPlace(
-                        { ...place, opens: [opened?.id ?? editing?.conversation_id ?? FRESH] },
+                        {
+                          ...place,
+                          opens: [opened?.conversation_id ?? editing?.conversation_id ?? FRESH],
+                        },
                         "push",
                       )
                     : onPlace({ ...place, opens: [] }, "replace")

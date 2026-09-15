@@ -32,16 +32,34 @@ export type Member = {
 
 export type ConversationAgent = { id: string; name: string };
 
+/** The liveest turn a conversation holds, `idle` where it holds none. */
+export type ConversationTurn = "running" | "queued" | "parked" | "idle";
+
+/** One conversation as the `conversation` kind lists and resolves it: the rail's row, the Home
+ *  table's, the open chat's and a permalink's are one record, `conversation_id` the kind's `name`.
+ *  `readable` is whether its content reads now, `disclosable` whether an admin may open it by
+ *  acknowledging, and `speakable` whether the member's messages land in it. */
 export type Conversation = {
-  id: string;
-  agent: ConversationAgent | null;
+  conversation_id: string;
+  agent_id: string;
+  agent_name: string;
+  title: string;
+  opening: string | null;
+  last_at: string;
   surface: string;
   surface_label: string | null;
   audience: string;
   member_email: string | null;
+  owner_email: string | null;
+  owner_name: string | null;
   mine: boolean;
-  description: string;
+  speaker: string | null;
   source: string | null;
+  turn: ConversationTurn;
+  automation_kind: string | null;
+  automation_name: string | null;
+  automation_title: string | null;
+  unread: boolean;
   speakers: string[];
   turn_count: number;
   created_at: string;
@@ -53,8 +71,6 @@ export type Conversation = {
   disclosable: boolean;
   speakable: boolean;
 };
-
-export type OwnedConversation = Conversation & { agent: ConversationAgent };
 
 export type ArchivedApp = {
   id: string;

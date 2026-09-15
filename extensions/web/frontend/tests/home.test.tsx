@@ -839,29 +839,6 @@ test("a chat lane's history lists the member's own conversations and groups coll
   };
   const { calls } = wire({
     ...chatsOnWire([CHAT_ROW, colleague]),
-    "/conversations$": () =>
-      json({
-        conversations: [
-          {
-            id: PRIVATE_CONVO_ID,
-            agent: null,
-            surface: "slack",
-            surface_label: "#ops",
-            audience: "member:justin",
-            member_email: "justin@simplecasual.com",
-            description: "",
-            source: null,
-            speakers: [],
-            turn_count: 3,
-            created_at: "2026-08-01T09:00:00",
-            last_turn_at: "2026-08-01T09:00:00",
-            readable: false,
-            disclosable: true,
-            speakable: false,
-          },
-        ],
-        more: false,
-      }),
   });
   drawHome([AGENT_ID]);
 
@@ -877,7 +854,7 @@ test("a chat lane's history lists the member's own conversations and groups coll
   expect(rows[1]).toContain(colleague.title);
   expect(within(lane).getByRole("heading", { name: "Other members", level: 4 })).toBeTruthy();
   expect(within(lane).queryByText(/justin@simplecasual.com/)).toBeNull();
-  expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(false);
+  expect(calls.some((url) => url.includes("/objects/conversation?agent=" + AGENT_ID))).toBe(false);
 });
 
 test("picking an app not yet standing takes the picker lane's place in the address", async () => {

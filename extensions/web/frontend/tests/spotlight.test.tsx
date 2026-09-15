@@ -7,7 +7,7 @@ import { wakeAppStatus } from "@/lib/appStatusStore";
 import { parseHash, sectionHash } from "@/lib/route";
 import { REST_MS } from "@/views/Spotlight";
 
-import { AGENT, AGENT_ID, automationsIndex, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, TASK_KIND, TRIGGER_KIND, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, automationsIndex, CHAT_ROW, conversationObject, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, TASK_KIND, TRIGGER_KIND, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "";
@@ -17,18 +17,18 @@ beforeEach(() => {
 const GRANT = "0d1f2e3a-4b5c-4d6e-8f70-112233445566";
 
 const FOUND_CONVERSATION = {
-  id: CONVO_ID,
-  agent: { id: AGENT_ID, name: "assistant" },
+  ...CHAT_ROW,
+  conversation_id: CONVO_ID,
+  agent_id: AGENT_ID,
+  agent_name: "assistant",
   surface: "web",
   surface_label: null,
   audience: "shared",
   member_email: null,
-  description: "Rename the deploy job",
+  mine: false,
+  title: "Rename the deploy job",
   source: null,
-  speakers: [],
-  turn_count: 2,
-  created_at: "2026-07-30T10:00:00",
-  last_turn_at: "2026-07-30T11:00:00",
+  last_at: "2026-07-30T11:00:00",
   readable: true,
   disclosable: false,
   speakable: false,
@@ -84,7 +84,7 @@ function everything(extra: Record<string, Route> = {}) {
   return wire({
     ["/objects/" + TASK_KIND.kind + "/nightly-deploy"]: () => json(FOUND_TASK_DETAIL),
     ...QUIET,
-    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
+    "/objects/conversation$": () => json({ objects: [conversationObject(FOUND_CONVERSATION)] }),
     "/objects/artifact": () => json({ objects: [FOUND_FILE] }),
     ["/objects/" + TASK_KIND.kind]: () => objectIndex(TASK_KIND, [FOUND_TASK]),
     ...extra,
@@ -190,8 +190,7 @@ test("one term reaches every kind the workspace holds, each hit under its own he
   const asked = calls.filter((url) => url.includes("q=deploy"));
   expect(asked.some((url) => url.includes("/objects/artifact"))).toBe(true);
   expect(asked.some((url) => url.includes("/workspace/memory"))).toBe(false);
-  expect(asked.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(true);
-  expect(asked.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(true);
+  expect(asked.some((url) => url.includes("/objects/conversation?"))).toBe(true);
   expect(asked.some((url) => url.includes("/objects/" + TASK_KIND.kind))).toBe(true);
 });
 
@@ -283,7 +282,7 @@ test("an automation hit opens that automation's Details on the screen it lands o
 test("a read that fails states so under its own heading, and the others still answer", async () => {
   wire({
     ...QUIET,
-    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
+    "/objects/conversation$": () => json({ objects: [conversationObject(FOUND_CONVERSATION)] }),
     "/objects/artifact": () => new Response("nope", { status: 503 }),
   });
   await open();
@@ -324,8 +323,8 @@ function slow(answer: () => Response): { route: Route; lands: () => void } {
 }
 
 test("a kind stands as soon as it answers, while a slower kind is still being read", async () => {
-  const conversations = slow(() => json({ conversations: [FOUND_CONVERSATION] }));
-  everything({ "/conversations$": conversations.route });
+  const conversations = slow(() => json({ objects: [conversationObject(FOUND_CONVERSATION)] }));
+  everything({ "/objects/conversation$": conversations.route });
   await open();
   await type("deploy");
 
@@ -342,8 +341,8 @@ test("a kind stands as soon as it answers, while a slower kind is still being re
 });
 
 test("a kind that answers last still stands in its own place", async () => {
-  const conversations = slow(() => json({ conversations: [FOUND_CONVERSATION] }));
-  everything({ "/conversations$": conversations.route });
+  const conversations = slow(() => json({ objects: [conversationObject(FOUND_CONVERSATION)] }));
+  everything({ "/objects/conversation$": conversations.route });
   await open();
   await type("deploy");
 
@@ -523,7 +522,7 @@ test("the rail's search tile opens the palette, and no tile searches beside it",
   expect(await screen.findByRole("combobox", { name: "Search" })).toBeTruthy();
 });
 
-const UNTITLED_CONVERSATION = { ...FOUND_CONVERSATION, description: "" };
+const UNTITLED_CONVERSATION = { ...FOUND_CONVERSATION, title: "" };
 
 const TRIGGER_NAME = "github-30847ee49f0a4c7f8d2e1a3b4c5d6e7f-1a2b3c4d";
 
@@ -536,7 +535,7 @@ const FOUND_TRIGGER = owned({
 });
 
 test("a thread the wire titles with nothing reads as who it is with, never as its id", async () => {
-  everything({ "/conversations$": () => json({ conversations: [UNTITLED_CONVERSATION] }) });
+  everything({ "/objects/conversation$": () => json({ objects: [conversationObject(UNTITLED_CONVERSATION)] }) });
   await open();
   await type("deploy");
 

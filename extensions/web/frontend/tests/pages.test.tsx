@@ -13,14 +13,14 @@ import {
   AGENT,
   ARRIVAL_ID,
   CHAT_ROW,
+  conversationDetail,
   CONVO_ID,
+  json,
   MEMBER,
   SECOND_ID,
   TURN_ID,
-  json,
-  linked,
-  wire,
   type Route,
+  wire,
 } from "./harness";
 
 /** jsdom delivers `postMessage` and drives `requestAnimationFrame` on the window's own timers, so both
@@ -485,15 +485,15 @@ test("the chat page opens a conversation without re-listing, and switching opens
   const B = ARRIVAL_ID;
   const conversationRow = (id: string, title: string) => chatListRow(id, title);
   const resolvedChat = (id: string, title: string) =>
-    linked({ ...CHAT_ROW, conversation_id: id, title });
+    conversationDetail({ ...CHAT_ROW, conversation_id: id, title });
   const { calls } = await runPage("chat", {
-    "/objects/conversation": () =>
+    "/objects/conversation$": () =>
       json({ objects: [conversationRow(A, "Alpha"), conversationRow(B, "Bravo")], next_cursor: null }),
-    "/api/chats": (url) =>
-      json({ conversation: url.includes(B) ? resolvedChat(B, "Bravo") : resolvedChat(A, "Alpha") }),
+    "/objects/conversation/": (url) =>
+      json(url.includes(B) ? resolvedChat(B, "Bravo") : resolvedChat(A, "Alpha")),
     "/transcript": () => json({ messages: [] }),
   });
-  const listReads = () => calls.filter((url) => url.includes("/objects/conversation")).length;
+  const listReads = () => calls.filter((url) => url.includes("/objects/conversation?")).length;
 
   // Wait for the bridge handshake and the place subscription before driving one, or the post races the
   // mount and is lost.
@@ -517,8 +517,8 @@ test("the chat page heads one conversation under the crumb the shell handed it",
   await runPage(
     "chat",
     {
-      "/api/chats": () =>
-        json({ conversation: linked({ ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "second" }) }),
+      "/objects/conversation/": () =>
+        json(conversationDetail({ ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "second" })),
       "/transcript": () => json({ messages: [] }),
       "/slots": () => json({ slots: [] }),
     },
@@ -548,25 +548,24 @@ test("the chat page heads one conversation under the crumb the shell handed it",
 test("the chat page opens a Slack or terminal conversation for comments", async () => {
   const SLACK = TURN_ID;
   const slackConversation = {
-    id: SLACK,
-    agent: { id: AGENT.id, name: AGENT.name },
+    ...CHAT_ROW,
+    conversation_id: SLACK,
+    agent_id: AGENT.id,
+    agent_name: AGENT.name,
     surface: "slack",
     surface_label: "#general",
     audience: "member:m1",
     member_email: MEMBER.email,
-    description: "Slack thread",
+    title: "Slack thread",
     source: "https://slack.example/archives/x/p1",
-    speakers: [MEMBER.email],
-    turn_count: 2,
-    created_at: "2026-08-01T09:00:00",
-    last_turn_at: "2026-08-01T09:00:01",
+    last_at: "2026-08-01T09:00:01",
     readable: true,
     disclosable: false,
     speakable: true,
   };
   const { calls } = await runPage("chat", {
-    "/objects/conversation": () => json({ objects: [], next_cursor: null }),
-    "/api/chats": () => json({ conversation: slackConversation }),
+    "/objects/conversation$": () => json({ objects: [], next_cursor: null }),
+    "/objects/conversation/": () => json(conversationDetail(slackConversation)),
     "/transcript": () => json({ messages: [] }),
   });
 
@@ -617,7 +616,7 @@ test("every surface stands in the list until the member puts one away", async ()
           chatListRow(ARRIVAL_ID, "Slack words", { surface: "slack", surface_label: "#ops" }),
       ]),
   });
-  const listReads = () => calls.filter((url) => url.includes("/objects/conversation"));
+  const listReads = () => calls.filter((url) => url.includes("/objects/conversation?"));
   await screen.findByRole("heading", { name: "Chat" });
 
   expect(listReads().every((url) => !url.includes("surface=") && !url.includes("portal="))).toBe(
@@ -792,7 +791,7 @@ test("the chat page answers an emptied track with its conversation list", async 
     "chat",
     {
       "/objects/conversation$": chatListing([row(CONVO_ID, "Alpha"), row(ARRIVAL_ID, "Bravo")]),
-      "/api/chats": () => json({ conversation: linked({ ...CHAT_ROW, title: "Alpha" }) }),
+      "/objects/conversation/": () => json(conversationDetail({ ...CHAT_ROW, title: "Alpha" })),
       "/transcript": () => json({ messages: [] }),
     },
     { place: { opens: [CONVO_ID] } },

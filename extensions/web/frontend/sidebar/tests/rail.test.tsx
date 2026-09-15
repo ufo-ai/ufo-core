@@ -5,7 +5,8 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { WORKING_STATUS_MS } from "@/lib/appStatusStore";
 import { rowMoment } from "@/lib/moments";
-import { heldRailShown, holdRailShown, stampIso, type RailTurn } from "@/lib/rail";
+import { heldRailShown, holdRailShown, stampIso } from "@/lib/rail";
+import type { ConversationTurn } from "@/lib/types";
 
 import { AGENT, AGENT_ID, atPhoneWidth, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, MEMBER, objectIndex, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "../../tests/harness";
 
@@ -249,7 +250,7 @@ test("a running thread's row draws the live dot and an idle one's rests in the s
 
 test("a row's dot follows the listing, not the row it was founded with", async () => {
   const other = "66666666-6666-4666-8666-666666666666";
-  let held: RailTurn[] = ["running", "idle"];
+  let held: ConversationTurn[] = ["running", "idle"];
   vi.useFakeTimers();
   wire({
     "/objects/conversation$": () =>

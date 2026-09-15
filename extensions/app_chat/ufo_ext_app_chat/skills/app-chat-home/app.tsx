@@ -50,7 +50,14 @@ import {
   useRef,
   useState,
 } from "ufo/kit";
-import type { Agent, Conversation, Crumb, Member, WorkspacePlace } from "ufo/kit";
+import type {
+  Agent,
+  Conversation,
+  ConversationDetailPayload,
+  Crumb,
+  Member,
+  WorkspacePlace,
+} from "ufo/kit";
 
 const COMPOSE = "compose";
 
@@ -437,19 +444,26 @@ function ChatApp({
     }
     let live = true;
     setShown((held) =>
-      held.kind === "open" && held.conversation.id === wanted ? held : { kind: "loading" },
+      held.kind === "open" && held.conversation.conversation_id === wanted
+        ? held
+        : { kind: "loading" },
     );
-    void getJson<{ conversation: Conversation }>("/api/chats?conversation=" + wanted).then(
-      (sought) => {
-        if (!live) return;
-        const conversation = sought.ok ? sought.payload.conversation : null;
-        setShown(
-          conversation && (conversation.readable || conversation.disclosable)
-            ? { kind: "open", conversation }
-            : { kind: "missing" },
-        );
-      },
-    );
+    void getJson<ConversationDetailPayload>("/objects/conversation/" + wanted).then((sought) => {
+      if (!live) return;
+      const conversation: Conversation | null = sought.ok
+        ? {
+            conversation_id: sought.payload.name,
+            agent_id: sought.payload.agent_id,
+            agent_name: sought.payload.agent_name,
+            ...sought.payload.status,
+          }
+        : null;
+      setShown(
+        conversation && (conversation.readable || conversation.disclosable)
+          ? { kind: "open", conversation }
+          : { kind: "missing" },
+      );
+    });
     return () => {
       live = false;
     };
@@ -616,14 +630,14 @@ function ChatApp({
   if (shown.kind === "open") {
     const convo = shown.conversation;
     const agent =
-      agents.find((entry) => entry.id === convo.agent?.id) ??
-      ({ id: convo.agent?.id ?? "", name: convo.agent?.name ?? "", model: "" } as Agent);
+      agents.find((entry) => entry.id === convo.agent_id) ??
+      ({ id: convo.agent_id, name: convo.agent_name, model: "" } as Agent);
     return (
       <ChatPane
-        key={convo.id}
+        key={convo.conversation_id}
         agent={agent}
         member={member}
-        conversationId={convo.id}
+        conversationId={convo.conversation_id}
         conversation={convo}
         crumb={crumb}
         onActivity={() => {}}

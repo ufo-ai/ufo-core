@@ -4,14 +4,8 @@ import { Button } from "@/components/ui/button";
 import { ActionControls } from "@/kernel/action";
 import { MessageLog, OpenedAtTheFoot, TranscriptScroll } from "@/kernel/messages";
 import { Notice, Panel, PanelBlank, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
-import { agentName } from "@/lib/agentName";
 import { postAction } from "@/lib/api";
-import {
-  origin as surfaceOrigin,
-  slackLink,
-  subject,
-  useViewer,
-} from "@/lib/audience";
+import { origin, slackLink, subject, useViewer } from "@/lib/audience";
 import { useEarlierMessages, type EarlierMessages } from "@/lib/earlier";
 import { useRoute } from "@/lib/router";
 import type { ActionView, Agent, Conversation, Message, Transcript } from "@/lib/types";
@@ -91,17 +85,13 @@ export function Disclose({
       {onBack ? <Back onBack={onBack} /> : null}
       <DiscloseBand
         agentId={agent.id}
-        conversationId={conversation.id}
+        conversationId={conversation.conversation_id}
         owner={conversation.member_email || "another member"}
         title={conversationTitle(conversation, viewer)}
         onOpened={onOpened}
       />
     </>
   );
-}
-
-function origin(conversation: Conversation): string {
-  return conversation.agent ? agentName(conversation.agent.name) : surfaceOrigin(conversation);
 }
 
 function conversationTitle(conversation: Conversation, viewer: string | null): ReactNode {
@@ -111,15 +101,12 @@ function conversationTitle(conversation: Conversation, viewer: string | null): R
 
 function wayOut(conversation: Conversation): { href: string; channel: string } | null {
   const href = slackLink(conversation.surface, conversation.source);
-  return href === null ? null : { href, channel: surfaceOrigin(conversation) };
+  return href === null ? null : { href, channel: origin(conversation) };
 }
 
 function originParts(conversation: Conversation): ReactNode[] {
   const out = wayOut(conversation);
-  const stated = origin(conversation);
-  if (out === null) return [stated];
-  const away = <WayOut key="way-out" out={out} />;
-  return out.channel === stated ? [away] : [stated, away];
+  return out === null ? [origin(conversation)] : [<WayOut key="way-out" out={out} />];
 }
 
 /** On a listing row the link is the row's second target: `rowControl` hands a press that lands on it to
@@ -187,7 +174,7 @@ export function ConversationDetail({
   onBack?: () => void;
   headed?: boolean;
 }) {
-  const path = "/agents/" + agent.id + "/conversations/" + conversation.id;
+  const path = "/agents/" + agent.id + "/conversations/" + conversation.conversation_id;
   const state = usePanelRead<Transcript>(path + "/transcript");
   const earlier = useEarlierMessages(
     path + "/transcript",

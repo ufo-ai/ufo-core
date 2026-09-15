@@ -22,7 +22,6 @@ const ENDPOINTS: Endpoint[] = (
     ["GET", "objects/{kind}/{name}"],
     ["GET", "actions/{kind}"],
     ["GET", "actions/{kind}/{name}"],
-    ["GET", "agents/{id}/conversations"],
     ["GET", "agents/{id}/conversations/{cid}/transcript"],
     ["GET", "agents/{id}/conversations/{cid}/slots"],
     ["GET", "agents/{id}/conversations/{cid}/slots/{slot}"],

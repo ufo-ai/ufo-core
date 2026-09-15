@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import type { ChatRow } from "@/lib/rail";
+import type { Conversation } from "@/lib/types";
 import { railActivity } from "@/lib/railStore";
 
 import {
@@ -25,7 +25,7 @@ const COLLEAGUE_ID = "66666666-6666-4666-8666-666666666666";
 const THIRD_ID = "77777777-7777-4777-8777-777777777777";
 const ALERT_ID = "99999999-9999-4999-8999-999999999999";
 
-const COLLEAGUE: ChatRow = {
+const COLLEAGUE: Conversation = {
   ...CHAT_ROW,
   conversation_id: COLLEAGUE_ID,
   title: "Deploy question",
@@ -39,7 +39,7 @@ const COLLEAGUE: ChatRow = {
   turn: "running",
 };
 
-const WORKSPACE_CHAT: ChatRow = {
+const WORKSPACE_CHAT: Conversation = {
   ...CHAT_ROW,
   conversation_id: SECOND_ID,
   title: "Migration run",
@@ -52,7 +52,7 @@ const WORKSPACE_CHAT: ChatRow = {
   turn: "parked",
 };
 
-const UNREAD: ChatRow = {
+const UNREAD: Conversation = {
   ...CHAT_ROW,
   conversation_id: THIRD_ID,
   title: "Unanswered thread",
@@ -164,14 +164,14 @@ test("a turn admitted here moves its chat to the top, and its ending leaves it t
 });
 
 test("a channel names its surface, and a Slack thread's room stands under the pointer", async () => {
-  const slack: ChatRow = {
+  const slack: Conversation = {
     ...CHAT_ROW,
     conversation_id: SECOND_ID,
     title: "Standup notes",
     surface: "slack",
     surface_label: "#eng",
   };
-  const terminal: ChatRow = {
+  const terminal: Conversation = {
     ...CHAT_ROW,
     conversation_id: THIRD_ID,
     title: "Index rebuild",
@@ -196,7 +196,7 @@ test("a channel names its surface, and a Slack thread's room stands under the po
 });
 
 test("a Slack room leads back out to its thread, above the row it names", async () => {
-  const slack: ChatRow = {
+  const slack: Conversation = {
     ...CHAT_ROW,
     conversation_id: SECOND_ID,
     title: "Standup notes",
@@ -218,7 +218,7 @@ test("a Slack room leads back out to its thread, above the row it names", async 
 });
 
 test("an automation names itself above the row and leads to its own screen", async () => {
-  const automated: ChatRow = {
+  const automated: Conversation = {
     ...CHAT_ROW,
     conversation_id: SECOND_ID,
     title: "Last night's digest",
@@ -264,7 +264,7 @@ test("a press on a row opens that conversation", async () => {
 
 test("a press on an app's own conversation opens that conversation, not the app's page", async () => {
   const radar = { ...SECOND, name: "radar", app: "radar" };
-  const alert: ChatRow = {
+  const alert: Conversation = {
     ...CHAT_ROW,
     conversation_id: ALERT_ID,
     agent_id: SECOND_ID,
@@ -313,7 +313,7 @@ test("the rail keeps its own mark while the table reads the same state", async (
 });
 
 test("an automation states itself beside its name, and the rail filter can drop it", async () => {
-  const automated: ChatRow = {
+  const automated: Conversation = {
     ...CHAT_ROW,
     conversation_id: SECOND_ID,
     title: "Digest the night's changes",
@@ -367,7 +367,7 @@ test("an owner is one coloured monogram, and the address stands under the pointe
 /** Two addresses at one company differ in their first letters, which is where FNV-1a's avalanche
  *  is weakest; bucketing on the low bits put this pair on one colour. */
 test("two colleagues at one company are not drawn in one colour", async () => {
-  const rows: ChatRow[] = [
+  const rows: Conversation[] = [
     { ...CHAT_ROW, owner_email: "alex@simplecasual.com", owner_name: null },
     {
       ...CHAT_ROW,
@@ -468,7 +468,7 @@ test("a phone draws the chat alone, and the columns beside it are not stacked un
 });
 
 test("the automation mark stands at the chat column's own right edge", async () => {
-  const automated: ChatRow = {
+  const automated: Conversation = {
     ...CHAT_ROW,
     conversation_id: SECOND_ID,
     title: "Digest the night's changes",
@@ -501,7 +501,7 @@ test("a listing the workspace holds more than says so rather than truncating in 
 });
 
 test("a search reaches past the bound, so it never reports a chat it did not look for", async () => {
-  const older: ChatRow = {
+  const older: Conversation = {
     ...CHAT_ROW,
     conversation_id: THIRD_ID,
     title: "Older than the bound",
@@ -533,7 +533,7 @@ test("a search reaches past the bound, so it never reports a chat it did not loo
 });
 
 test("a search that matches more than one page offers the step to the rest", async () => {
-  const older: ChatRow = { ...CHAT_ROW, conversation_id: THIRD_ID, title: "Second page thread" };
+  const older: Conversation = { ...CHAT_ROW, conversation_id: THIRD_ID, title: "Second page thread" };
   const reads: string[] = [];
   wire({
     "/objects/conversation$": (url) => {

@@ -17,9 +17,8 @@ import {
   type WorkspaceTab,
   WORKSPACE_TABS,
 } from "@/lib/route";
-import { MEMBER_SUBJECT, SHARED_SUBJECT, WorkspaceId } from "@/lib/audience";
-import type { ChatRow } from "@/lib/rail";
-import type { OwnedConversation } from "@/lib/types";
+import { WorkspaceId } from "@/lib/audience";
+import type { Conversation } from "@/lib/types";
 
 export const WORKSPACE_ID = "31b26b98-0000-4000-8000-000000000031";
 
@@ -166,7 +165,6 @@ export type Route = (url: string, init?: RequestInit) => Response | Promise<Resp
 export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
   const fallbacks: Record<string, Route> = {
-    "/api/chats": () => NO_SUCH_CONVERSATION(),
     "/objects/conversation$": () => json({ objects: [] }),
     "/api/agents/status": () => json({ statuses: [], out_of_credit: false }),
     "/shell$": () => json({ available: false, active: false }),
@@ -187,7 +185,6 @@ export function wire(routes: Record<string, Route>) {
     "/workspace/sources$": () => json({ sources: [] }),
     "/github/coverage": () => json({ api: false, sources: false }),
     "/homepage": () => json({ state: "none" }),
-    "/conversations$": () => json({ conversations: [] }),
     "/follow-ups": () => json({ offers: [] }),
   };
   /* Order is load-bearing: a longer path must be matched before the prefix it shares, so a named
@@ -199,6 +196,8 @@ export function wire(routes: Record<string, Route>) {
     if (!named.has(twin)) table[pattern] = route;
   }
   Object.assign(table, routes);
+  /* Last, so a resolve stub naming its id is reached before the refusal every other id answers. */
+  table["/objects/conversation/"] ??= () => NO_SUCH_CONVERSATION();
   const matches = (url: string, pattern: string) =>
     pattern.endsWith("$")
       ? url.split("?")[0].endsWith(pattern.slice(0, -1))
@@ -283,7 +282,7 @@ export const SETTINGS = {
   audience: [],
 };
 
-export const CHAT_ROW: ChatRow = {
+export const CHAT_ROW: Conversation = {
   conversation_id: CONVO_ID,
   agent_id: AGENT_ID,
   agent_name: "assistant",
@@ -304,72 +303,84 @@ export const CHAT_ROW: ChatRow = {
   automation_name: null,
   automation_title: null,
   unread: false,
-  archived: false,
-  deleted: false,
-  pinned: false,
-};
-
-export const json = (payload: unknown) => Response.json(payload);
-
-type RailRow = ChatRow;
-
-export const conversationObject = ({ conversation_id, ...row }: RailRow) => ({
-  name: conversation_id,
-  ...row,
-});
-
-/** The resolve's projection of a listing row, as the server derives it: the member reads what the
- *  listing returned them, and speaks where the audience is the workspace or their own. */
-export const linked = (row: RailRow): OwnedConversation => ({
-  id: row.conversation_id,
-  agent: { id: row.agent_id, name: row.agent_name },
-  surface: row.surface,
-  surface_label: row.surface_label,
-  audience: row.audience,
-  member_email: row.member_email,
-  mine: row.mine,
-  description: row.title,
-  source: null,
   speakers: [],
   turn_count: 1,
-  created_at: row.last_at,
-  last_turn_at: row.last_at,
+  created_at: "2026-08-01T09:00:00.000Z",
+  last_turn_at: "2026-08-01T09:00:00.000Z",
   archived: false,
   deleted: false,
   pinned: false,
   readable: true,
   disclosable: false,
-  speakable: row.audience === SHARED_SUBJECT || row.audience === MEMBER_SUBJECT + MEMBER.id,
+  speakable: true,
+};
+
+export const json = (payload: unknown) => Response.json(payload);
+
+/** A listing row on the wire: the kind's fields flat under `name`. */
+export const conversationObject = ({ conversation_id, ...row }: Conversation) => ({
+  name: conversation_id,
+  ...row,
+});
+
+/** The detail read's envelope for one row — `objects/conversation/<id>` — the same fields under
+ *  `status`, the agent it was read under beside them. */
+export const conversationDetail = ({
+  conversation_id,
+  agent_id,
+  agent_name,
+  ...status
+}: Conversation) => ({
+  kind: "conversation",
+  fields: Object.keys(status),
+  spec_schema: {},
+  applies: false,
+  deletes: false,
+  name: conversation_id,
+  summary: status.title,
+  agent_id,
+  agent_name,
+  spec: null,
+  generation: null,
+  status,
+  links: [],
+  created_at: status.last_at,
+  updated_at: status.last_at,
 });
 
 export const NO_SUCH_CONVERSATION = () => new Response("no such conversation", { status: 404 });
 
 const resolveOnWire =
-  (rows: RailRow[]): Route =>
+  (rows: Conversation[]): Route =>
   (url) => {
-    const id = new URLSearchParams(url.split("?")[1] ?? "").get("conversation");
+    const id = url.split("?")[0].split("/").pop();
     const row = rows.find((entry) => entry.conversation_id === id);
-    return row ? json({ conversation: linked(row) }) : NO_SUCH_CONVERSATION();
+    return row ? json(conversationDetail(row)) : NO_SUCH_CONVERSATION();
   };
 
-/** The listing searches on the server, scanning a row's string fields the way `object_page` does,
- *  so a test's wire narrows where the real read narrows rather than answering every row to every
- *  query. */
-export const chatsOnWire = (rows: RailRow[]): Record<string, Route> => ({
+/** The listing narrows in the read the way the kind does — by `agent`, to the rows the viewer
+ *  reads or under `readable=false` to the rest, and by `q` over a row's string fields the way
+ *  `object_page` scans them — so a test's wire narrows where the real read narrows rather than
+ *  answering every row to every query. */
+export const chatsOnWire = (rows: Conversation[]): Record<string, Route> => ({
   "/objects/conversation$": (url) => {
     const params = new URLSearchParams(url.split("?")[1] ?? "");
-    const archived = params.get("archived") === "true";
     const said = params.get("q")?.toLowerCase() ?? "";
-    const side = rows
-      .filter((row) => Boolean(row.archived) === archived)
-      .filter((row) =>
+    const agent = params.get("agent");
+    const readable = params.get("readable") !== "false";
+    const archived = params.get("archived") === "true";
+    const found = rows.filter(
+      (row) =>
+        (agent === null || row.agent_id === agent) &&
+        row.readable === readable &&
+        Boolean(row.archived) === archived &&
         Object.values(conversationObject(row)).some(
           (value) => typeof value === "string" && value.toLowerCase().includes(said),
         ),
-      );
-    return json({ objects: side.map(conversationObject) });
+    );
+    return json({ objects: found.map(conversationObject) });
   },
-  "/api/chats": resolveOnWire(rows),
+  "/objects/conversation/": resolveOnWire(rows),
 });
 
 export const RADAR_TOUR = "What this workspace can do";

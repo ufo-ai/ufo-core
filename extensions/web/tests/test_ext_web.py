@@ -3989,9 +3989,10 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
     )
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
     reached = await client.get(
-        f"/surface/web/api/chats?conversation={conversation_id}", headers=cookie
+        f"/surface/web/objects/conversation/{conversation_id}", headers=cookie
     )
-    assert reached.json()["conversation"]["id"] == str(conversation_id)
+    assert reached.json()["name"] == str(conversation_id)
+    assert reached.json()["agent_id"] == str(review_agent)
     index = await client.get("/surface/web/api/agents", headers=cookie)
     assert str(review_agent) not in {agent["id"] for agent in index.json()["agents"]}
     settings = await client.get(f"/surface/web/agents/{review_agent}/settings", headers=cookie)
@@ -4037,8 +4038,7 @@ async def test_a_member_can_read_and_reply_in_a_private_extension_conversation(
         headers=cookie,
     )
     shared_permalink = await client.get(
-        f"/surface/web/api/chats?conversation={shared_id}",
-        headers=cookie,
+        f"/surface/web/objects/conversation/{shared_id}", headers=cookie
     )
     assert shared_transcript.status_code == 404
     assert shared_reply.status_code == 404
@@ -4198,7 +4198,7 @@ async def test_a_conversation_the_member_cannot_name_is_not_railed(
 
     assert [row["name"] for row in await _rail_rows(client, cookie)] == [str(named_id)]
 
-    reached = await client.get(f"/surface/web/api/chats?conversation={nameless_id}", headers=cookie)
+    reached = await client.get(f"/surface/web/objects/conversation/{nameless_id}", headers=cookie)
     assert reached.status_code == 200
 
 
@@ -4257,18 +4257,44 @@ async def test_a_parameterless_call_is_refused_before_anything_opens(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_bare_chats_read_names_no_conversation_and_is_refused(
+async def test_an_app_page_resolves_the_conversation_it_opens(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The rail's listing is the `conversation` kind's member listing; `api/chats` keeps only the
-    permalink resolve, so a read naming no conversation is a stated refusal rather than a page."""
-    client, workspace_id, _agent_id = web
-    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
-    bare = await client.get(
-        "/surface/web/api/chats", headers={"cookie": f"{SESSION_COOKIE}={token}"}
+    """A Chat app homepage reads `api/chats?conversation=` for the conversation it opens, and the
+    row answers under the field names its kit carries. A read naming no conversation is refused,
+    and another member's conversation is not found."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, _turn_id = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="hi"),
+        title="Opened from the homepage",
     )
+
+    resolved = await client.get(
+        f"/surface/web/api/chats?conversation={conversation_id}", headers=cookie
+    )
+    row = resolved.json()["conversation"]
+    assert row["id"] == str(conversation_id)
+    assert row["agent"] == {"id": str(agent_id), "name": "assistant"}
+    assert row["description"] == "Opened from the homepage"
+    assert row["audience"] == f"member:{member_id}"
+    assert (row["mine"], row["readable"], row["speakable"]) == (True, True, True)
+    assert row["disclosable"] is False
+
+    bare = await client.get("/surface/web/api/chats", headers=cookie)
     assert bare.status_code == 400
     assert bare.text == "name a conversation to resolve"
+    crossed = await client.get(
+        f"/surface/web/api/chats?conversation={conversation_id}",
+        headers={"cookie": f"{SESSION_COOKIE}={peer_token}"},
+    )
+    assert crossed.status_code == 404
 
 
 @pytest.mark.usefixtures("database_url")
@@ -4278,8 +4304,8 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An emitted `#/c/<id>` link outlives the rail's bound: with the bound at one, the displaced
-    older conversation still answers `api/chats?conversation=` as the conversation it is, while
-    another member's id and a malformed id are not found."""
+    older conversation still answers `objects/conversation/<id>` as the row the listing would
+    carry, while another member's id and a malformed id are not found."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
@@ -4309,22 +4335,26 @@ async def test_a_conversation_past_the_rails_bound_still_resolves_by_id(
     assert [row["name"] for row in await _rail_rows(client, cookie)] == [
         newer.json()["conversation_id"]
     ]
-    resolved = await client.get(f"/surface/web/api/chats?conversation={older_id}", headers=cookie)
-    row = resolved.json()["conversation"]
-    assert row["id"] == str(older_id)
-    assert row["agent"] == {"id": str(agent_id), "name": "assistant"}
-    assert row["description"] == "Displaced but linked"
+    resolved = await client.get(f"/surface/web/objects/conversation/{older_id}", headers=cookie)
+    resolved_row = resolved.json()
+    assert resolved_row["name"] == str(older_id)
+    assert (resolved_row["agent_id"], resolved_row["agent_name"]) == (str(agent_id), "assistant")
+    row = resolved_row["status"]
+    assert row["title"] == "Displaced but linked"
     assert row["audience"] == f"member:{member_id}"
     assert row["member_email"] == "owner@example.com"
-    assert row["last_turn_at"] is not None
+    assert isinstance(row["last_at"], str)
     assert row["source"] is None
     assert (row["mine"], row["readable"], row["speakable"]) == (True, True, True)
+    assert set(row) == {
+        field for field in conversations_kind.CONVERSATION_OBJECT.list_fields if field != "private"
+    }
     crossed = await client.get(
-        f"/surface/web/api/chats?conversation={older_id}",
+        f"/surface/web/objects/conversation/{older_id}",
         headers={"cookie": f"{SESSION_COOKIE}={peer_token}"},
     )
     assert crossed.status_code == 404
-    malformed = await client.get("/surface/web/api/chats?conversation=not-a-uuid", headers=cookie)
+    malformed = await client.get("/surface/web/objects/conversation/not-a-uuid", headers=cookie)
     assert malformed.status_code == 404
 
 
@@ -4365,19 +4395,18 @@ async def test_a_permalink_resolves_with_the_viewers_own_admin_flag(
     admin_cookie = {"cookie": f"{SESSION_COOKIE}={admin_token}"}
     peer_cookie = {"cookie": f"{SESSION_COOKIE}={peer_token}"}
 
-    private = await client.get(
-        f"/surface/web/api/chats?conversation={theirs}", headers=admin_cookie
-    )
-    walled = await client.get(f"/surface/web/api/chats?conversation={room}", headers=admin_cookie)
+    private = await client.get(f"/surface/web/objects/conversation/{theirs}", headers=admin_cookie)
+    walled = await client.get(f"/surface/web/objects/conversation/{room}", headers=admin_cookie)
 
-    assert private.json()["conversation"]["id"] == str(theirs)
-    assert private.json()["conversation"]["member_email"] == "owner@example.com"
-    assert private.json()["conversation"]["readable"] is False
-    assert private.json()["conversation"]["disclosable"] is True
-    assert private.json()["conversation"]["speakable"] is False
-    assert walled.json()["conversation"]["readable"] is False
-    assert walled.json()["conversation"]["disclosable"] is False
-    assert walled.json()["conversation"]["speakable"] is False
+    assert private.json()["name"] == str(theirs)
+    assert private.json()["status"]["member_email"] == "owner@example.com"
+    assert private.json()["status"]["title"] == ""
+    assert private.json()["status"]["readable"] is False
+    assert private.json()["status"]["disclosable"] is True
+    assert private.json()["status"]["speakable"] is False
+    assert walled.json()["status"]["readable"] is False
+    assert walled.json()["status"]["disclosable"] is False
+    assert walled.json()["status"]["speakable"] is False
     refused = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation={theirs}",
         content=b"not mine",
@@ -4386,7 +4415,7 @@ async def test_a_permalink_resolves_with_the_viewers_own_admin_flag(
     assert refused.status_code == 404
     for conversation_id in (theirs, room):
         unprivileged = await client.get(
-            f"/surface/web/api/chats?conversation={conversation_id}", headers=peer_cookie
+            f"/surface/web/objects/conversation/{conversation_id}", headers=peer_cookie
         )
         assert unprivileged.status_code == 404, conversation_id
 
@@ -4415,7 +4444,7 @@ async def test_a_colleague_reads_and_replies_in_a_workspace_shared_web_chat(
         headers=cookie,
     )
     resolved = await client.get(
-        f"/surface/web/api/chats?conversation={conversation_id}", headers=cookie
+        f"/surface/web/objects/conversation/{conversation_id}", headers=cookie
     )
     reply = await client.post(
         f"/surface/web/agents/{agent_id}/chat?conversation={conversation_id}",
@@ -4424,7 +4453,7 @@ async def test_a_colleague_reads_and_replies_in_a_workspace_shared_web_chat(
     )
 
     assert read.status_code == 200
-    row = resolved.json()["conversation"]
+    row = resolved.json()["status"]
     assert (row["mine"], row["readable"], row["speakable"]) == (False, True, True)
     assert reply.status_code == 200
     async with workspace_tx() as connection:
@@ -5383,6 +5412,10 @@ async def _seed_web_turn(
             )
         )
     return conversation_id, turn_id
+
+
+def _agent_conversations_path(agent_id: UUID) -> str:
+    return f"/surface/web/objects/conversation?agent={agent_id}&order_by=last_at&order=desc"
 
 
 async def _rail_rows(client: AsyncClient, headers: dict[str, str]) -> list[dict[str, object]]:
@@ -10911,15 +10944,15 @@ async def test_the_conversations_search_narrows_the_read_not_the_page(
         TerminalFrame(status="done", text="hi"),
         title="Order more coffee",
     )
-    path = f"/surface/web/agents/{agent_id}/conversations"
+    path = _agent_conversations_path(agent_id)
 
     everything = await client.get(path, headers=cookie)
-    matched = await client.get(path + "?q=DEPLOY", headers=cookie)
-    unmatched = await client.get(path + "?q=nothing%20here", headers=cookie)
+    matched = await client.get(path + "&q=DEPLOY", headers=cookie)
+    unmatched = await client.get(path + "&q=nothing%20here", headers=cookie)
 
-    assert len({row["id"] for row in everything.json()["conversations"]}) == 2
-    assert [row["id"] for row in matched.json()["conversations"]] == [str(wanted)]
-    assert unmatched.json()["conversations"] == []
+    assert len({row["name"] for row in everything.json()["objects"]}) == 2
+    assert [row["name"] for row in matched.json()["objects"]] == [str(wanted)]
+    assert unmatched.json()["objects"] == []
 
 
 @pytest.mark.usefixtures("database_url")
@@ -10928,9 +10961,8 @@ async def test_the_conversations_read_says_it_stopped_at_its_bound(
     web: tuple[AsyncClient, UUID, UUID],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The read carries no cursor, so the screen drawing its rows can only say the rest are there
-    if this answer says so. It is counted rather than guessed from a full page: a set exactly the
-    size of the bound says nothing stands behind it."""
+    """The listing is bounded before it is paged, so the screen drawing its rows can only say the
+    rest are there if the page states `cut`."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "m@example.com")
     cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
@@ -10943,17 +10975,17 @@ async def test_the_conversations_read_says_it_stopped_at_its_bound(
             TerminalFrame(status="done", text="hi"),
             title=title,
         )
-    path = f"/surface/web/agents/{agent_id}/conversations"
+    path = _agent_conversations_path(agent_id)
 
-    monkeypatch.setattr(web_surface, "CONVERSATION_LIST_LIMIT", 1)
+    monkeypatch.setattr(conversations_kind, "CONVERSATION_MINE_LIMIT", 1)
     bounded = (await client.get(path, headers=cookie)).json()
-    monkeypatch.setattr(web_surface, "CONVERSATION_LIST_LIMIT", 2)
-    exact = (await client.get(path, headers=cookie)).json()
+    monkeypatch.setattr(conversations_kind, "CONVERSATION_MINE_LIMIT", 3)
+    whole = (await client.get(path, headers=cookie)).json()
 
-    assert len(bounded["conversations"]) == 1
-    assert bounded["more"] is True
-    assert len(exact["conversations"]) == 2
-    assert exact["more"] is False
+    assert len(bounded["objects"]) == 1
+    assert bounded["cut"] is True
+    assert len(whole["objects"]) == 2
+    assert whole["cut"] is False
 
 
 @pytest.mark.usefixtures("database_url")
@@ -10988,17 +11020,20 @@ async def test_an_unreadable_conversation_states_no_words_and_no_speakers(
     )
 
     listed = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations",
+        _agent_conversations_path(agent_id) + "&readable=false",
         headers={"cookie": f"{SESSION_COOKIE}={admin_token}"},
     )
 
-    row = next(entry for entry in listed.json()["conversations"] if entry["id"] == str(theirs))
+    row = next(entry for entry in listed.json()["objects"] if entry["name"] == str(theirs))
     assert row["readable"] is False
     assert row["disclosable"] is True
+    assert row["speakable"] is False
     assert row["member_email"] == "owner@example.com"
-    assert row["description"] == ""
+    assert row["title"] == ""
+    assert row["opening"] is None
     assert row["source"] is None
-    assert row["speakers"] == []
+    assert row["speaker"] is None
+    assert row["owner_name"] is None
 
 
 @pytest.mark.usefixtures("database_url")
@@ -11006,13 +11041,13 @@ async def test_an_unreadable_conversation_states_no_words_and_no_speakers(
 async def test_conversations_list_by_audience_and_the_agent_wall(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
-    """The conversations view, read by a member who holds no grant and reaches the main agent
+    """One agent's conversations, read by a member who holds no grant and reaches the main agent
     by default: they list their own conversations plus the workspace-shared ones, never another
-    member's private one or a room's. An admin lists every one of the agent's
-    as administration metadata and reads only the workspace-shared one — every member-private
-    conversation and every room is listed unreadable, the same shape a private task's content takes
-    for an admin. Another agent's conversation is absent, and an out-of-audience agent is
-    not-found."""
+    member's private one or a room's. An admin's unfiltered read is the same, and under the
+    declared filter `readable=false` they list the rest of the agent's as administration
+    metadata — every member-private conversation and every room, unreadable, the same shape a
+    private task's content takes for an admin. Another agent's conversation is absent, and an
+    out-of-audience agent is not-found."""
     client, workspace_id, agent_id = web
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, _token_n = await _seed_member(workspace_id, "n@example.com")
@@ -11063,14 +11098,19 @@ async def test_conversations_list_by_audience_and_the_agent_wall(
     elsewhere = await _seed_agent_conversation(
         workspace_id, walled_agent, queue_key="other", audience="shared", member_id=None
     )
-    path = f"/surface/web/agents/{agent_id}/conversations"
+    for spoken, speaker in ((mine, member_m), (shared, member_n), (theirs, member_n), (room, None)):
+        await _seed_listed_turn(
+            workspace_id, spoken, agent_id, seq=1, inbound="words", speaker_member_id=speaker
+        )
+    await _seed_listed_turn(workspace_id, elsewhere, walled_agent, seq=1, inbound="words")
+    path = _agent_conversations_path(agent_id)
 
     listed = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
     assert listed.status_code == 200
-    rows = listed.json()["conversations"]
-    assert {entry["id"] for entry in rows} == {str(mine), str(shared)}
+    rows = listed.json()["objects"]
+    assert {entry["name"] for entry in rows} == {str(mine), str(shared)}
     assert all(entry["readable"] for entry in rows)
-    by_id = {entry["id"]: entry for entry in rows}
+    by_id = {entry["name"]: entry for entry in rows}
     assert by_id[str(mine)]["member_email"] == "m@example.com"
     assert by_id[str(mine)]["mine"] is True
     assert by_id[str(shared)]["surface"] == "slack"
@@ -11078,24 +11118,20 @@ async def test_conversations_list_by_audience_and_the_agent_wall(
     assert by_id[str(shared)]["member_email"] is None
     assert by_id[str(shared)]["mine"] is False
 
-    admin_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_admin}"})
-    admin_rows = admin_view.json()["conversations"]
-    assert {entry["id"] for entry in admin_rows} == {
-        str(mine),
-        str(shared),
-        str(theirs),
-        str(room),
-    }
-    assert {entry["id"] for entry in admin_rows if entry["readable"]} == {str(shared)}
-    assert {entry["id"] for entry in admin_rows if not entry["readable"]} == {
-        str(mine),
-        str(theirs),
-        str(room),
-    }
-    assert str(elsewhere) not in {entry["id"] for entry in admin_rows}
+    admin_cookie = {"cookie": f"{SESSION_COOKIE}={token_admin}"}
+    admin_view = await client.get(path, headers=admin_cookie)
+    assert {entry["name"] for entry in admin_view.json()["objects"]} == {str(shared)}
+    admin_rest = await client.get(path + "&readable=false", headers=admin_cookie)
+    admin_rows = admin_rest.json()["objects"]
+    assert {entry["name"] for entry in admin_rows} == {str(mine), str(theirs), str(room)}
+    assert not any(entry["readable"] for entry in admin_rows)
+    member_rest = await client.get(
+        path + "&readable=false", headers={"cookie": f"{SESSION_COOKIE}={token_m}"}
+    )
+    assert member_rest.json()["objects"] == []
 
     walled = await client.get(
-        f"/surface/web/agents/{walled_agent}/conversations",
+        _agent_conversations_path(walled_agent),
         headers={"cookie": f"{SESSION_COOKIE}={token_m}"},
     )
     assert walled.status_code == 404
@@ -11886,11 +11922,16 @@ async def test_the_conversations_route_serializes_who_may_be_disclosed(
     )
     assert (await _acknowledge(client, agent_id, theirs, token_admin)).json()["applied"] is True
 
-    listed = await client.get(
-        f"/surface/web/agents/{agent_id}/conversations",
-        headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
+    admin_cookie = {"cookie": f"{SESSION_COOKIE}={token_admin}"}
+    for spoken, speaker in ((theirs, member_m), (room, None), (own, admin_id)):
+        await _seed_listed_turn(
+            workspace_id, spoken, agent_id, seq=2, inbound="words", speaker_member_id=speaker
+        )
+    listed = await client.get(_agent_conversations_path(agent_id), headers=admin_cookie)
+    rest = await client.get(
+        _agent_conversations_path(agent_id) + "&readable=false", headers=admin_cookie
     )
-    rows = {entry["id"]: entry for entry in listed.json()["conversations"]}
+    rows = {entry["name"]: entry for entry in listed.json()["objects"] + rest.json()["objects"]}
     assert rows[str(theirs)]["disclosable"] is True
     assert rows[str(room)]["disclosable"] is False
     assert rows[str(own)]["disclosable"] is False

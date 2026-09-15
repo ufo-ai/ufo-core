@@ -23,17 +23,20 @@ import {
   mergeChats,
   railRows,
   readChat,
-  type ChatRow,
-  type ChatsPayload,
+  resolvedConversation,
+  type ConversationDetailPayload,
   type ConversationsPayload,
   type RailShown,
   type RailSort,
 } from "@/lib/rail";
-import type { OwnedConversation } from "@/lib/types";
+import type { Conversation } from "@/lib/types";
 
 export type RailPhase = "loading" | "failed" | "ready";
 
-/** A refusal the resolve answered, read where no record of the conversation is held. */
+/** What the resolve answered instead of the conversation. A refusal outranks a record the tab
+ *  holds: the resolve is the one read that answers for the open conversation, and the rail may
+ *  still list what it refused. A read that failed answers for the read alone, so the held record
+ *  outranks it. */
 export type Sought =
   | { kind: "absent" }
   | { kind: "signed-out" }
@@ -41,9 +44,12 @@ export type Sought =
 
 export type RailState = {
   phase: RailPhase;
-  rows: ChatRow[];
+  /** The listing, newest activity first. */
+  rows: Conversation[];
   sought: Readonly<Record<string, Sought>>;
-  linked: Readonly<Record<string, OwnedConversation>>;
+  /** Every conversation this tab holds a record of, by id: the listed rows, the ones a permalink
+   *  resolved past the listing's bound, and the one a send just founded. */
+  known: Readonly<Record<string, Conversation>>;
   fault: ToastState | null;
   cut: boolean;
   shown: RailShown;
@@ -59,7 +65,7 @@ function fresh(): RailState {
     phase: "loading",
     rows: [],
     sought: {},
-    linked: {},
+    known: {},
     fault: null,
     cut: false,
     shown: heldRailShown(),
@@ -83,14 +89,20 @@ function applyVisibility<Held extends VisibilityState>(conversationId: string, h
 }
 
 function withVisibility(held: RailState, conversationId: string, next: VisibilityState): RailState {
-  const linked = held.linked[conversationId];
-  return {
-    ...held,
-    rows: held.rows.map((entry) =>
+  const known = held.known[conversationId];
+  return withRows(
+    known ? { ...held, known: { ...held.known, [conversationId]: { ...known, ...next } } } : held,
+    held.rows.map((entry) =>
       entry.conversation_id === conversationId ? { ...entry, ...next } : entry,
     ),
-    linked: linked ? { ...held.linked, [conversationId]: { ...linked, ...next } } : held.linked,
-  };
+  );
+}
+
+/** The listing's rows are known rows too, so every write to the listing lands in both. */
+function withRows(held: RailState, rows: Conversation[]): RailState {
+  const known = { ...held.known };
+  for (const row of rows) known[row.conversation_id] = row;
+  return { ...held, rows, known };
 }
 
 export function railState(): RailState {
@@ -126,7 +138,7 @@ export function readRail(): void {
 /** Each page stands as it lands and the walk goes on behind it, so the rail is drawn on the first
  *  read rather than on the whole continuation. */
 async function walkRail(read: number): Promise<void> {
-  const gathered: ChatRow[] = [];
+  const gathered: Conversation[] = [];
   let cursor = "";
   for (;;) {
     const params = new URLSearchParams({ order_by: "last_at", order: "desc" });
@@ -148,12 +160,12 @@ async function walkRail(read: number): Promise<void> {
     gathered.push(
       ...chatRows(result.payload).map((row) => applyVisibility(row.conversation_id, row)),
     );
-    update((held) => ({
-      ...held,
-      phase: "ready" as const,
-      cut: result.payload.cut === true,
-      rows: mergeChats(gathered, held.rows),
-    }));
+    update((held) =>
+      withRows(
+        { ...held, phase: "ready" as const, cut: result.payload.cut === true },
+        mergeChats(gathered, held.rows),
+      ),
+    );
     cursor = result.payload.next_cursor ?? "";
     if (!cursor || gathered.length >= RAIL_ROWS_MAX) return;
   }
@@ -167,7 +179,7 @@ async function refreshRail(): Promise<void> {
   const result = await getJson<ConversationsPayload>("/objects/conversation?" + params.toString());
   if (read !== reads || !result.ok) return;
   const fetched = chatRows(result.payload).map((row) => applyVisibility(row.conversation_id, row));
-  update((held) => ({ ...held, rows: mergeChats(fetched, held.rows) }));
+  update((held) => withRows(held, mergeChats(fetched, held.rows)));
 }
 
 let ticking: number | null = null;
@@ -219,41 +231,45 @@ export function watchRail(): () => void {
  *  read has not answered is loading, never unshared. */
 const seeking = new Set<string>();
 
+/** The conversations this tab founded and has not left yet: each holds the row its own send wrote,
+ *  so its first visit reads nothing back. */
+const founded = new Set<string>();
+
 /** Every visit reads the conversation again, so its title line follows a rename or a change of
  *  audience made since the last one; the record held meanwhile stands until the answer lands. */
 export function seekChat(conversationId: string): void {
-  if (seeking.has(conversationId)) return;
+  if (seeking.has(conversationId) || founded.delete(conversationId)) return;
   seeking.add(conversationId);
-  void getJson<ChatsPayload>("/api/chats?conversation=" + conversationId).then((result) => {
-    seeking.delete(conversationId);
-    if (result.ok) {
+  void getJson<ConversationDetailPayload>("/objects/conversation/" + conversationId).then(
+    (result) => {
+      seeking.delete(conversationId);
+      if (result.ok) {
+        const resolved = applyVisibility(conversationId, resolvedConversation(result.payload));
+        update((current) => {
+          const { [conversationId]: _refused, ...sought } = current.sought;
+          return { ...current, sought, known: { ...current.known, [conversationId]: resolved } };
+        });
+        return;
+      }
+      const outcome: Sought =
+        result.status === 404
+          ? { kind: "absent" }
+          : result.status === 401
+            ? { kind: "signed-out" }
+            : { kind: "failed", message: result.message };
       update((current) => ({
         ...current,
-        linked: {
-          ...current.linked,
-          [conversationId]: applyVisibility(conversationId, result.payload.conversation),
-        },
+        sought: { ...current.sought, [conversationId]: outcome },
       }));
-      return;
-    }
-    const outcome: Sought =
-      result.status === 404
-        ? { kind: "absent" }
-        : result.status === 401
-          ? { kind: "signed-out" }
-          : { kind: "failed", message: result.message };
-    update((current) => ({ ...current, sought: { ...current.sought, [conversationId]: outcome } }));
-  });
+    },
+  );
 }
 
-/** The founding client holds every fact the listing row and the resolved projection would carry, so
- *  both stand at once and the conversation opens without a read of what it just wrote. */
-export function railFounded(row: ChatRow, conversation: OwnedConversation): void {
-  update((held) => ({
-    ...held,
-    rows: mergeChats(held.rows, [row]),
-    linked: { ...held.linked, [conversation.id]: conversation },
-  }));
+/** The founding client holds every fact the row carries, so the conversation is listed and opens
+ *  without a read of what it just wrote. */
+export function railFounded(row: Conversation): void {
+  founded.add(row.conversation_id);
+  update((held) => withRows(held, mergeChats(held.rows, [row])));
   wakeRail();
 }
 
@@ -263,9 +279,7 @@ export function changeRailVisibility(
   memberEmail: string | null,
 ): boolean {
   const held = railState();
-  const current =
-    held.linked[conversationId] ??
-    held.rows.find((entry) => entry.conversation_id === conversationId);
+  const current = held.known[conversationId];
   if (!current || visibilityChanges.has(conversationId) || current.audience === audience) {
     return false;
   }
@@ -297,17 +311,18 @@ export function settleRailVisibility(conversationId: string, outcome: IntentOutc
 }
 
 export function railRead(conversationId: string): void {
-  update((held) => ({ ...held, rows: readChat(held.rows, conversationId) }));
+  update((held) => withRows(held, readChat(held.rows, conversationId)));
 }
 
 export function railActivity(conversationId: string, turn: ChatTurn): void {
-  update((held) => ({
-    ...held,
-    rows:
+  update((held) =>
+    withRows(
+      held,
       turn === "running"
         ? bumpChat(held.rows, conversationId, new Date(), turn)
         : turnedChat(held.rows, conversationId, turn),
-  }));
+    ),
+  );
   wakeRail();
 }
 
@@ -352,6 +367,7 @@ export function resetRailStore(): void {
   state = null;
   reads = 0;
   seeking.clear();
+  founded.clear();
   visibilityChanges.clear();
   if (ticking !== null) window.clearTimeout(ticking);
   ticking = null;

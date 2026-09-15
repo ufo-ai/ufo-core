@@ -20,7 +20,7 @@ import {
 } from "@/lib/audience";
 import { automationId } from "@/lib/automationLane";
 import { cn } from "@/lib/cn";
-import type { ChatRow, RailTurn } from "@/lib/rail";
+import type { Conversation, ConversationTurn } from "@/lib/types";
 import { automationsHash } from "@/lib/route";
 
 export const AUTOMATION = "Automation";
@@ -52,11 +52,11 @@ function Spinner({ glyph: Glyph, ink }: { glyph: typeof IconLoader; ink: string 
 }
 
 /** A type predicate, so the ink table below stays total over the turns that reach it. */
-function live(turn: RailTurn): turn is "running" | "queued" {
+function live(turn: ConversationTurn): turn is "running" | "queued" {
   return turn === "running" || turn === "queued";
 }
 
-const TURN_INK: Record<Exclude<RailTurn, "running" | "queued">, string> = {
+const TURN_INK: Record<Exclude<ConversationTurn, "running" | "queued">, string> = {
   parked: "text-blocked",
   idle: "text-ink-quiet",
 };
@@ -75,7 +75,7 @@ export function ChatMark({
   className,
 }: {
   surface: string;
-  turn: RailTurn;
+  turn: ConversationTurn;
   automated: boolean;
   unread: boolean;
   className?: string;
@@ -99,7 +99,7 @@ export type ChatState = "working" | "waiting" | "unread" | "idle";
 
 /** What a chat is doing: the agent is working, it is held for an answer only the member can
  *  give, it moved while they were away, or it is resting. */
-export function chatState(row: ChatRow): ChatState {
+export function chatState(row: Conversation): ChatState {
   if (live(row.turn)) return "working";
   if (row.turn === "parked") return "waiting";
   return row.unread ? "unread" : "idle";
@@ -121,7 +121,7 @@ const STATE_INK: Record<Exclude<ChatState, "working">, string> = {
 /** The table's status is the state alone and never the surface, which has a column of its own to
  *  be named in. Its spinner is grey where the rail's is primary: a column of them would otherwise
  *  read as a column of brand colour rather than one of status. */
-export function ChatStatus({ row }: { row: ChatRow }) {
+export function ChatStatus({ row }: { row: Conversation }) {
   const state = chatState(row);
   return (
     <span
@@ -157,7 +157,7 @@ function LinkedTip({ at, says }: { at: string; says: string }) {
 
 /** The mark names the automation that last fired here and leads to it: an automation runs on its
  *  own schedule, so what a member wants from its chat is usually the thing that scheduled it. */
-export function AutomationMark({ row, className }: { row: ChatRow; className?: string }) {
+export function AutomationMark({ row, className }: { row: Conversation; className?: string }) {
   const name = row.automation_name;
   const kind = row.automation_kind;
   const mark = (
@@ -188,7 +188,7 @@ function channelWord(surface: string): string {
 /** The surface names itself in the column and the room it ran in stands under the pointer: one
  *  Slack workspace fills a column with `#`-prefixed names that differ only in their last word. The
  *  room leads back out to the thread where the surface reported a link for it. */
-export function ChannelMark({ row }: { row: ChatRow }) {
+export function ChannelMark({ row }: { row: Conversation }) {
   const cell = (
     <span className="flex min-w-0 items-center gap-2xs">
       <ChannelGlyph surface={row.surface} className={cn(MARK, "text-ink-soft")} />

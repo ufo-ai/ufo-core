@@ -5,21 +5,19 @@ import { App } from "@/App";
 import { Portal } from "@/Portal";
 import { agentHash, chatHash, newChatHash, type Route } from "@/lib/route";
 import { pageCrumb, pageTitle } from "@/lib/title";
-import type { OwnedConversation } from "@/lib/types";
+import type { Conversation } from "@/lib/types";
 
-import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, linked, MEMBER, SECOND, SECOND_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, SECOND, SECOND_ID, useStreamFake, wire } from "./harness";
 
 const PLACE = { place: {} };
 
-const LINKED: OwnedConversation = {
-  id: CONVO_ID,
-  agent: { id: AGENT_ID, name: "assistant" },
+const LINKED: Conversation = {
+  ...CHAT_ROW,
   surface: "slack",
-  surface_label: null,
   audience: "room:slack:C2",
   member_email: "owner@example.com",
   mine: false,
-  description: "Ship the release",
+  title: "Ship the release",
   source: null,
   speakers: [],
   turn_count: 3,
@@ -33,12 +31,12 @@ const LINKED: OwnedConversation = {
   speakable: false,
 };
 
-const HELD = { [CONVO_ID]: linked(CHAT_ROW) };
+const HELD = { [CONVO_ID]: CHAT_ROW };
 
-const titled = (route: Route, held: Record<string, OwnedConversation> = HELD) =>
+const titled = (route: Route, held: Record<string, Conversation> = HELD) =>
   pageTitle(route, [AGENT, SECOND], held, AGENT);
 
-const crumbed = (route: Route, held: Record<string, OwnedConversation> = HELD) =>
+const crumbed = (route: Route, held: Record<string, Conversation> = HELD) =>
   pageCrumb(route, [AGENT, SECOND], held, AGENT);
 
 beforeEach(() => {
@@ -103,7 +101,7 @@ test("home is titled the same whatever its track holds", () => {
 });
 
 test("a step no roster row reaches is the app's name and nothing to press", () => {
-  const held = linked({ ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "daily-brief" });
+  const held = { ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "daily-brief" };
   const route: Route = { kind: "chat", conversationId: CONVO_ID };
   expect(pageCrumb(route, [AGENT], { [CONVO_ID]: held }, AGENT)).toEqual({ label: "Daily-Brief" });
 });

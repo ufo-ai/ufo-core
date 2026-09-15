@@ -167,8 +167,8 @@ export function useShell(agents: Agent[], onAgents: () => void, fleeting?: Fleet
   }, [narrow]);
 
   useEffect(() => {
-    document.title = pageTitle(route, agents, rail.linked, mainAgent);
-  }, [route, agents, rail.linked, mainAgent]);
+    document.title = pageTitle(route, agents, rail.known, mainAgent);
+  }, [route, agents, rail.known, mainAgent]);
 
   useEffect(() => {
     if (route.kind === "first-run" && !mainAgent) openHome();

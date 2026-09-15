@@ -10,8 +10,7 @@ const CONVERSATION_WORD = "Conversation";
  *  for; until an answer lands the anchor reads as the plain word, never as the id. */
 export function ConversationLink({ id }: { id: string }) {
   const rail = useRail();
-  const title =
-    rail.rows.find((row) => row.conversation_id === id)?.title || rail.linked[id]?.description;
+  const title = rail.known[id]?.title;
   useEffect(() => {
     if (!title) seekChat(id);
   }, [id, title]);

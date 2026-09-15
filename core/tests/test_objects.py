@@ -4942,12 +4942,114 @@ async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:
     assert shared_row.fields["source"] == SLACK_PERMALINK
     assert shared_row.fields["audience"] == str(SHARED_AUDIENCE)
     assert shared_row.fields["member_email"] is None
+    for row in page.rows:
+        assert (row.fields["readable"], row.fields["disclosable"], row.fields["speakable"]) == (
+            True,
+            False,
+            True,
+        )
     assert [row.name for row in widened.rows] == [row.name for row in page.rows]
     bob_rows = {row.name: row for row in bob_page.rows}
     assert set(bob_rows) == {str(shared_id), str(private_id)}
     assert bob_rows[str(shared_id)].fields["mine"] is True
     assert bob_rows[str(shared_id)].fields["speaker"] is None
     assert [row.name for row in portal_only.rows] == [str(mine_id)]
+
+
+async def test_conversation_kind_lists_and_resolves_the_unreadable_for_an_admin(db: None) -> None:
+    """The one row a listed and a resolved conversation share. An admin's unfiltered page is
+    their own reach; `readable: false` lists the selected agent's rows they may not read as
+    metadata — another member's private one disclosable, a room's not, titles withheld — and
+    `member_detail` resolves each of those rows the same way, so a permalink an admin was offered
+    opens the acknowledgement rather than reading as absent. A non-admin's `readable: false` page
+    is empty and their resolve of another member's conversation is None. The prepared-intent lane
+    resolves for its member and is not speakable, since nothing reads a message folded onto it."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        theirs = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Bob private",
+            audience=conversation_audience(bob),
+            member_id=bob,
+            speaker_member_id=bob,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="slack",
+            surface_label="DM",
+            source=SLACK_PERMALINK,
+        )
+        room = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Ops room",
+            audience=room_audience("slack", "C9"),
+            member_id=None,
+            speaker_member_id=bob,
+            admission="member",
+            moved_at=datetime(2026, 8, 2, tzinfo=UTC),
+            surface="slack",
+            surface_label="#ops",
+        )
+        lane = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title='{"verb": "apply"}',
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="intent",
+            moved_at=datetime(2026, 8, 3, tzinfo=UTC),
+            surface="web",
+        )
+        query = ObjectListQuery(
+            order_by="last_at",
+            order="desc",
+            filters={"readable": False},
+            supported_fields=CONVERSATION_OBJECT.list_fields,
+        )
+        with agent(agent_id):
+            store = CONVERSATION_OBJECT.store
+            admin_rest = await store.member_page(None, member_id=alice, admin=True, query=query)
+            member_rest = await store.member_page(None, member_id=bob, admin=False, query=query)
+            plain = await store.member_page(
+                None, member_id=alice, admin=True, query=replace(query, filters={})
+            )
+            resolved_theirs = await store.member_detail(
+                None, str(theirs), member_id=alice, admin=True
+            )
+            resolved_room = await store.member_detail(None, str(room), member_id=alice, admin=True)
+            unprivileged = await store.member_detail(
+                None, str(theirs), member_id=alice, admin=False
+            )
+            resolved_lane = await store.member_detail(None, str(lane), member_id=alice, admin=False)
+
+    assert [row.name for row in admin_rest.rows] == [str(room), str(theirs)]
+    room_row, theirs_row = admin_rest.rows
+    assert (theirs_row.fields["readable"], theirs_row.fields["disclosable"]) == (False, True)
+    assert (room_row.fields["readable"], room_row.fields["disclosable"]) == (False, False)
+    assert theirs_row.fields["speakable"] is False
+    assert theirs_row.fields["title"] == ""
+    assert theirs_row.fields["opening"] is None
+    assert theirs_row.fields["source"] is None
+    assert theirs_row.fields["speaker"] is None
+    assert theirs_row.fields["member_email"] == f"{bob.hex[:8]}@x.test"
+    assert member_rest.rows == ()
+    assert [row.name for row in plain.rows] == []
+    assert resolved_theirs is not None
+    assert resolved_theirs.row == theirs_row
+    assert resolved_theirs.detail.spec.audience == str(conversation_audience(bob))
+    assert resolved_room is not None
+    assert resolved_room.row == room_row
+    assert unprivileged is None
+    assert resolved_lane is not None
+    assert (resolved_lane.row.fields["readable"], resolved_lane.row.fields["speakable"]) == (
+        True,
+        False,
+    )
 
 
 async def test_conversation_rows_carry_one_opening_sentence(db: None) -> None:

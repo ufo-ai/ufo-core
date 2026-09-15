@@ -84,7 +84,8 @@ test("the endpoint table admits its rows and their fills, and nothing else", () 
     endpointFor("POST", "agents/" + AGENT_ID + "/actions/surface/slack/slack_connect"),
   ).toBeTruthy();
   expect(endpointFor("POST", "agents/" + AGENT_ID + "/chat?conversation=new")).toBeTruthy();
-  expect(endpointFor("GET", "api/chats?conversation=" + AGENT_ID)).toBeTruthy();
+  expect(endpointFor("GET", "api/chats?conversation=" + CONVERSATION_ID)).toBeTruthy();
+  expect(endpointFor("GET", "agents/" + AGENT_ID + "/conversations")).toBeNull();
   expect(endpointFor("POST", "preview")).toBeTruthy();
   expect(endpointFor("GET", "workspace/usage")).toBeNull();
   expect(endpointFor("GET", "workspace/radar")).toBeNull();
@@ -205,9 +206,9 @@ test("a tabled GET is forwarded and its payload returned", async () => {
   vi.stubGlobal("fetch", fetchMock);
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
-  deliver({ ufo: "call", id: "r1", method: "GET", path: "api/chats" }, iframe.contentWindow);
+  deliver({ ufo: "call", id: "r1", method: "GET", path: "api/agents" }, iframe.contentWindow);
   await vi.waitFor(() => expect(posted).toHaveLength(1));
-  expect(fetchMock.mock.calls[0][0]).toBe("/surface/web/api/chats");
+  expect(fetchMock.mock.calls[0][0]).toBe("/surface/web/api/agents");
   expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "GET" });
   expect(posted[0]).toEqual({
     ufo: "data",
@@ -572,7 +573,7 @@ test("a form on a row that takes none is refused without a fetch", async () => {
   const { iframe, posted } = fakeFrame();
   bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
   deliver(
-    { ufo: "call", id: "f2", method: "GET", path: "api/chats", form: [] },
+    { ufo: "call", id: "f2", method: "GET", path: "api/agents", form: [] },
     iframe.contentWindow,
   );
   await vi.waitFor(() => expect(posted).toHaveLength(1));
@@ -594,7 +595,7 @@ test("a body of the wrong shape for its row is refused without a fetch", async (
     iframe.contentWindow,
   );
   deliver(
-    { ufo: "call", id: "b3", method: "GET", path: "api/chats", body: { extra: true } },
+    { ufo: "call", id: "b3", method: "GET", path: "api/agents", body: { extra: true } },
     iframe.contentWindow,
   );
   await vi.waitFor(() => expect(posted).toHaveLength(3));

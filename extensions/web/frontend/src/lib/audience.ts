@@ -147,24 +147,16 @@ export function speakerName(speaker: string): string {
 const EVERY_MEMBER = "Every member";
 const NO_MEMBER_GRANTS = "No member grants — admins only";
 
-function who(
-  entry: {
-    member_email: string | null;
-    audience: string;
-    surface_label?: string | null;
-    speakers?: string[];
-  },
-  viewer: string | null,
-): string {
-  if (entry.member_email === null) return audienceLabel(entry, viewer);
-  const owned = ownerLabel(entry.member_email, viewer);
+function who(conversation: Conversation, viewer: string | null): string {
+  if (conversation.member_email === null) return audienceLabel(conversation, viewer);
+  const owned = ownerLabel(conversation.member_email, viewer);
   if (owned === "You") return owned;
-  const sender = entry.speakers?.find(Boolean);
-  return sender ? speakerName(sender) : owned;
+  return conversation.speaker ? speakerName(conversation.speaker) : owned;
 }
 
+/** What a conversation is called, or whose it is where its title is withheld or not yet written. */
 export function subject(conversation: Conversation, viewer: string | null): string {
-  return conversation.description || who(conversation, viewer);
+  return conversation.title || who(conversation, viewer);
 }
 
 export function webAudienceLabel(main: boolean, audience: string[]): string {

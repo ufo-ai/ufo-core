@@ -4,7 +4,7 @@ import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
 import { MEMBER_SUBJECT, WEB_SURFACE } from "@/lib/audience";
 import { cn } from "@/lib/cn";
 import { useNarrow } from "@/lib/narrow";
-import { railAudience, stampIso } from "@/lib/rail";
+import { stampIso } from "@/lib/rail";
 import { railActivity, railFounded, useRail } from "@/lib/railStore";
 import {
   CONNECTION_TABS,
@@ -75,54 +75,38 @@ export function founded(
   if (member.id === undefined) throw new Error("member id missing");
   const at = stampIso(new Date());
   const audience = MEMBER_SUBJECT + member.id;
-  railFounded(
-    {
-      conversation_id: conversationId,
-      agent_id: agent.id,
-      agent_name: agent.name,
-      title,
-      opening: null,
-      last_at: at,
-      surface: WEB_SURFACE,
-      surface_label: null,
-      audience,
-      member_email: member.email,
-      owner_email: member.email,
-      owner_name: null,
-      mine: true,
-      speaker: null,
-      source: null,
-      turn: "running",
-      automation_kind: null,
-      automation_name: null,
-      automation_title: null,
-      unread: false,
-      archived: false,
-      deleted: false,
-      pinned: false,
-    },
-    {
-      id: conversationId,
-      agent: { id: agent.id, name: agent.name },
-      surface: WEB_SURFACE,
-      surface_label: null,
-      audience,
-      member_email: member.email,
-      mine: true,
-      description: title,
-      source: null,
-      speakers: [member.email],
-      turn_count: 1,
-      created_at: at,
-      last_turn_at: at,
-      archived: false,
-      deleted: false,
-      pinned: false,
-      readable: true,
-      disclosable: false,
-      speakable: true,
-    },
-  );
+  railFounded({
+    conversation_id: conversationId,
+    agent_id: agent.id,
+    agent_name: agent.name,
+    title,
+    opening: null,
+    last_at: at,
+    surface: WEB_SURFACE,
+    surface_label: null,
+    audience,
+    member_email: member.email,
+    owner_email: member.email,
+    owner_name: null,
+    mine: true,
+    speaker: null,
+    source: null,
+    turn: "running",
+    automation_kind: null,
+    automation_name: null,
+    automation_title: null,
+    unread: false,
+    speakers: [member.email],
+    turn_count: 1,
+    created_at: at,
+    last_turn_at: at,
+    archived: false,
+    deleted: false,
+    pinned: false,
+    readable: true,
+    disclosable: false,
+    speakable: true,
+  });
   const seen = heldRoute();
   if (seen.kind === "new-chat" && seen.agentId === agent.id) openChat(conversationId);
 }
@@ -145,7 +129,7 @@ export function useCrumb(
   mainAgent: Agent | null,
 ): Crumb | undefined {
   const rail = useRail();
-  return pageCrumb(route, agents, rail.linked, mainAgent);
+  return pageCrumb(route, agents, rail.known, mainAgent);
 }
 
 /** The apps flag withholds every address that lists, builds or shops for apps. */
@@ -353,7 +337,7 @@ export function SlotPane({
       conversationId={route.conversationId}
       slot={route.slot}
       rootConversationId={route.rootConversationId}
-      audience={railAudience(rail.rows, rail.linked, route.conversationId)}
+      audience={rail.known[route.conversationId]}
       crumb={crumb}
     />
   );
@@ -372,9 +356,10 @@ export function ChatRoutePane({
 }) {
   const rail = useRail();
   const narrow = useNarrow();
-  const conversation = rail.linked[route.conversationId];
+  const outcome = rail.sought[route.conversationId];
+  const refused = outcome !== undefined && outcome.kind !== "failed";
+  const conversation = refused ? undefined : rail.known[route.conversationId];
   if (!conversation) {
-    const outcome = rail.sought[route.conversationId];
     if (!outcome) return <PaneLoading />;
     if (outcome.kind === "absent") return <NotShared />;
     if (outcome.kind === "signed-out") {
@@ -389,19 +374,19 @@ export function ChatRoutePane({
     return <PaneNote>{outcome.message}</PaneNote>;
   }
   if (!conversation.readable && !conversation.disclosable) return <NotShared />;
-  const listedAgent = agents.find((entry) => entry.id === conversation.agent.id);
+  const listedAgent = agents.find((entry) => entry.id === conversation.agent_id);
   const agent =
     listedAgent ??
     (conversation.surface.startsWith("extension:")
-      ? { id: conversation.agent.id, name: conversation.agent.name, model: "" }
+      ? { id: conversation.agent_id, name: conversation.agent_name, model: "" }
       : undefined);
   if (!agent) return <NoSuchApp />;
   return (
     <ChatPane
-      key={conversation.id}
+      key={conversation.conversation_id}
       agent={agent}
       member={member}
-      conversationId={conversation.id}
+      conversationId={conversation.conversation_id}
       conversation={conversation}
       focusComposer={!narrow}
       onActivity={railActivity}

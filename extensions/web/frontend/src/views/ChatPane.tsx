@@ -98,7 +98,7 @@ function VisibilityControl({
   member: Member;
 }) {
   const viewer = useViewer();
-  const conversationId = conversation.id;
+  const conversationId = conversation.conversation_id;
   const current: Visibility = isMemberAudience(conversation.audience) ? PRIVATE : WORKSPACE;
   const [changing, setChanging] = useState(false);
 
@@ -287,7 +287,7 @@ export function ChatPane({
   title,
   acts: hostActs,
 }: ChatPaneProps) {
-  const disclosed = useDisclosed(conversation?.id);
+  const disclosed = useDisclosed(conversation?.conversation_id);
   const viewer = useViewer();
   const gate = conversation && !conversation.readable && !disclosed ? conversation : null;
   const { acts, selected, settled, shell } = useThreadActs({
@@ -342,7 +342,7 @@ export function ChatPane({
         />
       ) : (
         <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-          <Disclose agent={agent} conversation={gate} onOpened={() => markDisclosed(gate.id)} />
+          <Disclose agent={agent} conversation={gate} onOpened={() => markDisclosed(gate.conversation_id)} />
         </div>
       )}
     </div>

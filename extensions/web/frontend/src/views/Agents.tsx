@@ -27,14 +27,13 @@ import { wizardKey } from "@/lib/wizard";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
-import type { ChatRow } from "@/lib/rail";
-import type { Agent, Member } from "@/lib/types";
+import type { Agent, Conversation, Member } from "@/lib/types";
 
 export type AgentsProps = {
   member: Member;
   selected: Agent | null;
   build: boolean;
-  chats: ChatRow[] | null;
+  chats: Conversation[] | null;
   place: WorkspacePlace;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
   onCreated: (agent: Agent, conversationId: string, title: string) => void;

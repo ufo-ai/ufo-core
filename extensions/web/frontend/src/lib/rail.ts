@@ -1,67 +1,9 @@
-import {
-  IMESSAGE_SURFACE,
-  SLACK_SURFACE,
-  UFO_SURFACE,
-  type AudienceEntry,
-} from "@/lib/audience";
-import type { Agent, OwnedConversation } from "@/lib/types";
+import { IMESSAGE_SURFACE, SLACK_SURFACE, UFO_SURFACE } from "@/lib/audience";
+import type { Agent, Conversation, ConversationTurn } from "@/lib/types";
 
-/** The liveest turn a conversation holds, `idle` where it holds none. */
-export type RailTurn = "running" | "queued" | "parked" | "idle";
-
-export type ChatRow = {
-  conversation_id: string;
-  agent_id: string;
-  agent_name: string;
-  title: string;
-  opening: string | null;
-  last_at: string;
-  surface: string;
-  surface_label: string | null;
-  audience: string;
-  member_email: string | null;
-  owner_email: string | null;
-  owner_name: string | null;
-  mine: boolean;
-  speaker: string | null;
-  source: string | null;
-  turn: RailTurn;
-  automation_kind: string | null;
-  automation_name: string | null;
-  automation_title: string | null;
-  unread: boolean;
-  archived: boolean;
-  deleted: boolean;
-  pinned: boolean;
-};
-
-export type ChatsPayload = { conversation: OwnedConversation };
-
-export type ConversationRow = {
-  name: string;
-  agent_id: string;
-  agent_name: string;
-  title: string;
-  opening: string | null;
-  last_at: string;
-  surface: string;
-  surface_label: string | null;
-  audience: string;
-  member_email: string | null;
-  owner_email: string | null;
-  owner_name: string | null;
-  mine: boolean;
-  speaker: string | null;
-  source: string | null;
-  turn: RailTurn;
-  automation_kind: string | null;
-  automation_name: string | null;
-  automation_title: string | null;
-  unread: boolean;
-  archived: boolean;
-  deleted: boolean;
-  pinned: boolean;
-};
+/** A listed conversation on the wire: the kind's row, its fields flat under `name`, and the agent
+ *  the read ran under. */
+export type ConversationRow = Omit<Conversation, "conversation_id"> & { name: string };
 
 export type ConversationsPayload = {
   objects: ConversationRow[];
@@ -70,9 +12,18 @@ export type ConversationsPayload = {
   cut?: boolean;
 };
 
-export function chatRows(payload: ConversationsPayload): ChatRow[] {
-  return payload.objects.map((row) => ({
-    conversation_id: row.name,
+/** A resolved conversation on the wire — `objects/conversation/<id>` — the same fields under
+ *  `status`, the object detail's envelope. */
+export type ConversationDetailPayload = {
+  name: string;
+  agent_id: string;
+  agent_name: string;
+  status: Omit<Conversation, "conversation_id" | "agent_id" | "agent_name">;
+};
+
+function conversation(name: string, row: Omit<Conversation, "conversation_id">): Conversation {
+  return {
+    conversation_id: name,
     agent_id: row.agent_id,
     agent_name: row.agent_name,
     title: row.title,
@@ -92,21 +43,29 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
     automation_name: row.automation_name,
     automation_title: row.automation_title,
     unread: row.unread,
+    speakers: row.speakers,
+    turn_count: row.turn_count,
+    created_at: row.created_at,
+    last_turn_at: row.last_turn_at,
     archived: row.archived,
     deleted: row.deleted,
     pinned: row.pinned,
-  }));
+    readable: row.readable,
+    disclosable: row.disclosable,
+    speakable: row.speakable,
+  };
 }
 
-/** Who reads one conversation, from whichever rail record names it: the listing row for a chat
- *  the portal carries, the resolved projection for one another surface holds. A conversation the
- *  rail has not answered for yet has no audience to state, and the pane states none. */
-export function railAudience(
-  rows: ChatRow[],
-  linked: Readonly<Record<string, OwnedConversation>>,
-  conversationId: string,
-): AudienceEntry | undefined {
-  return rows.find((row) => row.conversation_id === conversationId) ?? linked[conversationId];
+export function chatRows(payload: ConversationsPayload): Conversation[] {
+  return payload.objects.map((row) => conversation(row.name, row));
+}
+
+export function resolvedConversation(payload: ConversationDetailPayload): Conversation {
+  return conversation(payload.name, {
+    ...payload.status,
+    agent_id: payload.agent_id,
+    agent_name: payload.agent_name,
+  });
 }
 
 export type RailShown = {
@@ -259,7 +218,7 @@ export function holdAppsExpanded(expanded: boolean): void {
 
 /** An automation's conversation is admitted on that alone: what drove it is the thing a member
  *  filters it out for, and the surface it reported on is beside the point. */
-function admits(row: ChatRow, shown: RailShown): boolean {
+function admits(row: Conversation, shown: RailShown): boolean {
   if (row.automation_name !== null) return shown.automations;
   if (row.surface === UFO_SURFACE) return shown.terminal;
   if (row.surface === SLACK_SURFACE) return shown.slack;
@@ -268,11 +227,11 @@ function admits(row: ChatRow, shown: RailShown): boolean {
 }
 
 /** The rail stands in one order, newest first: a chat is found by when it last moved. */
-const TURN_RANK: Record<RailTurn, number> = { parked: 0, running: 1, queued: 1, idle: 2 };
+const TURN_RANK: Record<ConversationTurn, number> = { parked: 0, running: 1, queued: 1, idle: 2 };
 
 /** The conversations the member is in — `mine` is the listing's one participation fact — so one
  *  shared with them that they never spoke in stands on the Home table and not here. */
-export function railRows(rows: ChatRow[], shown: RailShown, sort: RailSort): ChatRow[] {
+export function railRows(rows: Conversation[], shown: RailShown, sort: RailSort): Conversation[] {
   const kept = rows.filter((row) => row.mine && admits(row, shown));
   if (sort === "recency") return kept;
   return [...kept].sort(
@@ -307,7 +266,7 @@ export function stampIso(at: Date): string {
   return at.toISOString();
 }
 
-function moment(row: ChatRow): number {
+function moment(row: Conversation): number {
   const at = new Date(row.last_at).getTime();
   return Number.isNaN(at) ? 0 : at;
 }
@@ -315,11 +274,11 @@ function moment(row: ChatRow): number {
 /** A conversation this tab has just admitted a turn into: its row moves to the top and its dot
  *  reads live, until the next listing read states the turn the engine holds. */
 export function bumpChat(
-  rows: ChatRow[],
+  rows: Conversation[],
   conversationId: string,
   at: Date,
-  turn: RailTurn,
-): ChatRow[] {
+  turn: ConversationTurn,
+): Conversation[] {
   const bumped = rows.map((row) =>
     row.conversation_id === conversationId ? { ...row, last_at: stampIso(at), turn } : row,
   );
@@ -329,7 +288,7 @@ export function bumpChat(
 
 /** A chat this tab has just opened: its mark stops reading unread as the member reaches it, ahead
  *  of the transcript read that moves the cursor the next listing answers from. */
-export function readChat(rows: ChatRow[], conversationId: string): ChatRow[] {
+export function readChat(rows: Conversation[], conversationId: string): Conversation[] {
   return rows.map((row) =>
     row.conversation_id === conversationId ? { ...row, unread: false } : row,
   );
@@ -337,11 +296,11 @@ export function readChat(rows: ChatRow[], conversationId: string): ChatRow[] {
 
 /** A turn that ends restates its row's mark alone: its moment is the turn it started, so a landing
  *  turn must not reorder the rail under the member. */
-export function turnedChat(rows: ChatRow[], conversationId: string, turn: RailTurn): ChatRow[] {
+export function turnedChat(rows: Conversation[], conversationId: string, turn: ConversationTurn): Conversation[] {
   return rows.map((row) => (row.conversation_id === conversationId ? { ...row, turn } : row));
 }
 
-export function mergeChats(fetched: ChatRow[], held: ChatRow[]): ChatRow[] {
+export function mergeChats(fetched: Conversation[], held: Conversation[]): Conversation[] {
   const known = new Set(fetched.map((row) => row.conversation_id));
   const merged = fetched.concat(held.filter((row) => !known.has(row.conversation_id)));
   merged.sort((a, b) => moment(b) - moment(a));

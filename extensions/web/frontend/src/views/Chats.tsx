@@ -13,9 +13,10 @@ import { SHARED_SUBJECT } from "@/lib/audience";
 import { AutomationMark, ChannelMark, ChatStatus } from "@/lib/chatMark";
 import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
-import { chatRows, type ChatRow, type ConversationsPayload } from "@/lib/rail";
+import { chatRows, type ConversationsPayload } from "@/lib/rail";
 import { useRail } from "@/lib/railStore";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
+import type { Conversation } from "@/lib/types";
 import { HOME_TITLE } from "@/lib/title";
 
 const COLUMNS = [
@@ -71,13 +72,13 @@ function memberMark(email: string): string {
   return MEMBER_MARKS[Math.floor(spread * MEMBER_MARKS.length)];
 }
 
-function owner(row: ChatRow): string {
+function owner(row: Conversation): string {
   return row.owner_name || row.owner_email || "";
 }
 
 /** One letter, because a second initial is a name the portal does not hold. The name a surface
  *  reported goes under the pointer: the address beside it is the fact every row carries. */
-function Owner({ row }: { row: ChatRow }) {
+function Owner({ row }: { row: Conversation }) {
   if (!row.owner_email) return null;
   const mark = (
     <span className="flex items-center gap-sm">
@@ -98,7 +99,7 @@ function Owner({ row }: { row: ChatRow }) {
   );
 }
 
-function scoped(row: ChatRow, scope: Scope): boolean {
+function scoped(row: Conversation, scope: Scope): boolean {
   if (scope === "mine") return row.mine;
   if (scope === "workspace") return row.audience === SHARED_SUBJECT;
   return true;
@@ -113,7 +114,7 @@ export function Chats({
 }: {
   place: WorkspacePlace;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
-  onOpen: (row: ChatRow) => void;
+  onOpen: (row: Conversation) => void;
 }) {
   const scope = asScope(place.scope);
   const query = place.q ?? "";
@@ -181,7 +182,7 @@ function Listing({
 }: {
   place: WorkspacePlace;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
-  onOpen: (row: ChatRow) => void;
+  onOpen: (row: Conversation) => void;
 }) {
   const scope = asScope(place.scope);
   const query = place.q ?? "";

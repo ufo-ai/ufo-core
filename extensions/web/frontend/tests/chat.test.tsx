@@ -13,7 +13,7 @@ import { chatHash, conversationSlotHash, newChatHash, workspaceHash } from "@/li
 import { Chat } from "@/views/Chat";
 import { ConversationTranscript } from "@/views/Conversations";
 
-import { AGENT, AGENT_ID, ARRIVAL_ID, atPhoneWidth, audienceMark, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, ARRIVAL_ID, atPhoneWidth, audienceMark, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationDetail, CONVO_ID, json, MEMBER, saying, SECOND, SECOND_ID, StreamFake, TURN_ID, type Route, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "#/c/" + CONVO_ID;
@@ -4645,18 +4645,17 @@ test("the shell chip is drawn for a conversation that did coding work, and for n
 });
 
 const SLACK_THREAD = {
-  id: CONVO_ID,
-  agent: { id: AGENT_ID, name: "assistant" },
+  ...CHAT_ROW,
+  conversation_id: CONVO_ID,
+  agent_id: AGENT_ID,
+  agent_name: "assistant",
   surface: "slack",
   surface_label: "#general",
   audience: "room:slack:C1",
   member_email: null,
-  description: "",
+  title: "",
   source: "https://example.slack.com/archives/C1/p1789239497408479",
-  speakers: [],
-  turn_count: 2,
-  created_at: "2026-08-01T09:00:00Z",
-  last_turn_at: "2026-08-01T09:05:00Z",
+  last_at: "2026-08-01T09:05:00Z",
   readable: true,
   disclosable: false,
   speakable: false,
@@ -4664,7 +4663,7 @@ const SLACK_THREAD = {
 
 test("a thread that arrived on Slack draws the slot chips and the shell beside its channel link", async () => {
   wire({
-    "/api/chats": () => json({ conversation: SLACK_THREAD }),
+    "/objects/conversation/": () => json(conversationDetail(SLACK_THREAD)),
     "/transcript": () => json({ messages: [] }),
     "/slots": () =>
       json({

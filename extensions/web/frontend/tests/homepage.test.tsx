@@ -10,7 +10,7 @@ import { chatHash, homeHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 import { HomepageFrame } from "@/views/HomepageFrame";
 
-import { AGENT, AGENT_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, SECOND, SECOND_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, json, MEMBER, SECOND, SECOND_ID, useStreamFake, wire } from "./harness";
 
 vi.mock("@/lib/bridge", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/bridge")>();
@@ -27,18 +27,15 @@ const SET = {
 };
 
 const LISTED = {
-  id: CONVO_ID,
-  agent: null,
+  ...CHAT_ROW,
+  conversation_id: CONVO_ID,
   surface: "web",
   surface_label: null,
   audience: "member:m1",
   member_email: MEMBER.email,
-  description: "Pick one thread",
+  title: "Pick one thread",
   source: null,
-  speakers: [MEMBER.email],
-  turn_count: 1,
-  created_at: "2026-08-01T09:00:00",
-  last_turn_at: "2026-08-01T09:00:01",
+  last_at: "2026-08-01T09:00:01",
   readable: true,
   disclosable: false,
   speakable: false,
@@ -261,7 +258,7 @@ test("the right-side chat's band starts another conversation, and carries no men
   open(
     {
       ...chatsOnWire([CHAT_ROW]),
-      "/conversations$": () => json({ conversations: [LISTED] }),
+      "/objects/conversation$": () => json({ objects: [conversationObject(LISTED)] }),
     },
     SET,
   );
@@ -314,10 +311,6 @@ test("the chat toggle opens the newest directive conversation", async () => {
           last_at: "2026-08-09T09:00:00.000Z",
         },
       ]),
-      "/conversations$": () =>
-        json({
-          conversations: [LISTED, { ...LISTED, id: newer, description: "Bold titles" }],
-        }),
     },
     SET,
   );
@@ -339,15 +332,17 @@ test("the chat toggle opens the composer when no directive conversation exists",
   expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
 });
 
-/** An app accumulates conversations no member opened, and the index answers one bounded page over all
- *  of them, so a member's own chat can fall outside it while the rail still carries it. */
+/** An app's index answers one bounded page over every conversation it holds, so a member's own chat
+ *  can fall outside the page read under `agent` while the rail's read across every agent carries it. */
 function openApp(routes: Parameters<typeof wire>[0] = {}) {
+  const railed = chatsOnWire([CHAT_ROW]);
   const wired = wire({
     "/transcript": () => json({ messages: [] }),
     "/homepage": () => json(SET),
     "/setup": () => json({ own_page: false, connectors: [], credentials: [], standing: [] }),
-    ...chatsOnWire([CHAT_ROW]),
-    "/conversations$": () => json({ conversations: [] }),
+    ...railed,
+    "/objects/conversation$": (url, init) =>
+      url.includes("agent=") ? json({ objects: [] }) : railed["/objects/conversation$"](url, init),
     ...routes,
   });
   render(
@@ -516,7 +511,7 @@ test("a chat opened on the chat app stands in the page's column alone", async ()
     "/transcript": () => json({ messages: [] }),
     "/homepage": () => json(SET),
     ...chatsOnWire([CHAT_ROW]),
-    "/conversations$": () => json({ conversations: [LISTED], more: false }),
+    "/objects/conversation$": () => json({ objects: [LISTED].map(conversationObject), cut: false }),
   });
   render(
     <App agents={[{ ...withHome(SET), app: "chat" }]} member={MEMBER} onAgents={() => {}} />,
@@ -527,7 +522,7 @@ test("a chat opened on the chat app stands in the page's column alone", async ()
   expect(screen.queryByLabelText("Ask UFO")).toBeNull();
   expect(screen.queryByRole("button", { name: "Edit Assistant" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Close edit of Assistant" })).toBeNull();
-  expect(calls.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(false);
+  expect(calls.some((url) => url.includes("/objects/conversation?agent=" + AGENT_ID))).toBe(false);
 
   const sent: unknown[] = [];
   vi.spyOn(frame, "contentWindow", "get").mockReturnValue({
@@ -596,7 +591,7 @@ function openChatApp(hash: string, homepage: unknown = SET) {
     ...chatsOnWire([{ ...CHAT_ROW, agent_id: CHAT_APP_ID, agent_name: "chat" }]),
     "/transcript": () => json({ messages: [] }),
     "/homepage": () => json(homepage),
-    "/conversations$": () => json({ conversations: [LISTED], more: false }),
+    "/objects/conversation$": () => json({ objects: [LISTED].map(conversationObject), cut: false }),
   });
   const main = { ...CHAT_APP, main: true, homepage } as Agent;
   render(<App agents={[main]} member={MEMBER} onAgents={() => {}} />);

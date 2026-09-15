@@ -168,6 +168,7 @@ from ufo.schema import tables
 from ufo.schema.records import (
     BACKGROUND_TASK_KEY_PREFIX,
     EXTENSION_SURFACE_PREFIX,
+    INTENT_ADMISSION,
     MEMBER_ADMISSION,
     NON_TERMINAL_STATUSES,
     PARKED,
@@ -1421,6 +1422,12 @@ class ListedConversation(BaseModel):
     a workspace conversation the member opened is theirs, and a colleague's they answered in is
     too. Like `turn` it is the shape of the work rather than a word of its content.
 
+    `speakable` is whether this viewer's messages may land here on the audience alone: a
+    conversation they read — their own, or the workspace-shared one — that is not the portal's
+    prepared-intent lane, where a turn runs no model round and a message folded onto it is read by
+    nothing. A surface still gates the agent's reach; the audience half is stated here so every
+    surface states it once.
+
     All are content of the conversation and all answer empty unless `readable`: a row listed to
     an admin as administration metadata states whose it is and how busy, never a word of it and
     never who else is in it. Reading it is the acknowledgement's act, and the acknowledgement is
@@ -1435,6 +1442,7 @@ class ListedConversation(BaseModel):
     unread: bool
     readable: bool
     disclosable: bool
+    speakable: bool
     title: str
     source: str | None
     speakers: tuple[ConversationSpeaker, ...]
@@ -1489,6 +1497,7 @@ class ConversationDirectory:
         participation: Literal["mine", "others"] | None = None,
         search: str | None = None,
         member_admitted: bool = False,
+        readable: bool | None = None,
         archived: bool = False,
         deleted: bool = False,
     ) -> tuple[ListedConversation, ...]:
@@ -1501,12 +1510,16 @@ class ConversationDirectory:
         `participation` narrows the same way to one side of the member: `mine` is the ones they
         are in — `_participated` defines that — and `others` the readable ones somebody else spoke
         and they did not. A rail reads both, one bound each; an agent's directory reads neither.
-        `member_admitted` narrows to conversations a member's own message ever opened a turn in —
-        what separates a conversation from a machine lane sharing its surface (a homepage seed, the
-        portal's prepared-intent queue). Each entry carries `readable` (content this viewer reads
-        now) and `disclosable` (an admin may acknowledge and read another member's private one —
-        `record_transcript_access` is the act) and `turn`, the liveest non-terminal turn it holds,
-        read correlated beside its activity so the page costs no scan of the workspace's turns.
+        `readable` narrows the same way to the rows this viewer reads or, false, to the ones they
+        do not — the metadata rows an admin lists to disclose from, which a non-admin's read never
+        holds, so for them `False` answers nothing. `member_admitted` narrows to conversations a
+        member's own message ever opened a turn in — what separates a conversation from a machine
+        lane sharing its surface (a homepage seed, the portal's prepared-intent queue). Each entry
+        carries `readable` (content this viewer reads now), `disclosable` (an admin may acknowledge
+        and read another member's private one — `record_transcript_access` is the act),
+        `speakable` (the audience admits this viewer's messages and the lane is no intent lane),
+        and `turn`, the liveest non-terminal turn it holds, read correlated beside its activity so
+        the page costs no scan of the workspace's turns.
         Subagent conversations are absent: they are the agent's own work on a request, listed
         nested under the turn that spawned them, never beside it. `conversation_id` selects one
         exact row before the bound for a durable permalink.
@@ -1551,6 +1564,7 @@ class ConversationDirectory:
                 self._live_turn().label("live_turn"),
                 self._read_at(member_id).label("read_at"),
                 self._spoke_at(member_id).label("spoke_at"),
+                self._intent_lane().label("intent_lane"),
             )
             .select_from(
                 tables.conversation.outerjoin(
@@ -1608,14 +1622,25 @@ class ConversationDirectory:
             query = query.where(self._member_admitted())
         if not admin:
             query = query.where(tables.conversation.c.audience.in_(readable_audiences(member_id)))
+        match readable:
+            case True:
+                query = query.where(
+                    tables.conversation.c.audience.in_(readable_audiences(member_id))
+                )
+            case False:
+                query = query.where(
+                    tables.conversation.c.audience.notin_(readable_audiences(member_id))
+                )
+            case None:
+                pass
         if search:
             query = query.where(self._matches(search, member_id))
         async with workspace_tx() as connection:
             rows = (await connection.execute(query)).all()
         if not rows:
             return ()
-        readable = readable_audiences(member_id)
-        content = [row.id for row in rows if row.audience in readable]
+        readers = readable_audiences(member_id)
+        content = [row.id for row in rows if row.audience in readers]
         every = [row.id for row in rows]
         openings, speakers, automations = await asyncio.gather(
             self.openings(content), self.speakers(content), self.automations(every)
@@ -1638,11 +1663,12 @@ class ConversationDirectory:
                 turn=row.live_turn,
                 automation=automations.get(row.id),
                 unread=_unread(row.last_turn_at, row.read_at, row.spoke_at),
-                readable=row.audience in readable,
+                readable=row.audience in readers,
                 disclosable=admin
                 and row.audience != mine
                 and audience_member(parse_audience(row.audience)) is not None,
-                title=row.title or "" if row.audience in readable else "",
+                speakable=row.audience in readers and not row.intent_lane,
+                title=row.title or "" if row.audience in readers else "",
                 source=openings.get(row.id, NO_OPENING).source,
                 speakers=speakers.get(row.id, ()),
                 mine=row.member_id == member_id or row.spoke_at is not None,
@@ -1910,6 +1936,20 @@ class ConversationDirectory:
                 )
             )
         return {conversation_id: tuple(who) for conversation_id, who in spoke.items()}
+
+    def _intent_lane(self) -> sa.ColumnElement[bool]:
+        """Whether this is the portal's prepared-intent lane: the one conversation whose turns
+        are admitted as `intent`, so holding one such turn names it."""
+        return (
+            sa.select(sa.literal(1))
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                tables.turn.c.admission_source == INTENT_ADMISSION,
+            )
+            .correlate(tables.conversation)
+            .exists()
+        )
 
     def _owns(self, member_id: UUID) -> sa.ColumnElement[bool]:
         """Whether this member owns the conversation: it is bound to them, or — a workspace one,

@@ -5,43 +5,36 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import type { Agent } from "@/lib/types";
 
-import {
-  heldConversation,
-  openConversation,
-  refusedNotice,
-  AGENT,
-  CONVO_ID,
-  MEMBER,
-  json,
-  useStreamFake,
-  wire,
-} from "./harness";
+import type { Conversation } from "@/lib/types";
+
+import { AGENT, CHAT_ROW, chatsOnWire, conversationDetail, conversationObject, CONVO_ID, heldConversation, json, MEMBER, openConversation, refusedNotice, useStreamFake, wire } from "./harness";
 
 const standing = (id: string) => openConversation(AGENT.id, id);
 
 const ADMIN = { ...MEMBER, admin: true };
 
-const HOSTING = { ...AGENT, homepage: { state: "set", url: "https://app.example.test" } as Agent["homepage"] };
+const HOSTING = {
+  ...AGENT,
+  homepage: { state: "set", url: "https://app.example.test" } as Agent["homepage"],
+};
 
-const PRIVATE = {
-  id: "c1",
+const PRIVATE: Conversation = {
+  ...CHAT_ROW,
+  conversation_id: "c1",
   surface: "slack",
   surface_label: null,
   audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
   member_email: "owner@example.com",
-  description: "",
-  speakers: [],
-  turn_count: 3,
-  created_at: "2026-07-30T10:00:00",
-  last_turn_at: "2026-07-30T11:00:00",
+  title: "",
+  last_at: "2026-07-30T11:00:00",
   readable: false,
   disclosable: true,
   speakable: false,
 };
 
-const WALLED = {
+const WALLED: Conversation = {
   ...PRIVATE,
-  id: "c2",
+  conversation_id: "c2",
   audience: "room:slack:C2",
   member_email: null,
   disclosable: false,
@@ -58,12 +51,12 @@ const OPEN_TRANSCRIPT = (id: string) => ({
   label: "Open transcript",
 });
 
-const conversations = <Entry extends { id: string }>(entries: Entry[]) => ({
-  "/conversations$": () => json({ conversations: entries }),
+const conversations = (entries: Conversation[]) => ({
+  ...chatsOnWire(entries),
   ...Object.fromEntries(
     entries.map((entry) => [
-      "/actions/conversation/" + entry.id + "$",
-      () => json({ actions: [OPEN_TRANSCRIPT(entry.id)] }),
+      "/actions/conversation/" + entry.conversation_id + "$",
+      () => json({ actions: [OPEN_TRANSCRIPT(entry.conversation_id)] }),
     ]),
   ),
 });
@@ -75,14 +68,14 @@ beforeEach(() => {
 
 test("a disclosable conversation offers the acknowledgement, one shared with nobody does not", async () => {
   wire(conversations([PRIVATE, WALLED]));
-  standing(PRIVATE.id);
+  standing(PRIVATE.conversation_id);
   const offered = render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByRole("button", { name: "Open transcript" })).toBeTruthy();
   expect(await heldConversation()).toBe(OWNER);
   offered.unmount();
 
-  standing(WALLED.id);
+  standing(WALLED.conversation_id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(
@@ -93,7 +86,7 @@ test("a disclosable conversation offers the acknowledgement, one shared with nob
 
 test("the acknowledgement names the owner and what opening records, and does not read yet", async () => {
   const { calls } = wire(conversations([PRIVATE]));
-  standing(PRIVATE.id);
+  standing(PRIVATE.conversation_id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   const warning = await screen.findByText(/private to owner@example.com/);
@@ -113,7 +106,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
     },
     ...conversations([PRIVATE]),
   });
-  standing(PRIVATE.id);
+  standing(PRIVATE.conversation_id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
@@ -130,7 +123,7 @@ test("acknowledging posts the transcript intent and opens the conversation it na
 });
 
 test("a disclosure taken on the agent screen holds when a failed poll unmounts the pane", async () => {
-  let reads = 0;
+  let failing = false;
   const posted: string[] = [];
   wire({
     "/transcript": () => json({ messages: [] }),
@@ -139,12 +132,14 @@ test("a disclosure taken on the agent screen holds when a failed poll unmounts t
       return json({ applied: true, message: "Recorded." });
     },
     ...conversations([PRIVATE]),
-    "/conversations$": () => {
-      reads += 1;
-      return reads === 2 ? new Response("nope", { status: 503 }) : json({ conversations: [PRIVATE] });
+    "/objects/conversation$": (url) => {
+      if (url.includes("readable=false")) {
+        return json({ objects: [conversationObject(PRIVATE)] });
+      }
+      return failing ? new Response("nope", { status: 503 }) : json({ objects: [] });
     },
   });
-  standing(PRIVATE.id);
+  standing(PRIVATE.conversation_id);
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
     render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
@@ -152,8 +147,10 @@ test("a disclosure taken on the agent screen holds when a failed poll unmounts t
     await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
     expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
 
+    failing = true;
     await vi.advanceTimersByTimeAsync(30_000);
     expect(await vi.waitFor(() => screen.getByText("Error 503 — reload to retry."))).toBeTruthy();
+    failing = false;
     await vi.advanceTimersByTimeAsync(30_000);
     expect(
       await vi.waitFor(() => screen.getByText("No messages in this conversation yet.")),
@@ -176,7 +173,7 @@ test("a disclosure taken beside a homepage holds over a press of History and bac
     },
     ...conversations([PRIVATE]),
   });
-  standing(PRIVATE.id);
+  standing(PRIVATE.conversation_id);
   render(<App agents={[HOSTING]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
@@ -201,12 +198,12 @@ test("leaving mid-acknowledgement does not open the transcript when the answer l
         release = resolve;
       }),
   });
-  standing(PRIVATE.id);
+  standing(PRIVATE.conversation_id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
   await waitFor(() => expect(release).not.toBeNull());
-  standing(WALLED.id);
+  standing(WALLED.conversation_id);
   await waitFor(async () => expect(await heldConversation()).toBe(ROOM));
 
   release!(Response.json({ applied: true, message: "Recorded." }));
@@ -228,12 +225,12 @@ test("an acknowledgement in flight for one conversation never opens over another
       });
     },
   });
-  standing(PRIVATE.id);
+  standing(PRIVATE.conversation_id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
   await waitFor(() => expect(release).not.toBeNull());
-  standing(WALLED.id);
+  standing(WALLED.conversation_id);
   await waitFor(async () => expect(await heldConversation()).toBe(ROOM));
 
   release!(Response.json({ applied: true, message: "Recorded." }));
@@ -248,7 +245,7 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
     ...conversations([PRIVATE]),
     "/read_private_transcript": () => json({ applied: false, message: "Only an admin may read it." }),
   });
-  standing(PRIVATE.id);
+  standing(PRIVATE.conversation_id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
@@ -259,9 +256,9 @@ test("a refused acknowledgement states the refusal and opens nothing", async () 
 
 test("a permalink to another member's conversation offers the listing's acknowledgement", async () => {
   location.hash = "#/c/" + CONVO_ID;
-  const linked = { ...PRIVATE, id: CONVO_ID, agent: { id: AGENT.id, name: AGENT.name } };
+  const linked = { ...PRIVATE, conversation_id: CONVO_ID };
   const { calls } = wire({
-    "/api/chats": () => json({ conversation: linked }),
+    "/objects/conversation/": () => json(conversationDetail(linked)),
     "/read_private_transcript": () => json({ applied: true, message: "Recorded." }),
     "/actions/conversation/": () => json({ actions: [OPEN_TRANSCRIPT(CONVO_ID)] }),
     "/transcript": () => json({ messages: [] }),
@@ -278,9 +275,9 @@ test("a permalink to another member's conversation offers the listing's acknowle
 
 test("a permalink to a conversation naming no member is unshared, not missing", async () => {
   location.hash = "#/c/" + CONVO_ID;
-  const linked = { ...WALLED, id: CONVO_ID, agent: { id: AGENT.id, name: AGENT.name }, member_email: null };
+  const linked = { ...WALLED, conversation_id: CONVO_ID };
   wire({
-    "/api/chats": () => json({ conversation: linked }),
+    "/objects/conversation/": () => json(conversationDetail(linked)),
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
@@ -291,16 +288,16 @@ test("a permalink to a conversation naming no member is unshared, not missing", 
 });
 
 test("a failed conversations read states the error rather than the composer", async () => {
-  wire({ "/conversations$": () => new Response("nope", { status: 503 }) });
+  wire({ "/objects/conversation$": () => new Response("nope", { status: 503 }) });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  expect(await screen.findByText("Error 503 — reload to retry.")).toBeTruthy();
+  expect((await screen.findAllByText("Error 503 — reload to retry.")).length).toBeGreaterThan(0);
   expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 });
 
 test("the band names the conversation the acknowledgement is about, and reads nothing until it is taken", async () => {
   const { calls } = wire(conversations([PRIVATE]));
-  standing(PRIVATE.id);
+  standing(PRIVATE.conversation_id);
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByRole("button", { name: "Open transcript" })).toBeTruthy();

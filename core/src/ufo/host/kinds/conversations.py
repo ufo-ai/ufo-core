@@ -46,11 +46,7 @@ from ufo.runtime.objects import (
 )
 from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
 from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
-from ufo.runtime.turns.audience import (
-    FOREIGN_AUDIENCE_PREFIX,
-    audience_subjects,
-    conversation_audience,
-)
+from ufo.runtime.turns.audience import FOREIGN_AUDIENCE_PREFIX
 from ufo.runtime.turns.subjects import MEMBER_SUBJECT_PREFIX
 from ufo.runtime.turns.transcript import TranscriptDecodeError, decode, transcript_key
 from ufo.runtime.workspace import ws_current
@@ -90,8 +86,9 @@ class ConversationObjects:
     conversation of the selected agent as a metadata row: get serves its spec and links, list
     shows such rows only under the explicit `{"private": true}` filter, status answers nothing,
     and no transcript is read or written — content stays behind the recorded acknowledgement, and
-    a foreign-audience turn never widens. Resolves artifact and scheduled-task links; every
-    mutation refuses."""
+    a foreign-audience turn never widens. `member_page` and `member_detail` are the portal's one
+    row for a listed and a resolved conversation alike. Resolves artifact and scheduled-task links;
+    every mutation refuses."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
         # The mark filters narrow the read in the query, before the page is cut; the default page
@@ -151,6 +148,15 @@ class ConversationObjects:
         admitting surface reported for the message that opened the row, so a rail row leads back
         out to the thread it came in on; a portal row's source is no link out and answers None.
 
+        Every row states `readable`, `disclosable` and `speakable` — whether its content reads
+        now, whether an admin may open it by acknowledging, and whether the viewer's messages may
+        land in it on the audience alone. The rail's rows are all readable; the declared filter
+        `readable: false` is the one read that widens, for an admin: the selected agent's
+        conversations they may not read — another member's private ones, disclosable, and rooms,
+        not — as metadata rows under `CONVERSATION_OTHERS_LIMIT`, titles and words withheld with
+        the rest of the content. Asked for, not granted: a non-admin's `readable: false` page is
+        empty, and no unfiltered read carries a row its viewer cannot read.
+
         A search runs in the directory read rather than over the rows it returns, for the reason
         `portal` does: searched after the bound, a query for an older conversation answers nothing
         while the conversation stands. It runs there and nowhere else — the page is ordered and cut
@@ -165,32 +171,56 @@ class ConversationObjects:
         page by default — the default page is the conversations under no mark."""
         directory = ConversationDirectory(ws_current().workspace_id)
         agent_id = object_agent_id()
-        sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
-            ("mine", CONVERSATION_MINE_LIMIT),
-            ("others", CONVERSATION_OTHERS_LIMIT),
-        )
         portal = query.filters.get("portal")
-        listed = await asyncio.gather(
-            *(
-                directory.list(
-                    agent_id,
-                    member_id,
-                    admin=False,
-                    limit=limit,
-                    participation=participation,
-                    member_admitted=True,
-                    portal=portal if isinstance(portal, bool) else None,
-                    search=query.query or None,
-                    archived=query.filters.get("archived") is True,
-                    deleted=query.filters.get("deleted") is True,
-                )
-                for participation, limit in sides
+        carried = portal if isinstance(portal, bool) else None
+        search = query.query or None
+        archived = query.filters.get("archived") is True
+        deleted = query.filters.get("deleted") is True
+        if query.filters.get("readable") is False:
+            listed = await directory.list(
+                agent_id,
+                member_id,
+                admin=admin,
+                limit=CONVERSATION_OTHERS_LIMIT,
+                readable=False,
+                member_admitted=True,
+                portal=carried,
+                search=search,
+                archived=archived,
+                deleted=deleted,
             )
-        )
-        cut = any(len(side) >= limit for side, (_, limit) in zip(listed, sides, strict=True))
+            gathered = tuple(_member_row(entry) for entry in listed)
+            cut = len(listed) >= CONVERSATION_OTHERS_LIMIT
+        else:
+            sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
+                ("mine", CONVERSATION_MINE_LIMIT),
+                ("others", CONVERSATION_OTHERS_LIMIT),
+            )
+            listed_sides = await asyncio.gather(
+                *(
+                    directory.list(
+                        agent_id,
+                        member_id,
+                        admin=False,
+                        limit=limit,
+                        participation=participation,
+                        member_admitted=True,
+                        portal=carried,
+                        search=search,
+                        archived=archived,
+                        deleted=deleted,
+                    )
+                    for participation, limit in sides
+                )
+            )
+            gathered = tuple(
+                _member_row(entry) for side in listed_sides for entry in side if entry.title
+            )
+            cut = any(
+                len(side) >= limit for side, (_, limit) in zip(listed_sides, sides, strict=True)
+            )
         # The pin survives the page bound without the cut eating the newest rows or the
         # colleagues' side: order by the page's own key, pinned ahead, then last activity.
-        gathered = tuple(_member_row(entry) for side in listed for entry in side if entry.title)
         ordered = sorted(
             gathered,
             key=lambda row: (
@@ -198,8 +228,7 @@ class ConversationObjects:
                 [-ord(c) for c in str(row.fields.get("last_at") or "")],
             ),
         )
-        page_rows = ordered[:OBJECT_LIST_PAGE]
-        page = object_page(tuple(page_rows), replace(query, query=""))
+        page = object_page(tuple(ordered[:OBJECT_LIST_PAGE]), replace(query, query=""))
         return replace(page, cut=cut)
 
     async def member_detail(
@@ -210,14 +239,30 @@ class ConversationObjects:
         member_id: UUID,
         admin: bool,
     ) -> MemberObject[ConversationSpec] | None:
-        """One conversation as the portal reads it outside a turn — the row `list` renders beside
-        the detail `get` reads, gated on the subjects a member's own conversation carries: their
-        own and the workspace-shared. A room's conversation and another member's private one are
-        absent here for everyone, an admin included; the recorded acknowledgement opens transcript
-        content, never this row. The agent is the caller's ambient one, the same wall `list`
-        answers behind."""
-        row = await self._find(audience_subjects(conversation_audience(member_id)), name)
-        return None if row is None else MemberObject(row=_row(row), detail=_detail(row))
+        """One conversation as the portal reads it outside a turn — the `#/c/<id>` permalink's
+        resolve: the same row `member_page` lists, read by id past the listing's bound and its
+        title filter, beside the detail `get` reads. A member reaches their own conversations and
+        the workspace-shared ones; an admin also reaches another member's private one and a room's
+        as the metadata row the listing's `readable: false` carries — unreadable, disclosable or
+        not — so a permalink an admin was offered resolves rather than reading as absent. The
+        recorded acknowledgement opens transcript content, never this row. The agent is the
+        caller's ambient one, the same wall `list` answers behind."""
+        try:
+            conversation_id = UUID(name)
+        except ValueError:
+            return None
+        listed = await ConversationDirectory(ws_current().workspace_id).list(
+            object_agent_id(), member_id, admin=admin, limit=1, conversation_id=conversation_id
+        )
+        if not listed:
+            return None
+        async with workspace_tx() as connection:
+            row = (
+                await connection.execute(
+                    _agent_conversations().where(tables.conversation.c.id == conversation_id)
+                )
+            ).one()
+        return MemberObject(row=_member_row(listed[0]), detail=_detail(row))
 
     async def status(
         self,
@@ -729,6 +774,9 @@ def _member_row(entry: ListedConversation) -> ObjectRow:
             "automation_name": None if entry.automation is None else entry.automation.name,
             "automation_title": None if entry.automation is None else entry.automation.title,
             "unread": entry.unread,
+            "readable": entry.readable,
+            "disclosable": entry.disclosable,
+            "speakable": entry.speakable,
             "archived": entry.archived,
             "deleted": entry.deleted,
             "pinned": entry.pinned,
@@ -841,6 +889,9 @@ CONVERSATION_OBJECT = ObjectKind(
             "automation_name",
             "automation_title",
             "unread",
+            "readable",
+            "disclosable",
+            "speakable",
             "archived",
             "deleted",
             "pinned",

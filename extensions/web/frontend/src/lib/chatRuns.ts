@@ -2,7 +2,8 @@ import { useSyncExternalStore } from "react";
 
 import { agentName } from "@/lib/agentName";
 import { IMESSAGE_SURFACE, SLACK_SURFACE, UFO_SURFACE, isPortalChat } from "@/lib/audience";
-import { heldStorage, type ChatRow } from "@/lib/rail";
+import { heldStorage } from "@/lib/rail";
+import type { Conversation } from "@/lib/types";
 
 export const CHAT_SHOWN_OPTIONS: { surface: string; label: string }[] = [
   { surface: UFO_SURFACE, label: "Terminal" },
@@ -71,7 +72,7 @@ export function useChatHidden(): string[] {
   return useSyncExternalStore(subscribe, heldChatHidden);
 }
 
-export function chatShown(row: ChatRow, hidden: string[]): boolean {
+export function chatShown(row: Conversation, hidden: string[]): boolean {
   return isPortalChat(row.surface) || !hidden.includes(row.surface);
 }
 
@@ -100,12 +101,12 @@ export function chatDateRun(raw: string, now: Date): string {
   return "Older";
 }
 
-export type ChatRun = { label: string; rows: ChatRow[] };
+export type ChatRun = { label: string; rows: Conversation[] };
 
 export const OTHER_MEMBERS = "Other members";
 
 export function chatRuns(
-  rows: ChatRow[],
+  rows: Conversation[],
   ladder: ChatLadder,
   hidden: string[],
   now: Date,
@@ -117,10 +118,10 @@ export function chatRuns(
   return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
 }
 
-function bucketed(rows: ChatRow[], ladder: ChatLadder, now: Date): ChatRun[] {
-  const named = (row: ChatRow) =>
+function bucketed(rows: Conversation[], ladder: ChatLadder, now: Date): ChatRun[] {
+  const named = (row: Conversation) =>
     ladder === "app" ? agentName(row.agent_name) : chatDateRun(row.last_at, now);
-  const buckets = new Map<string, ChatRow[]>();
+  const buckets = new Map<string, Conversation[]>();
   for (const row of rows) {
     const label = named(row);
     buckets.set(label, (buckets.get(label) ?? []).concat(row));

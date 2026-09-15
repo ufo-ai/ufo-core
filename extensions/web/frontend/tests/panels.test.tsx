@@ -14,7 +14,9 @@ import { openAgent, placeHome } from "@/lib/router";
 import { agentCrumb } from "@/lib/title";
 import { ConversationSlotPane } from "@/views/ConversationSlotPane";
 
-import { AGENT, AGENT_ID, agentIndex, atPhoneWidth, audienceMark, CHAT_ROW, chatsOnWire, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
+import type { Conversation } from "@/lib/types";
+
+import { AGENT, AGENT_ID, agentIndex, atPhoneWidth, audienceMark, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, fact, FRESH, heldConversation, json, MEMBER, openAgentSettings, openConversation, opened, pick, PlacedWorkspace, pressRow, refusedNotice, SECOND, SECOND_ID, SETTINGS, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
 beforeEach(() => {
   useStreamFake();
 });
@@ -450,26 +452,20 @@ test("a workspace-shared conversation names its audience and surface in its band
   const shared = "5c0be3aa-0000-4000-8000-000000000003";
   wire({
     ["/conversations/" + shared + "/transcript"]: () => json({ messages: [] }),
-    "/conversations$": () =>
-      json({
-        conversations: [
+    "/objects/conversation$": () => json({ objects: [
           {
-            id: shared,
+            ...CHAT_ROW,
+            conversation_id: shared,
             surface: "slack",
             surface_label: null,
             audience: "shared",
             member_email: null,
-            description: "",
-            speakers: [],
-            turn_count: 3,
-            created_at: "2026-07-30T10:00:00",
-            last_turn_at: null,
+            title: "",
             readable: true,
             disclosable: false,
             speakable: true,
           },
-        ],
-      }),
+        ].map(conversationObject) }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "?open=" + shared;
@@ -487,26 +483,21 @@ test("a conversation the address names is opened, and named by what it is about"
   const said = "can you take a look at the failing deploy";
   wire({
     ["/conversations/" + opened + "/transcript"]: () => json({ messages: [] }),
-    "/conversations$": () =>
-      json({
-        conversations: [
+    "/objects/conversation$": () => json({ objects: [
           {
-            id: opened,
+            ...CHAT_ROW,
+            conversation_id: opened,
             surface: "slack",
             surface_label: null,
             audience: "shared",
             member_email: "mel@example.com",
-            description: said,
-            speakers: ["Mel Okafor (mel@example.com)", "pat@example.com"],
-            turn_count: 4,
-            created_at: "2026-07-30T10:00:00",
-            last_turn_at: "2026-08-07T11:00:00",
+            title: said,
+            last_at: "2026-08-07T11:00:00",
             readable: true,
             disclosable: false,
             speakable: true,
           },
-        ],
-      }),
+        ].map(conversationObject) }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
@@ -525,27 +516,22 @@ test("a Slack conversation's band marks its channel, and that mark is the way ou
   const permalink = "https://acme.slack.com/archives/C1/p1700000000000100";
   wire({
     ["/conversations/" + thread + "/transcript"]: () => json({ messages: [] }),
-    "/conversations$": () =>
-      json({
-        conversations: [
+    "/objects/conversation$": () => json({ objects: [
           {
-            id: thread,
+            ...CHAT_ROW,
+            conversation_id: thread,
             surface: "slack",
             surface_label: "#ops",
             audience: "shared",
             member_email: null,
-            description: "take a look at the failing deploy",
+            title: "take a look at the failing deploy",
             source: permalink,
-            speakers: [],
-            turn_count: 4,
-            created_at: "2026-07-30T10:00:00",
-            last_turn_at: "2026-08-07T11:00:00",
+            last_at: "2026-08-07T11:00:00",
             readable: true,
             disclosable: false,
             speakable: true,
           },
-        ],
-      }),
+        ].map(conversationObject) }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "?open=" + thread;
@@ -573,17 +559,15 @@ test("a Slack conversation's band marks its channel, and that mark is the way ou
 test("a slot chip on the app page opens its panel, and the next conversation opens without it", async () => {
   const held = "3b6d5a77-0000-4000-8000-00000000000b";
   const next = "4c7e6b88-0000-4000-8000-00000000000c";
-  const row = (id: string, description: string) => ({
-    id,
+  const row = (id: string, title: string): Conversation => ({
+    ...CHAT_ROW,
+    conversation_id: id,
     surface: "web",
     surface_label: null,
     audience: "member:m1",
     member_email: "member@example.com",
-    description,
-    speakers: ["member@example.com"],
-    turn_count: 1,
-    created_at: "2026-07-30T10:00:00",
-    last_turn_at: "2026-07-30T10:00:01",
+    title,
+    last_at: "2026-07-30T10:00:01",
     readable: true,
     speakable: true,
   });
@@ -604,7 +588,7 @@ test("a slot chip on the app page opens its panel, and the next conversation ope
       json({
         slots: [{ id: "changes", label: "Changes", icon: "diff", kind: "changes", count: 1 }],
       }),
-    "/conversations$": () => json({ conversations: [row(held, "Rename the deploy job"), row(next, "Ship the sweep")] }),
+    ...chatsOnWire([row(held, "Rename the deploy job"), row(next, "Ship the sweep")]),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "?open=" + held;
@@ -650,25 +634,20 @@ test("a conversation opened here reads as chat, and a settled reply keeps no act
           },
         ],
       }),
-    "/conversations$": () =>
-      json({
-        conversations: [
+    "/objects/conversation$": () => json({ objects: [
           {
-            id: held,
+            ...CHAT_ROW,
+            conversation_id: held,
             surface: "web",
             surface_label: null,
             audience: "member:m1",
             member_email: "member@example.com",
-            description: "Rename the deploy job",
-            speakers: ["member@example.com"],
-            turn_count: 2,
-            created_at: "2026-07-30T10:00:00",
-            last_turn_at: "2026-07-30T10:00:01",
+            title: "Rename the deploy job",
+            last_at: "2026-07-30T10:00:01",
             readable: true,
             speakable: false,
           },
-        ],
-      }),
+        ].map(conversationObject) }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "?open=" + held;
@@ -688,20 +667,17 @@ test("a Slack transcript's band marks its surface as the way back, and a portal 
   const thread = "4f8e1c22-0000-4000-8000-000000000009";
   const portal = "5a7d3b44-0000-4000-8000-00000000000a";
   const root = "https://acme.slack.com/archives/C1/p1700000000000100";
-  const rows = (id: string, surface: string, description: string) => ({
-    id,
+  const rows = (id: string, surface: string, title: string): Conversation => ({
+    ...CHAT_ROW,
+    conversation_id: id,
     surface,
-    surface_label: null,
     audience: "shared",
     member_email: null,
-    description,
+    owner_email: null,
+    mine: false,
+    title,
     source: root,
-    speakers: [],
-    turn_count: 2,
-    created_at: "2026-07-30T10:00:00",
-    last_turn_at: "2026-07-30T10:00:01",
-    readable: true,
-    disclosable: false,
+    last_at: "2026-07-30T10:00:01",
     speakable: surface === "slack",
   });
   wire({
@@ -715,13 +691,10 @@ test("a Slack transcript's band marks its surface as the way back, and a portal 
       }),
     ["/conversations/" + portal + "/transcript"]: () =>
       json({ messages: [{ role: "user", text: "Rename the deploy job" }] }),
-    "/conversations$": () =>
-      json({
-        conversations: [
+    "/objects/conversation$": () => json({ objects: [
           rows(thread, "slack", "take a look at the failing deploy"),
           rows(portal, "web", "Rename the deploy job"),
-        ],
-      }),
+        ].map(conversationObject) }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID + "?open=" + thread;
@@ -754,39 +727,30 @@ test("a Slack transcript's band marks its surface as the way back, and a portal 
 
 test("a conversation nobody shared is never named, and the half stands on the composer", async () => {
   wire({
-    "/conversations$": () =>
-      json({
-        conversations: [
+    "/objects/conversation$": () => json({ objects: [
           {
-            id: "7ae41c02-0000-4000-8000-000000000001",
+            ...CHAT_ROW,
+            conversation_id: "7ae41c02-0000-4000-8000-000000000001",
             surface: "slack",
             surface_label: "#ops",
             audience: "room:slack:C123",
             member_email: null,
-            description: "",
-            speakers: [],
-            turn_count: 4,
-            created_at: "2026-07-30T10:00:00",
-            last_turn_at: null,
+            title: "",
             readable: false,
             speakable: false,
           },
           {
-            id: "31bd9f77-0000-4000-8000-000000000002",
+            ...CHAT_ROW,
+            conversation_id: "31bd9f77-0000-4000-8000-000000000002",
             surface: "slack",
             surface_label: null,
             audience: "room:slack:C456",
             member_email: null,
-            description: "",
-            speakers: [],
-            turn_count: 2,
-            created_at: "2026-07-30T11:00:00",
-            last_turn_at: null,
+            title: "",
             readable: false,
             speakable: false,
           },
-        ],
-      }),
+        ].map(conversationObject) }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/agents/" + AGENT_ID;
@@ -964,19 +928,11 @@ test("the drawer rides the address the home screen replaces, and shuts when the 
 
 test("an app opens on the conversation that moved last, and an address names another", async () => {
   const older = "44444444-4444-4444-8444-444444444444";
-  const listed = (id: string, description: string) => ({
-    id,
-    surface: "web",
-    surface_label: null,
-    audience: "member:m1",
-    member_email: "member@example.com",
-    description,
-    speakers: ["member@example.com"],
-    turn_count: 1,
-    created_at: "2026-07-30T10:00:00",
-    last_turn_at: "2026-07-30T10:00:01",
-    readable: true,
-    disclosable: false,
+  const listed = (id: string, title: string): Conversation => ({
+    ...CHAT_ROW,
+    conversation_id: id,
+    title,
+    last_at: "2026-07-30T10:00:01",
     speakable: false,
   });
   location.hash = "#/agents/" + AGENT_ID;
@@ -985,10 +941,7 @@ test("an app opens on the conversation that moved last, and an address names ano
       { ...CHAT_ROW, title: "Newest thread" },
       { ...CHAT_ROW, conversation_id: older, title: "Older thread" },
     ]),
-    "/conversations$": () =>
-      json({
-        conversations: [listed(CONVO_ID, "Newest thread"), listed(older, "Older thread")],
-      }),
+    "/objects/conversation$": () => json({ objects: [listed(CONVO_ID, "Newest thread"), listed(older, "Older thread")].map(conversationObject) }),
     "/homepage": () => json({ state: "none" }),
     "/transcript": () => json({ messages: [] }),
   });
@@ -1007,21 +960,13 @@ test("an app opens on the conversation that moved last, and an address names ano
 
 test("an app with no page opens its newest conversation whole, with no lane beside", async () => {
   const older = "44444444-4444-4444-8444-444444444444";
-  const listed = (id: string, description: string, readable = true) => ({
-    id,
-    agent: null,
-    surface: "web",
-    surface_label: null,
-    audience: "member:m1",
-    member_email: "member@example.com",
-    description,
-    source: null,
-    speakers: ["member@example.com"],
-    turn_count: 1,
-    created_at: "2026-07-30T10:00:00",
-    last_turn_at: "2026-07-30T10:00:01",
+  const listed = (id: string, title: string, readable = true): Conversation => ({
+    ...CHAT_ROW,
+    conversation_id: id,
+    title,
+    last_at: "2026-07-30T10:00:01",
     readable,
-    disclosable: false,
+    speakable: false,
   });
   location.hash = "#/agents/" + AGENT_ID;
   wire({
@@ -1029,10 +974,7 @@ test("an app with no page opens its newest conversation whole, with no lane besi
       { ...CHAT_ROW, title: "Newest thread" },
       { ...CHAT_ROW, conversation_id: older, title: "Older thread" },
     ]),
-    "/conversations$": () =>
-      json({
-        conversations: [listed(CONVO_ID, "Newest thread"), listed(older, "Older thread")],
-      }),
+    "/objects/conversation$": () => json({ objects: [listed(CONVO_ID, "Newest thread"), listed(older, "Older thread")].map(conversationObject) }),
     "/homepage": () => json({ state: "none" }),
     "/transcript": () => json({ messages: [] }),
   });
@@ -1067,28 +1009,22 @@ test("New starts a fresh conversation while the address still names one", async 
   location.hash = "#/agents/" + AGENT_ID + "?open=" + held;
   wire({
     ...chatsOnWire([{ ...CHAT_ROW, conversation_id: held }]),
-    "/conversations$": () =>
-      json({
-        conversations: [
+    "/objects/conversation$": () => json({ objects: [
           {
-            id: held,
-            agent: null,
+            ...CHAT_ROW,
+            conversation_id: held,
             surface: "web",
             surface_label: null,
             audience: "shared",
             member_email: MEMBER.email,
-            description: "The one already open",
+            title: "The one already open",
             source: null,
-            speakers: [MEMBER.email],
-            turn_count: 2,
-            created_at: "2026-08-01T09:00:00",
-            last_turn_at: "2026-08-07T11:00:00",
+            last_at: "2026-08-07T11:00:00",
             readable: true,
             disclosable: false,
             speakable: false,
           },
-        ],
-      }),
+        ].map(conversationObject) }),
     "/homepage": () => json({ state: "none" }),
     "/transcript": () => json({ messages: [] }),
   });
@@ -1330,22 +1266,13 @@ test("a slot on its own address states who reads the conversation it belongs to"
 
 const APP_SITE = { state: "set", url: "https://tasks.example.test", deploy_generation: 1 } as const;
 
-function appConversation(id: string, description: string, surface = "web") {
+function appConversation(id: string, title: string, surface = "web"): Conversation {
   return {
-    id,
-    agent: null,
+    ...CHAT_ROW,
+    conversation_id: id,
     surface,
-    surface_label: null,
-    audience: "member:m1",
-    member_email: "member@example.com",
-    description,
-    source: null,
-    speakers: ["member@example.com"],
-    turn_count: 1,
-    created_at: "2026-07-30T10:00:00",
-    last_turn_at: "2026-07-30T10:00:01",
-    readable: true,
-    disclosable: false,
+    title,
+    last_at: "2026-07-30T10:00:01",
     speakable: false,
   };
 }
@@ -1353,7 +1280,7 @@ function appConversation(id: string, description: string, surface = "web") {
 function appOnWire(conversations: ReturnType<typeof appConversation>[], more = false) {
   return {
     ...chatsOnWire([{ ...CHAT_ROW, title: "Newest thread" }]),
-    "/conversations$": () => json({ conversations, more }),
+    "/objects/conversation$": () => json({ objects: conversations.map(conversationObject), cut: more }),
     "/homepage": () => json(APP_SITE),
     "/setup": () => json({ own_page: false, connectors: [], credentials: [], standing: [] }),
     "/transcript": () => json({ messages: [] }),

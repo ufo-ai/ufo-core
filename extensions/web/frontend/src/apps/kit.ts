@@ -36,7 +36,7 @@ import type { ObjectAddress, ObjectRow } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
 import type { Face, FacetGroup } from "@/kernel/pane";
 import type { PanelState } from "@/kernel/panel";
-import type { ChatRow } from "@/lib/rail";
+import type { ConversationDetailPayload } from "@/lib/rail";
 import type { Crumb } from "@/lib/title";
 import type { Agent, Conversation, Member } from "@/lib/types";
 import type { PaneView } from "@/views/registry";
@@ -207,8 +207,8 @@ export type {
   AvatarStackPerson,
   ChartBar,
   MeterPart,
-  ChatRow,
   Conversation,
+  ConversationDetailPayload,
   Crumb,
   Face,
   FacetGroup,

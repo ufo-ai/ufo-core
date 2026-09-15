@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
-import type { ChatRow } from "@/lib/rail";
+import type { Conversation } from "@/lib/types";
 import { readRail } from "@/lib/railStore";
 import { newChatHash } from "@/lib/route";
 
@@ -37,7 +37,7 @@ const action = (name: string) => ({
 
 const ACTIONS = [action("make_conversation_private"), action("share_conversation")];
 
-const chat = (row: ChatRow) => ({
+const chat = (row: Conversation) => ({
   ...chatsOnWire([row]),
   "/transcript": () => json({ messages: [] }),
   "/slots": () => json({ slots: [] }),
@@ -103,7 +103,7 @@ test("a new conversation states Private before its first answer finishes", async
 
 test("choosing Private toggles in the menu immediately and dispatches the prepared intent", async () => {
   const posted: { url: string; body: unknown }[] = [];
-  let serverRow: ChatRow = WORKSPACE_ROW;
+  let serverRow: Conversation = WORKSPACE_ROW;
   let finish: (response: Response) => void = () => {};
   const pending = new Promise<Response>((resolve) => {
     finish = resolve;
@@ -157,7 +157,7 @@ test("choosing Private toggles in the menu immediately and dispatches the prepar
 
 test("choosing Workspace toggles immediately and dispatches share_conversation", async () => {
   const posted: string[] = [];
-  let serverRow: ChatRow = CHAT_ROW;
+  let serverRow: Conversation = CHAT_ROW;
   let finish: (response: Response) => void = () => {};
   const pending = new Promise<Response>((resolve) => {
     finish = resolve;

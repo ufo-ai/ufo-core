@@ -52,7 +52,7 @@ from ufo_ext_slack.tools import SLACK_CONNECT_ACTION
 from ufo_ext_ufo.surface import SURFACE_UFO
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
-from ufo.sdk.audience import SHARED_AUDIENCE, audience_subjects, conversation_audience
+from ufo.sdk.audience import audience_subjects, conversation_audience
 from ufo.sdk.balance import spend_admitted
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
@@ -126,6 +126,7 @@ from ufo.sdk.o11y import emit_metric, log
 from ufo.sdk.objects import (
     AGENT_KIND,
     ARTIFACT_KIND,
+    CONVERSATION_KIND,
     CREDENTIAL_KIND,
     MEMBER_KIND,
     SURFACE_KIND,
@@ -270,7 +271,6 @@ REFUSAL_HEADER = "x-ufo-refusal"
 NO_MEMBER_FAULT = "no-member"
 NO_SEAT_FAULT = "no-seat"
 MAX_MEMORY_QUERY_CHARS = 500
-MAX_SEARCH_CHARS = 200
 MEMORY_RECENT_LIMIT = 100
 MEMORY_RESULT_LIMIT = 100
 MEMORY_KIND = "memory"
@@ -280,7 +280,6 @@ OBJECT_FANOUT_LIMIT = 50
 TASK_KINDS = ("scheduled_task", "source_trigger")
 LAST_RUN_FIELD = "last_run_at"
 TASK_LANE_SEPARATOR = "|"
-CONVERSATION_LIST_LIMIT = 100
 COMMENT_SURFACES = frozenset({"slack", "ufo"})
 SUBAGENT_ACTIVITY_LIMIT = 40
 SUBAGENT_EVENT_LIMIT = 100
@@ -1205,23 +1204,21 @@ async def _spoken_conversation(
     listed = await ctx.list_agent_conversations(
         agent_id, member_id, admin=False, limit=1, conversation_id=conversation_id
     )
-    if listed and _speakable(audience, agent_id, listed[0], member_id):
+    if (
+        listed
+        and listed[0].speakable
+        and _reaches(audience, agent_id, listed[0].audience, member_id)
+    ):
         return listed[0]
     return None
 
 
-def _speakable(
-    audience: WebAudience, agent_id: UUID, conversation: ListedConversation, member_id: UUID
-) -> bool:
-    """Whether this member's messages land here: a conversation of their own with an agent in their
-    chat reach, or a workspace-shared one with an agent in their web reach, whatever surface holds
-    it. The prepared-intent lane takes none — an intent turn runs no model round, so a message
-    folded onto it is read by nothing."""
-    if conversation.summary.queue_key.startswith(PORTAL_LANE_PREFIX):
-        return False
-    if conversation.audience == str(conversation_audience(member_id)):
-        return audience.allows_chat(agent_id)
-    return conversation.audience == str(SHARED_AUDIENCE) and audience.allows(agent_id)
+def _reaches(audience: WebAudience, agent_id: UUID, held: str, member_id: UUID) -> bool:
+    """The agent-reach half of a conversation being this member's to open or speak in, beside the
+    audience half the row's `speakable` states: an agent in their web reach opens every
+    conversation the row admits, and an agent reached only through a member-private extension
+    conversation opens that conversation — their own, `held` being its audience — and no other."""
+    return audience.allows(agent_id) or held == str(conversation_audience(member_id))
 
 
 def _turn_context(email: str, request: Request, source: str) -> TurnContext:
@@ -3112,12 +3109,15 @@ def _provider_summary(provider: str) -> str:
 
 
 async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
-    """The `#/c/<id>` permalink resolve: the one conversation `?conversation=` names, as the
-    conversations panel would list it to this viewer, admin flag included — so a row an admin may
-    only disclose resolves with `readable: false` rather than as a conversation that does not
-    exist. An agent reached through a member-private conversation alone resolves that conversation
-    and no other. The rail's listing is the `conversation` kind's member listing, so a read naming
-    no conversation has nothing to answer here."""
+    """The one conversation `?conversation=` names, as an app page reads it: the row the
+    `conversation` kind lists, under the field names the kit's `Conversation` carries. A Chat app
+    homepage resolves the conversation it opens here, and a deploy of that page rebuilds nothing,
+    so the shape this answers is the one every deployed page reads. The portal itself resolves a
+    permalink through `objects/conversation/<id>`, which answers the same row.
+
+    An agent reached through a member-private conversation alone resolves that conversation and no
+    other, and a row an admin may only disclose resolves with `readable` false rather than as a
+    conversation that does not exist."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -3137,13 +3137,31 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
     listed = await ctx.list_agent_conversations(
         agent.id, member_id, admin=audience.admin, limit=1, conversation_id=conversation_id
     )
-    if not listed:
+    if not listed or not _reaches(audience, agent.id, listed[0].audience, member_id):
         return absent
-    speakable = _speakable(audience, agent.id, listed[0], member_id)
-    if not _reaches(audience, agent.id, listed[0], member_id):
-        return absent
-    row = _conversation_row(listed[0], speakable, {"id": str(agent.id), "name": agent.name})
-    return JSONResponse({"conversation": row})
+    entry = listed[0]
+    return JSONResponse(
+        {
+            "conversation": {
+                "id": str(entry.summary.id),
+                "agent": {"id": str(agent.id), "name": agent.name},
+                "surface": entry.summary.surface,
+                "surface_label": entry.surface_label,
+                "audience": entry.audience,
+                "member_email": entry.summary.member_email,
+                "mine": entry.mine,
+                "description": entry.title,
+                "source": entry.source,
+                "speakers": [who.sender or who.email for who in entry.speakers],
+                "turn_count": entry.summary.turn_count,
+                "created_at": _iso(entry.summary.created_at),
+                "last_turn_at": _iso(entry.summary.last_turn_at),
+                "readable": entry.readable,
+                "disclosable": entry.disclosable,
+                "speakable": entry.speakable,
+            }
+        }
+    )
 
 
 async def _panel_gate(
@@ -3165,16 +3183,6 @@ async def _panel_gate(
     if agent_id is None or not reach(audience, agent_id):
         return Response("no such agent", status_code=404)
     return member_id, email, audience, agent_id
-
-
-def _reaches(
-    audience: WebAudience, agent_id: UUID, conversation: ListedConversation, member_id: UUID
-) -> bool:
-    """Whether a conversation the agent's listing answered is this member's to open. An agent in
-    their web reach admits every row the listing answers them — `readable` on the row then says
-    whether its content may be read now. An agent in their chat reach alone, held through a
-    member-private conversation, admits the member's own conversation and no other."""
-    return audience.allows(agent_id) or _speakable(audience, agent_id, conversation, member_id)
 
 
 def _iso(moment: datetime | None) -> str | None:
@@ -3463,98 +3471,6 @@ async def github_coverage(ctx: SurfaceContext, request: Request) -> Response:
     return JSONResponse(coverage.model_dump(mode="json"))
 
 
-async def conversations(ctx: SurfaceContext, request: Request) -> Response:
-    """The selected agent's conversations this member may see: their own plus the workspace-shared
-    ones, every one of the agent's for an admin. Each says whether its content reads now and
-    whether an admin may disclose it to themselves by acknowledging. Recorded disclosures are not
-    here and no portal read lists them: that record is the operator's, read with
-    `ufoctl transcript-reads`.
-
-    This read carries the newest of them and no cursor, so `more` says whether it stopped at its
-    own bound: a screen drawing the rows has to state that the rest are there rather than end in
-    silence on a set the member has no way to know is cut. It is read one row past the bound and
-    answers the bound, so the fact is counted rather than guessed from a full page.
-
-    `q` narrows the read itself rather than the page it returns, so a member searching for a
-    conversation older than the bound finds it."""
-    gated = await _panel_gate(ctx, request)
-    if isinstance(gated, Response):
-        return gated
-    member_id, _email, audience, agent_id = gated
-    listed = await ctx.list_agent_conversations(
-        agent_id,
-        member_id,
-        admin=audience.admin,
-        limit=CONVERSATION_LIST_LIMIT + 1,
-        search=_searched(request),
-    )
-    page = listed[:CONVERSATION_LIST_LIMIT]
-    return JSONResponse(
-        {
-            "conversations": [
-                _conversation_row(entry, _speakable(audience, agent_id, entry, member_id))
-                for entry in page
-            ],
-            "more": len(listed) > CONVERSATION_LIST_LIMIT,
-        }
-    )
-
-
-def _searched(request: Request) -> str | None:
-    """What the member typed into a listing's search box, or None where the box is empty. Bounded
-    beside the query it reaches, because it is a member's string on a read this surface runs."""
-    typed = request.query_params.get("q", "").strip()[:MAX_SEARCH_CHARS]
-    return typed or None
-
-
-def _conversation_row(
-    entry: ListedConversation,
-    speakable: bool,
-    agent: dict[str, str] | None = None,
-) -> dict[str, object]:
-    """One conversation as the panel lists it. `description` is what the conversation is called —
-    the one string the rail row, this row and the record's own heading all read, so no screen names
-    one conversation two ways. A row this viewer may not read carries neither a description nor a
-    speaker: what a conversation is called is content, and core withholds it with the rest.
-
-    `agent` names the owner of a row read across every agent, and is null for a read taken inside
-    one agent's namespace, where the pane names it once instead of every row naming it again.
-
-    `source` is where the conversation was opened, as the admitting surface reported it — the
-    permalink of a Slack thread's first message, so a row leads back out to the thread as well as
-    into the transcript, and the transcript itself states the one way back. Every surface defines
-    its own, and a portal chat's names the portal, so the row states it and the screen decides which
-    surface's is a link worth drawing.
-
-    `mine` is whether the viewer is in the conversation — founded it or spoke in it — which is what
-    a screen sorts their own threads by, never whose audience it carries. `speakable` is whether
-    their messages land here, which is what draws the composer.
-
-    `archived` and `deleted` are the conversation's own filing marks; `pinned` is this viewer's
-    own, so two members reading one row read their own pin."""
-    return {
-        "id": str(entry.summary.id),
-        "agent": agent,
-        "surface": entry.summary.surface,
-        "surface_label": entry.surface_label,
-        "audience": entry.audience,
-        "member_email": entry.summary.member_email,
-        "mine": entry.mine,
-        "description": entry.title,
-        "source": entry.source,
-        "speakers": [who.sender or who.email for who in entry.speakers],
-        "turn_count": entry.summary.turn_count,
-        "created_at": _iso(entry.summary.created_at),
-        "last_turn_at": _iso(entry.summary.last_turn_at),
-        "archived": entry.archived,
-        "deleted": entry.deleted,
-        "pinned": entry.pinned,
-        "readable": entry.readable,
-        "disclosable": entry.disclosable,
-        "speakable": speakable,
-    }
-
-
 async def _readable_conversation(
     ctx: SurfaceContext, request: Request, conversation_id: UUID | None = None
 ) -> tuple[UUID, UUID, "SlotViewer"] | Response:
@@ -3580,7 +3496,11 @@ async def _readable_conversation(
         listed = await ctx.list_agent_conversations(
             agent_id, member_id, admin=False, limit=1, conversation_id=conversation_id
         )
-        readable = bool(listed) and _reaches(audience, agent_id, listed[0], member_id)
+        readable = (
+            bool(listed)
+            and listed[0].speakable
+            and _reaches(audience, agent_id, listed[0].audience, member_id)
+        )
     if not readable:
         return Response("no such conversation", status_code=404)
     return agent_id, conversation_id, SlotViewer(member_id, audience.admin, _opens(audience))
@@ -4966,6 +4886,24 @@ async def _object_gate(
     return member_id, audience, described
 
 
+async def _detail_agent(
+    ctx: SurfaceContext, request: Request, audience: WebAudience, kind: PortalKind, name: str
+) -> AgentSummary | Response:
+    """The agent namespace one detail read runs in: `agent` where the read names one, else — for a
+    conversation alone, whose row is bound to its agent — the conversation's own, gated by the
+    viewer's chat reach."""
+    if kind.kind != CONVERSATION_KIND or request.query_params.get("agent", ""):
+        return _object_agent(request, audience)
+    absent = Response(f"no {kind.kind} named {name!r}", status_code=404)
+    try:
+        conversation_id = UUID(name)
+    except ValueError:
+        return absent
+    agent_id = await ctx.conversation_agent(conversation_id)
+    agent = next((held for held in audience.chat_agents if held.id == agent_id), None)
+    return absent if agent is None else agent
+
+
 def _object_agent(request: Request, audience: WebAudience) -> AgentSummary | Response:
     """The one agent namespace a read runs in, named by `agent` and gated by the viewer's web
     audience like every per-agent panel."""
@@ -5258,20 +5196,30 @@ async def object_detail(ctx: SurfaceContext, request: Request) -> Response:
     """One object as the signed-in member reads it: the spec its kind applied, the declared fields
     that are its live state, its typed outgoing links — each naming an object and saying whether
     this member's read of that row answers, since a kind reading for members is not that row
-    reading for this one — and the row's timestamps. `spec` is null where the kind elides content
-    the member may not read. A row the member may not see is not-found, exactly as an absent
-    one is."""
+    reading for this one — the row's timestamps, and the agent it was read under. `spec` is null
+    where the kind elides content the member may not read. A row the member may not see is
+    not-found, exactly as an absent one is.
+
+    A conversation read naming no `agent` is the `#/c/<id>` permalink's resolve: the conversation
+    names its agent, and the reach is chat reach rather than web reach, so an agent reached only
+    through a member-private extension conversation resolves that conversation — the member's own —
+    and no other. The row itself is the one `objects/conversation` lists, so a permalink an admin
+    was offered resolves with `readable` false and `disclosable` true rather than as absent."""
     gated = await _object_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
     member_id, audience, kind = gated
-    agent = _object_agent(request, audience)
+    name = request.path_params["name"]
+    agent = await _detail_agent(ctx, request, audience, kind, name)
     if isinstance(agent, Response):
         return agent
     agent_id, admin = agent.id, audience.admin
-    name = request.path_params["name"]
     found = await ctx.member_object(kind.kind, name, agent_id, member_id, admin=admin)
     if found is None:
+        return Response(f"no {kind.kind} named {name!r}", status_code=404)
+    if kind.kind == CONVERSATION_KIND and not _reaches(
+        audience, agent_id, str(found.row.fields["audience"]), member_id
+    ):
         return Response(f"no {kind.kind} named {name!r}", status_code=404)
     detail = found.detail
     opened = [
@@ -5286,6 +5234,8 @@ async def object_detail(ctx: SurfaceContext, request: Request) -> Response:
             **_kind_payload(kind),
             "name": found.row.name,
             "summary": found.row.summary,
+            "agent_id": str(agent.id),
+            "agent_name": agent.name,
             "spec": detail.spec.model_dump(mode="json") if detail.spec_visible else None,
             "generation": None if detail.generation is None else str(detail.generation),
             "status": dict(found.row.fields),
@@ -5821,7 +5771,6 @@ ROUTES = (
         path="agents/{agent_id}/skills/community/{owner}/{repo}/{skill}",
         handler=community_skill,
     ),
-    SurfaceRoute(method="GET", path="agents/{agent_id}/conversations", handler=conversations),
     SurfaceRoute(
         method="GET",
         path="agents/{agent_id}/conversations/{conversation_id}/transcript",

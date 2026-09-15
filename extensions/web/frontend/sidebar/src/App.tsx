@@ -98,7 +98,6 @@ import {
   RAIL_SORT_OPTIONS,
   railRows,
   type RailSort,
-  type RailTurn,
 } from "@/lib/rail";
 import {
   foldSidebar,
@@ -129,7 +128,7 @@ import {
   type Section,
 } from "@/lib/route";
 import {useOfferedTabs, useSurfaces} from "@/lib/surfaces";
-import type { Agent, Member } from "@/lib/types";
+import type { Agent, ConversationTurn, Member } from "@/lib/types";
 
 const Chats = lazy(() => import("@/views/Chats").then((module) => ({ default: module.Chats })));
 
@@ -707,7 +706,7 @@ function RailRow({
   surface: string;
   surfaceLabel: string | null;
   source: string | null;
-  turn: RailTurn;
+  turn: ConversationTurn;
   automated: boolean;
   unread: boolean;
   when: string;

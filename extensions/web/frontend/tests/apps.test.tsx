@@ -666,7 +666,7 @@ test("a page mounted through the kit alone greets the shell, reads over the brid
   const { getJson, mountApp, useEffect, useState } = await import("@/apps/kit");
   const { unmountApp } = await import("@/apps/shell");
   const answers: Record<string, string> = {
-    "/api/chats": JSON.stringify({ chats: [{ title: "Weekly report" }] }),
+    "/api/agents": JSON.stringify({ chats: [{ title: "Weekly report" }] }),
   };
   cleanups.push(
     shell((message) => {
@@ -694,7 +694,7 @@ test("a page mounted through the kit alone greets the shell, reads over the brid
     const [read, setRead] = useState("reading");
     const [heard, setHeard] = useState("silent");
     useEffect(() => {
-      void getJson<{ chats: { title: string }[] }>("/api/chats").then((answer) =>
+      void getJson<{ chats: { title: string }[] }>("/api/agents").then((answer) =>
         setRead(answer.ok ? answer.payload.chats[0].title : answer.message),
       );
       const source = new EventSource("/surface/web/turns/" + TURN_ID + "/stream");

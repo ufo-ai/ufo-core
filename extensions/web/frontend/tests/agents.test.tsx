@@ -282,7 +282,7 @@ test("an app page draws its homepage from the boot agent, without pulling its co
   const region = await screen.findByRole("region", { name: /radar homepage/i });
   expect(region.querySelector("iframe")?.getAttribute("src")).toBe("https://ingress.test/site");
   expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/homepage"))).toBe(false);
-  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
+  expect(calls.some((url) => url.includes("/objects/conversation?agent=" + SECOND_ID))).toBe(false);
 });
 
 test("a conversation the composer founds after a failed opening send is still the run's", async () => {

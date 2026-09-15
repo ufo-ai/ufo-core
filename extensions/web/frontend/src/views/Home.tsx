@@ -52,7 +52,6 @@ import {
   type ChatRun,
   chatShown,
 } from "@/lib/chatRuns";
-import type { ChatRow } from "@/lib/rail";
 import { postObjectAction, type IntentOutcome } from "@/lib/api";
 import { seekChat, useRail, readRail } from "@/lib/railStore";
 import { heldRoute, placeHome } from "@/lib/router";
@@ -70,7 +69,7 @@ import { Chat, type ChatProps } from "@/views/Chat";
 import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";
 import { TabbedPane } from "@/views/TabbedPane";
 import { CONNECTORS } from "@/views/registry";
-import type { Agent, Member } from "@/lib/types";
+import type { Agent, Conversation, Member } from "@/lib/types";
 import { GLYPH_STROKE } from "@/lib/glyph";
 
 const NEW_TAB = "New tab";
@@ -452,7 +451,7 @@ function HistoryRow({
   onPick,
   archived = false,
 }: {
-  row: ChatRow;
+  row: Conversation;
   onPick: (conversationId: string) => void;
   archived?: boolean;
 }) {
@@ -769,8 +768,8 @@ function ConversationLane({
 }) {
   const rail = useRail();
   const [history, setHistory] = useState(false);
-  const linked = rail.linked[conversationId];
-  const agent = linked ? agents.find((entry) => entry.id === linked.agent.id) : undefined;
+  const linked = rail.known[conversationId];
+  const agent = linked ? agents.find((entry) => entry.id === linked.agent_id) : undefined;
   const sought = rail.sought[conversationId];
   useEffect(() => {
     if (!linked && sought === undefined) seekChat(conversationId);
@@ -791,7 +790,7 @@ function ConversationLane({
       />
     );
   }
-  const title = linked.description || agentName(agent.name);
+  const title = linked.title || agentName(agent.name);
   return (
     <Lane
       lane={lane}

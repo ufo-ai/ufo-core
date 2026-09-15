@@ -9,7 +9,7 @@ import { Viewer } from "@/lib/audience";
 import { chatHash } from "@/lib/route";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { AGENT, AGENT_ID, CHAT_ROW, CONVO_ID, json, linked, MEMBER, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CHAT_ROW, conversationDetail, CONVO_ID, json, MEMBER, useStreamFake, wire } from "./harness";
 
 const AFTER_SETTLE = { timeout: 3000 };
 
@@ -310,21 +310,8 @@ test("the conversation the task belongs to stands in the pane by its title", asy
     "/objects/scheduled_task/daily-brief": () =>
       json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
   });
-  const nightly = {
-    ...CHAT_ROW,
-    conversation_id: CONVO_ID,
-    agent_id: AGENT_ID,
-    agent_name: "assistant",
-    title: "Ship the nightly",
-    last_at: "2026-08-01T09:00:00.000Z",
-    surface: "web",
-    surface_label: null,
-    audience: "member:m1",
-    member_email: "member@example.com",
-    mine: true,
-    speaker: null,
-  };
-  railFounded(nightly, linked(nightly));
+  const nightly = { ...CHAT_ROW, title: "Ship the nightly" };
+  railFounded(nightly);
   mount();
 
   const link = await screen.findByRole("link", { name: "Ship the nightly" });
@@ -370,26 +357,16 @@ test("a conversation the wire names with a projection alone is titled by its des
   wire({
     "/objects/scheduled_task/daily-brief": () =>
       json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
-    "/api/chats": () =>
-      json({
-        conversation: {
-          id: CONVO_ID,
-          agent: { id: AGENT_ID, name: "assistant", icon: "spark" },
+    "/objects/conversation/": () =>
+      json(
+        conversationDetail({
+          ...CHAT_ROW,
           surface: "slack",
           surface_label: "#general",
-          audience: "member:m1",
-          member_email: MEMBER.email,
-          description: "Ship the nightly",
-          source: null,
-          speakers: [MEMBER.email],
-          turn_count: 1,
-          created_at: "2026-07-30T10:00:00",
-          last_turn_at: "2026-07-30T10:00:01",
-          readable: true,
-          disclosable: false,
+          title: "Ship the nightly",
           speakable: false,
-        },
-      }),
+        }),
+      ),
   });
   mount();
 
@@ -401,23 +378,8 @@ test("a conversation the rail never gathered is sought, so an app page names it 
   wire({
     "/objects/scheduled_task/daily-brief": () =>
       json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
-    "/api/chats": () =>
-      json({
-        conversation: linked({
-          ...CHAT_ROW,
-          conversation_id: CONVO_ID,
-          agent_id: AGENT_ID,
-          agent_name: "assistant",
-          title: "Ship the nightly",
-          last_at: "2026-08-01T09:00:00.000Z",
-          surface: "web",
-          surface_label: null,
-          audience: "member:m1",
-          member_email: "member@example.com",
-          mine: true,
-          speaker: null,
-        }),
-      }),
+    "/objects/conversation/": () =>
+      json(conversationDetail({ ...CHAT_ROW, title: "Ship the nightly" })),
   });
   mount();
 

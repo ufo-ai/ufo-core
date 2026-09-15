@@ -1,6 +1,6 @@
 import { agentName } from "@/lib/agentName";
 import { agentHash, newChatHash, type Route } from "@/lib/route";
-import type { Agent, OwnedConversation } from "@/lib/types";
+import type { Agent, Conversation } from "@/lib/types";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 
 export const APP_STORE_TITLE = "App Store";
@@ -35,28 +35,28 @@ export function titled(...parts: string[]): string {
 export function pageTitle(
   route: Route,
   agents: Agent[],
-  linked: Record<string, OwnedConversation>,
+  known: Record<string, Conversation>,
   main: Agent | null,
 ): string {
-  return titled(...trail(route, agents, linked, main).map((step) => step.label));
+  return titled(...trail(route, agents, known, main).map((step) => step.label));
 }
 
 export function pageCrumb(
   route: Route,
   agents: Agent[],
-  linked: Record<string, OwnedConversation>,
+  known: Record<string, Conversation>,
   main: Agent | null,
 ): Crumb | undefined {
-  return trail(route, agents, linked, main)[1];
+  return trail(route, agents, known, main)[1];
 }
 
 function trail(
   route: Route,
   agents: Agent[],
-  linked: Record<string, OwnedConversation>,
+  known: Record<string, Conversation>,
   main: Agent | null,
 ): Crumb[] {
-  return where(route, agents, linked, main).filter((step): step is Crumb =>
+  return where(route, agents, known, main).filter((step): step is Crumb =>
     Boolean(step?.label),
   );
 }
@@ -66,7 +66,7 @@ function trail(
 function where(
   route: Route,
   agents: Agent[],
-  linked: Record<string, OwnedConversation>,
+  known: Record<string, Conversation>,
   main: Agent | null,
 ): (Crumb | undefined)[] {
   const named = (agentId: string) => {
@@ -81,12 +81,12 @@ function where(
     case "new-chat":
       return [{ label: NEW_CONVERSATION }, named(route.agentId)];
     case "chat": {
-      const held = linked[route.conversationId];
+      const held = known[route.conversationId];
       if (!held) return [];
-      const found = agents.find((agent) => agent.id === held.agent.id);
+      const found = agents.find((agent) => agent.id === held.agent_id);
       return [
-        { label: held.description },
-        found ? chatCrumb(found) : { label: agentName(held.agent.name) },
+        { label: held.title },
+        found ? chatCrumb(found) : { label: agentName(held.agent_name) },
       ];
     }
     case "conversation-slot":

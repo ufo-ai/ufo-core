@@ -13,6 +13,7 @@ import { automationId } from "@/lib/automationLane";
 import { getJson } from "@/lib/api";
 import { subject } from "@/lib/audience";
 import { chatHash, agentHash, sectionHash, automationsHash } from "@/lib/route";
+import { chatRows, type ConversationsPayload } from "@/lib/rail";
 import type { Agent, Conversation } from "@/lib/types";
 
 export type Hit = {
@@ -52,10 +53,19 @@ type FoundObject = { name: string; agent_id: string; summary: string };
 type FoundArtifact = { name: string; filename: string; media_type: string };
 
 type Found = {
-  conversations: { conversations: Conversation[] };
+  conversations: ConversationsPayload;
   artifacts: { objects: FoundArtifact[] };
   objects: { objects: FoundObject[] };
 };
+
+const CONVERSATION_ORDER = { order_by: "last_at", order: "desc" };
+
+/** The `conversation` kind's listing, searched in the read ahead of its bound: one agent's under
+ *  `agent`, every agent the member reaches without it. */
+function conversationsPath(term: string, agentId?: string): string {
+  const narrowed = agentId ? { ...CONVERSATION_ORDER, agent: agentId } : CONVERSATION_ORDER;
+  return "/objects/conversation" + query(term, narrowed);
+}
 
 function query(term: string, extra: Record<string, string> = {}): string {
   const params = new URLSearchParams({ q: term, ...extra });
@@ -134,8 +144,6 @@ export async function searchConnectors(term: string, signal: AbortSignal): Promi
 
 type Slot = "apps" | "conversations" | "files" | "sites" | "automations" | "connectors";
 
-/** A conversation search is one read per agent the member reaches, because no projection searches
- *  conversations across agents. */
 export async function searchEverywhere(
   term: string,
   agents: Agent[],
@@ -193,13 +201,13 @@ export async function searchEverywhere(
       group<"conversations">(
         "Threads",
         IconMessage,
-        agents.map((agent) => "/agents/" + agent.id + "/conversations" + query(wanted)),
+        [conversationsPath(wanted)],
         (payload) =>
-          payload.conversations.map((entry) => ({
-            key: entry.id,
-            hash: chatHash(entry.id),
+          chatRows(payload).map((entry) => ({
+            key: entry.conversation_id,
+            hash: chatHash(entry.conversation_id),
             primary: threadLine(entry, viewer),
-            fact: entry.agent ? agentName(entry.agent.name) : "",
+            fact: agentName(entry.agent_name),
           })),
         signal,
       ),
