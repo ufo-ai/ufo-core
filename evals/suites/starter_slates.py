@@ -22,7 +22,8 @@ from evals.harness.registry import EvalTask, gather_cases
 from evals.harness.target import CapabilityTarget, InProcessTarget
 
 STARTER_SLATE_JUDGE_MODEL = "gpt-5.4-mini"
-STARTER_SLATE_RUBRIC = (
+STARTER_ASK_PREFIX = "Build an application that"
+REQUEST_RUBRIC = (
     "Every ask starts directly with an imperative verb. It does not start with a first-person "
     "subject such as I or we, a question, a greeting, or a polite preface.",
     "Every ask names the concrete work of its own row and reads as a complete request the member "
@@ -30,7 +31,7 @@ STARTER_SLATE_RUBRIC = (
     "No ask tells the member to connect, authorize, or grant an account.",
 )
 AUTOMATION_SLATE_RUBRIC = (
-    *STARTER_SLATE_RUBRIC,
+    *REQUEST_RUBRIC,
     "Every ask states when the work runs, by schedule, frequency, or event.",
 )
 
@@ -69,8 +70,8 @@ PRODUCT_MEMORY = (
 )
 
 CASES = (
-    _SlateCase("starter-founder", "starters", FOUNDER_MEMORY, STARTER_SLATE_RUBRIC),
-    _SlateCase("starter-product", "starters", PRODUCT_MEMORY, STARTER_SLATE_RUBRIC),
+    _SlateCase("starter-founder", "starters", FOUNDER_MEMORY, REQUEST_RUBRIC),
+    _SlateCase("starter-product", "starters", PRODUCT_MEMORY, REQUEST_RUBRIC),
     _SlateCase(
         "automation-founder",
         "automations",
@@ -120,6 +121,15 @@ async def _run_case(case: _SlateCase, target: CapabilityTarget) -> EvalCaseResul
         )
     slate_payload = cast("JsonObject", slate.model_dump(mode="json"))
     answer = json.dumps(slate.model_dump(mode="json"), ensure_ascii=False)
+    if case.kind == "starters" and any(
+        not entry.ask.startswith(STARTER_ASK_PREFIX) for entry in slate.ranked
+    ):
+        return EvalCaseResult(
+            name=case.name,
+            passed=False,
+            reason=f"a starter ask did not start {STARTER_ASK_PREFIX!r}",
+            evidence={"kind": case.kind, "slate": slate_payload},
+        )
     if case.kind == "automations" and slate.check_in is not None:
         return EvalCaseResult(
             name=case.name,

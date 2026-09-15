@@ -1,0 +1,34 @@
+name = "automation-ask-framing"
+base = "HEAD"
+suites = ["starter_slates"]
+cases = [
+  "automation-founder",
+  "automation-product",
+]
+repeats = 4
+concurrency = 4
+max_stacks = 2
+budget_usd = 20.0
+model = "gpt-5.4-mini"
+reasoning = "off"
+est_usd_per_case = 0.25
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "first-person"
+
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/prompts/automations_slate.md"
+old = '''- ask: the request the member sends by pressing the card, one line starting with a verb: Write, Show, Find, Summarize. Name the work and when it runs. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
+'''
+new = '''- ask: the sentence the member says by pressing the card, first person, asking for the automation. Name the work and when it runs. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
+'''

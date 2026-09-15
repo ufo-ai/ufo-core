@@ -4,8 +4,6 @@ suites = ["starter_slates"]
 cases = [
   "starter-founder",
   "starter-product",
-  "automation-founder",
-  "automation-product",
 ]
 repeats = 4
 concurrency = 4
@@ -26,18 +24,21 @@ research = { search_provider = "perplexity" }
 sandbox = { backend = "local" }
 
 [[arm]]
+name = "one-off-verbs"
+
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/prompts/starters_slate.md"
+old = '''- ask: the request the member sends by pressing the row, one line starting `Build an application that`. Name the work concretely. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
+'''
+new = '''- ask: the request the member sends by pressing the row, one line starting with a verb: Write, Show, Find, Summarize. Name the work concretely. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
+'''
+
+[[arm]]
 name = "first-person"
 
 [[arm.replacements]]
 path = "extensions/web/ufo_ext_web/prompts/starters_slate.md"
-old = '''- ask: the request the member sends by pressing the row, one line starting with a verb: Write, Show, Find, Summarize. Name the work concretely. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
+old = '''- ask: the request the member sends by pressing the row, one line starting `Build an application that`. Name the work concretely. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
 '''
 new = '''- ask: the sentence the member says by pressing the row, first person, asking for the application. Name the work concretely. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
-'''
-
-[[arm.replacements]]
-path = "extensions/web/ufo_ext_web/prompts/automations_slate.md"
-old = '''- ask: the request the member sends by pressing the card, one line starting with a verb: Write, Show, Find, Summarize. Name the work and when it runs. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
-'''
-new = '''- ask: the sentence the member says by pressing the card, first person, asking for the automation. Name the work and when it runs. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
 '''

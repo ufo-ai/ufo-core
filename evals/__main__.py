@@ -1051,6 +1051,7 @@ async def _run(
                     stack.push_async_callback(blob_backend.close)
             blob = WorkspaceBlobStore(backend=blob_backend)
             dbos = replay_safe_client(config.database.system_url)
+            stack.push_async_callback(asyncio.to_thread, dbos.destroy)
             registry = model_registry(config, manifests)
             if model is None:
                 resolved_agent_model = registry.resolve(agent_model)
