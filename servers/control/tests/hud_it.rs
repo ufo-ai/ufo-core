@@ -8,7 +8,8 @@ use reqwest::redirect::Policy;
 use reqwest::StatusCode;
 use ufo_control::campaign::Campaigns;
 use ufo_control::claim::ClaimWorkflow;
-use ufo_control::email::{parse_senders, AwsEndpoints, FounderSender};
+use ufo_control::email::{parse_senders, AwsEndpoints, EmailSender, FounderSender};
+use ufo_control::email_send::EmailSends;
 use ufo_control::gateway::{router, stamped_script, GatewayState, Onboarding, OPERATOR_COOKIE};
 use ufo_control::hud::{csrf_token, CSRF_HEADER, EMAIL_SURFACE_PATH, OPERATOR_LOGIN_PATH};
 use ufo_control::invite::InviteCodes;
@@ -30,6 +31,7 @@ fn bearer(email: &str) -> String {
 
 async fn rig(sends: bool) -> (String, String) {
     let pool = ledger_pool().await;
+    let sends_pool = pool.clone();
     let (serve, _serve_log) = spawn_http(Vec::new()).await;
     let (aws, _aws_log) = spawn_http(Vec::new()).await;
     let workspaces = SharedWorkspaces {
@@ -72,6 +74,11 @@ async fn rig(sends: bool) -> (String, String) {
             },
             apex_host: "ufo.ai".to_string(),
         }),
+        email_sends: EmailSends {
+            pool: sends_pool,
+            sender: EmailSender::Console,
+            apex_host: "ufo.ai".to_string(),
+        },
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();

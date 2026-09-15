@@ -81,6 +81,7 @@ gbrain = "ufo_ext_gbrain.manifest:manifest"
 index_default = "ufo_ext_index_default:manifest"
 imessage = "ufo_ext_imessage.manifest:manifest"
 keyed_connectors = "ufo_ext_keyed_connectors:manifest"
+lifecycle_email = "ufo_ext_lifecycle_email.manifest:manifest"
 mcp = "ufo_ext_mcp:manifest"
 memory = "ufo_ext_memory.manifest:manifest"
 metronome = "ufo_ext_metronome:manifest"
@@ -182,6 +183,7 @@ packages = [
     "evals",
     "extensions/eval_env/ufo_ext_eval_env",
     "extensions/imessage/ufo_ext_imessage",
+    "extensions/lifecycle_email/ufo_ext_lifecycle_email",
     "extensions/memory/ufo_ext_memory",
     "extensions/monitors/ufo_ext_monitors",
     "extensions/pipedream/ufo_ext_pipedream",

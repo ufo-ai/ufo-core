@@ -10,6 +10,7 @@ use ufo_control::email::{
     apex_host, email_sender_from_env, founder_sender_from_env, invite_email,
     public_apex_host_from_env, DEFAULT_PUBLIC_BASE_URL, PUBLIC_BASE_URL_ENV,
 };
+use ufo_control::email_send::EmailSends;
 use ufo_control::gateway::{
     parse_invite_required, router, stamped_script, GatewayState, Onboarding, CLIENT_BIN_DIR_ENV,
     GATEWAY_PORT_ENV, INVITE_REQUIRED_ENV, SIGNUP_KEY_ENV,
@@ -183,10 +184,12 @@ async fn gateway() -> Result<(), String> {
     let pool_for_campaigns = pool.clone();
     let pool_for_sends = pool.clone();
     let pool_for_feedback = pool.clone();
+    let pool_for_sends_route = pool.clone();
     let apex_for_slack = apex.clone();
     let apex_for_invites = apex.clone();
     let apex_for_campaigns = apex.clone();
     let apex_for_sends = apex.clone();
+    let apex_for_send_route = apex.clone();
     let core_for_invites = SharedWorkspaces {
         workspace_url: workspace_url.clone(),
         serve_internal_url: serve_internal_url.clone(),
@@ -222,6 +225,11 @@ async fn gateway() -> Result<(), String> {
         client_version: std::env::var(CLIENT_VERSION_ENV).unwrap_or_default(),
         console_mode,
         campaigns,
+        email_sends: EmailSends {
+            pool: pool_for_sends_route,
+            sender: sender.clone(),
+            apex_host: apex_for_send_route,
+        },
     };
 
     let worker_id = format!(

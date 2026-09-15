@@ -41,6 +41,14 @@ locals {
   ses_arn_prefix    = "arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}"
 }
 
+locals {
+  # Transactional mail carries its own configuration set on the topic and queue the campaign set
+  # already publishes to: a configuration set is what makes SES publish a delivery event at all, and
+  # the identity and the From condition differ from a campaign's while the consumer does not. Its
+  # own locals block so the grant lines around it keep their alignment.
+  transactional_configuration_set = "ufo-${local.founder_environment}-transactional"
+}
+
 resource "aws_sesv2_email_identity" "onboard" {
   count = var.owns_account_resources ? 1 : 0
 
@@ -59,6 +67,22 @@ moved {
 
 resource "aws_sesv2_configuration_set" "founder_email" {
   configuration_set_name = local.founder_configuration_set
+
+  delivery_options {
+    tls_policy = "REQUIRE"
+  }
+
+  reputation_options {
+    reputation_metrics_enabled = true
+  }
+
+  sending_options {
+    sending_enabled = true
+  }
+}
+
+resource "aws_sesv2_configuration_set" "transactional" {
+  configuration_set_name = local.transactional_configuration_set
 
   delivery_options {
     tls_policy = "REQUIRE"
@@ -99,6 +123,33 @@ data "aws_iam_policy_document" "founder_email_topic" {
       test     = "StringEquals"
       variable = "AWS:SourceArn"
       values   = ["${local.ses_arn_prefix}:configuration-set/${local.founder_configuration_set}"]
+    }
+  }
+
+  # The transactional set publishes to the same topic. Its own statement rather than a second value
+  # on the one above, so the campaign's grant lines are not rewritten to add it.
+  statement {
+    sid       = "PublishTransactionalSesEvents"
+    actions   = ["SNS:Publish"]
+    resources = [aws_sns_topic.founder_email.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ses.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceArn"
+      values = [
+        "${local.ses_arn_prefix}:configuration-set/${local.transactional_configuration_set}"
+      ]
     }
   }
 }
@@ -192,11 +243,54 @@ resource "aws_sesv2_configuration_set_event_destination" "founder_email" {
   depends_on = [aws_sns_topic_policy.founder_email]
 }
 
+# The transactional counterpart. SUBSCRIPTION is here because this set carries more than
+# transactional mail: a send that names a contact-list topic hosts its own unsubscribe page, and
+# the event that page raises is the only record the deploy gets that the member left.
+resource "aws_sesv2_configuration_set_event_destination" "transactional" {
+  configuration_set_name = aws_sesv2_configuration_set.transactional.configuration_set_name
+  event_destination_name = "feedback"
+
+  event_destination {
+    enabled = true
+
+    matching_event_types = [
+      "SEND",
+      "REJECT",
+      "BOUNCE",
+      "COMPLAINT",
+      "DELIVERY",
+      "DELIVERY_DELAY",
+      "RENDERING_FAILURE",
+      "SUBSCRIPTION",
+    ]
+
+    sns_destination {
+      topic_arn = aws_sns_topic.founder_email.arn
+    }
+  }
+
+  depends_on = [aws_sns_topic_policy.founder_email]
+}
+
 data "aws_iam_policy_document" "gateway_ses" {
   statement {
     sid       = "SendOnboardingEmail"
     actions   = ["ses:SendEmail"]
     resources = ["arn:aws:ses:${var.region}:${data.aws_caller_identity.current.account_id}:identity/${local.ses_domain}"]
+    condition {
+      test     = "StringEquals"
+      variable = "ses:FromAddress"
+      values   = [var.ses_sender]
+    }
+  }
+
+  # The configuration set the transactional sender names, granted beside the identity above rather
+  # than inside its statement: SES authorizes each resource a send touches on its own, and adding a
+  # value to that statement would rewrite a grant the running fleet holds.
+  statement {
+    sid       = "SendTransactionalUnderItsConfigurationSet"
+    actions   = ["ses:SendEmail"]
+    resources = [aws_sesv2_configuration_set.transactional.arn]
     condition {
       test     = "StringEquals"
       variable = "ses:FromAddress"

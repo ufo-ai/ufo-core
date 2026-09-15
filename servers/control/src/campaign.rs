@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::email::{normalize_email, FounderSender, Sender};
 use crate::gateway::OPERATOR_EMAIL_DOMAIN;
+use crate::message::{render, Message, Words};
 use crate::shared::{SeatError, SeatedMember, SharedWorkspaces};
-use crate::web::LOGO_PNG_PATH;
 
 pub const TABLE: &str = "ufo_control.email_campaign";
 pub const RECIPIENT_TABLE: &str = "ufo_control.email_recipient";
@@ -43,15 +43,16 @@ pub const RENDERING_FAILED: &str = "rendering_failed";
 /// from every later campaign, whichever campaign recorded it.
 pub const SUPPRESSED: &[&str] = &[BOUNCED, COMPLAINED, UNSUBSCRIBED];
 
+/// What bars a message a workspace sends about a member's own money or access. Only the states
+/// that say the address itself does not work: leaving a campaign is a preference about marketing,
+/// and a member who asked for no more of our news has not asked to be left unable to pay.
+pub const UNREACHABLE: &[&str] = &[BOUNCED, COMPLAINED];
+
 pub const MAX_SUBJECT_CHARS: usize = 200;
 pub const MAX_BODY_CHARS: usize = 20_000;
 pub const MAX_ACTION_LABEL_CHARS: usize = 60;
 pub const MAX_ACTION_URL_CHARS: usize = 2000;
 pub const SAMPLE_RECIPIENTS: i64 = 10;
-
-/// SES replaces this with the one-click unsubscribe URL for the contact and topic the send names.
-/// Without it in the body, `ListManagementOptions` adds the header and no visible link.
-pub const UNSUBSCRIBE_PLACEHOLDER: &str = "{{amazonSESUnsubscribeUrl}}";
 
 pub const DDL: &[&str] = &[
     "create table if not exists ufo_control.email_campaign (\
@@ -254,79 +255,18 @@ fn trimmed(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CampaignMessage {
-    pub subject: String,
-    pub text: String,
-    pub html: String,
-}
-
-const CAMPAIGN_HTML: &str = r##"<!doctype html>
-<html lang="en">
-<body style="margin:0;padding:0;background:#FAF9F7;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="background:#FAF9F7;">
-<tr><td align="center" style="padding:24px 16px;">
-<table role="presentation" width="440" cellpadding="0" cellspacing="0" border="0"
-       style="width:100%;max-width:440px;">
-<tr><td align="center" style="padding-bottom:20px;">
-<img src="https://{apex_host}{logo_path}" alt="ufo" width="72" height="18"
-     style="display:block;border:0;width:72px;height:18px;"></td></tr>
-<tr><td style="padding:20px;background:#FAF9F7;border:1px solid #EBEAE9;border-radius:4px;">
-{paragraphs}{action}</td></tr>
-<tr><td align="center" style="padding-top:16px;">
-<a href="{unsubscribe}"
-   style="font:12px/1.5 system-ui,sans-serif;color:#919090;">Unsubscribe</a></td></tr>
-</table>
-</td></tr></table>
-</body>
-</html>
-"##;
-
-const CAMPAIGN_ACTION_HTML: &str = r##"<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-<tr><td align="center" bgcolor="#191A1A" style="border-radius:4px;">
-<a href="{action_url}"
-   style="display:block;padding:10px 18px;font:500 15px/1.5 system-ui,sans-serif;color:#FAF9F7;text-decoration:none;">{action_label}</a>
-</td></tr></table>
-"##;
-
 /// The exact bytes the send carries, so the preview and the worker cannot disagree.
-pub fn campaign_message(campaign: &Campaign, apex_host: &str) -> CampaignMessage {
-    let action_text = match (&campaign.action_label, &campaign.action_url) {
-        (Some(label), Some(url)) => format!("\n{label}: {url}\n"),
-        _ => String::new(),
-    };
-    let action_html = match (&campaign.action_label, &campaign.action_url) {
-        (Some(label), Some(url)) => CAMPAIGN_ACTION_HTML
-            .replace("{action_url}", &escaped(url))
-            .replace("{action_label}", &escaped(label)),
-        _ => String::new(),
-    };
-    let paragraphs = campaign
-        .body
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|block| !block.is_empty())
-        .map(|block| {
-            format!(
-                "<p style=\"margin:0 0 16px;font:15px/1.6 system-ui,sans-serif;color:#191A1A;\">{}</p>\n",
-                escaped(block).replace('\n', "<br>")
-            )
-        })
-        .collect::<String>();
-    CampaignMessage {
-        subject: campaign.subject.clone(),
-        text: format!(
-            "{}\n{action_text}\nUnsubscribe: {UNSUBSCRIBE_PLACEHOLDER}\n",
-            campaign.body
-        ),
-        html: CAMPAIGN_HTML
-            .replace("{apex_host}", &escaped(apex_host))
-            .replace("{logo_path}", LOGO_PNG_PATH)
-            .replace("{paragraphs}", &paragraphs)
-            .replace("{action}", &action_html)
-            .replace("{unsubscribe}", UNSUBSCRIBE_PLACEHOLDER),
-    }
+pub fn campaign_message(campaign: &Campaign, apex_host: &str) -> Message {
+    render(
+        &Words {
+            subject: &campaign.subject,
+            body: &campaign.body,
+            action_label: campaign.action_label.as_deref(),
+            action_url: campaign.action_url.as_deref(),
+            unsubscribe: true,
+        },
+        apex_host,
+    )
 }
 
 pub async fn read_campaign(pool: &Pool, id: Uuid) -> Result<Campaign, CampaignError> {
@@ -340,15 +280,6 @@ pub async fn read_campaign(pool: &Pool, id: Uuid) -> Result<Campaign, CampaignEr
         .as_ref()
         .map(campaign)
         .ok_or(CampaignError::Absent(id))
-}
-
-fn escaped(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -377,7 +308,7 @@ pub struct Exclusions {
 #[derive(Debug, Clone, Serialize)]
 pub struct Preview {
     pub campaign: Campaign,
-    pub message: CampaignMessage,
+    pub message: Message,
     pub counts: Counts,
     pub exclusions: Exclusions,
     pub sample: Vec<String>,

@@ -391,7 +391,7 @@ async def _note(ctx: ToolContext, args: NoteInput) -> ToolResult:
 
 
 async def _tick(ctx: ExtensionContext) -> None:
-    await ctx.store.put(JOB_KEY, {"ran": True})
+    await ctx.store.put(JOB_KEY, {"ran": True, "home_url": ctx.home_url()})
     if ctx.corpus is None:
         return
     trajectories = await ctx.trajectories()

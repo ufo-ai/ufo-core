@@ -11,6 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use crate::campaign::Campaigns;
 use crate::claim::ClaimWorkflow;
 use crate::directives::{client_install, directive, render, PROMPT};
+use crate::email_send::{self, EmailSends};
 use crate::hud;
 use crate::invite::{InviteCodes, InviteError, Redemption, SignupProfile};
 use crate::shared::{EnsuredWorkspace, SeatError, SharedWorkspaces, WorkspaceChoice};
@@ -457,6 +458,8 @@ pub struct GatewayState {
     /// Absent where this deploy sends no campaigns, which is what keeps the operator surface off a
     /// self-hosted install rather than serving a page every act of which would fail.
     pub campaigns: Option<Campaigns>,
+    /// The one-message seam core calls.
+    pub email_sends: EmailSends,
 }
 
 pub fn router(state: GatewayState) -> Router {
@@ -477,7 +480,8 @@ pub fn router(state: GatewayState) -> Router {
         .route(AUTH_START_PATH, get(auth_start))
         .route(AUTH_CALLBACK_PATH, get(auth_callback))
         .route("/v1/onboard/web", post(onboard_web))
-        .route("/v1/onboard/{channel}", post(onboard));
+        .route("/v1/onboard/{channel}", post(onboard))
+        .merge(email_send::routes());
     if state.console_mode {
         router = router.route(AUTH_CONSOLE_PATH, get(auth_console));
     }

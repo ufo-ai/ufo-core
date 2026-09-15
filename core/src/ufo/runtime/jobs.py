@@ -53,6 +53,7 @@ from ufo.runtime.billing.accounting import (
 )
 from ufo.runtime.billing.balance import funded
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
+from ufo.runtime.email import EmailSends
 from ufo.runtime.ext.context import (
     CORE_EXTENSION,
     SPEND_REFUSAL_NOTICE_KEY,
@@ -1066,7 +1067,11 @@ class JobRunner:
     sandboxes: ConversationSandbox | None = None
     registry: ModelRegistry | None = None
     probes: ConversationProbes | None = None
+    email: EmailSends | None = None
     background_model: str | None = None
+    own_key_slots: tuple[str, ...] = ()
+    public_base_url: str | None = None
+    home_surface: str | None = None
     provisioned_workspaces: set[UUID] = field(default_factory=set, compare=False, repr=False)
 
     def launch(self) -> None:
@@ -1159,6 +1164,10 @@ class JobRunner:
                 probes=self.probes,
                 member_context_read=binding.member_context_read,
                 member_context_blob=self.blob,
+                email=self.email,
+                own_key_slots=self.own_key_slots,
+                public_base_url=self.public_base_url,
+                home_surface=self.home_surface,
             )
             try:
                 await binding.spec.handler(context)

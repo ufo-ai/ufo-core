@@ -18,6 +18,7 @@ locals {
       "enable-installed-skills"    = true
       "enable-issues-app"          = false
       "enable-lanes-shell"         = false
+      "enable-lifecycle-email"     = true
       "enable-meetings-app"        = false
       "enable-memory-tab"          = true
       "enable-metrics-app"         = false
@@ -36,6 +37,7 @@ locals {
       "enable-installed-skills"    = true
       "enable-issues-app"          = false
       "enable-lanes-shell"         = false
+      "enable-lifecycle-email"     = false
       "enable-meetings-app"        = false
       "enable-memory-tab"          = false
       "enable-metrics-app"         = false

@@ -9,12 +9,13 @@ use harness::{ledger_pool, spawn_http};
 use ufo_control::campaign::{
     campaign_message, Campaign, Campaigns, Draft, RECIPIENT_TABLE, SEND_CANCELLED, SEND_FAILED,
     SEND_PENDING, SEND_SENT, STATE_APPROVED, STATE_COMPLETED, STATE_DRAFT, STATE_PREPARED,
-    STATE_SENDING, UNSUBSCRIBE_PLACEHOLDER,
+    STATE_SENDING,
 };
 use ufo_control::campaign_feedback::{CampaignFeedback, FeedbackQueue};
 use ufo_control::campaign_send::CampaignSends;
 use ufo_control::email::{parse_senders, AwsEndpoints, FounderSender};
 use ufo_control::hud::csrf_token;
+use ufo_control::message::UNSUBSCRIBE_PLACEHOLDER;
 use ufo_control::shared::SharedWorkspaces;
 use uuid::Uuid;
 

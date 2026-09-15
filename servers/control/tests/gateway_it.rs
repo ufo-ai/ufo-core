@@ -5,6 +5,8 @@ use harness::{ledger_pool, spawn_http};
 use reqwest::redirect::Policy;
 use reqwest::StatusCode;
 use ufo_control::claim::ClaimWorkflow;
+use ufo_control::email::EmailSender;
+use ufo_control::email_send::{EmailSends, SEND_PATH};
 use ufo_control::gateway::{
     keyed_mark, parse_invite_required, router, stamped_script, GatewayState, Onboarding,
     BILLING_CHOICE, FIRST_MOVE_PROMPT, INVITATION_LOGIN_PATH, JOIN_LOGIN_PATH, LOGIN_PATH,
@@ -76,6 +78,11 @@ async fn rig_with(
         client_version: String::new(),
         console_mode: true,
         campaigns: None,
+        email_sends: EmailSends {
+            pool: pool.clone(),
+            sender: EmailSender::Console,
+            apex_host: "ufo.ai".to_string(),
+        },
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1635,4 +1642,57 @@ async fn the_join_ask_survives_the_google_hop_it_was_carried_into() {
         .map(|directive| directive["verb"].as_str().unwrap())
         .collect();
     assert!(verbs.contains(&"token"), "{payload}");
+}
+
+#[tokio::test]
+async fn the_send_seam_answers_only_the_control_token() {
+    let rig = rig(Vec::new(), Vec::new(), true).await;
+    let asked = serde_json::json!({
+        "email": "member@acme.com",
+        "kind": "balance_exhausted",
+        "subject": "acme.com is out of credit",
+        "body": "acme.com has no credit left, so the agent has stopped answering.",
+    });
+
+    let refused = client()
+        .post(format!("{}{SEND_PATH}", rig.base))
+        .json(&asked)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+
+    let unreadable = client()
+        .post(format!("{}{SEND_PATH}", rig.base))
+        .body("{")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unreadable.status(),
+        StatusCode::UNAUTHORIZED,
+        "the token is answered before the body is read, so nothing is told the shape"
+    );
+
+    let admitted = client()
+        .post(format!("{}{SEND_PATH}", rig.base))
+        .bearer_auth("onboard-token")
+        .json(&asked)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admitted.status(), StatusCode::OK);
+    let message_id = admitted.json::<serde_json::Value>().await.unwrap()["message_id"]
+        .as_str()
+        .expect("the send answers with its message id")
+        .to_string();
+
+    let read_back = client()
+        .get(format!("{}/internal/email/send/{message_id}", rig.base))
+        .bearer_auth("onboard-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read_back.status(), StatusCode::OK);
+    assert!(read_back.json::<serde_json::Value>().await.unwrap()["delivery"].is_null());
 }

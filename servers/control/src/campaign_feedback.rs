@@ -12,6 +12,7 @@ use crate::campaign::{
 use crate::email::{
     assume_role, signed_post, AwsCall, AwsError, SesCredentials, AWS_TIMEOUT_SECONDS, SQS_SERVICE,
 };
+use crate::email_send::TABLE as SEND_TABLE;
 
 pub const POLL_INTERVAL_SECONDS: u64 = 20;
 pub const WAIT_TIME_SECONDS: u32 = 20;
@@ -334,17 +335,21 @@ impl CampaignFeedback {
             return Ok(());
         };
         let suppressed: Vec<String> = SUPPRESSED.iter().map(|state| state.to_string()).collect();
-        connection
-            .execute(
-                &format!(
-                    "update {RECIPIENT_TABLE} set delivery = $3, updated_at = now() \
-                     where ses_message_id = $1 and email = $2 \
-                       and (delivery is null or delivery <> all($4::text[]) \
-                            or $3 = any($4::text[]))"
-                ),
-                &[&event.mail.message_id, &email, &delivery, &suppressed],
-            )
-            .await?;
+        // One event, two ledgers: a campaign recipient and a one-message send are the same fact
+        // under two keys, and a message id belongs to exactly one of them.
+        for table in [RECIPIENT_TABLE, SEND_TABLE] {
+            connection
+                .execute(
+                    &format!(
+                        "update {table} set delivery = $3, updated_at = now() \
+                         where ses_message_id = $1 and email = $2 \
+                           and (delivery is null or delivery <> all($4::text[]) \
+                                or $3 = any($4::text[]))"
+                    ),
+                    &[&event.mail.message_id, &email, &delivery, &suppressed],
+                )
+                .await?;
+        }
         Ok(())
     }
 }

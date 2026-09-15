@@ -64,6 +64,11 @@ output "gateway_ses_role_arn" {
   value       = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/${local.gateway_ses_role_name}"
 }
 
+output "transactional_configuration_set" {
+  description = "The configuration set every transactional send names, so SES publishes its delivery events."
+  value       = aws_sesv2_configuration_set.transactional.configuration_set_name
+}
+
 output "founder_email" {
   description = "What the gateway needs to send a founder campaign and read its delivery feedback."
   value = {

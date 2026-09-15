@@ -9,7 +9,8 @@ use ufo_control::email::{
     sigv4_headers, AwsCall, AwsEndpoints, EmailError, EmailSender, SesCredentials, SesEmailSender,
     SignupEmailPolicy, AWS_ROLE_ARN_ENV, AWS_TIMEOUT_SECONDS, AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
     CONSOLE_EMAIL_MODE, DEFAULT_SES_REGION, DISPOSABLE_EMAIL_DOMAINS, EMAIL_MODE_ENV,
-    FREE_EMAIL_DOMAINS, JSON_CONTENT_TYPE, SEND_EMAIL, SES_REGION_ENV, SES_SENDER_ENV, SES_SERVICE,
+    FREE_EMAIL_DOMAINS, JSON_CONTENT_TYPE, SEND_EMAIL, SES_CONFIGURATION_SET_ENV, SES_REGION_ENV,
+    SES_SENDER_ENV, SES_SERVICE,
 };
 
 const STS_RESPONSE: &str = r#"<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -284,6 +285,7 @@ async fn serve(responses: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<Exchange
 fn sender(base: &str, token_file: PathBuf) -> SesEmailSender {
     SesEmailSender {
         source: "no-reply@flyingobject.ai".to_string(),
+        configuration_set: "ufo-testing-transactional".to_string(),
         region: "us-east-1".to_string(),
         role_arn: "arn:aws:iam::111122223333:role/ufo-testing-gateway-ses".to_string(),
         token_file,
@@ -305,11 +307,11 @@ fn projected_token() -> (tempfile::TempDir, PathBuf) {
 async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
     let (base, log) = serve(vec![
         (200, STS_RESPONSE.to_string()),
-        (200, "{}".to_string()),
+        (200, r#"{"MessageId": "message-one"}"#.to_string()),
     ])
     .await;
     let (_directory, token_file) = projected_token();
-    sender(&base, token_file)
+    let message_id = sender(&base, token_file)
         .send(
             "founder@acme.com",
             "Your invitation",
@@ -318,6 +320,7 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
         )
         .await
         .unwrap();
+    assert_eq!(message_id, "message-one");
 
     let exchanges = log.lock().unwrap();
     assert_eq!(exchanges.len(), 2, "one STS exchange, then one SES send");
@@ -353,6 +356,10 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
         payload["Content"]["Simple"]["Body"]["Html"]["Data"],
         "<p>body markup</p>"
     );
+    assert_eq!(
+        payload["ConfigurationSetName"], "ufo-testing-transactional",
+        "a send under no configuration set publishes no delivery event"
+    );
     let authorization = ses.authorization.as_deref().unwrap_or_default();
     assert!(
         authorization.contains("Credential=ASIAEXAMPLE/"),
@@ -364,7 +371,7 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
 async fn a_send_with_no_html_alternative_posts_a_text_only_body() {
     let (base, log) = serve(vec![
         (200, STS_RESPONSE.to_string()),
-        (200, "{}".to_string()),
+        (200, r#"{"MessageId": "message-one"}"#.to_string()),
     ])
     .await;
     let (_directory, token_file) = projected_token();
@@ -463,6 +470,7 @@ fn the_sender_is_built_from_the_pods_irsa_identity() {
         &[
             (EMAIL_MODE_ENV, None),
             (SES_SENDER_ENV, Some("no-reply@flyingobject.ai")),
+            (SES_CONFIGURATION_SET_ENV, Some("ufo-testing-transactional")),
             (SES_REGION_ENV, None),
             (AWS_ROLE_ARN_ENV, Some("arn:aws:iam::111122223333:role/ses")),
             (AWS_WEB_IDENTITY_TOKEN_FILE_ENV, Some("/var/run/token")),
@@ -474,6 +482,7 @@ fn the_sender_is_built_from_the_pods_irsa_identity() {
         panic!("the default mode is SES");
     };
     assert_eq!(sender.source, "no-reply@flyingobject.ai");
+    assert_eq!(sender.configuration_set, "ufo-testing-transactional");
     assert_eq!(sender.region, DEFAULT_SES_REGION);
     assert_eq!(sender.role_arn, "arn:aws:iam::111122223333:role/ses");
     assert_eq!(sender.token_file, PathBuf::from("/var/run/token"));
@@ -489,6 +498,7 @@ fn the_sender_fails_loud_without_irsa() {
         &[
             (EMAIL_MODE_ENV, None),
             (SES_SENDER_ENV, Some("no-reply@flyingobject.ai")),
+            (SES_CONFIGURATION_SET_ENV, Some("ufo-testing-transactional")),
             (AWS_ROLE_ARN_ENV, None),
             (AWS_WEB_IDENTITY_TOKEN_FILE_ENV, None),
         ],
@@ -505,6 +515,7 @@ async fn console_mode_needs_no_ses_configuration() {
         &[
             (EMAIL_MODE_ENV, Some(CONSOLE_EMAIL_MODE)),
             (SES_SENDER_ENV, None),
+            (SES_CONFIGURATION_SET_ENV, None),
             (AWS_ROLE_ARN_ENV, None),
             (AWS_WEB_IDENTITY_TOKEN_FILE_ENV, None),
         ],

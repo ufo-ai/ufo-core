@@ -9,7 +9,7 @@ it share one transaction and the row records what the balance actually moved."""
 
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -27,6 +27,11 @@ BALANCE_CHARGED_METRIC = "balance_charged_micro_usd_total"
 _no_balance: dict[UUID, float] = {}
 # The refill job cannot be instant, and one turn can outspend the gap, so a balance tested against
 # the bare line would refuse a workspace about to be topped up.
+EXHAUSTION_WINDOW = timedelta(days=3)
+"""How long after a workspace crosses the entry line it is still work a job reacting to a spent
+balance has to do. Past this it has been down long enough that nobody waits on the reaction, and
+holding it in a per-minute candidate set costs one execution a minute for as long as it exists."""
+
 TOPUP_GRACE_MICRO_USD = 100_000_000
 
 
@@ -159,6 +164,48 @@ def topping_up_workspaces() -> WorkspaceCandidates:
     return owner_candidates(short_of_its_line)
 
 
+def unfunded_balances() -> sa.Select[tuple[UUID, int]]:
+    """Every balance row that has reached the entry line, with the lifetime grant total beside it —
+    what a job reacting to a spent balance builds its candidate read from.
+
+    A workspace with no balance row is not here, and that is the whole of the self-host and the
+    never-purchased case — the gate allows both, and a workspace that has bought nothing has spent
+    nothing.
+
+    The grant total is projected because it names the exhaustion: a caller that acts once per
+    exhaustion joins its own record of what it has acted on against this column and leaves those
+    workspaces out, so the set it reads each tick is the work it still owes rather than every
+    workspace that has ever spent out. Without that join the set only grows.
+
+    The own-key exemption `funded` applies is not here, because the slots it tests belong to the
+    process and not to a query a candidate builder writes at declaration time. A handler bound to
+    one workspace answers it with `spend_admitted` before it acts.
+
+    `EXHAUSTION_WINDOW` is the second bound, and it is the one that holds when nothing acts at all.
+    A caller's own record only takes a workspace out of the set once the caller has written a row,
+    and a caller held back by a flag writes none — so the balance row's own stamp bounds the set
+    instead. Spending is what moves that stamp, and the gate stops the spending, so it freezes
+    where the workspace crossed the line: a workspace that crossed within the window is work, and
+    one that crossed a month ago is not."""
+    granted = (
+        sa.select(
+            sa.cast(
+                sa.func.coalesce(sa.func.sum(tables.balance_purchase.c.granted_micro_usd), 0),
+                sa.BigInteger,
+            )
+        )
+        .where(tables.balance_purchase.c.workspace_id == tables.workspace_balance.c.workspace_id)
+        .scalar_subquery()
+    )
+    return sa.select(
+        tables.workspace_balance.c.workspace_id,
+        granted.label("granted_micro_usd"),
+    ).where(
+        below_the_entry_line(),
+        tables.workspace_balance.c.updated_at > datetime.now(UTC) - EXHAUSTION_WINDOW,
+    )
+
+
 async def set_auto_topup(
     connection: AsyncConnection,
     workspace_id: UUID,
@@ -270,14 +317,6 @@ def funded(
     consumer replays one refused batch every tick for as long as the balance stays down. A workspace
     held here records nothing: the balance row is the state, and the credit that raises it is the
     wake, because the next tick finds the work due as it always was."""
-    grace = sa.case(
-        (tables.workspace_balance.c.topup_verified_at.is_(None), 0),
-        else_=TOPUP_GRACE_MICRO_USD,
-    )
-    above_the_line = (
-        tables.workspace_balance.c.balance_micro_usd
-        > tables.workspace_balance.c.reserve_micro_usd - grace
-    )
     serves_itself = sa.and_(
         tables.workspace_balance.c.balance_micro_usd > 0,
         sa.exists(
@@ -289,7 +328,7 @@ def funded(
     )
     held = sa.select(sa.literal(1)).where(
         tables.workspace_balance.c.workspace_id == workspace_id,
-        ~above_the_line,
+        below_the_entry_line(),
         ~serves_itself if own_key_slots else sa.true(),
     )
     return ~sa.exists(held)
@@ -308,6 +347,21 @@ async def spend_admitted(
         (
             await connection.execute(sa.select(funded(sa.literal(workspace_id), own_key_slots)))
         ).scalar_one()
+    )
+
+
+def below_the_entry_line() -> sa.ColumnElement[bool]:
+    """The balance row's own half of the gate's entry test: at or under the reserve, less the grace
+    a settled card has earned. `funded` wraps it in a correlated exists for a query over some other
+    table; a query already reading `workspace_balance` applies it directly, because a correlated
+    subquery over the same table would collapse into the outer row and test nothing."""
+    grace = sa.case(
+        (tables.workspace_balance.c.topup_verified_at.is_(None), 0),
+        else_=TOPUP_GRACE_MICRO_USD,
+    )
+    return (
+        tables.workspace_balance.c.balance_micro_usd
+        <= tables.workspace_balance.c.reserve_micro_usd - grace
     )
 
 

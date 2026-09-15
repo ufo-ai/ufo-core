@@ -127,6 +127,7 @@ from ufo.runtime.context_boundary import (
     select_flagged_context_boundary,
 )
 from ufo.runtime.delivery import DeliverySweep
+from ufo.runtime.email import email_sends_from_env
 from ufo.runtime.ext.context import ConversationProbes, CredentialAccess, ModelAccess
 from ufo.runtime.ext.context import context_for as extension_context_for
 from ufo.runtime.ext.conversation_slots import BoundConversationSlot
@@ -724,7 +725,11 @@ def _launch_jobs(
         sandboxes=runtime.sandboxes,
         registry=runtime.registry,
         probes=probes,
+        email=email_sends_from_env(),
         background_model=runtime.config.models.background_jobs_model,
+        own_key_slots=model_key_slots(runtime.registry),
+        public_base_url=runtime.config.connect.public_base_url,
+        home_surface=home_surface(runtime.manifests),
     ).launch()
 
 

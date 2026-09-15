@@ -12,6 +12,7 @@ use quick_xml::Reader;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 const DOMAIN_LABEL: &str = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
 
@@ -691,6 +692,7 @@ pub const SEND_EMAIL: &str = "SendEmail";
 pub const LIST_CONTACTS: &str = "ListContacts";
 
 pub const SES_SENDER_ENV: &str = "UFO_SES_SENDER";
+pub const SES_CONFIGURATION_SET_ENV: &str = "UFO_SES_CONFIGURATION_SET";
 pub const SES_REGION_ENV: &str = "UFO_SES_REGION";
 pub const FOUNDER_SENDERS_ENV: &str = "UFO_FOUNDER_SENDERS";
 pub const FOUNDER_CONFIGURATION_SET_ENV: &str = "UFO_FOUNDER_CONFIGURATION_SET";
@@ -1064,9 +1066,13 @@ pub async fn signed_post(
     Ok(response.text().await?)
 }
 
+/// The transactional sender. `configuration_set` is what makes a send reportable: SES publishes a
+/// delivery event only for a message sent under one, and every event lands in the queue
+/// `CampaignFeedback` already drains.
 #[derive(Debug, Clone)]
 pub struct SesEmailSender {
     pub source: String,
+    pub configuration_set: String,
     pub region: String,
     pub role_arn: String,
     pub token_file: PathBuf,
@@ -1074,13 +1080,14 @@ pub struct SesEmailSender {
 }
 
 impl SesEmailSender {
+    /// The SES message id, which every delivery event this send later produces is keyed by.
     pub async fn send(
         &self,
         email: &str,
         subject: &str,
         text: &str,
         html: Option<&str>,
-    ) -> Result<(), AwsError> {
+    ) -> Result<String, AwsError> {
         let credentials =
             assume_role(&self.endpoints.sts, &self.role_arn, &self.token_file).await?;
         let mut content = serde_json::Map::new();
@@ -1097,18 +1104,25 @@ impl SesEmailSender {
                     "Body": content,
                 }
             },
+            "ConfigurationSetName": self.configuration_set,
         })
         .to_string()
         .into_bytes();
         let url = format!("{}{SES_OUTBOUND_PATH}", self.endpoints.ses);
-        signed_post(
+        let answered = signed_post(
             &ses_call(&url, SEND_EMAIL),
             body,
             &self.region,
             &credentials,
         )
         .await?;
-        Ok(())
+        let sent: SentMessage =
+            serde_json::from_str(&answered).map_err(|_| AwsError::Unreadable {
+                service: SES_SERVICE,
+                field: "MessageId",
+                body: clipped(&answered),
+            })?;
+        Ok(sent.message_id)
     }
 }
 
@@ -1460,13 +1474,15 @@ pub enum EmailSender {
 }
 
 impl EmailSender {
+    /// The SES message id a delivery event is keyed by. Console mode mints one of its own, so a
+    /// caller recording the send holds the same shape of row on a deploy with no SES identity.
     pub async fn send(
         &self,
         email: &str,
         subject: &str,
         text: &str,
         html: Option<&str>,
-    ) -> Result<(), AwsError> {
+    ) -> Result<String, AwsError> {
         match self {
             Self::Ses(sender) => sender.send(email, subject, text, html).await,
             Self::Console => {
@@ -1474,7 +1490,7 @@ impl EmailSender {
                     target: "ufo_control::email",
                     "email (console mode) → {email} | {subject} | {text}"
                 );
-                Ok(())
+                Ok(Uuid::new_v4().to_string())
             }
         }
     }
@@ -1491,6 +1507,7 @@ pub fn email_sender_from_env() -> Result<EmailSender, EmailConfigError> {
     let region = ses_region();
     Ok(EmailSender::Ses(Box::new(SesEmailSender {
         source: require_env(SES_SENDER_ENV)?,
+        configuration_set: require_env(SES_CONFIGURATION_SET_ENV)?,
         endpoints: AwsEndpoints::for_region(&region),
         region,
         role_arn: require_env(AWS_ROLE_ARN_ENV)?,

@@ -289,10 +289,11 @@ data "kubectl_file_documents" "hosted" {
 
     residential_proxy_enabled = var.residential_proxy_url != ""
 
-    ses_sender           = var.ses_sender
-    ses_region           = var.region
-    gateway_ses_role_arn = module.platform.gateway_ses_role_arn
-    founder_email        = module.platform.founder_email
+    ses_sender            = var.ses_sender
+    ses_region            = var.region
+    gateway_ses_role_arn  = module.platform.gateway_ses_role_arn
+    founder_email         = module.platform.founder_email
+    ses_configuration_set = module.platform.transactional_configuration_set
 
     slack_connect_enabled = var.slack_connect_enabled ? "true" : "false"
     slack_connect_team_id = var.slack_connect_team_id

@@ -1,6 +1,7 @@
 use chrono::{TimeZone, Utc};
 use serde::Deserialize;
 use ufo_control::directives::directive;
+use ufo_control::email_send::{Asked, Delivered, Sent, SEND_PATH};
 use ufo_control::token::{sign, verified_email};
 
 #[derive(Deserialize)]
@@ -78,4 +79,60 @@ fn every_onboard_fixture_line_is_this_encoder() {
             row.verb
         );
     }
+}
+
+#[derive(Deserialize)]
+struct EmailSendContract {
+    send_path: String,
+    delivery_path: String,
+    send_request: serde_json::Value,
+    send_response: serde_json::Value,
+    reported_response: serde_json::Value,
+    unreported_response: serde_json::Value,
+}
+
+#[test]
+fn the_send_seam_reads_and_answers_exactly_what_core_writes() {
+    let contract: EmailSendContract =
+        serde_json::from_str(include_str!("email_send_contract.json"))
+            .expect("the contract parses");
+    assert_eq!(SEND_PATH, contract.send_path);
+    assert!(
+        contract.delivery_path.starts_with(&format!("{SEND_PATH}/")),
+        "a delivery is read under the send it names"
+    );
+
+    let asked: Asked =
+        serde_json::from_value(contract.send_request.clone()).expect("core's body deserializes");
+    assert_eq!(asked.email, "member@acme.com");
+    assert_eq!(asked.kind, "balance_exhausted");
+    assert_eq!(asked.subject, "acme.com is out of credit");
+    assert!(asked.body.contains("no credit left"));
+    assert_eq!(asked.action_label.as_deref(), Some("Add credit"));
+    assert!(asked
+        .action_url
+        .as_deref()
+        .is_some_and(|url| url.starts_with("https://")));
+
+    let message_id = contract.send_response["message_id"]
+        .as_str()
+        .expect("the fixture names a message id")
+        .to_string();
+    assert_eq!(
+        serde_json::to_value(Sent { message_id }).unwrap(),
+        contract.send_response,
+        "core reads message_id off this shape"
+    );
+    assert_eq!(
+        serde_json::to_value(Delivered {
+            delivery: Some("delivered".to_string())
+        })
+        .unwrap(),
+        contract.reported_response
+    );
+    assert_eq!(
+        serde_json::to_value(Delivered { delivery: None }).unwrap(),
+        contract.unreported_response,
+        "a send SES has not reported on answers with a null, never an absent field"
+    );
 }

@@ -218,7 +218,7 @@ async def test_an_installed_extension_fires_through_the_loader(
         for workspace_id in await runner.candidates(f"{sample.NAME}:{sample.JOB_NAME}"):
             await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}", workspace_id)
         scoped = ScopedStore(extension=sample.NAME)
-        assert await scoped.get(sample.JOB_KEY) == {"ran": True}
+        assert (await scoped.get(sample.JOB_KEY) or {})["ran"] is True
 
 
 def test_bundle_pins_a_bundle_only_extension_and_writes_a_build_context(
@@ -316,4 +316,4 @@ async def test_a_bundle_boots_its_pinned_extension_on_a_clean_lockfile(
         for workspace_id in await runner.candidates(f"{sample.NAME}:{sample.JOB_NAME}"):
             await runner.fire(f"{sample.NAME}:{sample.JOB_NAME}", workspace_id)
         scoped = ScopedStore(extension=sample.NAME)
-        assert await scoped.get(sample.JOB_KEY) == {"ran": True}
+        assert (await scoped.get(sample.JOB_KEY) or {})["ran"] is True

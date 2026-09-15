@@ -92,6 +92,8 @@ services:
       UFO_TOKEN_SECRET: ufo-local-dev-token-secret
       UFO_CREDENTIAL_KEY: b2Adxpv2mSpXfvoBrALyxxePNw-h7N_1mgxzUFVMMFI=
       UFO_ARTIFACT_TOKEN_SECRET: ufo-local-dev-artifact-secret
+      # The gateway's send seam. Locally the gateway runs in console mode, so a send is logged.
+      UFO_CONTROL_EMAIL_URL: http://gateway:8080
       UFO_PUBLIC_BASE_URL: http://${UFO_STACK_HOST:-localhost}:${UFO_STACK_PORT_HOST:-8080}
       UFO_INGRESS_PUBLIC_URL: http://${UFO_STACK_HOST:-ufo.localhost}:${UFO_INGRESS_PORT_HOST:-8100}
       AWS_REGION: us-east-1

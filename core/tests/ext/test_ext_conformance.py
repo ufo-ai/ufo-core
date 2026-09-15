@@ -1217,7 +1217,7 @@ async def test_job_fires_through_its_scoped_context(db: None) -> None:
         for workspace_id in await runner.candidates(f"{manifest.name}:{sample.JOB_NAME}"):
             await runner.fire(f"{manifest.name}:{sample.JOB_NAME}", workspace_id)
         scoped = ScopedStore(extension=sample.NAME)
-        assert await scoped.get(sample.JOB_KEY) == {"ran": True}
+        assert (await scoped.get(sample.JOB_KEY) or {})["ran"] is True
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -1310,6 +1310,29 @@ def test_a_tool_is_handed_the_deploy_base_and_the_browser_home() -> None:
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_job_is_handed_the_deploy_base_and_the_browser_home(db: None) -> None:
+    """A job handler reaches a member off the turn path — the notice that a workspace has stopped
+    for want of credit — and the only thing that message is worth sending for is the link it
+    carries. The dispatcher has to hand the portal address down, because a job holds no request to
+    read it off and an extension carries no surface name of its own."""
+    workspace_id = await _workspace()
+    manifest = _sample_manifest()
+    runner = JobRunner(
+        bindings=bindings_from((manifest,), ()),
+        manifests=(manifest,),
+        public_base_url="https://ufo.test/",
+        home_surface="portal",
+    )
+    with ws(workspace_id):
+        await runner.fire(f"{manifest.name}:{sample.JOB_NAME}", workspace_id)
+        stored = await ScopedStore(extension=sample.NAME).get(sample.JOB_KEY)
+    assert stored == {
+        "ran": True,
+        "home_url": "https://ufo.test/surface/portal",
+    }
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> None:
     first = await _workspace()
     await _seed_note(first)
@@ -1328,7 +1351,7 @@ async def test_a_second_workspace_reaches_none_of_the_firsts_rows(db: None) -> N
         await store.get(second, sample.API_SLOT)
 
     with ws(first):
-        assert await ScopedStore(extension=sample.NAME).get(sample.JOB_KEY) == {"ran": True}
+        assert (await ScopedStore(extension=sample.NAME).get(sample.JOB_KEY) or {})["ran"] is True
 
 
 SEED_PROMPT = "You are helpful."

@@ -85,6 +85,7 @@ EXTENSIONS = (
     "flagship",
     "flags_open",
     "metronome",
+    "lifecycle_email",
 )
 SKILLS_DIR = Path(__file__).parent / "skills"
 SKILL_NAMES = ("customer-onboarding-help",)

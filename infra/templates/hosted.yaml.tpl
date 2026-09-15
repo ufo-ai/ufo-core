@@ -112,6 +112,9 @@ spec:
             - {name: UFO_CLIENT_VERSION, value: "${client_version}"}
             - {name: UFO_SES_SENDER, value: "${ses_sender}"}
             - {name: UFO_SES_REGION, value: "${ses_region}"}
+            # Transactional mail names its own configuration set, which is what makes SES publish a
+            # delivery event for it into the queue this pod drains.
+            - {name: UFO_SES_CONFIGURATION_SET, value: "${ses_configuration_set}"}
             # Founder campaigns: every From the same identity may send as, with the configuration
             # set that publishes each delivery event into the queue the gateway drains.
             - {name: UFO_FOUNDER_SENDERS, value: "${founder_email.senders}"}
@@ -741,6 +744,12 @@ spec:
             - secretRef: {name: ufo-platform-secrets}
           env:
             - {name: AWS_REGION, value: "${region}"}
+            # The gateway's one-message send seam. No Python in the repo sends email: an extension
+            # that has to reach a member posts here, and the gateway holds the one SES client, the
+            # suppression union, and the consumer that reports delivery. The bearer is
+            # UFO_ONBOARD_CONTROL_TOKEN, read from the platform Secret above — one shared secret for
+            # the one channel between the two services.
+            - {name: UFO_CONTROL_EMAIL_URL, value: "http://ufo-gateway.${namespace}.svc.cluster.local"}
             - {name: E2B_TEMPLATES, value: "${e2b_templates}"}
             - {name: UFO_RUNTIME_REVISION, value: "${image_tag}"}
             - {name: UFO_RUNTIME_IMAGE, value: "${bundle_image}"}
@@ -992,6 +1001,12 @@ spec:
             - secretRef: {name: ufo-platform-secrets}
           env:
             - {name: AWS_REGION, value: "${region}"}
+            # The gateway's one-message send seam. No Python in the repo sends email: an extension
+            # that has to reach a member posts here, and the gateway holds the one SES client, the
+            # suppression union, and the consumer that reports delivery. The bearer is
+            # UFO_ONBOARD_CONTROL_TOKEN, read from the platform Secret above — one shared secret for
+            # the one channel between the two services.
+            - {name: UFO_CONTROL_EMAIL_URL, value: "http://ufo-gateway.${namespace}.svc.cluster.local"}
             - {name: E2B_TEMPLATES, value: "${e2b_templates}"}
             - {name: UFO_RUNTIME_REVISION, value: "${image_tag}"}
             - {name: UFO_RUNTIME_IMAGE, value: "${bundle_image}"}

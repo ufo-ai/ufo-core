@@ -188,6 +188,7 @@ async fn worker(
             },
             sender: EmailSender::Ses(Box::new(SesEmailSender {
                 source: "no-reply@flyingobject.ai".to_string(),
+                configuration_set: "ufo-testing-transactional".to_string(),
                 region: "us-east-1".to_string(),
                 role_arn: "arn:aws:iam::111122223333:role/ufo-testing-gateway-ses".to_string(),
                 token_file,
@@ -349,8 +350,10 @@ impl Source {
     }
 }
 
+const SES_SENT: &str = r#"{"MessageId": "message-one"}"#;
+
 fn sent_ok() -> Vec<Answer> {
-    vec![ok(STS_RESPONSE), ok("{}")]
+    vec![ok(STS_RESPONSE), ok(SES_SENT)]
 }
 
 async fn row(pool: &deadpool_postgres::Pool, workspace: Uuid, email: &str) -> tokio_postgres::Row {
@@ -930,7 +933,12 @@ async fn a_seat_that_commits_after_a_later_stamped_one_is_still_materialized() {
             "acme.com",
             "2026-08-18T10:00:05Z",
         )],
-        vec![ok(STS_RESPONSE), ok("{}"), ok(STS_RESPONSE), ok("{}")],
+        vec![
+            ok(STS_RESPONSE),
+            ok(SES_SENT),
+            ok(STS_RESPONSE),
+            ok(SES_SENT),
+        ],
     )
     .await;
     assert!(fleet.deliveries.poll().await.unwrap());

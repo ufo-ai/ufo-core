@@ -55,6 +55,7 @@ from ufo.runtime.billing.accounting import (
     read_pending_usage_exports,
 )
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
+from ufo.runtime.email import EmailSends
 from ufo.runtime.ext.surface import (
     OPERATOR_EMAIL_DOMAIN,
     TERMINAL_TURN_STATUSES,
@@ -1312,6 +1313,7 @@ class ExtensionContext:
     probes: ConversationProbes | None = None
     invoker: TurnInvoker | None = None
     model: ModelAccess | None = None
+    email: EmailSends | None = None
     key_slot_for: Callable[[str], str | None] | None = None
     public_base_url: str | None = None
     home_surface: str | None = None
@@ -1321,6 +1323,11 @@ class ExtensionContext:
     member_context_member_id: UUID | None = None
     member_context_blob: WorkspaceBlobStore | None = None
     artifact_token_secret: str = ""
+    own_key_slots: tuple[str, ...] = ()
+    """Every key slot a model of this deploy keys from. A handler deciding what the balance gate is
+    doing to the bound workspace tests it through `spend_admitted`, so it reads the answer the gate
+    gives rather than the bare balance line — a workspace paying its own way for a model runs every
+    turn that model serves, whatever its prepaid balance says."""
 
     @property
     def workspace_id(self) -> UUID:
@@ -2896,12 +2903,14 @@ def context_for(
     member_context_blob: WorkspaceBlobStore | None = None,
     search: SearchProvider | None = None,
     *,
+    email: EmailSends | None = None,
     audience: Audience = SHARED_AUDIENCE,
     public_base_url: str | None = None,
     artifact_token_secret: str = "",
     home_surface: str | None = None,
     deploy_credentials: DeployCredentials = NO_DEPLOY_CREDENTIALS,
     workspace_credentials: Callable[[], Awaitable[frozenset[str]]] | None = None,
+    own_key_slots: tuple[str, ...] = (),
 ) -> ExtensionContext:
     """The scoped handle a handler receives — no workspace passed: every accessor reads the ambient
     workspace the turn or job bound (`ws_current()`), so the one context object serves whichever
@@ -2934,6 +2943,7 @@ def context_for(
         files=None if sandboxes is None else ConversationFiles(sandboxes),
         probes=probes,
         invoker=invoker,
+        email=email,
         model=(
             None
             if model_resolver is None or model_job is None
@@ -2948,4 +2958,5 @@ def context_for(
         member_context_blob=member_context_blob if member_context_read else None,
         artifact_token_secret=artifact_token_secret,
         deploy_credentials=deploy_credentials,
+        own_key_slots=own_key_slots,
     )

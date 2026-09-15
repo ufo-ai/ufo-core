@@ -51,13 +51,25 @@ So the extension does not send. It asks control to.
 
 | Layer | What lands |
 |---|---|
-| `servers/control` | `POST /internal/email/send` — one address, one rendered message, a named kind; returns the SES message id |
-| `ufo.sdk` | `send_email(...)`, the capability an extension holds; posts to that route with the control token |
-| `ufo_control` | the row the feedback consumer already updates, so a lifecycle send reports delivery like a campaign |
+| `servers/control` | `POST /internal/email/send` — one address, one rendered message, a named kind; returns the SES message id. `GET /internal/email/send/{id}` reads the delivery back |
+| `ufo.sdk` | `EmailSends`, held on the scoped context as `ctx.email`; posts to those routes with the control token. A deploy naming no control service wires none, and the capability is absent rather than silently doing nothing |
+| `ufo_control` | `email_send`, one row per message; the consumer that reports a campaign's delivery updates it by the same SES message id |
+
+An extension posts words, never markup: a subject, paragraphs separated by a blank line, and at
+most one act. One frame draws every message this deploy sends, a campaign and a balance notice
+alike, so the frame lives in control beside the sender that carries it and a second one cannot grow
+in Python. It also means the unsubscribe footer is added where the topic is known, which is the
+only place it can be: SES fills the placeholder only for a send that names a contact list.
+
+Transactional mail gains its own SES configuration set, on the topic and queue the campaign set
+already publishes to. A configuration set is what makes SES publish a delivery event at all, so
+without one the seam could send and never report; the set is separate because the identity and the
+`ses:FromAddress` condition differ from a campaign's, and the consumer does not.
 
 Suppression stays where it already is, and control applies it centrally. A hard suppression —
-bounced, complained — bars every kind. A topic opt-out bars marketing and drip, and never bars
-transactional: a member who unsubscribed from product news is still told their balance ran out.
+bounced, complained, unsubscribed — bars every kind, and unit 1 lands it. A topic opt-out bars
+marketing and drip, and never bars transactional: a member who unsubscribed from product news is
+still told their balance ran out. That half arrives with the preferences in unit 5.
 
 ## What fires a sequence
 
@@ -79,7 +91,13 @@ Three tables in the extension's own migration chain, following `app_notification
 |---|---|
 | `lifecycle_event` | `(workspace_id, member_id, name, occurred_at, payload)` — the instant a delay is measured from |
 | `lifecycle_enrollment` | one member in one sequence: `step`, `next_due_at`, `claimed_by`, `claim_expires_at`, `state` |
-| `lifecycle_send` | one attempt: `ses_message_id`, `delivery`, `attempted_at`, `last_error` |
+| `lifecycle_send` | one attempt: `(workspace_id, member_id, kind, occasion)`, `state`, `ses_message_id`, `delivery`, `last_error` |
+
+`occasion` is what makes a message once-per-reason rather than once-ever: it names the instance of
+the state that caused it — for the balance notice, the total credit the workspace has ever been
+granted, so a top-up that is spent again is a new occasion and the same admin is told again. The
+unique key over it is the claim: the row is inserted before control is called, and a second pass
+inserts nothing and sends nothing.
 
 The runner is the `scheduled_tasks` shape: a per-minute job whose candidates are the workspaces with
 a due enrollment, a lease claim on the row, and the attempt marked in the same statement that claims
