@@ -13,6 +13,9 @@ from ufo.sdk.sources import PageChange
 
 WAKE_TIME = datetime(2026, 7, 20, tzinfo=UTC)
 WAKE_ID = UUID("30000000-0000-0000-0000-000000000001")
+WAKE_LABELS = {"github": "GitHub"}
+"""The provider names the deploy's connect flow declares, for the providers a case wakes on: the
+eval process installs no flow, and the words the alert leads with must be the deploy's own."""
 
 
 def woken_inbound(
@@ -29,6 +32,7 @@ def woken_inbound(
         FeedConnection(
             id=WAKE_ID,
             provider=provider,
+            label=WAKE_LABELS[provider],
             account_id=account,
             base_url=None,
             backfill_days=None,

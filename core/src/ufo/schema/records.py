@@ -659,6 +659,9 @@ class FiredBy(BaseModel):
     kind: str
     name: str
     title: str
+    provider: str | None = None
+    """The connector provider whose feed fired it — the brand a member's view draws beside the
+    words — or None for a fire no provider stands behind."""
 
 
 class Turn(BaseModel):

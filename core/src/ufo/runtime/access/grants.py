@@ -222,12 +222,13 @@ class ConnectionSummary:
 @dataclass(frozen=True)
 class FeedConnection:
     """One connection as a feed registrar reads it: the account its streams authenticate as, the
-    tenant URL they dial, how far back their first sync reaches, and the disclosure their pages
-    carry. Every connection the workspace holds is one — which agents may read what it syncs is the
-    grant's answer, not the registrar's."""
+    name a member reads its provider as, the tenant URL they dial, how far back their first sync
+    reaches, and the disclosure their pages carry. Every connection the workspace holds is one —
+    which agents may read what it syncs is the grant's answer, not the registrar's."""
 
     id: UUID
     provider: str
+    label: str
     account_id: str
     base_url: str | None
     backfill_days: int | None
@@ -1076,7 +1077,7 @@ class ConnectFlow:
         OAuth descriptor, so it is handed in beside the providers; an open-namespace slug the broker
         serves without a declaration falls back to the slug read as words, which is the same
         rendering the catalog gives it."""
-        return self.labels.get(provider) or provider.replace("_", " ").title()
+        return self.labels.get(provider) or _slug_words(provider)
 
     def _provider(self, name: str) -> OAuthProvider:
         descriptor = self.providers.get(name)
@@ -1238,6 +1239,17 @@ def installed_connect_flow() -> ConnectFlow:
     if _installed_flow is None:
         raise ConnectUnavailable("grants unavailable: no credential key configured")
     return _installed_flow
+
+
+def provider_label(provider: str) -> str:
+    """The connector's member-facing name: what the installed connect flow declares for it, or the
+    slug read as words on a deploy that installs no flow — the words `label_for` falls back to, so
+    one provider reads one way wherever it is named."""
+    return _slug_words(provider) if _installed_flow is None else _installed_flow.label_for(provider)
+
+
+def _slug_words(provider: str) -> str:
+    return provider.replace("_", " ").title()
 
 
 def connect_bridge_workspace(request: Request) -> UUID | None:
@@ -1552,6 +1564,7 @@ async def feed_connections() -> tuple[FeedConnection, ...]:
         FeedConnection(
             id=row.id,
             provider=row.provider,
+            label=provider_label(row.provider),
             account_id=row.account_id,
             base_url=row.base_url,
             backfill_days=row.backfill_days,

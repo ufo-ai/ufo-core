@@ -30,6 +30,9 @@ from ufo.runtime.access.grants import (
 from ufo.runtime.access.grants import (
     grant_summaries as grant_summaries,
 )
+from ufo.runtime.access.grants import (
+    provider_label as provider_label,
+)
 from ufo.schema.tables import (
     MAX_BACKFILL_DAYS as MAX_BACKFILL_DAYS,
 )

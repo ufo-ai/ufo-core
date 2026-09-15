@@ -5255,6 +5255,7 @@ class SurfaceContext:
             tables.turn.c.fired_by_kind,
             tables.turn.c.fired_by_name,
             tables.turn.c.fired_by_title,
+            tables.turn.c.fired_by_provider,
             tables.turn.c.created_at,
             tables.turn.c.updated_at,
             tables.turn.c.context,
@@ -5282,7 +5283,10 @@ class SurfaceContext:
                 None
                 if row.fired_by_kind is None
                 else FiredBy(
-                    kind=row.fired_by_kind, name=row.fired_by_name, title=row.fired_by_title
+                    kind=row.fired_by_kind,
+                    name=row.fired_by_name,
+                    title=row.fired_by_title,
+                    provider=row.fired_by_provider,
                 )
             ),
             created_at=row.created_at,

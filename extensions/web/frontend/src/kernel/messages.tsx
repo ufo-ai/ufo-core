@@ -408,6 +408,11 @@ export function MessageLog({
                 <Markdown text={message.text} />
               ) : message.arrival_id ? (
                 <span className="italic text-ink-soft">{spoken(message)}</span>
+              ) : message.fired?.provider ? (
+                <span className="flex items-center gap-xs">
+                  <BrandMark provider={message.fired.provider} className="size-icon" />
+                  <span>{spoken(message)}</span>
+                </span>
               ) : (
                 spoken(message)
               )}

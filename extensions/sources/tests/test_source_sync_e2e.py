@@ -57,6 +57,7 @@ from ufo.runtime.workspace import init_workspace_credentials, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.grants import provider_label
 from ufo.sdk.sources import ConnectorSourceConfig
 from ufo.serve import _select_auth_proxy, _source_backends, _source_watch_readers
 
@@ -1203,7 +1204,9 @@ async def test_a_watched_pull_request_is_read_every_tick_and_wakes_its_conversat
             .all()
         )
     assert len(turns) == 1
-    assert turns[0]["inbound"].startswith("github: Add retry to egress dial ")
+    assert turns[0]["inbound"].startswith(
+        f"{provider_label('github')} update: Add retry to egress dial"
+    )
     assert "pull_requests: 1 " in turns[0]["inbound"]
     assert WATCHED_PULL in turns[0]["inbound"]
 

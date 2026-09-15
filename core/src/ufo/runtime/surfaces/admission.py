@@ -1148,6 +1148,7 @@ class Admission:
                 fired_by_kind=None if fired_by is None else fired_by.kind,
                 fired_by_name=None if fired_by is None else fired_by.name,
                 fired_by_title=None if fired_by is None else fired_by.title,
+                fired_by_provider=None if fired_by is None else fired_by.provider,
                 parent_turn_id=(
                     None if spawned_identity is None else spawned_identity.parent_turn_id
                 ),

@@ -322,7 +322,7 @@ test("a bubble an object's fire admitted says ufo sent it", async () => {
   wire(
     transcript({
       messages: [
-        { role: "user", text: "github: Fix the build updated", fired: true },
+        { role: "user", text: "GitHub update: Fix the build", fired: { provider: "github" } },
         { role: "assistant", text: "Reviewed." },
         { role: "user", text: "thanks" },
       ],
@@ -330,10 +330,11 @@ test("a bubble an object's fire admitted says ufo sent it", async () => {
   );
   open();
 
-  const sent = (await screen.findByText("github: Fix the build updated")).closest(
+  const sent = (await screen.findByText("GitHub update: Fix the build")).closest(
     "[data-slot=message]",
   );
   expect(sent && within(sent as HTMLElement).getByText("Sent by UFO")).toBeTruthy();
+  expect(sent?.querySelector("[style*='--brand-github']")).toBeTruthy();
   const own = screen.getByText("thanks").closest("[data-slot=message]");
   expect(own && within(own as HTMLElement).queryByText("Sent by UFO")).toBeNull();
 });

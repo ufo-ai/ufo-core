@@ -96,9 +96,7 @@ old = '''
         titles = f"{_label(changes[-1])} and {len(changes) - 1} other pages"
     else:
         titles = "; ".join(_label(change) for change in changes)
-    happened = {_disposition(change) for change in changes}
-    what = next(iter(happened)) if len(happened) == 1 else "changed"
-    return f"{connection.provider}: {titles} {what}"
+    return f"{connection.label} update: {titles}"
 '''
 new = '''
     if len(changes) == 1:

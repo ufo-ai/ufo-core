@@ -388,6 +388,7 @@ turn = sa.Table(
     sa.Column("fired_by_kind", sa.Text, nullable=True),
     sa.Column("fired_by_name", sa.Text, nullable=True),
     sa.Column("fired_by_title", sa.Text, nullable=True),
+    sa.Column("fired_by_provider", sa.Text, nullable=True),
     sa.Column("connect_authorization_url", sa.Text, nullable=True),
     sa.Column("connect_authorized_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("connect_landed_at", sa.DateTime(timezone=True), nullable=True),

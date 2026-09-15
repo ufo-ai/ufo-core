@@ -769,6 +769,7 @@ async def _fire_trigger(
             _feed_name(connection), trigger.conversation_id, trigger.resource, trigger.streams
         ),
         title=_trigger_summary(connection, trigger),
+        provider=connection.provider,
     )
     batch_id = sha256(
         "\n".join(f"{change.revision}:{change.page_id.hex}" for change in authorized).encode()
@@ -911,17 +912,16 @@ def alert_message(
 
 
 def _headline(connection: FeedConnection, changes: list[PageChange]) -> str:
-    """The one line a member reads of the alert, and the name a conversation it opens carries for
-    good — nothing but the payload names a conversation no member spoke in. A changed page's own
-    title leads: under counts alone every batch of one feed reads alike. The feed replays in
-    revision order, so the last change of a long batch is its newest."""
+    """The one line a member reads of the alert, under the provider's name and beside its mark,
+    and the name a conversation it opens carries for good — nothing but the payload names a
+    conversation no member spoke in. The changed pages' own titles follow: under counts alone every
+    batch of one feed reads alike. The feed replays in revision order, so the last change of a long
+    batch is its newest."""
     if len(changes) > ALERT_NAMED_MAX:
         titles = f"{_label(changes[-1])} and {len(changes) - 1} other pages"
     else:
         titles = "; ".join(_label(change) for change in changes)
-    happened = {_disposition(change) for change in changes}
-    what = next(iter(happened)) if len(happened) == 1 else "changed"
-    return f"{connection.provider}: {titles} {what}"
+    return f"{connection.label} update: {titles}"
 
 
 def _label(change: PageChange) -> str:

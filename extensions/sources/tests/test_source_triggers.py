@@ -62,7 +62,7 @@ from ufo.schema.records import Agent, Turn, TurnContext, TurnRuntimeConfig
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.connectors import ConnectorRegistry
 from ufo.sdk.context import SUBAGENT_SURFACE
-from ufo.sdk.grants import account_object_name
+from ufo.sdk.grants import account_object_name, provider_label
 from ufo.sdk.manifest import (
     HookContext,
     HookOutcome,
@@ -960,6 +960,7 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
         assert turn["fired_by_kind"] == SOURCE_TRIGGER_KIND
         assert turn["fired_by_name"] == trigger_name(feed.name, state.conversation_id)
         assert turn["fired_by_title"].startswith(feed.name)
+        assert turn["fired_by_provider"] == ASANA
         assert "tasks: 2 added on connection" in turn["inbound"]
         assert f"{PAGE_KIND}/{shipped.page_id}" in turn["inbound"]
         assert f"{PAGE_KIND}/{legal.page_id}" in turn["inbound"]
@@ -987,7 +988,8 @@ async def test_alert_opens_on_what_changed_and_asks_for_no_member_report(db: Non
         (turn,) = await _turns(state.conversation_id)
         headline, opened, counts, refs, closing, closed = turn["inbound"].splitlines()
         assert headline == (
-            f"{ASANA}: asana tasks: Ship the launch list; asana tasks: Follow up with legal added"
+            f"{provider_label(ASANA)} update: asana tasks: Ship the launch list; "
+            "asana tasks: Follow up with legal"
         )
         assert member_message_text(turn["inbound"]) == headline
         assert (opened, closed) == ("<agent_detail>", "</agent_detail>")
@@ -1458,7 +1460,7 @@ async def test_alert_counts_by_stream_and_never_truncates(db: None, tmp_path) ->
 
         (turn,) = await _turns(state.conversation_id)
         headline, *_ = turn["inbound"].splitlines()
-        assert headline == f"{ASANA}: gone 1 and 8 other pages changed"
+        assert headline == f"{provider_label(ASANA)} update: gone 1 and 8 other pages"
         assert "projects: 2 removed; tasks: 3 added, 4 updated on connection" in turn["inbound"]
         assert "more" not in turn["inbound"]
         assert not any(str(change.page_id) in turn["inbound"] for change in changes)

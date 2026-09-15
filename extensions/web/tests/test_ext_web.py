@@ -1747,11 +1747,12 @@ async def test_a_fired_turns_prompt_states_its_headline_as_sent_by_ufo(
                 seq=2,
                 status="running",
                 inbound=with_agent_detail(
-                    "github: Fix the build updated", "object_get refs: page/1."
+                    "GitHub update: Fix the build", "object_get refs: page/1."
                 ),
                 fired_by_kind="source_trigger",
                 fired_by_name="github-acct-one",
                 fired_by_title="github-acct-one (github account acct-one)",
+                fired_by_provider="github",
                 created_at=admitted,
                 updated_at=admitted,
             )
@@ -1767,7 +1768,13 @@ async def test_a_fired_turns_prompt_states_its_headline_as_sent_by_ufo(
     assert datetime.fromisoformat(body.pop("turn_started_at")) == admitted
     body["messages"] = _worded(body["messages"])
     assert body == {
-        "messages": [{"role": "user", "text": "github: Fix the build updated", "fired": True}],
+        "messages": [
+            {
+                "role": "user",
+                "text": "GitHub update: Fix the build",
+                "fired": {"provider": "github"},
+            }
+        ],
         "turn": str(woken),
     }
 
@@ -12649,16 +12656,21 @@ def test_projection_marks_a_fired_turns_headline_as_sent_by_ufo() -> None:
             Message(
                 role="user",
                 content=f"<context>\nmessage_ref: {woken}\n</context>\n"
-                + with_agent_detail("github: Fix the build updated", "object_get refs: page/1."),
+                + with_agent_detail("GitHub update: Fix the build", "object_get refs: page/1."),
             ),
             Message(role="assistant", content="Reviewed."),
         ),
         None,
         frozenset({woken}),
-        fired=frozenset({woken}),
+        fired={woken: "github"},
     )
     assert rendered == [
-        {"role": "user", "text": "github: Fix the build updated", "turn": woken, "fired": True},
+        {
+            "role": "user",
+            "text": "GitHub update: Fix the build",
+            "turn": woken,
+            "fired": {"provider": "github"},
+        },
         {"role": "assistant", "text": "Reviewed.", "turn": woken},
     ]
 
