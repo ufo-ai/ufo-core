@@ -137,7 +137,9 @@ from ufo.runtime.turns.transcript import (
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import (
+    BACKGROUND_TASK_KEY_PREFIX,
     MAIN_AGENT_ICON,
+    SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
     WRITEBACK_PENDING,
     AskQuestion,
@@ -3816,6 +3818,7 @@ async def _seed_pending_arrival(
     speaker_member_id: UUID | None = None,
     consumed_turn_id: UUID | None = None,
     context: TurnContext | None = None,
+    idempotency_key: str | None = None,
 ) -> UUID:
     arrival_id = uuid4()
     async with workspace_tx() as connection:
@@ -3827,6 +3830,7 @@ async def _seed_pending_arrival(
                 seq=seq,
                 body=body,
                 admission_source=admission_source,
+                idempotency_key=idempotency_key,
                 speaker_member_id=speaker_member_id,
                 admitted_turn_id=turn_id,
                 consumed_turn_id=consumed_turn_id,
@@ -3835,6 +3839,79 @@ async def _seed_pending_arrival(
             )
         )
     return arrival_id
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_agent_origin_refs_name_every_machine_envelope(db: None, tmp_path) -> None:
+    """A scheduled firing, a subagent's delivered result and a detached command's exit report are
+    machine envelopes, whether they founded a turn or landed on a running one's queue; a member's
+    words and an extension's prose are not."""
+    workspace_id, agent_id, member_id = await _seed()
+    conversation_id = await _seed_conversation(
+        workspace_id, agent_id, queue_key="root", audience=str(SHARED_AUDIENCE), member_id=None
+    )
+    spoken = await _seed_conversation_turn(
+        workspace_id, conversation_id, agent_id, seq=1, inbound="run the suite in the background"
+    )
+    alerted = await _seed_conversation_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=2,
+        inbound="GitHub update: Fix the build",
+        admission_source="internal",
+        idempotency_key="source-trigger:github:batch",
+    )
+    reported = await _seed_conversation_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=3,
+        inbound="Background task 8afad587 ended with exit code 0. Log: runs/x/tasks/8afad587.log",
+        admission_source="internal",
+        idempotency_key=f"{BACKGROUND_TASK_KEY_PREFIX}{spoken.hex}:8afad587",
+    )
+    fired = await _seed_conversation_turn(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        seq=4,
+        inbound="check",
+        admission_source="scheduled",
+    )
+    delivered = await _seed_pending_arrival(
+        workspace_id,
+        conversation_id,
+        fired,
+        seq=1,
+        body="<subagent_result>done</subagent_result>",
+        admission_source="internal",
+        idempotency_key=f"{SPAWN_RESULT_KEY_PREFIX}c7",
+    )
+    queued_report = await _seed_pending_arrival(
+        workspace_id,
+        conversation_id,
+        fired,
+        seq=2,
+        body="Background task 1f2e3d4c ended with exit code 1. Log: runs/x/tasks/1f2e3d4c.log",
+        admission_source="internal",
+        idempotency_key=f"{BACKGROUND_TASK_KEY_PREFIX}{spoken.hex}:1f2e3d4c",
+    )
+    folded = await _seed_pending_arrival(
+        workspace_id,
+        conversation_id,
+        fired,
+        seq=3,
+        body="thanks",
+        admission_source="member",
+        speaker_member_id=member_id,
+    )
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path / "blobs"))
+
+    refs = await context.agent_origin_refs(conversation_id)
+
+    assert refs == frozenset(str(ref) for ref in (reported, fired, delivered, queued_report))
+    assert not refs & {str(spoken), str(alerted), str(folded)}
 
 
 def _preview_service(handler, monkeypatch):

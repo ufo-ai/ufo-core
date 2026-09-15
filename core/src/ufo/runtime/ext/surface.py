@@ -166,6 +166,7 @@ from ufo.runtime.turns.workspace_changes import (
 from ufo.runtime.workspace import MEMBER_ROUTED_SLOTS, ws, ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
+    BACKGROUND_TASK_KEY_PREFIX,
     EXTENSION_SURFACE_PREFIX,
     MEMBER_ADMISSION,
     NON_TERMINAL_STATUSES,
@@ -4896,20 +4897,22 @@ class SurfaceContext:
 
     async def agent_origin_refs(self, conversation_id: UUID) -> frozenset[str]:
         """The `message_ref`s in this conversation whose inbound is a machine envelope rather than
-        words: a scheduled task's firing, wrapped in its cron element, and a subagent result,
-        wrapped in the element naming the child that answered. A transcript projection renders a
-        member's own words as their bubble, and neither of these is words.
+        words: a scheduled task's firing, wrapped in its cron element, a subagent result, wrapped
+        in the element naming the child that answered, and a detached command's exit report with
+        its log tail. A transcript projection renders a member's own words as their bubble, and
+        none of these is words.
 
-        Both are named by what produced them — the firing by its admission source, the delivery by
-        the key it admits under — never by reading the body. An extension invoking a turn sends the
-        member prose they are meant to read (which sources changed, which pull request to review),
-        so it is deliberately not here: `internal` alone would take those prompts away and leave an
-        answer to nothing. Both id spaces answer, because a turn's founding inbound is referenced by
-        the turn and a drained arrival by its queue row."""
-        machine = sa.or_(
-            tables.turn.c.admission_source == SCHEDULED_ADMISSION,
+        All are named by what produced them — the firing by its admission source, the delivery and
+        the report by the keys they admit under — never by reading the body. An extension invoking
+        a turn sends the member prose they are meant to read (which sources changed, which pull
+        request to review), so it is deliberately not here: `internal` alone would take those
+        prompts away and leave an answer to nothing. Both id spaces answer, because a turn's
+        founding inbound is referenced by the turn and a drained arrival by its queue row."""
+        machine_keys = sa.or_(
             tables.turn.c.idempotency_key.startswith(SPAWN_RESULT_KEY_PREFIX),
+            tables.turn.c.idempotency_key.startswith(BACKGROUND_TASK_KEY_PREFIX),
         )
+        machine = sa.or_(tables.turn.c.admission_source == SCHEDULED_ADMISSION, machine_keys)
         async with workspace_tx() as connection:
             refs = (
                 await connection.execute(
@@ -4922,8 +4925,13 @@ class SurfaceContext:
                         sa.select(tables.inbound_message.c.id).where(
                             tables.inbound_message.c.workspace_id == self.workspace_id,
                             tables.inbound_message.c.conversation_id == conversation_id,
-                            tables.inbound_message.c.idempotency_key.startswith(
-                                SPAWN_RESULT_KEY_PREFIX
+                            sa.or_(
+                                tables.inbound_message.c.idempotency_key.startswith(
+                                    SPAWN_RESULT_KEY_PREFIX
+                                ),
+                                tables.inbound_message.c.idempotency_key.startswith(
+                                    BACKGROUND_TASK_KEY_PREFIX
+                                ),
                             ),
                         ),
                     )

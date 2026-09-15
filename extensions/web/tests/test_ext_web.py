@@ -258,6 +258,7 @@ from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
 from ufo.schema.records import (
+    BACKGROUND_TASK_KEY_PREFIX,
     MEMBER_ADMISSION,
     SPAWN_RESULT_KEY_PREFIX,
     SUBAGENT_SURFACE,
@@ -12602,6 +12603,56 @@ async def test_an_agents_own_reply_is_never_read_as_a_payload(
         {"role": "user", "text": "Give me the json."},
         {"role": "assistant", "text": reply},
     ]
+
+
+async def test_a_background_task_report_is_no_member_bubble(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A detached command's exit report wakes the agent with the task id, the exit code and the
+    log tail — machine detail the agent acts on, not words for the member. The projection skips
+    it by the key it admits under, and the member reads the reply alone."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    conversation_id, first = await _seed_web_turn(
+        workspace_id,
+        agent_id,
+        member_id,
+        "owner@example.com",
+        TerminalFrame(status="done", text="Started the suite in the background."),
+    )
+    woken = uuid4()
+    admitted = datetime.now(UTC) - timedelta(minutes=8)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=woken,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=2,
+                status="running",
+                inbound=(
+                    "Background task 8afad587 ended with exit code 0. "
+                    "Log: $UFO_HOME/runs/x/tasks/8afad587.log\npending=0 fail=0"
+                ),
+                admission_source="internal",
+                idempotency_key=f"{BACKGROUND_TASK_KEY_PREFIX}{first.hex}:8afad587",
+                created_at=admitted,
+                updated_at=admitted,
+            )
+        )
+
+    reloaded = await client.get(
+        f"/surface/web/agents/{agent_id}/conversations/{conversation_id}/transcript",
+        headers=cookie,
+    )
+
+    assert reloaded.status_code == 200
+    body = reloaded.json()
+    assert datetime.fromisoformat(body.pop("turn_started_at")) == admitted
+    assert body == {"messages": [], "turn": str(woken)}
 
 
 def test_projection_draws_no_member_bubble_for_a_delivered_subagent_result() -> None:

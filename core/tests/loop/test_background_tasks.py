@@ -23,7 +23,6 @@ from ufo.harness.sandbox.session import (
 from ufo.host.tools.builtins import BashInput, bash_handler
 from ufo.runtime.background_tasks import (
     DETACHED_FOLLOW,
-    IDEMPOTENCY_PREFIX,
     BackgroundTaskSweep,
 )
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
@@ -31,7 +30,7 @@ from ufo.runtime.tools.context import SpawnResult, ToolContext
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn
+from ufo.schema.records import BACKGROUND_TASK_KEY_PREFIX, Agent, Turn
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -287,7 +286,7 @@ async def test_a_finished_task_is_posted_once_and_the_stamp_clears(
     turns = await _turns(rig)
     assert len(turns) == 2
     posted = turns[1]
-    assert posted.idempotency_key == f"{IDEMPOTENCY_PREFIX}{rig.turn.id.hex}:{task}"
+    assert posted.idempotency_key == f"{BACKGROUND_TASK_KEY_PREFIX}{rig.turn.id.hex}:{task}"
     assert f"Background task {task} ended with exit code 3." in posted.inbound
     assert f"{base}.log" in posted.inbound
     assert "finished-marker" in posted.inbound

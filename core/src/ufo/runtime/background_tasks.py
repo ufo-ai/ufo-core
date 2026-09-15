@@ -16,7 +16,7 @@ from ufo.harness.sandbox.session import ExecResult, shell_path
 from ufo.runtime.ext.context import AgentArchived, TurnInvoker, conversation_agent_id
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
-from ufo.schema.records import Turn
+from ufo.schema.records import BACKGROUND_TASK_KEY_PREFIX, Turn
 
 BACKGROUND_TASKS_JOB = "background_tasks"
 BACKGROUND_TASKS_SCHEDULE = "0 * * * * *"
@@ -24,7 +24,6 @@ DETACHED_FOLLOW = timedelta(hours=24)
 FOLLOW_HOURS = int(DETACHED_FOLLOW.total_seconds() // 3600)
 LOG_TAIL_BYTES = 4000
 PROBE_TIMEOUT_SECONDS = 15
-IDEMPOTENCY_PREFIX = "background-task:"
 TASK_SCAN = (
     "base={base}; "
     'if [ -e "$base.exit" ]; then printf "exit %s\\n" "$(cat "$base.exit")"; '
@@ -217,7 +216,7 @@ class BackgroundTaskSweep:
                 followed.conversation_id,
                 agent_id,
                 body,
-                f"{IDEMPOTENCY_PREFIX}{followed.turn_id.hex}:{followed.task}",
+                f"{BACKGROUND_TASK_KEY_PREFIX}{followed.turn_id.hex}:{followed.task}",
                 holds_work_already_done=True,
             )
         except AgentArchived:
