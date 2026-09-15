@@ -26,8 +26,10 @@ from ufo.runtime.billing.accounting import (
     SANDBOX_TOKENS_ATTEMPT,
     SANDBOX_TOKENS_DIMENSION,
     TOKENS_DIMENSION,
+    JobDayRollup,
     SpendRollup,
     TurnCost,
+    job_day_candidates,
     read_turn_cost,
     record_egress_request,
     record_image_usage,
@@ -35,6 +37,7 @@ from ufo.runtime.billing.accounting import (
     record_turn_usage,
     record_video_usage,
     record_workspace_usage,
+    rolled_days,
 )
 from ufo.runtime.billing.balance import credit
 from ufo.runtime.workspace import (
@@ -720,6 +723,132 @@ async def _spawn_child_turn(
     return child_turn
 
 
+async def _seed_job_spend(
+    connection: AsyncConnection, workspace_id: UUID, now: datetime, ages: tuple[timedelta, ...]
+) -> None:
+    for offset, age in enumerate(ages, start=1):
+        await record_workspace_usage(
+            connection, workspace_id, "claude-opus-4-8", Usage(input_tokens=offset * 100)
+        )
+        await connection.execute(
+            sa.update(tables.ledger)
+            .where(
+                tables.ledger.c.workspace_id == workspace_id,
+                tables.ledger.c.turn_id.is_(None),
+                tables.ledger.c.amount == offset * 100,
+            )
+            .values(created_at=now - age)
+        )
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_folding_job_days_leaves_every_usage_answer_unchanged(db: None) -> None:
+    """The fold is an index over rows the ledger still holds, so reading through it has to answer
+    exactly what reading the ledger answered. The ages straddle both instants a range is cut at —
+    the start of the selected period and the start of the one before it — because a folded day is
+    whole and cannot say which side of a cut its spend fell on."""
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await record_turn_usage(connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE)
+        await _seed_job_spend(
+            connection,
+            workspace_id,
+            now,
+            (
+                timedelta(days=1),
+                timedelta(days=5),
+                timedelta(days=30, hours=-1),
+                timedelta(days=30, hours=1),
+                timedelta(days=59, hours=23),
+                timedelta(days=60, hours=1),
+            ),
+        )
+    async with workspace_tx() as connection:
+        before = await SpendRollup(workspace_id).read(connection, 30 * 86_400)
+    async with workspace_tx() as connection:
+        folded = await JobDayRollup(workspace_id).roll(connection, now)
+    async with workspace_tx() as connection:
+        after = await SpendRollup(workspace_id).read(connection, 30 * 86_400)
+    assert folded
+    assert after == before
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_folding_job_days_leaves_today_in_the_ledger_and_repeats_clean(db: None) -> None:
+    """Today is still being written, so it stays in the ledger and the read takes it from there.
+    A second pass finds nothing left to fold, which is what lets the job run every ten minutes."""
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        workspace_id, _turn_id = await _seed_turn(connection)
+        await _seed_job_spend(
+            connection, workspace_id, now, (timedelta(days=2), timedelta(minutes=5))
+        )
+    async with workspace_tx() as connection:
+        first = await JobDayRollup(workspace_id).roll(connection, now)
+    async with workspace_tx() as connection:
+        second = await JobDayRollup(workspace_id).roll(connection, now)
+        days = (
+            await connection.execute(
+                sa.select(tables.ledger_job_day.c.day, tables.ledger_job_day.c.amount).where(
+                    tables.ledger_job_day.c.workspace_id == workspace_id
+                )
+            )
+        ).all()
+    assert first == ((now - timedelta(days=2)).date(),)
+    assert second == ()
+    assert [(row.day, row.amount) for row in days] == [((now - timedelta(days=2)).date(), 100)]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_fold_is_bounded_by_the_watermark_the_skip_was_built_from(db: None) -> None:
+    """The read takes a snapshot per statement, so the job can commit another day between the
+    watermark read and the fold read. Both halves are bounded by the watermark rather than by what
+    the fold holds, so that day stays in the ledger half alone instead of being counted twice."""
+    now = datetime.now(UTC)
+    async with workspace_tx() as connection:
+        workspace_id, _turn_id = await _seed_turn(connection)
+        await _seed_job_spend(connection, workspace_id, now, (timedelta(days=3), timedelta(days=2)))
+        await JobDayRollup(workspace_id).roll(connection, now)
+    stale = (now - timedelta(days=3)).date()
+    async with workspace_tx() as connection:
+        bounded = (
+            await connection.execute(
+                rolled_days(workspace_id, stale, now - timedelta(days=30), None).totals
+            )
+        ).one()
+    assert int(bounded.tokens) == 100
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_day_stays_open_until_a_transaction_stamped_inside_it_must_have_committed(
+    db: None,
+) -> None:
+    """`record_workspace_usage` stamps `created_at` with the transaction's start, so one that began
+    before midnight commits onto yesterday after midnight. A day the fold closes is never revisited,
+    so closing one the instant it ends would drop that row from every usage answer."""
+    midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    async with workspace_tx() as connection:
+        workspace_id, _turn_id = await _seed_turn(connection)
+        await _seed_job_spend(connection, workspace_id, midnight, (timedelta(minutes=1),))
+    async with workspace_tx() as connection:
+        early = await JobDayRollup(workspace_id).roll(connection, midnight + timedelta(minutes=1))
+    async with workspace_tx() as connection:
+        settled = await JobDayRollup(workspace_id).roll(connection, midnight + timedelta(hours=1))
+    assert early == ()
+    assert settled == ((midnight - timedelta(days=1)).date(),)
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_fold_names_its_candidates_without_reading_the_ledger(db: None) -> None:
+    """A workspace that has never booked a turn-less row is still named, because asking the ledger
+    which workspaces are behind is a full scan of the table this fold exists to stop reading."""
+    async with workspace_tx() as connection:
+        workspace_id, _turn_id = await _seed_turn(connection)
+    candidates = job_day_candidates()
+    assert workspace_id in await candidates()
+
+
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_spend_by_origin_gathers_a_subagents_burn_under_the_channel(db: None) -> None:
     async with workspace_tx() as connection:
@@ -867,9 +996,9 @@ async def test_spend_rollup_reads_each_report_in_a_bounded_statement_count(db: N
             all_time_statements = len(statements)
         finally:
             sa.event.remove(connection.sync_connection, "before_cursor_execute", record)
-    assert workspace_statements == 5
+    assert workspace_statements == 6
     assert member_statements == 3
-    assert all_time_statements == 4
+    assert all_time_statements == 5
     workspace_rollup = next(query for query in workspace_queries if " AS period" in query)
     workspace_rollup = " ".join(workspace_rollup.split())
     workspace_scope = workspace_rollup.rsplit(" WHERE ", 1)[1].split(" GROUP BY ", 1)[0]

@@ -35,6 +35,7 @@ from ufo.runtime.access.connectors import Credential
 from ufo.runtime.access.grants import INDEX_REAP_KEY_PREFIX, GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.background_tasks import BACKGROUND_TASKS_JOB, BackgroundTaskSweep
+from ufo.runtime.billing.accounting import JOB_DAY_ROLLUP_JOB
 from ufo.runtime.billing.balance import credit, set_reserve
 from ufo.runtime.delivery import DeliverySweep
 from ufo.runtime.ext.context import (
@@ -5317,6 +5318,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         RESULT_DELIVERY_JOB,
         BACKGROUND_TASKS_JOB,
         INDEX_REAP_JOB,
+        JOB_DAY_ROLLUP_JOB,
         PRODUCT_CENSUS_JOB,
     ]
     assert all(spec.schedule is not None for spec in specs)
@@ -5327,6 +5329,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         f"{CORE_EXTENSION}:{RESULT_DELIVERY_JOB}",
         f"{CORE_EXTENSION}:{BACKGROUND_TASKS_JOB}",
         f"{CORE_EXTENSION}:{INDEX_REAP_JOB}",
+        f"{CORE_EXTENSION}:{JOB_DAY_ROLLUP_JOB}",
         f"{CORE_EXTENSION}:{PRODUCT_CENSUS_JOB}",
     }
 

@@ -1082,6 +1082,259 @@ def _token_cost_sum() -> sa.ColumnElement[int]:
     )
 
 
+JOB_DAY_ROLLUP_JOB = "job_day_rollup"
+JOB_DAY_ROLLUP_SCHEDULE = "0 30 0 * * *"
+JOB_DAY_SETTLE_SECONDS = 900
+
+
+def _earliest(held: datetime | None, offered: datetime | None) -> datetime | None:
+    if offered is None:
+        return held
+    return offered if held is None or offered < held else held
+
+
+def _settled(now: datetime) -> date:
+    """The first day still open to folding. `record_workspace_usage` stamps `created_at` with
+    `now()`, which Postgres reads as the transaction's start, so a transaction that began before
+    midnight can commit a row onto yesterday after midnight. A day the fold has closed is never
+    revisited and its rows are dropped from the ledger read, so closing one early loses that spend
+    outright. The margin holds a day open until a transaction stamped inside it must have
+    committed or died."""
+    return (now - timedelta(seconds=JOB_DAY_SETTLE_SECONDS)).date()
+
+
+def _day_start(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, tzinfo=UTC)
+
+
+def _previous_start(cutoff: datetime | None, now: datetime) -> datetime | None:
+    return None if cutoff is None else cutoff - (now - cutoff)
+
+
+async def _rolled_through(connection: AsyncConnection, workspace_id: UUID) -> date | None:
+    """The newest day this workspace's turn-less spend is folded through, or None when none is.
+    The writer rolls closed days oldest first, so every day up to this one is answered by
+    `ledger_job_day` and every later row is still in the ledger."""
+    rolled = (
+        await connection.execute(
+            sa.select(sa.func.max(tables.ledger_job_day.c.day)).where(
+                tables.ledger_job_day.c.workspace_id == workspace_id
+            )
+        )
+    ).scalar()
+    return None if rolled is None else date.fromisoformat(str(rolled))
+
+
+@dataclass(frozen=True)
+class RolledDays:
+    """The folded days a usage read stands on: the ledger predicate that skips what the fold
+    already answers, and the folded rows that answer it instead. The two are built together
+    because they must name the same span exactly once — a day counted in both is billed twice,
+    and a day in neither vanishes."""
+
+    skip: sa.ColumnElement[bool]
+    rows: sa.Select[tuple[str, bool, object, str, str, str, str, int, int, datetime]]
+    totals: sa.Select[tuple[int, int, int, datetime]]
+
+
+def rolled_days(
+    workspace_id: UUID,
+    rolled_through: date,
+    cutoff: datetime | None,
+    previous_start: datetime | None,
+) -> RolledDays:
+    """Split a workspace's turn-less spend between the fold and the ledger for one read.
+
+    Both halves are bounded by the same `rolled_through` the ledger predicate was built from, not
+    by what the fold holds when each statement runs. The read takes a snapshot per statement, so a
+    day the job commits between them would otherwise arrive in the fold while the ledger predicate
+    still admits it, and be counted twice.
+
+    Two days are always read from the ledger however far the fold has run: the day the range
+    starts in and the day the selected period starts in. A folded day is whole, so a day a
+    boundary cuts through cannot say which side of it its spend fell on, and counting the whole
+    day would bill the part outside the range. Everything else on a folded day comes from the
+    fold, and everything after it from the ledger."""
+    folded = tables.ledger_job_day
+    mine = folded.c.workspace_id == workspace_id
+    partial = tuple({moment.date() for moment in (cutoff, previous_start) if moment is not None})
+    skip: sa.ColumnElement[bool] = tables.ledger.c.turn_id.isnot(None) | (
+        tables.ledger.c.created_at >= _day_start(rolled_through + timedelta(days=1))
+    )
+    for day in partial:
+        skip |= (tables.ledger.c.created_at >= _day_start(day)) & (
+            tables.ledger.c.created_at < _day_start(day + timedelta(days=1))
+        )
+    whole = mine & (folded.c.day <= rolled_through)
+    if partial:
+        whole &= folded.c.day.notin_(partial)
+    token = folded.c.dimension.in_(TOKEN_DIMENSIONS)
+    selected = sa.true() if cutoff is None else folded.c.day > cutoff.date()
+    rows = sa.select(
+        (
+            sa.literal(SELECTED_PERIOD)
+            if previous_start is None
+            else sa.case((selected, SELECTED_PERIOD), else_=PREVIOUS_PERIOD)
+        ).label("period"),
+        token.label("token"),
+        sa.case((selected, folded.c.day)).label("day"),
+        sa.case((selected, folded.c.dimension)).label("dimension"),
+        sa.case((selected & token, folded.c.model)).label("model"),
+        sa.case((selected, folded.c.price_digest)).label("price_digest"),
+        sa.cast(sa.null(), sa.Text).label("execution"),
+        folded.c.amount.label("amount"),
+        folded.c.priced_micro_usd.label("priced"),
+        folded.c.first_used_at.label("first_used_at"),
+    ).where(whole if previous_start is None else whole & (folded.c.day > previous_start.date()))
+    totals = sa.select(
+        sa.func.coalesce(sa.func.sum(sa.case((token, folded.c.amount), else_=0)), 0).label(
+            "tokens"
+        ),
+        sa.func.coalesce(
+            sa.func.sum(sa.case((token, folded.c.priced_micro_usd), else_=0)), 0
+        ).label("token_cost"),
+        sa.func.coalesce(sa.func.sum(folded.c.priced_micro_usd), 0).label("cost"),
+        sa.func.min(folded.c.first_used_at).label("first_used_at"),
+    ).where(whole)
+    return RolledDays(skip=skip, rows=rows, totals=totals)
+
+
+@dataclass(frozen=True)
+class JobDayRollup:
+    """Fold a workspace's turn-less ledger rows — a background job's model spend, which reaches no
+    member, agent or conversation — into one row per closed day, dimension, model and price digest.
+
+    Those rows are 90% of a busy workspace's ledger — 637,767 of the 730,257 in a 30-day window on
+    2026-09-15 — and every usage read scanned all of them to reach totals no reader needs per
+    call.
+
+    A closed day is rewritten whole rather than merged into. `record_workspace_usage` inserts a
+    turn-less row and never updates it, so recomputing a day always yields the same sums and the
+    delete-then-insert is idempotent under replay. Today stays in the ledger, because it is still
+    being written."""
+
+    workspace_id: UUID
+
+    async def roll(self, connection: AsyncConnection, now: datetime) -> tuple[date, ...]:
+        rolled_through = await _rolled_through(connection, self.workspace_id)
+        days = await self._pending_days(connection, now, rolled_through)
+        for day in days:
+            await self._write_day(connection, day, now)
+        return days
+
+    async def _pending_days(
+        self, connection: AsyncConnection, now: datetime, rolled_through: date | None
+    ) -> tuple[date, ...]:
+        scope = (
+            (tables.ledger.c.workspace_id == self.workspace_id)
+            & tables.ledger.c.turn_id.is_(None)
+            & (tables.ledger.c.created_at < _day_start(_settled(now)))
+        )
+        if rolled_through is not None:
+            scope &= tables.ledger.c.created_at >= _day_start(rolled_through + timedelta(days=1))
+        day = sa.func.date(tables.ledger.c.created_at).label("day")
+        rows = await connection.execute(sa.select(day).where(scope).distinct().order_by(day))
+        return tuple(sorted(date.fromisoformat(str(row.day)) for row in rows))
+
+    async def _write_day(self, connection: AsyncConnection, day: date, now: datetime) -> None:
+        await connection.execute(
+            sa.delete(tables.ledger_job_day).where(
+                tables.ledger_job_day.c.workspace_id == self.workspace_id,
+                tables.ledger_job_day.c.day == day,
+            )
+        )
+        start = _day_start(day)
+        totals = await connection.execute(
+            sa.select(
+                tables.ledger.c.dimension,
+                tables.ledger.c.model,
+                tables.ledger.c.price_digest,
+                sa.func.sum(tables.ledger.c.amount).label("amount"),
+                sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+                sa.func.min(tables.ledger.c.created_at).label("first_used_at"),
+            )
+            .where(
+                tables.ledger.c.workspace_id == self.workspace_id,
+                tables.ledger.c.turn_id.is_(None),
+                tables.ledger.c.created_at >= start,
+                tables.ledger.c.created_at < start + timedelta(days=1),
+            )
+            .group_by(
+                tables.ledger.c.dimension, tables.ledger.c.model, tables.ledger.c.price_digest
+            )
+        )
+        for row in totals:
+            await connection.execute(
+                sa.insert(tables.ledger_job_day).values(
+                    id=uuid4(),
+                    workspace_id=self.workspace_id,
+                    day=day,
+                    dimension=row.dimension,
+                    model=row.model,
+                    price_digest=row.price_digest,
+                    amount=int(row.amount),
+                    priced_micro_usd=int(row.priced),
+                    first_used_at=row.first_used_at,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+
+def job_day_candidates() -> WorkspaceCandidates:
+    """Every workspace, because naming only the ones with spend to fold costs more than folding.
+
+    The ledger carries no index that answers "turn-less rows on a day this workspace has not
+    folded": `date(created_at)` is not sargable and the turn-less rows are most of the table, so
+    the question is a full scan of the one table this change exists to stop reading. A workspace
+    with nothing to fold answers in an indexed range scan of its own rows instead, and the job
+    fires once a day, because a day closes once a day."""
+    return owner_candidates(lambda: sa.select(tables.workspace.c.id))
+
+
+@dataclass(frozen=True)
+class _AllTime:
+    tokens: int
+    token_cost: int
+    cost: int
+    first_used_at: datetime | None
+
+
+async def _all_time(
+    connection: AsyncConnection,
+    source: sa.FromClause,
+    scope: sa.ColumnElement[bool],
+    rolled: RolledDays | None,
+) -> _AllTime:
+    """Everything this scope ever spent, over the ledger and whatever the fold already answers for.
+    The two are disjoint by construction — the caller's scope carries `rolled.skip`, which drops
+    from the ledger read exactly the days `rolled.totals` sums — so they add rather than overlap."""
+    totals = (
+        await connection.execute(
+            sa.select(
+                _token_sum().label("tokens"),
+                _token_cost_sum().label("token_cost"),
+                sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0).label("cost"),
+                sa.func.min(tables.ledger.c.created_at).label("first_used_at"),
+            )
+            .select_from(source)
+            .where(scope)
+        )
+    ).one()
+    held = _AllTime(
+        int(totals.tokens), int(totals.token_cost), int(totals.cost), totals.first_used_at
+    )
+    if rolled is None:
+        return held
+    folded = (await connection.execute(rolled.totals)).one()
+    return _AllTime(
+        held.tokens + int(folded.tokens),
+        held.token_cost + int(folded.token_cost),
+        held.cost + int(folded.cost),
+        _earliest(held.first_used_at, folded.first_used_at),
+    )
+
+
 async def _ledger_rollup(
     connection: AsyncConnection,
     source: sa.FromClause,
@@ -1089,10 +1342,11 @@ async def _ledger_rollup(
     cutoff: datetime | None,
     now: datetime,
     execution_column: sa.ColumnElement[str] | None,
+    rolled: RolledDays | None = None,
 ) -> _LedgerRollup:
     created_at = tables.ledger.c.created_at
     selected = sa.true() if cutoff is None else created_at >= cutoff
-    previous_start = None if cutoff is None else cutoff - (now - cutoff)
+    previous_start = _previous_start(cutoff, now)
     period = (
         sa.literal(SELECTED_PERIOD)
         if previous_start is None
@@ -1116,32 +1370,12 @@ async def _ledger_rollup(
             )
         )
     ).label("execution")
-    all_time_tokens = 0
-    all_time_token_cost = 0
-    all_time_cost = 0
-    first_used_at: datetime | None = None
+    all_time = _AllTime(0, 0, 0, None)
     detail_scope = scope
     if previous_start is not None:
-        totals = (
-            await connection.execute(
-                sa.select(
-                    _token_sum().label("tokens"),
-                    _token_cost_sum().label("token_cost"),
-                    sa.func.coalesce(sa.func.sum(tables.ledger.c.priced_micro_usd), 0).label(
-                        "cost"
-                    ),
-                    sa.func.min(created_at).label("first_used_at"),
-                )
-                .select_from(source)
-                .where(scope)
-            )
-        ).one()
-        all_time_tokens = int(totals.tokens)
-        all_time_token_cost = int(totals.token_cost)
-        all_time_cost = int(totals.cost)
-        first_used_at = totals.first_used_at
+        all_time = await _all_time(connection, source, scope, rolled)
         detail_scope &= created_at >= previous_start
-    rows = await connection.execute(
+    detail = (
         sa.select(
             period,
             token,
@@ -1158,6 +1392,11 @@ async def _ledger_rollup(
         .where(detail_scope)
         .group_by(period, token, day, dimension, model, price_digest, execution)
     )
+    rows = await connection.execute(detail if rolled is None else detail.union_all(rolled.rows))
+    all_time_tokens = all_time.tokens
+    all_time_token_cost = all_time.token_cost
+    all_time_cost = all_time.cost
+    first_used_at = all_time.first_used_at
     selected_tokens = 0
     selected_token_cost = 0
     selected_cost = 0
@@ -1258,13 +1497,23 @@ class SpendRollup:
         if cutoff is not None:
             window &= tables.ledger.c.created_at >= cutoff
         member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
+        rolled_through = await _rolled_through(connection, self.workspace_id)
+        rolled = (
+            None
+            if rolled_through is None
+            else rolled_days(
+                self.workspace_id, rolled_through, cutoff, _previous_start(cutoff, now)
+            )
+        )
+        mine = tables.ledger.c.workspace_id == self.workspace_id
         ledger = await _ledger_rollup(
             connection,
             tables.ledger,
-            tables.ledger.c.workspace_id == self.workspace_id,
+            mine if rolled is None else mine & rolled.skip,
             cutoff,
             now,
             None,
+            rolled,
         )
         by_member = tuple(
             SubjectTotal(row.member_id, row.email, int(row.tokens), int(row.priced))

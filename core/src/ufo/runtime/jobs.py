@@ -47,9 +47,13 @@ from ufo.runtime.access.grants import INDEX_REAP_EXTENSION, INDEX_REAP_KEY_PREFI
 from ufo.runtime.background_tasks import BACKGROUND_TASKS_JOB, BACKGROUND_TASKS_SCHEDULE
 from ufo.runtime.billing.accounting import (
     ALLOW,
+    JOB_DAY_ROLLUP_JOB,
+    JOB_DAY_ROLLUP_SCHEDULE,
     BalanceGate,
+    JobDayRollup,
     OffTurnSpendRefused,
     SpendEvaluator,
+    job_day_candidates,
 )
 from ufo.runtime.billing.balance import funded
 from ufo.runtime.candidates import WorkspaceCandidates, owner_candidates
@@ -906,6 +910,10 @@ def core_jobs(
         await product_census()
         await onboarding_census()
 
+    async def _roll_job_days(context: ExtensionContext) -> None:
+        async with workspace_tx() as connection:
+            await JobDayRollup(ws_current().workspace_id).roll(connection, datetime.now(UTC))
+
     async def _reap_index(context: ExtensionContext) -> None:
         await reap_index_queue(context.store, context.index)
 
@@ -978,6 +986,12 @@ def core_jobs(
             schedule=INDEX_REAP_SCHEDULE,
             handler=_reap_index,
             candidates=_reap_candidates(),
+        ),
+        JobSpec(
+            name=JOB_DAY_ROLLUP_JOB,
+            schedule=JOB_DAY_ROLLUP_SCHEDULE,
+            handler=_roll_job_days,
+            candidates=job_day_candidates(),
         ),
         JobSpec(
             name=PRODUCT_CENSUS_JOB,

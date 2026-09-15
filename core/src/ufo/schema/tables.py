@@ -629,6 +629,25 @@ ledger = sa.Table(
     sa.Index("ledger_workspace_created", "workspace_id", "created_at"),
 )
 
+ledger_job_day = sa.Table(
+    "ledger_job_day",
+    metadata,
+    sa.Column("id", sa.Uuid, primary_key=True),
+    sa.Column("workspace_id", sa.Uuid, nullable=False),
+    sa.Column("day", sa.Date, nullable=False),
+    sa.Column("dimension", sa.Text, nullable=False),
+    sa.Column("model", sa.Text, nullable=False),
+    sa.Column("price_digest", sa.Text, nullable=True),
+    sa.Column("amount", sa.BigInteger, nullable=False),
+    sa.Column("priced_micro_usd", sa.BigInteger, nullable=False),
+    sa.Column("first_used_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("amount > 0", name="ledger_job_day_amount"),
+    sa.CheckConstraint("priced_micro_usd >= 0", name="ledger_job_day_priced"),
+    sa.Index("ledger_job_day_workspace", "workspace_id", "day"),
+)
+
 ledger_export = sa.Table(
     "ledger_export",
     metadata,
