@@ -318,6 +318,46 @@ FIRST_RUN_PROVIDERS = (
 
 FIRST_RUN_PROVIDER_NAMES = frozenset(tile.name for tile in FIRST_RUN_PROVIDERS)
 
+
+class McpServerTile(BaseModel):
+    """One MCP server this deploy offers by name. `url` is the server's own endpoint and `token`
+    names the credential its vendor issues, so connecting one asks for that token alone and the
+    member never types a URL. `name` is the name the value is filed under in the `mcp_servers`
+    slot, which is also the name `list_mcp_tools` and `call_mcp_tool` take as `server`."""
+
+    name: str
+    label: str
+    url: str
+    token: str
+    summary: str
+    group: str
+
+
+MCP_SERVERS = (
+    McpServerTile(
+        name="neon",
+        label="Neon",
+        url="https://mcp.neon.tech/mcp",
+        token="Neon API key",
+        summary="Read and change Postgres projects and branches.",
+        group="Developer platforms",
+    ),
+    McpServerTile(
+        name="render",
+        label="Render",
+        url="https://mcp.render.com/mcp",
+        token="Render API key",
+        summary="Read services, deploys, and logs.",
+        group="Developer platforms",
+    ),
+)
+"""A row earns its place by answering an `Authorization: Bearer` header and by reaching a provider
+no broker already connects. Supabase and Hugging Face answer the header but Composio brokers both
+over managed OAuth, which beats asking a member for a personal access token; a server authorizing
+over OAuth issues no token to ask for at all."""
+
+MCP_SERVER_NAMES = frozenset(tile.name for tile in MCP_SERVERS)
+
 TRACKERS = ("linear", "jira", "asana")
 SUPPORT = ("intercom", "zendesk")
 CRM = ("hubspot", "salesforce", "attio")

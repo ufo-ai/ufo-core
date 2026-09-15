@@ -41,6 +41,7 @@ import {
 import { Td, TdFact } from "@/components/ui/table";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import type { Placement } from "@/kernel/pager";
+import { usePageSearch } from "@/kernel/pane";
 import {
   Notice,
   type NoticeState,
@@ -64,13 +65,19 @@ import { cn } from "@/lib/cn";
 import { ConsentLink, openConsentWindow } from "@/lib/consent";
 import { Moment } from "@/lib/moments";
 import { agentName } from "@/lib/agentName";
-import { BASE, getJson, postIntent, postObjectAction, type Fetched } from "@/lib/api";
+import { BASE, getJson, postAction, postIntent, postObjectAction, type Fetched } from "@/lib/api";
 import { ownerLabel, useViewer } from "@/lib/audience";
 import { ProviderGlyph } from "@/lib/providerGlyph";
 import { connectArrival } from "@/lib/router";
 import { useAgents, useMainAgent } from "@/lib/mainAgent";
-import type { Agent } from "@/lib/types";
-import { FIRST_RUN_READ, WATCH_MS, type FirstRunPayload } from "@/lib/firstRun";
+import type { ActionView, Agent } from "@/lib/types";
+import {
+  FIRST_RUN_READ,
+  WATCH_MS,
+  type FirstRunPayload,
+  type McpServerTile,
+} from "@/lib/firstRun";
+import { MCP_SERVERS_SLOT } from "@/views/CredentialPrompt";
 import { ConnectAccount } from "@/views/ConnectAccount";
 import { CONNECT_INSTALLS, WorkspaceChannels } from "@/views/Surfaces";
 
@@ -191,6 +198,14 @@ function connectionFacts(
   ];
 }
 
+/** `searched` is what the broker's catalogue already returned for this term, passed whatever it
+ *  reads as: that search matches a category too, which no spelling of a label here would keep. */
+function rowMatches(row: ConnectionRow, query: string, searched: Set<string>): boolean {
+  if (!query || searched.has(row.name)) return true;
+  const said = [row.label, row.name, row.entry ? accountHeld(row.entry) : ""].join(" ");
+  return said.toLowerCase().includes(query.toLowerCase());
+}
+
 function matches(entry: Connection | PoolConnection, query: string): boolean {
   const said = [
     entry.provider,
@@ -209,7 +224,21 @@ type ConnectionRow = {
   group: string;
   entry: PoolConnection | null;
   installed: boolean;
+  /** Set on a named MCP server, which holds a token rather than a consent leg — so its row
+   *  connects through the credential prompt and never through the `connect` verb. */
+  mcp: McpServerTile | null;
 };
+
+type CredentialSlotView = { slot: string; entries: string[] };
+type CredentialsPayload = { slots: CredentialSlotView[]; actions: ActionView[] };
+
+/** The MCP servers this workspace has configured, by name — the same names `connectionRows` files
+ *  a connected server's row under. */
+function mcpHeld(state: PanelState<CredentialsPayload>): Set<string> {
+  if (state.phase !== "ready") return new Set();
+  const slot = state.payload.slots.find((row) => row.slot === MCP_SERVERS_SLOT);
+  return new Set(slot?.entries ?? []);
+}
 
 
 /** Whose a row is, is the owner address against the viewer, never `own` — that flag is whether the
@@ -249,6 +278,7 @@ function connectionRows(
   catalog: FirstRunPayload,
   pool: PoolPayload,
   viewer: string | null,
+  mcp: Set<string>,
 ): ConnectionRow[] {
   const tiles = new Map(catalog.providers.map((tile) => [tile.name, tile]));
   const held = pool.connections.map((entry) => ({
@@ -259,6 +289,19 @@ function connectionRows(
     group: tiles.get(entry.provider)?.group ?? "",
     entry,
     installed: false,
+    mcp: null,
+  }));
+  const servers = catalog.mcp_servers.map((tile) => ({
+    key: "mcp:" + tile.name,
+    name: tile.name,
+    label: tile.label,
+    summary: tile.summary,
+    group: tile.group,
+    entry: null,
+    // A server's token is a workspace credential, so a configured one belongs to the workspace and
+    // wears that badge — no member owns it and none of them can be the owner a personal row needs.
+    installed: mcp.has(tile.name),
+    mcp: tile,
   }));
   const installs = catalog.connectors
     .filter((row) => row.installed)
@@ -270,6 +313,7 @@ function connectionRows(
       group: tiles.get(row.name)?.group ?? "",
       entry: null,
       installed: true,
+      mcp: null,
     }));
   const connected = new Set(
     pool.connections
@@ -289,12 +333,15 @@ function connectionRows(
       group: tile.group,
       entry: null,
       installed: false,
+      mcp: null,
     }));
   return [
     ...held.filter((row) => ownAccount(row, viewer)),
     ...held.filter((row) => !ownAccount(row, viewer)),
     ...installs,
+    ...servers.filter((row) => row.installed),
     ...offered,
+    ...servers.filter((row) => !row.installed),
   ];
 }
 
@@ -319,6 +366,118 @@ function CredentialOffer() {
         </a>
       </ItemActions>
     </Item>
+  );
+}
+
+/** The other half of what a search that matched nothing can still offer: a server this deploy names
+ *  no row for is reached by its own address, which the credentials screen takes. */
+function McpOffer() {
+  return (
+    <Item>
+      <MarkTile>
+        <BrandMark provider="mcp" className="text-ink" />
+      </MarkTile>
+      <ItemContent>
+        <ItemTitle>MCP server</ItemTitle>
+        <ItemDescription>An address and token for a server with no row here.</ItemDescription>
+      </ItemContent>
+      <ItemActions>
+        <a
+          href={workspaceHash("credentials")}
+          className={cn(buttonVariants({ variant: "outline", size: "bar" }))}
+        >
+          Add MCP server
+        </a>
+      </ItemActions>
+    </Item>
+  );
+}
+
+/** The endpoint is the row's, so only the token is asked for; the value written is the same
+ *  `{name, url, auth}` the slot's merge takes from the credentials screen's own form. */
+function ConnectMcpServer({
+  tile,
+  agentId,
+  actions,
+  onDone,
+  onClose,
+}: {
+  tile: McpServerTile;
+  agentId: string;
+  actions: ActionView[];
+  onDone: (notice: NoticeState) => void;
+  onClose: () => void;
+}) {
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<NoticeState>(QUIET);
+  const request = actions.find((view) => view.name === "request_credentials");
+
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (busy || !token.trim() || !request) return;
+    setBusy(true);
+    const outcome = await postAction(agentId, request.call, {
+      reason: "Sent to " + tile.url + " and nowhere else. Stored encrypted and never shown again.",
+      prompts: [{ slot: MCP_SERVERS_SLOT, prompt: tile.token }],
+    });
+    const sealed = outcome.credentials?.sealed;
+    if (!sealed) {
+      setBusy(false);
+      setNotice(outcomeNotice(outcome));
+      return;
+    }
+    let res: Response;
+    try {
+      res = await fetch(BASE + "/credentials", {
+        method: "POST",
+        body: new URLSearchParams({
+          sealed,
+          slot: MCP_SERVERS_SLOT,
+          value: JSON.stringify({ name: tile.name, url: tile.url, auth: token.trim() }),
+        }),
+        credentials: "same-origin",
+      });
+    } catch {
+      setBusy(false);
+      setNotice({ text: "Network error — try again.", refused: true });
+      return;
+    }
+    setBusy(false);
+    if (!res.ok) {
+      setNotice({ text: (await res.text().catch(() => "")) || "The token was not stored.", refused: true });
+      return;
+    }
+    onDone({ text: tile.label + " connected.", refused: false });
+  }
+
+  return (
+    <Sheet open title={"Connect " + tile.label} onClose={onClose}>
+      <OutcomeNotice state={notice} />
+      <form onSubmit={save} className="flex flex-col gap-2xl">
+        <Facts rows={[{ label: "Server", value: tile.url }]} />
+        <Field
+          label={tile.token}
+          htmlFor="mcp-token"
+          description="Stored encrypted and never shown again."
+        >
+          <Input
+            id="mcp-token"
+            type="password"
+            autoComplete="off"
+            autoFocus
+            required
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+          />
+        </Field>
+        <div className="flex justify-end">
+          <Button type="submit" variant="send" size="bar" busy={busy} disabled={!request}>
+            Connect
+          </Button>
+        </div>
+      </form>
+    </Sheet>
   );
 }
 
@@ -524,21 +683,30 @@ export function Connectors({
   const [watching, setWatching] = useState<string | null>(null);
   const [handoff, setHandoff] = useState<Handoff | null>(null);
   const [removing, setRemoving] = useState<ConnectionRow | null>(null);
+  const [connecting, setConnecting] = useState<McpServerTile | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [toast, setToast] = useState<ToastState>(arrivedToast);
   const consent = useRef<Window | null>(null);
   const viewer = useViewer();
   const agent = useMainAgent();
   const agents = useAgents();
+  const box = usePageSearch();
   const catalog = usePanelRead<FirstRunPayload>(
     FIRST_RUN_READ,
     reloads,
     waiting ? WATCH_MS : undefined,
   );
   const pool = usePanelRead<PoolPayload>("/connections", reloads, waiting ? WATCH_MS : undefined);
-  const expanded = useConnectorCatalog("", reloads);
+  const query = place.q ?? "";
+  const expanded = useConnectorCatalog(query, reloads);
+  // The credential slots carry both halves a named MCP row needs: which servers this workspace
+  // already holds, and the action that seals the prompt its token is typed into.
+  const credentials = usePanelRead<CredentialsPayload>("/workspace/credentials", reloads);
   const coverage = usePanelRead<GithubCoverage>("/github/coverage", reloads);
   const state = joined(catalog, pool, expanded.state);
+  const searched = new Set(
+    expanded.state.phase === "ready" ? expanded.state.payload.providers.map((row) => row.name) : [],
+  );
   const landed =
     state.phase === "ready" &&
     (state.payload.pool.connections.some((entry) => entry.provider === waiting) ||
@@ -664,17 +832,21 @@ export function Connectors({
       <OutcomeNotice state={expanded.error} />
       <Panel state={state}>
         {(reads) => {
-          const rows = connectionRows(reads.catalog, reads.pool, viewer);
+          const rows = connectionRows(reads.catalog, reads.pool, viewer, mcpHeld(credentials));
+          const found = rows.filter((row) => rowMatches(row, query, searched));
           const shelves: Record<Shelf, ConnectionRow[]> = {
-            available: rows.filter((row) => !row.entry && !row.installed),
-            personal: rows.filter((row) => row.entry !== null && ownAccount(row, viewer)),
-            workspace: rows.filter(
+            available: found.filter((row) => !row.entry && !row.installed),
+            personal: found.filter((row) => row.entry !== null && ownAccount(row, viewer)),
+            workspace: found.filter(
               (row) => row.installed || (row.entry !== null && !ownAccount(row, viewer)),
             ),
           };
           const shelf = readShelf(place.chip, shelves);
           const standing = shelves[shelf];
           const more = shelf === "available" && expanded.state.phase === "ready" && expanded.state.payload.after;
+          // A search that matched nothing is the one moment the two open-ended paths are what the
+          // member wants, so they stand alone where the rows would have been.
+          const unmatched = query !== "" && standing.length === 0;
           return (
             <div className="@container flex flex-col gap-6xl">
               <Section title="Reach ufo from wherever you already work">
@@ -686,19 +858,33 @@ export function Connectors({
               <Section
                 title="Integrations"
                 action={
-                  <Segmented
-                    label="Integrations"
-                    segments={SHELVES.map((name) => ({
-                      label: SHELF_LABELS[name],
-                      value: name,
-                    }))}
-                    value={shelf}
-                    onPick={(next: string) => onPlace({ chip: next })}
-                  />
+                  /* Beside the shelf it narrows rather than over the page: the two sections above
+                     hold no rows a search could filter. */
+                  <div className="flex items-center gap-sm max-narrow:flex-wrap">
+                    {box}
+                    <Segmented
+                      label="Integrations"
+                      segments={SHELVES.map((name) => ({
+                        label: SHELF_LABELS[name],
+                        value: name,
+                      }))}
+                      value={shelf}
+                      onPick={(next: string) => onPlace({ chip: next })}
+                    />
+                  </div>
                 }
               >
                 <div className="flex flex-col gap-2xl">
-                  {standing.length || shelf === "available" ? (
+                  {unmatched ? (
+                    <>
+                      <PanelBlank body={"No connector matches " + query + "."} />
+                      <ItemGroup>
+                        <CredentialOffer />
+                        <ItemSeparator />
+                        <McpOffer />
+                      </ItemGroup>
+                    </>
+                  ) : standing.length || shelf === "available" ? (
                     <ItemGroup>
                       {standing.map((row, index) => (
                         <Fragment key={row.key}>
@@ -748,7 +934,11 @@ export function Connectors({
                                   size="bar"
                                   busy={waiting === row.name}
                                   disabled={busy !== null && waiting !== row.name}
-                                  onClick={() => connect(row.name, row.label)}
+                                  onClick={() =>
+                                    row.mcp
+                                      ? setConnecting(row.mcp)
+                                      : connect(row.name, row.label)
+                                  }
                                 >
                                   {waiting === row.name ? "Connecting" : "Connect"}
                                 </Button>
@@ -781,6 +971,19 @@ export function Connectors({
         }}
       </Panel>
       {sheet}
+      {connecting && agent ? (
+        <ConnectMcpServer
+          tile={connecting}
+          agentId={agent.id}
+          actions={credentials.phase === "ready" ? credentials.payload.actions : []}
+          onDone={(outcome) => {
+            setConnecting(null);
+            setNotice(outcome);
+            setReloads((count) => count + 1);
+          }}
+          onClose={() => setConnecting(null)}
+        />
+      ) : null}
       <Dialog open={removing !== null} onOpenChange={(next) => !next && setRemoving(null)}>
         {removing?.entry && agent ? (
           <RemoveConnection

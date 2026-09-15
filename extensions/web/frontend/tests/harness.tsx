@@ -170,6 +170,7 @@ export function wire(routes: Record<string, Route>) {
     "/workspace/first-run": () =>
       json({
         providers: [],
+        mcp_servers: [],
         connectors: [],
         actions: { member: [], memory: [], enrichment_profile: [] },
         model_key_held: false,

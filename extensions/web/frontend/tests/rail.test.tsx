@@ -826,7 +826,7 @@ test("the sidebar marks the destination the member is in and leaves the others o
     "/objects/site": () => objectIndex(SITE_KIND, []),
     "/workspace/artifacts": () => json({ artifacts: [] }),
     "/connections": () => json({ connections: [] }),
-    "/workspace/first-run": () => json({ providers: [], connectors: [] }),
+    "/workspace/first-run": () => json({ providers: [], mcp_servers: [], connectors: [] }),
     "/github/coverage": () => json({ api: false, sources: false }),
     "/settings": () => new Response("nope", { status: 503 }),
   });

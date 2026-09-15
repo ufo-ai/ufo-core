@@ -32,9 +32,10 @@ beforeEach(() => {
   useStreamFake();
 });
 
-const BARE = { providers: [], connectors: [] };
+const BARE = { providers: [], mcp_servers: [], connectors: [] };
 
 const CATALOG = {
+  mcp_servers: [],
   providers: [
     {
       name: "slack",
@@ -1247,7 +1248,7 @@ test("a catalogue with nothing left to offer still stands the credential row", a
   location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/workspace/first-run": () =>
-      json({ providers: [CATALOG.providers[2]], connectors: [] }),
+      json({ providers: [CATALOG.providers[2]], mcp_servers: [], connectors: [] }),
     "/connections": () => json(POOLED_NOTION),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);

@@ -50,6 +50,7 @@ function messaging(
     "/workspace/first-run$": () =>
       json({
         providers: [],
+        mcp_servers: [],
         connectors: [{ name: "slack", label: "Slack", installed: false }],
         actions: { member: [], memory: [], enrichment_profile: [] },
         model_key_held: false,
@@ -130,6 +131,7 @@ test("an admin sees the Slack install act", async () => {
     "/workspace/first-run$": () =>
       json({
         providers: [],
+        mcp_servers: [],
         connectors: [],
         actions: { member: [], memory: [], enrichment_profile: [] },
         model_key_held: false,

@@ -24,6 +24,7 @@ const RECORD_VIEW: FirstRunPayload["actions"]["memory"][number] = {
 
 const FIRST_RUN = {
   providers: [{ name: "github", label: "GitHub", summary: "Read and write code.", group: "Code" }],
+  mcp_servers: [],
   connectors: [],
   model_key_held: true,
   workspace_domain: null,

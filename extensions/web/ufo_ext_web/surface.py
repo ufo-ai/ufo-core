@@ -215,6 +215,7 @@ from ufo_ext_web.openai_login import (
 )
 from ufo_ext_web.panels import (
     FIRST_RUN_PROVIDERS,
+    MCP_SERVERS,
     SPOKEN_ROOM_PREFIXES,
     STARTER_APP_EXTENSIONS,
     UNLOCKS_BY_NAME,
@@ -4341,6 +4342,7 @@ async def workspace_first_run(ctx: SurfaceContext, request: Request) -> Response
     return JSONResponse(
         {
             "providers": [tile.model_dump(mode="json") for tile in FIRST_RUN_PROVIDERS],
+            "mcp_servers": [tile.model_dump(mode="json") for tile in MCP_SERVERS],
             "model_key_held": model_key_held,
             "workspace_domain": workspace_domain,
             "connectors": [

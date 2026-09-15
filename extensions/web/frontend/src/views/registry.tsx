@@ -54,6 +54,7 @@ export const ARTIFACTS: PaneView = {
 export const CONNECTORS: PaneView = {
   label: "Connections",
   remountOnPlace: false,
+  search: "Search connections",
   render: placed(() =>
     import("@/views/Connectors").then((module) => ({ default: module.Connectors })),
   ),

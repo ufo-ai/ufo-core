@@ -10,8 +10,13 @@ export type ProviderTile = { name: string; label: string; summary: string; group
 
 type Connector = ProviderTile & { installed: boolean };
 
+/** A named MCP server: the deploy holds its endpoint, so connecting one asks only for the token its
+ *  vendor issues. */
+export type McpServerTile = ProviderTile & { url: string; token: string };
+
 export type FirstRunPayload = {
   providers: ProviderTile[];
+  mcp_servers: McpServerTile[];
   connectors: Connector[];
   actions: { member: ActionView[]; memory: ActionView[]; enrichment_profile: ActionView[] };
   model_key_held: boolean;

@@ -3855,7 +3855,7 @@ test("the starters close on a link to the connectors screen, which the press rea
   wire({
     ...transcript(),
     "/connections": () => json({ connections: [] }),
-    "/workspace/first-run": () => json({ providers: [], connectors: [] }),
+    "/workspace/first-run": () => json({ providers: [], mcp_servers: [], connectors: [] }),
   });
   location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);

@@ -94,6 +94,7 @@ from ufo_ext_web.openai_login import (
 from ufo_ext_web.panels import (
     DEEPSEEK_FLASH_FLAG,
     DEEPSEEK_FLASH_MODEL,
+    FIRST_RUN_PROVIDER_NAMES,
     FRAME_HEADER,
     NO_FRAME_ACCESS,
     _action_intent,
@@ -2825,11 +2826,20 @@ async def test_first_run_states_the_tiles_and_the_connectors_real_state(
     assert anonymous.status_code == 401
     assert set(payload) == {
         "providers",
+        "mcp_servers",
         "connectors",
         "actions",
         "model_key_held",
         "workspace_domain",
     }
+    # Each named server's endpoint is the deploy's, so the row carries it and the member is asked
+    # for the token alone.
+    neon = next(row for row in payload["mcp_servers"] if row["name"] == "neon")
+    assert neon["url"] == "https://mcp.neon.tech/mcp"
+    assert neon["token"] == "Neon API key"
+    assert all(row["url"].startswith("https://") for row in payload["mcp_servers"])
+    # A row exists only where no broker connects the provider, so none may name a catalogued one.
+    assert not {row["name"] for row in payload["mcp_servers"]} & FIRST_RUN_PROVIDER_NAMES
     assert [view["name"] for view in payload["actions"]["member"]] == ["add_member"]
     assert payload["actions"]["enrichment_profile"] == []
     assert payload["workspace_domain"] is None

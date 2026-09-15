@@ -37,6 +37,7 @@ function portal(surfaces: SurfaceRow[], surfacesRoute?: () => Response) {
     "/workspace/first-run$": () =>
       json({
         providers: [],
+        mcp_servers: [],
         connectors: [{ name: "slack", label: "Slack", installed: false }],
         actions: { member: [], memory: [], enrichment_profile: [] },
         model_key_held: false,

@@ -169,6 +169,7 @@ const DOMAIN = "simplecasual.com";
 
 const FIRST_RUN = {
   providers: [SLACK_TILE, { name: "github", label: "GitHub", summary: "Read and write code.", group: "Code" }],
+  mcp_servers: [],
   connectors: [{ name: "slack", label: "Slack", installed: false }],
   model_key_held: true,
   workspace_domain: DOMAIN as string | null,

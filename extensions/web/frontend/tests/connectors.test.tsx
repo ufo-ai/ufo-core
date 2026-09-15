@@ -32,9 +32,19 @@ beforeEach(() => {
   useStreamFake();
 });
 
-const BARE = { providers: [], connectors: [] };
+const BARE = { providers: [], mcp_servers: [], connectors: [] };
+
+const NEON_MCP = {
+  name: "neon",
+  label: "Neon",
+  url: "https://mcp.neon.tech/mcp",
+  token: "Neon API key",
+  summary: "Read and change Postgres projects and branches.",
+  group: "Developer platforms",
+};
 
 const CATALOG = {
+  mcp_servers: [NEON_MCP],
   providers: [
     {
       name: "slack",
@@ -1325,7 +1335,7 @@ test("a catalogue with nothing left to offer still stands the credential row", a
   location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/workspace/first-run": () =>
-      json({ providers: [CATALOG.providers[2]], connectors: [] }),
+      json({ providers: [CATALOG.providers[2]], mcp_servers: [], connectors: [] }),
     "/connections": () => json(POOLED_NOTION),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -1503,4 +1513,94 @@ test("each biz-ops connector is drawn by a mark of its own", () => {
   for (const slug of ["apollo", "brex", "docusign", "mercury", "pandadoc", "ramp", "xero"]) {
     expect(BRAND_MARKS.has(slug) || slug in PROVIDER_GLYPHS).toBe(true);
   }
+});
+
+const CREDENTIAL_ACTIONS = [
+  {
+    name: "request_credentials",
+    description: "Ask the member for a credential through a private prompt.",
+    input_schema: { properties: {}, required: [] },
+    call: { kind: "credential", action: "request_credentials", input: {} },
+    label: "Set credential",
+  },
+];
+
+test("a named MCP server is connected by its token alone, and the url is the deploy's", async () => {
+  const posted: string[] = [];
+  location.hash = sectionHash("connectors", { chip: "available" });
+  library({
+    "/workspace/credentials$": () => json({ actions: CREDENTIAL_ACTIONS, slots: [] }),
+    "/actions/credential/request_credentials": () =>
+      json({
+        applied: true,
+        message: "",
+        turn_id: TURN_ID,
+        credentials: { sealed: "seal", reason: "", prompts: [] },
+      }),
+    "/credentials": (_url, init) => {
+      posted.push(String(init?.body));
+      return json({ stored: true });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await offered();
+  await userEvent.click(connects("Neon"));
+
+  // No URL field: the row carries the endpoint, so the member answers for the token alone.
+  expect(await screen.findByText("https://mcp.neon.tech/mcp")).toBeTruthy();
+  expect(screen.queryByLabelText("Server URL")).toBeNull();
+
+  await userEvent.type(screen.getByLabelText("Neon API key"), "neon-live");
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Connect" }));
+
+  await waitFor(() => expect(posted).toHaveLength(1));
+  const sent = new URLSearchParams(posted[0]);
+  expect(sent.get("slot")).toBe("mcp_servers");
+  expect(JSON.parse(String(sent.get("value")))).toEqual({
+    name: "neon",
+    url: "https://mcp.neon.tech/mcp",
+    auth: "neon-live",
+  });
+});
+
+test("a configured MCP server stands on the workspace shelf rather than offering itself", async () => {
+  location.hash = sectionHash("connectors", { chip: "workspace" });
+  library({
+    "/workspace/credentials$": () =>
+      json({ actions: [], slots: [{ slot: "mcp_servers", entries: ["neon"] }] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await connected("Neon")).toBeTruthy();
+
+  await atShelf("available");
+
+  expect(rowsNamed("Neon")).toHaveLength(0);
+});
+
+test("a search matching no connector offers the credential and MCP paths instead", async () => {
+  location.hash = sectionHash("connectors", { chip: "available" });
+  library();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await offered();
+
+  await userEvent.type(screen.getByLabelText("Search connections"), "nothingnamedthis{Enter}");
+
+  expect(await screen.findByText("No connector matches nothingnamedthis.")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Add credential" })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Add MCP server" })).toBeTruthy();
+});
+
+test("a search that matches narrows the shelf to it and offers neither path", async () => {
+  location.hash = sectionHash("connectors", { chip: "available" });
+  library();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await offered();
+
+  await userEvent.type(screen.getByLabelText("Search connections"), "neo{Enter}");
+
+  await waitFor(() => expect(rowsNamed("Neon")).toHaveLength(1));
+  expect(rowsNamed("Notion")).toHaveLength(0);
+  expect(screen.queryByRole("link", { name: "Add MCP server" })).toBeNull();
 });

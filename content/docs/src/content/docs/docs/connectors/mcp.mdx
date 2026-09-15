@@ -5,9 +5,22 @@ description: Give ufo access to tools from a Streamable HTTP MCP server.
 
 import ConnectorAccess from "../../../../components/ConnectorAccess.astro";
 
-## Prepare the server
+## Named servers
 
-You need:
+The Connections page lists these servers by name. ufo holds each endpoint, so connecting one asks
+for its token and nothing else.
+
+| Server | Token to enter |
+| --- | --- |
+| Neon | Neon API key |
+| Render | Render API key |
+
+A server that authorizes over OAuth issues no such token and is not listed here. Neither is a
+server whose provider already has a connector on the Connections page — connect that instead.
+
+## Prepare another server
+
+For a server with no row of its own you need:
 
 - A short name for the server.
 - Its HTTP or HTTPS Streamable HTTP endpoint.
