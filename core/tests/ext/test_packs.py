@@ -132,6 +132,7 @@ def test_activating_the_assistant_eval_pack_swaps_real_brokers_for_the_environme
     assert names == [*assistant_eval.EXTENSIONS, assistant_eval.NAME]
     assert "eval_env" in names
     assert "connectors" in names
+    assert "context_rollover" in names
     assert not assistant_eval.REAL_BROKERS & set(names)
 
 

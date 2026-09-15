@@ -20,6 +20,7 @@ EXTENSIONS = (
     *(name for name in ufo_pack_assistant.EXTENSIONS if name not in REAL_BROKERS),
     "eval_env",
     "docker",
+    "context_rollover",
 )
 
 

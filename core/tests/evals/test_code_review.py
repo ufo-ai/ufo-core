@@ -665,6 +665,87 @@ def test_change_log_batch_case_names_the_complete_log() -> None:
     assert len(code_review.CHANGE_LOG_BATCH_PAGE_IDS) == 6
 
 
+async def test_reviewed_head_rollover_grader_requires_a_read_no_spawn_and_a_reset() -> None:
+    read = _call("object_get", "read", {"ref": f"page/{code_review.REVIEWED_PAGE_ID}"})
+    spawn = _call(
+        "spawn",
+        "spawn",
+        {"target": "coding", "background": True, "payload": {"objective": "review"}},
+    )
+    reset = _call("new_context", "reset", {})
+
+    passed = await code_review._grade_reviewed_head_rollover(
+        CapabilityOutput("The source batch is complete.", (read, reset), own_calls=(read, reset))
+    )
+    rereviewed = await code_review._grade_reviewed_head_rollover(
+        CapabilityOutput("", (read, spawn, reset), own_calls=(read, spawn, reset))
+    )
+    retained = await code_review._grade_reviewed_head_rollover(
+        CapabilityOutput("", (read,), own_calls=(read,))
+    )
+    repeated = await code_review._grade_reviewed_head_rollover(
+        CapabilityOutput(
+            "The source batch is complete.",
+            (read, reset, reset),
+            own_calls=(read, reset, reset),
+        )
+    )
+    open_turn = await code_review._grade_reviewed_head_rollover(
+        CapabilityOutput("", (read, reset), own_calls=(read, reset))
+    )
+
+    assert passed.passed, passed.reason
+    assert not rereviewed.passed
+    assert "another review" in rereviewed.reason
+    assert not retained.passed
+    assert "kept the old context" in retained.reason
+    assert not repeated.passed
+    assert "more tool calls" in repeated.reason
+    assert not open_turn.passed
+    assert "did not close" in open_turn.reason
+
+
+def test_reviewed_head_rollover_case_names_the_reviewed_page() -> None:
+    case = next(
+        case for case in code_review.CASES if case.name == "code-review-reviewed-head-rolls-over"
+    )
+
+    assert str(code_review.REVIEWED_PAGE_ID) in case.message
+    assert "terminal `ufo review` status" in case.grader.grading
+
+
+async def test_reviewed_head_close_grader_requires_one_read_and_the_exact_close() -> None:
+    read = _call("object_get", "read", {"ref": f"page/{code_review.REVIEWED_PAGE_ID}"})
+    reset = _call("new_context", "reset", {})
+
+    passed = await code_review._grade_reviewed_head_close(
+        CapabilityOutput("The source batch is complete.", (read,), own_calls=(read,))
+    )
+    reset_anyway = await code_review._grade_reviewed_head_close(
+        CapabilityOutput("The source batch is complete.", (read, reset), own_calls=(read, reset))
+    )
+    open_turn = await code_review._grade_reviewed_head_close(
+        CapabilityOutput("", (read,), own_calls=(read,))
+    )
+
+    assert passed.passed, passed.reason
+    assert not reset_anyway.passed
+    assert "more tool calls" in reset_anyway.reason
+    assert not open_turn.passed
+    assert "did not close" in open_turn.reason
+
+
+def test_reviewed_head_close_case_names_the_reviewed_page() -> None:
+    case = next(
+        case
+        for case in code_review.CASES
+        if case.name == "code-review-reviewed-head-closes-without-reset"
+    )
+
+    assert str(code_review.REVIEWED_PAGE_ID) in case.message
+    assert "without the reset tool" in case.grader.grading
+
+
 async def test_a_foreground_launch_reads_as_a_foreground_launch() -> None:
     """The count and the background rule are two facts, and the verdict names which one failed.
 

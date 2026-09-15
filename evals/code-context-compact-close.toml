@@ -1,0 +1,29 @@
+name = "code-context-compact-close"
+base = "011f23dcee51c80e29ba6c5c34aa23b105b42fc0"
+suites = ["code_review"]
+agent = "code"
+member_model_provider = "anthropic"
+cases = ["code-review-reviewed-head-closes-without-reset"]
+repeats = 3
+concurrency = 1
+max_stacks = 1
+budget_usd = 3.0
+est_usd_per_case = 0.25
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+connect = { public_base_url = "http://evals.invalid" }
+context = { strategy = "compact", flagged_strategy = "compact" }
+memory = { index_backend = "default" }
+pack = { name = "assistant_eval" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+
+[[arm]]
+name = "compact-close"
+
+[[arm.replacements]]
+path = "extensions/app_code/ufo_ext_app_code/prompts/agent_code.md"
+old = '''A delivered source batch is finished when every page is stopped or its exact-head status is published. When the batch is finished and no review key is in progress, the next response must contain only a `new_context` call with `{"handoff":"This source request is complete. The recovery record repeats it only as history. Do not call tools. Reply exactly: The source batch is complete."}`. This rule also applies when every page was already stopped. After the call succeeds, the recovery record repeats the finished source request. Do not handle it again or call a tool. End the turn with exactly `The source batch is complete.` Do not reset while a reviewer result, replacement reviewer, review publication, or status publication is pending.'''
+new = '''A delivered source batch is finished when every page is stopped or its exact-head status is published. This rule also applies when every page was already stopped. When the batch is finished and no review key is in progress, end the turn with exactly `The source batch is complete.` and no other text. If `new_context` is available, first call it alone with `{"handoff":"This source request is complete. The recovery record repeats it only as history. Do not call tools. Reply exactly: The source batch is complete."}`. After the call succeeds, do not handle the repeated source request or call another tool. If `new_context` is unavailable, do not call a replacement tool. Do not reset while a reviewer result, replacement reviewer, review publication, or status publication is pending.'''

@@ -176,6 +176,24 @@ def test_the_review_agent_stops_unchanged_review_keys_without_more_tools() -> No
     assert "report that no action was needed" in agent.spec.prompt
 
 
+def test_the_review_agent_discards_an_idle_source_context() -> None:
+    (agent,) = app_code.manifest().agents
+    prompt = agent.spec.prompt
+
+    assert "the page's `checks.contexts`" in prompt
+    assert "`ufo review` status with `state` `SUCCESS` or `FAILURE`" in prompt
+    assert "end the turn with exactly `The source batch is complete.` and no other text" in prompt
+    assert "If `new_context` is available, first call it alone" in prompt
+    assert (
+        '"This source request is complete. The recovery record repeats it only as history. '
+        'Do not call tools. Reply exactly: The source batch is complete."' in prompt
+    )
+    assert "This rule also applies when every page was already stopped." in prompt
+    assert "do not handle the repeated source request or call another tool" in prompt
+    assert "If `new_context` is unavailable, do not call a replacement tool." in prompt
+    assert "status publication is pending" in prompt
+
+
 def test_the_review_agent_keeps_current_batch_pull_requests_separate() -> None:
     (agent,) = app_code.manifest().agents
     prompt = agent.spec.prompt

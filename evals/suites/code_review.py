@@ -50,6 +50,7 @@ STALE_OBJECTIVE_PAGE_ID = UUID("20000000-0000-0000-0000-000000000008")
 LAUNCH_PAGE_ID = UUID("20000000-0000-0000-0000-000000000009")
 RECOVERY_PAGE_ID = UUID("20000000-0000-0000-0000-00000000000a")
 PUBLISH_PAGE_ID = UUID("20000000-0000-0000-0000-00000000000b")
+REVIEWED_PAGE_ID = UUID("20000000-0000-0000-0000-000000000014")
 CURRENT_BATCH_PAGE_IDS = (
     UUID("20000000-0000-0000-0000-00000000000c"),
     UUID("20000000-0000-0000-0000-00000000000d"),
@@ -68,6 +69,7 @@ STALE_OBJECTIVE_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000008")
 LAUNCH_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000009")
 RECOVERY_SOURCE_ID = UUID("30000000-0000-0000-0000-00000000000a")
 PUBLISH_SOURCE_ID = UUID("30000000-0000-0000-0000-00000000000b")
+REVIEWED_SOURCE_ID = UUID("30000000-0000-0000-0000-000000000014")
 CURRENT_BATCH_SOURCE_IDS = (
     UUID("30000000-0000-0000-0000-00000000000c"),
     UUID("30000000-0000-0000-0000-00000000000d"),
@@ -478,25 +480,35 @@ async def _seed_page(
     base_sha: str = BASE_SHA,
     pull_number: int = 7,
     grant_publication: bool = True,
+    reviewed: bool = False,
 ) -> None:
-    body = json.dumps(
-        {
-            "number": pull_number,
-            "state": "open",
-            "draft": False,
-            "merged": False,
-            "html_url": f"file:///workspace/review-target/pull/{pull_number}",
-            "base": {
-                "sha": base_sha,
-                "repo": {
-                    "clone_url": "file:///workspace/review-target",
-                    "full_name": "eval/review-target",
-                },
+    page: JsonObject = {
+        "number": pull_number,
+        "state": "open",
+        "draft": False,
+        "merged": False,
+        "html_url": f"file:///workspace/review-target/pull/{pull_number}",
+        "base": {
+            "sha": base_sha,
+            "repo": {
+                "clone_url": "file:///workspace/review-target",
+                "full_name": "eval/review-target",
             },
-            "head": {"sha": head_sha},
         },
-        sort_keys=True,
-    ).encode()
+        "head": {"sha": head_sha},
+    }
+    if reviewed:
+        page["checks"] = {
+            "state": "SUCCESS",
+            "contexts": [
+                {
+                    "context": PUBLISH_CONTEXT,
+                    "state": "SUCCESS",
+                    "targetUrl": "https://testing.ufo.ai/reviews/7",
+                }
+            ],
+        }
+    body = json.dumps(page, sort_keys=True).encode()
     body_ref = f"pages/{page_id}"
     await blob.put(body_ref, body)
     async with workspace_tx() as connection:
@@ -612,6 +624,18 @@ async def _seed_recovery(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlob
 
 async def _seed_publish(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
     await _seed_page(workspace_id, agent_id, blob, PUBLISH_PAGE_ID, PUBLISH_SOURCE_ID, HEAD_SHA)
+
+
+async def _seed_reviewed(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
+    await _seed_page(
+        workspace_id,
+        agent_id,
+        blob,
+        REVIEWED_PAGE_ID,
+        REVIEWED_SOURCE_ID,
+        HEAD_SHA,
+        reviewed=True,
+    )
 
 
 async def _seed_no_plan(workspace_id: UUID, agent_id: UUID, blob: WorkspaceBlobStore) -> None:
@@ -1367,6 +1391,56 @@ async def _grade_published_verdict(output: CapabilityOutput) -> CapabilityVerdic
     return CapabilityVerdict(True, "one success status on the head commit", evidence)
 
 
+async def _grade_reviewed_head_rollover(output: CapabilityOutput) -> CapabilityVerdict:
+    reads = tuple(call for call in output.own_calls if call.name == "object_get" and call.succeeded)
+    spawns = _coding_spawns(output)
+    resets = tuple(
+        call for call in output.own_calls if call.name == "new_context" and call.succeeded
+    )
+    evidence: JsonObject = {
+        "page_reads": len(reads),
+        "spawn_count": len(spawns),
+        "context_resets": len(resets),
+        "own_calls": [call.name for call in output.own_calls],
+        "response": output.response,
+    }
+    if not reads:
+        return CapabilityVerdict(False, "the agent did not read the changed page", evidence)
+    if spawns:
+        return CapabilityVerdict(False, "the reviewed head started another review", evidence)
+    if not resets:
+        return CapabilityVerdict(False, "the idle source batch kept the old context", evidence)
+    if tuple(call.name for call in output.own_calls) != ("object_get", "new_context"):
+        return CapabilityVerdict(False, "the reset context made more tool calls", evidence)
+    if output.response.strip() != "The source batch is complete.":
+        return CapabilityVerdict(False, "the reset context did not close the turn", evidence)
+    return CapabilityVerdict(
+        True, "the reviewed head started no reviewer and the idle batch reset its context", evidence
+    )
+
+
+async def _grade_reviewed_head_close(output: CapabilityOutput) -> CapabilityVerdict:
+    reads = tuple(call for call in output.own_calls if call.name == "object_get" and call.succeeded)
+    spawns = _coding_spawns(output)
+    evidence: JsonObject = {
+        "page_reads": len(reads),
+        "spawn_count": len(spawns),
+        "own_calls": [call.name for call in output.own_calls],
+        "response": output.response,
+    }
+    if not reads:
+        return CapabilityVerdict(False, "the agent did not read the changed page", evidence)
+    if spawns:
+        return CapabilityVerdict(False, "the reviewed head started another review", evidence)
+    if tuple(call.name for call in output.own_calls) != ("object_get",):
+        return CapabilityVerdict(False, "the settled compact batch made more tool calls", evidence)
+    if output.response.strip() != "The source batch is complete.":
+        return CapabilityVerdict(False, "the compact context did not close the turn", evidence)
+    return CapabilityVerdict(
+        True, "the reviewed head started no reviewer and the compact batch closed", evidence
+    )
+
+
 def _publish_arguments(call: ToolInvocation) -> dict[str, Json] | None:
     arguments = call.input.get("arguments")
     return arguments if isinstance(arguments, dict) else None
@@ -1603,6 +1677,32 @@ CASES = (
         prepare=_prepare_review,
         wait_for_background=True,
         digest_tag="code-review:published-verdict:v1",
+    ),
+    CapabilityCase(
+        name="code-review-reviewed-head-rolls-over",
+        message=_source_change(REVIEWED_PAGE_ID),
+        grader=DescribedGrader(
+            "an exact head with a terminal `ufo review` status starts no reviewer, and the agent "
+            "resets its context after the source batch has no work in progress",
+            _grade_reviewed_head_rollover,
+        ),
+        workspace_files=WORKSPACE_FILES,
+        seed=_seed_reviewed,
+        prepare=_prepare_review,
+        digest_tag="code-review:reviewed-head-rollover:v1",
+    ),
+    CapabilityCase(
+        name="code-review-reviewed-head-closes-without-reset",
+        message=_source_change(REVIEWED_PAGE_ID),
+        grader=DescribedGrader(
+            "an exact head with a terminal `ufo review` status starts no reviewer, and an agent "
+            "without the reset tool closes the settled source batch",
+            _grade_reviewed_head_close,
+        ),
+        workspace_files=WORKSPACE_FILES,
+        seed=_seed_reviewed,
+        prepare=_prepare_review,
+        digest_tag="code-review:reviewed-head-close:v1",
     ),
     CapabilityCase(
         name="code-review-launch-carries-objective",
