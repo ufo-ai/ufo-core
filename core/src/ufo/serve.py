@@ -572,6 +572,7 @@ def run(fleet: Fleet) -> None:
         runtime_identity=runtime_identity,
         connectors=connectors,
         key_slot_for=registry.key_slot_for,
+        own_key_slots=model_key_slots(registry),
         ambient_reply=AmbientReplyClassifier(
             model=ModelAccess(
                 replace(registry, auto_model=config.models.ambient_reply_model),
@@ -1293,6 +1294,7 @@ def _mount_shared_surfaces(
     surface_model: "Callable[[str], SurfaceModel] | None" = None,
     objects: MemberObjectRegistry | None = None,
     key_slot_for: Callable[[str], str | None] | None = None,
+    own_key_slots: tuple[str, ...] = (),
     ambient_reply_for: "Callable[[str], AmbientReplyClassifier] | None" = None,
 ) -> None:
     """Install the fleet-wide `WorkspaceScopeBoundary` and mount each shared-fleet-capable
@@ -1360,6 +1362,7 @@ def _mount_shared_surfaces(
             _credentials=credentials,
             _artifact_token_secret=artifact_secret,
             _key_slot_for=key_slot_for,
+            _own_key_slots=own_key_slots,
             _public_base_url=public_base_url,
             _home_surface=home_surface(manifests),
             _ingress_public_url=ingress_public_url,

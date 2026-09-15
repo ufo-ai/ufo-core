@@ -2100,6 +2100,7 @@ class SurfaceContext:
         default_factory=lambda: SystemSkillBundle.from_skills(())
     )
     _key_slot_for: Callable[[str], str | None] | None = None
+    _own_key_slots: tuple[str, ...] = ()
     _object_schemas: Mapping[str, dict[str, Any]] = field(default_factory=dict)
     _sandbox_sizes: tuple[str, ...] = ()
     _memory: "MemorySearch | None" = None
@@ -2124,6 +2125,13 @@ class SurfaceContext:
     def conversation_slots(self) -> tuple["BoundConversationSlot", ...]:
         """The deploy's extension-provided conversation slots, fixed and validated at boot."""
         return self._conversation_slots
+
+    @property
+    def own_key_slots(self) -> tuple[str, ...]:
+        """Every key slot a model of this deploy keys from — what the balance gate's own-key
+        exemption is tested against, so a surface reporting whether the workspace is running asks
+        the question the gate answers rather than the bare balance line."""
+        return self._own_key_slots
 
     async def read_conversation_slot(
         self, bound: "BoundConversationSlot", context: "ConversationSlotContext"

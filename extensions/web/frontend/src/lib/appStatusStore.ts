@@ -13,6 +13,7 @@ export type AgentStatus = {
 export type AppStatusState = {
   statuses: Readonly<Record<string, AgentStatus>>;
   working: boolean;
+  outOfCredit: boolean;
 };
 
 /** A step an app takes is over in seconds, so a line naming one is only true if it is re-read at that
@@ -22,7 +23,7 @@ export const RESTING_STATUS_MS = 30_000;
 
 const STATUS_PATH = "/api/agents/status";
 
-const QUIET: AppStatusState = { statuses: {}, working: false };
+const QUIET: AppStatusState = { statuses: {}, working: false, outOfCredit: false };
 
 let state: AppStatusState = QUIET;
 const listeners = new Set<() => void>();
@@ -42,6 +43,7 @@ let stirred = false;
 const heldTurns = new Map<string, string>();
 
 let wired: Readonly<Record<string, AgentStatus>> = {};
+let wiredOutOfCredit = false;
 
 function restate(): void {
   const statuses: Record<string, AgentStatus> = { ...wired };
@@ -63,6 +65,7 @@ function restate(): void {
       Object.values(wired).some(
         (status) => status.turn === "running" || status.turn === "queued",
       ),
+    outOfCredit: wiredOutOfCredit,
   };
   for (const listener of listeners) listener();
 }
@@ -123,11 +126,13 @@ async function read(): Promise<void> {
   reading = true;
   const run = generation;
   try {
-    const result = await getJson<{ statuses: AgentStatus[] }>(STATUS_PATH);
+    const result = await getJson<{ statuses: AgentStatus[]; out_of_credit: boolean }>(
+      STATUS_PATH,
+    );
     if (run !== generation) return;
     if (result.ok) {
       answered = true;
-      hold(result.payload.statuses);
+      hold(result.payload.statuses, result.payload.out_of_credit);
     } else if (!answered) return;
     poll();
   } finally {
@@ -139,12 +144,16 @@ async function read(): Promise<void> {
 
 let wiredSaid = "";
 
-function hold(statuses: AgentStatus[]): void {
-  if (!Array.isArray(statuses)) return;
-  const said = JSON.stringify(statuses);
+function hold(statuses: AgentStatus[], outOfCredit: boolean): void {
+  const said = JSON.stringify([statuses, outOfCredit]);
   if (said === wiredSaid) return;
   wiredSaid = said;
-  wired = Object.fromEntries(statuses.map((status) => [status.agent_id, status]));
+  /* The two halves of the answer stand or fall on their own: a malformed status list must not take
+     the credit line down with it, since that line is what explains why the agents stopped. */
+  if (Array.isArray(statuses)) {
+    wired = Object.fromEntries(statuses.map((status) => [status.agent_id, status]));
+  }
+  wiredOutOfCredit = outOfCredit === true;
   restate();
 }
 
@@ -170,6 +179,7 @@ function quiet(): void {
   reading = false;
   heldTurns.clear();
   wired = {};
+  wiredOutOfCredit = false;
   wiredSaid = "";
   state = QUIET;
   if (typeof document !== "undefined") {

@@ -295,6 +295,22 @@ def funded(
     return ~sa.exists(held)
 
 
+async def spend_admitted(
+    connection: AsyncConnection, workspace_id: UUID, own_key_slots: tuple[str, ...] = ()
+) -> bool:
+    """Whether `BalanceGate.admits` would start work in this workspace, answered for one workspace
+    rather than as a filter over many.
+
+    A surface telling a member what the balance is doing to their workspace has to answer the
+    question the gate answers, own-key exemption included — the bare balance line says a workspace
+    serving itself on its own key has stopped when every turn it takes still runs."""
+    return bool(
+        (
+            await connection.execute(sa.select(funded(sa.literal(workspace_id), own_key_slots)))
+        ).scalar_one()
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Purchase:
     """One credit to the balance: what it added, what it cost, and when. A grant charges nothing, so

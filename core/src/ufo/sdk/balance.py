@@ -47,5 +47,8 @@ from ufo.runtime.billing.balance import (
     set_auto_topup as set_auto_topup,
 )
 from ufo.runtime.billing.balance import (
+    spend_admitted as spend_admitted,
+)
+from ufo.runtime.billing.balance import (
     topping_up_workspaces as topping_up_workspaces,
 )

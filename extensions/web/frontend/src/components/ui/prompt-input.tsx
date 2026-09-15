@@ -144,32 +144,55 @@ export function PromptInput({
   );
 }
 
+export type EyebrowTone = "default" | "attention";
+
+const EYEBROW_TONES: Record<EyebrowTone, string> = {
+  default: "bg-fill-strong text-ink-soft",
+  attention: "bg-attention text-attention-ink",
+};
+
+/** `attention` is the palette's second accent at the weight a status is tinted at, the one tone that
+ *  asks for the member — the same one a late commitment and a stopped run take. */
 export function PromptInputEyebrow({
   glyph,
   label,
+  action,
+  tone = "default",
   onDismiss,
 }: {
   glyph?: ReactNode;
   label: string;
-  onDismiss: () => void;
+  action?: ReactNode;
+  tone?: EyebrowTone;
+  onDismiss?: () => void;
 }) {
   return (
-    <div className="-mx-lg -mt-lg -mb-2xs flex h-(--size-row) items-center justify-between rounded-t-bubble bg-fill-strong pl-2xl pr-2xs text-label text-ink-soft">
+    <div
+      role={tone === "attention" ? "status" : undefined}
+      className={cn(
+        "-mx-lg -mt-lg -mb-2xs flex h-(--size-row) items-center justify-between",
+        "rounded-t-bubble pl-2xl pr-2xs text-label",
+        EYEBROW_TONES[tone],
+      )}
+    >
       <span className="flex min-w-0 items-center gap-xs">
         {glyph}
         <span className="truncate">{label}</span>
       </span>
-      <Button variant="quiet" aria-label={"Stop addressing " + label} onClick={onDismiss}>
-        <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
-          <path
-            d="m4.5 4.5 7 7m0-7-7 7"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-          />
-        </svg>
-      </Button>
+      {action}
+      {onDismiss ? (
+        <Button variant="quiet" aria-label={"Stop addressing " + label} onClick={onDismiss}>
+          <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
+            <path
+              d="m4.5 4.5 7 7m0-7-7 7"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          </svg>
+        </Button>
+      ) : null}
     </div>
   );
 }

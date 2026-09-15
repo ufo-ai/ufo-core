@@ -21,9 +21,9 @@ from ufo.runtime.billing.balance import (
     balance_refusal_message,
     credit,
     debit,
-    funded,
     mark_topup_verified,
     set_reserve,
+    spend_admitted,
 )
 from ufo.runtime.hub import Parked
 from ufo.runtime.surfaces.admission import Admission
@@ -631,20 +631,6 @@ async def test_a_park_no_gate_still_refuses_reads_as_a_pause(db: None) -> None:
         assert await turn_status_frame(turn_id) == Parked(message=PARK_NOTICE)
 
 
-async def _funded(
-    connection: AsyncConnection, workspace_id: UUID, own_key_slots: tuple[str, ...] = ()
-) -> bool:
-    row = (
-        await connection.execute(
-            sa.select(tables.workspace.c.id).where(
-                tables.workspace.c.id == workspace_id,
-                funded(tables.workspace.c.id, own_key_slots),
-            )
-        )
-    ).one_or_none()
-    return row is not None
-
-
 async def _store_own_key(connection: AsyncConnection, workspace_id: UUID) -> None:
     await connection.execute(
         sa.insert(tables.credential).values(
@@ -658,8 +644,9 @@ async def _store_own_key(connection: AsyncConnection, workspace_id: UUID) -> Non
 
 
 async def test_the_hold_is_the_gates_entry_line(db: None) -> None:
-    """`funded` is the SQL form of the decision `admits` makes before a turn starts, read by the
-    jobs that would otherwise open a workspace the gate is about to refuse. The two agree on every
+    """`spend_admitted` and its `funded` predicate are the decision `admits` makes before a turn
+    starts — read by the jobs that would otherwise open a workspace the gate is about to refuse, and
+    by a surface telling a member whether their workspace is running. The two agree on every
     side of the line — no row, above the reserve, at it, under it but inside a settled card's
     grace, past the grace — and on the own-key exemption: a workspace under the line that holds its
     own key for the model is admitted while its balance is above zero, held once it is not, and held
@@ -699,7 +686,7 @@ async def test_the_hold_is_the_gates_entry_line(db: None) -> None:
             gate = BalanceGate(workspace_id)
             slot = slots[0] if slots else None
             decision = await gate.admits(connection, key_slot_for=lambda _m, s=slot: s, model="m")
-            assert await _funded(connection, workspace_id, slots) is funded_now, (
+            assert await spend_admitted(connection, workspace_id, slots) is funded_now, (
                 workspace_id,
                 slots,
             )

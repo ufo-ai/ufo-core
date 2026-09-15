@@ -53,7 +53,7 @@ from ufo_ext_ufo.surface import SURFACE_UFO
 
 from ufo.sdk.accounting import MemberSpendReport, SpendReport
 from ufo.sdk.audience import SHARED_AUDIENCE, audience_subjects, conversation_audience
-from ufo.sdk.balance import read_headroom
+from ufo.sdk.balance import spend_admitted
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
 from ufo.sdk.context import (
@@ -1561,7 +1561,12 @@ async def agents_status(ctx: SurfaceContext, request: Request) -> Response:
     Every tab holding the portal open polls this for as long as it is open, at four seconds while
     any agent in the workspace works, so it costs one turn aggregate for every agent at once and
     nothing per resting agent. The single per-agent read is the hub peek, taken only for the
-    agents holding a running turn, because the frame it wants exists only while that turn does."""
+    agents holding a running turn, because the frame it wants exists only while that turn does.
+
+    The balance rides the same answer because the composer has to say, before a member types, that
+    the workspace is out of credit — and the billing read that states it in full answers an admin
+    only, so it cannot be what a member's composer asks. This is the same one-row headroom read the
+    starters already take, on a poll every open tab already runs."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -1587,7 +1592,8 @@ async def agents_status(ctx: SurfaceContext, request: Request) -> Response:
                     "last_failed": status.last_failed,
                 }
                 for status in statuses
-            ]
+            ],
+            "out_of_credit": not await _solvent(ctx),
         }
     )
 
@@ -4535,16 +4541,17 @@ def fill_starters(
     return tuple(apps), unlock
 
 
-async def _solvent() -> bool:
-    """Whether this workspace's balance still admits spend. Read as its own line rather than through
-    `BalanceGate`, which a surface cannot reach and which answers about a turn — the question here
-    is only whether generating a slate is spending money a refusing workspace does not have."""
+async def _solvent(ctx: SurfaceContext) -> bool:
+    """Whether the balance would let this workspace start work — the gate's own question, asked for
+    the workspace rather than for a turn.
+
+    The bare balance line is not that question: a workspace under it that holds its own key in a
+    model slot still runs every turn that model serves, so a line read off the reserve alone tells
+    a member their work has stopped while it is running. The slots the exemption is tested against
+    are the deploy's, so they ride the surface context rather than being rebuilt here."""
     ext = web_extension()
     async with ext.transaction() as connection:
-        headroom = await read_headroom(connection, ext.workspace_id)
-    if headroom is None:
-        return True
-    return headroom.balance_micro_usd > headroom.reserve_micro_usd - headroom.grace_micro_usd
+        return await spend_admitted(connection, ext.workspace_id, ctx.own_key_slots)
 
 
 async def _recalled(ctx: SurfaceContext, member_id: UUID) -> tuple[str, ...]:
@@ -4603,7 +4610,7 @@ async def workspace_starters(ctx: SurfaceContext, request: Request) -> Response:
         ),
         recalled=await _recalled(ctx, member_id),
         model=ctx.model,
-        solvent=await _solvent(),
+        solvent=await _solvent(ctx),
     ).read()
     if slate is None:
         return JSONResponse({"starters": [], "unlock": None})
@@ -4655,7 +4662,7 @@ async def workspace_automations(ctx: SurfaceContext, request: Request) -> Respon
         agents=tuple(sorted(agent.name for agent in audience.agents)),
         recalled=await _recalled(ctx, member_id),
         model=ctx.model,
-        solvent=await _solvent(),
+        solvent=await _solvent(ctx),
         prompt=AUTOMATIONS_SLATE,
     ).read()
     if slate is None:

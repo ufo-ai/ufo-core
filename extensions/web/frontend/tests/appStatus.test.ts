@@ -186,3 +186,17 @@ function useAppStatusOnce(): Readonly<Record<string, AgentStatus>> {
   view.unmount();
   return held;
 }
+
+test("a malformed status list does not take the credit line down with it", async () => {
+  /* The guard has to be per-half: the credit line is what explains why the agents stopped, so a
+     status list the route cannot render must not also hide it. */
+  wire({
+    "/api/agents/status": () => json({ statuses: null, out_of_credit: true }),
+  });
+  const { result } = renderHook(() => useAppStatus());
+
+  await settle(1);
+
+  expect(result.current.outOfCredit).toBe(true);
+  expect(result.current.statuses).toEqual({});
+});

@@ -164,7 +164,7 @@ export function wire(routes: Record<string, Route>) {
   const fallbacks: Record<string, Route> = {
     "/api/chats": () => json({ chats: [] }),
     "/objects/conversation$": () => json({ objects: [] }),
-    "/api/agents/status": () => json({ statuses: [] }),
+    "/api/agents/status": () => json({ statuses: [], out_of_credit: false }),
     "/connector-catalog": () => json({ providers: [], after: null }),
     "/connections": () => json({ connections: [] }),
     "/workspace/first-run": () =>

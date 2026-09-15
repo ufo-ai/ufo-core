@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
-import { IconCheck, IconChevronRight, IconMessage, IconPlug } from "@tabler/icons-react";
+import {
+  IconCheck,
+  IconChevronRight,
+  IconCreditCardOff,
+  IconMessage,
+  IconPlug,
+} from "@tabler/icons-react";
 
 import logo from "@/assets/ufo-logo.svg";
 
@@ -24,7 +30,7 @@ import {
   type QuestionnaireItemDefinition,
 } from "@/components/ui/questionnaire";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   PromptInput,
   PromptInputAttach,
@@ -49,6 +55,8 @@ import { COLUMN } from "@/kernel/pane";
 import { Empty, usePanelRead } from "@/kernel/panel";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
+import { useAppStatus } from "@/lib/appStatusStore";
+import { useMe } from "@/lib/audience";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { chatState, clearChat, updateChat, useChat, type ChatTurn } from "@/lib/chatStore";
@@ -64,7 +72,7 @@ import { useEarlierMessages } from "@/lib/earlier";
 import { CHAT_SURFACE } from "@/lib/mainAgent";
 import { AUTO_MODEL } from "@/lib/models";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
-import { newChatHash, sectionHash } from "@/lib/route";
+import { newChatHash, sectionHash, workspaceHash } from "@/lib/route";
 import { navigate, useRoute } from "@/lib/router";
 import { uploadAttachment, type UploadRef } from "@/lib/api";
 import {
@@ -639,6 +647,11 @@ const SEND_SCROLL_MS = 700;
 const COMPOSER_LABEL = "Ask UFO";
 const NEW_CHAT_PLACEHOLDER = "Start new chat…";
 const FOLLOW_UP_PLACEHOLDER = "Ask a follow-up…";
+/* No resume is promised: a scheduled fire is cancelled and its occurrence consumed (`_refused` in
+   `admission.py`, `reschedule` in `schedules.py`). Billing answers an admin alone, hence one link. */
+const OUT_OF_CREDIT_ADMIN = "Out of credit. All work has stopped.";
+const OUT_OF_CREDIT_MEMBER = "Out of credit. Ask your admin to add credit.";
+const BILLING_LINK = "Go to billing";
 
 /** A composition in flight — an IME candidate — takes its own Enter, so the guard reads `isComposing`
  *  before claiming the key. */
@@ -674,6 +687,8 @@ function Composer({
   /** A conversation's agent reaches this box as a `ConversationAgent`, which carries no `app`, so the
    *  chat surface arrives named but unclassed. */
   const addressed = [agent.app, agent.name].includes(CHAT_SURFACE) ? null : agentName(agent.name);
+  const { outOfCredit } = useAppStatus();
+  const admin = useMe()?.admin === true;
   const showsEyebrow = addressed !== null && !dismissed;
   const running = state.turn;
   const disabled = state.messages === null || (target.conversationId === null && state.busy);
@@ -758,7 +773,23 @@ function Composer({
 
   const box = (
     <PromptInput onSend={send}>
-      {showsEyebrow ? (
+      {outOfCredit ? (
+        <PromptInputEyebrow
+          tone="attention"
+          glyph={<IconCreditCardOff className="size-(--size-glyph) shrink-0" />}
+          label={admin ? OUT_OF_CREDIT_ADMIN : OUT_OF_CREDIT_MEMBER}
+          action={
+            admin ? (
+              <a
+                href={workspaceHash("billing")}
+                className={buttonVariants({ variant: "quiet" }) + " no-underline"}
+              >
+                {BILLING_LINK}
+              </a>
+            ) : null
+          }
+        />
+      ) : showsEyebrow ? (
         <PromptInputEyebrow
           glyph={
             agent.icon ? (

@@ -1125,6 +1125,7 @@ async def web(
         None,
         ("auto", "claude-opus-4-8", "claude-sonnet-5"),
         connectors=ConnectorRegistry(entries={}, resolver=CatalogResolver()),
+        own_key_slots=(OWN_KEY_SLOT,),
         ambient_reply=UNREACHED_AMBIENT_REPLY,
         surface_model=lambda _name: SURFACE_MODEL[0],
         skills=EMPTY_SKILL_REGISTRY,
@@ -2046,6 +2047,8 @@ async def test_a_flag_service_that_answers_nothing_leaves_a_member_what_they_had
 
 
 STATUS_PATH = "/surface/web/api/agents/status"
+DOLLAR = 1_000_000
+OWN_KEY_SLOT = "anthropic_api_key"
 
 
 async def _seed_status_agent(workspace_id: UUID, name: str) -> UUID:
@@ -2199,6 +2202,81 @@ async def test_agents_status_never_reads_the_task_store(
     row = next(entry for entry in working["statuses"] if entry["agent_id"] == str(agent_id))
     assert row["turn"] == "running"
     assert [statement for statement in busy if "scheduled_task" in statement] == []
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_agents_status_says_when_the_balance_has_stopped_the_workspace(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The composer's credit line rides this poll because the billing read that states the balance
+    in full answers an admin alone, and the member who is about to type is usually not one."""
+    client, workspace_id, _agent_id = web
+    _member, token = await _seed_member(workspace_id, "m@example.com")
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    assert (await client.get(STATUS_PATH, headers=headers)).json()["out_of_credit"] is False
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace_balance).values(
+                workspace_id=workspace_id,
+                balance_micro_usd=5 * DOLLAR,
+                reserve_micro_usd=10 * DOLLAR,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    assert (await client.get(STATUS_PATH, headers=headers)).json()["out_of_credit"] is True
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.workspace_balance)
+            .where(tables.workspace_balance.c.workspace_id == workspace_id)
+            .values(balance_micro_usd=50 * DOLLAR)
+        )
+
+    assert (await client.get(STATUS_PATH, headers=headers)).json()["out_of_credit"] is False
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_agents_status_leaves_a_workspace_on_its_own_key_running(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The gate admits a workspace under the line that holds its own key for the model, so the
+    composer must not tell that member their work has stopped while every turn of theirs is
+    answered. The exemption is stated in the deploy's key slots, which reach the route through the
+    surface context."""
+    client, workspace_id, _agent_id = web
+    _member, token = await _seed_member(workspace_id, "m@example.com")
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.workspace_balance).values(
+                workspace_id=workspace_id,
+                balance_micro_usd=DOLLAR,
+                reserve_micro_usd=10 * DOLLAR,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    assert (await client.get(STATUS_PATH, headers=headers)).json()["out_of_credit"] is True
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.credential).values(
+                workspace_id=workspace_id,
+                slot=OWN_KEY_SLOT,
+                ciphertext=b"sealed",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    assert (await client.get(STATUS_PATH, headers=headers)).json()["out_of_credit"] is False
 
 
 @pytest.mark.usefixtures("database_url")

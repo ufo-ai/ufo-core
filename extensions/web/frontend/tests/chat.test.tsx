@@ -3,12 +3,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { wakeAppStatus } from "@/lib/appStatusStore";
 import { liveTurn, resetChatStore } from "@/lib/chatStore";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 import { ADMIN_DISCLOSURE } from "@/lib/audience";
 import { resetStreams } from "@/lib/turnStream";
 import type { EarlierMessages } from "@/lib/earlier";
-import { chatHash, conversationSlotHash, newChatHash } from "@/lib/route";
+import { chatHash, conversationSlotHash, newChatHash, workspaceHash } from "@/lib/route";
 import { Chat } from "@/views/Chat";
 import { ConversationTranscript } from "@/views/Conversations";
 
@@ -4642,4 +4643,44 @@ test("a run pressed while the transcript is still read is marked when its words 
   } finally {
     vi.useRealTimers();
   }
+});
+
+const OUT_OF_CREDIT = () => ({
+  ...transcript(),
+  "/api/agents/status": () => json({ statuses: [], out_of_credit: true }),
+});
+
+test("an out-of-credit workspace says so above the composer, and offers billing to an admin alone", async () => {
+  wire(OUT_OF_CREDIT());
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
+
+  expect(await screen.findByText("Out of credit. All work has stopped.")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Go to billing" }).getAttribute("href")).toBe(
+    workspaceHash("billing"),
+  );
+
+  cleanup();
+  wire(OUT_OF_CREDIT());
+  open();
+
+  expect(await screen.findByText("Out of credit. Ask your admin to add credit.")).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "Go to billing" })).toBeNull();
+});
+
+test("the credit line takes the eyebrow from the agent it addresses, and gives it back", async () => {
+  wire(OUT_OF_CREDIT());
+  render(<Chat agent={AGENT} member={MEMBER} conversationId={CONVO_ID} />);
+
+  expect(await screen.findByText("Out of credit. Ask your admin to add credit.")).toBeTruthy();
+  expect(screen.queryByText("Assistant")).toBeNull();
+
+  /* The credit lands on the poll the mounted box already runs, so the line has to go on that
+     answer — resetting the store would clear its listeners and prove nothing. */
+  wire(transcript());
+  await act(async () => {
+    wakeAppStatus();
+  });
+
+  expect(await screen.findByText("Assistant")).toBeTruthy();
+  expect(screen.queryByText(/^Out of credit\./)).toBeNull();
 });
