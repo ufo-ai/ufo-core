@@ -99,6 +99,7 @@ function serve() {
               description: "OpenAI API key",
               extension: "models",
               filled: true,
+              entries: [],
             },
           ],
         });

@@ -265,6 +265,7 @@ test("a credential's provider mark carries no round mask", async () => {
             extension: "models",
             description: "the key",
             filled: true,
+            entries: [],
           },
         ],
         actions: [],

@@ -107,12 +107,17 @@ class CredentialSlot:
     wire so the sandbox never holds it; without one it is readable only in-process.
 
     `merge` belongs to a structured secret whose private prompt submits one update. Core owns the
-    encrypted row and lock, so the extension supplies only the pure value merge."""
+    encrypted row and lock, so the extension supplies only the pure value merge.
+
+    `entries` reads the same structured value back as the non-secret names it holds, so a reader
+    sees which of them are set without any read disclosing one. A slot holding a single secret
+    declares none and its fill state is the whole of what a read can say."""
 
     name: str
     description: str
     injection: InjectionTarget | None = None
     merge: Callable[[str | None, str], str] | None = None
+    entries: Callable[[str], tuple[str, ...]] | None = None
 
 
 JOB_FAULT_MAX_CHARS = 500
@@ -1011,6 +1016,7 @@ def declared_slot(slot: CredentialSlot, extension: str) -> DeclaredSlot:
         env="" if slot.injection is None else slot.injection.env or "",
         header="" if slot.injection is None else slot.injection.header,
         merge=slot.merge,
+        entries=slot.entries,
     )
 
 

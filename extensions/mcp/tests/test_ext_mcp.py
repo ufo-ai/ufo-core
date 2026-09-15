@@ -171,6 +171,28 @@ def test_manifest_declares_the_two_dynamic_tools_and_the_server_slot() -> None:
     assert slot.name == "mcp_servers"
     assert slot.injection is None
     assert slot.merge is mcp.merge_mcp_server
+    assert slot.entries is mcp.mcp_server_names
+
+
+def test_configured_server_names_are_sorted_and_carry_no_url_or_token() -> None:
+    stored = json.dumps(
+        {
+            "servers": {
+                "supabase": {"url": "https://mcp.supabase.com/mcp", "auth": "sbp-token"},
+                "neon": {"url": "https://mcp.neon.tech/mcp", "auth": "neon-token"},
+            }
+        }
+    )
+
+    named = mcp.mcp_server_names(stored)
+
+    assert named == ("neon", "supabase")
+    assert "sbp-token" not in str(named)
+    assert "mcp.supabase.com" not in str(named)
+
+
+def test_no_server_is_configured_reads_as_no_names() -> None:
+    assert mcp.mcp_server_names(json.dumps({"servers": {}})) == ()
 
 
 def test_one_mcp_server_update_preserves_other_servers_and_saved_auth() -> None:

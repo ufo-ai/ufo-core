@@ -493,7 +493,8 @@ class DeclaredSlot:
     or the `HostChoice` a member selects within — `env`, the sandbox variable the slot's
     sentinel is exported as, empty for a slot the sandbox never sees, and `header`, the header the
     secret rides in on the wire. `merge` updates a structured
-    secret from one private submission at the encrypted store boundary."""
+    secret from one private submission at the encrypted store boundary, and `entries` reads that
+    same value back as the non-secret names it holds."""
 
     name: str
     description: str
@@ -502,6 +503,22 @@ class DeclaredSlot:
     env: str = ""
     header: str = ""
     merge: Callable[[str | None, str], str] | None = None
+    entries: Callable[[str], tuple[str, ...]] | None = None
+
+
+async def slot_entries(
+    store: "CredentialStore | None", workspace_id: UUID, slot: DeclaredSlot
+) -> tuple[str, ...]:
+    """The non-secret names one structured slot's stored value holds, read for the projections that
+    carry them. The value is decrypted, named and dropped inside this call, so a caller holding the
+    result holds no secret. A slot that declares no reader, a process that holds no store, and an
+    empty slot all read as no entries."""
+    if slot.entries is None or store is None:
+        return ()
+    try:
+        return slot.entries(await store.get(workspace_id, slot.name))
+    except CredentialSlotUnset:
+        return ()
 
 
 def declared_slot_fingerprint(slot: DeclaredSlot) -> str:

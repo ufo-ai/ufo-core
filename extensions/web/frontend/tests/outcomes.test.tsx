@@ -73,6 +73,7 @@ const SLOT = {
   extension: "models",
   description: "the key",
   filled: true,
+  entries: [],
 };
 
 const HOST_SLOT = {
@@ -81,9 +82,19 @@ const HOST_SLOT = {
   extension: "coding",
   description: "paste the key from `api.datadoghq.com`",
   filled: true,
+  entries: [],
 };
 
 const EMPTY_SLOT = { ...HOST_SLOT, name: "apollo", slot: "APOLLO_API_KEY", filled: false };
+
+const MCP_SLOT = {
+  name: "mcp-servers",
+  slot: "mcp_servers",
+  extension: "mcp",
+  description: "BYOK MCP servers.",
+  filled: true,
+  entries: ["neon", "supabase"],
+};
 
 const WORKSPACE_SLOT = {
   name: "acme-api-key",
@@ -94,6 +105,7 @@ const WORKSPACE_SLOT = {
   host: "api.acme.com",
   env: "ACME_API_KEY",
   header: "Authorization",
+  entries: [],
 };
 
 const CREDENTIAL_ACTIONS = [
@@ -119,6 +131,7 @@ const BEDROCK_SLOT = {
   extension: "models",
   description: "the key",
   filled: true,
+  entries: [],
 };
 
 const SLACK_TOKEN = {
@@ -127,6 +140,7 @@ const SLACK_TOKEN = {
   extension: "slack",
   description: "the bot user OAuth token",
   filled: true,
+  entries: [],
 };
 const SLACK_SECRET = {
   ...SLACK_TOKEN,
@@ -247,6 +261,23 @@ test("credentials group and sort the filled slots, and render their literals", a
   expect(code.tagName).toBe("CODE");
   expect(code.textContent).not.toContain("`");
   expect(credentialNames()).toEqual(["OPENAI_API_KEY", "DATADOG_API_KEY"]);
+});
+
+test("the MCP slot names the servers it holds, and a search for one finds that row", async () => {
+  location.hash = "#/workspace/credentials";
+  wire({
+    "/workspace/credentials": () =>
+      json({ actions: CREDENTIAL_ACTIONS, slots: [SLOT, MCP_SLOT] }),
+    "/workspace/accounts": () => json({ accounts: [] }),
+  });
+  render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+  await screen.findByText("mcp_servers");
+  expect(screen.getByText(/neon, supabase/)).toBeTruthy();
+
+  await userEvent.type(screen.getByLabelText("Search credentials"), "supabase{Enter}");
+
+  expect(credentialNames()).toEqual(["mcp_servers"]);
 });
 
 test("a workspace key is declared and filled by one save, and edited by one intent", async () => {
@@ -421,7 +452,7 @@ test("a credential row names the variable, and a row with no prose leads with no
         slots: [
           SLOT,
           { ...WORKSPACE_SLOT, filled: true, description: "" },
-          { name: "slack", slot: "SLACK_BOT_TOKEN", extension: "slack", description: "", filled: true },
+          { name: "slack", slot: "SLACK_BOT_TOKEN", extension: "slack", description: "", filled: true, entries: [] },
         ],
       }),
     "/workspace/accounts": () => json({ accounts: [] }),

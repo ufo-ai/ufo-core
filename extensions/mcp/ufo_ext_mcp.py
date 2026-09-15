@@ -156,6 +156,12 @@ def merge_mcp_server(current: str | None, submitted: str) -> str:
     return McpServersConfig(servers=servers).model_dump_json(exclude_none=True)
 
 
+def mcp_server_names(current: str) -> tuple[str, ...]:
+    """The servers one workspace has configured, named for the reads that list them. Only the map's
+    keys leave this call — a server's url is the member's own and its token is a secret."""
+    return tuple(sorted(McpServersConfig.model_validate_json(current).servers))
+
+
 class ListMcpToolsInput(BaseModel):
     server: str = Field(description="The name of an MCP server configured for this workspace.")
     tool_names: tuple[str, ...] = Field(
@@ -360,6 +366,7 @@ def manifest() -> Manifest:
                     "all servers. auth is sent as a Bearer token."
                 ),
                 merge=merge_mcp_server,
+                entries=mcp_server_names,
             ),
         ),
     )

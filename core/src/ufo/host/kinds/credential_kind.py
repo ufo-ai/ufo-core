@@ -28,6 +28,7 @@ from ufo.runtime.access.credentials import (
     HostChoice,
     credential_host,
     named_slots,
+    slot_entries,
 )
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.ext.context import ExtensionContext, JsonValue
@@ -58,7 +59,8 @@ class CredentialSpec(BaseModel):
     pins its host per account instead carries `host_slot` and the `host_options` a member may
     select, so the agent asks with the real answers rather than inviting a hostname. `env` is the
     sandbox variable the slot's sentinel is exported as and `header` the header it rides in on the
-    wire to `host`."""
+    wire to `host`. `entries` names what a structured value already holds, so the agent asking for
+    one more names the ones it is adding to."""
 
     model_config = ConfigDict(extra="forbid")
     slot: str
@@ -69,6 +71,7 @@ class CredentialSpec(BaseModel):
     header: str = ""
     host_slot: str = ""
     host_options: tuple[str, ...] = ()
+    entries: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -217,6 +220,7 @@ class CredentialObjects:
                 header=slot.header,
                 host_slot=slot.host.slot if isinstance(slot.host, HostChoice) else "",
                 host_options=slot.host.hosts if isinstance(slot.host, HostChoice) else (),
+                entries=await slot_entries(self.credentials, ws_current().workspace_id, slot),
             ),
             created_at=None if row is None else row.created_at,
             updated_at=None if row is None else row.updated_at,

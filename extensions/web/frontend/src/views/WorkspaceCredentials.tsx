@@ -55,6 +55,7 @@ type Slot = {
   host: string;
   env: string;
   header: string;
+  entries: string[];
 };
 
 const WORKSPACE_EXTENSION = "workspace_credentials";
@@ -209,7 +210,8 @@ const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
         return left.slot.localeCompare(right.slot);
       }),
   rowKey: (row) => row.name,
-  search: (row) => [row.slot, row.description, row.extension, row.host, row.env].join(" "),
+  search: (row) =>
+    [row.slot, row.description, row.extension, row.host, row.env, ...row.entries].join(" "),
   list: {
     mark: (row) => (
       <MarkTile>
@@ -235,6 +237,7 @@ const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     meta: [
       { field: "description", render: (description) => codeSpans(description) },
       { field: "host", render: (host) => codeSpans(host) },
+      { field: "entries", render: (entries) => (entries.length ? entries.join(", ") : null) },
     ],
   },
 
@@ -435,6 +438,7 @@ function DeclareForm({
       host: hostOf(host),
       env: env.trim(),
       header: header.trim() || DEFAULT_HEADER,
+      entries: [],
     };
     setSaving(true);
     const outcome = await context.act({

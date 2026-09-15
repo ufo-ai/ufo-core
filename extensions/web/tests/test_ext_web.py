@@ -2509,6 +2509,7 @@ async def test_credentials_view_reports_slots_and_never_values(
             "host": "api.acme.test",
             "env": "ACME_API_KEY",
             "header": "Authorization",
+            "entries": [],
         },
         {
             "slot": "acme_install_seal",
@@ -2519,6 +2520,7 @@ async def test_credentials_view_reports_slots_and_never_values(
             "host": "",
             "env": "",
             "header": "",
+            "entries": [],
         },
         {
             "slot": "acme_signing_key",
@@ -2529,6 +2531,7 @@ async def test_credentials_view_reports_slots_and_never_values(
             "host": "",
             "env": "",
             "header": "",
+            "entries": [],
         },
     ]
     assert "sealed" not in listed.text
