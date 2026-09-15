@@ -6,6 +6,7 @@ locals {
     "ufo.model_round_ms",
     "ufo.onboarding_step_latency_ms",
     "ufo.tool_call_ms",
+    "ufo.turn_dispatch_wait_ms",
     "ufo.turn_ms",
     "ufo.turn_slot_wait_ms",
   ]
@@ -31,6 +32,14 @@ resource "datadog_metric_tag_configuration" "db_tx_acquire_ms" {
 resource "datadog_metric_tag_configuration" "turn_slot_wait_ms" {
   depends_on          = [terraform_data.metric_seed]
   metric_name         = "ufo.turn_slot_wait_ms"
+  metric_type         = "distribution"
+  include_percentiles = true
+  tags                = ["env", "host", "service"]
+}
+
+resource "datadog_metric_tag_configuration" "turn_dispatch_wait_ms" {
+  depends_on          = [terraform_data.metric_seed]
+  metric_name         = "ufo.turn_dispatch_wait_ms"
   metric_type         = "distribution"
   include_percentiles = true
   tags                = ["env", "host", "service"]
@@ -106,6 +115,13 @@ resource "datadog_metric_metadata" "db_tx_acquire_ms" {
 resource "datadog_metric_metadata" "turn_slot_wait_ms" {
   depends_on = [terraform_data.metric_seed]
   metric     = "ufo.turn_slot_wait_ms"
+  type       = "gauge"
+  unit       = "millisecond"
+}
+
+resource "datadog_metric_metadata" "turn_dispatch_wait_ms" {
+  depends_on = [terraform_data.metric_seed]
+  metric     = "ufo.turn_dispatch_wait_ms"
   type       = "gauge"
   unit       = "millisecond"
 }

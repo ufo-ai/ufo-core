@@ -213,8 +213,8 @@ async def _parked_turn(
                 inbound="hello",
                 speaker_member_id=speaker_member_id,
                 admission_source=admission_source,
-                created_at=sa.func.now() - timedelta(hours=1),
-                updated_at=sa.func.now() - timedelta(hours=1),
+                created_at=datetime.now(UTC) - timedelta(hours=1),
+                updated_at=datetime.now(UTC) - timedelta(hours=1),
             )
         )
     return turn_id

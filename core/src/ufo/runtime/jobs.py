@@ -35,7 +35,7 @@ from pydantic import BaseModel
 from ufo.blob import WorkspaceBlobStore
 from ufo.db import failed_statement, owner_tx, workspace_tx
 from ufo.harness.models.registry import ModelRegistry
-from ufo.harness.o11y import emit_metric, formatted_stack, log, log_error, warn
+from ufo.harness.o11y import emit_histogram, emit_metric, formatted_stack, log, log_error, warn
 from ufo.harness.sandbox.conversation import ConversationSandbox
 from ufo.product import (
     PRODUCT_CENSUS_JOB,
@@ -88,6 +88,7 @@ from ufo.runtime.sources.sync import (
     page_cursor,
 )
 from ufo.runtime.turns.audience import SHARED_AUDIENCE
+from ufo.runtime.turns.dispatch import dispatch_wait_ms
 from ufo.runtime.turns.subjects import MEMBER_SUBJECT_PREFIX
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
@@ -167,6 +168,7 @@ class _DispatchTurn:
     admission_source: TurnAdmissionSource
     status: TurnStatus
     parent_turn_id: UUID | None
+    created_at: datetime
 
 
 @dataclass(frozen=True)
@@ -258,6 +260,7 @@ class TurnDispatcher:
                         tables.turn.c.admission_source,
                         tables.turn.c.status,
                         tables.turn.c.parent_turn_id,
+                        tables.turn.c.created_at,
                     )
                     .where(self._eligible(now))
                     .order_by(
@@ -278,6 +281,7 @@ class TurnDispatcher:
                 r.admission_source,
                 r.status,
                 r.parent_turn_id,
+                r.created_at,
             )
             for r in rows
         )
@@ -303,6 +307,8 @@ class TurnDispatcher:
             ).one_or_none()
         if claimed is None:
             return
+        if turn.status == QUEUED:
+            emit_histogram("turn_dispatch_wait_ms", dispatch_wait_ms(turn.created_at))
         options: EnqueueOptions = {
             "queue_name": turn_queue_for(turn.parent_turn_id, turn.admission_source),
             "workflow_name": TURN_WORKFLOW_NAME,

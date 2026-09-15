@@ -37,6 +37,46 @@ resource "datadog_monitor" "deploy_failed" {
   tags = ["env:testing", "managed-by:terraform", "team:ufo"]
 }
 
+# The refusal reaches only the model: on 2026-09-14 it took 24 trigger-fired reviewer spawns and the
+# review fleet went quiet for a day with nobody told.
+resource "datadog_monitor" "member_authorization_refused" {
+  name    = "ufo testing refused member authorizations it could not show"
+  type    = "query alert"
+  query   = "sum(last_30m):sum:ufo.member_authorization_refused_total{env:testing} by {call}.as_count() >= 3"
+  message = "{{value}} calls to {{call.name}} were refused in 30 minutes because their arguments could not be shown for approval. Read the refused turns' transcripts: a credential shape in a legitimate argument means the call needs a form that keeps the secret out of its arguments; a run of refusals on automatic turns means the gate is running where no member is asked."
+
+  priority = 4
+
+  monitor_thresholds {
+    critical = 3
+  }
+
+  require_full_window = false
+  timeout_h           = 1
+
+  tags = ["env:testing", "managed-by:terraform", "team:ufo"]
+}
+
+# A queued turn waits behind its conversation's live sibling; a wait this long is a conversation that
+# has stopped answering, whatever holds it. On 2026-09-15 thirty-one reviewer results waited hours.
+resource "datadog_monitor" "turn_dispatch_wait" {
+  name    = "ufo testing turns are waiting behind a live turn"
+  type    = "query alert"
+  query   = "max(last_30m):max:ufo.turn_dispatch_wait_ms{env:testing} > 1800000"
+  message = "A queued turn waited {{value}} ms behind its conversation's live turn before it was offered. Find the conversation in the debugger: a member turn absorbing many arrivals is running long, or results are founding turns instead of folding in, or the live turn is wedged."
+
+  priority = 4
+
+  monitor_thresholds {
+    critical = 1800000
+  }
+
+  require_full_window = false
+  timeout_h           = 1
+
+  tags = ["env:testing", "managed-by:terraform", "team:ufo"]
+}
+
 # Postgres never sees a connection that never arrives, so no database-side metric can show this; the
 # count is taken in `db._opened`, where the wait happens.
 resource "datadog_monitor" "db_tx_unavailable" {

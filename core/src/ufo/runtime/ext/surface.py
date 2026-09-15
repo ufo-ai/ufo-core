@@ -183,6 +183,7 @@ from ufo.schema.records import (
     ArtifactRole,
     AskUserInput,
     FiredBy,
+    ObjectRef,
     ReasoningEffort,
     RuntimeIdentity,
     SandboxSize,
@@ -5338,6 +5339,7 @@ class SurfaceContext:
             tables.turn.c.status,
             tables.turn.c.inbound,
             tables.turn.c.admission_source,
+            tables.turn.c.idempotency_key,
             tables.turn.c.speaker_member_id,
             tables.turn.c.fired_by_kind,
             tables.turn.c.fired_by_name,
@@ -5347,11 +5349,16 @@ class SurfaceContext:
             tables.turn.c.updated_at,
             tables.turn.c.context,
             tables.turn.c.terminal,
+            tables.turn.c.created_refs,
             tables.turn.c.parent_turn_id,
             tables.turn.c.subagent_profile,
             tables.turn.c.subagent_name,
+            tables.turn.c.result_delivery,
+            tables.turn.c.retry_at,
+            tables.turn.c.external_retry_count,
             tables.turn.c.traceparent,
             tables.turn.c.connect_landed_at,
+            tables.turn.c.runtime_config,
             tables.turn.c.model_accounts,
         )
 
@@ -5365,6 +5372,7 @@ class SurfaceContext:
             status=row.status,
             inbound=row.inbound,
             admission_source=row.admission_source,
+            idempotency_key=row.idempotency_key,
             speaker_member_id=row.speaker_member_id,
             fired_by=(
                 None
@@ -5380,11 +5388,20 @@ class SurfaceContext:
             updated_at=row.updated_at,
             context=None if row.context is None else TurnContext.model_validate(row.context),
             terminal=None if row.terminal is None else TerminalFrame.model_validate(row.terminal),
+            created_refs=tuple(ObjectRef.model_validate(ref) for ref in row.created_refs or ()),
             parent_turn_id=row.parent_turn_id,
             subagent_profile=row.subagent_profile,
             subagent_name=row.subagent_name,
+            result_delivery=row.result_delivery,
+            retry_at=row.retry_at,
+            external_retry_count=row.external_retry_count,
             traceparent=row.traceparent,
             connect_landed_at=row.connect_landed_at,
+            runtime_config=(
+                None
+                if row.runtime_config is None
+                else TurnRuntimeConfig.model_validate(row.runtime_config)
+            ),
             model_accounts=row.model_accounts,
         )
 

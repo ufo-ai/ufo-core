@@ -221,8 +221,41 @@ async def test_each_opening_turn_persists_its_own_runtime_config(db: None) -> No
     )
 
 
+@pytest.mark.parametrize("live_is_unrestricted", [True, False])
+async def test_paid_work_within_the_live_turns_scope_folds_into_it(
+    db: None, live_is_unrestricted: bool
+) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    connection_id = uuid4()
+    live_config = (
+        None if live_is_unrestricted else TurnRuntimeConfig(connections=(connection_id, uuid4()))
+    )
+    live = await admission.admit_member(
+        workspace_id, conversation_id, "dequeue", member_id, runtime_config=live_config
+    )
+    assert await _claim_turn(live.turn_id, str(live.turn_id))
+
+    delivered = await _invoke(
+        admission,
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "<spawn_result>done</spawn_result>",
+        "subagent-result:child",
+        holds_work_already_done=True,
+        runtime_config=TurnRuntimeConfig(connections=(connection_id,)),
+    )
+
+    assert delivered == live.turn_id
+    assert await _turn_count(conversation_id) == 1
+    assert await _queued_bodies(conversation_id) == ["<spawn_result>done</spawn_result>"]
+    assert dbos.enqueued == [str(live.turn_id)]
+
+
 @pytest.mark.parametrize("delivered_is_unrestricted", [False, True])
-async def test_paid_work_with_another_runtime_config_waits_in_its_own_turn(
+async def test_paid_work_outside_the_live_turns_scope_waits_in_its_own_turn(
     db: None, delivered_is_unrestricted: bool
 ) -> None:
     workspace_id, member_id, agent_id, conversation_id = await _seed()

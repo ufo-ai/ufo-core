@@ -71,6 +71,7 @@ METRICS = (
     "sandbox_tool_output_dir_reclaimed_total",
     "tool_activity_failed_total",
     "member_authorization_failed_total",
+    "member_authorization_refused_total",
     "tool_offload_failed_total",
     "db_tx_unavailable_total",
     "db_pool_exhausted_total",
@@ -107,6 +108,7 @@ JOB_DIMENSION = "job"
 HISTOGRAMS = {
     "db_tx_acquire_ms": ("path",),
     "turn_slot_wait_ms": (),
+    "turn_dispatch_wait_ms": (),
     "model_round_ms": (
         "model",
         "provider",

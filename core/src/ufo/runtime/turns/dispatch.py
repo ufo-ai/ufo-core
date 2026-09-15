@@ -9,13 +9,14 @@ the queue. A crash between a terminal and this call is caught by the dispatcher 
 both may fire: the stamp update admits one winner, and the enqueue is dedup'd on the workflow id.
 """
 
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from dbos import DBOSClient, EnqueueOptions
 
 from ufo.db import workspace_tx
-from ufo.harness.o11y import log
+from ufo.harness.o11y import emit_histogram, log
 from ufo.schema import tables
 from ufo.schema.records import (
     DBOS_APP_VERSION,
@@ -23,6 +24,14 @@ from ufo.schema.records import (
     TURN_WORKFLOW_NAME,
     turn_queue_for,
 )
+
+
+def dispatch_wait_ms(created_at: datetime) -> int:
+    """How long a queued turn waited from admission to its offer — the time a conversation held it
+    behind a live sibling. Recorded by both offerers, so one series answers how far behind a
+    conversation is running."""
+    admitted = created_at if created_at.tzinfo else created_at.replace(tzinfo=UTC)
+    return max(0, round((datetime.now(UTC) - admitted).total_seconds() * 1000))
 
 
 async def dispatch_next_turn(client: DBOSClient, conversation_id: UUID) -> None:
@@ -58,6 +67,7 @@ async def dispatch_next_turn(client: DBOSClient, conversation_id: UUID) -> None:
                     tables.turn.c.admission_source,
                     tables.turn.c.running_attempt,
                     tables.turn.c.dispatch_enqueued_at,
+                    tables.turn.c.created_at,
                 )
                 .where(
                     tables.turn.c.conversation_id == conversation_id,
@@ -75,6 +85,7 @@ async def dispatch_next_turn(client: DBOSClient, conversation_id: UUID) -> None:
             .values(dispatch_enqueued_at=sa.func.now(), updated_at=sa.func.now())
             .where(tables.turn.c.id == offered.id)
         )
+    emit_histogram("turn_dispatch_wait_ms", dispatch_wait_ms(offered.created_at))
     workflow_id = uuid4().hex if offered.running_attempt is not None else str(offered.id)
     options: EnqueueOptions = {
         "queue_name": turn_queue_for(offered.parent_turn_id, offered.admission_source),

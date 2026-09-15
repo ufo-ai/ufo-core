@@ -483,6 +483,7 @@ class MemberAuthorization:
     async def preflight(self, request: AuthorizationRequest) -> AuthorizationAttempt:
         effect = self._effect_json(request.effect)
         if effect is None:
+            emit_metric("member_authorization_refused_total", call=request.effect.call)
             return AuthorizationAttempt(
                 request=request,
                 refusal=MEMBER_AUTHORIZATION_UNDISCLOSABLE,

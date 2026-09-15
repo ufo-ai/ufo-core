@@ -148,7 +148,11 @@ class _FoldResult:
     waits_for_live_turn: bool = False
     """The arrival founds its own turn and that turn waits for the live one to end. The turn is
     left unstamped rather than enqueued, so the live turn's own exit offers it — a conversation
-    runs one turn at a time, and work that could not fold does not become a second runner."""
+    runs one turn at a time, and work that could not fold does not become a second runner. Work
+    already done folds when its connection scope reaches nothing the live turn cannot — a live turn
+    pinned to no scope covers every scope, and its other pins are the ones a fold runs under, as a
+    redispatch already folds a stale pin under the live one's — and waits only when it reaches a
+    connection the live turn lacks, so the causal scope its result needs stays with it."""
 
 
 @dataclass(frozen=True)
@@ -896,8 +900,16 @@ class Admission:
         )
         if live_turn is not None and live_runtime_config != runtime_config:
             if holds_work_already_done:
-                return _FoldResult(waits_for_live_turn=True)
-            if runtime_config is not None:
+                arrival_scope = None if runtime_config is None else runtime_config.connections
+                live_scope = (
+                    None if live_runtime_config is None else live_runtime_config.connections
+                )
+                covered = arrival_scope is not None and (
+                    live_scope is None or set(arrival_scope) <= set(live_scope)
+                )
+                if not covered:
+                    return _FoldResult(waits_for_live_turn=True)
+            elif runtime_config is not None:
                 raise ValueError("running turn has a different runtime config")
         if (
             live_turn is not None

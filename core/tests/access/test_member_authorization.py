@@ -8,11 +8,14 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from pydantic import BaseModel, SecretStr
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 import ufo.runtime.access.member_authorization as member_authorization_module
 from ufo.db import workspace_tx
+from ufo.harness import o11y
 from ufo.harness.models.interface import Message, ModelRequest, ToolUseBlock
 from ufo.runtime.access.member_authorization import (
     MEMBER_AUTHORIZATION_EFFECT_CHARS,
@@ -1326,6 +1329,30 @@ async def test_undisclosable_effects_leave_no_durable_secret_verifier(db: None) 
     assert model.requests == []
     assert await _authorizations() == []
     assert await _permissions() == []
+
+
+async def test_an_undisclosable_refusal_is_counted(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_counters", {})
+    ids = await _seed()
+    effect = AuthorizationEffect(call="publish", arguments={"token": "secret-value"})
+
+    denied = await MemberAuthorization(StubModel([]), TEST_DIGEST_KEY).authorize(
+        _request(ids, "Publish it", effect=effect)
+    )
+
+    assert denied.refusal == MEMBER_AUTHORIZATION_UNDISCLOSABLE
+    points = [
+        (metric.name, dict(point.attributes), point.value)
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        for point in metric.data.data_points
+    ]
+    assert points == [("ufo.member_authorization_refused_total", {"call": "publish"}, 1)]
 
 
 async def test_undisclosable_effect_cannot_settle_with_a_forged_choice(db: None) -> None:

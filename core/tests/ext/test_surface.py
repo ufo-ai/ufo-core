@@ -148,6 +148,7 @@ from ufo.schema.records import (
     TerminalFrame,
     ToolIntent,
     TurnContext,
+    TurnRuntimeConfig,
 )
 
 SURFACE = "test_surface"
@@ -3135,6 +3136,47 @@ async def _turn_row(
             )
         )
     return turn_id
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_turn_projections_carry_the_rows_dispatch_and_scope_columns(
+    db: None, tmp_path
+) -> None:
+    workspace_id, agent_id, member_id = await _seed(member_email="bee@example.com")
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    conversation_id = await _conversation_row(workspace_id, queue_key="scoped", member_id=member_id)
+    turn_id, connection_id = uuid4(), uuid4()
+    retry_at = datetime(2026, 9, 15, 15, 0, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.turn).values(
+                id=turn_id,
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                seq=1,
+                status="queued",
+                inbound="<spawn_result>done</spawn_result>",
+                idempotency_key="subagent-result:child",
+                result_delivery="pending",
+                retry_at=retry_at,
+                external_retry_count=2,
+                runtime_config={"connections": [str(connection_id)]},
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+
+    (listed,) = await context.list_turns(conversation_id)
+    detail = await context.turn_detail(turn_id)
+
+    assert detail is not None
+    for turn in (listed, detail.turn):
+        assert turn.runtime_config == TurnRuntimeConfig(connections=(connection_id,))
+        assert turn.idempotency_key == "subagent-result:child"
+        assert turn.result_delivery == "pending"
+        assert turn.retry_at == retry_at
+        assert turn.external_retry_count == 2
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

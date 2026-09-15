@@ -110,6 +110,7 @@ from ufo.runtime.access.grants import (
 from ufo.runtime.access.member_authorization import (
     MEMBER_AUTHORIZATION_MODEL,
     MEMBER_AUTHORIZATION_TOOL,
+    MEMBER_AUTHORIZATION_UNDISCLOSABLE,
     AuthorizationAnswer,
     AuthorizationAttempt,
     AuthorizationBinding,
@@ -2937,6 +2938,66 @@ async def test_a_continuation_binds_its_causal_request_without_asking_again(
     assert gate.requests == []
 
 
+async def test_a_continuation_dispatches_a_review_sized_call_past_every_gate(
+    db: None, tmp_path: Path
+) -> None:
+    class Objective(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        objective: str
+
+    request = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    async with workspace_tx() as connection:
+        member = (
+            await connection.execute(
+                sa.select(tables.conversation.c.member_id).where(
+                    tables.conversation.c.id == request.conversation_id
+                )
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(speaker_member_id=member, inbound="Review every pull request as it changes")
+            .where(tables.turn.c.id == request.id)
+        )
+    gate = RecordingMemberAuthorization(
+        AuthorizationResolution("deny", refusal=MEMBER_AUTHORIZATION_UNDISCLOSABLE)
+    )
+    spawned: list[int] = []
+
+    async def spawn_reviewer(ctx: ToolContext, args: Objective) -> ToolResult:
+        spawned.append(len(args.objective))
+        return ToolResult(content=(TextContent(text="running"),))
+
+    engine = replace(
+        _engine(request, EchoModel(), tmp_path),
+        member_authorization=gate,
+        tools=ToolRegistry(
+            (
+                ToolDef(
+                    name="spawn_reviewer",
+                    description="d",
+                    input_model=Objective,
+                    handler=spawn_reviewer,
+                ),
+            )
+        ),
+    )
+    objective = "Review pull request #3690 at head d0fca01e for correctness. " * 60
+    with ws(request.workspace_id):
+        requester = await engine._continued_requester(request.id)
+        result = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(id="spawn", name="spawn_reviewer", input={"objective": objective}),
+            {request.id: requester},
+        )
+
+    assert not result.is_error
+    assert spawned == [len(objective)]
+    assert gate.preflight_requests == []
+    assert gate.requests == []
+
+
 async def test_a_member_creates_an_app_in_their_own_conversation_without_the_ref(
     db: None, tmp_path: Path
 ) -> None:
@@ -5237,15 +5298,63 @@ async def test_exit_handoff_offers_an_ever_claimed_next_turn_a_fresh_workflow_id
     assert stamp is not None
 
 
+def _histogram_reader(monkeypatch: pytest.MonkeyPatch) -> InMemoryMetricReader:
+    reader = InMemoryMetricReader()
+    monkeypatch.setattr(o11y.metrics, "get_meter", MeterProvider(metric_readers=[reader]).get_meter)
+    monkeypatch.setattr(o11y, "_histograms", {})
+    return reader
+
+
+def _histogram_points(reader: InMemoryMetricReader, name: str) -> list[tuple[int, float]]:
+    return [
+        (point.count, point.min)
+        for resource in reader.get_metrics_data().resource_metrics
+        for scope in resource.scope_metrics
+        for metric in scope.metrics
+        if metric.name == name
+        for point in metric.data.data_points
+    ]
+
+
+async def _backdate(turn_id: UUID, minutes: int) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .values(created_at=datetime.now(UTC) - timedelta(minutes=minutes))
+            .where(tables.turn.c.id == turn_id)
+        )
+
+
 async def test_exit_handoff_offers_a_never_claimed_next_turn_its_own_workflow_id(
-    db: None,
+    db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     turn = await _seed_turn("done", TerminalFrame(status="done", text="over"))
     next_id = await _queued_successor(turn, running_attempt=None)
+    await _backdate(next_id, minutes=10)
+    reader = _histogram_reader(monkeypatch)
     client = _RecordingEnqueue()
     await dispatch_next_turn(client, turn.conversation_id)
     (options,) = client.options
     assert options["workflow_id"] == str(next_id)
+    ((count, waited_ms),) = _histogram_points(reader, "ufo.turn_dispatch_wait_ms")
+    assert count == 1
+    assert waited_ms >= 10 * 60 * 1000
+
+
+async def test_sweep_offers_a_stale_queued_turn_and_records_its_wait(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn = await _seed_turn("queued", None)
+    await _backdate(turn.id, minutes=10)
+    reader = _histogram_reader(monkeypatch)
+    client = _RecordingEnqueue()
+    with ws(turn.workspace_id):
+        await TurnDispatcher(client=client).run()
+    (options,) = client.options
+    assert options["workflow_id"] == str(turn.id)
+    ((count, waited_ms),) = _histogram_points(reader, "ufo.turn_dispatch_wait_ms")
+    assert count == 1
+    assert waited_ms >= 10 * 60 * 1000
 
 
 async def test_exit_handoff_offers_nothing_past_a_running_sibling(db: None) -> None:
