@@ -100,6 +100,7 @@ class AgentSpec(BaseModel):
         ),
     )
     reasoning: ReasoningEffort = Field(
+        title="Thinking level",
         description=(
             "Reasoning effort for the agent's turns: a fixed level ('low', 'medium', 'high'), "
             "'off', or 'auto' — an Anthropic model sets its own depth per request; other "

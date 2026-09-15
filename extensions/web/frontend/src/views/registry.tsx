@@ -76,6 +76,13 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
     remountOnPlace: false,
     render: placed(() => import("@/views/Apps").then((module) => ({ default: module.Apps }))),
   },
+  chat: {
+    label: "Chat defaults",
+    remountOnPlace: false,
+    render: placed(() =>
+      import("@/views/ChatDefaults").then((module) => ({ default: module.ChatDefaults })),
+    ),
+  },
   skills: {
     label: "Skills",
     remountOnPlace: false,

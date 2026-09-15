@@ -7,7 +7,6 @@ import { Facts, Group } from "@/components/ui/facts";
 import { Hint, Textarea } from "@/components/ui/field";
 import { Reveal } from "@/components/ui/reveal";
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
-import { FormFromSchema, initialSpecValue, type SpecValue } from "@/kernel/form";
 import { type NoticeState, OutcomeNotice, Panel, QUIET, outcomeNotice, usePanelRead } from "@/kernel/panel";
 import { AGENT_ICONS, AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
@@ -16,7 +15,8 @@ import { cn } from "@/lib/cn";
 import { workspaceHash } from "@/lib/route";
 import { surfaceWord, webAudienceLabel } from "@/lib/audience";
 import { Moment } from "@/lib/moments";
-import type { Agent, SchemaProperty } from "@/lib/types";
+import type { Agent } from "@/lib/types";
+import { SpecPreferences, type SettingsPayload } from "@/views/Preferences";
 
 
 const UFO_ICON = "ufo";
@@ -65,39 +65,17 @@ function EditAction({
   );
 }
 
-type SettingsPayload = {
-  agent: {
-    name: string;
-    main: boolean;
-    surfaces: string[];
-    archivable: boolean;
-    updated_at: string;
-    prompt: string;
-    prompt_digest: string;
-  };
-  spec: { icon: string; [field: string]: unknown };
-  spec_schema: { properties?: Record<string, SchemaProperty> };
-  models: string[];
-  deploy: { sandbox_internet: boolean };
-  audience?: string[] | null;
-};
-
 export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () => void }) {
   const [reloads, setReloads] = useState(0);
   const state = usePanelRead<SettingsPayload>("/agents/" + agent.id + "/settings", reloads);
-  const [values, setValues] = useState<Record<string, SpecValue>>({});
   const [prompt, setPrompt] = useState("");
   const [icon, setIcon] = useState("");
-  const settingsDirty = useRef(false);
-  const settingsSaved = useRef<Record<string, SpecValue> | null>(null);
   const promptDirty = useRef(false);
   const promptSaved = useRef<string | null>(null);
   const iconDirty = useRef(false);
   const iconSaved = useRef<string | null>(null);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
   const [busy, setBusy] = useState(false);
-  const intended = useRef<Record<string, SpecValue> | null>(null);
-  const saving = useRef(false);
   const [editingIcon, setEditingIcon] = useState(false);
   const [editingPrompt, setEditingPrompt] = useState(false);
   const [toast, setToast] = useState<ToastState>(SILENT);
@@ -106,24 +84,6 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
 
   useEffect(() => {
     if (!payload) return;
-    const properties = payload.spec_schema.properties ?? {};
-    const projected = Object.fromEntries(
-      Object.keys(properties).map((key) => [
-        key,
-        initialSpecValue(properties[key], payload.spec[key]),
-      ]),
-    );
-    const sent = settingsSaved.current;
-    const settingsLanded =
-      sent !== null && Object.keys(properties).every((key) => projected[key] === sent[key]);
-    if (!settingsDirty.current || settingsLanded) {
-      setValues(projected);
-      if (settingsLanded) {
-        settingsDirty.current = false;
-        settingsSaved.current = null;
-        intended.current = null;
-      }
-    }
     const promptLanded =
       promptSaved.current !== null && payload.agent.prompt === promptSaved.current;
     if (!promptDirty.current || promptLanded) {
@@ -146,42 +106,7 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
   return (
     <Panel state={state} shape="form">
       {(ready) => {
-        const properties = ready.spec_schema.properties ?? {};
         const writable = ready.audience !== null && ready.audience !== undefined;
-
-        async function save(spec: Record<string, SpecValue>) {
-          intended.current = spec;
-          if (saving.current) return;
-          saving.current = true;
-          setBusy(true);
-          try {
-            let sent: Record<string, SpecValue> | null = null;
-            while (intended.current !== null && intended.current !== sent) {
-              sent = intended.current;
-              const outcome = await postIntent(agent.id, {
-                verb: "apply",
-                kind: "agent",
-                name: ready.agent.name,
-                spec: sent,
-              });
-              if (!outcome.applied) {
-                intended.current = null;
-                settingsDirty.current = false;
-                settingsSaved.current = null;
-                setNotice(outcomeNotice(outcome));
-                setReloads((count) => count + 1);
-                return;
-              }
-              setNotice(QUIET);
-              setToast({ title: agentName(ready.agent.name) + " saved." });
-              settingsSaved.current = { ...sent };
-            }
-            setReloads((count) => count + 1);
-          } finally {
-            saving.current = false;
-            setBusy(false);
-          }
-        }
 
         async function savePrompt() {
           if (busy) return;
@@ -368,32 +293,14 @@ export function Settings({ agent, onArchived }: { agent: Agent; onArchived: () =
               </div>
             </Group>
             <Group title="Preferences">
-              <div>
-                <FormFromSchema
-                  schema={ready.spec_schema}
-                  layout="rows"
-                  values={Object.fromEntries(
-                    Object.keys(properties).map((key) => [
-                      key,
-                      values[key] ?? initialSpecValue(properties[key], ready.spec[key]),
-                    ]),
-                  )}
-                  options={{ model: ready.models }}
-                  onChange={(key, value) => {
-                    settingsDirty.current = true;
-                    settingsSaved.current = null;
-                    const next = { ...(intended.current ?? values), [key]: value };
-                    setValues(next);
-                    void save(next);
-                  }}
-                />
-                {ready.deploy.sandbox_internet ? null : (
-                  <Hint className="m-0 mt-md">
-                    This deploy grants no sandbox public internet — the app setting narrows a
-                    capability that is currently off.
-                  </Hint>
-                )}
-              </div>
+              <SpecPreferences
+                agentId={agent.id}
+                payload={ready}
+                onSettled={(applied) => {
+                  if (applied) setToast({ title: agentName(ready.agent.name) + " saved." });
+                  setReloads((count) => count + 1);
+                }}
+              />
             </Group>
             <Group title="Details">
               <Facts
