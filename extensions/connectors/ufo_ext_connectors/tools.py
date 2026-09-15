@@ -567,7 +567,9 @@ async def _destination_is_internal(
     except Exception as error:
         log("connector.slack.destination_unread", error_class=type(error).__name__)
         return False
-    info = payload.get("channel") if isinstance(payload, Mapping) else None
+    if not isinstance(payload, Mapping):
+        return False
+    info = payload.get("channel")
     return (
         payload.get("ok") is True
         and isinstance(info, Mapping)

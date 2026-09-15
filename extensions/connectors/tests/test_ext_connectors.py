@@ -195,7 +195,7 @@ class _ChangingToolBroker(_AnySlugBroker):
 
 @dataclass(frozen=True, kw_only=True)
 class _SlackBroker(_AnySlugBroker):
-    response: dict[str, object]
+    response: object
 
     async def credential(self, workspace_id: UUID, provider: str, account: str) -> Credential:
         if account != SLACK_ACCOUNT:
@@ -572,6 +572,8 @@ async def test_read_only_turn_refuses_mutating_or_unclassified_connector_tools(s
         ({"ok": True, "channel": {"id": "C1", "is_shared": True}}, False),
         ({"ok": False, "channel": {"id": "C1"}, "error": "channel_not_found"}, False),
         ({"ok": True, "channel": {}}, False),
+        ([{"ok": True, "channel": {"id": "C1"}}], False),
+        ("ok", False),
     ],
     ids=[
         "internal",
@@ -581,10 +583,12 @@ async def test_read_only_turn_refuses_mutating_or_unclassified_connector_tools(s
         "shared",
         "unavailable",
         "incomplete",
+        "list_body",
+        "string_body",
     ],
 )
 async def test_a_slack_send_uses_its_connector_account_to_settle_the_footer(
-    response: dict[str, object], marked: bool
+    response: object, marked: bool
 ) -> None:
     broker = _SlackBroker(response=response)
     registry = ConnectorRegistry(
