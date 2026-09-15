@@ -430,7 +430,6 @@ impl<W: Write> App<W> {
             return Reply::None;
         };
         let pick = match key.code {
-            KeyCode::Char('k') if ctrl => Pick::Close,
             KeyCode::Esc => Pick::Close,
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
                 match pick_key(key) {
@@ -1025,7 +1024,9 @@ impl<W: Write> App<W> {
     fn compose_key(&mut self, key: KeyEvent) -> Reply {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('k') if ctrl => return Reply::OpenConversations,
+            KeyCode::Left if key.modifiers.is_empty() && self.ask.text.is_empty() => {
+                return Reply::OpenConversations
+            }
             KeyCode::Char('?') if self.read_only.is_some() => {
                 self.focus = Focus::Keys;
                 return Reply::None;
@@ -2821,12 +2822,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_opens_the_conversation_page_and_a_pick_names_the_row() {
+    fn left_on_an_empty_composer_opens_the_conversation_page_and_a_pick_names_the_row() {
         let mut app = app_on_memory();
+        assert_eq!(app.on_key(key(KeyCode::Left)), Reply::OpenConversations);
         typed(&mut app, "draft");
+        assert_eq!(app.on_key(key(KeyCode::Left)), Reply::None);
         assert_eq!(
-            app.on_key(ctrl(KeyCode::Char('k'))),
-            Reply::OpenConversations
+            app.ask.cursor,
+            "draf".len(),
+            "a draft keeps Left as cursor motion"
         );
         let fetch = app.open_conversations(true);
         assert_eq!(fetch.generation, 1);
@@ -2956,11 +2960,6 @@ mod tests {
         app.open_conversations(true);
         assert_eq!(app.on_key(key(KeyCode::Esc)), Reply::CloseConversations);
         assert_eq!(app.focus, Focus::Compose);
-        app.open_conversations(true);
-        assert_eq!(
-            app.on_key(ctrl(KeyCode::Char('k'))),
-            Reply::CloseConversations
-        );
         app.open_conversations(false);
         assert_eq!(app.on_key(key(KeyCode::Esc)), Reply::Exit);
     }
@@ -2992,10 +2991,7 @@ mod tests {
             painted.contains("Reply in Slack to continue it."),
             "{painted}"
         );
-        assert_eq!(
-            app.on_key(ctrl(KeyCode::Char('k'))),
-            Reply::OpenConversations
-        );
+        assert_eq!(app.on_key(key(KeyCode::Left)), Reply::OpenConversations);
         app.reset_conversation(&Target::Channel("abc".to_string()), "abc".to_string(), None);
         typed(&mut app, "hello");
         assert_eq!(

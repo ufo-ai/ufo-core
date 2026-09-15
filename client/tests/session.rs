@@ -3619,7 +3619,7 @@ fn a_terminal_row_resumes_on_its_channel_with_the_directory() {
 
 #[cfg(unix)]
 #[test]
-fn ctrl_k_lists_from_a_conversation_and_esc_returns_to_it() {
+fn left_lists_from_a_conversation_and_esc_returns_to_it() {
     let served = serve_with(
         vec![
             Exchange {
@@ -3642,7 +3642,7 @@ fn ctrl_k_lists_from_a_conversation_and_esc_returns_to_it() {
         .recv_timeout(ARRIVAL_WAIT)
         .expect("the opening message reaches the gateway");
     wait_for(&session, "hello there");
-    session.press(b"\x0b");
+    session.press(b"\x1b[D");
     let page = wait_for(&session, "Who owns the pager");
     assert!(page.contains("UFO Chats"), "{page}");
     assert!(page.contains("New chat \u{276f}"), "{page}");
@@ -3658,11 +3658,11 @@ fn ctrl_k_lists_from_a_conversation_and_esc_returns_to_it() {
     session.press(b"\x1b");
     let back = wait_for(&session, "hello there");
     assert!(!back.contains("UFO Chats"), "{back}");
-    let (row, col) = locate(&back, "\u{2303}K");
+    let (row, col) = locate(&back, "Left list");
     session.press(click(row, col).as_bytes());
     let reopened = wait_for(&session, "UFO Chats");
     assert!(
-        !reopened.contains("\u{2303}K"),
+        !reopened.contains("Left list"),
         "the page carries no hint: {reopened}"
     );
     let _ = session.child.kill();

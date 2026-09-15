@@ -2,12 +2,13 @@
 
 This crate builds `ufo`, the terminal program a person uses to talk to their workspace assistant.
 Run it in a terminal, type a message, and the reply is rendered where you typed — text, diffs, code
-with syntax colors, and tool activity. Ctrl+K lists every conversation you can open — from the
-terminal, the portal, or Slack — under the mark, with the entry bar still at the bottom: typing
-there and pressing Enter starts a new chat, Up reaches the search line and then the list, and Enter
-on a row opens it. A click opens a row too, Esc returns to the conversation you left, and the list
-refreshes every five seconds while it is up, with a row drawn bold once its conversation moves. The
-page opens on the list as it last stood, kept under `$UFO_HOME`, and refreshes behind it.
+with syntax colors, and tool activity. Left, on an empty entry bar, lists every conversation you can
+open — from the terminal, the portal, or Slack — under the mark, with the entry bar still at the
+bottom: typing there and pressing Enter starts a new chat, Up reaches the search line and then the
+list, and Enter on a row opens it. A click opens a row too, Esc returns to the conversation you
+left, and the list refreshes every five seconds while it is up, with a row drawn bold once its
+conversation moves. The page opens on the list as it last stood, kept under `$UFO_HOME`, and
+refreshes behind it.
 
 The client is also the assistant's hands on your machine. When the assistant needs to read a file,
 write one, edit one, search a tree, or run a command, the request arrives over the same connection

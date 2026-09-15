@@ -98,7 +98,7 @@ pub fn elapsed(ran: Duration) -> String {
     }
 }
 
-pub const LIST_HINT: &str = "⌃K list";
+pub const LIST_HINT: &str = "Left list";
 const HINT_INSET: usize = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -346,14 +346,14 @@ mod tests {
         );
         assert_eq!(
             line.to_string(),
-            format!("{:<32}{LIST_HINT} ", "acme.ufo.dev · engineer")
+            format!("{:<30}{LIST_HINT} ", "acme.ufo.dev · engineer")
         );
         assert_eq!(line.width(), 40);
         assert_eq!(
             hits,
             FooterHits {
                 pr: None,
-                list: Some(32..39),
+                list: Some(30..39),
             }
         );
     }
@@ -363,7 +363,7 @@ mod tests {
         let (line, _) = footer(&theme(), 30, "acme.ufo.dev", "", None, Some(LIST_HINT));
         assert_eq!(
             line.to_string(),
-            format!("{:<22}{LIST_HINT} ", "acme.ufo.dev")
+            format!("{:<20}{LIST_HINT} ", "acme.ufo.dev")
         );
     }
 
@@ -377,8 +377,8 @@ mod tests {
             None,
             Some(LIST_HINT),
         );
-        assert_eq!(line.to_string(), format!("acme.ufo.   {LIST_HINT} "));
-        assert_eq!(hits.list, Some(12..19));
+        assert_eq!(line.to_string(), format!("acme.uf   {LIST_HINT} "));
+        assert_eq!(hits.list, Some(10..19));
         let (line, hits) = footer(
             &theme(),
             10,
@@ -406,7 +406,7 @@ mod tests {
         };
         let (line, hits) = footer(
             &theme(),
-            44,
+            46,
             "acme.ufo.dev",
             "general",
             Some(&pr),
@@ -418,14 +418,14 @@ mod tests {
                 "acme.ufo.dev · general · {}PR #1892{}{}{LIST_HINT} ",
                 osc::link_open(&pr.url),
                 osc::LINK_CLOSE,
-                " ".repeat(44 - 1 - 33 - 7)
+                " ".repeat(46 - 1 - 33 - 9)
             )
         );
         assert_eq!(
             hits,
             FooterHits {
                 pr: Some(25..33),
-                list: Some(36..43),
+                list: Some(36..45),
             }
         );
     }
@@ -456,10 +456,10 @@ mod tests {
         );
         assert_eq!(
             line.to_string(),
-            format!("{:<28}{LIST_HINT} ", "acme.ufo.dev · general")
+            format!("{:<26}{LIST_HINT} ", "acme.ufo.dev · general")
         );
         assert_eq!(hits.pr, None);
-        assert_eq!(hits.list, Some(28..35));
+        assert_eq!(hits.list, Some(26..35));
     }
 
     #[test]
