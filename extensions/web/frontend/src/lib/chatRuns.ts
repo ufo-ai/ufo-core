@@ -110,7 +110,7 @@ export function chatRuns(
   hidden: string[],
   now: Date,
 ): ChatRun[] {
-  const shown = rows.filter((row) => chatShown(row, hidden));
+  const shown = rows.filter((row) => chatShown(row, hidden) && !row.archived);
   const own = shown.filter((row) => row.mine);
   const theirs = shown.filter((row) => !row.mine);
   const grouped = own.length ? bucketed(own, ladder, now) : [];

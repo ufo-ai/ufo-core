@@ -1920,3 +1920,84 @@ async def test_admission_stamps_where_a_turn_reply_lands(db: None) -> None:
     assert await _reply_reaches(spoken.turn_id) == "cli"
     assert background is not None
     assert await _reply_reaches(background) == REPLY_REACHES_NOBODY
+
+
+async def test_a_slack_arrival_clears_the_archive_mark(db: None) -> None:
+    """Archiving is broken by the message, not by the screen that drew the archive: a member who
+    filed a conversation away and then answers it in Slack finds it back in the list. Admission
+    holds the conversation row locked for every surface, so the mark is cleared there and every
+    surface's arrival breaks it."""
+    workspace_id, member_id, agent_id, _conversation_id = await _seed()
+    slack_conversation = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=slack_conversation,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="slack",
+                queue_key="slack/C1/thread",
+                member_id=member_id,
+                audience=str(conversation_audience(member_id)),
+                archived_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset({"slack"}))
+
+    await admission.admit_member(workspace_id, slack_conversation, "any news?", member_id)
+
+    async with workspace_tx() as connection:
+        archived_at = (
+            await connection.execute(
+                sa.select(tables.conversation.c.archived_at).where(
+                    tables.conversation.c.id == slack_conversation
+                )
+            )
+        ).scalar_one()
+    assert archived_at is None
+    assert await _turn_count(slack_conversation) == 1
+
+
+async def test_an_internal_turn_leaves_the_archive_mark(db: None) -> None:
+    """The contract is a member's message, not any arrival: a scheduled fire reports into the
+    conversation it files its lane under, and that report must not unfile it — the member put the
+    automation lane away, and only their own word brings it back."""
+    workspace_id, member_id, agent_id, _conversation_id = await _seed()
+    task_lane = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.conversation).values(
+                id=task_lane,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                surface="web",
+                queue_key="scheduled/task-lane",
+                member_id=member_id,
+                audience=str(conversation_audience(member_id)),
+                archived_at=sa.func.now(),
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset({"web"}))
+
+    await admission.invoke(
+        workspace_id,
+        task_lane,
+        agent_id,
+        "the 09:00 sweep found nothing",
+        as_scheduled=True,
+    )
+
+    async with workspace_tx() as connection:
+        archived_at = (
+            await connection.execute(
+                sa.select(tables.conversation.c.archived_at).where(
+                    tables.conversation.c.id == task_lane
+                )
+            )
+        ).scalar_one()
+    assert archived_at is not None
+    assert await _turn_count(task_lane) == 1

@@ -480,6 +480,7 @@ class Admission:
                         )
                         .scalar_subquery()
                         .label("archived_at"),
+                        tables.conversation.c.archived_at.label("conversation_archived_at"),
                     )
                     .where(tables.conversation.c.id == conversation_id)
                     .with_for_update()
@@ -489,6 +490,16 @@ class Admission:
                 raise ValueError("conversation is bound to another agent")
             agent_id = conversation.agent_id
             archived = conversation.archived_at is not None
+            await self._clear_archive_mark(
+                connection,
+                workspace_id,
+                conversation_id,
+                conversation.conversation_archived_at
+                # A member message brings a filed-away conversation back out; an internal turn
+                # (a scheduled fire, an agent's own arrival) is not one, and leaves the mark.
+                if intent is None and speaker_member_id is not None
+                else None,
+            )
             if speaker_member_id is not None:
                 speaker = (
                     await connection.execute(
@@ -647,6 +658,26 @@ class Admission:
             folded_parked_turn,
             dispatch_now,
             redispatch_workflow_id,
+        )
+
+    @staticmethod
+    async def _clear_archive_mark(
+        connection: AsyncConnection,
+        workspace_id: UUID,
+        conversation_id: UUID,
+        archived_at: datetime | None,
+    ) -> None:
+        """Every surface's arrival breaks the archive mark here, under the row lock admission
+        already holds. A prepared intent is a portal form's act, not a message, and leaves it."""
+        if archived_at is None:
+            return
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(
+                tables.conversation.c.workspace_id == workspace_id,
+                tables.conversation.c.id == conversation_id,
+            )
+            .values(archived_at=None, updated_at=sa.func.now())
         )
 
     async def _guard_member_watermark(

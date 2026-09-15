@@ -195,6 +195,8 @@ conversation = sa.Table(
     ),
     sa.Column("sandbox_conversation_id", sa.Uuid, nullable=True),
     sa.Column("sandbox_handle", sa.Text, nullable=True),
+    sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint(
@@ -1065,6 +1067,26 @@ conversation_read = sa.Table(
     sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("member_id", sa.Uuid, nullable=False),
     sa.Column("read_at", sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "conversation_id"],
+        ["conversation.workspace_id", "conversation.id"],
+        ondelete="CASCADE",
+    ),
+    sa.ForeignKeyConstraint(
+        ["workspace_id", "member_id"],
+        ["member.workspace_id", "member.id"],
+        ondelete="CASCADE",
+    ),
+    sa.PrimaryKeyConstraint("workspace_id", "conversation_id", "member_id"),
+)
+
+conversation_pin = sa.Table(
+    "conversation_pin",
+    metadata,
+    sa.Column("workspace_id", sa.Uuid, sa.ForeignKey("workspace.id"), nullable=False),
+    sa.Column("conversation_id", sa.Uuid, nullable=False),
+    sa.Column("member_id", sa.Uuid, nullable=False),
+    sa.Column("pinned_at", sa.DateTime(timezone=True), nullable=False),
     sa.ForeignKeyConstraint(
         ["workspace_id", "conversation_id"],
         ["conversation.workspace_id", "conversation.id"],

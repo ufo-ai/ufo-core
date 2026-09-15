@@ -3558,7 +3558,10 @@ def _conversation_row(
 
     `mine` is whether the viewer is in the conversation — founded it or spoke in it — which is what
     a screen sorts their own threads by, never whose audience it carries. `speakable` is whether
-    their messages land here, which is what draws the composer."""
+    their messages land here, which is what draws the composer.
+
+    `archived` and `deleted` are the conversation's own filing marks; `pinned` is this viewer's
+    own, so two members reading one row read their own pin."""
     return {
         "id": str(entry.summary.id),
         "agent": agent,
@@ -3573,6 +3576,9 @@ def _conversation_row(
         "turn_count": entry.summary.turn_count,
         "created_at": _iso(entry.summary.created_at),
         "last_turn_at": _iso(entry.summary.last_turn_at),
+        "archived": entry.archived,
+        "deleted": entry.deleted,
+        "pinned": entry.pinned,
         "readable": entry.readable,
         "disclosable": entry.disclosable,
         "speakable": speakable,

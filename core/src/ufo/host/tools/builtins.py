@@ -65,6 +65,7 @@ from ufo.harness.sandbox.session import (
     workspace_path,
 )
 from ufo.host.kinds.artifacts import artifact_object_names
+from ufo.host.kinds.conversations import CONVERSATION_MARK_ACTIONS
 from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
 from ufo.host.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.runtime.access.credentials import declared_slot_fingerprint
@@ -1501,6 +1502,7 @@ BUILTIN_ACTIONS: tuple[ToolDef, ...] = (
     ADD_MEMBER_TOOL_DEF,
     RESTORE_APPLICATION_TOOL_DEF,
     REQUEST_CREDENTIALS_TOOL_DEF,
+    *CONVERSATION_MARK_ACTIONS,
 )
 """Core's own bound actions, registered by the loader beside every extension's — actions on the
 kinds core itself projects, dispatching with no extension context exactly as `BUILTIN_TOOLS` do."""

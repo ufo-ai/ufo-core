@@ -35,6 +35,7 @@ the theme, both colour schemes and every width at once, and a shape built beside
 
 - **`getJson`** — A GET of the portal API, answered as `{ok, payload}` or `{ok:
 - **`postIntent`** — Post a prepared intent to an agent — the one mutation path a page has; the turn is the chat transport and the audit record.
+- **`postObjectAction`** — Post one act a row of an object kind offers, read off that row's own action projection — the one way a screen dispatches an act it did not declare itself.
 
 ## artifact
 
@@ -120,6 +121,11 @@ the theme, both colour schemes and every width at once, and a shape built beside
 ## dialog
 
 - **`Dialog`** — A modal dialog's root:
+- **`DialogContent`** — A dialog's own surface:
+- **`DialogDescription`** — The line under a dialog's title, saying what the act reaches before it is answered.
+- **`DialogFooter`** — A dialog's closing row:
+- **`DialogHeader`** — A dialog's heading block, holding its title and the line under it.
+- **`DialogTitle`** — What a dialog asks, in one line — the title a screen reader announces when it opens.
 - **`DialogTrigger`** — The control that opens the Dialog it stands in; `asChild` makes the child the trigger.
 
 ## dropdown-menu

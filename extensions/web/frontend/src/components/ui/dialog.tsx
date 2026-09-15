@@ -11,6 +11,7 @@ export const Dialog = DialogPrimitive.Root;
 /** The control that opens the Dialog it stands in; `asChild` makes the child the trigger. */
 export const DialogTrigger = DialogPrimitive.Trigger;
 
+/** A dialog's own surface: the scrim over the screen and the raised card the rest of it sits in. */
 export function DialogContent({
   className,
   children,
@@ -36,10 +37,12 @@ export function DialogContent({
   );
 }
 
+/** A dialog's heading block, holding its title and the line under it. */
 export function DialogHeader({ className, ...props }: ComponentProps<"div">) {
   return <div data-slot="dialog-header" className={cn("flex flex-col gap-2xs", className)} {...props} />;
 }
 
+/** What a dialog asks, in one line — the title a screen reader announces when it opens. */
 export function DialogTitle({
   className,
   ...props
@@ -53,6 +56,7 @@ export function DialogTitle({
   );
 }
 
+/** The line under a dialog's title, saying what the act reaches before it is answered. */
 export function DialogDescription({
   className,
   ...props
@@ -66,6 +70,7 @@ export function DialogDescription({
   );
 }
 
+/** A dialog's closing row: the way out, named by `leave`, beside the act that answers it. */
 export function DialogFooter({
   className,
   children,

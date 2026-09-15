@@ -104,6 +104,9 @@ export function postAction(
 
 export type ObjectAction = { kind: string; name: string; action: string };
 
+/** Post one act a row of an object kind offers, read off that row's own action projection — the
+ * one way a screen dispatches an act it did not declare itself. The outcome is the act's own
+ * result or its refusal in the handler's words. */
 export async function postObjectAction(
   agentId: string,
   target: ObjectAction,

@@ -83,6 +83,9 @@ function row(id: string, last_at: string): ChatRow {
     automation_name: null,
     automation_title: null,
     unread: false,
+    archived: false,
+    deleted: false,
+    pinned: false,
   };
 }
 

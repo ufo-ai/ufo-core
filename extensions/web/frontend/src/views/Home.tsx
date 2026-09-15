@@ -13,18 +13,27 @@ import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { PressRow } from "@/components/ui/pressrow";
+import { IconDots } from "@tabler/icons-react";
 import type { Placement } from "@/kernel/pager";
 import { COLUMN } from "@/kernel/pane";
 import { Empty, Loading } from "@/kernel/panel";
 import { SlotTrack, opened, useSlot, type Seek } from "@/kernel/slots";
-import { isPortalChat, origin } from "@/lib/audience";
+import { isPortalChat, origin, useViewer } from "@/lib/audience";
 import { AudienceMark } from "@/lib/audienceMark";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
@@ -41,8 +50,11 @@ import {
   useChatLadder,
   type ChatLadder,
   type ChatRun,
+  chatShown,
 } from "@/lib/chatRuns";
-import { seekChat, useRail } from "@/lib/railStore";
+import type { ChatRow } from "@/lib/rail";
+import { postObjectAction, type IntentOutcome } from "@/lib/api";
+import { seekChat, useRail, readRail } from "@/lib/railStore";
 import { heldRoute, placeHome } from "@/lib/router";
 import {
   HOME_CONNECTORS_LANE,
@@ -63,6 +75,7 @@ import { GLYPH_STROKE } from "@/lib/glyph";
 
 const NEW_TAB = "New tab";
 const HISTORY = "History";
+const ARCHIVED = "Archived";
 const NO_HISTORY = "No conversations yet.";
 
 const NO_APP = "No such app";
@@ -77,6 +90,13 @@ const SORT_BY = "Sort by";
 const SHOW = "Show";
 
 const CONNECTORS_SECTION = "connectors" as const;
+
+const CONVERSATION_KIND = "conversation";
+const ARCHIVE_ACTION = "archive_conversation";
+const UNARCHIVE_ACTION = "unarchive_conversation";
+const PIN_ACTION = "pin_conversation";
+const UNPIN_ACTION = "unpin_conversation";
+const DELETE_ACTION = "delete_conversation";
 
 const CONNECTORS_PURPOSE = "Connect the accounts your apps work in.";
 
@@ -360,6 +380,7 @@ function History({
   const ladder = useChatLadder();
   const hidden = useChatHidden();
   const runs = chatRuns(rail.rows, ladder, hidden, new Date());
+  const filed = rail.rows.filter((row) => row.archived && chatShown(row, hidden));
   const openAtTop = useCallback(
     (history: HTMLDivElement | null) => history?.scrollTo({ top: 0, behavior: "auto" }),
     [],
@@ -370,7 +391,7 @@ function History({
         <h3 className={cn(PICK_LABEL, "px-0")}>{HISTORY}</h3>
         <HistoryOptions ladder={ladder} hidden={hidden} />
       </div>
-      {runs.length ? (
+      {runs.length || filed.length ? (
         <div ref={openAtTop} className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable">
           <HistoryRuns
             runs={runs}
@@ -378,6 +399,21 @@ function History({
               onOpens(taken(opens, lane, homeConversationLane(conversationId)))
             }
           />
+          {filed.length ? (
+            <section className="mt-2xl flex flex-col">
+              <h4 className={PICK_LABEL}>{ARCHIVED}</h4>
+              {filed.map((row) => (
+                <HistoryRow
+                  key={row.conversation_id}
+                  row={row}
+                  archived
+                  onPick={(conversationId) =>
+                    onOpens(taken(opens, lane, homeConversationLane(conversationId)))
+                  }
+                />
+              ))}
+            </section>
+          ) : null}
         </div>
       ) : rail.phase === "loading" ? (
         <Loading />
@@ -403,17 +439,120 @@ function HistoryRuns({
         <section key={run.label} className="flex flex-col">
           {headings ? <h4 className={PICK_LABEL}>{run.label}</h4> : null}
           {run.rows.map((row) => (
-            <PressRow
-              key={row.conversation_id}
-              line={row.title || agentName(row.agent_name)}
-              note={isPortalChat(row.surface) ? undefined : origin(row)}
-              when={row.last_at}
-              onPress={() => onPick(row.conversation_id)}
-            />
+            <HistoryRow key={row.conversation_id} row={row} onPick={onPick} />
           ))}
         </section>
       ))}
     </>
+  );
+}
+
+function HistoryRow({
+  row,
+  onPick,
+  archived = false,
+}: {
+  row: ChatRow;
+  onPick: (conversationId: string) => void;
+  archived?: boolean;
+}) {
+  const acting = useViewer();
+  const [confirming, setConfirming] = useState(false);
+  const [fault, setFault] = useState<string | null>(null);
+  const file = useCallback(
+    async (action: string) => {
+      const outcome: IntentOutcome = await postObjectAction(
+        row.agent_id,
+        { kind: CONVERSATION_KIND, name: row.conversation_id, action },
+        {},
+      );
+      if (!outcome.applied) setFault(outcome.message);
+      else readRail();
+    },
+    [row.agent_id, row.conversation_id],
+  );
+  const own =
+    acting !== null &&
+    (row.owner_email === acting || (row.mine && row.owner_email === null));
+  const menu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="mark"
+          size="glyph"
+          aria-label={archived ? "Archived conversation options" : "Conversation options"}
+          className="shrink-0"
+        >
+          <IconDots aria-hidden stroke={GLYPH_STROKE} />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => void file(archived ? UNARCHIVE_ACTION : ARCHIVE_ACTION)}>
+          {archived ? "Unarchive" : "Archive"}
+        </DropdownMenuItem>
+        {row.pinned ? (
+          <DropdownMenuItem onSelect={() => void file(UNPIN_ACTION)}>Unpin</DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem onSelect={() => void file(PIN_ACTION)}>Pin</DropdownMenuItem>
+        )}
+        {own ? (
+          <DropdownMenuItem className="text-ink" onSelect={() => setConfirming(true)}>
+            Delete
+          </DropdownMenuItem>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+  return (
+    <div className="group/row relative flex items-center">
+      <PressRow
+        line={row.title || agentName(row.agent_name)}
+        note={isPortalChat(row.surface) ? undefined : origin(row)}
+        when={row.last_at}
+        onPress={() => onPick(row.conversation_id)}
+      />
+      {menu}
+      {confirming ? (
+        <Dialog open onOpenChange={(next) => !next && setConfirming(false)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete this conversation?</DialogTitle>
+              <DialogDescription>
+                {(row.title || agentName(row.agent_name)) +
+                  " leaves every listing and only you, its owner, can restore it."}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex justify-end gap-sm">
+              <Button variant="quiet" onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="send"
+                onClick={() => {
+                  setConfirming(false);
+                  void file(DELETE_ACTION);
+                }}
+              >
+                Delete
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+      {fault ? <HistoryFault fault={fault} onDone={() => setFault(null)} /> : null}
+    </div>
+  );
+}
+
+function HistoryFault({ fault, onDone }: { fault: string; onDone: () => void }) {
+  useEffect(() => {
+    const beat = setTimeout(onDone, 6000);
+    return () => clearTimeout(beat);
+  }, [onDone]);
+  return (
+    <p role="alert" className="m-0 px-lg text-label text-ink-soft">
+      {fault}
+    </p>
   );
 }
 

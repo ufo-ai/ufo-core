@@ -58,7 +58,9 @@ from ufo.host.kinds.artifacts import (
 )
 from ufo.host.kinds.conversations import (
     CONVERSATION_KIND,
+    CONVERSATION_MARK_ACTIONS,
     CONVERSATION_OBJECT,
+    NOT_THE_OWNER,
 )
 from ufo.host.kinds.credential_kind import CredentialObjects
 from ufo.host.kinds.members import MEMBER_OBJECT
@@ -105,6 +107,7 @@ from ufo.runtime.objects import (
     ObjectKind,
     ObjectListQuery,
     ObjectOwner,
+    ObjectPage,
     ObjectRow,
     ObjectVerbs,
     OwnedRow,
@@ -4536,6 +4539,283 @@ async def test_conversation_kind_names_an_owner_for_a_workspace_conversation(db:
 
     owners = {row.name: row.fields["owner_email"] for row in page.rows}
     assert owners == {str(shared_id): alice_email, str(mine_id): alice_email}
+
+
+async def _file(ctx: ToolContext, conversation_id: UUID, action: str) -> ToolResult:
+    held = next(held for held in CONVERSATION_MARK_ACTIONS if held.name == action)
+    return await held.handler(
+        replace(
+            ctx,
+            target=ObjectActionTarget(
+                kind=CONVERSATION_KIND,
+                name=str(conversation_id),
+                agent=None,
+                generation=None,
+                expected_generation=None,
+            ),
+        ),
+        held.input_model(),
+    )
+
+
+async def _filed_rail(agent_id: UUID, member_id: UUID, **filters: bool) -> ObjectPage:
+    with agent(agent_id):
+        return await CONVERSATION_OBJECT.store.member_page(
+            None,
+            member_id=member_id,
+            admin=False,
+            query=ObjectListQuery(
+                filters=filters,
+                order_by="last_at",
+                order="desc",
+                supported_fields=CONVERSATION_OBJECT.list_fields,
+            ),
+        )
+
+
+async def test_conversation_filing_marks_round_trip_through_the_listing(db: None) -> None:
+    """Archiving a conversation takes it off the default page and puts it on the archived one, and
+    the row states the mark either way, for everyone who lists it. A pin is the member's own: the
+    colleague reading the same shared conversation reads their own pin, not the one alice set."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        filed_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Last quarter's release",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        live_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Ship the plan",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 2, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        ctx = _tool_context(workspace_id, speaker_member_id=alice)
+        with agent(agent_id):
+            archived = await _file(ctx, filed_id, "archive_conversation")
+            pinned = await _file(ctx, live_id, "pin_conversation")
+        default = await _filed_rail(agent_id, alice)
+        archive = await _filed_rail(agent_id, alice, archived=True)
+        colleague = await _filed_rail(agent_id, bob)
+        with agent(agent_id):
+            unarchived = await _file(ctx, filed_id, "unarchive_conversation")
+        back = await _filed_rail(agent_id, alice)
+
+    assert (archived.is_error, pinned.is_error, unarchived.is_error) == (False, False, False)
+    assert [row.name for row in default.rows] == [str(live_id)]
+    assert default.rows[0].fields["pinned"] is True
+    assert [row.name for row in archive.rows] == [str(filed_id)]
+    assert archive.rows[0].fields["archived"] is True
+    assert {row.name: row.fields["pinned"] for row in colleague.rows} == {str(live_id): False}
+    assert {row.name for row in back.rows} == {str(live_id), str(filed_id)}
+
+
+async def test_a_deleted_page_lists_a_row_whatever_its_archive_mark(db: None) -> None:
+    """The two marks are set independently, so a conversation archived and then deleted must stay
+    on its owner's deleted page for the restore to reach it — the default and archived pages are
+    the ones the delete predicate keeps it off."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        filed_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Last quarter's release",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        ctx = _tool_context(workspace_id, speaker_member_id=alice)
+        with agent(agent_id):
+            await _file(ctx, filed_id, "archive_conversation")
+            await _file(ctx, filed_id, "delete_conversation")
+        default = await _filed_rail(agent_id, alice)
+        archive = await _filed_rail(agent_id, alice, archived=True)
+        deleted = await _filed_rail(agent_id, alice, deleted=True)
+
+    assert default.rows == ()
+    assert archive.rows == ()
+    assert [row.name for row in deleted.rows] == [str(filed_id)]
+
+
+async def test_the_agent_listing_answers_the_declared_mark_filters(db: None) -> None:
+    """The agent-facing listing serves the same pages the rail does: the declared `archived` and
+    `deleted` filters answer their own rows, the default page carries the conversations under no
+    mark, and the deleted page answers its owner alone — a colleague who can read the row reads
+    none of it."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        filed_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Last quarter's release",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        live_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Ship the plan",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 2, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        ctx = _tool_context(workspace_id, speaker_member_id=alice)
+        with agent(agent_id):
+            await _file(ctx, filed_id, "archive_conversation")
+            await _file(ctx, filed_id, "delete_conversation")
+            default = await _listed(agent_id, ctx)
+            archived = await _listed(agent_id, ctx, archived=True)
+            deleted = await _listed(agent_id, ctx, deleted=True)
+            colleagues_deleted = await _listed(
+                agent_id, _tool_context(workspace_id, speaker_member_id=bob), deleted=True
+            )
+
+    assert [row.name for row in default.rows] == [str(live_id)]
+    assert archived.rows == ()
+    assert [row.name for row in deleted.rows] == [str(filed_id)]
+    assert colleagues_deleted.rows == ()
+
+
+async def _listed(agent_id: UUID, ctx: ToolContext, **filters: bool) -> ObjectPage:
+    with agent(agent_id):
+        return await CONVERSATION_OBJECT.store.list(
+            ctx,
+            ObjectListQuery(
+                filters=filters,
+                order_by="last_at",
+                order="desc",
+                supported_fields=CONVERSATION_OBJECT.list_fields,
+            ),
+        )
+
+
+async def test_the_pin_holds_the_row_above_the_bound(db: None) -> None:
+    """A pinned conversation holds the head of the page whatever newer activity stands behind it:
+    the pin enters the directory read's order beside its bound, so a row pushed past the page by a
+    hundred newer threads still leads it."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        pinned_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="The one worth keeping",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 7, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        for day in range(2, 202):
+            stamp = datetime(2026, 7, 1, tzinfo=UTC) + timedelta(days=day - 1)
+            await _rail_conversation(
+                workspace_id,
+                agent_id,
+                title=f"Traffic {day}",
+                audience=SHARED_AUDIENCE,
+                member_id=None,
+                speaker_member_id=alice,
+                admission="member",
+                moved_at=stamp,
+                surface="web",
+                turn_status="done",
+            )
+        ctx = _tool_context(workspace_id, speaker_member_id=alice)
+        with agent(agent_id):
+            await _file(ctx, pinned_id, "pin_conversation")
+            page = await _filed_rail(agent_id, alice)
+
+    by_name = {row.name: row.fields for row in page.rows}
+    assert str(pinned_id) in by_name
+    assert by_name[str(pinned_id)]["pinned"] is True
+    assert len(page.rows) == OBJECT_LIST_PAGE
+
+
+async def test_only_a_conversations_owner_deletes_it(db: None) -> None:
+    """Deleting takes a conversation off every member's listing, so the verb answers its owner
+    alone — the member it is bound to, or, in a workspace conversation, whoever spoke in it first.
+    A colleague who can read it is refused and the row stands."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, JOINER_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        thread_id = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="Ship the plan",
+            audience=SHARED_AUDIENCE,
+            member_id=None,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        with agent(agent_id):
+            refused = await _file(
+                _tool_context(workspace_id, speaker_member_id=bob),
+                thread_id,
+                "delete_conversation",
+            )
+        standing = await _filed_rail(agent_id, bob)
+        with agent(agent_id):
+            deleted = await _file(
+                _tool_context(workspace_id, speaker_member_id=alice),
+                thread_id,
+                "delete_conversation",
+            )
+        after_owner = await _filed_rail(agent_id, alice)
+        after_colleague = await _filed_rail(agent_id, bob)
+        owners_deleted = await _filed_rail(agent_id, alice, deleted=True)
+        colleagues_deleted = await _filed_rail(agent_id, bob, deleted=True)
+
+    assert refused.is_error is True
+    assert isinstance(refused.content[0], TextContent)
+    assert refused.content[0].text == NOT_THE_OWNER
+    assert [row.name for row in standing.rows] == [str(thread_id)]
+    assert deleted.is_error is False
+    assert after_owner.rows == ()
+    assert after_colleague.rows == ()
+    assert [row.name for row in owners_deleted.rows] == [str(thread_id)]
+    assert colleagues_deleted.rows == ()
 
 
 async def test_conversation_kind_lists_the_rail_per_viewer(db: None) -> None:

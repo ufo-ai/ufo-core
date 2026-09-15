@@ -4,16 +4,23 @@ Artifacts and scheduled tasks link to the conversation they came from or report 
 what those links resolve to — the surface, the origin label that surface wrote, audience, row
 timestamps, and, through status, the text exchange written into the turn's workspace. The portal
 resolves the same links against the same row: `member_detail` answers a signed-in member outside a
-turn, on the subjects their own conversation carries. Surfaces create conversations, so every
-mutation is refused."""
+turn, on the subjects their own conversation carries. Surfaces create conversations, so apply and
+delete are refused; what a member does own is the filing — the archive and delete marks the
+conversation carries, and their own pin — which the actions at the foot of this module set and
+clear."""
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import Literal
+from datetime import UTC, datetime
+from typing import ClassVar, Literal
 from uuid import UUID
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.blob import BlobNotFound
 from ufo.db import workspace_tx
@@ -25,6 +32,7 @@ from ufo.runtime.object_name import ObjectRef
 from ufo.runtime.object_scope import object_agent_id
 from ufo.runtime.objects import (
     MATERIALIZE_MAX_BYTES,
+    OBJECT_LIST_PAGE,
     MemberObject,
     ObjectDetail,
     ObjectKind,
@@ -36,7 +44,8 @@ from ufo.runtime.objects import (
     VerbNotSupported,
     object_page,
 )
-from ufo.runtime.tools.context import ToolContext
+from ufo.runtime.tools.context import TextContent, ToolContext, ToolResult
+from ufo.runtime.tools.registry import ActionPresentation, ObjectBinding, ToolDef
 from ufo.runtime.turns.audience import (
     FOREIGN_AUDIENCE_PREFIX,
     audience_subjects,
@@ -55,6 +64,9 @@ CONVERSATION_OTHERS_LIMIT = 25
 CONVERSATIONS_ARE_SURFACE_MADE = (
     "conversations are created by surfaces and closed by retention, never authored"
 )
+NO_SUCH_CONVERSATION = "No conversation with that id on this agent."
+NOT_THE_OWNER = "Only the member who owns a conversation can delete or restore it."
+FILING_GATE = "filing a conversation"
 
 
 class ConversationSpec(BaseModel):
@@ -82,13 +94,31 @@ class ConversationObjects:
     mutation refuses."""
 
     async def list(self, ctx: ToolContext, query: ObjectListQuery) -> ObjectPage:
-        rows = tuple(_row(row) for row in await self._rows(ctx.read_subjects, conversation_id=None))
+        # The mark filters narrow the read in the query, before the page is cut; the default page
+        # is the conversations under no mark.
+        narrowed = {
+            name: query.filters.get(name) if isinstance(query.filters.get(name), bool) else False
+            for name in ("archived", "deleted")
+        }
+        token = ActingMember.current.set(ctx.speaker_member_id)
+        try:
+            rows = [
+                _row(row)
+                for row in await self._rows(
+                    ctx.read_subjects,
+                    conversation_id=None,
+                    archived=narrowed["archived"],
+                    deleted=narrowed["deleted"],
+                )
+            ]
+        finally:
+            ActingMember.current.reset(token)
         if query.filters.get("private") is True and await self._widens_for_admin(ctx):
             rows += tuple(
                 _row(row, private=True)
                 for row in await self._private_rows(ctx, conversation_id=None)
             )
-        return object_page(rows, query)
+        return object_page(tuple(rows), query)
 
     async def get(self, ctx: ToolContext, name: str) -> ObjectDetail[ConversationSpec] | None:
         row = await self._find(ctx.read_subjects, name)
@@ -127,7 +157,12 @@ class ConversationObjects:
         by the term but never narrowed by it a second time, because two narrowings over two field
         sets leave the page their intersection, and a term either of them alone would match then
         answers nothing. A side that comes back full is a side the workspace holds more of, so the
-        page states `cut` and the screen drawing it says so."""
+        page states `cut` and the screen drawing it says so.
+
+        `archived` and `deleted` are declared filters for the same reason `portal` is: the marks
+        narrow the directory read ahead of each side's bound, so an archived conversation past the
+        bound is listed by the archived page rather than cut out of it. Neither filter carries the
+        page by default — the default page is the conversations under no mark."""
         directory = ConversationDirectory(ws_current().workspace_id)
         agent_id = object_agent_id()
         sides: tuple[tuple[Literal["mine", "others"], int], ...] = (
@@ -146,13 +181,25 @@ class ConversationObjects:
                     member_admitted=True,
                     portal=portal if isinstance(portal, bool) else None,
                     search=query.query or None,
+                    archived=query.filters.get("archived") is True,
+                    deleted=query.filters.get("deleted") is True,
                 )
                 for participation, limit in sides
             )
         )
-        rows = tuple(_member_row(entry) for side in listed for entry in side if entry.title)
         cut = any(len(side) >= limit for side, (_, limit) in zip(listed, sides, strict=True))
-        page = object_page(rows, replace(query, query=""))
+        # The pin survives the page bound without the cut eating the newest rows or the
+        # colleagues' side: order by the page's own key, pinned ahead, then last activity.
+        gathered = tuple(_member_row(entry) for side in listed for entry in side if entry.title)
+        ordered = sorted(
+            gathered,
+            key=lambda row: (
+                not row.fields.get("pinned"),
+                [-ord(c) for c in str(row.fields.get("last_at") or "")],
+            ),
+        )
+        page_rows = ordered[:OBJECT_LIST_PAGE]
+        page = object_page(tuple(page_rows), replace(query, query=""))
         return replace(page, cut=cut)
 
     async def member_detail(
@@ -258,9 +305,18 @@ class ConversationObjects:
         return rows[0] if rows else None
 
     async def _rows(
-        self, subjects: frozenset[str], *, conversation_id: UUID | None
+        self,
+        subjects: frozenset[str],
+        *,
+        conversation_id: UUID | None,
+        archived: JsonValue | None = None,
+        deleted: JsonValue | None = None,
     ) -> tuple[sa.Row, ...]:
-        query = _visible(subjects)
+        query = _visible(
+            subjects,
+            archived=archived if isinstance(archived, bool) else None,
+            deleted=deleted if isinstance(deleted, bool) else None,
+        )
         if conversation_id is not None:
             query = query.where(tables.conversation.c.id == conversation_id)
         async with workspace_tx() as connection:
@@ -294,8 +350,269 @@ class ConversationObjects:
             return tuple((await connection.execute(query)).all())
 
 
+class ConversationMarkInput(BaseModel):
+    """Empty: the conversation is the action's target on the `conversation` kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+@dataclass(frozen=True)
+class ConversationArchive:
+    """The archive mark on a conversation, set or cleared by the act, and the sentence read back.
+    The mark is the conversation's rather than the reader's — a workspace conversation one member
+    archives is archived for everyone who lists it, the way its title and audience are — and every
+    surface's next arrival clears it, which admission does under the same row lock."""
+
+    archived: bool
+    said: str
+
+    async def act(self, ctx: ToolContext, args: ConversationMarkInput) -> ToolResult:
+        ctx.require_speaker(FILING_GATE)
+        conversation_id = _marked_conversation(ctx)
+        async with workspace_tx() as connection:
+            if not await _readable(connection, ctx.read_subjects, conversation_id):
+                return _no_conversation()
+            await connection.execute(
+                _filing(conversation_id).values(
+                    archived_at=sa.func.now() if self.archived else None
+                )
+            )
+        return ToolResult(content=(TextContent(text=self.said),))
+
+
+@dataclass(frozen=True)
+class ConversationDelete:
+    """The delete mark on a conversation, set or cleared by the act. The conversation leaves every
+    member's listing and its transcript stands, so the act is the owner's alone: taking a
+    conversation off a colleague's list is not a filing anybody else gets to do."""
+
+    deleted: bool
+    said: str
+
+    async def act(self, ctx: ToolContext, args: ConversationMarkInput) -> ToolResult:
+        speaker = ctx.require_speaker(FILING_GATE)
+        conversation_id = _marked_conversation(ctx)
+        async with workspace_tx() as connection:
+            if not await _readable(connection, ctx.read_subjects, conversation_id):
+                return _no_conversation()
+            if await _owner(connection, conversation_id) != speaker:
+                return ToolResult(content=(TextContent(text=NOT_THE_OWNER),), is_error=True)
+            await connection.execute(
+                _filing(conversation_id).values(deleted_at=sa.func.now() if self.deleted else None)
+            )
+        return ToolResult(content=(TextContent(text=self.said),))
+
+
+@dataclass(frozen=True)
+class ConversationPin:
+    """The speaking member's own pin on a conversation, which holds it above the rest of their own
+    listing. It is keyed by member beside the read cursor rather than stored on the conversation:
+    a shared conversation is listed by everyone it is shared with, and one member's filing of it
+    must not reorder anybody else's list."""
+
+    pinned: bool
+    said: str
+
+    async def act(self, ctx: ToolContext, args: ConversationMarkInput) -> ToolResult:
+        speaker = ctx.require_speaker(FILING_GATE)
+        conversation_id = _marked_conversation(ctx)
+        workspace_id = ws_current().workspace_id
+        pinned_at = datetime.now(UTC)
+        async with workspace_tx() as connection:
+            if not await _readable(connection, ctx.read_subjects, conversation_id):
+                return _no_conversation()
+            if not self.pinned:
+                await connection.execute(
+                    sa.delete(tables.conversation_pin).where(
+                        tables.conversation_pin.c.workspace_id == workspace_id,
+                        tables.conversation_pin.c.conversation_id == conversation_id,
+                        tables.conversation_pin.c.member_id == speaker,
+                    )
+                )
+                return ToolResult(content=(TextContent(text=self.said),))
+            insert = postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+            await connection.execute(
+                insert(tables.conversation_pin)
+                .values(
+                    workspace_id=workspace_id,
+                    conversation_id=conversation_id,
+                    member_id=speaker,
+                    pinned_at=pinned_at,
+                )
+                .on_conflict_do_update(
+                    index_elements=("workspace_id", "conversation_id", "member_id"),
+                    set_={"pinned_at": pinned_at},
+                )
+            )
+        return ToolResult(content=(TextContent(text=self.said),))
+
+
+def _filing(conversation_id: UUID) -> sa.Update:
+    return sa.update(tables.conversation).where(
+        tables.conversation.c.workspace_id == ws_current().workspace_id,
+        tables.conversation.c.id == conversation_id,
+    )
+
+
+def _marked_conversation(ctx: ToolContext) -> UUID:
+    if ctx.target is None or ctx.target.name is None:
+        raise RuntimeError("a conversation filing action dispatched without its target")
+    try:
+        return UUID(ctx.target.name)
+    except ValueError as error:
+        raise UnknownObject(NO_SUCH_CONVERSATION) from error
+
+
+async def _readable(
+    connection: AsyncConnection, subjects: frozenset[str], conversation_id: UUID
+) -> bool:
+    found = (
+        await connection.execute(
+            _visible(subjects).where(tables.conversation.c.id == conversation_id)
+        )
+    ).first()
+    return found is not None
+
+
+def _no_conversation() -> ToolResult:
+    return ToolResult(content=(TextContent(text=NO_SUCH_CONVERSATION),), is_error=True)
+
+
+async def _owner(connection: AsyncConnection, conversation_id: UUID) -> UUID | None:
+    """Whose the conversation is: the member it is bound to, or — a workspace one, which
+    `conversation_audience_member` leaves bound to nobody — whoever spoke in it first. The rule
+    `ListedConversation.owner_email` states over a listed page, read for one row."""
+    workspace_id = ws_current().workspace_id
+    first_speaker = (
+        sa.select(tables.turn.c.speaker_member_id)
+        .where(
+            tables.turn.c.workspace_id == workspace_id,
+            tables.turn.c.conversation_id == conversation_id,
+            tables.turn.c.speaker_member_id.is_not(None),
+        )
+        .order_by(tables.turn.c.seq.asc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    return (
+        await connection.execute(
+            sa.select(sa.func.coalesce(tables.conversation.c.member_id, first_speaker)).where(
+                tables.conversation.c.workspace_id == workspace_id,
+                tables.conversation.c.id == conversation_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+CONVERSATION_MARK_ACTIONS: tuple[ToolDef, ...] = (
+    ToolDef(
+        name="archive_conversation",
+        description=(
+            "Archive this conversation: it leaves the conversation list and reads as before. The "
+            "next message a member sends in it brings it back."
+        ),
+        input_model=ConversationMarkInput,
+        handler=ConversationArchive(
+            archived=True,
+            said="Archived. It is out of the conversation list until its next message.",
+        ).act,
+        side_effecting=True,
+        parallel_safe=True,
+        bound=ObjectBinding(kind=CONVERSATION_KIND, binding="instance"),
+        agent_targetable=True,
+        presentation=ActionPresentation(label="Archive", frame=True),
+    ),
+    ToolDef(
+        name="unarchive_conversation",
+        description="Take this conversation out of the archive, back into the conversation list.",
+        input_model=ConversationMarkInput,
+        handler=ConversationArchive(
+            archived=False,
+            said="Unarchived. It is back in the conversation list.",
+        ).act,
+        side_effecting=True,
+        parallel_safe=True,
+        bound=ObjectBinding(kind=CONVERSATION_KIND, binding="instance"),
+        agent_targetable=True,
+        presentation=ActionPresentation(label="Unarchive", frame=True),
+    ),
+    ToolDef(
+        name="pin_conversation",
+        description=(
+            "Pin this conversation above the others in the speaking member's own conversation "
+            "list. The pin is theirs alone; no other member's list moves."
+        ),
+        input_model=ConversationMarkInput,
+        handler=ConversationPin(
+            pinned=True,
+            said="Pinned. It stands above your other conversations.",
+        ).act,
+        side_effecting=True,
+        parallel_safe=True,
+        bound=ObjectBinding(kind=CONVERSATION_KIND, binding="instance"),
+        agent_targetable=True,
+        presentation=ActionPresentation(label="Pin", frame=True),
+    ),
+    ToolDef(
+        name="unpin_conversation",
+        description=(
+            "Unpin this conversation from the speaking member's own conversation list; it sorts "
+            "with the others again."
+        ),
+        input_model=ConversationMarkInput,
+        handler=ConversationPin(
+            pinned=False,
+            said="Unpinned. It sorts with your other conversations again.",
+        ).act,
+        side_effecting=True,
+        parallel_safe=True,
+        bound=ObjectBinding(kind=CONVERSATION_KIND, binding="instance"),
+        agent_targetable=True,
+        presentation=ActionPresentation(label="Unpin", frame=True),
+    ),
+    ToolDef(
+        name="delete_conversation",
+        description=(
+            "Delete this conversation: it leaves every member's conversation list and its own "
+            "owner reaches it by link alone. Only the member who owns it may delete it. The "
+            "transcript itself stays and retention closes it."
+        ),
+        input_model=ConversationMarkInput,
+        handler=ConversationDelete(
+            deleted=True,
+            said="Deleted. It is off the conversation list.",
+        ).act,
+        side_effecting=True,
+        parallel_safe=True,
+        bound=ObjectBinding(kind=CONVERSATION_KIND, binding="instance"),
+        agent_targetable=True,
+        presentation=ActionPresentation(
+            label="Delete", confirm="Delete this conversation?", frame=True
+        ),
+    ),
+    ToolDef(
+        name="restore_conversation",
+        description=(
+            "Put this deleted conversation back in the conversation list. Only the member who "
+            "owns it may restore it."
+        ),
+        input_model=ConversationMarkInput,
+        handler=ConversationDelete(
+            deleted=False,
+            said="Restored. It is back in the conversation list.",
+        ).act,
+        side_effecting=True,
+        parallel_safe=True,
+        bound=ObjectBinding(kind=CONVERSATION_KIND, binding="instance"),
+        agent_targetable=True,
+        presentation=ActionPresentation(label="Restore", frame=True),
+    ),
+)
+
+
 def _agent_conversations() -> sa.Select:
     member_name = sa.func.coalesce(tables.agent.c.archived_name, tables.agent.c.name)
+    acting = _acting_member()
     return (
         sa.select(
             tables.conversation.c.id,
@@ -305,7 +622,21 @@ def _agent_conversations() -> sa.Select:
             tables.conversation.c.title,
             tables.conversation.c.created_at,
             tables.conversation.c.updated_at,
+            tables.conversation.c.archived_at,
+            tables.conversation.c.deleted_at,
             member_name.label("agent_name"),
+            (
+                sa.select(tables.conversation_pin.c.pinned_at)
+                .where(
+                    tables.conversation_pin.c.workspace_id == ws_current().workspace_id,
+                    tables.conversation_pin.c.conversation_id == tables.conversation.c.id,
+                    tables.conversation_pin.c.member_id == acting,
+                )
+                .correlate(tables.conversation)
+                .scalar_subquery()
+            ).label("pinned_at")
+            if acting is not None
+            else sa.literal(None).label("pinned_at"),
         )
         .select_from(
             tables.conversation.join(
@@ -319,8 +650,55 @@ def _agent_conversations() -> sa.Select:
     )
 
 
-def _visible(subjects: frozenset[str]) -> sa.Select:
-    return _agent_conversations().where(tables.conversation.c.audience.in_(subjects))
+def _visible(
+    subjects: frozenset[str], *, archived: bool | None = None, deleted: bool | None = None
+) -> sa.Select:
+    query = _agent_conversations().where(tables.conversation.c.audience.in_(subjects))
+    # The marks narrow the read in the query; a deleted row answers its owner alone — the rule
+    # `_owns` reads in the rail.
+    if archived is not None or deleted is not None:
+        owns = sa.func.coalesce(
+            tables.conversation.c.member_id,
+            sa.select(tables.turn.c.speaker_member_id)
+            .where(
+                tables.turn.c.workspace_id == tables.conversation.c.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                tables.turn.c.speaker_member_id.is_not(None),
+            )
+            .order_by(tables.turn.c.seq.asc())
+            .limit(1)
+            .correlate(tables.conversation)
+            .scalar_subquery(),
+        )
+        if deleted is True:
+            query = query.where(
+                tables.conversation.c.deleted_at.is_not(None),
+                owns == _acting_member(),
+            )
+        else:
+            query = query.where(
+                tables.conversation.c.deleted_at.is_(None),
+                tables.conversation.c.archived_at.is_not(None)
+                if archived is True
+                else tables.conversation.c.archived_at.is_(None),
+            )
+    return query
+
+
+def _acting_member() -> UUID | None:
+    """The member the turn reads as, when the turn reads as one — the subject the delete mark's
+    ownership rule answers. An agent reading with no member speaking reads no one's deleted rows."""
+    return _acting_member_var.get()
+
+
+class ActingMember:
+    """The member the standing turn reads as, bound beside the workspace and agent scopes — the
+    one fact the delete mark's ownership predicate needs that the ambient scopes do not hold."""
+
+    current: ClassVar[ContextVar[UUID | None]] = ContextVar("acting_member", default=None)
+
+
+_acting_member_var = ActingMember.current
 
 
 def _member_row(entry: ListedConversation) -> ObjectRow:
@@ -351,6 +729,9 @@ def _member_row(entry: ListedConversation) -> ObjectRow:
             "automation_name": None if entry.automation is None else entry.automation.name,
             "automation_title": None if entry.automation is None else entry.automation.title,
             "unread": entry.unread,
+            "archived": entry.archived,
+            "deleted": entry.deleted,
+            "pinned": entry.pinned,
         },
     )
 
@@ -362,7 +743,14 @@ def _row(row: sa.Row, *, private: bool = False) -> ObjectRow:
         else f"{row.surface_label} on {row.surface}"
     )
     title = None if private else row.title
-    fields: dict[str, JsonValue] = {"surface": row.surface}
+    fields: dict[str, JsonValue] = {
+        "surface": row.surface,
+        # The marks ride every row the agent-facing listing serves, the way `_member_row` writes
+        # them on the rail's: the declared filters can only answer fields the rows carry.
+        "archived": row.archived_at is not None,
+        "deleted": row.deleted_at is not None,
+        "pinned": row.pinned_at is not None,
+    }
     if row.surface_label is not None:
         fields["surface_label"] = row.surface_label
     if private:
@@ -395,7 +783,8 @@ CONVERSATION_OBJECT = ObjectKind(
     name=CONVERSATION_KIND,
     description=(
         "A past conversation: its surface, origin label, audience, timestamps, and text "
-        "transcript. Created by surfaces; every mutation is refused."
+        "transcript. Created by surfaces; a member files one with the archive, pin and delete "
+        "actions and changes nothing else about it."
     ),
     guidance=(
         "Conversations resolve artifact `created_in` and scheduled-task `reports_to` links: get "
@@ -420,8 +809,15 @@ CONVERSATION_OBJECT = ObjectKind(
         "`unread`, whether it moved after the "
         "member last read it and last spoke in it. Order by "
         "`last_at` desc for the newest activity first. "
+        "It also carries the filing marks the actions on a row set and clear: `archived` and "
+        "`deleted`, which the conversation carries for everyone who lists it, and `pinned`, which "
+        "is the reading member's own. A listing answers the "
+        "conversations under no mark; ask for the archived ones with the filter "
+        '{"archived": true}, and for your own deleted ones with {"deleted": true}. A member\'s '
+        "next message in an archived conversation clears the archive mark. Only the member who "
+        "owns a conversation may delete or restore it. "
         "`status.workspace_path` writes a visible text exchange into your workspace. Conversations "
-        "cannot be created, changed, or deleted through objects."
+        "cannot be created or changed through objects."
     ),
     spec_model=ConversationSpec,
     store=ConversationObjects(),
@@ -445,6 +841,9 @@ CONVERSATION_OBJECT = ObjectKind(
             "automation_name",
             "automation_title",
             "unread",
+            "archived",
+            "deleted",
+            "pinned",
             "private",
         }
     ),

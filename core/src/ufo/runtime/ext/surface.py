@@ -1408,6 +1408,12 @@ class ListedConversation(BaseModel):
     gone. Like `turn` it is the shape of the conversation's work rather than a word of its content,
     so an unreadable row states it too.
 
+    `archived` and `deleted` are the marks the conversation carries: out of the default listing and
+    off it, for everyone who lists it, the way its title and audience are. `pinned` is this
+    viewer's own — a member holds a row above their list without moving anybody else's. All three
+    are the shape of the filing rather than a word of the content, so an unreadable row states
+    them like `turn_count`.
+
     `speakers` runs in order of first appearance and stops at `MAX_CONVERSATION_SPEAKERS`.
 
     `mine` is whether this viewer is in the conversation — bound to it, or a speaker of a turn of
@@ -1433,6 +1439,9 @@ class ListedConversation(BaseModel):
     source: str | None
     speakers: tuple[ConversationSpeaker, ...]
     mine: bool
+    archived: bool
+    deleted: bool
+    pinned: bool
 
     @property
     def owner_email(self) -> str | None:
@@ -1480,6 +1489,8 @@ class ConversationDirectory:
         participation: Literal["mine", "others"] | None = None,
         search: str | None = None,
         member_admitted: bool = False,
+        archived: bool = False,
+        deleted: bool = False,
     ) -> tuple[ListedConversation, ...]:
         """One agent's conversations as the portal lists them, newest activity first and bounded:
         the member's own plus the workspace-shared ones, every one of the agent's for an admin.
@@ -1499,6 +1510,12 @@ class ConversationDirectory:
         Subagent conversations are absent: they are the agent's own work on a request, listed
         nested under the turn that spawned them, never beside it. `conversation_id` selects one
         exact row before the bound for a durable permalink.
+
+        `archived` says which side of the archive mark the page holds — every other conversation
+        by default, the archived ones alone when true — and `deleted` does the same for the delete
+        mark, which answers the owner alone: a conversation its owner deleted is gone from every
+        listing anyone else reads. A permalink resolve narrows on neither mark, so a member's own
+        link still opens what they archived or deleted.
 
         Newest activity is the last turn, and creation only where no turn has landed yet, so the
         top of the page is what moved most recently rather than what was opened most recently.
@@ -1526,6 +1543,9 @@ class ConversationDirectory:
                 tables.conversation.c.member_id,
                 tables.member.c.email,
                 tables.conversation.c.created_at,
+                tables.conversation.c.archived_at,
+                tables.conversation.c.deleted_at,
+                self._pinned_at(member_id).label("pinned_at"),
                 self._turn_count().label("turn_count"),
                 last_turn_at.label("last_turn_at"),
                 self._live_turn().label("live_turn"),
@@ -1543,6 +1563,9 @@ class ConversationDirectory:
                 tables.conversation.c.surface != SUBAGENT_SURFACE,
             )
             .order_by(
+                # The pin enters the order beside the bound, so a pinned row past the page's
+                # cut is not the row the bound throws away.
+                sa.desc(self._pinned_at(member_id).is_not(None)),
                 sa.func.coalesce(last_turn_at, tables.conversation.c.created_at).desc(),
                 tables.conversation.c.created_at.desc(),
             )
@@ -1557,7 +1580,23 @@ class ConversationDirectory:
             )
             query = query.where(carried if portal else sa.not_(carried))
         if conversation_id is not None:
-            query = query.where(tables.conversation.c.id == conversation_id)
+            query = query.where(
+                tables.conversation.c.id == conversation_id,
+                sa.or_(tables.conversation.c.deleted_at.is_(None), self._owns(member_id)),
+            )
+        else:
+            # The deleted page reads rows whatever the archive mark says: a row filed away and
+            # then deleted must stay reachable for its restore.
+            query = query.where(
+                sa.and_(tables.conversation.c.deleted_at.is_not(None), self._owns(member_id))
+                if deleted
+                else sa.and_(
+                    tables.conversation.c.deleted_at.is_(None),
+                    tables.conversation.c.archived_at.is_not(None)
+                    if archived
+                    else tables.conversation.c.archived_at.is_(None),
+                ),
+            )
         match participation:
             case "mine":
                 query = query.where(self._participated(member_id))
@@ -1582,7 +1621,7 @@ class ConversationDirectory:
             self.openings(content), self.speakers(content), self.automations(every)
         )
         mine = str(conversation_audience(member_id))
-        return tuple(
+        listed = [
             ListedConversation(
                 summary=ConversationSummary(
                     id=row.id,
@@ -1607,9 +1646,15 @@ class ConversationDirectory:
                 source=openings.get(row.id, NO_OPENING).source,
                 speakers=speakers.get(row.id, ()),
                 mine=row.member_id == member_id or row.spoke_at is not None,
+                archived=row.archived_at is not None,
+                deleted=row.deleted_at is not None,
+                pinned=row.pinned_at is not None,
             )
             for row in rows
-        )
+        ]
+        # The pinned rows lead the page whatever their activity, read beside the read rather
+        # than applied by the screen after the bound has thrown the row away.
+        return tuple(sorted(listed, key=lambda entry: not entry.pinned))
 
     def _last_turn_at(self) -> sa.ColumnElement[datetime | None]:
         return (
@@ -1644,6 +1689,21 @@ class ConversationDirectory:
                 tables.conversation_read.c.workspace_id == self.workspace_id,
                 tables.conversation_read.c.conversation_id == tables.conversation.c.id,
                 tables.conversation_read.c.member_id == member_id,
+            )
+            .correlate(tables.conversation)
+            .scalar_subquery()
+        )
+
+    def _pinned_at(self, member_id: UUID) -> sa.ColumnElement[datetime | None]:
+        """When this member pinned the conversation, null where they have not. The pin is the
+        member's own filing of a row they may share with the workspace, so it is keyed by member
+        the way the read cursor beside it is, and one member's pin never moves another's list."""
+        return (
+            sa.select(tables.conversation_pin.c.pinned_at)
+            .where(
+                tables.conversation_pin.c.workspace_id == self.workspace_id,
+                tables.conversation_pin.c.conversation_id == tables.conversation.c.id,
+                tables.conversation_pin.c.member_id == member_id,
             )
             .correlate(tables.conversation)
             .scalar_subquery()
@@ -1850,6 +1910,25 @@ class ConversationDirectory:
                 )
             )
         return {conversation_id: tuple(who) for conversation_id, who in spoke.items()}
+
+    def _owns(self, member_id: UUID) -> sa.ColumnElement[bool]:
+        """Whether this member owns the conversation: it is bound to them, or — a workspace one,
+        which `conversation_audience_member` leaves bound to nobody — they spoke in it first. The
+        same rule `ListedConversation.owner_email` reads off the page, in the query, because the
+        delete mark is narrowed on it before the bound."""
+        first_speaker = (
+            sa.select(tables.turn.c.speaker_member_id)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.conversation_id == tables.conversation.c.id,
+                tables.turn.c.speaker_member_id.is_not(None),
+            )
+            .order_by(tables.turn.c.seq.asc())
+            .limit(1)
+            .correlate(tables.conversation)
+            .scalar_subquery()
+        )
+        return sa.func.coalesce(tables.conversation.c.member_id, first_speaker) == member_id
 
     def _member_admitted(self) -> sa.ColumnElement[bool]:
         """Whether a member's own message ever opened a turn here. An intent turn carries the
@@ -4763,6 +4842,8 @@ class SurfaceContext:
         participation: Literal["mine", "others"] | None = None,
         search: str | None = None,
         member_admitted: bool = False,
+        archived: bool = False,
+        deleted: bool = False,
     ) -> tuple[ListedConversation, ...]:
         """One agent's conversations as the portal lists them — `ConversationDirectory.list`,
         bound to this surface's workspace."""
@@ -4776,6 +4857,8 @@ class SurfaceContext:
             participation=participation,
             search=search,
             member_admitted=member_admitted,
+            archived=archived,
+            deleted=deleted,
         )
 
     async def mark_conversation_read(self, conversation_id: UUID, member_id: UUID) -> None:

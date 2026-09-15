@@ -303,6 +303,9 @@ export const CHAT_ROW: ChatRow = {
   automation_name: null,
   automation_title: null,
   unread: false,
+  archived: false,
+  deleted: false,
+  pinned: false,
 };
 
 export const json = (payload: unknown) => Response.json(payload);
@@ -330,6 +333,9 @@ export const linked = (row: RailRow): OwnedConversation => ({
   turn_count: 1,
   created_at: row.last_at,
   last_turn_at: row.last_at,
+  archived: false,
+  deleted: false,
+  pinned: false,
   readable: true,
   disclosable: false,
   speakable: row.audience === SHARED_SUBJECT || row.audience === MEMBER_SUBJECT + MEMBER.id,
@@ -350,13 +356,17 @@ const resolveOnWire =
  *  query. */
 export const chatsOnWire = (rows: RailRow[]): Record<string, Route> => ({
   "/objects/conversation$": (url) => {
-    const said = new URLSearchParams(url.split("?")[1] ?? "").get("q")?.toLowerCase() ?? "";
-    const found = rows.filter((row) =>
-      Object.values(conversationObject(row)).some(
-        (value) => typeof value === "string" && value.toLowerCase().includes(said),
-      ),
-    );
-    return json({ objects: found.map(conversationObject) });
+    const params = new URLSearchParams(url.split("?")[1] ?? "");
+    const archived = params.get("archived") === "true";
+    const said = params.get("q")?.toLowerCase() ?? "";
+    const side = rows
+      .filter((row) => Boolean(row.archived) === archived)
+      .filter((row) =>
+        Object.values(conversationObject(row)).some(
+          (value) => typeof value === "string" && value.toLowerCase().includes(said),
+        ),
+      );
+    return json({ objects: side.map(conversationObject) });
   },
   "/api/chats": resolveOnWire(rows),
 });

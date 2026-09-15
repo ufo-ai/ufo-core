@@ -590,21 +590,32 @@ function chatListRow(id: string, title: string, extra: Record<string, unknown> =
     surface_label: null,
     mine: true,
     speaker: null,
+    owner_email: MEMBER.email,
+    archived: false,
+    pinned: false,
     last_at: new Date().toISOString(),
     ...extra,
   };
 }
 
+/** The listing as the kind answers it: the archived conversations on their own page, the rest on
+ *  the default one, because the home reads the two sides as two walks. */
+function chatListing(objects: ReturnType<typeof chatListRow>[]): Route {
+  return (url) => {
+    const archived = url.includes("archived=true");
+    return json({
+      objects: objects.filter((row) => row.archived === archived),
+      next_cursor: null,
+    });
+  };
+}
+
 test("every surface stands in the list until the member puts one away", async () => {
   const { calls } = await runPage("chat", {
-    "/objects/conversation$": () =>
-      json({
-        objects: [
+    "/objects/conversation$": chatListing([
           chatListRow(CONVO_ID, "Portal words"),
           chatListRow(ARRIVAL_ID, "Slack words", { surface: "slack", surface_label: "#ops" }),
-        ],
-        next_cursor: null,
-      }),
+      ]),
   });
   const listReads = () => calls.filter((url) => url.includes("/objects/conversation"));
   await screen.findByRole("heading", { name: "Chat" });
@@ -631,14 +642,10 @@ test("every surface stands in the list until the member puts one away", async ()
 test("a surface the member put away is away on the next visit", async () => {
   localStorage.setItem("chat-hidden", "slack");
   await runPage("chat", {
-    "/objects/conversation$": () =>
-      json({
-        objects: [
+    "/objects/conversation$": chatListing([
           chatListRow(CONVO_ID, "Portal words"),
           chatListRow(ARRIVAL_ID, "Slack words", { surface: "slack", surface_label: "#ops" }),
-        ],
-        next_cursor: null,
-      }),
+      ]),
   });
 
   expect(await screen.findByText("Portal words")).toBeTruthy();
@@ -660,7 +667,7 @@ test("the chat list runs its rows under the ladder this browser holds", async ()
   ];
   localStorage.setItem("chat-ladder", "app");
   await runPage("chat", {
-    "/objects/conversation$": () => json({ objects: rows, next_cursor: null }),
+    "/objects/conversation$": chatListing(rows),
   });
 
   await screen.findByRole("heading", { name: "Chat" });
@@ -684,16 +691,12 @@ test("the chat list runs its rows under the ladder this browser holds", async ()
 test("the list opens on the day-runs a conversation falls in, and skips the empty ones", async () => {
   const at = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
   await runPage("chat", {
-    "/objects/conversation$": () =>
-      json({
-        objects: [
+    "/objects/conversation$": chatListing([
           chatListRow(CONVO_ID, "This morning", { last_at: at(0) }),
           chatListRow(ARRIVAL_ID, "Earlier this week", { last_at: at(3) }),
           chatListRow(TURN_ID, "Last month", { last_at: at(20) }),
           chatListRow(SECOND_ID, "Long ago", { last_at: at(400) }),
-        ],
-        next_cursor: null,
-      }),
+      ]),
   });
 
   const headings = async () =>
@@ -714,9 +717,7 @@ test("a row from another surface trails the source it came in on, and a portal r
   await runPage(
     "chat",
     {
-      "/objects/conversation$": () =>
-        json({
-          objects: [
+      "/objects/conversation$": chatListing([
             chatListRow(CONVO_ID, "Portal words"),
             chatListRow(ARRIVAL_ID, "Slack words", { surface: "slack", surface_label: "#ops" }),
             chatListRow(TURN_ID, "Terminal words", { surface: "ufo" }),
@@ -724,9 +725,7 @@ test("a row from another surface trails the source it came in on, and a portal r
               agent_id: SECOND_ID,
               agent_name: "meetings",
             }),
-          ],
-          next_cursor: null,
-        }),
+        ]),
     },
   );
 
@@ -749,6 +748,7 @@ test("a row from another surface trails the source it came in on, and a portal r
 test("one page of the chat list gathers the listing's own pages up to its bound", async () => {
   const { calls } = await runPage("chat", {
     "/objects/conversation$": (url) => {
+      if (url.includes("archived=true")) return json({ objects: [], next_cursor: null });
       const held = /cursor=walk-(\d+)/.exec(url);
       const page = held === null ? 1 : Number(held[1]) + 1;
       return json({
@@ -769,8 +769,7 @@ test("one page of the chat list gathers the listing's own pages up to its bound"
 
 test("the chat list stands over the entry that starts a conversation, and a send founds one", async () => {
   const { calls } = await runPage("chat", {
-    "/objects/conversation$": () =>
-      json({ objects: [chatListRow(CONVO_ID, "Warehouse restock")], next_cursor: null }),
+    "/objects/conversation$": chatListing([chatListRow(CONVO_ID, "Warehouse restock")]),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: ARRIVAL_ID, title: "fresh words" }),
   });
 
@@ -792,8 +791,7 @@ test("the chat page answers an emptied track with its conversation list", async 
   await runPage(
     "chat",
     {
-      "/objects/conversation$": () =>
-        json({ objects: [row(CONVO_ID, "Alpha"), row(ARRIVAL_ID, "Bravo")], next_cursor: null }),
+      "/objects/conversation$": chatListing([row(CONVO_ID, "Alpha"), row(ARRIVAL_ID, "Bravo")]),
       "/api/chats": () => json({ conversation: linked({ ...CHAT_ROW, title: "Alpha" }) }),
       "/transcript": () => json({ messages: [] }),
     },
@@ -810,4 +808,73 @@ test("the chat page answers an emptied track with its conversation list", async 
   await vi.waitFor(() => expect(screen.getByRole("heading", { name: "Chat" })).toBeTruthy());
   expect(screen.getByText("Bravo")).toBeTruthy();
   expect(screen.getByText("Alpha")).toBeTruthy();
+});
+
+const FILING_ACTIONS = [
+  "archive_conversation",
+  "unarchive_conversation",
+  "pin_conversation",
+  "unpin_conversation",
+  "delete_conversation",
+  "restore_conversation",
+];
+
+/** The conversation kind's own action projection for one row, as the portal reads it before
+ *  dispatching an act the page did not declare itself. */
+function filingActions(url: string) {
+  const conversationId = url.split("/actions/conversation/")[1].split("?")[0];
+  return json({
+    actions: FILING_ACTIONS.map((name) => ({
+      name,
+      description: "",
+      input_schema: { properties: {} },
+      call: { kind: "conversation", name: conversationId, action: name },
+      label: name,
+    })),
+  });
+}
+
+test("a chat row files its conversation away, holds it above the list, or deletes it", async () => {
+  const posted: string[] = [];
+  await runPage("chat", {
+    "/objects/conversation$": chatListing([
+      chatListRow(CONVO_ID, "Ship the plan", { pinned: true }),
+      chatListRow(ARRIVAL_ID, "Last quarter's release", { last_at: "2026-08-01T09:00:00.000Z" }),
+      chatListRow(TURN_ID, "Old runbook", { archived: true }),
+      chatListRow(SECOND_ID, "Bob's thread", { mine: false, owner_email: "bob@example.com" }),
+    ]),
+    "/actions/conversation/": (url, init) => {
+      if (init?.method !== "POST") return filingActions(url);
+      posted.push(url.split("/actions/conversation/")[1]);
+      return json({ applied: true, message: "Saved." });
+    },
+  });
+
+  await screen.findByRole("heading", { name: "Chat" });
+  const archived = await screen.findByRole("heading", { name: "Archived" });
+  expect(within(archived.parentElement!).getByText("Old runbook")).toBeTruthy();
+
+  const titles = screen
+    .getAllByRole("listitem")
+    .map((row) => row.textContent ?? "")
+    .filter((text) => text.includes("Ship the plan") || text.includes("Last quarter"));
+  expect(titles[0]).toContain("Ship the plan");
+
+  await userEvent.click(screen.getByRole("button", { name: "Actions for Ship the plan" }));
+  expect(await screen.findByRole("menuitem", { name: "Archive" })).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "Unpin" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+  expect(await screen.findByRole("dialog")).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+  await vi.waitFor(() => expect(posted).toEqual([CONVO_ID + "/delete_conversation"]));
+
+  await userEvent.click(screen.getByRole("button", { name: "Actions for Old runbook" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Unarchive" }));
+  await vi.waitFor(() =>
+    expect(posted).toContain(TURN_ID + "/unarchive_conversation"),
+  );
+
+  await userEvent.click(screen.getByRole("button", { name: "Actions for Bob's thread" }));
+  expect(await screen.findByRole("menuitem", { name: "Archive" })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
 });

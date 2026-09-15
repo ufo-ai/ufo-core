@@ -67,7 +67,15 @@ import {
 import { Chart, ChartBars } from "@/components/ui/chart";
 import type { ChartBar } from "@/components/ui/chart";
 import { Detail } from "@/components/ui/detail";
-import { Dialog, DialogTrigger } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -146,7 +154,7 @@ import { DataTable } from "@/kernel/table";
 import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { BrandMark } from "@/lib/brandMark";
-import { getJson, postIntent } from "@/lib/api";
+import { getJson, postIntent, postObjectAction } from "@/lib/api";
 import {
   IMESSAGE_SURFACE,
   SHARED_SUBJECT,
@@ -268,6 +276,11 @@ export {
   buttonVariants,
   Detail,
   Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   DialogTrigger,
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -343,6 +356,7 @@ export {
   BrandMark,
   getJson,
   postIntent,
+  postObjectAction,
   IMESSAGE_SURFACE,
   SHARED_SUBJECT,
   SLACK_SURFACE,

@@ -46,6 +46,9 @@ export type Conversation = {
   turn_count: number;
   created_at: string;
   last_turn_at: string | null;
+  archived: boolean;
+  deleted: boolean;
+  pinned: boolean;
   readable: boolean;
   disclosable: boolean;
   speakable: boolean;

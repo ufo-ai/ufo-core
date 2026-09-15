@@ -3,9 +3,16 @@ import {
   Button,
   COLUMN,
   ChatPane,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -14,6 +21,7 @@ import {
   FoundingChat,
   Header,
   IMESSAGE_SURFACE,
+  IconDots,
   IconFilter2,
   Moment,
   PageToolbar,
@@ -32,6 +40,7 @@ import {
   mountApp,
   navigate,
   onPlaced,
+  postObjectAction,
   routeIs,
   surfaceWord,
   useAppLinks,
@@ -59,6 +68,9 @@ type ConversationRow = {
   surface_label: string | null;
   mine: boolean;
   speaker: string | null;
+  owner_email: string | null;
+  archived: boolean;
+  pinned: boolean;
   last_at: string;
 };
 
@@ -128,6 +140,12 @@ function origin(row: ConversationRow): string {
   return row.surface_label || surfaceWord(row.surface);
 }
 
+// Pinned rows lead the list under no heading of their own: a member who pinned a thread is looking
+// for it at the top, and a heading over two rows costs more of the column than it names.
+const PINNED = "";
+const PINNED_SECTION_KEY = "pinned";
+const ARCHIVED = "Archived";
+
 function runs(
   rows: ConversationRow[],
   category: string,
@@ -135,10 +153,13 @@ function runs(
   now: Date,
 ): Run[] {
   const admitted = rows.filter((row) => admits(row, hidden));
-  const own = admitted.filter((row) => row.mine);
-  const theirs = admitted.filter((row) => !row.mine);
-  const grouped = own.length ? bucketed(own, category, now) : [];
-  return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
+  const pinned = admitted.filter((row) => row.pinned);
+  const rest = admitted.filter((row) => !row.pinned);
+  const own = rest.filter((row) => row.mine);
+  const theirs = rest.filter((row) => !row.mine);
+  const grouped = pinned.length ? [{ label: PINNED, rows: pinned }] : [];
+  const dated = own.length ? grouped.concat(bucketed(own, category, now)) : grouped;
+  return theirs.length ? dated.concat({ label: OTHER_MEMBERS, rows: theirs }) : dated;
 }
 
 function bucketed(rows: ConversationRow[], category: string, now: Date): Run[] {
@@ -168,6 +189,203 @@ type Listing =
 
 const CHAT_PAGES = 6;
 
+/** One walk of the conversation listing, kept fresh: the pages the member's own cursor opens,
+ *  narrowed server-side to the archived conversations or to the rest of them. The archive is its
+ *  own read rather than a filter over the rows this one gathered, because a filter applied to a
+ *  gathered stride leaves every archived conversation past that stride out of the section that
+ *  names it. */
+function useConversations(after: string, archived: boolean): [Listing, () => void] {
+  const [held, setHeld] = useState<Listing>({ kind: "loading" });
+  const walk = useCallback(() => {
+    let live = true;
+    setHeld((standing) =>
+      standing.kind === "ready" || standing.kind === "refresh"
+        ? { kind: "refresh", rows: standing.rows, walk: standing.walk }
+        : standing,
+    );
+    void (async () => {
+      const gathered: ConversationRow[] = [];
+      let cursor = after;
+      for (let page = 1; ; page += 1) {
+        const params = new URLSearchParams({ order_by: "last_at", order: "desc" });
+        if (archived) params.set("archived", "true");
+        if (cursor) params.set("cursor", cursor);
+        const answer = await getJson<{ objects: ConversationRow[]; next_cursor: string | null }>(
+          "/objects/conversation?" + params.toString(),
+        );
+        if (!live) return;
+        if (!answer.ok) {
+          setHeld(
+            gathered.length
+              ? { kind: "ready", rows: gathered, walk: cursor || null }
+              : { kind: "failed" },
+          );
+          return;
+        }
+        gathered.push(...answer.payload.objects);
+        cursor = answer.payload.next_cursor ?? "";
+        const done = !cursor || page >= CHAT_PAGES;
+        setHeld({ kind: "ready", rows: [...gathered], walk: done ? cursor || null : null });
+        if (done) return;
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [after, archived]);
+  useEffect(() => walk(), [walk]);
+  // The rows the member reads stand while the listing walks again, so a walk that lands mid-read
+  // never blanks the column.
+  useEffect(() => {
+    const beat = setInterval(walk, 5000);
+    return () => clearInterval(beat);
+  }, [walk]);
+  return [held, walk];
+}
+
+const ARCHIVE_ACTION = "archive_conversation";
+const UNARCHIVE_ACTION = "unarchive_conversation";
+const PIN_ACTION = "pin_conversation";
+const UNPIN_ACTION = "unpin_conversation";
+const DELETE_ACTION = "delete_conversation";
+
+/** The acts a member takes on one conversation from its row: file it away, hold it above the
+ *  others, or take it off the list. Each is the conversation kind's own action, posted on the
+ *  agent the row belongs to, and the listing is read again once the act applied so the row lands
+ *  in the section the server now puts it in.
+ *
+ *  Delete is offered on a conversation this member owns and on no other, because the verb refuses
+ *  anybody else; a control that refuses on press is a control that should not have been drawn. */
+function RowActs({
+  row,
+  member,
+  onActed,
+}: {
+  row: ConversationRow;
+  member: Member;
+  onActed: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [refused, setRefused] = useState("");
+  const owned = row.owner_email !== null && row.owner_email === member.email;
+  const act = async (action: string) => {
+    setBusy(true);
+    setRefused("");
+    const outcome = await postObjectAction(
+      row.agent_id,
+      { kind: "conversation", name: row.name, action },
+      {},
+    );
+    setBusy(false);
+    if (!outcome.applied) {
+      setRefused(outcome.message);
+      return;
+    }
+    setAsking(false);
+    onActed();
+  };
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="row"
+            size="icon"
+            busy={busy}
+            aria-label={"Actions for " + row.title}
+            className="shrink-0 border-transparent text-ink-soft hover:bg-fill"
+          >
+            <IconDots aria-hidden />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            onSelect={() => void act(row.archived ? UNARCHIVE_ACTION : ARCHIVE_ACTION)}
+          >
+            {row.archived ? "Unarchive" : "Archive"}
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => void act(row.pinned ? UNPIN_ACTION : PIN_ACTION)}>
+            {row.pinned ? "Unpin" : "Pin"}
+          </DropdownMenuItem>
+          {owned ? (
+            <DropdownMenuItem onSelect={() => setAsking(true)}>Delete</DropdownMenuItem>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Dialog open={asking} onOpenChange={setAsking}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete this conversation?</DialogTitle>
+            <DialogDescription>
+              {row.title} leaves every member's conversation list. Its transcript stays and
+              retention closes it.
+            </DialogDescription>
+          </DialogHeader>
+          {refused ? (
+            <p role="status" className="m-0 text-small text-ink-soft">
+              {refused}
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button busy={busy} onClick={() => void act(DELETE_ACTION)}>
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+/** One run of the list under its heading, each row opening the conversation and carrying the acts
+ *  on it. The pinned run heads the column under no heading, so its section draws none. */
+function RunSection({
+  run,
+  member,
+  mainAgent,
+  onOpen,
+  onActed,
+}: {
+  run: Run;
+  member: Member;
+  mainAgent: Agent | null;
+  onOpen: (conversationId: string) => void;
+  onActed: () => void;
+}) {
+  return (
+    <section className="flex flex-col gap-sm">
+      {run.label ? (
+        <h2 className="m-0 px-sm font-sans text-label font-medium text-ink-soft">{run.label}</h2>
+      ) : null}
+      <ul className="m-0 flex list-none flex-col gap-hair p-0">
+        {run.rows.map((row) => (
+          <li key={row.name} className="flex items-center gap-2xs">
+            <button type="button" onClick={() => onOpen(row.name)} className={ROW}>
+              <span className="min-w-0 flex-1 truncate">{row.title}</span>
+              {isPortalChat(row.surface) ? null : (
+                <span className="flex shrink-0 items-center gap-2xs text-label text-ink-soft">
+                  <SurfaceGlyph surface={row.surface} />
+                  {origin(row)}
+                </span>
+              )}
+              {mainAgent && row.agent_id !== mainAgent.id ? (
+                <span className="shrink-0 text-label text-ink-soft">
+                  {agentName(row.agent_name)}
+                </span>
+              ) : null}
+              <span className="shrink-0 font-mono text-small text-ink-soft">
+                <Moment at={row.last_at} />
+              </span>
+            </button>
+            <RowActs row={row} member={member} onActed={onActed} />
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function ChatApp({
   arrived,
   appId,
@@ -191,50 +409,12 @@ function ChatApp({
   const after = at.after ?? "";
   const [hidden, setHidden] = useState<string[]>(heldHidden);
   const [category, setCategory] = useState<string>(heldLadder);
-  const [list, setList] = useState<Listing>({ kind: "loading" });
-  const walk = useCallback(() => {
-    let live = true;
-    setList((held) =>
-      held.kind === "ready" || held.kind === "refresh"
-        ? { kind: "refresh", rows: held.rows, walk: held.walk }
-        : held,
-    );
-    void (async () => {
-      const gathered: ConversationRow[] = [];
-      let cursor = after;
-      for (let page = 1; ; page += 1) {
-        const params = new URLSearchParams({ order_by: "last_at", order: "desc" });
-        if (cursor) params.set("cursor", cursor);
-        const answer = await getJson<{ objects: ConversationRow[]; next_cursor: string | null }>(
-          "/objects/conversation?" + params.toString(),
-        );
-        if (!live) return;
-        if (!answer.ok) {
-          setList(
-            gathered.length
-              ? { kind: "ready", rows: gathered, walk: cursor || null }
-              : { kind: "failed" },
-          );
-          return;
-        }
-        gathered.push(...answer.payload.objects);
-        cursor = answer.payload.next_cursor ?? "";
-        const done = !cursor || page >= CHAT_PAGES;
-        setList({ kind: "ready", rows: [...gathered], walk: done ? cursor || null : null });
-        if (done) return;
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [after]);
-  useEffect(() => walk(), [walk]);
-  // The rows the member reads stand while the listing walks again, so a walk that lands mid-read
-  // never blanks the column.
-  useEffect(() => {
-    const beat = setInterval(walk, 5000);
-    return () => clearInterval(beat);
-  }, [walk]);
+  const [list, walk] = useConversations(after, false);
+  const [archive, walkArchive] = useConversations("", true);
+  const acted = useCallback(() => {
+    walk();
+    walkArchive();
+  }, [walk, walkArchive]);
 
   const [shown, setShown] = useState<Shown>({ kind: "loading" });
   useEffect(() => {
@@ -334,6 +514,10 @@ function ChatApp({
   }
   if (shown.kind === "list") {
     const drawn = runs(shown.rows, category, hidden, new Date());
+    const archived =
+      archive.kind === "ready" || archive.kind === "refresh"
+        ? archive.rows.filter((row) => admits(row, hidden))
+        : [];
     if (!mainAgent) return <PaneNote>No such app.</PaneNote>;
     return (
       <Pane>
@@ -391,36 +575,25 @@ function ChatApp({
               <p className="m-0 text-ink-soft">No conversations yet.</p>
             ) : (
               drawn.map((run) => (
-                <section key={run.label} className="flex flex-col gap-sm">
-                  <h2 className="m-0 px-sm font-sans text-label font-medium text-ink-soft">
-                    {run.label}
-                  </h2>
-                  <ul className="m-0 flex list-none flex-col gap-hair p-0">
-                    {run.rows.map((row) => (
-                      <li key={row.name}>
-                        <button type="button" onClick={() => place(row.name)} className={ROW}>
-                          <span className="min-w-0 flex-1 truncate">{row.title}</span>
-                          {isPortalChat(row.surface) ? null : (
-                            <span className="flex shrink-0 items-center gap-2xs text-label text-ink-soft">
-                              <SurfaceGlyph surface={row.surface} />
-                              {origin(row)}
-                            </span>
-                          )}
-                          {mainAgent && row.agent_id !== mainAgent.id ? (
-                            <span className="shrink-0 text-label text-ink-soft">
-                              {agentName(row.agent_name)}
-                            </span>
-                          ) : null}
-                          <span className="shrink-0 font-mono text-small text-ink-soft">
-                            <Moment at={row.last_at} />
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
+                <RunSection
+                  key={run.label || PINNED_SECTION_KEY}
+                  run={run}
+                  member={member}
+                  mainAgent={mainAgent}
+                  onOpen={place}
+                  onActed={acted}
+                />
               ))
             )}
+            {archived.length ? (
+              <RunSection
+                run={{ label: ARCHIVED, rows: archived }}
+                member={member}
+                mainAgent={mainAgent}
+                onOpen={place}
+                onActed={acted}
+              />
+            ) : null}
             {shown.walk || after ? (
               <div className="flex gap-sm">
                 {shown.walk ? (

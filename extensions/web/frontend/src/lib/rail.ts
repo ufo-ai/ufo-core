@@ -30,6 +30,9 @@ export type ChatRow = {
   automation_name: string | null;
   automation_title: string | null;
   unread: boolean;
+  archived: boolean;
+  deleted: boolean;
+  pinned: boolean;
 };
 
 export type ChatsPayload = { conversation: OwnedConversation };
@@ -55,6 +58,9 @@ export type ConversationRow = {
   automation_name: string | null;
   automation_title: string | null;
   unread: boolean;
+  archived: boolean;
+  deleted: boolean;
+  pinned: boolean;
 };
 
 export type ConversationsPayload = {
@@ -86,6 +92,9 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
     automation_name: row.automation_name,
     automation_title: row.automation_title,
     unread: row.unread,
+    archived: row.archived,
+    deleted: row.deleted,
+    pinned: row.pinned,
   }));
 }
 

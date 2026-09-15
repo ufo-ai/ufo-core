@@ -870,6 +870,7 @@ test("a chat lane's history lists the member's own conversations and groups coll
 
   const rows = [...lane.querySelectorAll("section")]
     .flatMap((run) => [...run.querySelectorAll("button")])
+    .filter((row) => row.className.includes("group"))
     .map((row) => row.textContent ?? "");
   expect(rows).toHaveLength(2);
   expect(rows[0]).toContain(CHAT_ROW.title);
