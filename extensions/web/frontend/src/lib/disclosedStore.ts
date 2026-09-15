@@ -1,8 +1,7 @@
 import { useSyncExternalStore } from "react";
 
-/** The disclosures acknowledged in this session, held outside every pane that draws one: a listing
- *  answers `readable` from audience membership alone, so a remounted pane would draw the
- *  acknowledgement over a transcript already opened and record a second disclosure for one act. */
+/** Held outside every pane that draws one: a listing answers `readable` from audience membership
+ *  alone, so a remounted pane would re-draw the acknowledgement and record a second disclosure. */
 const DISCLOSED = new Set<string>();
 
 const listeners = new Set<() => void>();
