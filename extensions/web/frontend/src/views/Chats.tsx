@@ -5,15 +5,27 @@ import { Search } from "@/components/ui/field";
 import { Segmented } from "@/components/ui/filter";
 import { TdFact, TdFill, TdWhole } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Pager } from "@/kernel/pager";
-import { Header, PageToolbar, Pane } from "@/kernel/pane";
+import { BANDS, COLUMN, FacetMenu, Header, Page, PageToolbar, Pane } from "@/kernel/pane";
+import type { FacetGroup } from "@/kernel/pane";
 import { Notice, PanelEmpty, PanelSkeleton, Section, usePanelRead } from "@/kernel/panel";
+import type { PanelState } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
-import { SHARED_SUBJECT } from "@/lib/audience";
-import { AutomationMark, ChannelMark, ChatStatus } from "@/lib/chatMark";
+import { SHARED_SUBJECT, ownerLabel, useViewer } from "@/lib/audience";
+import {
+  AutomationMark,
+  ChannelMark,
+  ChatStatus,
+  ShareMark,
+  channelWord,
+} from "@/lib/chatMark";
 import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
-import { chatRows, type ConversationsPayload } from "@/lib/rail";
+import {
+  CHAT_STATE_RANK,
+  chatRows,
+  chatState,
+  type ConversationsPayload,
+} from "@/lib/rail";
 import { useRail } from "@/lib/railStore";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
 import type { Conversation } from "@/lib/types";
@@ -22,7 +34,6 @@ import { HOME_TITLE } from "@/lib/title";
 const COLUMNS = [
   { label: "Chat", fill: true },
   { label: "Owner", whole: true },
-  { label: "Channel", fact: true },
   { label: "Time", fact: true },
 ];
 
@@ -30,7 +41,11 @@ const NO_CHATS = "No conversations yet.";
 const NO_MATCHES = "No conversations match.";
 const UNREADABLE = "Couldn't load conversations.";
 const SEARCH = "Search chats";
-const CUT = "Showing your most recent conversations. Search to reach the rest.";
+const CUT = "Search to reach older chats.";
+
+/** Every cell but the time states a fact the member came to read, so the table is drawn in the
+ *  page's own ink and the stamp alone recedes. */
+const FACT = "text-ink";
 
 /** The listing behind the rail is bounded before it is paged, so narrowing the loaded rows answers
  *  `No conversations match` for a conversation that exists. */
@@ -52,49 +67,24 @@ function asScope(value: string | undefined): Scope {
   return value === "mine" || value === "workspace" ? value : "all";
 }
 
-const MEMBER_MARKS = [
-  "bg-member-1 text-member-1-ink",
-  "bg-member-2 text-member-2-ink",
-  "bg-member-3 text-member-3-ink",
-];
-
-const FNV_OFFSET = 2166136261;
-const FNV_PRIME = 16777619;
-
-/** Off the top bits: `% 6` over FNV-1a's low ones put two addresses at one company on one colour,
- *  and `Math.abs` folds two hashes onto one number at the sign bit. */
-function memberMark(email: string): string {
-  let hash = FNV_OFFSET;
-  for (const character of email.toLowerCase()) {
-    hash = Math.imul(hash ^ character.codePointAt(0)!, FNV_PRIME);
-  }
-  const spread = (hash >>> 0) / 2 ** 32;
-  return MEMBER_MARKS[Math.floor(spread * MEMBER_MARKS.length)];
-}
-
 function owner(row: Conversation): string {
   return row.owner_name || row.owner_email || "";
 }
 
-/** One letter, because a second initial is a name the portal does not hold. The name a surface
- *  reported goes under the pointer: the address beside it is the fact every row carries. */
+/** One letter, because a second initial is a name the portal does not hold; one ink, because a
+ *  column of tinted circles reads as a status the owner does not have. */
 function Owner({ row }: { row: Conversation }) {
   if (!row.owner_email) return null;
-  const mark = (
-    <span className="flex items-center gap-sm">
-      <Avatar aria-label={owner(row)}>
-        <AvatarFallback className={cn("font-medium", memberMark(row.owner_email))}>
-          {owner(row).slice(0, 1).toUpperCase()}
-        </AvatarFallback>
-      </Avatar>
-      {row.owner_email}
-    </span>
-  );
-  if (!row.owner_name) return mark;
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{mark}</TooltipTrigger>
-      <TooltipContent>{row.owner_name}</TooltipContent>
+      <TooltipTrigger asChild>
+        <Avatar aria-label={owner(row)}>
+          <AvatarFallback>{owner(row).slice(0, 1).toUpperCase()}</AvatarFallback>
+        </Avatar>
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        {row.owner_name ? row.owner_name + " · " + row.owner_email : row.owner_email}
+      </TooltipContent>
     </Tooltip>
   );
 }
@@ -105,8 +95,70 @@ function scoped(row: Conversation, scope: Scope): boolean {
   return true;
 }
 
-/** The rows are the rail's own, so the screen costs no read of its own and its status column
- *  moves as turns land. */
+const OWNER_FACET = "owner:";
+const CHANNEL_FACET = "channel:";
+
+/** The word the member reads, not the surface behind it: every portal surface draws `Web`, so a
+ *  facet keyed on the surface offers entries that differ in nothing they can see. */
+function channelFacet(row: Conversation): string {
+  return CHANNEL_FACET + channelWord(row.surface);
+}
+
+/** The held facet is offered whether or not the narrowed rows hold it, or a scope that excludes it
+ *  leaves the table empty with the filter responsible nowhere on screen. */
+function facets(rows: Conversation[], viewer: string | null, picked: string): FacetGroup[] {
+  const owners = new Map<string, string>();
+  const channels = new Map<string, string>();
+  for (const row of rows) {
+    if (row.owner_email) {
+      owners.set(OWNER_FACET + row.owner_email, ownerLabel(row.owner_email, viewer));
+    }
+    channels.set(channelFacet(row), channelWord(row.surface));
+  }
+  if (picked.startsWith(OWNER_FACET) && !owners.has(picked)) {
+    owners.set(picked, ownerLabel(picked.slice(OWNER_FACET.length), viewer));
+  }
+  if (picked.startsWith(CHANNEL_FACET) && !channels.has(picked)) {
+    channels.set(picked, picked.slice(CHANNEL_FACET.length));
+  }
+  const named = (held: Map<string, string>) =>
+    [...held]
+      .map(([value, label]) => ({ label, value }))
+      .sort((one, two) => one.label.localeCompare(two.label));
+  return [
+    { label: "Owner", options: named(owners) },
+    { label: "Channel", options: named(channels) },
+  ].filter((group) => group.options.length > 1);
+}
+
+/** A value the groups above cannot have minted admits no row rather than every row: an address
+ *  carrying a stale facet says so, instead of listing as though it held none. */
+function faceted(row: Conversation, picked: string): boolean {
+  if (!picked) return true;
+  if (picked.startsWith(OWNER_FACET)) return row.owner_email === picked.slice(OWNER_FACET.length);
+  if (picked.startsWith(CHANNEL_FACET)) return channelFacet(row) === picked;
+  return false;
+}
+
+/** The rows arrive newest `last_at` first and a sort holds equal keys in the order it was given
+ *  them, so recency orders each state's own run without being a key here. */
+function ordered(rows: Conversation[]): Conversation[] {
+  return [...rows].sort(
+    (one, two) => CHAT_STATE_RANK[chatState(one)] - CHAT_STATE_RANK[chatState(two)],
+  );
+}
+
+/** The rows behind the table, from whichever source answered for them. */
+type Read = {
+  phase: PanelState<unknown>["phase"];
+  rows: Conversation[];
+  cut: boolean;
+  older: string | null | undefined;
+};
+
+/** A search asks the workspace; at rest the rail's rows are the source, which carry the live turn
+ *  the status column draws. Both hand rows newest `last_at` first, the order the states below
+ *  stand within. */
 export function Chats({
   place,
   onPlace,
@@ -116,38 +168,70 @@ export function Chats({
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
   onOpen: (row: Conversation) => void;
 }) {
+  const viewer = useViewer();
   const scope = asScope(place.scope);
   const query = place.q ?? "";
+  const picked = place.chip ?? "";
+  const after = place.after ?? "";
+  const rail = useRail();
+  const said = usePanelRead<ConversationsPayload>(query ? conversationsRead(query, after) : null);
+  const read: Read = query
+    ? {
+        phase: said.phase,
+        rows: said.phase === "ready" ? chatRows(said.payload) : [],
+        /** A listing holding a step to the rest is not cut: the step is the way to them. */
+        cut: said.phase === "ready" && said.payload.cut === true && !said.payload.next_cursor,
+        older: said.phase === "ready" ? said.payload.next_cursor : null,
+      }
+    : { phase: rail.phase, rows: rail.rows, cut: rail.cut, older: null };
+  const shown = read.rows.filter((row) => scoped(row, scope));
+  const narrowed = query !== "" || scope !== "all" || picked !== "";
   return (
     <Pane>
       <section aria-label={HOME_TITLE} className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Header heading={1} title={HOME_TITLE} pinned />
-        <div className="flex min-h-0 flex-1 flex-col gap-2xl overflow-y-auto p-2xl">
-          <PageToolbar>
-            <Segmented
-              label={HOME_TITLE}
-              segments={SCOPE_SEGMENTS}
-              value={scope}
-              onPick={(value) =>
-                onPlace(
-                  { ...place, scope: value === "all" ? undefined : value, after: undefined },
-                  "replace",
-                )
-              }
-            />
-            <span className="ml-auto flex shrink-0 items-center gap-sm max-narrow:ml-0">
-              <ChatSearch
-                query={query}
-                onSearch={(said) =>
-                  onPlace({ ...place, q: said || undefined, after: undefined }, "replace")
+        <Page>
+          <div className={cn(COLUMN, BANDS)}>
+            <PageToolbar>
+              <Segmented
+                label={HOME_TITLE}
+                segments={SCOPE_SEGMENTS}
+                value={scope}
+                onPick={(value) =>
+                  onPlace(
+                    { ...place, scope: value === "all" ? undefined : value, after: undefined },
+                    "replace",
+                  )
                 }
               />
-            </span>
-          </PageToolbar>
-          <Section>
-            <Listing place={place} onPlace={onPlace} onOpen={onOpen} />
-          </Section>
-        </div>
+              <span className="ml-auto flex shrink-0 items-center gap-sm max-narrow:ml-0">
+                <FacetMenu
+                  groups={facets(shown, viewer, picked)}
+                  value={picked}
+                  onPick={(value) =>
+                    onPlace({ ...place, chip: value || undefined, after: undefined }, "replace")
+                  }
+                />
+                <ChatSearch
+                  query={query}
+                  onSearch={(said) =>
+                    onPlace({ ...place, q: said || undefined, after: undefined }, "replace")
+                  }
+                />
+              </span>
+            </PageToolbar>
+            <Section>
+              <Listing
+                read={read}
+                rows={ordered(shown.filter((row) => faceted(row, picked)))}
+                narrowed={narrowed}
+                after={place.after}
+                onPlace={(stepped) => onPlace({ ...place, after: stepped }, "push")}
+                onOpen={onOpen}
+              />
+            </Section>
+          </div>
+        </Page>
       </section>
     </Pane>
   );
@@ -173,71 +257,62 @@ function ChatSearch({ query, onSearch }: { query: string; onSearch: (query: stri
   );
 }
 
-/** A search asks the workspace; at rest the rail's rows are the source, which carry the live turn
- *  the status column draws. Both hand rows newest `last_at` first, the order the table stands in. */
 function Listing({
-  place,
+  read,
+  rows,
+  narrowed,
+  after,
   onPlace,
   onOpen,
 }: {
-  place: WorkspacePlace;
-  onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
+  read: Read;
+  rows: Conversation[];
+  narrowed: boolean;
+  after: string | undefined;
+  onPlace: (after: string | undefined) => void;
   onOpen: (row: Conversation) => void;
 }) {
-  const scope = asScope(place.scope);
-  const query = place.q ?? "";
-  const after = place.after ?? "";
-  const rail = useRail();
-  const said = usePanelRead<ConversationsPayload>(query ? conversationsRead(query, after) : null);
-  const read = query
-    ? {
-        phase: said.phase,
-        rows: said.phase === "ready" ? chatRows(said.payload) : [],
-        /** A listing holding a step to the rest is not cut: the step is the way to them. */
-        cut: said.phase === "ready" && said.payload.cut === true && !said.payload.next_cursor,
-        older: said.phase === "ready" ? said.payload.next_cursor : null,
-      }
-    : { phase: rail.phase, rows: rail.rows, cut: rail.cut, older: null };
   if (!read.rows.length && read.phase === "loading") return <PanelSkeleton shape="table" />;
   if (!read.rows.length && read.phase === "failed") return <PanelEmpty>{UNREADABLE}</PanelEmpty>;
-  const rows = read.rows.filter((row) => scoped(row, scope));
   return (
     <>
-      <DataTable
-        columns={COLUMNS}
-        rows={rows}
-        rowKey={(row) => row.conversation_id}
-        lede
-        empty={NO_CHATS}
-        note={scope !== "all" || query !== "" ? NO_MATCHES : undefined}
-        open={(row) => () => onOpen(row)}
-      >
-        {(row) => (
-          <>
-            <TdFill>
-              <span className="flex min-w-0 items-center gap-sm">
-                <ChatStatus row={row} />
-                <span className="truncate">{row.title}</span>
-                {row.automation_name ? <AutomationMark row={row} className="ml-auto" /> : null}
+    <DataTable
+      columns={COLUMNS}
+      rows={rows}
+      rowKey={(row) => row.conversation_id}
+      lede
+      empty={NO_CHATS}
+      note={narrowed ? NO_MATCHES : undefined}
+      open={(row) => () => onOpen(row)}
+      pager={{
+        payload: { older: read.older },
+        after,
+        onPlace: (stepped) => onPlace(stepped.after),
+      }}
+    >
+      {(row) => (
+        <>
+          <TdFill className={FACT}>
+            <span className="flex min-w-0 items-center gap-sm">
+              <ChatStatus row={row} />
+              <span className="truncate">{row.title}</span>
+              <span className="ml-auto flex shrink-0 items-center gap-2xs">
+                <ChannelMark row={row} />
+                {row.automation_name ? <AutomationMark row={row} /> : null}
+                <ShareMark row={row} />
               </span>
-            </TdFill>
-            <TdWhole>
-              <Owner row={row} />
-            </TdWhole>
-            <TdFact>
-              <ChannelMark row={row} />
-            </TdFact>
-            <TdFact>
-              <Moment at={row.last_at} />
-            </TdFact>
-          </>
-        )}
-      </DataTable>
-      <Pager
-        payload={{ older: read.older }}
-        onPlace={(stepped) => onPlace({ ...place, after: stepped.after }, "push")}
-      />
-      {read.cut ? <Notice>{CUT}</Notice> : null}
+            </span>
+          </TdFill>
+          <TdWhole className={FACT}>
+            <Owner row={row} />
+          </TdWhole>
+          <TdFact>
+            <Moment at={row.last_at} />
+          </TdFact>
+        </>
+      )}
+    </DataTable>
+    {read.cut ? <Notice>{CUT}</Notice> : null}
     </>
   );
 }

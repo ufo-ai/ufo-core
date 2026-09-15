@@ -1044,19 +1044,34 @@ test("the whole cell keeps its name and the prose beside it keeps its bound", ()
   expect(clipped.className).toContain("max-w-(--size-prose-column)");
 });
 
-test("the pager offers only the directions the payload carries", async () => {
+test("the pager draws both steps and disables the one with nowhere to go", async () => {
   const placed: unknown[] = [];
   const { unmount } = render(
     <Pager payload={{ older: "cursor-older" }} onPlace={(next) => placed.push(next)} />,
   );
-  expect(screen.queryByRole("button", { name: "Newer" })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Older" }));
-  expect(placed).toEqual([{ after: "cursor-older" }]);
+  expect(screen.getByRole("button", { name: "First" })).toHaveProperty("disabled", true);
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
+  expect(placed).toEqual([{ after: "cursor-older", opens: undefined }]);
   unmount();
 
-  render(<Pager payload={{ newer: "n", older: "o" }} onPlace={() => {}} />);
-  expect(screen.getByRole("button", { name: "Newer" })).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Older" })).toBeTruthy();
+  const { unmount: second } = render(<Pager payload={{ newer: "n", older: "o" }} onPlace={() => {}} />);
+  expect(screen.getByRole("button", { name: "Previous" })).toHaveProperty("disabled", false);
+  expect(screen.getByRole("button", { name: "Next" })).toHaveProperty("disabled", false);
+  second();
+
+  render(<Pager payload={{}} onPlace={() => {}} />);
+  expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
+});
+
+test("a page standing on a cursor names its back step First, and lands there", async () => {
+  const placed: unknown[] = [];
+  render(
+    <Pager payload={{ older: "o" }} after="cursor-here" onPlace={(next) => placed.push(next)} />,
+  );
+
+  expect(screen.queryByRole("button", { name: "Previous" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "First" }));
+  expect(placed).toEqual([{ after: undefined, opens: undefined }]);
 });
 
 function Form({ schema }: { schema: Parameters<typeof FormFromSchema>[0]["schema"] }) {

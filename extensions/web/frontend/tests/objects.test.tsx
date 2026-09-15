@@ -300,17 +300,24 @@ async function besidePress(target: HTMLElement): Promise<void> {
 }
 
 
-test("a moment reads as its distance from now, and as its date once it is old", () => {
+test("a moment reads as one number and one letter, and as its date once it is a year old", () => {
   expect(friendlyMoment("2026-08-01T11:59:30Z", NOW)).toBe("now");
-  expect(friendlyMoment("2026-08-01T11:30:00Z", NOW)).toBe("30m ago");
-  expect(friendlyMoment("2026-08-01T09:00:00Z", NOW)).toBe("3h ago");
-  expect(friendlyMoment("2026-07-31T11:00:00Z", NOW)).toBe("Yesterday");
-  expect(friendlyMoment("2026-07-29T12:00:00Z", NOW)).toBe("3d ago");
-  expect(friendlyMoment("2026-07-25T12:00:00Z", NOW)).toBe("Jul 25 2026");
-  expect(friendlyMoment("2026-08-01T15:00:00Z", NOW)).toBe("in 3h");
-  expect(friendlyMoment("2026-08-02T13:00:00Z", NOW)).toBe("Tomorrow");
-  expect(friendlyMoment("2026-09-01T12:00:00Z", NOW)).toBe("Sep 1 2026");
+  expect(friendlyMoment("2026-08-01T11:30:00Z", NOW)).toBe("30m");
+  expect(friendlyMoment("2026-08-01T09:00:00Z", NOW)).toBe("3h");
+  expect(friendlyMoment("2026-07-31T11:00:00Z", NOW)).toBe("1d");
+  expect(friendlyMoment("2026-07-24T12:00:00Z", NOW)).toBe("8d");
+  expect(friendlyMoment("2025-09-01T12:00:00Z", NOW)).toBe("334d");
+  expect(friendlyMoment("2025-08-01T12:00:00Z", NOW)).toBe("Aug 1 2025");
   expect(friendlyMoment("not a moment", NOW)).toBe("not a moment");
+});
+
+/** A stamp ahead of now keeps `in`: a next run and a last one land in the same columns, and `3d`
+ *  for both would make the two reads one word. */
+test("a moment still to come says so, until it too is a year out", () => {
+  expect(friendlyMoment("2026-08-01T15:00:00Z", NOW)).toBe("in 3h");
+  expect(friendlyMoment("2026-08-02T13:00:00Z", NOW)).toBe("in 1d");
+  expect(friendlyMoment("2026-09-01T12:00:00Z", NOW)).toBe("in 31d");
+  expect(friendlyMoment("2027-09-01T12:00:00Z", NOW)).toBe("Sep 1 2027");
 });
 
 test("a row's moment reads as an age today and as a named day with a clock time before that", () => {
@@ -349,7 +356,7 @@ test("an index carries the name and the two facts a prose-less kind leads with",
   const said = cells("daily-brief");
   expect(said[0]).toBe("daily-briefActive");
   expect(said[1]).toBe("Assistant");
-  expect(said[2]).toBe("Jul 31 2026 · done");
+  expect(said[2]).toBe(friendlyMoment(LAST_RUN, new Date()) + " · done");
   expect(said[3]).toContain("in ");
   expect(screen.queryByText("write the daily brief")).toBeNull();
   expect(screen.queryByText("0 9 * * * — daily brief")).toBeNull();
@@ -653,7 +660,7 @@ test("a detail renders spec, then status, then links, then when the row was made
   expect(await waitFor(() => specFact("Delivery"))).toHaveProperty("said.textContent", "current");
   expect(fact("Created By")).toBe("mel@example.com");
   expect(screen.queryByText("Owner Email")).toBeNull();
-  expect(screen.getByText("Created").textContent).toBe("Created Jul 1 2026");
+  expect(screen.getByText("Created").textContent).toBe("Created " + friendlyMoment("2026-07-01T09:00:00Z", new Date()));
 });
 
 test("a spec value longer than its row stands under its label, wrapped, and clears its neighbours", async () => {

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
 import { MainAgentProvider } from "@/lib/mainAgent";
+import { friendlyMoment } from "@/lib/moments";
 
 import { AGENT, PlacedWorkspace, json, refusedNotice, useStreamFake, wire } from "./harness";
 const MATCH = {
@@ -101,13 +102,13 @@ test("searching asks with the query and drops the filter and the pager", async (
   open();
 
   await screen.findByText("No memories yet.");
-  expect(screen.queryByRole("button", { name: "Older" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
 
   await userEvent.type(screen.getByPlaceholderText("Search"), "eks{Enter}");
 
   await waitFor(() => expect(calls.some((url) => url.includes("q=eks"))).toBe(true));
   expect(await screen.findByText("the deploy runs on EKS")).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Older" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
   expect(screen.queryByRole("tab", { name: "Fact" })).toBeNull();
 });
 
@@ -118,7 +119,7 @@ test("the pager walks by the cursor the read returned", async () => {
   });
   open();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Older" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Next" }));
   await waitFor(() =>
     expect(calls.some((url) => url.includes("after=older-cursor"))).toBe(true),
   );
@@ -221,7 +222,7 @@ test("each memory is a row carrying its class and date, never its raw ref", asyn
     "the deploy runs on EKS",
     "Fact",
     "Workspace",
-    "Jul 20 2026",
+    friendlyMoment("2026-07-20T08:00:00", new Date()),
   ]);
   expect(row.textContent).not.toContain("memory/m1");
 

@@ -4353,13 +4353,11 @@ async def test_conversation_kind_states_an_automation_fired_the_work(db: None) -
     assert fired.fields["automation_title"] == "nightly-digest"
 
 
-async def test_conversation_kind_searches_past_its_own_bound_and_says_when_it_cut(
+async def test_conversation_kind_searches_past_its_own_bound(
     db: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A member listing is bounded before it is paged, so it states `cut` when the workspace holds
-    more — a screen drawing the whole page has still not drawn everything. A search runs in the
-    directory read rather than over the rows it returned, so a query for a conversation past the
-    bound answers it instead of answering nothing."""
+    """A search runs in the directory read rather than over the rows it returned, so a query for a
+    conversation past the listing's own bound answers it instead of answering nothing."""
     workspace_id = await _workspace()
     with ws(workspace_id):
         alice = await _member(workspace_id, ADMIN_CREATED_AT)
@@ -4413,10 +4411,64 @@ async def test_conversation_kind_searches_past_its_own_bound_and_says_when_it_cu
                 ),
             )
 
-    assert page.cut is True
     assert str(older_id) not in {row.name for row in page.rows}
     assert [row.name for row in found.rows] == [str(older_id)]
-    assert found.cut is False
+
+
+async def test_conversation_page_keeps_a_member_their_own_rows_under_newer_colleagues(
+    db: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two sides compete for one page by last activity, so the colleagues' bound is also the
+    most of that page they can take. Raised past the page, newer colleague conversations left the
+    member none of their own — and the rail lists `mine` alone, so it drew nothing at all."""
+    workspace_id = await _workspace()
+    with ws(workspace_id):
+        alice = await _member(workspace_id, ADMIN_CREATED_AT)
+        bob = await _member(workspace_id, ADMIN_CREATED_AT)
+        agent_id = await _agent_row(workspace_id, name=f"agent-{uuid4().hex[:8]}")
+        mine = await _rail_conversation(
+            workspace_id,
+            agent_id,
+            title="My own thread",
+            audience=conversation_audience(alice),
+            member_id=alice,
+            speaker_member_id=alice,
+            admission="member",
+            moved_at=datetime(2026, 8, 1, tzinfo=UTC),
+            surface="web",
+            turn_status="done",
+        )
+        for index in range(6):
+            await _rail_conversation(
+                workspace_id,
+                agent_id,
+                title=f"Bob's newer thread {index}",
+                audience=SHARED_AUDIENCE,
+                member_id=None,
+                speaker_member_id=bob,
+                admission="member",
+                moved_at=datetime(2026, 8, 2 + index, tzinfo=UTC),
+                surface="web",
+                turn_status="done",
+            )
+        monkeypatch.setattr(conversations, "OBJECT_LIST_PAGE", 4)
+        monkeypatch.setattr(conversations, "CONVERSATION_OTHERS_LIMIT", 2)
+        with agent(agent_id):
+            page = await CONVERSATION_OBJECT.store.member_page(
+                None,
+                member_id=alice,
+                admin=False,
+                query=ObjectListQuery(
+                    order_by="last_at",
+                    order="desc",
+                    supported_fields=CONVERSATION_OBJECT.list_fields,
+                ),
+            )
+
+    assert str(mine) in {row.name for row in page.rows}
+    # The shipped pair, which the scaled one above models: a colleague's side that can fill the
+    # page is a member with no rows of their own on it.
+    assert conversations.CONVERSATION_OTHERS_LIMIT < OBJECT_LIST_PAGE
 
 
 async def test_conversation_kind_searches_one_field_set_and_finds_a_reported_name(

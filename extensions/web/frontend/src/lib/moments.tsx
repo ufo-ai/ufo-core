@@ -4,10 +4,9 @@ const ISO_MOMENT = /^\d{4}-\d{2}-\d{2}T/;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
-const NEAR_DAYS = 7;
-const WEEK_MS = 7 * DAY_MS;
-const MONTH_MS = 30 * DAY_MS;
 const YEAR_MS = 365 * DAY_MS;
+const MINUTES_AN_HOUR = 60;
+const HOURS_A_DAY = 24;
 
 export function isMoment(value: string): boolean {
   return ISO_MOMENT.test(value);
@@ -106,23 +105,29 @@ export function spanMoment(ms: number): string {
   return Math.floor(span / 3600) + "h " + Math.floor((span % 3600) / 60) + "m";
 }
 
-function dayNumber(year: number, month: number, date: number): number {
-  return Date.UTC(year, month - 1, date) / DAY_MS;
-}
-
+/** The one age the portal draws: `now`, then one number and one letter — `4m`, `2h`, `1d`, `8d` —
+ *  up to a year, and the calendar day itself past that, where a count of days has stopped being a
+ *  distance a reader can hold. A stamp ahead of now carries `in`, because a next run and a last
+ *  one would otherwise read as the same fact in the same column. */
 export function friendlyMoment(raw: string, now: Date): string {
   const at = new Date(raw);
   if (Number.isNaN(at.getTime())) return raw;
   const ahead = at.getTime() - now.getTime();
-  if (Math.abs(ahead) < DAY_MS) return relativeMoment(raw, now);
-  const [year, month, date] = raw.slice(0, 10).split("-").map(Number);
-  const days =
-    dayNumber(year, month, date) -
-    dayNumber(now.getUTCFullYear(), now.getUTCMonth() + 1, now.getUTCDate());
-  if (days === -1) return "Yesterday";
-  if (days === 1) return "Tomorrow";
-  if (Math.abs(days) < NEAR_DAYS) return days > 0 ? "in " + days + "d" : -days + "d ago";
-  return day(raw) ?? raw;
+  const span = Math.abs(ahead);
+  if (span < MINUTE_MS) return "now";
+  if (span >= YEAR_MS) return day(raw) ?? raw;
+  // Truncating a future span reads `in 2h` the millisecond a run three hours out is scheduled; the
+  // unit comes off the rounded count, or 23 and a half hours out reads `in 24h` for an hour.
+  const whole = ahead > 0 ? Math.round : Math.floor;
+  const minutes = whole(span / MINUTE_MS);
+  const hours = whole(span / HOUR_MS);
+  const size =
+    minutes < MINUTES_AN_HOUR
+      ? minutes + "m"
+      : hours < HOURS_A_DAY
+        ? hours + "h"
+        : whole(span / DAY_MS) + "d";
+  return ahead > 0 ? "in " + size : size;
 }
 
 /** A record's time wherever the portal draws one: friendly where it is read, and the whole stamp
@@ -137,26 +142,11 @@ export function Moment({ at }: { at: string | null }) {
   );
 }
 
-/** The distance from now as one number and one letter — `Now`, `4m`, `2h`, `3d`, `2w`, `5mo`,
- *  `1y` — for a column every row of a list carries, where the words beside it are what the member
- *  came to read. The whole stamp stands under the pointer. */
-export function ageMoment(raw: string, now: Date): string {
-  const at = new Date(raw);
-  if (Number.isNaN(at.getTime())) return raw;
-  const span = Math.abs(now.getTime() - at.getTime());
-  if (span < MINUTE_MS) return "Now";
-  if (span < HOUR_MS) return Math.floor(span / MINUTE_MS) + "m";
-  if (span < DAY_MS) return Math.floor(span / HOUR_MS) + "h";
-  if (span < WEEK_MS) return Math.floor(span / DAY_MS) + "d";
-  if (span < MONTH_MS) return Math.floor(span / WEEK_MS) + "w";
-  if (span < YEAR_MS) return Math.floor(span / MONTH_MS) + "mo";
-  return Math.floor(span / YEAR_MS) + "y";
-}
-
+/** The same age `Moment` draws, for a row that states its stamp without a label to name it. */
 export function Age({ at }: { at: string }) {
   return (
     <time dateTime={at} title={fullMoment(at)}>
-      {ageMoment(at, new Date())}
+      {friendlyMoment(at, new Date())}
     </time>
   );
 }

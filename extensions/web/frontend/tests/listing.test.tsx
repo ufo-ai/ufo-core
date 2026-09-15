@@ -227,7 +227,7 @@ test("a paged listing carries the cursor into its read and steps to the next pag
   await waitFor(() => expect(screen.getByText("alpha")).toBeTruthy());
   expect(calls[0].endsWith("/workspace/probe")).toBe(true);
 
-  await userEvent.click(screen.getByRole("button", { name: "Older" }));
+  await userEvent.click(screen.getByRole("button", { name: "Next" }));
   await waitFor(() =>
     expect(placed).toEqual([{ kind: undefined, after: "next" }]),
   );

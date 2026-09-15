@@ -502,7 +502,7 @@ test("an automation opens Details: the fields it runs under, with its runs under
   );
   expect(within(details).getByLabelText("Instructions").tagName).toBe("TEXTAREA");
   expect(await within(details).findByText(/Nothing changed overnight/)).toBeTruthy();
-  expect(within(details).queryByRole("button", { name: "Older" })).toBeNull();
+  expect(within(details).queryByRole("button", { name: "Next" })).toBeNull();
   expect(within(details).queryByRole("heading", { name: "Digest the night's changes" })).toBeNull();
 });
 
@@ -668,7 +668,7 @@ test("the run history pages on its own cursor, and the automations list stays wh
   const details = await screen.findByRole("dialog", { name: "Details" });
   expect(await within(details).findByText(/Nothing changed overnight/)).toBeTruthy();
 
-  await userEvent.click(await within(details).findByRole("button", { name: "Older" }));
+  await userEvent.click(await within(details).findByRole("button", { name: "Next" }));
 
   expect(await within(details).findByText(/The night before was quiet too/)).toBeTruthy();
   expect(decodeURIComponent(location.hash)).toContain("runs=" + RUNS_CURSOR);

@@ -140,6 +140,12 @@ function rowWords(row: HTMLElement): string {
   return (row.querySelector(":scope > span:not([data-turn])") as HTMLElement).textContent ?? "";
 }
 
+/** The marks stand beside the row's press rather than inside it, so a read of the press is the
+ *  title alone and the marks are reached the way the acts menu is. */
+function trail(railRow: HTMLElement): HTMLElement {
+  return railRow.closest("li")!;
+}
+
 test("the recency rail heads its own conversations with nothing at all", async () => {
   const today = { ...CHAT_ROW, last_at: stampIso(new Date()) };
   const older = {
@@ -372,7 +378,7 @@ test("a row from another surface draws its glyph and states the surface's own na
 
   const railRow = await screen.findByRole("button", { name: /Slack question/ });
   expect(rowWords(railRow)).toBe("Slack question");
-  expect(railRow.querySelector(".tabler-icon-brand-slack")).not.toBeNull();
+  expect(within(trail(railRow)).getByRole("img", { name: "Slack" })).toBeTruthy();
   fireEvent.focus(railRow);
   expect((await hoverCard()).textContent).toContain("DM");
 });
@@ -384,7 +390,7 @@ test("a cli row draws the terminal glyph and reads as Terminal, never as the sur
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Deploy the branch/ });
-  expect(railRow.querySelector(".tabler-icon-terminal-2")).not.toBeNull();
+  expect(trail(railRow).querySelector(".tabler-icon-terminal-2")).not.toBeNull();
   fireEvent.focus(railRow);
   expect((await hoverCard()).textContent).toContain("Terminal");
 });
@@ -396,8 +402,8 @@ test("the surface glyph is drawn at the sidebar's glyph size, not at the row's t
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const railRow = await screen.findByRole("button", { name: /Slack question/ });
-  const drawn = railRow
-    .querySelector("[data-turn] .tabler-icon-brand-slack")!
+  const drawn = trail(railRow)
+    .querySelector(".tabler-icon-brand-slack")!
     .getAttribute("class")!
     .split(" ");
   expect(drawn).toContain("size-3.5");

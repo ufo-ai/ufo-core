@@ -4,14 +4,15 @@ import {
   IconBrowser,
   IconHistoryToggle,
   IconLoader,
-  IconLoader2,
   IconMessageCircle,
   IconTerminal2,
+  IconUsersGroup,
 } from "@tabler/icons-react";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   IMESSAGE_SURFACE,
+  SHARED_SUBJECT,
   SLACK_SURFACE,
   UFO_SURFACE,
   isPortalChat,
@@ -20,16 +21,19 @@ import {
 } from "@/lib/audience";
 import { automationId } from "@/lib/automationLane";
 import { cn } from "@/lib/cn";
-import type { Conversation, ConversationTurn } from "@/lib/types";
+import { chatState, type ChatState } from "@/lib/rail";
+import type { Conversation } from "@/lib/types";
 import { automationsHash } from "@/lib/route";
 
 export const AUTOMATION = "Automation";
+
+export const SHARED = "Shared with Workspace";
 
 const GLYPH = "size-(--size-glyph) shrink-0";
 
 const MARK = "size-3.5 shrink-0";
 
-const DOT = "size-sm rounded-full bg-current";
+const DOT = "size-xs rounded-full bg-current";
 
 /** The picture a surface is drawn by, wherever the portal draws one. */
 function ChannelGlyph({ surface, className }: { surface: string; className: string }) {
@@ -39,70 +43,8 @@ function ChannelGlyph({ surface, className }: { surface: string; className: stri
   return <IconBrowser className={className} aria-hidden />;
 }
 
-/** The portal's bullet, rather than its glyph, is what keeps a rail of mostly portal rows reading
- *  down one left edge; `rail.test.tsx` holds it. */
-function Origin({ surface, automated, ink }: { surface: string; automated: boolean; ink: string }) {
-  if (automated) return <IconHistoryToggle className={cn(MARK, ink)} aria-hidden />;
-  if (isPortalChat(surface)) return <span aria-hidden className={cn(DOT, ink)} />;
-  return <ChannelGlyph surface={surface} className={cn(MARK, ink)} />;
-}
-
 function Spinner({ glyph: Glyph, ink }: { glyph: typeof IconLoader; ink: string }) {
   return <Glyph className={cn(GLYPH, "animate-spin motion-reduce:animate-none", ink)} aria-hidden />;
-}
-
-/** A type predicate, so the ink table below stays total over the turns that reach it. */
-function live(turn: ConversationTurn): turn is "running" | "queued" {
-  return turn === "running" || turn === "queued";
-}
-
-const TURN_INK: Record<Exclude<ConversationTurn, "running" | "queued">, string> = {
-  parked: "text-blocked",
-  idle: "text-ink-quiet",
-};
-
-/** A running turn keeps its spinner instead: what the agent is doing right now outranks what
- *  stands unread above it. */
-const UNREAD_INK = "text-live";
-
-/** The rail has one glyph's width for what drove the chat, where it runs and whether it moved
- *  unread; the table draws those apart, off this same file, and states its own spacing. */
-export function ChatMark({
-  surface,
-  turn,
-  automated,
-  unread,
-  className,
-}: {
-  surface: string;
-  turn: ConversationTurn;
-  automated: boolean;
-  unread: boolean;
-  className?: string;
-}) {
-  return (
-    <span
-      aria-hidden
-      data-turn={turn}
-      className={cn("flex items-center justify-center", GLYPH, className)}
-    >
-      {live(turn) ? (
-        <Spinner glyph={IconLoader2} ink="text-primary" />
-      ) : (
-        <Origin surface={surface} automated={automated} ink={unread ? UNREAD_INK : TURN_INK[turn]} />
-      )}
-    </span>
-  );
-}
-
-export type ChatState = "working" | "waiting" | "unread" | "idle";
-
-/** What a chat is doing: the agent is working, it is held for an answer only the member can
- *  give, it moved while they were away, or it is resting. */
-export function chatState(row: Conversation): ChatState {
-  if (live(row.turn)) return "working";
-  if (row.turn === "parked") return "waiting";
-  return row.unread ? "unread" : "idle";
 }
 
 const STATE_WORDS: Record<ChatState, string> = {
@@ -118,17 +60,19 @@ const STATE_INK: Record<Exclude<ChatState, "working">, string> = {
   idle: "text-ink-quiet",
 };
 
-/** The table's status is the state alone and never the surface, which has a column of its own to
- *  be named in. Its spinner is grey where the rail's is primary: a column of them would otherwise
- *  read as a column of brand colour rather than one of status. */
-export function ChatStatus({ row }: { row: Conversation }) {
+/** The one mark a conversation leads with, on the table and down the rail alike: the state alone
+ *  and never the surface, which has a column of its own on one and the row's end on the other. It
+ *  states the engine's turn beside the state it read off it, because a turn that lands is what a
+ *  stream watches while the state is what the ink draws. */
+export function ChatStatus({ row, className }: { row: Conversation; className?: string }) {
   const state = chatState(row);
   return (
     <span
       role="img"
       aria-label={STATE_WORDS[state]}
       data-state={state}
-      className={cn("flex items-center justify-center", GLYPH)}
+      data-turn={row.turn}
+      className={cn("flex items-center justify-center", GLYPH, className)}
     >
       {state === "working" ? (
         <Spinner glyph={IconLoader} ink="text-ink-soft" />
@@ -136,6 +80,29 @@ export function ChatStatus({ row }: { row: Conversation }) {
         <span aria-hidden className={cn(DOT, STATE_INK[state])} />
       )}
     </span>
+  );
+}
+
+/** What a row carries beyond its title: where it came in, what drove it, and who else can reach
+ *  it — each drawn only where it is true, so the ordinary conversation states nothing. The table
+ *  gives these a column and a tooltip each; the rail has one row's end for all three and draws
+ *  them named for a reader and silent under the pointer, because the row already opens a card. */
+export function ChatTrail({ row }: { row: Conversation }) {
+  const mark = cn(MARK, "text-ink-soft");
+  return (
+    <>
+      {isPortalChat(row.surface) ? null : (
+        <span role="img" aria-label={channelWord(row.surface)} className="flex">
+          <ChannelGlyph surface={row.surface} className={mark} />
+        </span>
+      )}
+      {row.automation_name === null ? null : (
+        <IconHistoryToggle className={mark} role="img" aria-label={AUTOMATION} />
+      )}
+      {row.audience === SHARED_SUBJECT ? (
+        <IconUsersGroup className={mark} role="img" aria-label={SHARED} />
+      ) : null}
+    </>
   );
 }
 
@@ -155,17 +122,29 @@ function LinkedTip({ at, says }: { at: string; says: string }) {
   );
 }
 
+/** Who can reach the chat, drawn only where that is anyone but its owner: a row carrying no mark is
+ *  private, which is the case that needs no stating. It stands beside the automation mark rather
+ *  than in a column, because most rows hold neither and a column of blanks is width the titles
+ *  want. */
+export function ShareMark({ row }: { row: Conversation }) {
+  if (row.audience !== SHARED_SUBJECT) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <IconUsersGroup className={cn(MARK, "text-ink-soft")} role="img" aria-label={SHARED} />
+      </TooltipTrigger>
+      <TooltipContent side="top">{SHARED}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 /** The mark names the automation that last fired here and leads to it: an automation runs on its
  *  own schedule, so what a member wants from its chat is usually the thing that scheduled it. */
-export function AutomationMark({ row, className }: { row: Conversation; className?: string }) {
+export function AutomationMark({ row }: { row: Conversation }) {
   const name = row.automation_name;
   const kind = row.automation_kind;
   const mark = (
-    <IconHistoryToggle
-      className={cn(MARK, "text-ink-soft", className)}
-      role="img"
-      aria-label={AUTOMATION}
-    />
+    <IconHistoryToggle className={cn(MARK, "text-ink-soft")} role="img" aria-label={AUTOMATION} />
   );
   if (name === null || kind === null) return mark;
   return (
@@ -181,29 +160,34 @@ export function AutomationMark({ row, className }: { row: Conversation; classNam
 
 /** The portal is `Web` in a column of channels, where `Portal` names the product rather than the
  *  place a member was sitting when they said it. */
-function channelWord(surface: string): string {
+export function channelWord(surface: string): string {
   return isPortalChat(surface) ? "Web" : surfaceWord(surface);
 }
 
-/** The surface names itself in the column and the room it ran in stands under the pointer: one
- *  Slack workspace fills a column with `#`-prefixed names that differ only in their last word. The
- *  room leads back out to the thread where the surface reported a link for it. */
+
+/** Where the conversation came in, drawn only where that is not the portal: most chats are the
+ *  member's own web ones, so a mark on every row would say nothing and the rows that arrived from
+ *  somewhere else would stop standing out.
+ *
+ *  The glyph is the whole of it and the words are under the pointer — the surface's name, or the
+ *  room it ran in where the surface reported one, because one Slack workspace fills a column with
+ *  `#`-prefixed names that differ only in their last word. A room leads back out to the thread. */
 export function ChannelMark({ row }: { row: Conversation }) {
-  const cell = (
-    <span className="flex min-w-0 items-center gap-2xs">
+  if (isPortalChat(row.surface)) return null;
+  const word = channelWord(row.surface);
+  const mark = (
+    <span role="img" aria-label={row.surface_label ?? word} className="flex">
       <ChannelGlyph surface={row.surface} className={cn(MARK, "text-ink-soft")} />
-      <span className="truncate">{channelWord(row.surface)}</span>
     </span>
   );
-  if (!row.surface_label) return cell;
   const out = slackLink(row.surface, row.source);
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{cell}</TooltipTrigger>
+      <TooltipTrigger asChild>{mark}</TooltipTrigger>
       {out === null ? (
-        <TooltipContent side="top">{row.surface_label}</TooltipContent>
+        <TooltipContent side="top">{row.surface_label ?? word}</TooltipContent>
       ) : (
-        <LinkedTip at={out} says={row.surface_label} />
+        <LinkedTip at={out} says={row.surface_label ?? word} />
       )}
     </Tooltip>
   );

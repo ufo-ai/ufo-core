@@ -56,6 +56,8 @@ from ufo.schema.records import EXTENSION_SURFACE_PREFIX, PORTAL_SURFACE
 CONVERSATION_KIND = "conversation"
 TRANSCRIPT_WORKSPACE_DIR = "transcripts"
 CONVERSATION_MINE_LIMIT = 100
+# Also the most of one page a colleague's rows can take, the two sides competing on last activity:
+# above `OBJECT_LIST_PAGE` it left a member none of their own and emptied the rail.
 CONVERSATION_OTHERS_LIMIT = 25
 CONVERSATIONS_ARE_SURFACE_MADE = (
     "conversations are created by surfaces and closed by retention, never authored"
@@ -162,8 +164,9 @@ class ConversationObjects:
         while the conversation stands. It runs there and nowhere else — the page is ordered and cut
         by the term but never narrowed by it a second time, because two narrowings over two field
         sets leave the page their intersection, and a term either of them alone would match then
-        answers nothing. A side that comes back full is a side the workspace holds more of, so the
-        page states `cut` and the screen drawing it says so.
+        answers nothing. The page states `cut` where it holds less than the workspace does — a side
+        that came back full, or an order longer than one page, which this listing slices without a
+        continuation because a pinned row and a keyset cursor do not compose.
 
         `archived` and `deleted` are declared filters for the same reason `portal` is: the marks
         narrow the directory read ahead of each side's bound, so an archived conversation past the
@@ -219,7 +222,7 @@ class ConversationObjects:
             cut = any(
                 len(side) >= limit for side, (_, limit) in zip(listed_sides, sides, strict=True)
             )
-        # The pin survives the page bound without the cut eating the newest rows or the
+        # The pin survives the page bound without the bound eating the newest rows or the
         # colleagues' side: order by the page's own key, pinned ahead, then last activity.
         ordered = sorted(
             gathered,
@@ -229,7 +232,9 @@ class ConversationObjects:
             ),
         )
         page = object_page(tuple(ordered[:OBJECT_LIST_PAGE]), replace(query, query=""))
-        return replace(page, cut=cut)
+        # The slice is a cut of its own: a pinned row and a keyset cursor do not compose, so the
+        # page is taken without a continuation and the rows past it have no step leading to them.
+        return replace(page, cut=cut or len(ordered) > OBJECT_LIST_PAGE)
 
     async def member_detail(
         self,

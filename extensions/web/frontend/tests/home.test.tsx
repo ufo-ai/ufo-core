@@ -544,7 +544,7 @@ test("a history row stamps when its conversation last moved", async () => {
 
   const stamp = within(lane).getByRole("button", { name: /^Pick one thread / }).querySelector("time")!;
   expect(stamp.getAttribute("datetime")).toBe(CHAT_ROW.last_at);
-  expect(stamp.textContent).toMatch(/^\d+(mo|y)$/);
+  expect(stamp.textContent).toMatch(/^\d+d$/);
 });
 
 test("the history runs the rows in the ladder the member picks and drops the surfaces they put away", async () => {

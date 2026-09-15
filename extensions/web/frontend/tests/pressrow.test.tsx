@@ -99,7 +99,7 @@ test("an older row keeps the same scale, and carries the whole stamp with it", (
   render(<PressRow line={TITLE} when={A_WEEK_BACK} onPress={() => {}} />);
 
   const stamp = screen.getByRole("button").querySelector("time");
-  expect(stamp?.textContent).toMatch(/^\d+(w|mo|y)$/);
+  expect(stamp?.textContent).toMatch(/^\d+d$/);
   expect(stamp?.getAttribute("datetime")).toBe(A_WEEK_BACK);
   expect(stamp?.getAttribute("title")).toBe("Aug 7 2026 at 3:00 PM GMT+5:30");
 });

@@ -1,5 +1,5 @@
 import { agentName } from "@/lib/agentName";
-import { agentHash, newChatHash, type Route } from "@/lib/route";
+import { agentHash, chatsHash, type Route } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
 
@@ -21,10 +21,6 @@ export type Crumb = { label: string; at?: string };
 
 export function agentCrumb(agent: { id: string; name: string }): Crumb {
   return { label: agentName(agent.name), at: agentHash(agent.id) };
-}
-
-function chatCrumb(agent: { id: string; name: string }): Crumb {
-  return { label: agentName(agent.name), at: newChatHash(agent.id) };
 }
 
 /** A tab truncates from the right, so the word that tells two of them apart stands first. */
@@ -83,11 +79,7 @@ function where(
     case "chat": {
       const held = known[route.conversationId];
       if (!held) return [];
-      const found = agents.find((agent) => agent.id === held.agent_id);
-      return [
-        { label: held.title },
-        found ? chatCrumb(found) : { label: agentName(held.agent_name) },
-      ];
+      return [{ label: held.title }, { label: HOME_TITLE, at: chatsHash() }];
     }
     case "conversation-slot":
       return [{ label: route.slot }, named(route.agentId)];

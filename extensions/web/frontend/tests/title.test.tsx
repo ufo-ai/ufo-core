@@ -3,7 +3,7 @@ import { beforeEach, expect, test } from "vitest";
 
 import { App } from "@/App";
 import { Portal } from "@/Portal";
-import { agentHash, chatHash, newChatHash, type Route } from "@/lib/route";
+import { agentHash, chatHash, chatsHash, type Route } from "@/lib/route";
 import { pageCrumb, pageTitle } from "@/lib/title";
 import type { Conversation } from "@/lib/types";
 
@@ -65,24 +65,22 @@ test("every page names where the member is, innermost first, then the product", 
 });
 
 test("a conversation is named by its own subject, and one still unread by the product alone", () => {
-  expect(titled({ kind: "chat", conversationId: CONVO_ID })).toBe(
-    "Pick one thread · Assistant · ufo",
-  );
+  expect(titled({ kind: "chat", conversationId: CONVO_ID })).toBe("Pick one thread · Home · ufo");
   expect(titled({ kind: "chat", conversationId: "unknown" })).toBe("ufo");
   expect(titled({ kind: "chat", conversationId: "linked" }, { linked: LINKED })).toBe(
-    "Ship the release · Assistant · ufo",
+    "Ship the release · Home · ufo",
   );
 });
 
 test("the crumb is the step the tab title names after the page", () => {
   expect(crumbed({ kind: "home", place: {} })).toEqual({ label: "Assistant", at: agentHash(AGENT_ID) });
   expect(crumbed({ kind: "chat", conversationId: CONVO_ID })).toEqual({
-    label: "Assistant",
-    at: newChatHash(AGENT_ID),
+    label: "Home",
+    at: chatsHash(),
   });
   expect(crumbed({ kind: "chat", conversationId: "linked" }, { linked: LINKED })).toEqual({
-    label: "Assistant",
-    at: newChatHash(AGENT_ID),
+    label: "Home",
+    at: chatsHash(),
   });
   expect(crumbed({ kind: "workspace", view: "team", ...PLACE })).toEqual({ label: "Workspace" });
   expect(crumbed({ kind: "agents", ...PLACE })).toBeUndefined();
@@ -100,10 +98,13 @@ test("home is titled the same whatever its track holds", () => {
   });
 });
 
-test("a step no roster row reaches is the app's name and nothing to press", () => {
+test("a conversation's step back is Home, whether or not its app is on the roster", () => {
   const held = { ...CHAT_ROW, agent_id: SECOND_ID, agent_name: "daily-brief" };
   const route: Route = { kind: "chat", conversationId: CONVO_ID };
-  expect(pageCrumb(route, [AGENT], { [CONVO_ID]: held }, AGENT)).toEqual({ label: "Daily-Brief" });
+  expect(pageCrumb(route, [AGENT], { [CONVO_ID]: held }, AGENT)).toEqual({
+    label: "Home",
+    at: chatsHash(),
+  });
 });
 
 test("the tab follows the hash the member opens", async () => {
@@ -116,7 +117,7 @@ test("the tab follows the hash the member opens", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
-  await waitFor(() => expect(document.title).toBe("Pick one thread · Assistant · ufo"));
+  await waitFor(() => expect(document.title).toBe("Pick one thread · Home · ufo"));
 
   location.hash = "#/agents";
   await waitFor(() => expect(document.title).toBe("Apps · ufo"));

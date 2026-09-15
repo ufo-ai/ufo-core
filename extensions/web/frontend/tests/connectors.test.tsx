@@ -5,6 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { BRAND_MARKS } from "@/lib/brandMark";
 import { HOME_CONNECTORS_LANE, HOME_NEW_LANE } from "@/lib/homeLanes";
+import { friendlyMoment } from "@/lib/moments";
 import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
 import { homeHash, sectionHash } from "@/lib/route";
 
@@ -489,7 +490,7 @@ test("the pool's record states what the row gave up, and attaches to the agent n
   await pressItem("github");
 
   expect(fact("Owner")).toBe("You");
-  expect(fact("Connected")).toBe("Jul 1 2026");
+  expect(fact("Connected")).toBe(friendlyMoment("2026-07-01T00:00:00", new Date()));
 
   await pick("App", "Second");
   await userEvent.click(screen.getByRole("button", { name: "Attach to app" }));
@@ -693,7 +694,7 @@ test("a grant change is admitted into the lane of the agent whose settings hold 
   await pressRow("github");
 
   expect(fact("Owner")).toBe("You");
-  expect(fact("Connected")).toBe("Jul 1 2026");
+  expect(fact("Connected")).toBe(friendlyMoment("2026-07-01T00:00:00", new Date()));
 
   await userEvent.click(screen.getByRole("button", { name: "Share with app" }));
 

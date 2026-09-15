@@ -1,7 +1,8 @@
 import { IconChevronRight } from "@tabler/icons-react";
 import type { ReactNode } from "react";
 
-import { Table, TableNote, Td, Th, tableFloor } from "@/components/ui/table";
+import { Table, TableNote, Td, TdActs, Th, tableFloor } from "@/components/ui/table";
+import { Pager, pagerSteps, type Paging } from "@/kernel/pager";
 import { rowControl } from "@/kernel/row";
 import { PanelBlank } from "@/kernel/panel";
 import { cn } from "@/lib/cn";
@@ -127,6 +128,7 @@ export function DataTable<Row>({
   open,
   current,
   act,
+  pager,
   stacks = true,
   lede = false,
   children,
@@ -140,6 +142,7 @@ export function DataTable<Row>({
   open?: (row: Row) => (() => void) | null;
   current?: (row: Row) => boolean;
   act?: (row: Row) => string | null;
+  pager?: Paging;
   stacks?: boolean;
   lede?: boolean;
   children: (row: Row) => ReactNode;
@@ -204,6 +207,15 @@ export function DataTable<Row>({
           <TableNote span={span}>{note}</TableNote>
         )}
       </tbody>
+      {pager && pagerSteps(pager) ? (
+        <tfoot>
+          <tr>
+            <TdActs colSpan={span} className="border-b-0">
+              <Pager {...pager} />
+            </TdActs>
+          </tr>
+        </tfoot>
+      ) : null}
     </Table>
   );
 }

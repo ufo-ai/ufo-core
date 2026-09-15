@@ -77,8 +77,7 @@ import {DrawerHost, useDrawerHost, useDrawerList} from "@/kernel/drawer";
 import {PaneFault} from "@/kernel/pane";
 
 import { agentName } from "@/lib/agentName";
-import { ChatMark } from "@/lib/chatMark";
-
+import { ChatStatus, ChatTrail } from "@/lib/chatMark";
 import { rowMoment } from "@/lib/moments";
 import { cn } from "@/lib/cn";
 import {HOME_TITLE} from "@/lib/title";
@@ -97,6 +96,7 @@ import {
   RAIL_SHOWN_OPTIONS,
   RAIL_SORT_OPTIONS,
   railRows,
+
   type RailSort,
 } from "@/lib/rail";
 import {
@@ -128,7 +128,7 @@ import {
   type Section,
 } from "@/lib/route";
 import {useOfferedTabs, useSurfaces} from "@/lib/surfaces";
-import type { Agent, ConversationTurn, Member } from "@/lib/types";
+import type { Agent, Conversation, Member } from "@/lib/types";
 
 const Chats = lazy(() => import("@/views/Chats").then((module) => ({ default: module.Chats })));
 
@@ -644,17 +644,8 @@ function RailList({ route, mainAgent }: { route: Route; mainAgent: Agent | null 
           <RailRow
             key={row.conversation_id}
             current={standing(route, `open:${row.conversation_id}`)}
-            conversationId={row.conversation_id}
+            row={row}
             facts={facts}
-            title={row.title}
-            opening={row.opening}
-            surface={row.surface}
-            surfaceLabel={row.surface_label}
-            source={row.source}
-            turn={row.turn}
-            automated={row.automation_name !== null}
-            unread={row.unread}
-            when={row.last_at}
             onClick={() => openRailRow(row.conversation_id)}
           />
         );
@@ -685,31 +676,13 @@ function RailList({ route, mainAgent }: { route: Route; mainAgent: Agent | null 
  *  opened the menu has gone to the menu. */
 function RailRow({
   current,
-  conversationId,
+  row,
   facts,
-  title,
-  opening,
-  surface,
-  surfaceLabel,
-  source,
-  turn,
-  automated,
-  unread,
-  when,
   onClick,
 }: {
   current: boolean;
-  conversationId: string;
+  row: Conversation;
   facts: string[];
-  title: string;
-  opening: string | null;
-  surface: string;
-  surfaceLabel: string | null;
-  source: string | null;
-  turn: ConversationTurn;
-  automated: boolean;
-  unread: boolean;
-  when: string;
   onClick: () => void;
 }) {
   const [asks, setAsks] = useState(0);
@@ -719,24 +692,16 @@ function RailRow({
   const button = (
     <SidebarPress
       current={current}
-      label={title}
+      label={row.title}
       className="gap-xs select-none"
       aria-describedby={card}
       onClick={onClick}
       onFocus={() => setAsks((asked) => asked + 1)}
       onBlur={() => setAsks(0)}
-      glyph={
-        <ChatMark
-          surface={surface}
-          turn={turn}
-          automated={automated}
-          unread={unread}
-          className="me-2xs"
-        />
-      }
+      glyph={<ChatStatus row={row} className="me-2xs" />}
     >
       <Ticker asks={asks + (acts ? 1 : 0)} className={cn("flex-1", reached && "me-6xl")}>
-        {title}
+        {row.title}
       </Ticker>
     </SidebarPress>
   );
@@ -749,21 +714,19 @@ function RailRow({
           onPointerLeave={() => setAsks(0)}
         >
           {button}
-          <RailRowActs
-            conversationId={conversationId}
-            surface={surface}
-            surfaceLabel={surfaceLabel}
-            source={source}
-            open={acts}
-            onOpenChange={setActs}
-          />
+          <span className={cn(RAIL_ROW_TRAIL, acts && "opacity-100")}>
+            <ChatTrail row={row} />
+            <RailRowActs row={row} open={acts} onOpenChange={setActs} />
+          </span>
         </SidebarRow>
       </HoverCardTrigger>
       <HoverCardContent id={card}>
-        <span className="text-balance font-medium leading-snug">{title}</span>
-        {opening ? <span className="text-pretty leading-snug text-ink-soft">{opening}</span> : null}
+        <span className="text-balance font-medium leading-snug">{row.title}</span>
+        {row.opening ? (
+          <span className="text-pretty leading-snug text-ink-soft">{row.opening}</span>
+        ) : null}
         <span className="text-small text-ink-faint">
-          {[...facts, rowMoment(when, new Date())].join(" · ")}
+          {[...facts, rowMoment(row.last_at, new Date())].join(" · ")}
         </span>
       </HoverCardContent>
     </HoverCard>
@@ -774,32 +737,35 @@ function RailRow({
  *  row up by its own words. */
 const THREAD_ACTS = "Thread options";
 
-const RAIL_ROW_GLYPH = cn(
-  "absolute end-xs top-1/2 -translate-y-1/2 rounded-control border-0 bg-fill p-hair text-ink-soft",
+/** The ground and the gradient ahead of it mask the title, which runs under the marks otherwise.
+ *  `bg-fill` is the pill's, because every state that draws the trail has already filled the pill. */
+const RAIL_ROW_TRAIL = cn(
+  "absolute end-0 top-1/2 flex h-full -translate-y-1/2 items-center gap-2xs",
+  "rounded-e-row bg-fill pe-xs ps-sm",
   "opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none",
   "group-hover/row:opacity-100 group-has-[:focus-visible]/row:opacity-100",
-  "focus-visible:opacity-100 data-[state=open]:opacity-100",
+  "before:absolute before:inset-y-0 before:end-full before:w-(--spacing-6xl)",
+  "before:bg-gradient-to-r before:from-transparent before:to-fill",
 );
 
-/** The menu stands beside the row's one press rather than inside it, so a pick of an act never opens
- *  the thread, and over the row's end rather than in its flow, so it holds width off no title. */
+const RAIL_ROW_GLYPH = cn(
+  "rounded-control border-0 bg-transparent p-hair text-ink-soft",
+  "hover:bg-fill-strong data-[state=open]:bg-fill-strong",
+);
+
+/** The menu stands beside the row's one press rather than inside it, so a pick of an act never
+ *  opens the thread. */
 function RailRowActs({
-  conversationId,
-  surface,
-  surfaceLabel,
-  source,
+  row,
   open,
   onOpenChange,
 }: {
-  conversationId: string;
-  surface: string;
-  surfaceLabel: string | null;
-  source: string | null;
+  row: Conversation;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
   const host = useDrawerHost();
-  const away = slackLink(surface, source);
+  const away = slackLink(row.surface, row.source);
   return (
     <DropdownMenu open={open} onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
@@ -809,7 +775,7 @@ function RailRowActs({
       </DropdownMenuTrigger>
       <DropdownMenuContent side="bottom" align="end" container={host}>
         <DropdownMenuItem
-          onSelect={() => void navigator.clipboard.writeText(threadLink(conversationId))}
+          onSelect={() => void navigator.clipboard.writeText(threadLink(row.conversation_id))}
         >
           Copy link
         </DropdownMenuItem>
@@ -821,7 +787,7 @@ function RailRowActs({
               rel="noopener noreferrer"
               className="text-inherit no-underline"
             >
-              Open in {surfaceLabel ?? surfaceWord(surface)}
+              Open in {row.surface_label ?? surfaceWord(row.surface)}
             </a>
           </DropdownMenuItem>
         )}

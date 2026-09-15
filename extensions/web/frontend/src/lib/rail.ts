@@ -1,6 +1,30 @@
 import { IMESSAGE_SURFACE, SLACK_SURFACE, UFO_SURFACE } from "@/lib/audience";
 import type { Agent, Conversation, ConversationTurn } from "@/lib/types";
 
+/** A type predicate, so the ink and rank tables over the rest stay total. */
+export function live(turn: ConversationTurn): turn is "running" | "queued" {
+  return turn === "running" || turn === "queued";
+}
+
+export type ChatState = "working" | "waiting" | "unread" | "idle";
+
+/** What a chat is doing, in the order a member wants it: the agent is working, it is held for an
+ *  answer only they can give, it moved while they were away, or it is resting. One reading feeds
+ *  every mark and every order the portal draws a conversation in, so the rail, the table and the
+ *  eye cannot disagree. */
+export function chatState(row: Conversation): ChatState {
+  if (live(row.turn)) return "working";
+  if (row.turn === "parked") return "waiting";
+  return row.unread ? "unread" : "idle";
+}
+
+export const CHAT_STATE_RANK: Record<ChatState, number> = {
+  working: 0,
+  waiting: 1,
+  unread: 2,
+  idle: 3,
+};
+
 /** A listed conversation on the wire: the kind's row, its fields flat under `name`, and the agent
  *  the read ran under. */
 export type ConversationRow = Omit<Conversation, "conversation_id"> & { name: string };
@@ -226,16 +250,16 @@ function admits(row: Conversation, shown: RailShown): boolean {
   return true;
 }
 
-/** The rail stands in one order, newest first: a chat is found by when it last moved. */
-const TURN_RANK: Record<ConversationTurn, number> = { parked: 0, running: 1, queued: 1, idle: 2 };
-
 /** The conversations the member is in — `mine` is the listing's one participation fact — so one
- *  shared with them that they never spoke in stands on the Home table and not here. */
+ *  shared with them that they never spoke in stands on the Home table and not here. Recency is the
+ *  order they arrive in; priority is the Home table's own, off the one state reading, so the two
+ *  screens do not rank one workspace two ways. */
 export function railRows(rows: Conversation[], shown: RailShown, sort: RailSort): Conversation[] {
   const kept = rows.filter((row) => row.mine && admits(row, shown));
   if (sort === "recency") return kept;
   return [...kept].sort(
-    (one, two) => TURN_RANK[one.turn] - TURN_RANK[two.turn] || moment(two) - moment(one),
+    (one, two) =>
+      CHAT_STATE_RANK[chatState(one)] - CHAT_STATE_RANK[chatState(two)] || moment(two) - moment(one),
   );
 }
 

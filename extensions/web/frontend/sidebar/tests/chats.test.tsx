@@ -16,6 +16,7 @@ import {
   SECOND,
   SECOND_ID,
   chatsOnWire,
+  conversationObject,
   json,
   useStreamFake,
   wire,
@@ -71,10 +72,9 @@ function cells(name: RegExp): string[] {
 }
 
 function titles(home: HTMLElement): (string | null)[] {
-  return within(home)
-    .getAllByRole("row")
-    .slice(1)
-    .map((held) => within(held).getAllByRole("cell")[0].textContent);
+  return [...(home.querySelectorAll("tbody tr") as NodeListOf<HTMLElement>)].map(
+    (held) => within(held).getAllByRole("cell")[0].textContent,
+  );
 }
 
 function state(name: RegExp): string | null {
@@ -107,10 +107,10 @@ test("the Home row stands a table of the chats the member reaches, whoever owns 
     within(home)
       .getAllByRole("columnheader")
       .map((head) => head.textContent),
-  ).toEqual(["Chat", "Owner", "Channel", "Time"]);
-  expect(cells(/Pick one thread/).slice(1, 3)).toEqual(["Mmember@example.com", "Web"]);
-  expect(cells(/Deploy question/).slice(1, 3)).toEqual(["Ddana@example.com", "Web"]);
-  expect(cells(/Migration run/).slice(1, 3)).toEqual(["Ssam@example.com", "Web"]);
+  ).toEqual(["Chat", "Owner", "Time"]);
+  expect(cells(/Pick one thread/)[1]).toBe("M");
+  expect(cells(/Deploy question/)[1]).toBe("D");
+  expect(cells(/Migration run/)[1]).toBe("S");
 });
 
 test("the status leads the chat's own cell, and holds no column of its own", async () => {
@@ -130,7 +130,7 @@ test("the status leads the chat's own cell, and holds no column of its own", asy
   expect(within(row(/Migration run/)).getByRole("img", { name: "Waiting for you" })).toBeTruthy();
 });
 
-test("the table stands newest first, whoever moved the chat and whatever its state", async () => {
+test("the table stands in state order: working, then waiting, then unread, then the rest", async () => {
   wire({
     ...chatsOnWire([WORKSPACE_CHAT, UNREAD, COLLEAGUE, CHAT_ROW]),
     "/transcript": () => json({ messages: [] }),
@@ -140,30 +140,30 @@ test("the table stands newest first, whoever moved the chat and whatever its sta
 
   const home = await screen.findByRole("region", { name: "Home" });
   expect(titles(home)).toEqual([
-    "Pick one thread",
     "Deploy question",
-    "Unanswered thread",
     "Migration run",
+    "Unanswered thread",
+    "Pick one thread",
   ]);
 });
 
-test("a turn admitted here moves its chat to the top, and its ending leaves it there", async () => {
+/** `Pick one thread` is the newer of the two, so a run ordered by recency alone puts it first and
+ *  only the state rank lifts the working chat above it. */
+test("recency orders a state's own run, under the state that leads it", async () => {
   wire({ ...chatsOnWire([CHAT_ROW, COLLEAGUE]), "/transcript": () => json({ messages: [] }) });
   location.hash = "#/chats";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
-  expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
-
-  await act(async () => railActivity(COLLEAGUE_ID, "running"));
   expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
 
   await act(async () => railActivity(COLLEAGUE_ID, "idle"));
+
   expect(state(/Deploy question/)).toBe("idle");
-  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
+  expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
 });
 
-test("a channel names its surface, and a Slack thread's room stands under the pointer", async () => {
+test("a channel is one glyph beside the title, drawn for every surface but the portal", async () => {
   const slack: Conversation = {
     ...CHAT_ROW,
     conversation_id: SECOND_ID,
@@ -186,12 +186,15 @@ test("a channel names its surface, and a Slack thread's room stands under the po
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
-  expect(cells(/Pick one thread/)[2]).toBe("Web");
-  expect(cells(/Standup notes/)[2]).toBe("Slack");
-  expect(cells(/Index rebuild/)[2]).toBe("Terminal");
+  expect(within(row(/Pick one thread/)).queryByRole("img", { name: /Web|#/ })).toBeNull();
+  expect(within(row(/Index rebuild/)).getByRole("img", { name: "Terminal" })).toBeTruthy();
+  expect(within(home).queryByText("Web")).toBeNull();
   expect(within(home).queryByText("Portal")).toBeNull();
+  expect(within(home).getAllByRole("columnheader").map((head) => head.textContent)).not.toContain(
+    "Channel",
+  );
 
-  await userEvent.hover(within(row(/Standup notes/)).getByText("Slack"));
+  await userEvent.hover(within(row(/Standup notes/)).getByRole("img", { name: "#eng" }));
   expect((await screen.findByRole("tooltip")).textContent).toBe("#eng");
 });
 
@@ -209,7 +212,7 @@ test("a Slack room leads back out to its thread, above the row it names", async 
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByRole("region", { name: "Home" });
-  await userEvent.hover(within(row(/Standup notes/)).getByText("Slack"));
+  await userEvent.hover(within(row(/Standup notes/)).getByRole("img", { name: "#eng" }));
 
   const tip = await screen.findByRole("tooltip");
   expect(tip.getAttribute("data-side")).toBe("top");
@@ -341,7 +344,7 @@ test("an automation states itself beside its name, and the rail filter can drop 
   expect(within(home).getByRole("row", { name: /Digest the night's changes/ })).toBeTruthy();
 });
 
-test("an owner is one coloured monogram, and the address stands under the pointer", async () => {
+test("the owner column is the monogram alone, and the address stands above it", async () => {
   wire({
     ...chatsOnWire([CHAT_ROW, COLLEAGUE, WORKSPACE_CHAT]),
     "/transcript": () => json({ messages: [] }),
@@ -354,19 +357,27 @@ test("an owner is one coloured monogram, and the address stands under the pointe
     .getAllByRole("row")
     .slice(1)
     .map((held) => within(held).getAllByRole("cell")[1].textContent);
-  expect([...owners].sort()).toEqual([
-    "Ddana@example.com",
-    "Mmember@example.com",
-    "Ssam@example.com",
-  ]);
+  expect([...owners].sort()).toEqual(["D", "M", "S"]);
+  expect(within(home).queryByText("dana@example.com")).toBeNull();
 
   await userEvent.hover(within(row(/Deploy question/)).getByLabelText("Dana Reed"));
-  expect((await screen.findByRole("tooltip")).textContent).toBe("Dana Reed");
+  const tip = await screen.findByRole("tooltip");
+  expect(tip.getAttribute("data-side")).toBe("top");
+  expect(tip.textContent).toBe("Dana Reed · dana@example.com");
 });
 
-/** Two addresses at one company differ in their first letters, which is where FNV-1a's avalanche
- *  is weakest; bucketing on the low bits put this pair on one colour. */
-test("two colleagues at one company are not drawn in one colour", async () => {
+test("a row with no name for its owner names the address alone above the monogram", async () => {
+  wire({ ...chatsOnWire([WORKSPACE_CHAT]), "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("region", { name: "Home" });
+  await userEvent.hover(within(row(/Migration run/)).getByLabelText("sam@example.com"));
+
+  expect((await screen.findByRole("tooltip")).textContent).toBe("sam@example.com");
+});
+
+test("every owner is drawn in one ink, whoever they are", async () => {
   const rows: Conversation[] = [
     { ...CHAT_ROW, owner_email: "alex@simplecasual.com", owner_name: null },
     {
@@ -382,13 +393,13 @@ test("two colleagues at one company are not drawn in one colour", async () => {
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByRole("region", { name: "Home" });
-  const hue = (name: RegExp) =>
+  const ink = (name: RegExp) =>
     within(row(name))
       .getAllByRole("cell")[1]
       .querySelector("[data-slot=avatar-fallback]")
       ?.getAttribute("class");
-  expect(hue(/Pick one thread/)).not.toBe(hue(/Second thread/));
-  expect(hue(/Pick one thread/)).toMatch(/bg-member-[1-3]/);
+  expect(ink(/Pick one thread/)).toBe(ink(/Second thread/));
+  expect(ink(/Pick one thread/)).not.toMatch(/bg-member/);
 });
 
 test("the filter bar narrows the table by scope and by what is typed, through the address", async () => {
@@ -400,7 +411,7 @@ test("the filter bar narrows the table by scope and by what is typed, through th
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
-  expect(titles(home)).toEqual(["Pick one thread", "Deploy question", "Migration run"]);
+  expect(titles(home)).toEqual(["Deploy question", "Migration run", "Pick one thread"]);
 
   await userEvent.click(within(home).getByRole("tab", { name: "Mine" }));
   expect(location.hash).toBe("#/chats?scope=mine");
@@ -432,7 +443,7 @@ test("the search is cleared by its own control, and by Escape, in one press", as
 
   expect(location.hash).toBe("#/chats");
   expect(field).toHaveProperty("value", "");
-  expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
+  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
   expect(within(home).queryByRole("button", { name: "Clear search" })).toBeNull();
 
   await userEvent.type(field, "dana{enter}");
@@ -440,7 +451,121 @@ test("the search is cleared by its own control, and by Escape, in one press", as
 
   await userEvent.type(field, "{Escape}");
   expect(location.hash).toBe("#/chats");
-  expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
+  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
+});
+
+test("the filter menu narrows the table to one owner, and to one channel, through the address", async () => {
+  const slack: Conversation = {
+    ...CHAT_ROW,
+    conversation_id: THIRD_ID,
+    title: "Standup notes",
+    surface: "slack",
+    surface_label: "#eng",
+  };
+  wire({
+    ...chatsOnWire([CHAT_ROW, COLLEAGUE, WORKSPACE_CHAT, slack]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await userEvent.click(within(home).getByRole("button", { name: "Filter" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "dana@example.com" }));
+
+  expect(location.hash).toBe("#/chats?chip=owner%3Adana%40example.com");
+  expect(titles(home)).toEqual(["Deploy question"]);
+
+  await userEvent.click(within(home).getByRole("button", { name: "Filter" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "Slack" }));
+
+  expect(location.hash).toBe("#/chats?chip=channel%3ASlack");
+  expect(titles(home)).toEqual(["Standup notes"]);
+
+  await userEvent.click(within(home).getByRole("button", { name: "Filter" }));
+  await userEvent.click(await screen.findByRole("menuitemradio", { name: "All" }));
+
+  expect(location.hash).toBe("#/chats");
+  expect(titles(home).length).toBe(4);
+});
+
+test("the member's own address is `You` in the filter menu, and the scope narrows what it offers", async () => {
+  wire({
+    ...chatsOnWire([CHAT_ROW, COLLEAGUE, WORKSPACE_CHAT]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await userEvent.click(within(home).getByRole("button", { name: "Filter" }));
+  expect(await screen.findByRole("menuitemradio", { name: "You" })).toBeTruthy();
+
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(within(home).getByRole("tab", { name: "Workspace" }));
+  await userEvent.click(within(home).getByRole("button", { name: "Filter" }));
+
+  expect(screen.queryByRole("menuitemradio", { name: "You" })).toBeNull();
+  expect(await screen.findByRole("menuitemradio", { name: "dana@example.com" })).toBeTruthy();
+});
+
+test("every portal surface is one Web channel, whichever extension opened it", async () => {
+  const extension: Conversation = {
+    ...CHAT_ROW,
+    conversation_id: THIRD_ID,
+    title: "Coding session",
+    surface: "extension:coding",
+  };
+  const slack: Conversation = {
+    ...CHAT_ROW,
+    conversation_id: SECOND_ID,
+    title: "Standup notes",
+    surface: "slack",
+  };
+  wire({
+    ...chatsOnWire([CHAT_ROW, extension, slack]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await userEvent.click(within(home).getByRole("button", { name: "Filter" }));
+
+  expect(await screen.findAllByRole("menuitemradio", { name: "Web" })).toHaveLength(1);
+
+  await userEvent.click(screen.getByRole("menuitemradio", { name: "Web" }));
+
+  expect(location.hash).toBe("#/chats?chip=channel%3AWeb");
+  expect(titles(home)).toEqual(["Pick one thread", "Coding session"]);
+});
+
+test("a held filter the narrowed rows no longer hold still stands in the menu", async () => {
+  wire({
+    ...chatsOnWire([CHAT_ROW, COLLEAGUE]),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats?chip=owner%3Adana%40example.com";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  expect(titles(home)).toEqual(["Deploy question"]);
+
+  await userEvent.click(within(home).getByRole("tab", { name: "Mine" }));
+  expect(await within(home).findByText("No conversations match.")).toBeTruthy();
+
+  await userEvent.click(within(home).getByRole("button", { name: "Filter" }));
+  const held = await screen.findByRole("menuitemradio", { name: "dana@example.com" });
+  expect(held.getAttribute("aria-checked")).toBe("true");
+});
+
+test("a filter the address names and no row holds leaves the table saying so", async () => {
+  wire({ ...chatsOnWire([CHAT_ROW]), "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/chats?chip=owner%3Agone%40example.com";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  expect(await within(home).findByText("No conversations match.")).toBeTruthy();
 });
 
 test("a filter that leaves nothing says so, and the bar stays put", async () => {
@@ -451,7 +576,7 @@ test("a filter that leaves nothing says so, and the bar stays put", async () => 
   const home = await screen.findByRole("region", { name: "Home" });
   expect(await within(home).findByText("No conversations match.")).toBeTruthy();
   expect(within(home).getByRole("tab", { name: "All" })).toBeTruthy();
-  expect(within(home).getAllByRole("columnheader").length).toBe(4);
+  expect(within(home).getAllByRole("columnheader").length).toBe(3);
 });
 
 test("a phone draws the chat alone, and the columns beside it are not stacked under it", async () => {
@@ -464,14 +589,15 @@ test("a phone draws the chat alone, and the columns beside it are not stacked un
   const table = home.querySelector("[data-slot=table]");
   expect(table?.getAttribute("data-lede")).toBe("");
   expect(table?.getAttribute("data-stacks")).toBeNull();
-  expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
+  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
 });
 
-test("the automation mark stands at the chat column's own right edge", async () => {
+test("the share and automation marks stand together at the chat column's own right edge", async () => {
   const automated: Conversation = {
     ...CHAT_ROW,
     conversation_id: SECOND_ID,
     title: "Digest the night's changes",
+    audience: "shared",
     automation_kind: "scheduled_task",
     automation_name: "nightly-digest",
     automation_title: "Digest the night's changes",
@@ -481,23 +607,32 @@ test("the automation mark stands at the chat column's own right edge", async () 
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByRole("region", { name: "Home" });
-  const drawn = within(row(/Digest the night's changes/)).getByRole("img", { name: "Automation" });
-  expect(drawn.getAttribute("class")).toContain("ml-auto");
+  const held = within(row(/Digest the night's changes/));
+  const marks = held.getByRole("img", { name: "Automation" }).parentElement;
+  expect(marks?.getAttribute("class")).toContain("ml-auto");
+  expect(held.getByRole("img", { name: "Shared with Workspace" }).parentElement).toBe(marks);
 });
 
-const CUT_NOTICE = "Showing your most recent conversations. Search to reach the rest.";
-
-test("a listing the workspace holds more than says so rather than truncating in silence", async () => {
+test("a shared chat says so above its own mark, and a private one draws none", async () => {
   wire({
-    "/objects/conversation$": () =>
-      json({ objects: [CHAT_ROW].map((row) => ({ name: row.conversation_id, ...row })), cut: true }),
+    ...chatsOnWire([CHAT_ROW, WORKSPACE_CHAT]),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/chats";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const home = await screen.findByRole("region", { name: "Home" });
-  expect(await within(home).findByText(CUT_NOTICE)).toBeTruthy();
+  await screen.findByRole("region", { name: "Home" });
+  expect(
+    within(row(/Pick one thread/)).queryByRole("img", { name: "Shared with Workspace" }),
+  ).toBeNull();
+
+  await userEvent.hover(
+    within(row(/Migration run/)).getByRole("img", { name: "Shared with Workspace" }),
+  );
+
+  const tip = await screen.findByRole("tooltip");
+  expect(tip.getAttribute("data-side")).toBe("top");
+  expect(tip.textContent).toBe("Shared with Workspace");
 });
 
 test("a search reaches past the bound, so it never reports a chat it did not look for", async () => {
@@ -529,7 +664,6 @@ test("a search reaches past the bound, so it never reports a chat it did not loo
 
   expect(await within(home).findByRole("row", { name: /Older than the bound/ })).toBeTruthy();
   expect(calls.some((url) => url.includes("q=older"))).toBe(true);
-  expect(within(home).queryByText(CUT_NOTICE)).toBeNull();
 });
 
 test("a search that matches more than one page offers the step to the rest", async () => {
@@ -553,23 +687,46 @@ test("a search that matches more than one page offers the step to the rest", asy
 
   const home = await screen.findByRole("region", { name: "Home" });
   expect(titles(home)).toEqual(["Pick one thread"]);
-  // A page that holds a step to the rest is not cut; the step is the way to them.
-  expect(within(home).queryByText(CUT_NOTICE)).toBeNull();
+  expect(within(home).getByRole("button", { name: "First" })).toHaveProperty("disabled", true);
 
-  await userEvent.click(within(home).getByRole("button", { name: "Older" }));
+  await userEvent.click(within(home).getByRole("button", { name: "Next" }));
 
   expect(location.hash).toBe("#/chats?after=page-two&q=thread");
   expect(await within(home).findByRole("row", { name: /Second page thread/ })).toBeTruthy();
   expect(reads.some((url) => url.includes("cursor=page-two"))).toBe(true);
-  expect(within(home).queryByRole("button", { name: "Older" })).toBeNull();
+  expect(within(home).getByRole("button", { name: "Next" })).toHaveProperty("disabled", true);
+
+  await userEvent.click(within(home).getByRole("button", { name: "First" }));
+
+  expect(location.hash).toBe("#/chats?q=thread");
+  expect(await within(home).findByRole("row", { name: /Pick one thread/ })).toBeTruthy();
 });
 
-test("a search the rows do not exhaust still says so when the listing was cut", async () => {
+test("a listing the workspace holds more than says so rather than truncating in silence", async () => {
   wire({
     "/objects/conversation$": () =>
+      json({ objects: [conversationObject(CHAT_ROW)], next_cursor: null, cut: true }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  expect(await within(home).findByText("Search to reach older chats.")).toBeTruthy();
+});
+
+test("a listing holding a step to the rest is not cut, because the step is the way to them", async () => {
+  wire({
+    "/objects/conversation$": (url) =>
       json({
-        objects: [{ name: CHAT_ROW.conversation_id, ...CHAT_ROW }],
-        next_cursor: null,
+        objects: [
+          conversationObject(
+            url.includes("cursor=")
+              ? { ...CHAT_ROW, conversation_id: SECOND_ID, title: "Second page thread" }
+              : CHAT_ROW,
+          ),
+        ],
+        next_cursor: url.includes("cursor=") ? null : "page-two",
         cut: true,
       }),
     "/transcript": () => json({ messages: [] }),
@@ -578,7 +735,18 @@ test("a search the rows do not exhaust still says so when the listing was cut", 
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
-  expect(await within(home).findByText(CUT_NOTICE)).toBeTruthy();
+  expect(await within(home).findByRole("button", { name: "Next" })).toBeTruthy();
+  expect(within(home).queryByText("Search to reach older chats.")).toBeNull();
+});
+
+test("a listing that fits on one page draws no steps under it", async () => {
+  wire({ ...chatsOnWire([CHAT_ROW]), "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  expect(within(home).queryByRole("button", { name: "Next" })).toBeNull();
+  expect(home.querySelector("tfoot")).toBeNull();
 });
 
 test("a row a colleague founded opens their conversation, with the composer to speak in it", async () => {

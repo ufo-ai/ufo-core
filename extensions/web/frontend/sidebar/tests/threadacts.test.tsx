@@ -51,9 +51,11 @@ test("a thread row holds its acts behind a mark drawn under the pointer and on t
 
   const mark = await acts("Pick one thread");
   expect(mark.getAttribute("aria-haspopup")).toBe("menu");
-  expect(mark.getAttribute("class")).toContain("opacity-0");
-  expect(mark.getAttribute("class")).toContain("group-hover/row:opacity-100");
-  expect(mark.getAttribute("class")).toContain("group-has-[:focus-visible]/row:opacity-100");
+  // The acts are revealed with the marks beside them, so the row's end is one thing that appears.
+  const trail = mark.parentElement!.getAttribute("class")!;
+  expect(trail).toContain("opacity-0");
+  expect(trail).toContain("group-hover/row:opacity-100");
+  expect(trail).toContain("group-has-[:focus-visible]/row:opacity-100");
 
   await userEvent.click(mark);
   expect(await screen.findByRole("menuitem", { name: "Copy link" })).toBeTruthy();

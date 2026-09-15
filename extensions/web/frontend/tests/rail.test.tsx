@@ -632,8 +632,7 @@ test("a private extension conversation opens the live chat", async () => {
   expect(await screen.findByText("Work to finish")).toBeTruthy();
   const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
   expect(crumb.getByText("Daily brief")).toBeTruthy();
-  expect(crumb.getByText("Daily-Brief")).toBeTruthy();
-  expect(crumb.queryByRole("link")).toBeNull();
+  expect(crumb.getByRole("link", { name: "Back to Home" })).toBeTruthy();
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
 });
 
@@ -737,7 +736,7 @@ test("a Slack conversation is headed like a web thread, marked with its way out 
   const header = within(screen.getByRole("main"));
   const crumb = within(screen.getByRole("navigation", { name: "Breadcrumb" }));
   expect(crumb.getByText("Warehouse restock plan")).toBeTruthy();
-  expect(crumb.getByText(agentName(AGENT.name))).toBeTruthy();
+  expect(crumb.getByRole("link", { name: "Back to Home" })).toBeTruthy();
   expect(crumb.queryByText(AGENT.model)).toBeNull();
   expect(header.queryByRole("heading", { name: "Warehouse restock plan" })).toBeNull();
   expect(header.queryByRole("button", { name: "All conversations" })).toBeNull();
@@ -975,11 +974,10 @@ test("the chat header names the agent holding the conversation and what it is ca
 
   const crumb = within(await screen.findByRole("navigation", { name: "Breadcrumb" }));
   expect(crumb.getByText("Pick one thread")).toBeTruthy();
-  expect(crumb.getByText("Assistant")).toBeTruthy();
   expect(crumb.queryByText(AGENT.model)).toBeNull();
 
-  await userEvent.click(crumb.getByRole("link", { name: "Back to Assistant" }));
-  expect(location.hash).toBe("#/new/" + AGENT_ID);
+  await userEvent.click(crumb.getByRole("link", { name: "Back to Home" }));
+  expect(location.hash).toBe("#/chats");
 });
 
 test("a deep link is not blamed while the rail is the thing that failed", async () => {
@@ -1092,19 +1090,21 @@ test("bumping a conversation moves it to the top and states the turn it is now i
   expect(bumpChat(bumped, "b", NOW, "idle")[0].turn).toBe("idle");
 });
 
-test("priority leads with what is held, then what is working, then the rest by recency", () => {
-  const held = { ...row("held", hoursAgo(50)), turn: "parked" as const };
+test("priority leads with what is working, then held, then unread, then the rest by recency", () => {
   const working = { ...row("working", hoursAgo(30)), turn: "running" as const };
   const queued = { ...row("queued", hoursAgo(80)), turn: "queued" as const };
+  const held = { ...row("held", hoursAgo(50)), turn: "parked" as const };
+  const unread = { ...row("unread", hoursAgo(70)), unread: true };
   const fresh = row("fresh", hoursAgo(1));
   const stale = row("stale", hoursAgo(9));
-  const rows = [fresh, stale, working, held, queued];
+  const rows = [fresh, stale, working, held, queued, unread];
 
   const ranked = railRows(rows, PORTAL_ONLY, "priority");
   expect(ranked.map((entry) => entry.conversation_id)).toEqual([
-    "held",
     "working",
     "queued",
+    "held",
+    "unread",
     "fresh",
     "stale",
   ]);

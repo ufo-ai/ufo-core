@@ -192,14 +192,6 @@
   /* The first accent raw, not held towards a text step: a hold that clears 4.5:1 over the light pane
      lands too pale over the dark. Stated here because recharts reads it as a property, not a class. */
   --color-series: var(--accent-primary);
-  /* A member's mark, picked by a hash of their address so one member keeps one colour. The three
-     accents and no fourth hue: the palette is eight steps and a member is not a reason to add one. */
-  --color-member-1: color-mix(in srgb, var(--accent-primary) 15%, var(--bkgd-100));
-  --color-member-1-ink: color-mix(in srgb, var(--accent-primary) 70%, var(--text-primary));
-  --color-member-2: color-mix(in srgb, var(--accent-secondary) 15%, var(--bkgd-100));
-  --color-member-2-ink: color-mix(in srgb, var(--accent-secondary) 70%, var(--text-primary));
-  --color-member-3: color-mix(in srgb, var(--accent-live) 15%, var(--bkgd-100));
-  --color-member-3-ink: color-mix(in srgb, var(--accent-live) 70%, var(--text-primary));
 
   --shadow-raised:
     0 8px 18px color-mix(in srgb, var(--text-primary) 10%, transparent),

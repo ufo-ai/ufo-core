@@ -182,7 +182,7 @@ the theme, both colour schemes and every width at once, and a shape built beside
 
 ## pager
 
-- **`Pager`** — The Newer and Older steps under a listing, drawn only for the cursors the payload holds.
+- **`Pager`** — The back and Next steps under a listing, each disabled where it has nowhere to go.
 
 ## pane
 
