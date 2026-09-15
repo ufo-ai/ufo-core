@@ -421,12 +421,14 @@ body[data-shell="sidebar"] {
   --brand-canva: url("./assets/brands/canva.svg");
   --brand-capsule_crm: url("./assets/brands/capsule_crm.png");
   --brand-clickup: url("./assets/brands/clickup.svg");
+  --brand-confluence: url("./assets/brands/confluence.svg");
   --brand-contentful: url("./assets/brands/contentful.png");
   --brand-crowdin: url("./assets/brands/crowdin.png");
   --brand-dart: url("./assets/brands/dart.png");
   --brand-datadog: url("./assets/brands/datadog.svg");
   --brand-deepseek: url("./assets/brands/deepseek.svg");
   --brand-dialpad: url("./assets/brands/dialpad.png");
+  --brand-digital_ocean: url("./assets/brands/digital_ocean.svg");
   --brand-discord: url("./assets/brands/discord.svg");
   --brand-discordbot: url("./assets/brands/discordbot.png");
   --brand-dropbox: url("./assets/brands/dropbox.svg");
@@ -451,6 +453,7 @@ body[data-shell="sidebar"] {
   --brand-googleslides: url("./assets/brands/googleslides.svg");
   --brand-gumroad: url("./assets/brands/gumroad.png");
   --brand-harvest: url("./assets/brands/harvest.png");
+  --brand-help_scout: url("./assets/brands/help_scout.svg");
   --brand-hubspot: url("./assets/brands/hubspot.png");
   --brand-hugging_face: url("./assets/brands/hugging_face.svg");
   --brand-instagram: url("./assets/brands/instagram.svg");
@@ -464,6 +467,7 @@ body[data-shell="sidebar"] {
   --brand-miro: url("./assets/brands/miro.png");
   --brand-monday: url("./assets/brands/monday.png");
   --brand-moneybird: url("./assets/brands/moneybird.png");
+  --brand-neon: url("./assets/brands/neon.svg");
   --brand-notion: url("./assets/brands/notion.svg");
   --brand-one_drive: url("./assets/brands/one_drive.svg");
   --brand-openai: url("./assets/brands/openai.svg");
@@ -471,19 +475,24 @@ body[data-shell="sidebar"] {
   --brand-outlook: url("./assets/brands/outlook.svg");
   --brand-pagerduty: url("./assets/brands/pagerduty.png");
   --brand-perplexity: url("./assets/brands/perplexity.svg");
+  --brand-pipedrive: url("./assets/brands/pipedrive.svg");
   --brand-prisma: url("./assets/brands/prisma.svg");
   --brand-productboard: url("./assets/brands/productboard.png");
   --brand-pushbullet: url("./assets/brands/pushbullet.png");
+  --brand-railway: url("./assets/brands/railway.svg");
   --brand-reddit: url("./assets/brands/reddit.svg");
   --brand-reddit_ads: url("./assets/brands/reddit_ads.png");
+  --brand-render: url("./assets/brands/render.svg");
   --brand-roam: url("./assets/brands/roam.png");
   --brand-salesforce: url("./assets/brands/salesforce.svg");
   --brand-sentry: url("./assets/brands/sentry.svg");
   --brand-share_point: url("./assets/brands/share_point.svg");
   --brand-shippo: url("./assets/brands/shippo.png");
+  --brand-shopify: url("./assets/brands/shopify.svg");
   --brand-slack: url("./assets/brands/slack.svg");
   --brand-slackbot: url("./assets/brands/slackbot.png");
   --brand-splitwise: url("./assets/brands/splitwise.png");
+  --brand-square: url("./assets/brands/square.svg");
   --brand-stack_exchange: url("./assets/brands/stack_exchange.png");
   --brand-strava: url("./assets/brands/strava.png");
   --brand-stripe: url("./assets/brands/stripe.svg");
@@ -495,8 +504,10 @@ body[data-shell="sidebar"] {
   --brand-toneden: url("./assets/brands/toneden.png");
   --brand-trello: url("./assets/brands/trello.svg");
   --brand-typeform: url("./assets/brands/typeform.png");
+  --brand-vercel: url("./assets/brands/vercel.svg");
   --brand-wakatime: url("./assets/brands/wakatime.svg");
   --brand-webex: url("./assets/brands/webex.png");
+  --brand-webflow: url("./assets/brands/webflow.svg");
   --brand-whatsapp: url("./assets/brands/whatsapp.svg");
   --brand-wrike: url("./assets/brands/wrike.png");
   --brand-youtube: url("./assets/brands/youtube.svg");
@@ -512,10 +523,16 @@ body[data-shell="sidebar"] {
   :root:where(:not(.light)) {
     --brand-dub: url("./assets/brands/dub-dark.svg");
     --brand-github: url("./assets/brands/github-dark.svg");
+    --brand-help_scout: url("./assets/brands/help_scout-dark.svg");
     --brand-mcp: url("./assets/brands/mcp-dark.svg");
+    --brand-neon: url("./assets/brands/neon-dark.svg");
     --brand-openai: url("./assets/brands/openai-dark.svg");
     --brand-openrouter: url("./assets/brands/openrouter-dark.svg");
     --brand-prisma: url("./assets/brands/prisma-dark.svg");
+    --brand-railway: url("./assets/brands/railway-dark.svg");
+    --brand-render: url("./assets/brands/render-dark.svg");
+    --brand-square: url("./assets/brands/square-dark.svg");
+    --brand-vercel: url("./assets/brands/vercel-dark.svg");
     --brand-wakatime: url("./assets/brands/wakatime-dark.svg");
   }
 }
@@ -523,10 +540,16 @@ body[data-shell="sidebar"] {
 :root:where(.dark) {
   --brand-dub: url("./assets/brands/dub-dark.svg");
   --brand-github: url("./assets/brands/github-dark.svg");
+  --brand-help_scout: url("./assets/brands/help_scout-dark.svg");
   --brand-mcp: url("./assets/brands/mcp-dark.svg");
+  --brand-neon: url("./assets/brands/neon-dark.svg");
   --brand-openai: url("./assets/brands/openai-dark.svg");
   --brand-openrouter: url("./assets/brands/openrouter-dark.svg");
   --brand-prisma: url("./assets/brands/prisma-dark.svg");
+  --brand-railway: url("./assets/brands/railway-dark.svg");
+  --brand-render: url("./assets/brands/render-dark.svg");
+  --brand-square: url("./assets/brands/square-dark.svg");
+  --brand-vercel: url("./assets/brands/vercel-dark.svg");
   --brand-wakatime: url("./assets/brands/wakatime-dark.svg");
 }
 
