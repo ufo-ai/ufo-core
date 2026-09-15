@@ -758,6 +758,33 @@ async def test_spend_by_origin_names_an_unlabelled_surface_and_a_turnless_job(db
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_spend_by_origin_totals_every_row_of_a_turn_and_of_the_jobs(db: None) -> None:
+    """The ledger folds to one row per turn before the origin climb, so a turn billed under two
+    attempts counts once and every turn-less job row lands in the one `Workspace jobs` total."""
+    async with workspace_tx() as connection:
+        workspace_id, turn_id = await _seed_turn(connection)
+        await connection.execute(
+            sa.update(tables.conversation)
+            .where(tables.conversation.c.workspace_id == workspace_id)
+            .values(surface="slack", surface_label="#eng")
+        )
+        for attempt in ("parked-run", "resumed-run"):
+            await record_turn_usage(
+                connection, workspace_id, turn_id, "claude-opus-4-8", FULL_USAGE, attempt
+            )
+        child_turn = await _spawn_child_turn(connection, workspace_id, turn_id)
+        await record_turn_usage(connection, workspace_id, child_turn, "claude-opus-4-8", FULL_USAGE)
+        for _ in range(2):
+            await record_workspace_usage(connection, workspace_id, "claude-opus-4-8", FULL_USAGE)
+    async with workspace_tx() as connection:
+        report = await SpendRollup(workspace_id).read(connection, 3600)
+    assert [(o.surface, o.label, o.tokens, o.priced_micro_usd) for o in report.by_origin] == [
+        ("slack", "#eng", 30_000, 289_500),
+        (None, "Workspace jobs", 20_000, 193_000),
+    ]
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_usage_details_report_history_models_execution_and_all_time(db: None) -> None:
     async with workspace_tx() as connection:
         workspace_id, turn_id = await _seed_turn(connection)

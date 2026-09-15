@@ -1358,7 +1358,12 @@ class SpendRollup:
         dimension and per resumed attempt, and seeding on the rows themselves would pair each of
         them with every root the turn contributed, multiplying the origin's total by their count. A
         turn-less row (a background job) reaches no conversation and gathers under `Workspace jobs`,
-        as it does per agent."""
+        as it does per agent.
+
+        The ledger folds to one row per turn before it meets that climb. Background jobs book a
+        turn-less row apiece and are 90% of a busy workspace's token rows, so joining the rows
+        themselves carried 685k of them into a hash join whose spill cost 11 of the page's 15
+        seconds; folded first, the join meets 70k and the query costs 1."""
         turn = tables.turn
         spent = sa.select(tables.ledger.c.turn_id).where(
             window,
@@ -1391,21 +1396,30 @@ class SpendRollup:
         label = sa.func.coalesce(
             conversation.c.surface_label, conversation.c.surface, WORKSPACE_JOB_LABEL
         ).label("label")
+        spent_per_turn = (
+            sa.select(
+                tables.ledger.c.turn_id.label("turn_id"),
+                sa.func.sum(tables.ledger.c.amount).label("tokens"),
+                sa.func.sum(tables.ledger.c.priced_micro_usd).label("priced"),
+            )
+            .where(window, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
+            .group_by(tables.ledger.c.turn_id)
+            .subquery("spend_per_turn")
+        )
         return tuple(
             OriginTotal(row.surface, row.label, int(row.tokens), int(row.priced))
             for row in await connection.execute(
                 sa.select(
                     conversation.c.surface,
                     label,
-                    _token_sum().label("tokens"),
-                    _token_cost_sum().label("priced"),
+                    sa.func.sum(spent_per_turn.c.tokens).label("tokens"),
+                    sa.func.sum(spent_per_turn.c.priced).label("priced"),
                 )
                 .select_from(
-                    tables.ledger.outerjoin(
-                        roots, roots.c.turn_id == tables.ledger.c.turn_id
+                    spent_per_turn.outerjoin(
+                        roots, roots.c.turn_id == spent_per_turn.c.turn_id
                     ).outerjoin(conversation, conversation.c.id == roots.c.conversation_id)
                 )
-                .where(window, tables.ledger.c.dimension.in_(TOKEN_DIMENSIONS))
                 .group_by(conversation.c.surface, label)
                 .order_by(sa.desc("priced"))
             )
