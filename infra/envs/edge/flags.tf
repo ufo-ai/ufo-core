@@ -33,7 +33,7 @@ locals {
       "enable-community-skills"    = false
       "enable-context-rollover"    = false
       "enable-deepseek-v4-1-flash" = false
-      "enable-installed-skills"    = false
+      "enable-installed-skills"    = true
       "enable-issues-app"          = false
       "enable-lanes-shell"         = false
       "enable-meetings-app"        = false
