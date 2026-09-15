@@ -10,13 +10,7 @@ import { Header, PageToolbar, Pane } from "@/kernel/pane";
 import { Notice, PanelEmpty, PanelSkeleton, Section, usePanelRead } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { SHARED_SUBJECT } from "@/lib/audience";
-import {
-  AutomationMark,
-  CHAT_STATE_RANK,
-  ChannelMark,
-  ChatStatus,
-  chatState,
-} from "../lib/chatMark";
+import { AutomationMark, ChannelMark, ChatStatus } from "../lib/chatMark";
 import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
 import { chatRows, type ChatRow, type ConversationsPayload } from "@/lib/rail";
@@ -178,16 +172,8 @@ function ChatSearch({ query, onSearch }: { query: string; onSearch: (query: stri
   );
 }
 
-/** The rail hands its rows newest first and a sort holds equal keys in the order it was given
- *  them, so recency is what orders a state's own run. */
-function ordered(rows: ChatRow[]): ChatRow[] {
-  return [...rows].sort(
-    (one, two) => CHAT_STATE_RANK[chatState(one)] - CHAT_STATE_RANK[chatState(two)],
-  );
-}
-
-/** A search asks the workspace; at rest the rail's rows are the source, because those carry the
- *  live turn the status column draws and a re-read of them keeps what it holds. */
+/** A search asks the workspace; at rest the rail's rows are the source, which carry the live turn
+ *  the status column draws. Both hand rows newest `last_at` first, the order the table stands in. */
 function Listing({
   place,
   onPlace,
@@ -213,7 +199,7 @@ function Listing({
     : { phase: rail.phase, rows: rail.rows, cut: rail.cut, older: null };
   if (!read.rows.length && read.phase === "loading") return <PanelSkeleton shape="table" />;
   if (!read.rows.length && read.phase === "failed") return <PanelEmpty>{UNREADABLE}</PanelEmpty>;
-  const rows = ordered(read.rows.filter((row) => scoped(row, scope)));
+  const rows = read.rows.filter((row) => scoped(row, scope));
   return (
     <>
       <DataTable

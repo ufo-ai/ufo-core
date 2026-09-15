@@ -97,21 +97,13 @@ export function ChatMark({
 
 export type ChatState = "working" | "waiting" | "unread" | "idle";
 
-/** What a chat is doing, in the order a member wants it: the agent is working, it is held for an
- *  answer only they can give, it moved while they were away, or it is resting. One reading feeds
- *  the mark and the order the table stands in, so the eye and the sort cannot disagree. */
+/** What a chat is doing: the agent is working, it is held for an answer only the member can
+ *  give, it moved while they were away, or it is resting. */
 export function chatState(row: ChatRow): ChatState {
   if (live(row.turn)) return "working";
   if (row.turn === "parked") return "waiting";
   return row.unread ? "unread" : "idle";
 }
-
-export const CHAT_STATE_RANK: Record<ChatState, number> = {
-  working: 0,
-  waiting: 1,
-  unread: 2,
-  idle: 3,
-};
 
 const STATE_WORDS: Record<ChatState, string> = {
   working: "Working",

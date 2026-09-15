@@ -56,6 +56,7 @@ const UNREAD: ChatRow = {
   ...CHAT_ROW,
   conversation_id: THIRD_ID,
   title: "Unanswered thread",
+  last_at: "2026-07-31T08:00:00.000Z",
   unread: true,
 };
 
@@ -129,9 +130,9 @@ test("the status leads the chat's own cell, and holds no column of its own", asy
   expect(within(row(/Migration run/)).getByRole("img", { name: "Waiting for you" })).toBeTruthy();
 });
 
-test("the table stands in state order: working, then waiting, then unread, then the rest", async () => {
+test("the table stands newest first, whoever moved the chat and whatever its state", async () => {
   wire({
-    ...chatsOnWire([CHAT_ROW, UNREAD, WORKSPACE_CHAT, COLLEAGUE]),
+    ...chatsOnWire([WORKSPACE_CHAT, UNREAD, COLLEAGUE, CHAT_ROW]),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/chats";
@@ -139,25 +140,27 @@ test("the table stands in state order: working, then waiting, then unread, then 
 
   const home = await screen.findByRole("region", { name: "Home" });
   expect(titles(home)).toEqual([
-    "Deploy question",
-    "Migration run",
-    "Unanswered thread",
     "Pick one thread",
+    "Deploy question",
+    "Unanswered thread",
+    "Migration run",
   ]);
 });
 
-test("a state that changes reorders the table under the member", async () => {
+test("a turn admitted here moves its chat to the top, and its ending leaves it there", async () => {
   wire({ ...chatsOnWire([CHAT_ROW, COLLEAGUE]), "/transcript": () => json({ messages: [] }) });
   location.hash = "#/chats";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
+  expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
+
+  await act(async () => railActivity(COLLEAGUE_ID, "running"));
   expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
 
-  await act(async () => railActivity(CONVO_ID, "running"));
-
-  expect(state(/Pick one thread/)).toBe("working");
-  expect(titles(home)[0]).toBe("Pick one thread");
+  await act(async () => railActivity(COLLEAGUE_ID, "idle"));
+  expect(state(/Deploy question/)).toBe("idle");
+  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
 });
 
 test("a channel names its surface, and a Slack thread's room stands under the pointer", async () => {
@@ -397,7 +400,7 @@ test("the filter bar narrows the table by scope and by what is typed, through th
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
-  expect(titles(home)).toEqual(["Deploy question", "Migration run", "Pick one thread"]);
+  expect(titles(home)).toEqual(["Pick one thread", "Deploy question", "Migration run"]);
 
   await userEvent.click(within(home).getByRole("tab", { name: "Mine" }));
   expect(location.hash).toBe("#/chats?scope=mine");
@@ -429,7 +432,7 @@ test("the search is cleared by its own control, and by Escape, in one press", as
 
   expect(location.hash).toBe("#/chats");
   expect(field).toHaveProperty("value", "");
-  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
+  expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
   expect(within(home).queryByRole("button", { name: "Clear search" })).toBeNull();
 
   await userEvent.type(field, "dana{enter}");
@@ -437,7 +440,7 @@ test("the search is cleared by its own control, and by Escape, in one press", as
 
   await userEvent.type(field, "{Escape}");
   expect(location.hash).toBe("#/chats");
-  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
+  expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
 });
 
 test("a filter that leaves nothing says so, and the bar stays put", async () => {
@@ -461,7 +464,7 @@ test("a phone draws the chat alone, and the columns beside it are not stacked un
   const table = home.querySelector("[data-slot=table]");
   expect(table?.getAttribute("data-lede")).toBe("");
   expect(table?.getAttribute("data-stacks")).toBeNull();
-  expect(titles(home)).toEqual(["Deploy question", "Pick one thread"]);
+  expect(titles(home)).toEqual(["Pick one thread", "Deploy question"]);
 });
 
 test("the automation mark stands at the chat column's own right edge", async () => {
