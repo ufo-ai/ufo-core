@@ -27,12 +27,6 @@ export type Bubble = Message & {
 
 export type LiveTurn = {
   text: string;
-  /** The words the turn streamed before the step it is on now — the latest passage alone, cleared
-   *  the moment the turn streams again, so two passages never run together. */
-  interstitial: string;
-  /** Every passage the turn already streamed, kept whole while the display holds only the latest:
-   *  a terminal frame that carries no text of its own records these words rather than losing them. */
-  passages: string;
   activity: string | null;
   meter: string[];
   summary: TurnSummary | null;
@@ -109,8 +103,6 @@ export function updateChat(chatKey: string, change: (state: ChatState) => ChatSt
 export function liveTurn(): LiveTurn {
   return {
     text: "",
-    interstitial: "",
-    passages: "",
     activity: null,
     meter: [],
     summary: null,

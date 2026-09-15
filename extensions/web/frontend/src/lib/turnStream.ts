@@ -202,13 +202,6 @@ export function streamTurn(
   attach(chatKey, turnId, answering, false, agentModel);
 }
 
-/** Every word the turn streamed, the passages an `activity` frame stood over the working line included:
- *  a terminal frame with no text of its own — a stop, a failure, a park, a dropped tail — records them. */
-function streamed(live: LiveTurn): string {
-  if (!live.passages) return live.text;
-  return live.text ? live.passages + "\n\n" + live.text : live.passages;
-}
-
 function tailed(chatKey: string, turnId: string): boolean {
   return chatState(chatKey).turn?.id === turnId && SOURCES.has(chatKey);
 }
@@ -245,10 +238,9 @@ function attach(
       const live = state.live;
       const asked = state.handoffs.question;
       const question = asked && asked.turn_id === turnId ? asked : null;
-      const said = live === null ? "" : streamed(live);
       if (
         !live ||
-        (!said &&
+        (!live.text &&
           !live.connect &&
           !live.subagents.length &&
           !live.files.length &&
@@ -261,7 +253,7 @@ function attach(
         ...state,
         messages: (state.messages ?? []).concat({
           role: "assistant",
-          text: said,
+          text: live.text,
           ...(live.at ? { at: live.at } : {}),
           ...(live.summary ? { summary: live.summary } : {}),
           ...(live.connect ? { connect: live.connect } : {}),
@@ -310,7 +302,6 @@ function attach(
     onLive((live) => ({
       ...live,
       text: live.text + chunk,
-      interstitial: "",
       sources: live.sources.length ? [] : live.sources,
     }));
   };
@@ -414,18 +405,12 @@ function attach(
   source.addEventListener("activity", (event) => {
     const frame = JSON.parse((event as MessageEvent).data);
     const entry: ActivityEvent = { kind: "activity", text: frame.text };
-    onLive((live) => {
-      const passage = live.text.trim();
-      return {
-        ...live,
-        events: live.events.concat(entry),
-        activity: entry.text,
-        text: "",
-        interstitial: passage || live.interstitial,
-        passages: passage ? streamed({ ...live, text: passage }) : live.passages,
-        sources: [],
-      };
-    });
+    onLive((live) => ({
+      ...live,
+      events: live.events.concat(entry),
+      activity: entry.text,
+      sources: [],
+    }));
   });
 
   source.addEventListener("sources", (event) => {
@@ -436,12 +421,10 @@ function attach(
   source.addEventListener("resumed", () => {
     const entry: ActivityEvent = { kind: "note", text: RESUMED_NOTE };
     onLive((live) => {
-      const text = streamed(live).trim();
+      const text = live.text.trim();
       return {
         ...live,
         text: "",
-        interstitial: "",
-        passages: "",
         events: text
           ? live.events.concat({ kind: "note", text }, entry)
           : live.events.concat(entry),
@@ -498,7 +481,7 @@ function attach(
     updateChat(chatKey, (state) => {
       const live = state.live ?? liveTurn();
       const handoffs = { ...state.handoffs };
-      let text = streamed(live);
+      let text = live.text;
       let summary = live.summary;
       if (frame.status === "done") {
         if (frame.text) text = frame.text;
@@ -522,11 +505,7 @@ function attach(
         if (!answering) handoffs.question = null;
       }
       const at = frame.status === "done" ? new Date().toISOString() : live.at;
-      return {
-        ...state,
-        handoffs,
-        live: { ...live, text, passages: "", interstitial: "", summary, at },
-      };
+      return { ...state, handoffs, live: { ...live, text, summary, at } };
     });
     record();
     close("idle");
@@ -534,15 +513,7 @@ function attach(
 
   source.addEventListener("parked", (event) => {
     const message = JSON.parse((event as MessageEvent).data).message as string;
-    onLive((live) => {
-      const text = streamed(live);
-      return {
-        ...live,
-        text: text ? text + "\n" + message : message,
-        passages: "",
-        interstitial: "",
-      };
-    });
+    onLive((live) => ({ ...live, text: live.text ? live.text + "\n" + message : message }));
     record();
     close("parked");
   });

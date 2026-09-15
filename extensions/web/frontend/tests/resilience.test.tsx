@@ -194,20 +194,6 @@ test("persistent fatal closes give up with the loss stated once", async () => {
   );
 });
 
-test("a dropped tail records the words standing above the step the turn was on", async () => {
-  setReattachTimer((fn) => {
-    fn();
-    return 0 as unknown as ReturnType<typeof setTimeout>;
-  });
-  const first = await streaming();
-  first.emit("message", { text: "Let me read the diff." });
-  first.emit("activity", { text: "Loading coding guidance." });
-  for (let round = 0; round < 7; round += 1) fatal(StreamFake.last());
-
-  expect(await screen.findByText("Connection lost — reload to see the reply.")).toBeTruthy();
-  expect(screen.getByText(saying("Let me read the diff."))).toBeTruthy();
-});
-
 test("returning to a tab with a dead stream reattaches without waiting out the backoff", async () => {
   const pending: (() => void)[] = [];
   setReattachTimer((fn) => {

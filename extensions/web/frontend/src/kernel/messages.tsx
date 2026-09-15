@@ -458,7 +458,6 @@ export function MessageLog({
                   events={row.live.events}
                   runs={row.live.subagents}
                   sources={row.live.sources}
-                  interstitial={row.live.interstitial}
                   working={
                     row.live.reconnecting
                       ? "Reconnecting…"
@@ -1198,19 +1197,17 @@ function Consulted({ sources }: { sources: SourceRef[] }) {
   );
 }
 
-/** What the turn said before this step stands over the step it is on, what it has read, then the step
- *  of each subagent it waits on: a count alone reads as a stuck turn, and words with no step are the reply. */
+/** The step a turn is on, what it has read, then the step of each subagent it waits on: a count
+ *  alone reads as a stuck turn. A turn holding no running run draws no line — its reply is what it did. */
 function Activity({
   events,
   runs,
   working,
-  interstitial = "",
   sources = [],
 }: {
   events: ActivityEvent[];
   runs: SubagentRun[];
   working?: string;
-  interstitial?: string;
   sources?: SourceRef[];
 }) {
   const waiting = runs.filter((run) => run.running);
@@ -1221,11 +1218,6 @@ function Activity({
   if (!step && sources.length === 0) return null;
   return (
     <>
-      {step && interstitial ? (
-        <Marker data-slot="interstitial" className="mt-2xs items-start text-small text-ink-soft">
-          <MarkerContent>{interstitial}</MarkerContent>
-        </Marker>
-      ) : null}
       {step ? (
         <Marker className="mt-2xs text-label text-ink-soft">
           <MarkerContent className="shimmer">
