@@ -159,22 +159,30 @@ NODE_INSTALL_COMMAND = (
 RUST_VERSION = "1.98.1"
 RUST_INSTALL_COMMAND = (
     'case "$(dpkg --print-architecture)" in '
-    "amd64) rust_arch=x86_64; rust_sha="
-    "24ba1338a2d35c5a3247936546429e163fa674d726102af18bdf624582c57aea ;; "
-    "arm64) rust_arch=aarch64; rust_sha="
-    "f00ba576645cef658e1deed96fab8f707958e9d58808b16343448b5d1c4f7407 ;; "
+    "amd64) rust_arch=x86_64; "
+    "rustc_sha=e974f036b28565f37c0f3bd92ddefa809bee16c04f9dcf07b9ed96e05aaaf7c4; "
+    "cargo_sha=ea1de9f9e23107d97ee2b41a72c552f34064a593da503789218387aee59f3ba4; "
+    "std_sha=fa3ff450172a16c026944030230c5069947af93c728d9179971d44e5e0cfb561 ;; "
+    "arm64) rust_arch=aarch64; "
+    "rustc_sha=89fb83041993b48816514815606f53a5264729b8b449671a6b291e6f0ae74f40; "
+    "cargo_sha=c09425a7f300af148c0bdfded0e7d5f1fe7c075b2b9674e8935afa769297b2f6; "
+    "std_sha=9bf796a6ec5b004813ebd0b650775a7c6a4f3aae97ad362ae294798dca4f3b23 ;; "
     '*) echo "unsupported Rust architecture" >&2; exit 1 ;; esac && '
     'triple="${rust_arch}-unknown-linux-gnu" && '
-    f'archive=/tmp/rust-{RUST_VERSION}-"$triple".tar.gz && '
-    f"curl -fsSL https://static.rust-lang.org/dist/rust-{RUST_VERSION}-"
-    '"$triple".tar.gz -o "$archive" && '
-    'echo "$rust_sha  $archive" | sha256sum -c - && '
-    "mkdir /tmp/rust && "
-    'tar -xzf "$archive" -C /tmp/rust --strip-components=1 --no-same-owner && '
-    "/tmp/rust/install.sh --prefix=/usr/local --disable-ldconfig "
-    '--components=rustc,cargo,rust-std-"$triple" && '
-    'rm -rf "$archive" /tmp/rust'
+    'for spec in "rustc:$rustc_sha" "cargo:$cargo_sha" "rust-std:$std_sha"; do '
+    'name="${spec%%:*}"; sha="${spec#*:}"; '
+    f'archive="/tmp/$name-{RUST_VERSION}-$triple.tar.xz"; '
+    f'curl -fsSL "https://static.rust-lang.org/dist/$name-{RUST_VERSION}-$triple.tar.xz" '
+    '-o "$archive" && '
+    'echo "$sha  $archive" | sha256sum -c - && '
+    'mkdir "/tmp/$name" && '
+    'tar -xJf "$archive" -C "/tmp/$name" --strip-components=1 --no-same-owner && '
+    '"/tmp/$name/install.sh" --prefix=/usr/local --disable-ldconfig && '
+    'rm -rf "$archive" "/tmp/$name" || exit 1; '
+    "done"
 )
+"""The whole `rust-<version>` archive is 380 MB and unpacks to 1.7 GB of mostly docs, and the E2B
+build's disk ran out under it: `tar` exit 2 on every template rebuild since the layer landed."""
 PIP_PACKAGES = (
     "urllib3",
     "brotli",

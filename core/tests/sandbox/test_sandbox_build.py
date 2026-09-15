@@ -194,7 +194,7 @@ def _check_the_sandbox_installs_the_pinned_rust_toolchain() -> None:
     """The client crate is Rust, so a sandbox without cargo cannot build or test it."""
     dockerfile = pod_dockerfile()
     assert RUST_INSTALL_COMMAND in dockerfile
-    assert f"https://static.rust-lang.org/dist/rust-{RUST_VERSION}-" in dockerfile
+    assert f"https://static.rust-lang.org/dist/$name-{RUST_VERSION}-$triple.tar.xz" in dockerfile
     assert (
         "test \"$(rustc --version | cut -d' ' -f2)\" = "
         f'"{RUST_VERSION}"' in SANDBOX_TEMPLATE_READY_COMMAND
