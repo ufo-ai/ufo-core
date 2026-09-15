@@ -71,6 +71,9 @@ own record always ties, so it lands every tick; dropping the trigger stops enume
 walk's own prune takes the entry with it. A read that meets the budget with pages of a clipped list
 still to fetch lands nothing for that pull request, since a page short of its files would read as
 files removed.
+Mergeability is not read: GitHub answers `mergeable: UNKNOWN` for every merged pull request and
+for every open one while a push to its base reruns the merge test, then the settled value a tick
+later, so the field turned one push to main into two revisions of every watched pull request's page.
 
 `workflow_runs` is the one unordered stream
 that carries a floor: Actions runs outnumber every other collection a busy repo publishes, so
@@ -157,7 +160,6 @@ pull requests, which go first, and of the pull requests the index lists above th
 `PULL_REQUEST_PASS_INTERVAL_SECONDS` bounds the smaller catalog that completes a pass inside one
 tick."""
 GRAPHQL_PATH = "/graphql"
-MERGEABILITY_PENDING = "UNKNOWN"
 COMMENT_BACKFILL_WINDOW_DAYS = 7
 ISSUE_BACKFILL_WINDOW_DAYS = 365
 _REPO_LIST_PARAMS = {"per_page": PAGE_SIZE, "type": "all", "sort": "pushed", "direction": "desc"}
@@ -200,7 +202,7 @@ _CONTEXT_COUNTS = (
 _THREAD_NODE = "isResolved comments(first: 1) { nodes { path body author { login } } }"
 _FILE_NODE = "path additions deletions"
 PULL_REQUEST_FIELDS = f"""
-  databaseId number title state isDraft mergeable reviewDecision updatedAt createdAt
+  databaseId number title state isDraft reviewDecision updatedAt createdAt
   totalCommentsCount author {{ login }} headRefName headRefOid baseRefName url
   repository {{ owner {{ login }} name }}
   commits(last: 1) {{ totalCount nodes {{ commit {{ statusCheckRollup {{ state
@@ -1015,16 +1017,10 @@ def _pull_record(node: dict[str, Any]) -> dict[str, Any]:
     """One pull request as it lands: every GraphQL connection replaced by the list it wraps with its
     total beside it, and the commit's check rollup lifted to `checks` — the field the walk exists to
     carry, which GraphQL publishes only under the last commit. The lists are the first page of each
-    connection until `_pull_tails` extends them to the end.
-
-    A `mergeable` of `UNKNOWN` is dropped rather than stored. GitHub answers it while its background
-    merge test runs, so storing it would make one recompute two page changes; `MERGEABLE` and
-    `CONFLICTING` are facts about the branch and change the page when they flip."""
+    connection until `_pull_tails` extends them to the end."""
     record = _unwrapped(node)
     commits = record.pop("commits")
     record["checks"] = get_path(commits[0], "commit.statusCheckRollup") if commits else None
-    if record.get("mergeable") == MERGEABILITY_PENDING:
-        record.pop("mergeable")
     return record
 
 

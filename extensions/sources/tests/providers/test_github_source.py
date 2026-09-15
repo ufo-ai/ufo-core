@@ -189,7 +189,6 @@ def _pull_node(
         "title": title or f"pr {number}",
         "state": "OPEN",
         "isDraft": False,
-        "mergeable": "MERGEABLE",
         "reviewDecision": None,
         "updatedAt": updated_at,
         "createdAt": "2026-01-01T00:00:00Z",
@@ -413,51 +412,21 @@ async def test_a_pull_request_carries_its_checks_reviews_threads_and_files(
     assert page.created_at == "2026-01-01T00:00:00.000000+00:00"
 
 
-def _mergeable_handler(mergeable: str) -> Callable[[httpx.Request], httpx.Response]:
+async def test_the_pull_request_read_never_asks_for_mergeability(
+    parents_reader: ParentsReader,
+) -> None:
+    queries: list[str] = []
+
     def handle(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/graphql":
-            node = _pull_node(7, "2026-09-02T00:00:00Z")
-            return _pulls(request, [{**node, "mergeable": mergeable}])
+            queries.append(json.loads(request.content)["query"])
+            return _pulls(request, [_pull_node(7, "2026-09-02T00:00:00Z")])
         return httpx.Response(404, json={"path": request.url.path})
 
-    return handle
+    await _fetch("pull_requests", handle, parents=parents_reader(LANDED))
 
-
-async def test_a_conflict_appearing_changes_the_pull_request_page(
-    parents_reader: ParentsReader,
-) -> None:
-    """Mergeability is the fact a reviewer waits on, and it reaches the page with the pull request
-    rather than costing a read of its own: a conflict appearing while neither SHA moves changes no
-    other field, so without it the digest is identical and nobody is woken."""
-    clean = await _fetch(
-        "pull_requests", _mergeable_handler("MERGEABLE"), parents=parents_reader(LANDED)
-    )
-    conflicted = await _fetch(
-        "pull_requests", _mergeable_handler("CONFLICTING"), parents=parents_reader(LANDED)
-    )
-
-    body = json.loads(clean.pages[0].body.split("\n\n", 1)[1])
-    assert body["mergeable"] == "MERGEABLE"
-    assert json.loads(conflicted.pages[0].body.split("\n\n", 1)[1])["mergeable"] == "CONFLICTING"
-    assert clean.pages[0].digest != conflicted.pages[0].digest
-
-
-async def test_a_merge_test_still_computing_leaves_the_page_alone(
-    parents_reader: ParentsReader,
-) -> None:
-    """GitHub computes mergeability lazily and names the interim state `UNKNOWN` — the enum value
-    its own schema documents as "still being calculated". Storing it would wake a narrowed trigger
-    for GitHub's bookkeeping rather than for the branch, so it is dropped and a pass that catches
-    the computation lands the page the pass before it did."""
-    computing = await _fetch(
-        "pull_requests", _mergeable_handler("UNKNOWN"), parents=parents_reader(LANDED)
-    )
-    settled = await _fetch(
-        "pull_requests", _mergeable_handler("MERGEABLE"), parents=parents_reader(LANDED)
-    )
-
-    assert "mergeable" not in json.loads(computing.pages[0].body.split("\n\n", 1)[1])
-    assert computing.pages[0].digest != settled.pages[0].digest
+    assert queries
+    assert all("mergeable" not in query for query in queries)
 
 
 async def test_the_rollup_and_the_check_run_pages_are_different_pages(

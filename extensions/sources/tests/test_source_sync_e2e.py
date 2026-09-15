@@ -929,7 +929,6 @@ def _pull_node(number: int, checks: str) -> dict[str, Any]:
         "title": "Add retry to egress dial",
         "state": "OPEN",
         "isDraft": False,
-        "mergeable": "MERGEABLE",
         "reviewDecision": None,
         "updatedAt": "2026-01-05T00:00:00Z",
         "createdAt": "2026-01-01T00:00:00Z",
