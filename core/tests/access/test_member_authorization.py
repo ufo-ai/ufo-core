@@ -1,5 +1,7 @@
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -7,7 +9,9 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from pydantic import BaseModel, SecretStr
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+import ufo.runtime.access.member_authorization as member_authorization_module
 from ufo.db import workspace_tx
 from ufo.harness.models.interface import Message, ModelRequest, ToolUseBlock
 from ufo.runtime.access.member_authorization import (
@@ -1770,3 +1774,62 @@ def test_authorization_question_metadata_is_runtime_only() -> None:
                 ),
             ),
         )
+
+
+@dataclass
+class _PausedBeforeStatement:
+    connection: AsyncConnection
+    before: int
+    paused: asyncio.Event
+    resume: asyncio.Event
+    issued: int = 0
+
+    @property
+    def dialect(self) -> sa.Dialect:
+        return self.connection.dialect
+
+    async def execute(
+        self, statement: sa.Executable, *args: object, **kwargs: object
+    ) -> sa.CursorResult:
+        if self.issued == self.before and not self.paused.is_set():
+            self.paused.set()
+            await self.resume.wait()
+        self.issued += 1
+        return await self.connection.execute(statement, *args, **kwargs)
+
+
+@pytest.mark.parametrize("gap", range(1, 5))
+async def test_a_settlement_landing_inside_the_duplicate_read_replays_allow(
+    db: None, database_url: str, monkeypatch: pytest.MonkeyPatch, gap: int
+) -> None:
+    if database_url.startswith("sqlite"):
+        pytest.skip("sqlite runs each transaction alone, so no read can be torn")
+    ids = await _seed()
+    model = StubModel([_verdict(decision="ask", basis="none", evidence="")])
+    gate = MemberAuthorization(model, TEST_DIGEST_KEY)
+    asked = await gate.authorize(_request(ids, "Maybe send it"))
+    answer_request = _request(
+        ids, "Allow", dispatch_key="answer", message_ref=uuid4(), answer=_answer(asked, "allow")
+    )
+    attempt = await gate.preflight(answer_request)
+    paused, resume = asyncio.Event(), asyncio.Event()
+    real_tx = member_authorization_module.workspace_tx
+
+    @asynccontextmanager
+    async def paused_tx(**options: bool) -> AsyncIterator[_PausedBeforeStatement]:
+        async with real_tx(**options) as connection:
+            yield _PausedBeforeStatement(connection, gap, paused, resume)
+
+    monkeypatch.setattr(member_authorization_module, "workspace_tx", paused_tx)
+    loser = asyncio.create_task(gate.authorize(answer_request, attempt))
+    await paused.wait()
+    winner = await gate.authorize(answer_request, attempt)
+    resume.set()
+    second = await loser
+
+    assert winner.decision == "allow"
+    assert second.decision == "allow", f"a settlement before read {gap} denied the duplicate"
+    assert len(model.requests) == 1
+    [stored] = await _authorizations()
+    assert stored["decision"] == "allow"
+    assert stored["decision_key"] == "answer"

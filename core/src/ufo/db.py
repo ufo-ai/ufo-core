@@ -388,10 +388,18 @@ async def _opened(engine: AsyncEngine, path: str) -> AsyncIterator[AsyncConnecti
 
 
 @asynccontextmanager
-async def workspace_tx() -> AsyncIterator[AsyncConnection]:
+async def workspace_tx(*, snapshot: bool = False) -> AsyncIterator[AsyncConnection]:
+    """`snapshot=True` reads every statement of the transaction from one snapshot, for a caller
+    assembling several reads into one picture of a row's state: under the default read committed
+    each statement takes its own, so a concurrent commit can land between two of them and be half
+    visible. The level is chosen at BEGIN because the workspace GUC below is a query, and Postgres
+    refuses SET TRANSACTION after one. SQLite already runs each transaction alone."""
     if _app_url is None:
         raise RuntimeError("db not initialized (init_db runs in the composition root)")
-    async with _opened(_engine_for(_app_url, _APP), "workspace") as connection:
+    engine = _engine_for(_app_url, _APP)
+    if snapshot and engine.dialect.name == "postgresql":
+        engine = engine.execution_options(isolation_level="REPEATABLE READ")
+    async with _opened(engine, "workspace") as connection:
         workspace_id = current_workspace.get()
         if workspace_id is not None and connection.dialect.name == "postgresql":
             await connection.execute(

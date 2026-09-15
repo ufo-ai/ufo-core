@@ -650,7 +650,7 @@ class MemberAuthorization:
             tables.member_authorization.c.call == request.effect.call,
             tables.member_authorization.c.effect_digest == self._digest(request.effect),
         )
-        async with workspace_tx() as connection:
+        async with workspace_tx(snapshot=True) as connection:
             email = (
                 await connection.execute(
                     sa.select(tables.member.c.email).where(
