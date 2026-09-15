@@ -54,6 +54,7 @@ FLAGS = (
         what="The portal draws the Apps tab, the app index, the app creator and the app store.",
     ),
     FlagSpec(key=PORTAL_SURFACES["memory"], what="The workspace Memory tab is drawn."),
+    FlagSpec(key=PORTAL_SURFACES["radar"], what="The sidebar draws the Radar row."),
     FlagSpec(
         key=PORTAL_SURFACES["community-skills"],
         what="The Skills tab offers the community catalogue.",

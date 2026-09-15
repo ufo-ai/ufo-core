@@ -9,6 +9,7 @@ export const ALL_SURFACES: Surfaces = {
   team: true,
   apps: true,
   memory: true,
+  radar: true,
   "community-skills": true,
   "installed-skills": true,
   "app-store": true,

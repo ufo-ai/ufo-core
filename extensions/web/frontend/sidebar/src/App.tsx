@@ -736,6 +736,7 @@ function WorkspaceSidebar({
 }) {
   const rail = useRail();
   const tabs = useOfferedTabs();
+  const surfaces = useSurfaces();
   const collapsed = rail.collapsed && !narrow;
   const chatApp = chatSurface(agents);
   const startChat = useCallback(() => {
@@ -806,16 +807,18 @@ function WorkspaceSidebar({
           label={AUTOMATIONS}
           onClick={openAutomations}
         />
-        {APP_SECTIONS.map(({ section, label }) => (
-          <NavRow
-            key={section}
-            icon={SECTION_GLYPHS[section]}
-            current={standing(route, `section:${section}`)}
-            collapsed={collapsed}
-            label={label}
-            onClick={() => placeSection(section, {}, "push")}
-          />
-        ))}
+        {APP_SECTIONS.filter(({ section }) => section !== "radar" || surfaces.radar).map(
+          ({ section, label }) => (
+            <NavRow
+              key={section}
+              icon={SECTION_GLYPHS[section]}
+              current={standing(route, `section:${section}`)}
+              collapsed={collapsed}
+              label={label}
+              onClick={() => placeSection(section, {}, "push")}
+            />
+          ),
+        )}
         <NavRow
           icon={SECTION_GLYPHS.connectors}
           current={CONNECTION_TABS.some((tab) => standing(route, `section:${tab}`))}

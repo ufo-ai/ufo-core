@@ -30,6 +30,7 @@ const WITHHELD: Surfaces = {
   team: false,
   apps: false,
   memory: false,
+  radar: false,
   "community-skills": false,
   "installed-skills": false,
   "app-store": false,

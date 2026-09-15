@@ -79,6 +79,7 @@ function places(
       const view = SECTION_VIEWS[section];
       const icon = SECTION_ICONS[section];
       if (!view || !icon) return [];
+      if (section === "radar" && !surfaces.radar) return [];
       return [{ label: view.label, hash: sectionHash(section), icon }];
     }),
     { label: "Workspace", hash: workspaceHash(landing), icon: IconUsers },

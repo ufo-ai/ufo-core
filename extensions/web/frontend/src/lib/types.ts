@@ -70,6 +70,7 @@ export type Surfaces = {
   team: boolean;
   apps: boolean;
   memory: boolean;
+  radar: boolean;
   "community-skills": boolean;
   "installed-skills": boolean;
   "app-store": boolean;

@@ -13477,6 +13477,7 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
                 "enable-community-skills": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-installed-skills": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-memory-tab": InMemoryFlag(default_variant="on", variants=variants),
+                "enable-radar-app": InMemoryFlag(default_variant="off", variants=variants),
                 "enable-app-store": InMemoryFlag(default_variant="on", variants=variants),
                 "enable-apps-tab": InMemoryFlag(default_variant="on", variants=variants),
                 "enable-wiki-app": InMemoryFlag(default_variant="off", variants=variants),
@@ -13490,6 +13491,7 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
     ).json()
     assert boot["surfaces"] == {
         "memory": True,
+        "radar": False,
         "community-skills": False,
         "installed-skills": False,
         "app-store": True,

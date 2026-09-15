@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test } from "vitest";
 
@@ -24,6 +24,7 @@ const WITHHELD: Surfaces = {
   team: false,
   apps: false,
   memory: false,
+  radar: false,
   "community-skills": false,
   "installed-skills": false,
   "app-store": false,
@@ -131,6 +132,51 @@ test("the palette's workspace row opens the first tab the member is drawn", asyn
   await userEvent.click(await screen.findByRole("option", { name: "Workspace" }));
 
   expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "apps", place: {} });
+});
+
+test("the radar row and its palette place are withheld with the flag off", async () => {
+  location.hash = "";
+  wire({ "/transcript": () => json({ messages: [] }) });
+  render(
+    <App
+      agents={[AGENT]}
+      member={MEMBER}
+      surfaces={{ ...ALL_SURFACES, radar: false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  const rail = await screen.findByRole("navigation", { name: "Workspace" });
+  expect(within(rail).queryByRole("button", { name: "Radar" })).toBeNull();
+  expect(within(rail).getByRole("button", { name: "Artifacts" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Search" }));
+  expect(screen.queryByRole("option", { name: "Radar" })).toBeNull();
+});
+
+test("the radar row stands with the flag on, and its address opens either way", async () => {
+  location.hash = "";
+  wire({ "/transcript": () => json({ messages: [] }) });
+  const drawn = render(
+    <App agents={[AGENT]} member={MEMBER} surfaces={ALL_SURFACES} onAgents={() => {}} />,
+  );
+
+  const rail = await screen.findByRole("navigation", { name: "Workspace" });
+  await userEvent.click(within(rail).getByRole("button", { name: "Radar" }));
+  await waitFor(() => expect(location.hash).toBe("#/radar"));
+  drawn.unmount();
+
+  render(
+    <App
+      agents={[AGENT]}
+      member={MEMBER}
+      surfaces={{ ...ALL_SURFACES, radar: false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  await waitFor(() => expect(screen.queryByText("This link is not valid.")).toBeNull());
+  expect(parseHash(location.hash)).toEqual({ kind: "section", section: "radar", place: {} });
 });
 
 test("the apps tab, the app index and the store are withheld with the flag off", async () => {

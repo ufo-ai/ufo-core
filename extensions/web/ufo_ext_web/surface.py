@@ -1353,6 +1353,7 @@ APP_FLAGS = {
 MAIN_AGENT_FLAG = "enable-assistant-app"
 PORTAL_SURFACES = {
     "memory": "enable-memory-tab",
+    "radar": "enable-radar-app",
     "community-skills": "enable-community-skills",
     "installed-skills": "enable-installed-skills",
     "app-store": "enable-app-store",
