@@ -80,6 +80,7 @@ from evals.suites import (
     skill_tail_search,
     slack_message_block,
     source_watch_offer,
+    starter_slates,
     surface_setup,
     tool_activity,
     tool_calling,
@@ -289,6 +290,7 @@ TASKS: tuple[EvalTask, ...] = (
     ),
     capability_task("monitor_arm", monitor_arm.CASES, packs=monitor_arm.MONITOR_PACKS),
     capability_task("source_watch_offer", source_watch_offer.CASES),
+    starter_slates.starter_slates_task(),
     capability_task("app_builder", app_builder.CASES),
     capability_task(
         "business_goal",

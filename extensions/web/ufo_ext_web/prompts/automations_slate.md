@@ -9,7 +9,7 @@ Rank the catalog rows whose work this member would want to run again and again. 
 For each ranked row write:
 - title: the card's heading. Name the automation in the member's own words. Sentence case, at most {{title_chars}} characters.
 - line: one clear sentence stating what the automation does for this member and how often, at most {{line_chars}} characters. It must read whole on its own. State the work and its cadence, not the accounts it reads. Name what is actually theirs — their team, their product, their repository, the thing itself. A line that would read the same for any company is too general to be worth a card.
-- ask: the sentence the member says by pressing the card, first person, asking for the automation. Name the work and when it runs. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
+- ask: the request the member sends by pressing the card, one line starting with a verb: Write, Show, Find, Summarize. Name the work and when it runs. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
 
 Write no check_in. This screen asks for automations and nothing else.
 

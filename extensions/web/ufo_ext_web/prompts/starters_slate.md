@@ -7,7 +7,7 @@ Rank the catalog rows that would help this member most. Rank a row for the work 
 For each ranked row write:
 - title: the row's identity. It is not drawn. Name the application in the member's own words. Sentence case, at most {{title_chars}} characters.
 - line: one clear sentence stating what the application does for this member, at most {{line_chars}} characters. It must read whole on its own. State the work, not the accounts it reads. Name what is actually theirs — their product, their customer, their repository, the thing itself. A line that would read the same for any company is too general to be worth a row.
-- ask: the sentence the member says by pressing the row, first person, asking for the application. Name the work concretely. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
+- ask: the request the member sends by pressing the row, one line starting with a verb: Write, Show, Find, Summarize. Name the work concretely. Do not mention connecting an account: the assistant asks for what it needs once the work is agreed.
 
 Then consider one check_in, and only write it if it clearly earns a place.
 
