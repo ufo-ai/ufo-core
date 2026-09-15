@@ -12,7 +12,11 @@ portal fallback because the member has no reach cannot pass as a push."""
 from uuid import uuid4
 
 import sqlalchemy as sa
-from ufo_ext_app_notification.deliver import DELIVERED, DELIVERED_TO_PORTAL_ONLY
+from ufo_ext_app_notification.deliver import (
+    DELIVERED,
+    DELIVERED_TO_PORTAL_ONLY,
+    REACH_SURFACES,
+)
 from ufo_ext_app_notification.notify_tool import NOTIFY_TOOL_NAME
 
 from evals.harness.capability import CapabilityOutput, ToolInvocation
@@ -229,7 +233,7 @@ async def test_the_seed_gives_the_member_a_reach_the_projection_answers(db: None
     with ws(workspace_id):
         await _give_the_member_reach(member_id)
         await _give_the_member_reach(member_id)
-        reach = await ext.member_reach(member_id)
+        reach = await ext.member_reach(member_id, REACH_SURFACES)
 
     assert [(one.surface, one.agent_id) for one in reach] == [(REACH_SURFACE, agent_id)]
 

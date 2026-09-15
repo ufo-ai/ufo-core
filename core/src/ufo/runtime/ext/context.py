@@ -859,7 +859,9 @@ class TurnInvoker(Protocol):
 
     async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None: ...
 
-    async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]: ...
+    async def member_reach(
+        self, member_id: UUID, surfaces: tuple[str, ...], limit: int
+    ) -> tuple[MemberReach, ...]: ...
 
 
 class ModelResolver(Protocol):
@@ -2043,17 +2045,21 @@ class ExtensionContext:
             fired_by=fired_by,
         )
 
-    async def member_reach(self, member_id: UUID, limit: int = 4) -> tuple[MemberReach, ...]:
-        """The durable-surface conversations `member_id` speaks in, newest first — where an
-        `invoke` reaches them when they are not in the invoking conversation, because admission
-        registers a writeback for a turn entering one. Member data, so gated like the roster; a
-        live surface's conversations are absent by construction, since its members tail the hub
-        and register no writeback."""
+    async def member_reach(
+        self, member_id: UUID, surfaces: tuple[str, ...], limit: int = 4
+    ) -> tuple[MemberReach, ...]:
+        """The direct chats `member_id` speaks in on `surfaces`, that ordering first and the newest
+        within one after it — where an `invoke` reaches them alone when they are not in the invoking
+        conversation, because admission registers a writeback for a turn entering one. The caller
+        names the surfaces it will speak on, so which chat carries a message is its decision and
+        never a matter of where the member happened to type last. Member data, so gated like the
+        roster; a live surface's conversations are absent by construction, since its members tail
+        the hub and register no writeback."""
         if not self.member_context_read_allowed:
             raise PermissionError("this extension cannot read a member's conversations")
         if self.invoker is None:
             raise RuntimeError("member_reach requires a turn invoker; none is wired")
-        return await self.invoker.member_reach(member_id, limit)
+        return await self.invoker.member_reach(member_id, surfaces, limit)
 
     def tail(
         self, turn_id: UUID, since: str = ""

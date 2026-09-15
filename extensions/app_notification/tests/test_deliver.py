@@ -1,9 +1,10 @@
 """End-to-end proof of delivery: the Notification agent's `deliver` founds one relay turn in the
-member's newest durable conversation through the real admission seam — which registers the writeback
-the poller posts — records that turn on the rows, refuses a second message in the same triage turn,
-falls back to the portal for a member with no durable conversation, and is held to the app's own
-provision. The append-only delivery identity is the loop fence: `notify` inside its relay refuses,
-and the next drain tick founds nothing."""
+member's own direct chat — Slack before iMessage, never a channel thread their colleagues read —
+through the real admission seam, which registers the writeback the poller posts. It records that
+turn on the rows, refuses a second message in the same triage turn, falls back to the portal for a
+member with no direct chat, and is held to the app's own provision. The append-only delivery
+identity is the loop fence: `notify` inside its relay refuses, and the next drain tick founds
+nothing."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
@@ -22,6 +23,7 @@ from ufo_ext_app_notification.deliver import (
     NOTHING_TO_DELIVER,
     ONE_DELIVERY_PER_TURN,
     PORTAL_ONLY,
+    REACH_SURFACES,
     RELAY_INSTRUCTION,
     RELAY_KEY,
     RELAY_SOURCE,
@@ -62,7 +64,11 @@ from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.queue import _agent_actions, _agent_tools, _load_turn
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import SpawnResult, ToolContext, ToolResult
-from ufo.runtime.turns.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.runtime.turns.audience import (
+    SHARED_AUDIENCE,
+    Audience,
+    conversation_audience,
+)
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.records import MEMBER_ADMISSION, Agent, Turn, TurnRuntimeConfig
@@ -146,6 +152,7 @@ async def _spoke_on(
     surface: str,
     *,
     spoke_at: datetime | None = None,
+    audience: Audience | None = None,
 ) -> UUID:
     conversation_id = uuid4()
     spoke = spoke_at or datetime.now(UTC)
@@ -157,8 +164,8 @@ async def _spoke_on(
                 agent_id=agent_id,
                 surface=surface,
                 queue_key=f"D{conversation_id.hex[:9].upper()}",
-                member_id=member_id,
-                audience=str(conversation_audience(member_id)),
+                member_id=None if audience is not None else member_id,
+                audience=str(audience or conversation_audience(member_id)),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
             )
@@ -181,9 +188,9 @@ async def _spoke_on(
     return conversation_id
 
 
-def _ext(workspace_id: UUID, dbos: StubDbos) -> ExtensionContext:
+def _ext(workspace_id: UUID, dbos: StubDbos, durable: frozenset[str] = DURABLE) -> ExtensionContext:
     invoker = AdmissionInvoker(
-        admission=Admission(dbos=dbos, durable_surfaces=DURABLE), workspace_id=workspace_id
+        admission=Admission(dbos=dbos, durable_surfaces=durable), workspace_id=workspace_id
     )
     return context_for(NAME, frozenset(), invoker=invoker, member_context_read=True)
 
@@ -341,7 +348,7 @@ def test_the_relay_instruction_carries_the_silence_sentinel() -> None:
     assert is_silence_sentinel(SILENCE_SENTINEL)
 
 
-async def test_deliver_founds_one_relay_turn_in_the_members_newest_durable_conversation(
+async def test_deliver_founds_one_relay_turn_in_the_members_own_direct_chat(
     db: None,
 ) -> None:
     workspace_id, member_id, main_id, inbox_id = await _seed()
@@ -377,6 +384,78 @@ async def test_deliver_founds_one_relay_turn_in_the_members_newest_durable_conve
     assert delivered["source/ashby"]["delivered_turn_id"] is None
     assert second.is_error is True
     assert second.content[0].text == ONE_DELIVERY_PER_TURN
+
+
+async def test_deliver_takes_the_slack_dm_over_a_channel_thread_and_a_newer_imessage_chat(
+    db: None,
+) -> None:
+    """The routing the surfaces cannot fix afterwards: a channel thread is where the member talks
+    to their colleagues, so a message meant for them alone never lands there however recently they
+    spoke in it, and Slack is asked before iMessage whichever chat they used last."""
+    workspace_id, member_id, main_id, inbox_id = await _seed()
+    now = datetime.now(UTC)
+    channel = await _spoke_on(
+        workspace_id,
+        main_id,
+        member_id,
+        "slack",
+        spoke_at=now - timedelta(minutes=1),
+        audience=SHARED_AUDIENCE,
+    )
+    dm = await _spoke_on(
+        workspace_id, main_id, member_id, "slack", spoke_at=now - timedelta(days=2)
+    )
+    texts = await _spoke_on(
+        workspace_id, main_id, member_id, "imessage", spoke_at=now - timedelta(hours=1)
+    )
+    dbos = StubDbos()
+    ext = _ext(workspace_id, dbos, frozenset({"slack", "imessage"}))
+    with ws(workspace_id), agent(inbox_id):
+        triage_turn, refs = await _raise_and_drain(ext, inbox_id, member_id, main_id, "source/crm")
+        result = await deliver(
+            _tool_ctx(ext, workspace_id, inbox_id, member_id, turn_id=triage_turn),
+            DeliverInput(refs=refs, text="Acme CRM changed"),
+        )
+        dm_turns = await _turns(workspace_id, dm)
+        channel_turns = await _turns(workspace_id, channel)
+        text_turns = await _turns(workspace_id, texts)
+        [row] = await _rows(workspace_id)
+
+    assert result.content[0].text == DELIVERED.format(surface="slack")
+    [_hello, relay] = dm_turns
+    assert relay["admission_source"] == "scheduled"
+    assert row["delivered_turn_id"] == relay["id"]
+    assert len(channel_turns) == 1
+    assert len(text_turns) == 1
+
+
+async def test_deliver_reaches_imessage_when_the_member_holds_no_slack_chat_of_their_own(
+    db: None,
+) -> None:
+    """The second surface is a fallback, not a tie-break: with no Slack chat of the member's own,
+    the push goes to their texts rather than to the portal."""
+    workspace_id, member_id, main_id, inbox_id = await _seed()
+    now = datetime.now(UTC)
+    await _spoke_on(
+        workspace_id, main_id, member_id, "slack", spoke_at=now, audience=SHARED_AUDIENCE
+    )
+    texts = await _spoke_on(
+        workspace_id, main_id, member_id, "imessage", spoke_at=now - timedelta(days=4)
+    )
+    dbos = StubDbos()
+    ext = _ext(workspace_id, dbos, frozenset({"slack", "imessage"}))
+    with ws(workspace_id), agent(inbox_id):
+        triage_turn, refs = await _raise_and_drain(ext, inbox_id, member_id, main_id, "source/crm")
+        result = await deliver(
+            _tool_ctx(ext, workspace_id, inbox_id, member_id, turn_id=triage_turn),
+            DeliverInput(refs=refs, text="Acme CRM changed"),
+        )
+        text_turns = await _turns(workspace_id, texts)
+        [row] = await _rows(workspace_id)
+
+    assert result.content[0].text == DELIVERED.format(surface="imessage")
+    assert len(text_turns) == 2
+    assert row["delivered_surface"] == "imessage"
 
 
 async def test_scoped_notifications_keep_exact_capabilities_through_triage_and_delivery(
@@ -692,7 +771,7 @@ async def test_a_crash_replay_uses_the_reserved_destination_after_reach_changes(
         ctx = _tool_ctx(ext, workspace_id, inbox_id, member_id, turn_id=triage_turn)
         request = DeliverInput(refs=refs, text="Acme CRM changed")
         rows = await store.deliverable(member_id, _names(refs))
-        [reach] = await ext.member_reach(member_id)
+        [reach] = await ext.member_reach(member_id, REACH_SURFACES)
         delivery_key = RELAY_KEY.format(turn=triage_turn.hex)
         destination = await store.prepare_delivery(
             delivery_key,
@@ -730,7 +809,7 @@ async def test_a_crash_replay_uses_the_reserved_destination_after_reach_changes(
                 )
         else:
             newer_conversation = await _spoke_on(workspace_id, main_id, member_id, "slack")
-        current_reaches = await ext.member_reach(member_id)
+        current_reaches = await ext.member_reach(member_id, REACH_SURFACES)
         result = await deliver(ctx, request)
         original_turns = await _turns(workspace_id, original_conversation)
         newer_turns = (
@@ -779,11 +858,14 @@ async def test_a_second_deliver_in_any_turn_founds_nothing_and_marks_nothing(db:
     assert rows["source/ashby"]["delivered_surface"] is None
 
 
-async def test_a_member_with_no_durable_conversation_is_marked_delivered_to_the_portal(
+async def test_a_member_with_no_direct_chat_is_marked_delivered_to_the_portal(
     db: None,
 ) -> None:
+    """A member whose whole Slack presence is a channel thread has no chat of their own, so the
+    push has nowhere private to land and the rows stay on the portal."""
     workspace_id, member_id, main_id, inbox_id = await _seed()
     await _spoke_on(workspace_id, main_id, member_id, "web")
+    channel = await _spoke_on(workspace_id, main_id, member_id, "slack", audience=SHARED_AUDIENCE)
     dbos = StubDbos()
     ext = _ext(workspace_id, dbos)
     with ws(workspace_id), agent(inbox_id):
@@ -794,12 +876,14 @@ async def test_a_member_with_no_durable_conversation_is_marked_delivered_to_the_
             DeliverInput(refs=refs, text="Acme CRM changed"),
         )
         [row] = await _rows(workspace_id)
+        channel_turns = await _turns(workspace_id, channel)
 
     assert result.is_error is False
     assert result.content[0].text == DELIVERED_TO_PORTAL_ONLY
     assert row["delivered_surface"] == PORTAL_ONLY
     assert row["delivered_turn_id"] is None
     assert len(dbos.enqueued) == before
+    assert len(channel_turns) == 1
 
 
 async def test_a_subject_raised_again_after_delivery_is_delivered_again(db: None) -> None:
@@ -885,7 +969,7 @@ async def test_a_conversation_archived_under_the_read_is_skipped_for_the_next_re
     ext = _ext(workspace_id, dbos)
     with ws(workspace_id), agent(inbox_id):
         triage_turn, refs = await _raise_and_drain(ext, inbox_id, member_id, main_id, "source/crm")
-        reach = await ext.member_reach(member_id)
+        reach = await ext.member_reach(member_id, REACH_SURFACES)
         async with workspace_tx() as connection:
             await connection.execute(
                 sa.update(tables.agent)

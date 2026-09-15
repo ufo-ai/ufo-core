@@ -6,14 +6,15 @@ the Notification app's own provision, and an allowlist is declared, never typed.
 re-checks that the calling agent is this extension's provision, so a second extension naming the
 same id in its own allowlist fails loud rather than widening the fence in silence.
 
-The handler picks the channel, not the model: the member's newest durable-surface conversation
-they personally spoke in (`member_reach`), which is the founders' "best channel by last usage" as a
-sort. Delivery is an automatic turn invoked there with the notification's exact capabilities —
-admission registers the writeback because the surface is durable, so the poller posts it and the
-member replies to it in the thread they already use. A conversation whose agent was archived
-between the read and the invoke is skipped for the next; a member with no durable conversation is
-not pushed, and the rows are marked delivered to the portal alone, where the kind already lists
-them.
+The handler picks the channel, not the model: the member's own direct chat, Slack first and iMessage
+after it (`REACH_SURFACES`), never a channel thread they happen to have spoken in — a notification
+is addressed to one member, and a room their colleagues read is the wrong place for it however
+recently they typed there. Delivery is an automatic turn invoked in that chat with the
+notification's exact capabilities — admission registers the writeback because the surface is
+durable, so the poller posts it and the member replies to it in the chat they already use. A
+conversation whose agent was archived between the read and the invoke is skipped for the next; a
+member with neither chat is not pushed, and the rows are marked delivered to the portal alone,
+where the kind already lists them.
 
 The relay turn holds the skip the app cannot: the member's own agent reads their standing orders and
 what it already said to them, so the instruction gives it the silence sentinel as a whole reply and
@@ -54,6 +55,7 @@ MESSAGE_MAX = 1200
 PORTAL_ONLY = "portal"
 RELAY_KEY = "notify-deliver:{turn}"
 RELAY_SOURCE = "notification"
+REACH_SURFACES = ("slack", "imessage")
 RELAY_INSTRUCTION = (
     "\nThe Notification app decided the member should hear this now. Say it to them in your own "
     "voice, in one message: what happened, what it means for them, and the one thing you could do "
@@ -65,8 +67,8 @@ RELAY_INSTRUCTION = (
     "silent is not silence."
 )
 DELIVER_DESCRIPTION = (
-    "Brief the member's own agent on the notifications named in `refs`, on the chat surface they "
-    "used most recently. `text` is what that agent is told, not what the member reads: it says "
+    "Brief the member's own agent on the notifications named in `refs`, in the member's own "
+    "direct chat with it. `text` is what that agent is told, not what the member reads: it says "
     "the message in its own voice, in the conversation it already has with them. Say what "
     "happened and what it means for them, and leave the wording to it. That agent says nothing "
     "at all when a standing order of the member's covers what you sent. Every call costs the "
@@ -86,8 +88,8 @@ NOTHING_TO_DELIVER = (
 )
 NOT_DELIVERED = "the member's conversation refused the turn, so nothing was delivered"
 DELIVERED_TO_PORTAL_ONLY = (
-    "The member has no chat conversation on a durable surface, so nothing was pushed; the "
-    "notifications stay readable on the portal and are marked delivered there."
+    "The member has no direct chat with the agent, so nothing was pushed; the notifications stay "
+    "readable on the portal and are marked delivered there."
 )
 DELIVERED = "Delivered on {surface}."
 
@@ -162,7 +164,7 @@ async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult:
     except DeliveryRequestConflict:
         return _refusal(ONE_DELIVERY_PER_TURN)
     if destination is None:
-        reaches = await ext.member_reach(member_id)
+        reaches = await ext.member_reach(member_id, REACH_SURFACES)
         if not reaches:
             await store.mark_delivered(rows, turn_id=None, surface=PORTAL_ONLY)
             return ToolResult(content=(TextContent(text=DELIVERED_TO_PORTAL_ONLY),))
@@ -195,7 +197,7 @@ async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult:
         except AgentArchived:
             remaining = tuple(
                 reach
-                for reach in await ext.member_reach(member_id)
+                for reach in await ext.member_reach(member_id, REACH_SURFACES)
                 if DeliveryDestination(
                     conversation_id=reach.conversation_id,
                     agent_id=reach.agent_id,

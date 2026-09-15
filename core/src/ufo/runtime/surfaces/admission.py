@@ -72,7 +72,7 @@ from ufo.runtime.ext.context import AgentArchived, MemberReach
 from ufo.runtime.ext.surface import Admitted, conversation_name
 from ufo.runtime.hub import Absorbed, ArrivalQueued, Hub, Reply
 from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE, Seats
-from ufo.runtime.turns.audience import readable_audiences
+from ufo.runtime.turns.audience import conversation_audience
 from ufo.runtime.workspace import ws_current
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -1456,13 +1456,23 @@ class AdmissionInvoker:
     async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None:
         return await self.admission.redispatch(self.workspace_id, conversation_id, ended_turn_id)
 
-    async def member_reach(self, member_id: UUID, limit: int) -> tuple[MemberReach, ...]:
-        """The conversations an invoke reaches `member_id` through: on a surface this admission
-        registers writebacks for, bound to a live agent, with an audience the member reads — their
-        own or the workspace's, never a room's — and holding a turn the member spoke, newest such
-        turn first. `speaker_member_id` is the privacy fence as well as the recency signal: only a
-        conversation this member personally spoke in, and can read, is ever returned. An archived
-        agent's conversation admits no turn, so it is no reach."""
+    async def member_reach(
+        self, member_id: UUID, surfaces: tuple[str, ...], limit: int
+    ) -> tuple[MemberReach, ...]:
+        """The conversations an invoke reaches `member_id` through: their own direct chat on each
+        of `surfaces`, the earliest-named surface first and the newest they spoke in within one.
+        The audience is the address and the fence at once — a conversation carries a message meant
+        for this member alone only when its audience is this member's own, so a channel thread they
+        once spoke in is no reach however recently they spoke there. A surface this admission
+        registers no writeback for is no reach either, and neither is a conversation bound to an
+        archived agent, which admits no turn."""
+        reachable = tuple(name for name in surfaces if name in self.admission.durable_surfaces)
+        if not reachable:
+            return ()
+        rank = sa.case(
+            {name: index for index, name in enumerate(reachable)},
+            value=tables.conversation.c.surface,
+        )
         last_spoke_at = sa.func.max(tables.turn.c.created_at).label("last_spoke_at")
         async with workspace_tx() as connection:
             rows = (
@@ -1483,8 +1493,8 @@ class AdmissionInvoker:
                         tables.conversation.c.workspace_id == self.workspace_id,
                         tables.turn.c.workspace_id == self.workspace_id,
                         tables.agent.c.archived_at.is_(None),
-                        tables.conversation.c.surface.in_(tuple(self.admission.durable_surfaces)),
-                        tables.conversation.c.audience.in_(readable_audiences(member_id)),
+                        tables.conversation.c.surface.in_(reachable),
+                        tables.conversation.c.audience == conversation_audience(member_id),
                         tables.turn.c.speaker_member_id == member_id,
                     )
                     .group_by(
@@ -1492,7 +1502,7 @@ class AdmissionInvoker:
                         tables.conversation.c.id,
                         tables.conversation.c.agent_id,
                     )
-                    .order_by(last_spoke_at.desc(), tables.conversation.c.id)
+                    .order_by(rank, last_spoke_at.desc(), tables.conversation.c.id)
                     .limit(limit)
                 )
             ).all()

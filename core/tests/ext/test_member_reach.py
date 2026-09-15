@@ -1,7 +1,8 @@
 """The reach projection: where an invoke reaches a member who is not in the invoking conversation.
-Only a durable-surface conversation the member reads — their own or the workspace's — in which
-they personally spoke is returned, newest such turn first; a live surface, another member's room,
-a private channel, and a conversation they never spoke in are all absent."""
+Only a durable-surface chat addressed to that member alone — their own audience — in which they
+personally spoke is returned, in the surface order the caller names and newest first within one
+surface; a shared channel thread, a live surface, another member's room, a private channel, and a
+conversation they never spoke in are all absent."""
 
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -128,12 +129,14 @@ async def _conversation(
     return conversation_id
 
 
-async def test_member_reach_is_the_members_readable_durable_conversations_newest_first(
+async def test_member_reach_is_the_members_own_chats_in_the_order_the_caller_names(
     db: None,
 ) -> None:
-    """Reach is participation inside a readable audience: the member's own conversations and the
-    workspace-shared channel they spoke in, never a private channel they spoke in (nobody reads a
-    room here), another member's DM, a conversation they never spoke in, or a live surface."""
+    """Reach is a chat addressed to this member alone, taken in the caller's surface order: the
+    Slack DM comes first because the caller named Slack first, not because of when anybody spoke,
+    and the shared channel thread the member spoke in an hour ago is no reach at all. A room they
+    spoke in, another member's DM, a live surface, and a chat of their own they never spoke in are
+    all absent."""
     workspace_id, member_id, agent_id = await _seed()
     other = await _member(workspace_id)
     now = datetime.now(UTC)
@@ -153,13 +156,21 @@ async def test_member_reach_is_the_members_readable_durable_conversations_newest
         spoken_by=member_id,
         spoke_at=now - timedelta(hours=1),
     )
-    shared_channel = await _conversation(
+    older_imessage = await _conversation(
+        workspace_id,
+        agent_id,
+        "imessage",
+        member_id,
+        spoken_by=member_id,
+        spoke_at=now - timedelta(days=3),
+    )
+    await _conversation(
         workspace_id,
         agent_id,
         "slack",
         None,
         spoken_by=member_id,
-        spoke_at=now - timedelta(days=1),
+        spoke_at=now - timedelta(hours=1),
     )
     await _conversation(workspace_id, agent_id, "web", member_id, spoken_by=member_id, spoke_at=now)
     await _conversation(workspace_id, agent_id, "slack", other, spoken_by=other, spoke_at=now)
@@ -180,18 +191,28 @@ async def test_member_reach_is_the_members_readable_durable_conversations_newest
     with ws(workspace_id):
         reach = await context_for(
             "sample", frozenset(), invoker=invoker, member_context_read=True
-        ).member_reach(member_id)
-        one = await invoker.member_reach(member_id, 1)
-        nobody = await invoker.member_reach(uuid4(), 4)
+        ).member_reach(member_id, ("slack", "imessage"))
+        imessage_first = await invoker.member_reach(member_id, ("imessage", "slack"), 4)
+        one = await invoker.member_reach(member_id, ("slack", "imessage"), 1)
+        slack_alone = await invoker.member_reach(member_id, ("slack",), 4)
+        unreachable = await invoker.member_reach(member_id, ("web",), 4)
+        nobody = await invoker.member_reach(uuid4(), ("slack", "imessage"), 4)
 
     assert [(hit.surface, hit.conversation_id) for hit in reach] == [
-        ("imessage", newer_imessage),
-        ("slack", shared_channel),
         ("slack", older_slack),
+        ("imessage", newer_imessage),
+        ("imessage", older_imessage),
     ]
     assert all(hit.agent_id == agent_id for hit in reach)
-    assert reach[0].last_spoke_at > reach[1].last_spoke_at > reach[2].last_spoke_at
-    assert [hit.conversation_id for hit in one] == [newer_imessage]
+    assert reach[1].last_spoke_at > reach[2].last_spoke_at
+    assert [hit.conversation_id for hit in imessage_first] == [
+        newer_imessage,
+        older_imessage,
+        older_slack,
+    ]
+    assert [hit.conversation_id for hit in one] == [older_slack]
+    assert [hit.conversation_id for hit in slack_alone] == [older_slack]
+    assert unreachable == ()
     assert nobody == ()
 
 
@@ -230,7 +251,7 @@ async def test_member_reach_skips_an_archived_agents_conversation(db: None) -> N
         admission=Admission(dbos=_NoDbos(), durable_surfaces=DURABLE), workspace_id=workspace_id
     )
     with ws(workspace_id):
-        reach = await invoker.member_reach(member_id, 4)
+        reach = await invoker.member_reach(member_id, ("slack", "imessage"), 4)
 
     assert [hit.conversation_id for hit in reach] == [live]
 
@@ -265,8 +286,10 @@ async def test_member_reach_is_member_data_and_needs_an_invoker(db: None) -> Non
     )
     with ws(workspace_id):
         with pytest.raises(PermissionError):
-            await context_for("sample", frozenset(), invoker=invoker).member_reach(member_id)
+            await context_for("sample", frozenset(), invoker=invoker).member_reach(
+                member_id, ("slack",)
+            )
         with pytest.raises(RuntimeError, match="invoker"):
             await context_for("sample", frozenset(), member_context_read=True).member_reach(
-                member_id
+                member_id, ("slack",)
             )
