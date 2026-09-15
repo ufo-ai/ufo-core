@@ -87,6 +87,13 @@ and revoked the same way, though a shared agent's own homepage screen stays limi
 admins. A member who asks for a new app chooses whether it is theirs alone or open to everyone in
 the workspace.
 
+A member's own conversation with an agent in the web portal is private at birth: only they and a
+workspace admin read it, and an admin who opens one is recorded doing so. Its title bar carries the
+control to change that — sharing it makes every member able to read it, past messages included, and
+what the agent notes there afterward joins shared memory rather than the member's own; making it
+private again is refused once another member has spoken in it. A Slack or terminal conversation
+takes its audience from where it runs and carries no such control.
+
 ## Members and admins
 
 A workspace can have several admins, and an admin asking you to make someone else an admin is

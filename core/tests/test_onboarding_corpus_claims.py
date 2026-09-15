@@ -669,6 +669,42 @@ CLAIMS = (
         ),
     ),
     Claim(
+        claim="a member's own portal conversation is private at birth",
+        corpus="references/capabilities.md",
+        phrase="A member's own conversation with an agent in the web portal is private at birth",
+        source=WEB_SURFACE,
+        pattern=r"A portal chat is its member's at birth\.",
+    ),
+    Claim(
+        claim="sharing a conversation lets every member read it, past messages included",
+        corpus="references/capabilities.md",
+        phrase="sharing it makes every member able to read it, past messages included",
+        source=WEB_AUDIENCE,
+        pattern=(
+            r"SHARED_WITH_WORKSPACE = \(\n"
+            r'\s+"Every member of the workspace can read this conversation, including its past'
+            r' messages\. "\n'
+            r'\s+"Notes made here are the workspace\'s by default\."\n'
+            r"\)"
+        ),
+    ),
+    Claim(
+        claim="making a conversation private again is refused once another member has spoken in it",
+        corpus="references/capabilities.md",
+        phrase="making it\nprivate again is refused once another member has spoken in it",
+        source=WEB_AUDIENCE,
+        pattern=r'"Another member has spoken in this conversation, so it stays with the'
+        r' workspace\."',
+    ),
+    Claim(
+        claim="an admin who opens a member's private conversation is recorded doing so",
+        corpus="references/capabilities.md",
+        phrase="an admin who opens one is recorded doing so",
+        source=WEB_AUDIENCE,
+        pattern=r'confirm="This records that you opened another member\'s private'
+        r' conversation\.",',
+    ),
+    Claim(
         claim="the billing screen turns automatic refills on or off, no chat needed",
         corpus="references/billing-and-seats.md",
         phrase="turn\n  automatic refills on or off",
