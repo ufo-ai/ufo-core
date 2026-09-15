@@ -40,11 +40,7 @@ from pathlib import Path
 from uuid import UUID
 
 from ufo.sdk.o11y import log
-from ufo.sdk.sandbox import (
-    SANDBOX_MODULE_BOOTSTRAP,
-    SANDBOX_PYTHON_FLAG,
-    shell_path,
-)
+from ufo.sdk.sandbox import SANDBOX_PYTHON_FLAG, shell_path
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sites.store import HostedSites
 
@@ -163,7 +159,6 @@ import signal
 import sys
 import time
 
-from containment import ContainmentError, contained_file
 from PIL import Image
 
 FLAGS = "{flags}"
@@ -183,7 +178,7 @@ READ_BYTES = 65536
 
 
 def main():
-    browser, url, width, height, scale, shot, profile, root = sys.argv[1:9]
+    browser, url, width, height, scale, shot, profile = sys.argv[1:8]
     driven = None
     signal.signal(signal.SIGALRM, expired)
     signal.alarm(DEADLINE)
@@ -195,11 +190,8 @@ def main():
         picture = settled(driven, url, int(width), int(height), float(scale))
         if picture is None:
             raise SystemExit("the page drew one flat colour, which is no picture of it")
-        try:
-            with contained_file(shot, root) as target:
-                target.replace_bytes(picture, 0o600)
-        except ContainmentError as error:
-            raise SystemExit(str(error))
+        with open(shot, "wb") as handle:
+            handle.write(picture)
     finally:
         signal.alarm(0)
         if driven is not None:
@@ -369,13 +361,11 @@ class Driven:
 main()
 '''
 """Drive one browser over the DevTools protocol and write the settled picture — `argv` is the
-browser, the url, the width, the height, the device scale factor, the shot, the browser profile
-directory, and the workspace root.
+browser, the url, the width, the height, the device scale factor, the shot, and the browser profile
+directory.
 
 The protocol is spoken from the standard library over the browser's own pipe, so the shot costs the
-browser no driver the sandbox does not already carry. The picture goes down through the containment
-guard, the way every other write inside the sandbox does: the shot's name sits in a directory the
-agent writes."""
+browser no driver the sandbox does not already carry."""
 SHOT_HEREDOC = "UFO_SHOT_DRIVER"
 SHOT_CMD = (
     "browser=\n"
@@ -386,7 +376,7 @@ SHOT_CMD = (
     'profile="$(mktemp -d ' + CARD_PROFILE_TEMPLATE + ')"\n'
     "trap 'rm -rf \"$profile\"' EXIT INT TERM\n"
     'python3 {isolated} - "$browser" {url} {width} {height}'
-    ' {scale} {shot} "$profile" {root} <<\'' + SHOT_HEREDOC + "'\n"
+    ' {scale} {shot} "$profile" <<\'' + SHOT_HEREDOC + "'\n"
     "{driver}\n" + SHOT_HEREDOC + "\n"
     "test -s {shot}"
 )
@@ -394,47 +384,39 @@ SHOT_CMD = (
 PAGE_PROG = """
 import base64
 import sys
-from containment import ContainmentError, contained_file
 
-try:
-    with contained_file(sys.argv[2], sys.argv[3]) as shot:
-        raw = shot.read_bytes({limit} + 1)
-    if len(raw) > {limit}:
-        raise SystemExit(sys.argv[2] + " is larger than a page shot may be")
-    with contained_file(sys.argv[1], sys.argv[3]) as page:
-        markup = page.read_text({limit})
-        uri = "data:image/png;base64," + base64.b64encode(raw).decode()
-        page.replace_text(markup.replace("{token}", uri), 0o600)
-except ContainmentError as error:
-    raise SystemExit(str(error))
+with open(sys.argv[2], "rb") as handle:
+    raw = handle.read({limit} + 1)
+if len(raw) > {limit}:
+    raise SystemExit(sys.argv[2] + " is larger than a page shot may be")
+with open(sys.argv[1], encoding="utf-8") as handle:
+    markup = handle.read()
+uri = "data:image/png;base64," + base64.b64encode(raw).decode()
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(markup.replace("{token}", uri))
 """
-"""Put the shot into the page the card is drawn from — `argv` is the page, the shot, the workspace
-root. The page arrives already written with `SHOT_TOKEN` where the `data:` URI belongs, so the only
-thing this decides is which bytes that token becomes."""
+"""Put the shot into the page the card is drawn from — `argv` is the page and the shot. The page
+arrives already written with `SHOT_TOKEN` where the `data:` URI belongs, so the only thing this
+decides is which bytes that token becomes."""
 
 ENCODE_PROG = """
 import hashlib
 import io
 import sys
 from PIL import Image
-from containment import ContainmentError, contained_file
 
-try:
-    with contained_file(sys.argv[1], sys.argv[3]) as drawn:
-        with drawn.open_bytes() as handle:
-            card = Image.open(handle).convert("RGB")
-    encoded = io.BytesIO()
-    card.save(encoded, format="JPEG", quality={quality}, optimize=True, progressive=True)
-    payload = encoded.getvalue()
-    with contained_file(sys.argv[2], sys.argv[3]) as target:
-        target.replace_bytes(payload, 0o600)
-except ContainmentError as error:
-    raise SystemExit(str(error))
+with Image.open(sys.argv[1]) as drawn:
+    card = drawn.convert("RGB")
+encoded = io.BytesIO()
+card.save(encoded, format="JPEG", quality={quality}, optimize=True, progressive=True)
+payload = encoded.getvalue()
+with open(sys.argv[2], "wb") as handle:
+    handle.write(payload)
 print(hashlib.sha256(payload).hexdigest())
 """
 """Encode the drawn card as the progressive JPEG a card is and answer its digest — `argv` is the
-drawn PNG, the card, the workspace root. Chromium writes baseline JPEG at a quality of its own
-choosing, so this one step runs through the image library; the composition is already drawn."""
+drawn PNG and the card. Chromium writes baseline JPEG at a quality of its own choosing, so this one
+step runs through the image library; the composition is already drawn."""
 
 CARD_SHOT_DRAWN = f"width:{SHOT_WIDTH}px;height:{CARD_HEIGHT}px"
 """How the card's own shot is drawn: 1488x1260 at half size, so the page it laid out for this box is
@@ -518,8 +500,8 @@ def _lockup() -> str:
     return drawing[drawing.index("<svg") :]
 
 
-def shot_command(*, url: str, width: int, height: int, scale: int, shot: str, root: str) -> str:
-    """Draw `url` into a contained `shot` with a disposable browser profile."""
+def shot_command(*, url: str, width: int, height: int, scale: int, shot: str) -> str:
+    """Draw `url` into `shot` with a disposable browser profile."""
     return SHOT_CMD.format(
         deadline=SHOT_DEADLINE_SECONDS,
         isolated=SANDBOX_PYTHON_FLAG,
@@ -528,9 +510,7 @@ def shot_command(*, url: str, width: int, height: int, scale: int, shot: str, ro
         height=height,
         shot=shell_path(shot),
         url=shlex.quote(url),
-        root=shell_path(root),
-        driver=SANDBOX_MODULE_BOOTSTRAP
-        + SHOT_PROG.format(
+        driver=SHOT_PROG.format(
             flags=SHOT_FLAGS,
             contained=CONTAINED_FLAGS,
             deadline=SHOT_DEADLINE_SECONDS,
@@ -585,11 +565,9 @@ async def _shoot(
 ) -> bool:
     """Draw one shot into `shot`, answering whether it landed.
 
-    The name is emptied first, through the guarded write every copy-in runs through, and the driver
-    puts the picture down through the same guard: the name sits in a directory the agent writes.
-    Emptied rather than deleted, because a non-empty shot is the command's verdict and the name is
-    the same one this site's last deploy drew into — a run that refuses what the page drew leaves it
-    empty, and the site keeps the picture it had."""
+    The name is emptied first rather than deleted, because a non-empty shot is the command's verdict
+    and the name is the same one this site's last deploy drew into — a run that refuses what the
+    page drew leaves it empty, and the site keeps the picture it had."""
     try:
         await ctx.sandbox.write_runtime_path(shot, b"")
     except OSError as refused:
@@ -602,7 +580,6 @@ async def _shoot(
             height=height,
             scale=scale,
             shot=shot,
-            root=await ctx.sandbox.runtime_path(TOOL_OUTPUT_DIR),
         ),
         timeout_s=CARD_TIMEOUT_SECONDS,
     )
@@ -636,7 +613,6 @@ async def _compose(
         PAGE_PROG.format(limit=SHOT_BYTES_MAX, token=SHOT_TOKEN),
         page,
         shot,
-        await ctx.sandbox.runtime_path(TOOL_OUTPUT_DIR),
         timeout_s=CARD_TIMEOUT_SECONDS,
     )
     if placed.exit_code != 0:
@@ -652,7 +628,6 @@ async def _compose(
         ENCODE_PROG.format(quality=CARD_QUALITY),
         drawn_card,
         card,
-        await ctx.sandbox.runtime_path(TOOL_OUTPUT_DIR),
         timeout_s=CARD_TIMEOUT_SECONDS,
     )
     digest = encoded.stdout.strip()

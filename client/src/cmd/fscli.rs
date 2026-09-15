@@ -1,5 +1,4 @@
-//! Checks 2 to 4 of `core/src/ufo/harness/containment.py`, in Rust. Refusal messages are
-//! `ContainmentError`'s own, because the host maps them to the model's `ValueError` and dashboards group on them.
+//! `ufo fs`: the file ops, each path resolved through `guard`.
 
 #[cfg(unix)]
 use std::io::Write;

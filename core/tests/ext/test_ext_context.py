@@ -1101,31 +1101,6 @@ async def test_conversation_files_refuse_another_workspaces_conversation(
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_conversation_files_prune_refuses_a_symlinked_prefix(
-    db: None, tmp_path: Path
-) -> None:
-    """Prune is the sharpest verb here — it deletes. A link planted at the prefix would aim the
-    deletion at whatever it points to, so the directory is proved to be a real one inside the
-    workspace before a single name is unlinked."""
-    workspace_id = await _workspace()
-    root = tmp_path / "workspaces"
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    for minute in range(3):
-        (outside / f"host-{minute}.txt").write_bytes(b"host file")
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id)
-        files = _files(_sandboxes(root))
-        await files.write(conversation_id, "keep/anchor.jsonl", b"{}\n")
-        (root / str(conversation_id) / "log").symlink_to(outside, target_is_directory=True)
-
-        with pytest.raises(OSError, match="escapes"):
-            await files.prune(conversation_id, "log", keep=1)
-
-    assert len(list(outside.iterdir())) == 3
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_conversation_files_prune_keeps_the_newest(db: None, tmp_path: Path) -> None:
     """An unattended writer is bounded: prune keeps the newest `keep` entries under the prefix and
     drops the rest, and never reaches a sibling directory."""

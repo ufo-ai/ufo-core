@@ -10,7 +10,6 @@ import pytest
 from pydantic import ValidationError
 from ufo_ext_gbrain.folder import GbrainFolderConfig, GbrainFolderSource
 
-from ufo.sdk.sandbox import ContainmentError
 from ufo.sdk.sources import SourceAuth, StreamFault, SyncResult
 
 
@@ -52,26 +51,13 @@ async def test_empty_root_is_an_empty_snapshot(tmp_path: Path) -> None:
 
 
 async def test_missing_root_fails_closed(tmp_path: Path) -> None:
-    with pytest.raises(ContainmentError, match="gone"):
+    with pytest.raises(FileNotFoundError, match="gone"):
         await _fetch(tmp_path / "gone")
 
 
 def test_relative_root_is_refused() -> None:
     with pytest.raises(ValidationError, match="pattern"):
         GbrainFolderConfig(root="notes")
-
-
-async def test_symlink_is_never_followed(tmp_path: Path) -> None:
-    outside = tmp_path / "outside.md"
-    outside.write_text("# Secret\n")
-    root = tmp_path / "brain"
-    root.mkdir()
-    (root / "kept.md").write_text("# Kept\n")
-    (root / "link.md").symlink_to(outside)
-
-    result = await _fetch(root)
-
-    assert [page.source_ref for page in result.pages] == ["kept.md"]
 
 
 async def test_oversize_folder_names_the_cap(tmp_path: Path) -> None:

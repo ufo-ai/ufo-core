@@ -23,7 +23,6 @@ from cryptography.fernet import Fernet
 from dbos import DBOSClient
 
 from ufo.db import workspace_tx
-from ufo.harness.containment import LocationEscape, NonDirectoryAncestor
 from ufo.harness.sandbox import terminal
 from ufo.harness.sandbox.conversation import (
     SANDBOX_IMAGE_REF,
@@ -287,7 +286,7 @@ async def test_open_sandbox_refuses_a_workspace_root_that_is_not_a_directory(
     workspace_id, conversation_id = await _conversation()
     (tmp_path / "workspaces").write_bytes(b"not a directory")
 
-    with ws(workspace_id), pytest.raises(NonDirectoryAncestor, match=WORKSPACE_ROOT_SETTING):
+    with ws(workspace_id), pytest.raises(NotADirectoryError, match=WORKSPACE_ROOT_SETTING):
         await _open_sandbox(
             _sandboxes(LocalCarrier(), "local", tmp_path),
             RUN_TOKENS,
@@ -297,33 +296,6 @@ async def test_open_sandbox_refuses_a_workspace_root_that_is_not_a_directory(
             (),
         )
 
-    assert await _stored_handle(conversation_id) is None
-
-
-async def test_open_sandbox_refuses_a_symlinked_conversation_directory(
-    db: None, tmp_path: Path
-) -> None:
-    """A link already holding the conversation's own name is the same escape one level down: the
-    directory is re-opened without following it, so the workspace is never pointed out of the
-    root."""
-    workspace_id, conversation_id = await _conversation()
-    root = tmp_path / "workspaces"
-    root.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (root / str(conversation_id)).symlink_to(outside, target_is_directory=True)
-
-    with ws(workspace_id), pytest.raises(LocationEscape):
-        await _open_sandbox(
-            _sandboxes(LocalCarrier(), "local", tmp_path),
-            RUN_TOKENS,
-            _turn(workspace_id, conversation_id),
-            {},
-            None,
-            (),
-        )
-
-    assert list(outside.iterdir()) == []
     assert await _stored_handle(conversation_id) is None
 
 

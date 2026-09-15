@@ -18,7 +18,7 @@ import tarfile
 from io import BytesIO
 from pathlib import Path
 
-from ufo.sdk.sandbox import WORKSPACE_DIR, workspace_path
+from ufo.sdk.sandbox import workspace_path
 from ufo.sdk.tools import ToolContext
 from ufo_ext_sites.store import HostedSite, SourceManifest
 
@@ -46,25 +46,16 @@ whose page names one is a project either way. The config and the preview frame a
 components as current as the pod that deployed it, and a page an app extension ships is audited in
 the same portal frame a generated one is."""
 PROJECT_FILE_ABSENT = 17
-PROJECT_FILE_READ = """from containment import ContainmentError, PathNotFound, contained_file
-import sys
+PROJECT_FILE_READ = f"""import sys
 
 try:
-    with contained_file(sys.argv[1], sys.argv[2]) as target:
-        text = target.read_text(int(sys.argv[3]))
-except PathNotFound:
-    raise SystemExit(17)
-except (ContainmentError, OSError) as error:
+    with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+        text = handle.read(int(sys.argv[2]))
+except FileNotFoundError:
+    raise SystemExit({PROJECT_FILE_ABSENT})
+except OSError as error:
     raise SystemExit(str(error))
 sys.stdout.write(text)"""
-"""Read one file of a project through the containment guard, answering 17 when it is not there.
-
-The guard is what makes a project path safe to read: the directory is the agent's, so a name in it
-can be a symlink out of the workspace, and `contained_file` re-derives every component under the
-root rather than trusting the path it was handed. `PathNotFound` is what absence arrives as: the
-guard turns every missing component and missing target into its own `ContainmentError` subclass,
-which is not a `FileNotFoundError`, so catching that instead would send an optional file's absence
-out as a read failure."""
 UPLOAD_SCRIPT = (
     'while [ "$#" -ge 2 ]; do curl -sS --fail-with-body -T "$1" --url "$2" || exit 1; shift 2; done'
 )
@@ -72,53 +63,21 @@ DOWNLOAD_SCRIPT = (
     'while [ "$#" -ge 2 ]; do '
     'curl -sS --fail-with-body --create-dirs -o "$1" --url "$2" || exit 1; shift 2; done'
 )
-CLAIM_TREE_PROG = """
-import os
-import sys
-from containment import ContainmentError, contained_dir, contained_file
-
-try:
-    if os.path.lexists(sys.argv[2]):
-        root = contained_dir(sys.argv[2], sys.argv[1])
-        for base, dirs, names in os.walk(root):
-            dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(base, name))]
-            for name in names:
-                with contained_file(os.path.join(base, name), root) as held:
-                    held.unlink()
-    for path in sys.argv[3:]:
-        with contained_file(path, sys.argv[1], create_parent=True) as target:
-            target.replace_bytes(b"", 0o644)
-except ContainmentError as error:
-    raise SystemExit(str(error))
-"""
-CLAIM_TIMEOUT_SECONDS = 120
+CLEAR_TIMEOUT_SECONDS = 120
 UNPACK_KIT_PROG = """
 import os
 import sys
 import tarfile
-from containment import ContainmentError, contained_file
 
-try:
-    with tarfile.open(sys.argv[2]) as archive:
-        for member in archive.getmembers():
-            if not member.isfile():
-                raise SystemExit(f"the kit archive holds {member.name}, which is not a file")
-            held = archive.extractfile(member)
-            with contained_file(
-                f"{sys.argv[3]}/{member.name}", sys.argv[1], create_parent=True
-            ) as target:
-                target.replace_bytes(held.read(), 0o644)
-    os.unlink(sys.argv[2])
-except ContainmentError as error:
-    raise SystemExit(str(error))
+with tarfile.open(sys.argv[1]) as archive:
+    for member in archive.getmembers():
+        target = os.path.join(sys.argv[2], member.name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with archive.extractfile(member) as held, open(target, "wb") as handle:
+            handle.write(held.read())
+os.unlink(sys.argv[1])
 """
-"""Unpack the kit member by member through the containment guard rather than with `extractall` or
-`tar`: every path is re-derived and checked under the workspace root, a member that is not a regular
-file stops the read, and no name in the archive can reach outside the destination or ride a symlink
-the agent left in it. `python3` is in the sandbox image by contract; `tar` is not.
-
-The archive is unlinked here rather than by a command after it, so the transfer leaves nothing
-behind in the directory a redeploy carries and the whole unpack is one round trip."""
+"""`python3` is in the sandbox image by contract; `tar` is not."""
 UNPACK_TIMEOUT_SECONDS = 300
 
 
@@ -175,13 +134,9 @@ async def materialize_source(
     answers without a transfer, which also leaves an agent's in-progress edits alone: the stamp can
     only match while the store still holds exactly what the last pull delivered.
 
-    Before either store's writes, the destination directory is emptied and every selected path
-    claimed through the containment guard — the emptying because a file a newer deploy dropped, or
-    a page an earlier build wrote here, must not survive a re-pull and ride the next redeploy back
-    onto the site; the claim because `curl -o` follows a symlink and truncates what it finds, and
-    the names sit in a directory the agent writes. Directories are made by an `O_NOFOLLOW` descent
-    and each name becomes a fresh empty regular file. The kit's own names are checked the same way
-    as they are unpacked, which is why the archive lands after the emptying rather than before."""
+    The destination is removed before either store's writes: a file a newer deploy dropped, or a
+    page an earlier build wrote here, must not survive a re-pull and ride the next redeploy back
+    onto the site."""
     if site.source_manifest is None:
         raise RuntimeError(f"site {site.name!r} has no stored source to materialize")
     manifest = SourceManifest.model_validate_json(site.source_manifest)
@@ -193,17 +148,9 @@ async def materialize_source(
     )
     if held.stdout.strip() == str(site.deploy_generation):
         return dest, paths
-    claimed = await ctx.sandbox.python(
-        CLAIM_TREE_PROG,
-        WORKSPACE_DIR,
-        dest,
-        *(f"{dest}/{path}" for path in paths),
-        timeout_s=CLAIM_TIMEOUT_SECONDS,
-    )
-    if claimed.exit_code != 0:
-        raise RuntimeError(
-            claimed.stderr.strip() or f"claiming the source tree under {dest} failed"
-        )
+    cleared = await ctx.sandbox.bash(f"rm -rf {shlex.quote(dest)}", timeout_s=CLEAR_TIMEOUT_SECONDS)
+    if cleared.exit_code != 0:
+        raise RuntimeError(cleared.stderr.strip() or f"removing {dest} failed")
     try:
         downloads = [
             (
@@ -224,22 +171,15 @@ async def materialize_source(
     return dest, paths
 
 
-async def unpack_page_kit(ctx: ToolContext, dest: str, runtime_root: str | None = None) -> None:
+async def unpack_page_kit(ctx: ToolContext, dest: str) -> None:
     """Write the deploy's kit under `<dest>/sdk/`, the sibling an app page project's `./sdk/kit.js`
     alias resolves through, so a page builds against components as current as the pod that deployed
     it rather than the ones its first build froze. One write and one unpack, which also unlinks the
     archive: a stray 2.3 MB file in the directory the build carries would ride onto the site."""
     archive = f"{dest}/{KIT_ARCHIVE}"
-    if runtime_root is None:
-        await ctx.sandbox.write_file(archive, PAGE_KIT_ARCHIVE)
-    else:
-        await ctx.sandbox.write_runtime_path(archive, PAGE_KIT_ARCHIVE)
+    await ctx.sandbox.write_file(archive, PAGE_KIT_ARCHIVE)
     unpacked = await ctx.sandbox.python(
-        UNPACK_KIT_PROG,
-        runtime_root or WORKSPACE_DIR,
-        archive,
-        dest,
-        timeout_s=UNPACK_TIMEOUT_SECONDS,
+        UNPACK_KIT_PROG, archive, dest, timeout_s=UNPACK_TIMEOUT_SECONDS
     )
     if unpacked.exit_code != 0:
         raise RuntimeError(unpacked.stderr.strip() or f"unpacking the kit under {dest} failed")

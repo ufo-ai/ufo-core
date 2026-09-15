@@ -28,7 +28,6 @@ from ufo.harness.sandbox.session import (
     PROBE_TOKEN_KIND,
     PROXY_ENV_NAMES,
     PROXY_PASSWORD,
-    SANDBOX_MODULE_BOOTSTRAP,
     SANDBOX_PYTHON_FLAG,
     SENTINEL_MODEL_KEY,
     SKILL_LOAD_PROG,
@@ -567,10 +566,9 @@ async def _check_skills_load_from_one_staged_container_payload() -> None:
             "python3",
             SANDBOX_PYTHON_FLAG,
             "-c",
-            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            SKILL_LOAD_PROG,
             staged,
             SYSTEM_SKILLS_ROOT,
-            runtime_root,
             hashlib.sha256(content).hexdigest(),
         )
     ]
@@ -656,9 +654,9 @@ async def _check_a_stale_sandbox_refreshes_before_loading_the_requested_system_s
 
     assert roots == {"sandbox": "/home/user/.ufo/skills/sandbox"}
     assert len(carrier.argvs) == 3
-    assert carrier.argvs[0][3] == f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}"
-    assert carrier.argvs[1][3] == f"{SANDBOX_MODULE_BOOTSTRAP}{SYSTEM_SKILL_SYNC_PROG}"
-    assert carrier.argvs[2][3] == f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}"
+    assert carrier.argvs[0][3] == SKILL_LOAD_PROG
+    assert carrier.argvs[1][3] == SYSTEM_SKILL_SYNC_PROG
+    assert carrier.argvs[2][3] == SKILL_LOAD_PROG
     assert all(argv[0] == "python3" for argv in carrier.argvs)
     runtime_root = f"/home/user/.ufo/runs/{session.handle.conversation_id.hex}"
     assert carrier.writes[0][0].startswith(f"{runtime_root}/{SKILL_STAGING_DIRNAME}/skill-load-")
@@ -696,10 +694,9 @@ def test_current_loader_refreshes_a_stale_bundle_and_installs_an_inactive_user_s
                 sys.executable,
                 "-I",
                 "-c",
-                f"{SANDBOX_MODULE_BOOTSTRAP}{SYSTEM_SKILL_SYNC_PROG}",
+                SYSTEM_SKILL_SYNC_PROG,
                 str(archive),
                 str(root),
-                str(tmp_path),
                 hashlib.sha256(bundle.archive).hexdigest(),
             ],
             check=True,
@@ -733,10 +730,9 @@ def test_current_loader_refreshes_a_stale_bundle_and_installs_an_inactive_user_s
             sys.executable,
             "-I",
             "-c",
-            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            SKILL_LOAD_PROG,
             str(payload),
             str(root),
-            str(tmp_path),
             hashlib.sha256(payload.read_bytes()).hexdigest(),
         ],
         check=True,
@@ -771,10 +767,9 @@ def test_privileged_loader_refuses_a_changed_staged_payload(tmp_path: Path) -> N
             sys.executable,
             "-I",
             "-c",
-            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            SKILL_LOAD_PROG,
             str(payload),
             str(root),
-            str(tmp_path),
             hashlib.sha256(original).hexdigest(),
         ],
         capture_output=True,
@@ -817,10 +812,9 @@ def test_privileged_loader_refuses_an_internal_skill_name(tmp_path: Path) -> Non
             sys.executable,
             "-I",
             "-c",
-            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            SKILL_LOAD_PROG,
             str(payload),
             str(root),
-            str(tmp_path),
             hashlib.sha256(payload.read_bytes()).hexdigest(),
         ],
         capture_output=True,
@@ -832,16 +826,11 @@ def test_privileged_loader_refuses_an_internal_skill_name(tmp_path: Path) -> Non
     assert manifest.read_text() == '{"skills":{}}'
 
 
-def test_privileged_loader_refuses_a_nested_skill_name_through_a_symlink(
-    tmp_path: Path,
-) -> None:
+def test_privileged_loader_refuses_a_nested_skill_name(tmp_path: Path) -> None:
     root = tmp_path / "skills"
     root.mkdir()
     manifest = root / ".system-manifest.json"
     manifest.write_text('{"skills":{}}')
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (root / "pack").symlink_to(outside, target_is_directory=True)
     user = RuntimeSkill(
         name="pack/subskill",
         description="user",
@@ -868,10 +857,9 @@ def test_privileged_loader_refuses_a_nested_skill_name_through_a_symlink(
             sys.executable,
             "-I",
             "-c",
-            f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+            SKILL_LOAD_PROG,
             str(payload),
             str(root),
-            str(tmp_path),
             hashlib.sha256(payload.read_bytes()).hexdigest(),
         ],
         capture_output=True,
@@ -880,7 +868,7 @@ def test_privileged_loader_refuses_a_nested_skill_name_through_a_symlink(
 
     assert loaded.returncode != 0
     assert "invalid user skill" in loaded.stderr
-    assert not (outside / "subskill").exists()
+    assert not (root / "pack").exists()
     assert manifest.read_text() == '{"skills":{}}'
 
 

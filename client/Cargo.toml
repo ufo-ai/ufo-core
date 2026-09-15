@@ -1,6 +1,6 @@
 [package]
 name = "ufo"
-version = "0.1.73"
+version = "0.1.75"
 edition = "2021"
 
 [[bin]]
@@ -31,6 +31,9 @@ tree-sitter-bash = "0.25"
 unicode-width = "0.2"
 ureq = { version = "2.12", features = ["native-certs"] }
 zip = { version = "2", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

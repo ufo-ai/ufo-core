@@ -551,9 +551,7 @@ async def test_a_write_the_turn_already_reached_carries_no_touch_hint(tmp_path: 
 
 
 @pytest.mark.integration
-async def test_write_and_edit_land_bounded_results_through_the_guard(
-    tmp_path: Path, sandbox_client: Path
-) -> None:
+async def test_write_and_edit_land_bounded_results(tmp_path: Path, sandbox_client: Path) -> None:
     """The write and the edit land through the real `ufo fs`, so this needs a built client."""
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
@@ -603,31 +601,6 @@ async def test_write_and_edit_land_bounded_results_through_the_guard(
     assert json.loads(large.content[0].text)["size_bytes"] == 40_000
     assert len(large.content[0].text) <= FILE_TOOL_RESULT_MAX_CHARS
     assert (workspace / "large.txt").read_text() == "new\n" * 10_000
-
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (workspace / "escape").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ValueError, match="escapes"):
-        await run(
-            "write",
-            ctx,
-            file_path="escape/file.txt",
-            content="outside\n",
-        )
-    assert not (outside / "file.txt").exists()
-
-    outside_file = outside / "target.txt"
-    outside_file.write_text("outside\n")
-    (workspace / "link.txt").symlink_to(outside_file)
-    ctx.touched_paths.add("link.txt")
-    with pytest.raises(ValueError, match="not a regular file"):
-        await run(
-            "write",
-            ctx,
-            file_path="link.txt",
-            content="inside\n",
-        )
-    assert outside_file.read_text() == "outside\n"
 
     injected = await run(
         "write",
@@ -730,23 +703,6 @@ def _check_share_traversal_is_refused_before_the_preflight() -> None:
     preflight already confined, and NanoClaw's second escape stays closed."""
     with pytest.raises(ValueError, match="escapes"):
         workspace_path("sub/../../outside.txt")
-
-
-async def test_the_share_preflight_refuses_a_planted_symlink(tmp_path: Path) -> None:
-    """A share of a link the agent planted would copy the target's bytes into the blob store and
-    mint a member download link for them — CVE-2026-56692 with one extra hop. The command refuses a
-    symlink at the target, the one containment the copy-out needs."""
-    workspace = tmp_path / "workspace"
-    session = await _local_session(workspace)
-    outside = tmp_path / "outside.txt"
-    outside.write_bytes(b"host secret")
-    (workspace / "report.txt").symlink_to(outside)
-
-    preflight = await _preflight(session, "/workspace/report.txt")
-
-    assert preflight.exit_code != 0
-    assert "not a regular file" in preflight.stderr
-    assert preflight.stdout == ""
 
 
 async def test_ask_user_returns_the_structured_question_and_the_end_turn_directive(

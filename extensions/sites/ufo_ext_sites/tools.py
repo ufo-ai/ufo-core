@@ -6,10 +6,7 @@ through `workspace_path` before it reaches a command, so a model-named path is s
 workspace rather than merely quoted into `cd`/`>` (under the local carrier those are host paths in a
 host subprocess). The log files default under the run's `tool-output` directory rather than the
 workspace root: a server log is scaffolding, and the workspace listing is the
-member's own file list. A predictable path in a directory the agent can write is still where a
-planted link would sit, so each log's name is emptied through the containment guard and the `>`
-redirect runs under `set -C`, which creates it `O_CREAT|O_EXCL` rather than truncating through a
-link.
+member's own file list.
 
 Each tool runs through `ctx.sandbox`, so the container's mount and egress scoping hold. `website`
 runs a build command and lists what it produced. `start_server`, `deploy_website`, and
@@ -51,7 +48,6 @@ import json
 import shlex
 from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import PurePosixPath
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -60,7 +56,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.objects import AGENT_KIND
 from ufo.sdk.sandbox import (
-    WORKSPACE_DIR,
     ExecResult,
     SandboxProviderUnavailable,
     serve_port,
@@ -341,14 +336,14 @@ PUBLISH_LOG = f"{TOOL_OUTPUT_DIR}/publish-{{port}}.log"
 PREVIEW_WIDTH = 1200
 PREVIEW_HEIGHT = 900
 LOG_CLEAR_PROG = """
+import os
 import sys
-from containment import ContainmentError, contained_file
 
+os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True)
 try:
-    with contained_file(sys.argv[1], sys.argv[2], create_parent=True) as target:
-        target.unlink()
-except ContainmentError as error:
-    raise SystemExit(str(error))
+    os.unlink(sys.argv[1])
+except FileNotFoundError:
+    pass
 """
 
 MAX_SITE_FILES = 1000
@@ -365,42 +360,25 @@ import hashlib
 import json
 import os
 import sys
-from containment import ContainmentError, NotRegularFile, contained_dir, contained_file
 
-project, workspace = sys.argv[1], sys.argv[2]
-max_files, max_bytes = int(sys.argv[3]), int(sys.argv[4])
-skipped = set(sys.argv[5].split(","))
-try:
-    root = contained_dir(project, workspace)
-except ContainmentError as error:
-    raise SystemExit(str(error))
+project = sys.argv[1]
+max_files, max_bytes = int(sys.argv[2]), int(sys.argv[3])
+skipped = set(sys.argv[4].split(","))
 files = {}
 total = 0
-for base, dirs, names in os.walk(root):
-    dirs[:] = [
-        name
-        for name in dirs
-        if name not in skipped and not os.path.islink(os.path.join(base, name))
-    ]
+for base, dirs, names in os.walk(project):
+    dirs[:] = [name for name in dirs if name not in skipped]
     for name in names:
         full = os.path.join(base, name)
-        if name in skipped or os.path.islink(full):
+        if name in skipped or not os.path.isfile(full):
             continue
-        path = os.path.relpath(full, root).replace(os.sep, "/")
+        path = os.path.relpath(full, project).replace(os.sep, "/")
         digest = hashlib.sha256()
         size = 0
-        try:
-            with contained_file(full, root) as target, target.open_bytes() as handle:
-                while True:
-                    chunk = handle.read(1 << 20)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    digest.update(chunk)
-        except (FileNotFoundError, NotRegularFile):
-            continue
-        except ContainmentError as error:
-            raise SystemExit(str(error))
+        with open(full, "rb") as handle:
+            while chunk := handle.read(1 << 20):
+                size += len(chunk)
+                digest.update(chunk)
         files[path] = {"size": size, "sha256": digest.hexdigest()}
         total += size
         if len(files) > max_files:
@@ -569,24 +547,13 @@ def _json_result(payload: dict[str, object]) -> ToolResult:
 
 
 async def _free_log(ctx: ToolContext, log_path: str) -> None:
-    """Leave the log's name holding nothing, so the server's redirect is the thing that creates it.
-
-    A shell redirect follows a symlink and truncates what it points at, and the log's name is one a
-    model chooses or predicts in a directory the agent writes. Creating the file here and
-    redirecting onto it afterwards only narrows that — the two are separate commands, and a link
-    replanted between them is what the `>` then opens. So the name is emptied instead, through the
-    guard's own `O_NOFOLLOW` descent, which also makes `tool-output` on the way; `set -C` then
-    makes the redirect an `O_CREAT|O_EXCL` create, so a replant fails the start rather than steers
-    it. A log an earlier run on this port left behind is this call's to clear.
+    """Leave the log's name holding nothing, so the server's redirect under `set -C` is the thing
+    that creates it. A log an earlier run on this port left behind is this call's to clear.
 
     Noclobber covers the redirect alone. The port cleanup writes to `/dev/null` and `command` is the
     model's own, free to redirect where it likes; the background job keeps the setting it was forked
     with, so restoring it in the parent cannot reach the redirect already made."""
-    runtime_root = PurePosixPath(await ctx.sandbox.runtime_path(TOOL_OUTPUT_DIR)).parent
-    root = (
-        str(runtime_root) if PurePosixPath(log_path).is_relative_to(runtime_root) else WORKSPACE_DIR
-    )
-    result = await ctx.sandbox.python(LOG_CLEAR_PROG, log_path, root)
+    result = await ctx.sandbox.python(LOG_CLEAR_PROG, log_path)
     if result.exit_code != 0:
         raise RuntimeError(result.stderr.strip() or f"cannot clear {log_path}")
 
@@ -791,7 +758,6 @@ async def _source_listing(ctx: ToolContext, project: str) -> dict[str, dict[str,
     listed = await ctx.sandbox.python(
         ENUMERATE_PROG,
         project,
-        WORKSPACE_DIR,
         str(MAX_SITE_FILES),
         str(MAX_SITE_TOTAL_BYTES),
         ",".join(SOURCE_SKIP_NAMES),
@@ -1155,7 +1121,7 @@ class ApplicationPageGate:
 
     async def _read(self, name: str, maximum: int) -> str | None:
         held = await self.ctx.sandbox.python(
-            PROJECT_FILE_READ, f"{self.project}/{name}", WORKSPACE_DIR, str(maximum)
+            PROJECT_FILE_READ, f"{self.project}/{name}", str(maximum)
         )
         if held.exit_code == PROJECT_FILE_ABSENT:
             return None

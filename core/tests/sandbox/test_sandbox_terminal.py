@@ -349,7 +349,7 @@ async def _check_a_document_read_relays_bounded_bytes_to_preview() -> None:
     assert result["pages_returned"] == 1
 
 
-async def _check_a_skill_document_read_keeps_ufo_home_as_its_containment_root() -> None:
+async def _check_a_skill_document_read_keeps_ufo_home_skills_as_its_workspace() -> None:
     async def preview(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,

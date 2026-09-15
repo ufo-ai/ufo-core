@@ -7,7 +7,6 @@ on:
       - sandbox/build_template.py
       - client/**
       - core/src/ufo/harness/sandbox/client_binary.py
-      - core/src/ufo/harness/containment.py
       - core/src/ufo/runtime/skills/**
       - extensions/e2b/ufo_ext_e2b.py
       - extensions/**/skills/**

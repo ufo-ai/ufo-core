@@ -1,5 +1,6 @@
-//! Checks 2 to 4 of `core/src/ufo/harness/containment.py`, in Rust. Refusal messages are
-//! `ContainmentError`'s own, because the host maps them to the model's `ValueError` and dashboards group on them.
+//! Symlink-safe path resolution for the file ops: canonical parent, per-component `O_NOFOLLOW`
+//! descent, `lstat` of the target. A refusal's message reaches the model as a `ValueError`, and
+//! dashboards group on that text.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::io::{Read, Write};

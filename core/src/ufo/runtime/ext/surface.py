@@ -61,7 +61,6 @@ from starlette.websockets import WebSocket
 from ufo.blob import BlobNotFound, BlobStore, FleetBlobStore, S3BlobStore, WorkspaceBlobStore
 from ufo.db import owner_tx, workspace_tx
 from ufo.harness.auth.token_signing import sign_detached, verify_detached
-from ufo.harness.containment import contained_leaf
 from ufo.harness.models.interface import Message, ModelRequest, TextBlock
 from ufo.harness.o11y import emit_metric, log, warn
 from ufo.harness.replies import marked_artifacts
@@ -337,11 +336,13 @@ def inbox_name(raw: str, used: set[str]) -> str:
     binary the read refuses. A suffix with no room left under the cap is not an extension, and gets
     cut with everything else.
 
-    One implementation for every surface. A Slack attachment name, a browser's content-disposition,
-    and whatever a future surface is handed are the same untrusted input, and the CVE-2026-56692
-    follow-on is what a per-surface copy of this costs: the second ingress kept its own weaker idea
-    of what was safe. `used` is updated with the returned name."""
-    leaf = INBOX_UNSAFE_NAME_CHARS.sub("-", contained_leaf(raw, INBOX_FALLBACK_NAME))
+    One implementation for every surface: a Slack attachment name, a browser's content-disposition,
+    and whatever a future surface is handed are the same untrusted input. `used` is updated with the
+    returned name."""
+    basename = PurePosixPath(raw.replace("\\", "/")).name
+    leaf = INBOX_UNSAFE_NAME_CHARS.sub(
+        "-", basename if basename not in ("", ".", "..") else INBOX_FALLBACK_NAME
+    )
     stem, dot, suffix = leaf.partition(".")
     stem = stem[: max(INBOX_NAME_MAX_CHARS - len(dot) - len(suffix), 0)]
     leaf = f"{stem}{dot}{suffix}"[:INBOX_NAME_MAX_CHARS].strip(".") or INBOX_FALLBACK_NAME

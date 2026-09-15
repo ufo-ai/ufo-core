@@ -130,7 +130,7 @@ ARTIFACT_FALLBACK_NAME = "download"
 ARTIFACT_PREVIEW_TIMEOUT_SECONDS = 330
 ARTIFACT_PREVIEW_DETAIL_CHARS = 500
 
-SHARE_DIR_PROBE_CMD = "[ -d {path} ] && [ ! -L {path} ]"
+SHARE_DIR_PROBE_CMD = "[ -d {path} ]"
 SHARE_PACK_TIMEOUT_SECONDS = 900
 SHARE_PACK_CMD = (
     "root={path}\n"
@@ -758,10 +758,9 @@ class _StagedShare:
 async def _packed_directory(ctx: ToolContext, scoped: str) -> str | None:
     """A directory at the share path becomes a `.tar.gz` of itself, packed in the container into
     the engine's own offload dir — the archive is the file the rest of the share measures, uploads,
-    and names. A regular file passes through as None, and a symlink at the path falls through to
-    the preflight's refusal. A pack that reaches the offload dir (the workspace root) leaves it
-    out: the archive is written there, so packing it would tar the archive into itself and ship
-    the engine's scratch renders beside the member's tree.
+    and names. Anything else passes through as None. A pack that reaches the offload dir (the
+    workspace root) leaves it out: the archive is written there, so packing it would tar the
+    archive into itself and ship the engine's scratch renders beside the member's tree.
 
     The exclusion is the member name `tar` itself stores, which the shell derives from the packed
     directory rather than from the logical path: the local and terminal carriers serve `/workspace`
@@ -850,11 +849,9 @@ async def _recorded_share(
 async def _staged_share(ctx: ToolContext, spec: SharedFileSpec, artifact_id: UUID) -> _StagedShare:
     """Stage one file into the artifact store under `artifacts/<uuid>/<name>`. A directory is
     packed into a `.tar.gz` of itself first (`_packed_directory`) and the archive is what shares.
-    A preflight in the container confines the path through the containment guard and streams the
-    file off the fd that descent pinned to derive its size and sha256 without loading it whole, so
-    a link the agent planted at the name is refused rather than copied out, and the upload is then
-    bound to those two measurements, so nothing crosses on the sandbox's word and no whole-file
-    buffer ever forms in this process."""
+    A preflight in the container streams the file to measure its size and sha256, so nothing is
+    buffered whole, and the upload is bound to those two measurements, so nothing crosses on the
+    sandbox's word and no whole-file buffer ever forms in this process."""
     recorded = await _recorded_share(ctx, spec, artifact_id)
     if recorded is not None:
         return recorded

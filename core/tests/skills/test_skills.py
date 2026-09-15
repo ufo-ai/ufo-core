@@ -8,7 +8,6 @@ from uuid import uuid4
 import pytest
 from cryptography.fernet import Fernet
 
-from ufo.harness.containment import ContainmentError
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint, SandboxSession, SandboxSpec
 from ufo.host.ext.loader import member_skill_listing, turn_member_skills
@@ -487,52 +486,13 @@ async def test_mount_refuses_a_file_key_that_climbs_out_of_the_skill(key: str) -
         raw_skill_md="---\nname: probe\n---\nbody\n",
     )
 
-    with pytest.raises(ContainmentError):
+    with pytest.raises(ValueError):
         await install_skill(sandbox, skill)
 
     assert not any(path.endswith("evil.md") for path in sandbox.files)
 
 
-async def test_install_replaces_a_planted_user_skill_tree_without_following_links(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    carrier = LocalCarrier()
-    handle = await carrier.create(
-        SandboxSpec(
-            conversation_id=uuid4(),
-            image_ref="ufo-sandbox:latest",
-            workspace_host_path=str(workspace),
-            proxy=ProxyEndpoint(port=9999, ca_cert="CA-PEM"),
-            run_token="run-token",
-        )
-    )
-    session = SandboxSession(
-        carrier=carrier,
-        handle=handle,
-    )
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    ufo_home = Path(handle.egress_env["UFO_HOME"])
-    (ufo_home / "skills" / "probe").mkdir(parents=True)
-    (ufo_home / "skills" / "probe" / "data").symlink_to(outside)
-    skill = RuntimeSkill(
-        name="probe",
-        description="d",
-        instructions="i",
-        files=(("data/notes.txt", b"kept"),),
-        raw_skill_md="---\nname: probe\n---\nbody\n",
-    )
-
-    await install_skill(session, skill)
-
-    assert list(outside.iterdir()) == []
-    assert (ufo_home / "skills" / "probe" / "data" / "notes.txt").read_bytes() == b"kept"
-
-
-async def test_install_replaces_a_top_level_user_skill_symlink_without_following_it(
-    tmp_path: Path,
-) -> None:
+async def test_install_replaces_the_user_skill_tree_already_at_the_name(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     carrier = LocalCarrier()
     handle = await carrier.create(
@@ -545,27 +505,22 @@ async def test_install_replaces_a_top_level_user_skill_symlink_without_following
         )
     )
     session = SandboxSession(carrier=carrier, handle=handle)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    sentinel = outside / "kept.txt"
-    sentinel.write_text("kept")
-    ufo_home = Path(handle.egress_env["UFO_HOME"])
-    root = ufo_home / "skills"
-    root.mkdir(parents=True, exist_ok=True)
-    name = "top-level-link-probe"
-    (root / name).symlink_to(outside, target_is_directory=True)
+    tree = Path(handle.egress_env["UFO_HOME"]) / "skills" / "probe"
+    (tree / "data").mkdir(parents=True)
+    (tree / "data" / "stale.txt").write_bytes(b"stale")
     skill = RuntimeSkill(
-        name=name,
+        name="probe",
         description="d",
         instructions="i",
-        raw_skill_md=f"---\nname: {name}\n---\nbody\n",
+        files=(("data/notes.txt", b"kept"),),
+        raw_skill_md="---\nname: probe\n---\nbody\n",
     )
 
     await install_skill(session, skill)
 
-    assert sentinel.read_text() == "kept"
-    assert not (root / name).is_symlink()
-    assert (root / name / "SKILL.md").read_text() == skill.raw_skill_md
+    assert not (tree / "data" / "stale.txt").exists()
+    assert (tree / "data" / "notes.txt").read_bytes() == b"kept"
+    assert (tree / "SKILL.md").read_text() == skill.raw_skill_md
 
 
 def _member_registry(

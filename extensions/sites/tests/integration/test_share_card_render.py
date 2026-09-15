@@ -2,8 +2,8 @@
 programs place the shot and encode the JPEG.
 
 Nothing here is faked. `card_page` builds the same markup the sandbox gets, `PAGE_PROG` and
-`ENCODE_PROG` run as the sandbox runs them — through the containment guard, against a workspace root
-— and `shot_command` launches the browser available to the sandbox. So this is where the card's
+`ENCODE_PROG` run as the sandbox runs them, and `shot_command` launches the browser available to
+the sandbox. So this is where the card's
 measurements are actually proved: 1200x630, the panel on the left, the site's page on the right at
 the size the shot decision fixes, under every platform's byte ceiling, and progressive.
 
@@ -52,7 +52,7 @@ from ufo_ext_sites.share_card import (
 from ufo_ext_sites.tools import PREVIEW_HEIGHT, PREVIEW_WIDTH
 from ufo_testsupport.browser import chrome_for_testing
 
-from ufo.harness.sandbox.session import SANDBOX_MODULE_BOOTSTRAP, SANDBOX_PYTHON_FLAG
+from ufo.harness.sandbox.session import SANDBOX_PYTHON_FLAG
 
 CARD_BYTES_MAX = 5 * 1024 * 1024
 """What every platform will draw: a card above this is dropped rather than shown."""
@@ -185,7 +185,6 @@ def _run_shot(url: str, width: int, height: int, scale: int, shot: Path) -> list
             height=height,
             scale=scale,
             shot=str(shot),
-            root=str(shot.parent),
         ),
     ]
 
@@ -278,18 +277,10 @@ def served(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
 
 
 def _program(program: str, *args: str) -> str:
-    """One of the shipped in-sandbox programs, run the way the sandbox runs it: isolated, with the
-    guard importable as `containment` off the shipped bootstrap the program carries — the same text
-    the session prepends, so the module under test here is the module a sandbox gets."""
+    """One of the shipped in-sandbox programs, run the way the sandbox runs it: isolated."""
     result = _run(
         f"the in-sandbox program over {args}",
-        [
-            sys.executable,
-            SANDBOX_PYTHON_FLAG,
-            "-c",
-            SANDBOX_MODULE_BOOTSTRAP + program,
-            *args,
-        ],
+        [sys.executable, SANDBOX_PYTHON_FLAG, "-c", program, *args],
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
@@ -300,17 +291,12 @@ def _compose(root: Path, name: str, shot: Path, drawn: str) -> tuple[Path, str]:
     token in it, the program puts the shot in, chromium draws the card, the program encodes it."""
     page = root / "share-card.html"
     page.write_text(card_page(name, drawn))
-    _program(
-        PAGE_PROG.format(limit=SHOT_BYTES_MAX, token=SHOT_TOKEN),
-        str(page),
-        str(shot),
-        str(root),
-    )
+    _program(PAGE_PROG.format(limit=SHOT_BYTES_MAX, token=SHOT_TOKEN), str(page), str(shot))
     assert SHOT_TOKEN not in page.read_text()
     card_png = root / "share-card.png"
     _shoot(str(page), CARD_WIDTH, CARD_HEIGHT, 1, card_png)
     card = root / "share-card.jpg"
-    digest = _program(ENCODE_PROG.format(quality=86), str(card_png), str(card), str(root))
+    digest = _program(ENCODE_PROG.format(quality=86), str(card_png), str(card))
     return card, digest
 
 

@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from ufo.runtime.ext.manifest import CarrierSpec
 
 from ufo.db import workspace_tx
-from ufo.harness.containment import PathNotFound, configured_root, contained_dir
 from ufo.harness.document_renderer import DocumentRenderer
 from ufo.harness.o11y import warn
 from ufo.harness.sandbox.session import (
@@ -286,9 +285,7 @@ class ConversationSandbox:
         session = await self.existing(conversation_id)
         if session is None:
             return
-        result = await session.python(
-            PRUNE_PROG, workspace_path(rel_prefix), WORKSPACE_DIR, str(keep)
-        )
+        result = await session.python(PRUNE_PROG, workspace_path(rel_prefix), str(keep))
         if result.exit_code != 0:
             raise OSError(result.stderr.strip() or f"cannot prune {rel_prefix}")
 
@@ -299,10 +296,8 @@ class ConversationSandbox:
         session = await self.existing(conversation_id)
         if session is None:
             return
-        relative = f"{category}/{rel_prefix}"
-        target = await session.runtime_path(relative)
-        root = await session.runtime_path(category)
-        result = await session.python(PRUNE_PROG, target, root, str(keep))
+        target = await session.runtime_path(f"{category}/{rel_prefix}")
+        result = await session.python(PRUNE_PROG, target, str(keep))
         if result.exit_code != 0:
             raise OSError(result.stderr.strip() or f"cannot prune {rel_prefix}")
 
@@ -425,34 +420,27 @@ class ConversationSandbox:
         return backend, routed, handle
 
     def _provisioned_dir(self, conversation_id: UUID) -> Path:
-        """The conversation's own directory under `workspace_root`, made if absent and then proved:
-        every component under the root is re-opened `O_NOFOLLOW`. A containment check cannot stand
-        in for that — with a symlinked directory planted under the root the `mkdir` follows the
-        link, the chown hands the link's target to the sandbox user, and every path the carrier
-        builds still resolves inside the root the check consulted.
-
-        The root itself is deploy config, so the one link an operator may have put there — the root
-        pointing at the volume the conversations live on — is followed once and canonicalized before
-        the descent, rather than refused into an outage of every turn and every browse. Anything
-        else already holding the name — a file, a broken link — is that check's to refuse with the
-        setting named, not `mkdir`'s to report as a bare errno."""
+        """The conversation's own directory under `workspace_root`, made if absent. The root is
+        deploy config, and a root that is a link to the volume the conversations live on is an
+        ordinary compose or k8s layout, so it is resolved once and the canonical directory is what
+        the carrier is handed. A root naming anything but a directory is refused with the setting
+        named, so an operator knows which key to fix, rather than as `mkdir`'s bare errno."""
         with suppress(FileExistsError):
             self.workspace_root.mkdir(parents=True, exist_ok=True)
-        root = configured_root(self.workspace_root, WORKSPACE_ROOT_SETTING)
-        return contained_dir(root / str(conversation_id), root, create=True)
+        root = self.workspace_root.resolve()
+        if not root.is_dir():
+            raise NotADirectoryError(
+                f"{WORKSPACE_ROOT_SETTING} names {self.workspace_root}, which is not a directory"
+            )
+        path = root / str(conversation_id)
+        path.mkdir(exist_ok=True)
+        return path
 
     def _existing_dir(self, conversation_id: UUID) -> Path | None:
         """The same directory on the read path, or None when nothing has made it — a read never
-        provisions. Absent is a conversation with no workspace; a link pointing out of the root is a
-        workspace pointed somewhere it may not go, and raises. A link to another directory *under*
-        the root resolves to it, which is the guard's policy on an ancestor everywhere: the
-        canonical directory is what the descent then pins. Nothing an agent reaches writes here —
-        a sandbox is mounted at its own conversation directory, never at the root above it."""
-        try:
-            root = configured_root(self.workspace_root, WORKSPACE_ROOT_SETTING)
-            return contained_dir(root / str(conversation_id), root)
-        except PathNotFound:
-            return None
+        provisions."""
+        path = self.workspace_root.resolve() / str(conversation_id)
+        return path if path.is_dir() else None
 
     async def _stored(self, conversation_id: UUID) -> str | None:
         handle, _ = await self._binding(conversation_id)
@@ -507,32 +495,12 @@ class ConversationSandbox:
 
 PRUNE_PROG = """
 import sys
-from containment import (
-    ContainmentError,
-    PathNotFound,
-    contained_dir,
-    contained_file,
-    contained_root,
-    is_contained_regular,
-)
+from pathlib import Path
 
-
-def prune(directory, root, keep):
-    try:
-        workspace = contained_root(root)
-        base = contained_dir(directory, workspace)
-    except PathNotFound:
-        return
-    names = sorted(
-        entry.name for entry in base.iterdir() if is_contained_regular(entry, workspace)
-    )
+base = Path(sys.argv[1])
+keep = int(sys.argv[2])
+if base.is_dir():
+    names = sorted(entry.name for entry in base.iterdir() if entry.is_file())
     for name in names[: max(len(names) - keep, 0)]:
-        with contained_file(base / name, workspace) as target:
-            target.unlink()
-
-
-try:
-    prune(sys.argv[1], sys.argv[2], int(sys.argv[3]))
-except ContainmentError as error:
-    raise SystemExit(str(error))
+        (base / name).unlink(missing_ok=True)
 """

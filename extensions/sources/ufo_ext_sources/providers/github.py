@@ -684,7 +684,14 @@ class GitHubConnector(RestConnector):
             landed: list[dict[str, Any]] = []
             whole: list[dict[str, Any]] = []
             for entry in listed:
-                if not _inside(bound, entry["updatedAt"]):
+                updated_at = entry["updatedAt"]
+                # Every edge is inclusive: a tie is re-read and the driver's digest-skip
+                # absorbs the repeat.
+                if (
+                    (bound.after is not None and updated_at < bound.after)
+                    or (bound.before is not None and updated_at > bound.before)
+                    or (bound.since is not None and updated_at < bound.since)
+                ):
                     continue
                 try:
                     record, spent = await self._pull_whole(
@@ -1000,17 +1007,6 @@ def _pinned_pulls(resources: tuple[str, ...]) -> dict[str, _PinnedPull]:
 def _repo_variables(repo: str) -> dict[str, Any]:
     owner, _, name = repo.partition("/")
     return {"owner": owner, "name": name}
-
-
-def _inside(bound: PartitionBound, updated_at: str) -> bool:
-    """Whether a listed pull request is one the walk lands: at or above a steady-state watermark, at
-    or below a backfill window's edge, and at or above the pinned floor — every edge inclusive, so a
-    tie is re-read and the driver's digest-skip absorbs the repeat."""
-    return (
-        (bound.after is None or updated_at >= bound.after)
-        and (bound.before is None or updated_at <= bound.before)
-        and (bound.since is None or updated_at >= bound.since)
-    )
 
 
 def _pull_record(node: dict[str, Any]) -> dict[str, Any]:

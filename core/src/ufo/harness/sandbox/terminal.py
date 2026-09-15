@@ -590,7 +590,7 @@ class TerminalCarrier:
     params, never code.
 
     No isolation: the agent acts as the member, on their machine, guarded by nothing the member's
-    own shell is not. The container carriers are where `containment` is load-bearing."""
+    own shell is not. The container carriers draw their boundary with the kernel."""
 
     terminals: TerminalTransport
     document_renderer: DocumentRenderer | None = None

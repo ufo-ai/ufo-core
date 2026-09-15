@@ -237,7 +237,7 @@ stage. The `_census_period_failures` gate moves with it.
 | Compatibility | A hosted extension pins the `ufo` version it was tested against. Rolling deploys keep RFC 0043's `MOVED_MODULES` rule: a persisted class that moves lands with its alias. |
 | SDK gate | `_sdk_import_failures` moves into `ufo_testsupport` as a function both repos' `gates.py` call over their own trees. |
 | Gates that move | Portal (`_portal_style_failures`, the `_app_*` gates, `_kit_catalogue_failures`, `_framed_stat_failures`, `_composition_rhythm_failures`, `_waiting_line_failures`, `_consent_mark_failures`, `_sse_listener_failures`, `_skill_palette_failures`), terraform (`_declared_flag_failures`, `_shared_singleton_failures`, `_retired_resource_failures`), census. |
-| Gates that stay | Everything over core, the SDK, the harness, migrations, containment, skills, the directive wire, and the sample extension's conformance. |
+| Gates that stay | Everything over core, the SDK, the harness, migrations, skills, the directive wire, and the sample extension's conformance. |
 | Open CI | Installs only the open set, runs the open tests and gates, boots `ufoctl serve` with the open `assistant` pack, and drives one real turn through the terminal client. |
 | Hosted CI | Installs the pinned `ufo` wheel plus its own packages, runs its tests and gates, builds the servers, and runs the contract test against the bundle the pin shipped. |
 

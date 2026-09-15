@@ -194,11 +194,9 @@ know whether the agent can see it.
 ## Doctrine fit / implications
 
 **No isolation, stated rather than implied.** The agent runs as the member, in their project.
-`containment.py` guards the container carriers, where it is load-bearing; on the client it guards
-nothing that `cat > /etc/hosts` does not already defeat, so the client's `write` does not pretend
-to, and the op programs walk symlinks the way the member's own shell would — the runner has no
-`O_NOFOLLOW`, and a boundary that cannot be held is not drawn. This is a `spec.md` change, not a
-footnote.
+The container carriers draw their boundary with the kernel; the client draws none, because a
+boundary that `cat > /etc/hosts` already defeats is not a boundary. This is a `spec.md` change, not
+a footnote.
 
 **Egress metering becomes cooperative** for a client-bound turn: a command that ignores `HTTP_PROXY`
 reaches the member's own network. Model spend is unaffected — the sentinel model keys are never

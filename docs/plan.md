@@ -146,7 +146,7 @@ eval harness port · enterprise k8s layer (apiserver rewriter module, multi-work
 |---|---|---|
 | Provider streams, tool ordering, rounds, and round budgets | `ufo.harness` | Typed model/tool effects and DBOS adapters. |
 | Window estimate and rollover line | `ufo.harness` | Token estimate, the line a window rolls over at, metering, hooks, and durable checkpoints. |
-| Sandbox command/file protocol, path containment | `ufo.harness` | Carrier selection, authorization, and egress policy. |
+| Sandbox command/file protocol | `ufo.harness` | Carrier selection, authorization, and egress policy. |
 | Durable turn host and harness adapters | `ufo.runtime` | Complete ownership. |
 | Workspace identity, grants, billing, extensions, and surfaces | Sibling `ufo` domain packages | Supply scoped effects to `ufo.runtime`. |
 | WorkOS, sessions, invitations, and onboarding gateway | Rust `ufo-control` | Calls runtime onboarding RPCs; no tenant-table SQL. |

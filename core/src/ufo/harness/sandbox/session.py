@@ -18,15 +18,13 @@ import re
 import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-import ufo.harness.containment as containment_module
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
 from ufo.harness.auth.token_signing import SignedTokenError, sign_token, verify_token
-from ufo.harness.containment import ContainmentError, contained_relative
 from ufo.harness.sandbox.protocol import SandboxCommands, SandboxFileOperations
 from ufo.schema.records import CONNECTION_SCOPE_MAX
 
@@ -36,41 +34,9 @@ WORKSPACE_SCOPE_HINT = (
     f"{WORKSPACE_DIR}."
 )
 WORKSPACE_WRITE_MODE = 0o644
-assert containment_module.__file__ is not None
-CONTAINMENT_SOURCE = Path(containment_module.__file__).read_text()
-SANDBOX_MODULE_BOOTSTRAP = (
-    "import sys, types\n"
-    "containment = types.ModuleType('containment')\n"
-    "sys.modules['containment'] = containment\n"
-    f"exec(compile({CONTAINMENT_SOURCE!r}, 'containment.py', 'exec'), containment.__dict__)\n"
-)
-"""Make the guard importable as `containment` by carrying its source in the program that needs it,
-so an in-sandbox program runs the guard this process ships and asks the sandbox for nothing but an
-interpreter. The alternative — reading it off a path — makes the guard whatever that sandbox holds:
-a member's own machine holds none, and an image holds the copy it was built with. The module is
-registered before its own source runs, the order an import itself uses: a dataclass in it resolves
-its module through `sys.modules` while the class is being built, and finds nothing otherwise."""
 SANDBOX_PYTHON_FLAG = "-I"
-"""Isolated mode, which is what keeps the program's own imports out of the workspace: `python3 -c`
-otherwise puts the process cwd at `sys.path[0]`, and a carrier runs commands with cwd inside the
-workspace the agent writes to, so `import hashlib` — or `import base64`, or `os` — would resolve
-against a module the agent planted there, before the guard has checked anything. `-I` drops cwd and
-the `PYTHON*` variables from module resolution, leaving the stdlib."""
-COPY_IN_PROG = """
-import sys
-from containment import ContainmentError, contained_file
-
-try:
-    with contained_file(sys.argv[1], sys.argv[2], create_parent=True) as target:
-        target.replace_bytes(sys.stdin.buffer.read(), target.mode(0o644))
-except ContainmentError as error:
-    raise SystemExit(str(error))
-"""
-"""The copy-in a carrier whose `/workspace` lives inside a container runs instead of a shell
-redirect: `> "$1"` truncates through a planted link and `mkdir -p` follows a symlinked ancestor,
-while this builds each directory as the descent reaches it and renames a staged inode onto the
-target. The mode repeats `WORKSPACE_WRITE_MODE` because a `-c` program inside the sandbox cannot
-import it."""
+"""Isolated mode keeps the process cwd and the `PYTHON*` variables off `sys.path`, and a program's
+cwd is the agent-writable workspace."""
 RUNTIME_DIRNAME = "runs"
 TOOL_OUTPUT_DIRNAME = "tool-output"
 SKILL_STAGING_DIRNAME = "staging"
@@ -82,8 +48,6 @@ import os
 import shutil
 import sys
 from pathlib import Path, PurePosixPath
-
-from containment import contained_file
 
 
 def safe(value):
@@ -116,10 +80,9 @@ def remove(path):
 
 
 payload_path = Path(sys.argv[1])
-with contained_file(payload_path, sys.argv[3]) as staged_payload:
-    payload_bytes = staged_payload.read_bytes(64 * 1024 * 1024)
-    staged_payload.unlink()
-if hashlib.sha256(payload_bytes).hexdigest() != sys.argv[4]:
+payload_bytes = payload_path.read_bytes()
+payload_path.unlink()
+if hashlib.sha256(payload_bytes).hexdigest() != sys.argv[3]:
     raise ValueError("skill load payload changed after staging")
 payload = json.loads(payload_bytes)
 root = Path(sys.argv[2])
@@ -198,8 +161,6 @@ import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from containment import contained_file
-
 
 def safe(value):
     path = PurePosixPath(value)
@@ -226,11 +187,9 @@ def remove(path):
 
 
 archive_path = Path(sys.argv[1])
-with contained_file(archive_path, sys.argv[3]) as staged_archive:
-    with staged_archive.open_bytes() as source:
-        archive_bytes = source.read()
-    staged_archive.unlink()
-if hashlib.sha256(archive_bytes).hexdigest() != sys.argv[4]:
+archive_bytes = archive_path.read_bytes()
+archive_path.unlink()
+if hashlib.sha256(archive_bytes).hexdigest() != sys.argv[3]:
     raise ValueError("system skill archive changed after staging")
 root = Path(sys.argv[2])
 root.mkdir(parents=True, exist_ok=True)
@@ -374,7 +333,7 @@ def egress_proxy_env(proxy: "ProxyEndpoint", run_token: str) -> dict[str, str]:
     the non-empty password makes `urllib` send authentication. `NO_PROXY` exempts the sandbox's own
     loopback services, the model keys are the sentinels the proxy swaps for real keys on the wire,
     and the CA is the one written into the sandbox so the proxy can terminate target TLS the
-    sandbox trusts. Off-cluster means the public base is required — absent it (the guard `serve`
+    sandbox trusts. Off-cluster means the public base is required — absent it (the check `serve`
     applies at boot), the sandbox would have no metered route out, so this fails loud rather than
     build an open sandbox."""
     if proxy.public_url is None:
@@ -734,13 +693,7 @@ class Carrier(Protocol):
         copy-in that pairs with `read`'s copy-out. Each carrier supplies its own (e2b uploads
         through its filesystem API, docker streams over a real stdin), because bytes must never ride
         `exec`'s argv: a carrier whose command API takes a shell string has to inline them, which
-        the provider rejects once they are large — exactly when a caller offloads a large result.
-
-        The path is a filename an agent, a model, or an inbound surface chose, so the write runs
-        through the containment guard — `COPY_IN_PROG` where the bytes land inside a container —
-        rather than a shell redirect, and a refusal is an OSError. A non-regular target is replaced,
-        not refused: the rename cannot write through a link, and a link the agent left at an inbox
-        name must not deny every later delivery to that name."""
+        the provider rejects once they are large — exactly when a caller offloads a large result."""
         ...
 
     def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
@@ -748,12 +701,9 @@ class Carrier(Protocol):
         buffering it whole in the host process — the copy-out that pairs with `write`. Each carrier
         supplies its own (e2b streams from its filesystem API, docker over a real stdout, the local
         carrier off the host directory). A missing path raises FileNotFoundError on every carrier;
-        the local carrier confines the path through the containment guard first, so a target that
-        is a symlink, a directory, or outside the workspace is refused as a ContainmentError before
-        any open, and the docker carrier raises each filesystem refusal as the OSError its errno
-        names (resolving cat's reason through strerror) while e2b surfaces its SDK's exception; a
-        read that dies for a non-filesystem reason raises the carrier's own error naming what is
-        known."""
+        the docker carrier raises each filesystem refusal as the OSError its errno names (resolving
+        cat's reason through strerror) while e2b surfaces its SDK's exception; a read that dies for
+        a non-filesystem reason raises the carrier's own error naming what is known."""
         ...
 
     async def dial(self, handle: SandboxHandle, port: int) -> DialTarget:
@@ -929,15 +879,14 @@ def workspace_path(path: str) -> str:
 
 def runtime_relative(path: str) -> PurePosixPath:
     """A runtime-internal name below one conversation's `$UFO_HOME/runs/<id>` root."""
-    root = "/runtime"
+    root = PurePosixPath("/runtime")
     try:
-        resolved = contained_relative(path, root)
-    except ContainmentError:
+        resolved = PurePosixPath(*_resolve_parts((root / path).parts))
+    except ValueError:
         raise ValueError(f"invalid runtime path: {path!r}") from None
-    relative = PurePosixPath(resolved).relative_to(root)
-    if str(relative) != path:
+    if root not in resolved.parents or str(resolved.relative_to(root)) != path:
         raise ValueError(f"invalid runtime path: {path!r}")
-    return relative
+    return resolved.relative_to(root)
 
 
 def sandbox_runtime_root(conversation_id: UUID) -> str:
@@ -969,7 +918,7 @@ def _runtime_display_path(handle: SandboxHandle, relative: str) -> str:
 
 
 def rooted_path(path: str, root: str) -> str:
-    """Normalize a path under `root` with the workspace guard and preserve its root spelling."""
+    """Normalize a path under `root` through `workspace_path` and preserve its root spelling."""
     normalized = workspace_path(f"{WORKSPACE_DIR}{path.removeprefix(root)}")
     return f"{root}{normalized.removeprefix(WORKSPACE_DIR)}"
 
@@ -1068,7 +1017,6 @@ class Sandbox:
             ),
             default_timeout_s=DEFAULT_EXEC_TIMEOUT_SECONDS,
             python_flag=SANDBOX_PYTHON_FLAG,
-            python_bootstrap=SANDBOX_MODULE_BOOTSTRAP,
             supervisor=SANDBOX_COMMAND_SUPERVISOR,
         )
 
@@ -1103,15 +1051,8 @@ class Sandbox:
         return await self._commands(bound).sh(script, *args, timeout_s=timeout_s)
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ExecResult:
-        """Run an in-sandbox python program with the containment guard importable, so a program that
-        builds a path from an argument runs the same checks the file ops run rather than its own —
-        the one place every such program reaches the guard from.
-
-        The guard is carried into the program by `SANDBOX_MODULE_BOOTSTRAP` rather than imported
-        from the sandbox, so it is the copy this process ships under every carrier. The interpreter
-        runs isolated (`SANDBOX_PYTHON_FLAG`), which is what keeps that bootstrap from resolving
-        against the very workspace it is about to guard. Run as argv, never through a login shell,
-        whose profile resets PATH and drops the local carrier's own bin directory."""
+        """Run an isolated in-sandbox python program as argv, never through a login shell, whose
+        profile resets PATH and drops the local carrier's own bin directory."""
         bound = await self._bound()
         return await self._commands(bound).python(program, *args, timeout_s=timeout_s)
 
@@ -1187,10 +1128,9 @@ class Sandbox:
                 "python3",
                 SANDBOX_PYTHON_FLAG,
                 "-c",
-                f"{SANDBOX_MODULE_BOOTSTRAP}{SKILL_LOAD_PROG}",
+                SKILL_LOAD_PROG,
                 staged,
                 SYSTEM_SKILLS_ROOT,
-                _runtime_root(bound.handle),
                 hashlib.sha256(content).hexdigest(),
             ),
         )
@@ -1204,10 +1144,9 @@ class Sandbox:
                 "python3",
                 SANDBOX_PYTHON_FLAG,
                 "-c",
-                f"{SANDBOX_MODULE_BOOTSTRAP}{SYSTEM_SKILL_SYNC_PROG}",
+                SYSTEM_SKILL_SYNC_PROG,
                 staged,
                 SYSTEM_SKILLS_ROOT,
-                _runtime_root(bound.handle),
                 hashlib.sha256(bound.system_skill_archive).hexdigest(),
             ),
         )

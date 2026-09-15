@@ -8,9 +8,8 @@ reaches no member; incomplete Markdown remains prose when the stream ends."""
 
 import re
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from uuid import UUID
-
-from ufo.harness.containment import contained_leaf
 
 REPLY_TAG = "reply-to"
 REPLY_CLOSER = f"</{REPLY_TAG}>"
@@ -100,7 +99,8 @@ def _named_message(named: str) -> UUID | None:
 
 
 def _artifact_name(named: str) -> str:
-    name = contained_leaf(named.strip(), ARTIFACT_FALLBACK_NAME)
+    leaf = PurePosixPath(named.strip().replace("\\", "/")).name
+    name = leaf if leaf not in ("", ".", "..") else ARTIFACT_FALLBACK_NAME
     return name if "." in name else name + ARTIFACT_DEFAULT_SUFFIX
 
 

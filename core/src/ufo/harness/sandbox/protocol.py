@@ -27,7 +27,6 @@ class SandboxCommands[ResultT]:
     execute: Callable[[tuple[str, ...], int], Awaitable[ResultT]]
     default_timeout_s: int
     python_flag: str
-    python_bootstrap: str
     supervisor: tuple[str, ...]
 
     async def bash(self, command: str, timeout_s: int | None = None) -> ResultT:
@@ -69,15 +68,9 @@ class SandboxCommands[ResultT]:
         )
 
     async def python(self, program: str, *args: str, timeout_s: int | None = None) -> ResultT:
-        """Run an isolated Python program with the caller's containment bootstrap."""
+        """Run an isolated Python program with `args` as its argv."""
         return await self.execute(
-            (
-                "python3",
-                self.python_flag,
-                "-c",
-                f"{self.python_bootstrap}{program}",
-                *args,
-            ),
+            ("python3", self.python_flag, "-c", program, *args),
             self.default_timeout_s if timeout_s is None else timeout_s,
         )
 

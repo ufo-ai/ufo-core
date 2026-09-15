@@ -1880,9 +1880,6 @@ def _check_the_sandbox_template_publishes_only_when_its_digest_inputs_move() -> 
     inputs += [
         build_template.CLIENT_SOURCE_DIR / name for name in build_template.CLIENT_SOURCE_DIRS
     ]
-    inputs += [
-        build_template.MODULE_SOURCE_DIR / name for name, _ in build_template.SANDBOX_MODULES
-    ]
     skills = [
         path
         for pattern in (

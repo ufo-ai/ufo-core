@@ -14,9 +14,12 @@ A command's git is the sandbox's, never the host's: Apple's git ships
 UI, then blocks on a synchronous XPC reply nothing can send — hanging `git`, and the turn awaiting
 it, forever.
 
-This is a development default, not an isolation boundary: a subprocess is confined to the workspace
-only through the `workspace_path` guard on tool arguments, not by the kernel. Docker and E2B are the
-carriers that add real isolation. A command's environment is built for it — the scratch HOME and
+Every command runs under the kernel's own sandbox, `ufo sandbox` — Seatbelt on macOS, Landlock on
+Linux — with writes confined to the workspace, the conversation's runtime root, the scratch home,
+and the temp dir, and everything readable. The binary that applies it sits on the scratch PATH
+outside every writable root, so no confined command can replace what confines the next. Egress is
+not kernel-held: a command that ignores the proxy env reaches the host's network. Docker and E2B
+are the carriers that hold both. A command's environment is built for it — the scratch HOME and
 PATH, locale and tmp passthrough, the proxy exports, the spec's own env — never serve's own, whose
 environment is the deploy's secrets."""
 
@@ -26,23 +29,19 @@ import io
 import json
 import os
 import shlex
+import shutil
 import sys
 import tempfile
 import zipfile
 from base64 import urlsafe_b64decode
 from collections.abc import AsyncIterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cache
-from io import BufferedReader
 from pathlib import Path, PurePosixPath
 from signal import SIGKILL
+from uuid import uuid4
 
-from ufo.harness.containment import (
-    PathNotFound,
-    contained_file,
-    contained_relative,
-    contained_remove,
-)
 from ufo.harness.o11y import warn
 from ufo.harness.sandbox.client_binary import CLIENT_BINARY_NAME, client_binary
 from ufo.harness.sandbox.session import (
@@ -71,27 +70,25 @@ ENV_PASSTHROUGH = (
     "PLAYWRIGHT_BROWSERS_PATH",
 )
 CA_FILENAME = "egress-ca.pem"
+SANDBOX_VERB = "sandbox"
+SANDBOX_WRITE_FLAG = "--write"
+DEFAULT_TMPDIR = "/tmp"
 EXEC_TIMEOUT_CODE = 124
 READ_CHUNK_BYTES = 1024 * 1024
+STAGED_PREFIX = ".ufo-staged-"
+SYSTEM_MANIFEST_NAME = ".system-manifest.json"
 
 
-@cache
-def _provision_scratch() -> Path:
-    """A process-lifetime scratch dir holding the command PATH's `ufo` client and a home for tools
-    that write under `$HOME` — created once per process, off the event loop at the first carrier's
-    construction. The binary is copied rather than linked, so every command of a running process
-    runs the one build resolved here, and nothing deletes the copy: one dir per construction would
-    leak the binary's size per carrier. The workspace itself is never here: it is the durable
-    bind-mount, kept clear of scaffolding.
-
-    A checkout holding no build of the client warns and carries on. The carrier is still the shell,
-    the reads and the writes every other seam needs, and only the file tools and `ufo llm` want the
-    binary — so the failure belongs to the command that asks for it, named there, rather than to
-    every conversation this process opens."""
-    root = Path(tempfile.mkdtemp(prefix="ufo-local-"))
-    (root / "home").mkdir()
+def provision_scratch(root: Path) -> Path:
+    """`root` as a carrier's scratch: a `home` for tools that write under `$HOME`, and a `bin` with
+    the command PATH's `ufo` client. That binary confines every command, so it sits outside every
+    directory a command may write, and it is copied rather than linked so every command of a running
+    process runs the one build resolved here. A checkout holding no build of the client leaves
+    `bin` empty, and every command then fails naming the build to run, while the carrier still
+    serves the reads and writes every other seam needs."""
+    (root / "home").mkdir(parents=True, exist_ok=True)
     bin_dir = root / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     try:
         source = client_binary()
     except RuntimeError as error:
@@ -103,14 +100,21 @@ def _provision_scratch() -> Path:
     return root
 
 
+@cache
+def _provision_scratch() -> Path:
+    return provision_scratch(Path(tempfile.mkdtemp(prefix="ufo-local-")))
+
+
 @dataclass(frozen=True)
 class LocalCarrier:
     _scratch: Path = field(default_factory=_provision_scratch)
 
     @property
     def ufo_home(self) -> Path:
-        """The local runtime's `$UFO_HOME`."""
-        return self._scratch / "home" / ".ufo"
+        """The local runtime's `$UFO_HOME`, beside the home rather than under it: a command may
+        write its home, while `skills/` here stays outside every writable root and only the
+        conversation's `runs/<id>` is named one."""
+        return self._scratch / "ufo"
 
     def seed_system_skills(self, archive: bytes) -> None:
         root = self.ufo_home / "skills"
@@ -127,20 +131,17 @@ class LocalCarrier:
                 raise TypeError("invalid system skill manifest")
             if any(not isinstance(name, str) for name in (*old_skills, *new_skills)):
                 raise TypeError("invalid system skill name")
-            top_levels = {
-                Path(contained_relative(name, str(root))).relative_to(root).parts[0]
-                for name in (*old_skills, *new_skills)
-            }
+            top_levels = {PurePosixPath(name).parts[0] for name in (*old_skills, *new_skills)}
             for name in top_levels:
-                contained_remove(root / name, root)
+                with suppress(FileNotFoundError):
+                    shutil.rmtree(root / name)
             for entry in bundle.infolist():
                 if entry.is_dir() or entry.filename == "manifest.json":
                     continue
-                target = contained_relative(entry.filename, str(root))
-                with contained_file(target, root, create_parent=True) as output:
-                    output.replace_bytes(bundle.read(entry), 0o644)
-            with contained_file(root / ".system-manifest.json", root) as output:
-                output.replace_bytes(manifest_bytes, 0o644)
+                target = root / entry.filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(bundle.read(entry))
+            (root / SYSTEM_MANIFEST_NAME).write_bytes(manifest_bytes)
 
     async def load_skills(self, handle: SandboxHandle, payload: Mapping[str, object]) -> ExecResult:
         """Resolve system and user skills under the local runtime's `$UFO_HOME/skills`."""
@@ -188,17 +189,16 @@ class LocalCarrier:
     ) -> tuple[str, str] | None:
         if not isinstance(name, str) or not isinstance(digest, str):
             raise TypeError("invalid system skill")
-        contained_relative(name, str(root))
         declared = manifest_skills.get(name)
         if not isinstance(declared, Mapping) or declared.get("digest") != digest:
             return None
         files = declared.get("files")
         if not isinstance(files, list) or any(not isinstance(path, str) for path in files):
             raise TypeError(f"invalid system skill manifest: {name}")
-        contents = self._read_skill_files(root, name, files)
+        contents = [(path, (root / name / path).read_bytes()) for path in files]
         if self._skill_digest(contents) != digest:
             return None
-        return name, contained_relative(name, str(root))
+        return name, str(root / name)
 
     def _load_user_skill(
         self,
@@ -209,7 +209,7 @@ class LocalCarrier:
     ) -> tuple[str, str]:
         if not isinstance(name, str) or not isinstance(encoded, Mapping):
             raise TypeError("invalid user skill")
-        self._validate_user_skill_name(name, root)
+        self._validate_user_skill_name(name)
         if any(
             system_name == name
             or (
@@ -227,48 +227,33 @@ class LocalCarrier:
         for path, content in files.items():
             if not isinstance(path, str) or not isinstance(content, str):
                 raise TypeError(f"invalid user skill file: {name}")
-            contained_relative(path, f"/{name}")
             contents.append((path, urlsafe_b64decode(content)))
         contents.sort()
         if self._skill_digest(contents) != digest:
             raise ValueError(f"user skill does not match its digest: {name}")
-        self._install_user_skill(root, name, contents)
-        return name, contained_relative(name, str(root))
+        destination = root / name
+        with suppress(FileNotFoundError):
+            shutil.rmtree(destination)
+        for path, content in contents:
+            target = destination / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        return name, str(destination)
 
     @staticmethod
     def _system_manifest(root: Path) -> Mapping[str, object]:
-        with contained_file(root / ".system-manifest.json", root) as source:
-            if source.lstat() is None:
-                return {"skills": {}}
-            with source.open_bytes() as contents:
-                manifest = json.load(contents)
+        try:
+            manifest = json.loads((root / SYSTEM_MANIFEST_NAME).read_bytes())
+        except FileNotFoundError:
+            return {"skills": {}}
         if not isinstance(manifest, Mapping):
             raise TypeError("invalid system skill manifest")
         return manifest
 
     @staticmethod
-    def _read_skill_files(root: Path, name: str, files: list[str]) -> list[tuple[str, bytes]]:
-        contents = []
-        for path in files:
-            target_path = contained_relative(f"{name}/{path}", str(root))
-            with contained_file(target_path, root) as target:
-                with target.open_bytes() as source:
-                    contents.append((path, source.read()))
-        return contents
-
-    @staticmethod
-    def _install_user_skill(root: Path, name: str, files: list[tuple[str, bytes]]) -> None:
-        destination = contained_relative(name, str(root))
-        contained_remove(destination, root)
-        for path, content in files:
-            target = contained_relative(f"{name}/{path}", str(root))
-            with contained_file(target, root, create_parent=True) as output:
-                output.replace_bytes(content, 0o644)
-
-    @staticmethod
-    def _validate_user_skill_name(name: str, root: Path) -> None:
-        relative = Path(contained_relative(name, str(root))).relative_to(root)
-        if len(relative.parts) != 1 or relative.parts[0].startswith("."):
+    def _validate_user_skill_name(name: str) -> None:
+        parts = PurePosixPath(name).parts
+        if len(parts) != 1 or parts[0].startswith("."):
             raise ValueError(f"invalid skill name: {name}")
 
     @staticmethod
@@ -382,7 +367,11 @@ class LocalCarrier:
         the host's CPU for as long as it lives, which is how one `bash -lc` that forks outlives
         every turn, conversation and process that could still name it. A command that exits on its
         own leaves its group alone: a backgrounded descendant outliving the exec that launched it
-        is how a turn starts a server."""
+        is how a turn starts a server.
+
+        The subprocess is `ufo sandbox` around the command: the kernel confines its writes to the
+        workspace, the runtime root, the scratch home, and `TMPDIR`, and every descendant inherits
+        the confinement."""
         root = _root(handle)
         rewritten = host_argv(argv, str(root))
         if len(rewritten) >= 3 and rewritten[-3:-1] == ("bash", "-lc"):
@@ -390,15 +379,34 @@ class LocalCarrier:
                 *rewritten[:-1],
                 f"export PATH={shlex.quote(handle.egress_env['PATH'])}\n{rewritten[-1]}",
             )
-        process = await asyncio.create_subprocess_exec(
-            *rewritten,
-            cwd=str(root),
-            env=dict(handle.egress_env),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
+        writes = (
+            str(root),
+            handle.runtime_root,
+            str(self._scratch / "home"),
+            handle.egress_env.get("TMPDIR", DEFAULT_TMPDIR),
         )
+        confined = (
+            str(self._scratch / "bin" / CLIENT_BINARY_NAME),
+            SANDBOX_VERB,
+            *(flag for path in writes if path for flag in (SANDBOX_WRITE_FLAG, path)),
+            "--",
+            *rewritten,
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *confined,
+                cwd=str(root),
+                env=dict(handle.egress_env),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"no {CLIENT_BINARY_NAME} client to confine the command; build one with "
+                "`cargo build --release` in client/"
+            ) from error
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)
         except TimeoutError:
@@ -420,58 +428,45 @@ class LocalCarrier:
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """The workspace is a host directory, so the copy-in is a host write under it — off the
-        loop, since the filesystem has no async API, and through the containment guard, since the
-        path was built from a tool argument or a surface's inbound filename. Every directory on the
-        way is created and re-opened `O_NOFOLLOW` as the descent reaches it, so a link planted at
-        any component cannot redirect the copy-in, and the bytes are staged under a name created
-        `O_CREAT|O_EXCL` beside the target and renamed onto it: a reader of the path sees the whole
-        of one write or the whole of the one before, which is what two writers racing one path need,
-        since a surface may deliver a file twice.
+        loop, since the filesystem has no async API. The bytes are staged beside the target and
+        renamed onto it: a reader of the path sees the whole of one write or the whole of the one
+        before, which is what two writers racing one path need, since a surface may deliver a file
+        twice. The staged name is its own, not the target's with a suffix, so the longest filename
+        a directory takes still fits, and it is removed on any failure, since the workspace listing
+        is the member's own file list and an orphan would appear in it as a file they never made.
 
-        The staged name is its own, not the target's with a suffix, so the longest filename a
-        directory takes still fits, and it is removed on any failure, since the workspace listing is
-        the member's own file list and an orphan would appear in it as a file they never made. A
-        path resolving to the workspace root, or above it, holds no file to write and is refused
-        before any byte is staged. A rename installs a new inode, so an overwrite carries the mode
-        across and an executable a turn produced stays executable for the turn that runs it — probed
-        once, without following a link, so a delete racing the write still ends in a created file.
-        Permission bits only: setuid, setgid and sticky do not survive a copy-in through any other
-        carrier. A file the copy-in creates lands 0o644 rather than under serve's umask, because the
-        sandbox user is the one that reads it, and so does one landing on a name something other
-        than a regular file holds — that name is replaced rather than refused, since the rename
-        cannot write through a link and a link left at an inbox name would otherwise deny every
-        later delivery to it."""
-        await asyncio.to_thread(self._write_contained, handle, path, content)
+        A rename installs a new inode, so an overwrite carries the mode across and an executable a
+        turn produced stays executable for the turn that runs it — probed once, so a delete racing
+        the write still ends in a created file. Permission bits only: setuid, setgid and sticky do
+        not survive a copy-in through any other carrier. A file the copy-in creates lands
+        `WORKSPACE_WRITE_MODE` rather than under serve's umask, because the sandbox user is the one
+        that reads it."""
+        await asyncio.to_thread(self._write, handle, path, content)
 
-    def _write_contained(self, handle: SandboxHandle, path: str, content: bytes) -> None:
-        name, root = _contained_name(handle, path)
-        with contained_file(name, root, create_parent=True) as target:
-            target.replace_bytes(content, target.mode(WORKSPACE_WRITE_MODE))
+    def _write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
+        target = _host_path(handle, path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            mode = target.stat().st_mode & 0o777
+        except FileNotFoundError:
+            mode = WORKSPACE_WRITE_MODE
+        staged = target.parent / f"{STAGED_PREFIX}{uuid4().hex}"
+        try:
+            staged.write_bytes(content)
+            staged.chmod(mode)
+            staged.replace(target)
+        finally:
+            staged.unlink(missing_ok=True)
 
     async def read(self, handle: SandboxHandle, path: str) -> AsyncIterator[bytes]:
         """The workspace is a host directory, so the copy-out is a chunked host read under it — off
-        the loop, since the filesystem has no async API. A copy-out is an ingress like any other:
-        the path is confined before a byte is touched and the stream comes off an `O_NOFOLLOW` fd
-        the descent proved regular, so a link the agent planted at the target — or at a directory on
-        the way to it — is refused instead of read out of the workspace."""
-        source = await asyncio.to_thread(self._contained_source, handle, path)
+        the loop, since the filesystem has no async API."""
+        source = await asyncio.to_thread(_host_path(handle, path).open, "rb")
         try:
             while chunk := await asyncio.to_thread(source.read, READ_CHUNK_BYTES):
                 yield chunk
         finally:
             await asyncio.to_thread(source.close)
-
-    def _contained_source(self, handle: SandboxHandle, path: str) -> BufferedReader:
-        """The pinned parent is released once the file's own fd is open, so the stream that outlives
-        this call names no path a later swap could redirect."""
-        try:
-            name, root = _contained_name(handle, path)
-            with contained_file(name, root) as target:
-                if target.lstat() is None:
-                    raise FileNotFoundError(str(target.path))
-                return target.open_bytes()
-        except PathNotFound as error:
-            raise FileNotFoundError(str(error)) from error
 
     async def file_op(
         self, handle: SandboxHandle, op: str, params: dict[str, object]
@@ -503,10 +498,10 @@ def _root(handle: SandboxHandle) -> Path:
     return Path(handle.workspace_host_path)
 
 
-def _contained_name(handle: SandboxHandle, path: str) -> tuple[PurePosixPath, Path]:
+def _host_path(handle: SandboxHandle, path: str) -> Path:
     candidate = PurePosixPath(path)
     if candidate.is_relative_to(WORKSPACE_DIR):
-        return candidate.relative_to(WORKSPACE_DIR), _root(handle)
+        return _root(handle) / candidate.relative_to(WORKSPACE_DIR)
     if handle.runtime_root and candidate.is_relative_to(handle.runtime_root):
-        return candidate.relative_to(handle.runtime_root), Path(handle.runtime_root)
+        return Path(handle.runtime_root) / candidate.relative_to(handle.runtime_root)
     raise ValueError(f"path {path!r} is outside the sandbox roots")

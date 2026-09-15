@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_docker as docker_ext
-from ufo_ext_docker import DockerCarrier
+from ufo_ext_docker import COPY_IN_SCRIPT, DockerCarrier
 
 from ufo.config import BlobConfig, Config, DatabaseConfig, SandboxConfig
 from ufo.db import workspace_tx
@@ -241,10 +241,8 @@ async def test_write_streams_the_content_over_stdin_and_never_on_the_command_lin
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The invariant the write seam exists for: a payload reaches the container through `docker exec
-    -i`'s stdin, never as an argv element, and the name it lands on goes through the containment
-    guard rather than a shell redirect that would truncate through a planted link. The real proof of
-    the stream is the 26 MB write in test_file_tools.py; this pins the call shape, which no
-    successful write can tell apart."""
+    -i`'s stdin, never as an argv element. The real proof of the stream is the 26 MB write in
+    test_file_tools.py; this pins the call shape, which no successful write can tell apart."""
     calls: list[tuple[tuple[str, ...], bytes]] = []
 
     async def record_docker(*argv: str, stdin: bytes = b"", timeout_s: int = 60):
@@ -261,11 +259,16 @@ async def test_write_streams_the_content_over_stdin_and_never_on_the_command_lin
     argv, stdin = calls[-1]
     assert stdin == content
     assert not any(content[:64].decode() in arg for arg in argv)
-    assert argv[:5] == ("exec", "-i", "cid1", "python3", docker_ext.SANDBOX_PYTHON_FLAG)
-    assert argv[-2:] == ("/workspace/notes/report.txt", "/workspace")
-    assert docker_ext.COPY_IN_PROG in argv[-3]
-    assert "from containment import" in argv[-3]
-    assert not any("cat > " in arg for arg in argv)
+    assert argv == (
+        "exec",
+        "-i",
+        "cid1",
+        "sh",
+        "-c",
+        COPY_IN_SCRIPT,
+        "sh",
+        "/workspace/notes/report.txt",
+    )
 
 
 async def test_write_raises_with_the_container_error_on_a_nonzero_exit(

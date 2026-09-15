@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from ufo.sdk.context import CredentialAccess, ScopedStore
 from ufo.sdk.manifest import CredentialSlot, Manifest, PromptSection
-from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, contained_relative
+from ufo.sdk.sandbox import workspace_path
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 
 NAME = "browser_use"
@@ -219,10 +219,7 @@ class HostedRun:
         """The run's own output files, written into the conversation workspace. A file past the
         size bound is reported rather than written, and a listing the count bound cut short says so
         through the vendor's own `hasMore`, so the caller can always say what it did not fetch; a
-        path that would escape the workspace is a fault, not a file — decided by the shared
-        containment guard rather than by a lexical check of this pack's own, with the carrier's
-        write proving the path against the filesystem after it, so a directory the vendor names
-        cannot be a link the agent left in the workspace."""
+        path that would escape the workspace is a fault, not a file."""
         if not self.save_outputs:
             return (), (), False
         listed = await self._json(
@@ -246,8 +243,8 @@ class HostedRun:
                 )
             entry = RunFile(path, size)
             try:
-                scoped = contained_relative(entry.path, WORKSPACE_DIR)
-            except ContainmentError as error:
+                scoped = workspace_path(entry.path)
+            except ValueError as error:
                 raise BrowserUseError(
                     f"run output path escapes the workspace: {entry.path!r}"
                 ) from error

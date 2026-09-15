@@ -27,12 +27,9 @@ from uuid import UUID
 
 from ufo.sdk.manifest import Manifest
 from ufo.sdk.sandbox import (
-    COPY_IN_PROG,
     NO_PROXY_HOSTS,
     PROXY_PASSWORD,
     SANDBOX_GID,
-    SANDBOX_MODULE_BOOTSTRAP,
-    SANDBOX_PYTHON_FLAG,
     SANDBOX_UID,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
@@ -50,6 +47,16 @@ CARRIER_NAME = "docker"
 CONTAINER_NAME_PREFIX = "ufo-sbx-"
 CREATE_TIMEOUT_SECONDS = 120
 WRITE_TIMEOUT_SECONDS = 30
+COPY_IN_SCRIPT = (
+    "set -e\n"
+    'd="$(dirname "$1")"\n'
+    'mkdir -p "$d"\n'
+    't="$d/.ufo-staged-$$"\n'
+    "trap 'rm -f \"$t\"' EXIT\n"
+    'cat > "$t"\n'
+    'if [ -e "$1" ]; then chmod --reference="$1" "$t"; else chmod 644 "$t"; fi\n'
+    'mv -f -T "$t" "$1"\n'
+)
 RUNTIME_ROOT_TIMEOUT_SECONDS = 30
 READ_CHUNK_BYTES = 1024 * 1024
 IDLE_RECLAIM_SECONDS = 1800
@@ -381,11 +388,10 @@ class DockerCarrier:
 
     async def write(self, handle: SandboxHandle, path: str, content: bytes) -> None:
         """`docker exec -i` gives the container a real stdin, so the bytes stream in over it and
-        never enter the command line — into the guard's own copy-in program, which the image bakes
-        the containment module beside. A shell `mkdir -p && cat > "$1"` follows a symlinked ancestor
-        and truncates through a planted link, and the container is the only thing scoping the path:
-        the name comes from a tool argument or an inbound attachment, and the agent writes the
-        directory it lands in."""
+        never enter the command line. They land under a staged name beside the target and are
+        renamed onto it, so a reader sees the whole of one write or the whole of the one before,
+        a copy-in that stops part-way leaves the target as it was, and an overwrite keeps the
+        file's mode."""
         self._inflight[handle.conversation_id] += 1
         self._touched[handle.conversation_id] = self.clock()
         try:
@@ -402,18 +408,15 @@ class DockerCarrier:
     async def _write_started(
         self, handle: SandboxHandle, path: str, content: bytes
     ) -> tuple[int, bytes]:
-        runtime_root = handle.runtime_root or sandbox_runtime_root(handle.conversation_id)
-        root = runtime_root if PurePosixPath(path).is_relative_to(runtime_root) else WORKSPACE_DIR
         code, _, stderr = await _docker(
             "exec",
             "-i",
             handle.container_id,
-            "python3",
-            SANDBOX_PYTHON_FLAG,
+            "sh",
             "-c",
-            f"{SANDBOX_MODULE_BOOTSTRAP}{COPY_IN_PROG}",
+            COPY_IN_SCRIPT,
+            "sh",
             path,
-            root,
             stdin=content,
             timeout_s=WRITE_TIMEOUT_SECONDS,
         )

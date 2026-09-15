@@ -12,7 +12,6 @@ verifies."""
 import asyncio
 import hashlib
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -36,11 +35,7 @@ from PIL import Image
 from ufo_ext_sites.conversation_slot import SITES_SLOT
 from ufo_ext_sites.manifest import manifest as sites_manifest
 from ufo_ext_sites.objects import SITE_KIND, site_object_name
-from ufo_ext_sites.source import (
-    CLAIM_TREE_PROG,
-    PROJECT_FILE_ABSENT,
-    PROJECT_FILE_READ,
-)
+from ufo_ext_sites.source import PROJECT_FILE_ABSENT, PROJECT_FILE_READ
 from ufo_ext_sites.store import (
     HomepageHoldsThePort,
     HostedSite,
@@ -89,7 +84,6 @@ from ufo_testsupport.surfaces import (
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.config import Config
 from ufo.db import workspace_tx
-from ufo.harness import containment
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
@@ -2614,70 +2608,25 @@ async def test_unhosting_by_object_delete_keeps_the_stored_source(db: None) -> N
         assert [entry.key for entry in await blob.list(root)] == [f"{root}index.html"]
 
 
-def test_the_claim_program_takes_a_planted_link_without_following_it(tmp_path: Path) -> None:
-    outside = tmp_path / "outside.txt"
-    outside.write_bytes(b"host bytes")
-    workspace = tmp_path / "workspace"
-    (workspace / "sites" / "home").mkdir(parents=True)
-    planted = workspace / "sites" / "home" / "index.html"
-    planted.symlink_to(outside)
-    guard_home = str(Path(containment.__file__).parent)
-
-    stale = workspace / "sites" / "home" / "dropped.html"
-    stale.write_bytes(b"a page a newer deploy removed")
-    claimed = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            CLAIM_TREE_PROG,
-            str(workspace),
-            str(workspace / "sites" / "home"),
-            str(planted),
-            str(workspace / "sites" / "home" / "assets" / "app.js"),
-        ],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "PYTHONPATH": guard_home},
-    )
-
-    assert claimed.returncode == 0, claimed.stderr
-    assert not planted.is_symlink()
-    assert planted.read_bytes() == b""
-    assert outside.read_bytes() == b"host bytes"
-    assert not stale.exists()
-    assert (workspace / "sites" / "home" / "assets" / "app.js").read_bytes() == b""
-
-
-def test_the_project_read_answers_absence_apart_from_a_refusal(tmp_path: Path) -> None:
-    """An app page project carries an `application-design.svg` or it does not, and the gate reads
-    the difference off this exit code. The guard answers a missing file with `PathNotFound`, which
-    is a `ContainmentError` and not a `FileNotFoundError`, so absence and refusal only stay apart
-    while the program catches the class the guard actually raises."""
-
+def test_the_project_read_answers_absence_by_exit_code(tmp_path: Path) -> None:
     project = tmp_path / "ufo-app"
     project.mkdir()
     (project / "app.tsx").write_text("const page = 1;\n")
-    (project / "escape.svg").symlink_to(tmp_path.parent / "outside.svg")
-    guard_home = str(Path(containment.__file__).parent)
 
     def read(name: str, maximum: str = "1000") -> CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, "-c", PROJECT_FILE_READ, str(project / name), str(tmp_path), maximum],
+            [sys.executable, "-c", PROJECT_FILE_READ, str(project / name), maximum],
             capture_output=True,
             text=True,
-            env={**os.environ, "PYTHONPATH": guard_home},
         )
 
     held = read("app.tsx")
     assert held.returncode == 0, held.stderr
     assert held.stdout == "const page = 1;\n"
+    assert read("app.tsx", "5").stdout == "const"
 
     assert read("application-design.svg").returncode == PROJECT_FILE_ABSENT
     assert read("nowhere/application-design.svg").returncode == PROJECT_FILE_ABSENT
-
-    refused = read("escape.svg")
-    assert refused.returncode == 1
-    assert "escape.svg" in refused.stderr
 
 
 def test_the_enumeration_program_lists_and_bounds_the_source_tree(tmp_path: Path) -> None:
@@ -2685,8 +2634,6 @@ def test_the_enumeration_program_lists_and_bounds_the_source_tree(tmp_path: Path
     (site / "assets").mkdir(parents=True)
     (site / "index.html").write_bytes(b"<html></html>")
     (site / "assets" / "app.js").write_bytes(b"0123456789")
-    (site / "twin.html").symlink_to(site / "index.html")
-    guard_home = str(Path(containment.__file__).parent)
 
     def enumerate_site(project: Path, max_files: str, max_bytes: str) -> CompletedProcess[str]:
         return subprocess.run(
@@ -2695,14 +2642,12 @@ def test_the_enumeration_program_lists_and_bounds_the_source_tree(tmp_path: Path
                 "-c",
                 ENUMERATE_PROG,
                 str(project),
-                str(tmp_path),
                 max_files,
                 max_bytes,
                 ",".join(SOURCE_SKIP_NAMES),
             ],
             capture_output=True,
             text=True,
-            env={**os.environ, "PYTHONPATH": guard_home},
         )
 
     listed = enumerate_site(site, "10", "1000")

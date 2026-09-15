@@ -41,7 +41,6 @@ from ufo.db import (
     workspace_tx,
 )
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV, mint_token
-from ufo.harness.containment import contained_file
 from ufo.harness.durability import replay_safe_client
 from ufo.harness.models.interface import (
     PROVIDER_ANTHROPIC,
@@ -114,7 +113,6 @@ backend = "open"
 CORE_VERSIONS_DIR = MIGRATIONS_DIR / "versions"
 MIGRATION_HEAD_FILENAME = "HEAD"
 MIGRATION_STAMP = "%Y%m%d%H%M%S"
-MIGRATION_FILE_MODE = 0o644
 MIGRATION_SLUG = re.compile(r"[a-z][a-z0-9_]*")
 MIGRATION_TEMPLATE = """\
 revision: str = "{revision}"
@@ -423,13 +421,10 @@ def new_migration(slug: str) -> None:
     forking main."""
     head = core_migration_head()
     stamp = datetime.now(UTC).strftime(MIGRATION_STAMP)
-    with contained_file(f"{stamp}_{slug}.py", CORE_VERSIONS_DIR) as target:
-        target.replace_text(
-            MIGRATION_TEMPLATE.format(revision=stamp, down_revision=head), MIGRATION_FILE_MODE
-        )
-        click.echo(f"wrote {target.path} — revision {stamp}, down_revision {head}")
-    with contained_file(MIGRATION_HEAD_FILENAME, CORE_VERSIONS_DIR) as head_file:
-        head_file.replace_text(f"{stamp}\n", MIGRATION_FILE_MODE)
+    target = CORE_VERSIONS_DIR / f"{stamp}_{slug}.py"
+    target.write_text(MIGRATION_TEMPLATE.format(revision=stamp, down_revision=head))
+    click.echo(f"wrote {target} — revision {stamp}, down_revision {head}")
+    (CORE_VERSIONS_DIR / MIGRATION_HEAD_FILENAME).write_text(f"{stamp}\n")
 
 
 @main.command()

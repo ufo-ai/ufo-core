@@ -33,7 +33,6 @@ import ufo.runtime.ext.surface as surface_module
 from ufo.blob import FilesystemBlobStore, WorkspaceBlobStore
 from ufo.db import workspace_tx
 from ufo.harness.auth.bearer import UFO_TOKEN_SECRET_ENV
-from ufo.harness.containment import ContainmentError
 from ufo.harness.models.interface import (
     AUTO_MODEL,
     Message,
@@ -1913,64 +1912,6 @@ def test_an_inbox_name_is_one_leaf_however_the_surface_was_handed_it() -> None:
         "z" * 79,
         "отчёт.pdf",
     }
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_write_workspace_file_replaces_a_planted_symlink(db: None, tmp_path) -> None:
-    """An inbound attachment lands through the carrier's containment guard, so a link the agent left
-    in its own inbox directory on an earlier turn is replaced rather than written through: the host
-    file it pointed at is untouched, and the member's attachment still arrives.
-
-    Replacing is what keeps the surface working. `slack-inbox/<name>` is Slack's name, not ours, so
-    refusing here would let one planted link deny every later message carrying a file of that
-    name — and the rename cannot follow the link anyway."""
-    workspace_id, _, _ = await _seed()
-    root = tmp_path / "workspaces"
-    context = _context(
-        workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path), _sandboxes(root)
-    )
-    outside = tmp_path / "outside.txt"
-    outside.write_bytes(b"host secret")
-
-    async def _chunks():
-        yield b"inbound bytes"
-
-    with ws(workspace_id):
-        conversation_id = await _conversation_row(workspace_id, queue_key="inbox")
-        inbox = root / str(conversation_id) / "slack-inbox"
-        inbox.mkdir(parents=True)
-        landed = inbox / "note.txt"
-        landed.symlink_to(outside)
-        await context.write_workspace_file(conversation_id, "slack-inbox/note.txt", _chunks())
-    assert outside.read_bytes() == b"host secret"
-    assert not landed.is_symlink()
-    assert landed.read_bytes() == b"inbound bytes"
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_write_workspace_file_refuses_a_link_out_of_the_workspace(db: None, tmp_path) -> None:
-    """A link at a *directory* on the way, pointing out of the conversation's workspace, is refused
-    outright: there is no name inside the workspace for the bytes to land on, so the delivery fails
-    loudly instead of writing into whatever the link named."""
-    workspace_id, _, _ = await _seed()
-    root = tmp_path / "workspaces"
-    context = _context(
-        workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path), _sandboxes(root)
-    )
-    outside = tmp_path / "outside"
-    outside.mkdir()
-
-    async def _chunks():
-        yield b"inbound bytes"
-
-    with ws(workspace_id):
-        conversation_id = await _conversation_row(workspace_id, queue_key="inbox")
-        workspace = root / str(conversation_id)
-        workspace.mkdir(parents=True)
-        (workspace / "slack-inbox").symlink_to(outside, target_is_directory=True)
-        with pytest.raises(ContainmentError):
-            await context.write_workspace_file(conversation_id, "slack-inbox/note.txt", _chunks())
-    assert list(outside.iterdir()) == []
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

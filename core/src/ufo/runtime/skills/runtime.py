@@ -30,7 +30,6 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-from ufo.harness.containment import contained_relative
 from ufo.harness.o11y import log
 from ufo.harness.sandbox.session import Sandbox
 
@@ -47,11 +46,6 @@ ALREADY_LOADED_NOTE = "Already in context above, not repeated: {names}"
 SUGGESTION_LIMIT = 5
 SYSTEM_SKILL_DIGEST_PREFIX = "sha256:"
 SYSTEM_SKILL_MANIFEST = "manifest.json"
-
-
-def skill_root(name: str) -> str:
-    """The skill's stable path under the runtime's `$UFO_HOME`."""
-    return f"{SKILLS_ROOT}/{name}"
 
 
 @dataclass(frozen=True)
@@ -93,7 +87,7 @@ class RuntimeSkill:
         return {SKILL_MD: self.raw_skill_md.encode(), **dict(self.files)}
 
     def root(self) -> str:
-        return skill_root(self.name)
+        return f"{SKILLS_ROOT}/{self.name}"
 
     def card(self) -> SkillCard:
         """This skill's routing view — what closure resolution and search walk for a deploy skill,
@@ -552,12 +546,12 @@ def loaded_context(
 
 
 def _wire_skill(skill: RuntimeSkill) -> dict[str, object]:
-    files = {
-        contained_relative(path, skill.root()).removeprefix(f"{skill.root()}/"): (
-            urlsafe_b64encode(content).decode()
-        )
-        for path, content in skill.all_files().items()
-    }
+    files: dict[str, str] = {}
+    for path, content in skill.all_files().items():
+        key = PurePosixPath(path)
+        if key.is_absolute() or ".." in key.parts:
+            raise ValueError(f"skill file {path!r} escapes {skill.root()}")
+        files[str(key)] = urlsafe_b64encode(content).decode()
     return {"digest": skill.content_digest(), "files": files}
 
 

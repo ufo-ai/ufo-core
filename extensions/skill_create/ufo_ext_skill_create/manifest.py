@@ -10,7 +10,7 @@ import json
 import logging
 import shlex
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -29,8 +29,8 @@ from ufo.sdk.objects import (
     ObjectRow,
     object_page,
 )
-from ufo.sdk.sandbox import ContainmentError, contained_relative, workspace_path
-from ufo.sdk.skills import SKILL_LINE_MAX_CHARS, RuntimeSkill, SkillCard, lexical_score, skill_root
+from ufo.sdk.sandbox import workspace_path
+from ufo.sdk.skills import SKILL_LINE_MAX_CHARS, RuntimeSkill, SkillCard, lexical_score
 from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_skill_create.store import (
     MAX_PINNED_USER_SKILLS,
@@ -122,14 +122,12 @@ def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
     return ext
 
 
-def _contained_keys(name: str, spec: UserSkillSpec) -> None:
-    """Every file key names a file inside the skill's own load directory."""
-    root = skill_root(name)
+def _contained_keys(spec: UserSkillSpec) -> None:
+    """Every file key is a relative path inside the skill's own load directory."""
     for path in spec.files:
-        try:
-            contained_relative(path, root)
-        except ContainmentError as error:
-            raise ValueError(f"skill file {path!r} is not a path inside the skill") from error
+        parts = PurePosixPath(path).parts
+        if not parts or parts[0] == "/" or ".." in parts:
+            raise ValueError(f"skill file {path!r} is not a path inside the skill")
 
 
 def _text(path: str, content: bytes) -> str:
@@ -242,7 +240,7 @@ class SkillObjects:
         ext = _require_ext(ctx.ext)
         if len(spec.files) > MAX_SKILL_FILES:
             raise ValueError(f"a skill holds at most {MAX_SKILL_FILES} files")
-        _contained_keys(name, spec)
+        _contained_keys(spec)
         resolved = await self._resolve(ctx, name, spec)
         total = sum(len(content) for content in resolved.values())
         if total > MAX_SKILL_TOTAL_BYTES:

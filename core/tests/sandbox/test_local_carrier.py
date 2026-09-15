@@ -3,15 +3,13 @@
 The local carrier has no fake to stand in for — it runs the host's own shell, so these drive it
 end to end: create the workspace, exec a command that writes into it, rewrite the logical
 `/workspace` path, carry the egress environment, reach a service on the sandbox's own loopback,
-stream a file out in bounded chunks, and confine that read to the workspace. The last test proves
-the payoff — the file tools run through the default carrier against the `ufo` client on its command
-PATH, no container."""
+and stream a file out in bounded chunks. The last test proves the payoff — the file tools run
+through the default carrier against the `ufo` client on its command PATH, no container."""
 
 import asyncio
 import json
 import os
-import shutil
-import subprocess
+import shlex
 import tempfile
 from base64 import urlsafe_b64encode
 from dataclasses import replace
@@ -21,17 +19,14 @@ from uuid import uuid4
 
 import pytest
 
-from ufo.harness.containment import ContainmentError, LocationEscape, NotRegularFile
 from ufo.harness.sandbox.local import (
     EXEC_TIMEOUT_CODE,
     LOCAL_CONTAINER_ID,
     READ_CHUNK_BYTES,
     LocalCarrier,
+    provision_scratch,
 )
 from ufo.harness.sandbox.session import (
-    COPY_IN_PROG,
-    SANDBOX_MODULE_BOOTSTRAP,
-    SANDBOX_PYTHON_FLAG,
     SENTINEL_MODEL_KEY,
     WORKSPACE_DIR,
     ProxyEndpoint,
@@ -51,7 +46,6 @@ PROBE_PARAMS_HELPER = "probe-params-helper-that-never-runs"
 PROBE_ASKPASS_USER = "probe-askpass-user"
 PROMPTS_DISABLED = "terminal prompts disabled"
 PRESIGNED_PUT = 'curl -sS --fail-with-body -T "$1" --url "$2"'
-BARE_PATH = "/usr/bin:/bin"
 PAGE = "<!doctype html><title>hello</title>"
 LOOPBACK_PROBE = (
     "import urllib.request;"
@@ -84,7 +78,7 @@ def test_supported_local_builds_produce_the_client() -> None:
 
 
 def test_system_skills_seed_directly_and_preserve_user_skills(tmp_path: Path) -> None:
-    carrier = LocalCarrier(_scratch=tmp_path / "scratch")
+    carrier = LocalCarrier(_scratch=provision_scratch(tmp_path / "scratch"))
     first = RuntimeSkill(
         name="first",
         description="first",
@@ -112,7 +106,7 @@ def test_system_skills_seed_directly_and_preserve_user_skills(tmp_path: Path) ->
 
 
 async def test_a_user_skill_may_replace_an_inactive_seeded_skill(tmp_path: Path) -> None:
-    carrier = LocalCarrier(_scratch=tmp_path / "scratch")
+    carrier = LocalCarrier(_scratch=provision_scratch(tmp_path / "scratch"))
     system = RuntimeSkill(
         name="probe",
         description="system",
@@ -145,7 +139,7 @@ async def test_a_user_skill_may_replace_an_inactive_seeded_skill(tmp_path: Path)
 
 
 async def test_a_nested_system_skill_seeds_and_loads(tmp_path: Path) -> None:
-    carrier = LocalCarrier(_scratch=tmp_path / "scratch")
+    carrier = LocalCarrier(_scratch=provision_scratch(tmp_path / "scratch"))
     system = RuntimeSkill(
         name="website-building/webapp",
         description="system",
@@ -166,7 +160,7 @@ async def test_a_nested_system_skill_seeds_and_loads(tmp_path: Path) -> None:
 
 
 async def test_a_user_skill_cannot_replace_the_system_manifest(tmp_path: Path) -> None:
-    carrier = LocalCarrier(_scratch=tmp_path / "scratch")
+    carrier = LocalCarrier(_scratch=provision_scratch(tmp_path / "scratch"))
     system = RuntimeSkill(
         name="probe",
         description="system",
@@ -391,6 +385,44 @@ async def test_exec_rewrites_the_logical_workspace_path(tmp_path: Path) -> None:
     assert (workspace / "w.txt").read_text() == "x"
 
 
+async def test_a_command_writes_only_where_the_carrier_names(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    carrier = LocalCarrier()
+    handle = await carrier.create(_spec(workspace))
+    outside = ROOT / f".ufo-sandbox-probe-{uuid4().hex}"
+
+    try:
+        refused = await carrier.exec(
+            handle, ("bash", "-lc", f"printf no > {shlex.quote(str(outside))}"), 30
+        )
+        landed = await carrier.exec(
+            handle,
+            (
+                "bash",
+                "-lc",
+                'printf ok > /workspace/in.txt && printf t > "${TMPDIR:-/tmp}/ufo-sandbox-probe" '
+                '&& printf h > "$HOME/ufo-sandbox-probe" && rm "${TMPDIR:-/tmp}/ufo-sandbox-probe"',
+            ),
+            30,
+        )
+        assert refused.exit_code != 0
+        assert not outside.exists()
+    finally:
+        outside.unlink(missing_ok=True)
+    assert landed.exit_code == 0, landed.stderr
+    assert (workspace / "in.txt").read_text() == "ok"
+    assert (carrier._scratch / "home" / "ufo-sandbox-probe").read_text() == "h"
+
+
+async def test_a_scratch_without_the_client_refuses_every_command(tmp_path: Path) -> None:
+    carrier = LocalCarrier(_scratch=tmp_path / "scratch")
+    (tmp_path / "scratch" / "home").mkdir(parents=True)
+    handle = await carrier.create(_spec(tmp_path / "workspace"))
+
+    with pytest.raises(RuntimeError, match="cargo build"):
+        await carrier.exec(handle, ("bash", "-lc", "true"), 30)
+
+
 async def test_a_logical_path_inside_a_file_a_command_reads_is_not_rewritten(
     tmp_path: Path,
 ) -> None:
@@ -596,57 +628,12 @@ async def test_a_cancelled_exec_takes_its_descendants_with_it(tmp_path: Path) ->
     assert not await _still_running(descendant)
 
 
-async def test_read_confines_to_the_workspace(tmp_path: Path) -> None:
+async def test_read_refuses_a_path_outside_the_sandbox_roots(tmp_path: Path) -> None:
     carrier = LocalCarrier()
     handle = await carrier.create(_spec(tmp_path / "workspace"))
 
     with pytest.raises(ValueError):
         [chunk async for chunk in carrier.read(handle, "/etc/passwd")]
-
-
-async def test_read_of_a_traversal_path_is_refused(tmp_path: Path) -> None:
-    """A name that climbs out of the workspace is refused where the path becomes a real one: the
-    lexical guard upstream contains at the workspace root, and a copy-out is what reads."""
-    workspace = tmp_path / "workspace"
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    (workspace / "sub").mkdir()
-    (tmp_path / "outside.txt").write_bytes(b"host secret")
-
-    with pytest.raises(LocationEscape):
-        [chunk async for chunk in carrier.read(handle, "/workspace/sub/../../outside.txt")]
-
-
-async def test_read_of_a_planted_symlink_is_refused(tmp_path: Path) -> None:
-    """The copy-out is CVE-2026-56692's shape: a link the agent plants in its own workspace, then a
-    share or a browse that resolves it. The host file's bytes never cross."""
-    workspace = tmp_path / "workspace"
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    outside = tmp_path / "outside.txt"
-    outside.write_bytes(b"host secret")
-    (workspace / "linked.txt").symlink_to(outside)
-
-    with pytest.raises(NotRegularFile):
-        [chunk async for chunk in carrier.read(handle, "/workspace/linked.txt")]
-
-
-async def test_read_through_a_symlinked_directory_out_of_the_workspace_is_refused(
-    tmp_path: Path,
-) -> None:
-    """The link need not be at the target: a directory whose link leaves the workspace is enough,
-    and canonicalizing the parent is what turns that into a refusal instead of a read of the link's
-    target — check 2's work, not the descent's, which walks components already canonical."""
-    workspace = tmp_path / "workspace"
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "secret.txt").write_bytes(b"host secret")
-    (workspace / "dir").symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(LocationEscape):
-        [chunk async for chunk in carrier.read(handle, "/workspace/dir/secret.txt")]
 
 
 @pytest.mark.integration
@@ -674,21 +661,6 @@ def test_every_carrier_in_a_process_shares_one_scratch() -> None:
     assert set(Path(tempfile.gettempdir()).glob("ufo-local-*")) == settled
 
 
-async def test_file_op_runs_in_a_resumed_sandbox(tmp_path: Path) -> None:
-    scratch = tmp_path / "scratch"
-    (scratch / "home").mkdir(parents=True)
-    bin_dir = scratch / "bin"
-    bin_dir.mkdir()
-    command = bin_dir / "sbxfs"
-    command.write_text('#!/bin/sh\nprintf \'{"op":"%s"}\' "$1"\n')
-    command.chmod(0o755)
-    carrier = LocalCarrier(_scratch=scratch)
-    spec = replace(_spec(tmp_path / "workspace"), env={"PATH": f"{bin_dir}:/usr/bin:/bin"})
-    handle = await carrier.create(spec)
-
-    assert await carrier.file_op(handle, "glob", {"pattern": "*"}) == {"op": "glob"}
-
-
 @pytest.mark.integration
 async def test_file_op_is_the_carrier_seam_a_session_runs_a_file_op_through(
     tmp_path: Path, sandbox_client: Path
@@ -710,160 +682,6 @@ async def test_file_op_is_the_carrier_seam_a_session_runs_a_file_op_through(
         await carrier.file_op(
             handle, "read", {"path": f"{WORKSPACE_DIR}/absent.txt", "workspace": WORKSPACE_DIR}
         )
-
-
-GUARD_PROBE_PROG = """
-import sys
-from containment import ContainmentError, contained_file
-
-try:
-    with contained_file(sys.argv[1], sys.argv[2]) as target:
-        target.lstat()
-except ContainmentError as error:
-    raise SystemExit(str(error))
-print("accepted")
-"""
-
-
-def _plant_fake_guard(workspace: Path) -> None:
-    """What the agent can do with its own `write` tool: leave modules named after the ones the
-    bootstrap imports in the directory the carrier runs commands in."""
-    (workspace / "shutil.py").write_text("def which(name):\n    return '/nonexistent/ufo'\n")
-    (workspace / "containment.py").write_text(
-        "class ContainmentError(Exception):\n    pass\n"
-        "from contextlib import contextmanager\n"
-        "@contextmanager\n"
-        "def contained_file(path, root, **kw):\n"
-        "    import os\n"
-        "    class T:\n"
-        "        def lstat(self):\n            return os.stat(path)\n"
-        "    yield T()\n"
-    )
-
-
-async def test_an_in_sandbox_program_cannot_be_pointed_at_a_planted_guard(tmp_path: Path) -> None:
-    """Every in-sandbox program — the share preflight, the prune, a connector's claim — decides its
-    verdict with the module the bootstrap imports, and commands run with cwd inside the workspace
-    the agent writes to. A plain `python3 -c` puts that cwd at `sys.path[0]`, so `shutil` and then
-    `containment` itself resolve to whatever the agent left there, and the guard's verdict becomes
-    the agent's to choose. The interpreter runs isolated for exactly that reason."""
-    workspace = tmp_path / "workspace"
-    outside = tmp_path / "host-secret.txt"
-    outside.write_bytes(b"host secret")
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    session = SandboxSession(carrier=carrier, handle=handle)
-    (workspace / "link.txt").symlink_to(outside)
-    (workspace / "real.txt").write_bytes(b"the workspace's own file")
-    _plant_fake_guard(workspace)
-
-    refused = await session.python(GUARD_PROBE_PROG, "/workspace/link.txt", "/workspace")
-
-    assert refused.exit_code == 1
-    assert "not a regular file" in refused.stderr
-    assert "accepted" not in refused.stdout
-
-    reachable = await session.python(GUARD_PROBE_PROG, "/workspace/real.txt", "/workspace")
-
-    assert reachable.exit_code == 0 and "accepted" in reachable.stdout
-
-
-async def test_an_in_sandbox_program_carries_the_guard_it_runs(tmp_path: Path) -> None:
-    """A carrier whose sandbox is the member's own machine provisions nothing onto its PATH — the
-    terminal carrier installs no client there, since the file ops that would need one are the
-    member's own client's already. The guard travels inside the program instead, so a program
-    decides its verdict with the module this process ships wherever it runs, and a sandbox holding
-    no helper at all still guards the paths it is handed. The system interpreter is the one a
-    member's machine answers `python3` with, which is what the program has to run under."""
-    workspace = tmp_path / "workspace"
-    outside = tmp_path / "host-secret.txt"
-    outside.write_bytes(b"host secret")
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    bare = replace(handle, egress_env={**handle.egress_env, "PATH": BARE_PATH})
-    session = SandboxSession(carrier=carrier, handle=bare)
-    (workspace / "link.txt").symlink_to(outside)
-    (workspace / "real.txt").write_bytes(b"the workspace's own file")
-    _plant_fake_guard(workspace)
-
-    assert shutil.which("ufo", path=BARE_PATH) is None
-
-    refused = await session.python(GUARD_PROBE_PROG, "/workspace/link.txt", "/workspace")
-    reachable = await session.python(GUARD_PROBE_PROG, "/workspace/real.txt", "/workspace")
-
-    assert refused.exit_code == 1
-    assert "not a regular file" in refused.stderr
-    assert "accepted" not in refused.stdout
-    assert reachable.exit_code == 0 and "accepted" in reachable.stdout
-
-
-async def test_the_container_copy_in_program_replaces_a_planted_symlink(tmp_path: Path) -> None:
-    """The program the container carriers stream a copy-in into, run with a real stdin the way
-    `docker exec -i` gives it one. `mkdir -p && cat > "$1"` truncated through a link planted at the
-    name and followed a symlinked ancestor; this stages an inode and renames it onto the name, so
-    the host file is untouched and the delivery still lands."""
-    workspace = tmp_path / "workspace"
-    outside = tmp_path / "outside.txt"
-    outside.write_bytes(b"host secret")
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    target = workspace / "inbox" / "report.pdf"
-    target.parent.mkdir()
-    target.symlink_to(outside)
-    _plant_fake_guard(workspace)
-
-    landed = await asyncio.to_thread(
-        subprocess.run,
-        [
-            "python3",
-            SANDBOX_PYTHON_FLAG,
-            "-c",
-            f"{SANDBOX_MODULE_BOOTSTRAP}{COPY_IN_PROG}",
-            str(target),
-            str(workspace),
-        ],
-        input=b"delivered bytes",
-        capture_output=True,
-        cwd=str(workspace),
-        env={"PATH": handle.egress_env["PATH"]},
-    )
-
-    assert landed.returncode == 0, landed.stderr
-    assert not target.is_symlink()
-    assert target.read_bytes() == b"delivered bytes"
-    assert target.stat().st_mode & 0o777 == 0o644
-    assert outside.read_bytes() == b"host secret"
-
-
-async def test_the_container_copy_in_program_refuses_a_path_out_of_the_workspace(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside = tmp_path / "outside.txt"
-    outside.write_bytes(b"host secret")
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-
-    refused = await asyncio.to_thread(
-        subprocess.run,
-        [
-            "python3",
-            SANDBOX_PYTHON_FLAG,
-            "-c",
-            f"{SANDBOX_MODULE_BOOTSTRAP}{COPY_IN_PROG}",
-            str(outside),
-            str(workspace),
-        ],
-        input=b"delivered bytes",
-        capture_output=True,
-        cwd=str(workspace),
-        env={"PATH": handle.egress_env["PATH"]},
-    )
-
-    assert refused.returncode == 1
-    assert "escapes" in refused.stderr.decode()
-    assert outside.read_bytes() == b"host secret"
 
 
 async def test_ensure_tool_output_dir_creates_the_directory_when_absent(tmp_path: Path) -> None:
@@ -1020,54 +838,11 @@ async def test_a_write_that_fails_leaves_nothing_behind(tmp_path: Path) -> None:
     handle = await carrier.create(_spec(workspace))
     await carrier.write(handle, "/workspace/inbox/keep.txt", b"kept")
 
-    with pytest.raises(NotRegularFile):
+    with pytest.raises(IsADirectoryError):
         await carrier.write(handle, "/workspace/inbox", b"onto the directory itself")
 
     assert [entry.name for entry in workspace.iterdir()] == ["inbox"]
     assert [entry.name for entry in (workspace / "inbox").iterdir()] == ["keep.txt"]
-
-
-@pytest.mark.parametrize("path", ("/workspace", "/workspace/.", "/workspace/sub/.."))
-async def test_a_write_at_the_workspace_root_is_refused_before_any_byte_lands(
-    tmp_path: Path, path: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The staged name is the target's sibling, and the workspace root's sibling is another
-    conversation's workspace — so a path resolving to the root is refused before it is staged, not
-    staged and cleaned up. Nothing is asserted created at all, since the cleanup would hide a staged
-    file from the directory listing and leave it behind only when the process dies mid-write."""
-    workspace = tmp_path / "conversations" / "one" / "workspace"
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    created: list[str] = []
-    unpatched = os.open
-
-    def spy(target, flags, *args, **kwargs):
-        if flags & os.O_CREAT:
-            created.append(str(target))
-        return unpatched(target, flags, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", spy)
-
-    with pytest.raises(ContainmentError):
-        await carrier.write(handle, path, b"payload that must not land beside the workspace")
-
-    assert created == []
-    assert [entry.name for entry in workspace.parent.iterdir()] == ["workspace"]
-    assert list(workspace.iterdir()) == []
-
-
-async def test_a_write_at_a_traversal_path_is_refused(tmp_path: Path) -> None:
-    """A surface's inbound filename and a tool's path both arrive here as a `/workspace` string, so
-    the copy-in is where a name climbing out of the workspace has to be refused."""
-    workspace = tmp_path / "workspace"
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    (workspace / "inbox").mkdir()
-
-    with pytest.raises(LocationEscape):
-        await carrier.write(handle, "/workspace/inbox/../../escape.txt", b"landed outside")
-
-    assert not (tmp_path / "escape.txt").exists()
 
 
 async def test_an_overwrite_keeps_the_mode_the_file_already_had(tmp_path: Path) -> None:
@@ -1101,78 +876,6 @@ async def test_an_overwrite_carries_permission_bits_and_not_the_others(tmp_path:
     await carrier.write(handle, "/workspace/tool", b"second")
 
     assert target.stat().st_mode & 0o7777 == 0o755
-
-
-async def test_a_write_onto_a_planted_symlink_replaces_the_link(tmp_path: Path) -> None:
-    """A copy-in stages under a name created `O_CREAT|O_EXCL` and renames it onto the target, so a
-    link the agent planted there is replaced rather than written through: neither the host file's
-    bytes nor its mode is reachable from the workspace, and the delivery still lands.
-
-    Replacing rather than refusing is the point. The name is a surface's to choose — `slack-inbox`,
-    an offload sidecar — so one link left at it would otherwise deny every later delivery under that
-    name, and the rename already cannot follow it."""
-    workspace = tmp_path / "workspace"
-    outside = tmp_path / "outside.sh"
-    outside.write_bytes(b"outside")
-    outside.chmod(0o777)
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    link = workspace / "linked.sh"
-    link.symlink_to(outside)
-
-    await carrier.write(handle, "/workspace/linked.sh", b"replaced")
-
-    assert not link.is_symlink()
-    assert link.read_bytes() == b"replaced"
-    assert link.stat().st_mode & 0o777 == 0o644
-    assert outside.read_bytes() == b"outside"
-    assert [entry.name for entry in workspace.iterdir()] == ["linked.sh"]
-
-
-async def test_a_write_through_a_symlinked_directory_out_of_the_workspace_is_refused(
-    tmp_path: Path,
-) -> None:
-    """A copy-in creates the directories it needs, so a link already holding one of their names
-    would otherwise carry the bytes out of the workspace — the parent is canonicalized and the
-    escape refused before a byte is staged."""
-    workspace = tmp_path / "workspace"
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    (workspace / "inbox").symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(LocationEscape):
-        await carrier.write(handle, "/workspace/inbox/note.txt", b"landed outside")
-
-    assert list(outside.iterdir()) == []
-
-
-async def test_the_mode_is_read_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One probe, so there is no window between two of them for a delete to land in — a second probe
-    turns a write into FileNotFoundError on a path the prune sweep, a bash `rm`, or a concurrent
-    delivery removed, where the copy-in would have recreated it."""
-    workspace = tmp_path / "workspace"
-    carrier = LocalCarrier()
-    handle = await carrier.create(_spec(workspace))
-    await carrier.write(handle, "/workspace/probed.txt", b"first")
-    target = workspace / "probed.txt"
-    probes: list[tuple[str, bool]] = []
-
-    for name in ("lstat", "stat"):
-        unpatched = getattr(os, name)
-
-        def counted(path, *args, _name=name, _unpatched=unpatched, **kwargs):
-            if Path(path).name == target.name:
-                probes.append((_name, kwargs.get("follow_symlinks", True)))
-            return _unpatched(path, *args, **kwargs)
-
-        monkeypatch.setattr(os, name, counted)
-
-    await carrier.write(handle, "/workspace/probed.txt", b"second")
-
-    assert probes == [("stat", False)]
-    assert target.read_bytes() == b"second"
 
 
 async def test_a_target_deleted_before_the_write_is_still_created(tmp_path: Path) -> None:

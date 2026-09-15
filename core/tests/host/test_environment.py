@@ -99,7 +99,7 @@ def test_a_malformed_or_oversized_or_widened_document_is_refused(
         environment.parse_environment_document(b'{"main": {}}')
 
 
-def test_a_files_entry_is_a_contained_destination_and_a_digest() -> None:
+def test_a_files_entry_is_a_workspace_relative_destination_and_a_digest() -> None:
     digest = f"sha256:{'a' * 64}"
     document = EnvironmentDocument.model_validate({"files": {"data/case.tar": digest}})
     assert document.files == {"data/case.tar": digest}

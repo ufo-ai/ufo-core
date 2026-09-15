@@ -69,11 +69,7 @@ class BlobConfig(BaseModel):
     workspace: that lives in the sandbox, which holds no credential for this store.
     `endpoint_url`/`region` are the S3 the serve process talks to; leaving `endpoint_url` unset
     selects AWS and its virtual-hosted addressing, setting it selects an S3-compatible endpoint and
-    path addressing — the same choice a presigned artifact PUT is signed under.
-
-    `root` may be a symlink to the directory the objects live on; it is canonicalized once per
-    operation and every key is contained under the result, so it is refused only when it names
-    something that is not a directory."""
+    path addressing — the same choice a presigned artifact PUT is signed under."""
 
     model_config = ConfigDict(extra="forbid")
     backend: Literal["filesystem", "s3"]
@@ -199,10 +195,7 @@ class SandboxConfig(BaseModel):
     `workspace_root` holds one directory per conversation, which an in-cluster carrier serves
     `/workspace` from — the Docker carrier's bind-mount source, the local carrier's cwd. An
     off-cluster carrier (E2B) cannot see the host filesystem and serves `/workspace` from its own
-    sandbox disk, so the setting does not reach it. It may be a symlink to the volume the workspaces
-    live on; it is canonicalized once and the per-conversation directory under it is then opened
-    component by component without following a link, so a link planted inside the root is still
-    refused.
+    sandbox disk, so the setting does not reach it.
 
     `image_ref` is the exact sandbox image an image-backed carrier starts. A content-addressed
     reference lets an eval or deploy bind the runtime tools it validated instead of resolving a

@@ -28,13 +28,14 @@ import base64
 import shlex
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import PurePosixPath
 from uuid import UUID
 
 from pydantic import JsonValue
 
 from ufo.sdk.browser import CdpLease, CdpProvider, FindCompleter, SessionGone
 from ufo.sdk.context import ScopedStore
-from ufo.sdk.sandbox import Sandbox, contained_leaf, workspace_path
+from ufo.sdk.sandbox import Sandbox, workspace_path
 from ufo_ext_browser.bua.session import BrowserSession
 
 CDP_TOKEN_KEY = "cdp-token/{conversation_id}"
@@ -236,8 +237,9 @@ class BuaSurface:
         download = await session.wait_for_download(args)
         data = await self._lease().fetch_download(download.guid)
         encoded = await asyncio.to_thread(base64.b64encode, data)
+        leaf = PurePosixPath(download.filename.replace("\\", "/")).name
         return {
-            "filename": contained_leaf(download.filename, DEFAULT_DOWNLOAD_NAME),
+            "filename": DEFAULT_DOWNLOAD_NAME if leaf in ("", ".", "..") else leaf,
             "content_base64": encoded.decode(),
             "size": len(data),
         }

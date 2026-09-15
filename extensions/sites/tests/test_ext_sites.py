@@ -792,7 +792,7 @@ async def test_a_server_log_defaults_into_the_runs_own_offload_dir(tmp_path: Pat
     assert payload["log"] == log
     assert payload["project_path"] == "/workspace/site"
     assert sandbox.programs == [
-        (LOG_CLEAR_PROG, (log, RUNTIME_ROOT)),
+        (LOG_CLEAR_PROG, (log,)),
         (PORT_STOP_PROG, ("5173",)),
     ]
     launch = next(

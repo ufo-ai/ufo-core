@@ -21,7 +21,6 @@ from ufo.blob import (
     blob_store_for,
 )
 from ufo.config import BlobConfig
-from ufo.harness.containment import NonDirectoryAncestor
 from ufo.runtime.workspace import WorkspaceUnbound, ws
 
 
@@ -51,10 +50,6 @@ async def test_filesystem_traversal_key_rejected(tmp_path: Path, key: str) -> No
 
 
 async def test_filesystem_symlinked_store_root_is_followed(tmp_path: Path) -> None:
-    """The store root is deploy config, not a path an agent can reach, and `/var/lib/ufo/blobs ->
-    /mnt/data/blobs` is an ordinary compose or k8s layout — so the link is followed once, keys are
-    contained under the canonical result, and the store works. Refusing it would take transcripts,
-    rollover records and every shared artifact down on a deploy doing nothing unusual."""
     outside = tmp_path / "outside"
     outside.mkdir()
     linked_root = tmp_path / "blobs"
@@ -77,27 +72,10 @@ async def test_filesystem_store_root_that_is_not_a_directory_names_its_setting(
     not_a_directory.write_bytes(b"not a directory")
     store = FilesystemBlobStore(root=not_a_directory)
 
-    with pytest.raises(NonDirectoryAncestor, match=BLOB_ROOT_SETTING):
+    with pytest.raises(NotADirectoryError, match=BLOB_ROOT_SETTING):
         await store.put("artifacts/x/report.txt", b"bytes")
 
     assert not_a_directory.read_bytes() == b"not a directory"
-
-
-async def test_filesystem_key_through_a_planted_symlink_refused(tmp_path: Path) -> None:
-    """A link planted inside the store resolves out of it, so a key naming it is refused rather than
-    written through — the store holds artifact bytes an agent named, on a filesystem it also has a
-    workspace on."""
-    root = tmp_path / "blobs"
-    root.mkdir()
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (root / "artifacts").symlink_to(outside, target_is_directory=True)
-    store = FilesystemBlobStore(root=root)
-
-    with pytest.raises(ValueError):
-        await store.put("artifacts/x/report.txt", b"bytes")
-
-    assert list(outside.iterdir()) == []
 
 
 async def test_filesystem_overwrite_replaces(tmp_path: Path) -> None:

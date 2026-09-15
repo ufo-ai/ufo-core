@@ -35,7 +35,6 @@ from sandbox.build_template import (
     RUST_INSTALL_COMMAND,
     RUST_VERSION,
     SANDBOX_ENV,
-    SANDBOX_MODULES,
     SANDBOX_TEMPLATE_READY_COMMAND,
     SANDBOX_TIERS,
     SANDBOX_TMPDIR,
@@ -284,14 +283,6 @@ def _check_the_baked_in_sandbox_cli_is_the_compiled_client() -> None:
         assert gone not in dockerfile
 
 
-def _check_the_containment_guard_is_baked_beside_the_client() -> None:
-    """An in-sandbox python program imports the guard as the sibling module `containment`, and the
-    bin dir is `sys.path[0]` for a program run from there — so the image carries the same file the
-    serve process imports as `ufo.harness.containment`, never a second copy of the checks."""
-    assert tuple(name for name, _ in SANDBOX_MODULES) == ("containment.py",)
-    assert "/usr/local/bin/containment.py" in pod_dockerfile()
-
-
 def _check_system_skills_are_baked_into_each_sandbox_image() -> None:
     dockerfile = pod_dockerfile()
     bundle = system_skill_bundle()
@@ -378,14 +369,6 @@ def test_the_baked_client_target_is_covered_by_the_drift_digest(monkeypatch) -> 
 
 def _check_the_client_definition_names_the_target_it_is_built_for() -> None:
     assert client_definition()["target"] == build_template.SANDBOX_CLIENT_TARGET
-
-
-def test_baked_modules_are_covered_by_the_drift_digest(monkeypatch) -> None:
-    """A live template baked from an older guard must fail --check, not keep serving file ops with
-    checks the host no longer has."""
-    before = build_definition_digest(None)
-    monkeypatch.setattr(build_template, "SANDBOX_MODULES", (("containment.py", 99),))
-    assert build_definition_digest(None) != before
 
 
 def _check_rendered_dockerfile_carries_the_full_install_sequence() -> None:
@@ -617,6 +600,6 @@ def test_check_reads_every_tier_against_its_own_digest(monkeypatch) -> None:
 
 def test_sandbox_build_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 24
+    assert len(checks) == 23
     for check in checks:
         check()

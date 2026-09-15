@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crossterm::event::{Event as TermEvent, KeyEventKind};
 
 use ufo::clipboard::{self, Clip};
-use ufo::cmd::{cp, fscli, llm, run, tools};
+use ufo::cmd::{cp, fscli, llm, run, sandbox, tools};
 #[cfg(unix)]
 use ufo::interrupt;
 use ufo::ops::{self, OpRuntime};
@@ -73,6 +73,7 @@ fn main() {
         Some("fs") => process::exit(fscli::main(&args[1..])),
         Some("llm") => process::exit(llm::main(&args[1..])),
         Some("run") => process::exit(run::main(&args[1..])),
+        Some("sandbox") => process::exit(sandbox::main(&args[1..])),
         Some("tool") => process::exit(tools::main(&args[1..])),
         _ => {}
     }

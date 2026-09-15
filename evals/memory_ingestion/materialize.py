@@ -22,12 +22,6 @@ from evals.memory_ingestion.models import IngestionSnapshot, canonical_json, loa
 from ufo.blob import WorkspaceBlobStore, blob_store_for
 from ufo.config import Config, SourceConfig, SourceEntry, load_config
 from ufo.db import dispose_db, init_db, workspace_tx
-from ufo.harness.containment import (
-    ContainmentError,
-    contained_file,
-    contained_root,
-    is_contained_regular,
-)
 from ufo.harness.models.registry import ModelRegistry, model_registry
 from ufo.host.ext.loader import embed_backend, index_backend, load_manifests
 from ufo.onboard.onboarding import DEFAULT_AGENT_MODEL, DEFAULT_AGENT_PROMPT
@@ -531,8 +525,10 @@ class MemoryIngestionMaterializer:
         temporary_root.mkdir()
         try:
             for page, ref in zip(snapshot.pages, refs, strict=True):
-                with contained_file(ref.as_posix(), temporary_root, create_parent=True) as target:
-                    target.replace_bytes(page.body.encode(), STAGE_FILE_MODE)
+                target = temporary_root / ref
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(page.body.encode())
+                target.chmod(STAGE_FILE_MODE)
             try:
                 temporary_root.rename(pages_root)
             except OSError:
@@ -555,26 +551,16 @@ class MemoryIngestionMaterializer:
     def _validate_stage(
         snapshot: IngestionSnapshot, refs: tuple[PurePosixPath, ...], pages_root: Path
     ) -> None:
-        try:
-            root = contained_root(pages_root)
-        except ContainmentError as error:
-            raise RuntimeError(
-                f"memory_ingestion stage does not match snapshot: {pages_root}"
-            ) from error
         actual = {
-            PurePosixPath(path.relative_to(root).as_posix())
-            for path in root.rglob("*")
-            if is_contained_regular(path, root)
+            PurePosixPath(path.relative_to(pages_root).as_posix())
+            for path in pages_root.rglob("*")
+            if path.is_file()
         }
         if actual != set(refs):
             raise RuntimeError(f"memory_ingestion stage does not match snapshot: {pages_root}")
         for page, ref in zip(snapshot.pages, refs, strict=True):
-            body = page.body.encode()
-            with contained_file(ref.as_posix(), root) as staged:
-                if staged.read_bytes(len(body) + 1) != body:
-                    raise RuntimeError(
-                        f"memory_ingestion stage does not match snapshot: {pages_root}"
-                    )
+            if (pages_root / ref).read_bytes() != page.body.encode():
+                raise RuntimeError(f"memory_ingestion stage does not match snapshot: {pages_root}")
 
     async def _derive_facts(self) -> None:
         runner = PageChangeRunner(

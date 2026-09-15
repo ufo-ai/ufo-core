@@ -37,7 +37,6 @@ KEY_INPUTS = frozenset(
         "sandbox/build_template.py",
         "client/**",
         "core/src/ufo/harness/sandbox/client_binary.py",
-        "core/src/ufo/harness/containment.py",
         "core/src/ufo/runtime/skills/**",
         "extensions/e2b/ufo_ext_e2b.py",
         "extensions/**/skills/**",
@@ -455,8 +454,7 @@ def test_integration_names_the_musl_client_it_builds() -> None:
 
 def test_every_input_that_moves_the_key_triggers_the_publisher() -> None:
     """The paths list stays pinned exactly, and every file a layer COPYs has to be covered by a
-    named key input — a key that moves with no publish behind it makes every PR rebuild the image,
-    and a sandbox running an image older than the guard baked into it cannot run a file op at all.
+    named key input — a key that moves with no publish behind it makes every PR rebuild the image.
 
     The staged client and skill archive are build products no trigger can name directly. Their
     tracked sources are the client crate and the three skill trees, which are also what the

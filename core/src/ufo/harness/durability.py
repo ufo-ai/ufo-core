@@ -127,7 +127,6 @@ MOVED_MODULES = {
     "ufo.sandbox": "ufo.harness.sandbox",
     "ufo.sandbox.cache": "ufo.harness.sandbox.cache",
     "ufo.sandbox.client_binary": "ufo.harness.sandbox.client_binary",
-    "ufo.sandbox.containment": "ufo.harness.containment",
     "ufo.sandbox.conversation": "ufo.harness.sandbox.conversation",
     "ufo.sandbox.exec_env": "ufo.harness.sandbox.exec_env",
     "ufo.sandbox.ingress_host": "ufo.harness.sandbox.ingress_host",

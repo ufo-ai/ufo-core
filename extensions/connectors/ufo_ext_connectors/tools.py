@@ -56,7 +56,7 @@ from ufo.sdk.connectors import (
 )
 from ufo.sdk.context import JsonValue
 from ufo.sdk.o11y import log
-from ufo.sdk.sandbox import WORKSPACE_DIR, contained_leaf, workspace_path
+from ufo.sdk.sandbox import WORKSPACE_DIR, workspace_path
 from ufo.sdk.tools import (
     AuthorizationBinding,
     AuthorizationScope,
@@ -71,6 +71,7 @@ from ufo.sdk.tools import (
 
 CONNECTOR_FILES_DIR = "connector_files"
 FALLBACK_FILENAME = "download"
+UNUSABLE_FILENAMES = frozenset({"", ".", ".."})
 FALLBACK_MIMETYPE = "application/octet-stream"
 TRANSFER_TIMEOUT_SECONDS = 600
 TRANSFER_MAX_BYTES = 100 * 1024 * 1024
@@ -165,58 +166,29 @@ DATA_URL_RE = re.compile(
 )
 
 MD5_PREFLIGHT_PROG = """
-import hashlib, sys
-from containment import ContainmentError, contained_file
+import hashlib
+import sys
 
-
-def measured(path, root):
-    h = hashlib.md5(usedforsecurity=False)
-    size = 0
-    with contained_file(path, root) as target:
-        if target.lstat() is None:
-            raise SystemExit(path + " not found")
-        with target.open_bytes() as handle:
-            while chunk := handle.read(1048576):
-                h.update(chunk)
-                size += len(chunk)
-    return h.hexdigest(), size
-
-
+digest = hashlib.md5(usedforsecurity=False)
+size = 0
 try:
-    digest, size = measured(sys.argv[1], sys.argv[2])
-except ContainmentError as error:
+    with open(sys.argv[1], "rb") as handle:
+        while chunk := handle.read(1048576):
+            digest.update(chunk)
+            size += len(chunk)
+except OSError as error:
     raise SystemExit(str(error))
-print(digest)
+print(digest.hexdigest())
 print(size)
 """
 
-CLAIM_PROG = """
-import sys
-from containment import ContainmentError, contained_file
-
-try:
-    with contained_file(sys.argv[1], sys.argv[2], create_parent=True) as target:
-        if target.lstat() is not None:
-            raise SystemExit(sys.argv[1] + " is already taken")
-        target.replace_bytes(b"", 0o644)
-except ContainmentError as error:
-    raise SystemExit(str(error))
-"""
-
 PLACE_PROG = """
+import os
 import sys
-from containment import ContainmentError, contained_file
 
 try:
-    with contained_file(sys.argv[1], sys.argv[3]) as source:
-        if source.lstat() is None:
-            raise SystemExit(sys.argv[1] + " not found")
-        with contained_file(sys.argv[2], sys.argv[3], create_parent=True) as target:
-            if target.lstat() is None:
-                target.replace_with(source)
-            else:
-                source.unlink()
-except ContainmentError as error:
+    os.replace(sys.argv[1], sys.argv[2])
+except OSError as error:
     raise SystemExit(str(error))
 """
 
@@ -682,16 +654,10 @@ class _ConnectorCall:
     async def _stage_file(self, path: str) -> dict[str, object]:
         """Stage one workspace file: hash it in the container, ask the broker where it goes, PUT
         the bytes there from inside the sandbox, and return the argument value that names it. A
-        broker answering a dedup hit (no put_url) already holds the bytes, so the PUT is skipped.
-
-        The preflight runs the containment guard and reads off the fd its descent pinned, so a
-        symlink the model planted at the path is refused rather than measured and uploaded — the
-        model chooses this path, and the provider's file store is off-workspace. `curl -T` then
-        re-resolves the name by path, which leaves the swap window a subprocess consumer always
-        leaves; what the guard closes is the planted link that needs no race at all."""
+        broker answering a dedup hit (no put_url) already holds the bytes, so the PUT is skipped."""
         scoped = workspace_path(path)
         preflight = await self.ctx.sandbox.python(
-            MD5_PREFLIGHT_PROG, scoped, WORKSPACE_DIR, timeout_s=TRANSFER_TIMEOUT_SECONDS
+            MD5_PREFLIGHT_PROG, scoped, timeout_s=TRANSFER_TIMEOUT_SECONDS
         )
         if preflight.exit_code != 0:
             raise ValueError(preflight.stderr.strip() or f"cannot read workspace file {path!r}")
@@ -719,28 +685,15 @@ class _ConnectorCall:
 
     async def _fetched_files(self, files: tuple[BrokerFile, ...]) -> list[dict[str, str]]:
         """Fetch each produced file from its presigned URL into the workspace, from inside the
-        sandbox — under a fresh `connector_files/<uuid>/` so no fetch clobbers another file.
-
-        The provider names the file, so the name is reduced to one leaf and the path is then claimed
-        through the containment guard before curl is handed it: `curl -o` follows a symlink and
-        truncates what it finds, so `connector_files` replaced by a link — the agent's own
-        workspace, the agent's own link — would otherwise send a provider's bytes wherever it
-        points. The claim creates the directories through an `O_NOFOLLOW` descent and the file
-        itself exclusively, so curl writes into a name nothing else holds."""
+        sandbox — under a fresh `connector_files/<uuid>/` so no fetch clobbers another file. The
+        provider names the file, so the name is reduced to one leaf."""
         saved: list[dict[str, str]] = []
         for file in files:
-            safe = contained_leaf(file.name, FALLBACK_FILENAME)
+            leaf = PurePosixPath(file.name.replace("\\", "/")).name
+            safe = FALLBACK_FILENAME if leaf in UNUSABLE_FILENAMES else leaf
             target = f"{WORKSPACE_DIR}/{CONNECTOR_FILES_DIR}/{uuid4()}/{safe}"
-            claimed = await self.ctx.sandbox.python(
-                CLAIM_PROG, target, WORKSPACE_DIR, timeout_s=TRANSFER_TIMEOUT_SECONDS
-            )
-            if claimed.exit_code != 0:
-                raise RuntimeError(
-                    claimed.stderr.strip()
-                    or f"claiming a workspace path for produced file {safe!r} failed"
-                )
             fetched = await self.ctx.sandbox.bash(
-                f"curl -fsSL --max-filesize {TRANSFER_MAX_BYTES} "
+                f"curl -fsSL --max-filesize {TRANSFER_MAX_BYTES} --create-dirs "
                 f"-o {shlex.quote(target)} --url {shlex.quote(file.url)}",
                 timeout_s=TRANSFER_TIMEOUT_SECONDS,
             )
@@ -879,24 +832,14 @@ class _ConnectorCall:
         beside the target and are renamed onto it, which is atomic within a directory: a reader
         either sees the previous complete file or the new one, never a truncated window. A produced
         file needs none of this because its `uuid4` path is unique to one fetch and no second writer
-        can reach it.
-
-        Content-addressed means predictable, which is what makes the placement the guard's business:
-        the agent can compute this path before the call and leave a symlink at it, and `mv -f`
-        places the bytes with no check of what it is placing them over. The rename now runs through
-        the containment guard, which reaches both ends through an `O_NOFOLLOW` descent and refuses a
-        name a link or a directory holds — where a copy-in onto an inbox name replaces one. The
-        policies differ because the denial does: an inbox name is one the agent can predict for a
-        file it has never seen, so a link left there would deny every later delivery to it, while
-        this name is a digest of bytes the agent must already hold to compute it. A name a regular
-        file holds is already this content, so the staged copy is dropped rather than renamed
-        over it — two turns decoding one payload leave one file and no work."""
-        safe = contained_leaf(name, FALLBACK_FILENAME)
+        can reach it."""
+        leaf = PurePosixPath(name.replace("\\", "/")).name
+        safe = FALLBACK_FILENAME if leaf in UNUSABLE_FILENAMES else leaf
         target = f"{WORKSPACE_DIR}/{CONNECTOR_FILES_DIR}/{hashlib.sha256(data).hexdigest()}/{safe}"
         staged = f"{target}.{uuid4()}.part"
         await self.ctx.sandbox.write_file(staged, data)
         placed = await self.ctx.sandbox.python(
-            PLACE_PROG, staged, target, WORKSPACE_DIR, timeout_s=TRANSFER_TIMEOUT_SECONDS
+            PLACE_PROG, staged, target, timeout_s=TRANSFER_TIMEOUT_SECONDS
         )
         if placed.exit_code != 0:
             raise RuntimeError(

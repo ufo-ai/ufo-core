@@ -33,7 +33,6 @@ from ufo.sdk.audience import (
     audience_member,
     parse_audience,
 )
-from ufo.sdk.sandbox import ContainmentError, contained_relative
 from ufo.sdk.tools import StoredPreview
 
 type Visibility = Literal["private", "workspace", "public"]
@@ -46,7 +45,6 @@ PORT_HELD_BY_ANOTHER_MEMBER = (
     "theirs: deploy under that site's name to update it, or ask them to unhost it"
 )
 SITE_NAME_MAX = 48
-SOURCE_PATH_ANCHOR = "/site-source"
 _NAME_RUN = re.compile(r"[^a-z0-9]+")
 
 _metadata = sa.MetaData()
@@ -101,20 +99,15 @@ class SourceManifest(BaseModel):
     @field_validator("files")
     @classmethod
     def _pathed(cls, files: dict[str, SiteFile]) -> dict[str, SiteFile]:
-        """Every path must already be the plain relative form the guard's lexical tier resolves it
-        to — a path that normalizes to something else (a leading slash, a dot segment, an escape)
-        is refused rather than rewritten, since the manifest's keys are what a read is answered
-        by."""
+        """A read is answered by the manifest's keys verbatim, so a path that would normalize to
+        another — a leading slash, an empty or dot segment — is refused rather than rewritten."""
         for path in files:
-            refusal = f"source path {path!r} is not a plain site-relative path"
-            if path.startswith("/") or "\\" in path or any(char < " " for char in path):
-                raise ValueError(refusal)
-            try:
-                resolved = contained_relative(path, SOURCE_PATH_ANCHOR)
-            except ContainmentError as escape:
-                raise ValueError(refusal) from escape
-            if resolved != f"{SOURCE_PATH_ANCHOR}/{path}":
-                raise ValueError(refusal)
+            plain = "\\" not in path and all(
+                part not in ("", ".", "..") and all(char >= " " for char in part)
+                for part in path.split("/")
+            )
+            if not plain:
+                raise ValueError(f"source path {path!r} is not a plain site-relative path")
         return files
 
 

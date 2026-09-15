@@ -65,7 +65,6 @@ ROOT = Path(__file__).resolve().parents[1]
 E2B_TEMPLATE_NAME = "ufo-sbx"
 SBX_BIN_DIR = "/usr/local/bin"
 UFO_DIR = "/etc/ufo"
-MODULE_SOURCE_DIR = ROOT / "core" / "src" / "ufo" / "harness"
 CLIENT_SOURCE_DIR = ROOT / "client"
 SANDBOX_CLIENT_TARGET = "x86_64-unknown-linux-musl"
 CLIENT_STAGE_DIR = ROOT / "sandbox" / "artifacts"
@@ -208,7 +207,6 @@ NPM_PACKAGES = (
     "pdf-lib",
     f"playwright@{PLAYWRIGHT_VERSION}",
 )
-SANDBOX_MODULES: tuple[tuple[str, int], ...] = (("containment.py", 4),)
 SANDBOX_TEMPLATE_READY_COMMAND = f"""
 set -ex
 command -v python3 >/dev/null
@@ -344,14 +342,6 @@ def build_definition_digest(sizing: Sizing | None) -> str:
         },
         "client": client_definition(),
         "system_skills": system_skill_bundle().digest,
-        "modules": [
-            {
-                "name": name,
-                "version": version,
-                "sha256": hashlib.sha256((MODULE_SOURCE_DIR / name).read_bytes()).hexdigest(),
-            }
-            for name, version in SANDBOX_MODULES
-        ],
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
@@ -396,12 +386,6 @@ def apply_layers(builder: TemplateBuilder, digest: str) -> TemplateFinal:
     client = f"{SBX_BIN_DIR}/{CLIENT_BINARY_NAME}"
     builder.copy(CLIENT_STAGE_PATH.relative_to(ROOT), client, mode=0o755)
     builder.run_cmd(f"chmod 0755 {client}")
-    modules = []
-    for name, _ in SANDBOX_MODULES:
-        target = f"{SBX_BIN_DIR}/{name}"
-        builder.copy((MODULE_SOURCE_DIR / name).relative_to(ROOT), target, mode=0o644)
-        modules.append(target)
-    builder.run_cmd(f"chmod 0644 {' '.join(modules)}")
     builder.set_user(RUNTIME_USER)
     return builder.set_start_cmd(START_COMMAND, SANDBOX_TEMPLATE_READY_COMMAND)
 

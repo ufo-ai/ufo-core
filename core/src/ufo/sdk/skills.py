@@ -16,9 +16,6 @@ from ufo.runtime.skills.runtime import (
 from ufo.runtime.skills.runtime import (
     parse_skill_content as parse_skill_content,
 )
-from ufo.runtime.skills.runtime import (
-    skill_root as skill_root,
-)
 from ufo.runtime.skills.selection import (
     SKILL_LINE_MAX_CHARS as SKILL_LINE_MAX_CHARS,
 )

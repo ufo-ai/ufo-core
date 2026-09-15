@@ -29,7 +29,6 @@ async def test_command_protocol_builds_supervised_and_isolated_argv() -> None:
         execute=execute,
         default_timeout_s=30,
         python_flag="-I",
-        python_bootstrap="guard\n",
         supervisor=("runner",),
     )
 
@@ -54,7 +53,7 @@ async def test_command_protocol_builds_supervised_and_isolated_argv() -> None:
             60,
         ),
         (("sh", "-c", 'printf %s "$1"', "sh", "value"), 30),
-        (("python3", "-I", "-c", "guard\nprint('ok')", "arg"), 30),
+        (("python3", "-I", "-c", "print('ok')", "arg"), 30),
     ]
 
 

@@ -2,11 +2,11 @@
 
 import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ufo.sdk.sandbox import contained_file, contained_root
 from ufo.sdk.sources import SourceAuth, StreamFault, SyncResult
 from ufo_ext_gbrain.pages import decoded, is_markdown_path, markdown_page
 
@@ -26,8 +26,7 @@ class GbrainFolderSource:
     its path relative to the root, titled from its frontmatter or first heading. A full scan each
     sync — the driver skips unchanged pages by digest and tombstones pages whose file is gone. The
     whole root going missing raises instead, so the sync fails closed and a transient mount blip
-    can't sweep the index. The root arrives from chat, so every byte is read through the
-    containment guard: a symlink is never followed, under the root or as the root."""
+    can't sweep the index."""
 
     max_bytes: int = FOLDER_MAX_BYTES
     config_model: ClassVar[type[GbrainFolderConfig]] = GbrainFolderConfig
@@ -41,17 +40,17 @@ class GbrainFolderSource:
 
     @staticmethod
     def _read(root: str, max_bytes: int) -> tuple[tuple[str, bytes], ...]:
-        canonical = contained_root(root)
+        canonical = Path(root).resolve(strict=True)
+        if not canonical.is_dir():
+            raise NotADirectoryError(root)
         entries: list[tuple[str, bytes]] = []
         total = 0
         for path in sorted(canonical.rglob("*")):
             ref = path.relative_to(canonical).as_posix()
-            if path.is_symlink() or not path.is_file() or not is_markdown_path(ref):
+            if not path.is_file() or not is_markdown_path(ref):
                 continue
-            with contained_file(ref, canonical) as handle:
-                data = handle.read_bytes(max_bytes + 1)
-            total += len(data)
+            total += path.stat().st_size
             if total > max_bytes:
                 raise StreamFault(f"{root} holds over {max_bytes} bytes of markdown")
-            entries.append((ref, data))
+            entries.append((ref, path.read_bytes()))
         return tuple(entries)

@@ -100,7 +100,7 @@ ARTIFACT_PUT_TTL_SECONDS = 900
 ARTIFACT_PUT_TIMEOUT_SECONDS = 900
 SHARE_PREFLIGHT_CMD = (
     "p={path}\n"
-    '[ -f "$p" ] && [ ! -L "$p" ] || {{ printf %s "$p is not a regular file" >&2; exit 1; }}\n'
+    '[ -f "$p" ] || {{ printf %s "$p is not a regular file" >&2; exit 1; }}\n'
     'size=$(wc -c < "$p" | tr -d " ") || exit 1\n'
     'digest=$(openssl dgst -sha256 "$p") || exit 1\n'
     "digest=${{digest##* }}\n"
@@ -113,9 +113,7 @@ SHARE_PREFLIGHT_CMD = (
 `openssl`, `head`, `tr` — so the same one command runs in the container and on a member's own
 machine, where no baked `ufo` client or usable `python3` exists. The size and digest bind the S3
 presigned PUT (§`store_artifact`), so a file changing between the measure and the upload fails at
-S3 rather than landing as a self-consistent lie. A symlink at the target is refused, the one
-containment the share path needs: the bytes it copies out must be the file the agent named, not a
-link's target."""
+S3 rather than landing as a self-consistent lie."""
 PREVIEW_SIZE_TIMEOUT_SECONDS = 30
 PREVIEW_PUT_TTL_SECONDS = 900
 PREVIEW_PUT_TIMEOUT_SECONDS = 300

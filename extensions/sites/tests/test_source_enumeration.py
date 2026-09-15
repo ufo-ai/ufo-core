@@ -1,6 +1,6 @@
 """Which of a directory's bytes become the site, decided the way a deploy decides it: the real
-listing step over a real sandbox — the shipped program, a real interpreter, the real containment
-guard, a real tree on disk."""
+listing step over a real sandbox — the shipped program, a real interpreter, a real tree on
+disk."""
 
 from datetime import UTC, datetime
 from pathlib import Path
@@ -92,17 +92,6 @@ async def test_a_directory_holding_only_skipped_names_is_refused_as_empty(tmp_pa
 
     with pytest.raises(RuntimeError, match="holds no files to host"):
         await _source_listing(ctx, f"{WORKSPACE_DIR}/site")
-
-
-async def test_a_project_outside_the_workspace_is_refused(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (tmp_path / "outside").mkdir()
-    (tmp_path / "outside" / "index.html").write_text(PAGE)
-    ctx = await _context(workspace, tmp_path)
-
-    with pytest.raises(RuntimeError):
-        await _source_listing(ctx, f"{WORKSPACE_DIR}/../outside")
 
 
 @pytest.mark.parametrize("name", SOURCE_SKIP_NAMES)

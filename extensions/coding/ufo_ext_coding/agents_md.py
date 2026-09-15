@@ -19,7 +19,7 @@ from uuid import UUID
 
 from ufo.sdk.manifest import HookContext, HookOutcome, HookSpec, InjectContext, PostToolUse
 from ufo.sdk.o11y import log_error
-from ufo.sdk.sandbox import WORKSPACE_DIR, ContainmentError, Sandbox, contained_relative
+from ufo.sdk.sandbox import WORKSPACE_DIR, Sandbox, workspace_path
 
 INSTRUCTION_FILENAME = "AGENTS.md"
 FILE_TOOLS = ("read", "write", "edit")
@@ -62,15 +62,14 @@ class _TurnMemory:
 HELD_TURNS: OrderedDict[UUID, _TurnMemory] = OrderedDict()
 
 
-def instruction_directories(file_path: str, root: str = WORKSPACE_DIR) -> tuple[str, ...]:
+def instruction_directories(file_path: str) -> tuple[str, ...]:
     """The directories whose `AGENTS.md` govern `file_path`: its own and every ancestor down to
-    `root`, root first. Empty for a path outside the root, which the guard's own lexical check
-    decides — a model-supplied path is untrusted input."""
+    the workspace, root first. Empty for a path outside the workspace."""
     try:
-        resolved = PurePosixPath(contained_relative(file_path, root))
-    except ContainmentError:
+        resolved = PurePosixPath(workspace_path(file_path))
+    except ValueError:
         return ()
-    base = PurePosixPath(root)
+    base = PurePosixPath(WORKSPACE_DIR)
     return tuple(
         str(parent) for parent in reversed(resolved.parents) if parent.is_relative_to(base)
     )

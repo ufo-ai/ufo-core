@@ -23,7 +23,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ufo.blob import WorkspaceBlobStore
-from ufo.harness.containment import ContainmentError, contained_relative
+from ufo.harness.sandbox.session import workspace_path
 from ufo.runtime.skills.runtime import parse_skill_content
 from ufo.schema.records import ENVIRONMENT_DOCUMENT_RE
 
@@ -159,8 +159,8 @@ class EnvironmentDocument(BaseModel):
                     f"a file destination is a workspace-relative path: {destination!r}"
                 )
             try:
-                contained_relative(destination, "/workspace")
-            except ContainmentError as error:
+                workspace_path(destination)
+            except ValueError as error:
                 raise ValueError(
                     f"a file destination is a workspace-relative path: {destination!r}"
                 ) from error
