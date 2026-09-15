@@ -217,10 +217,14 @@ export function Chat({
   const stalled = messages === null ? state.fault : null;
   const credentials = state.handoffs.credentials;
   const held = state.busy || state.messages === null;
-  /* Only the newest committed turn's ask is still open — an earlier one is a choice the member no
-     longer has — and it is open only while the card is still waiting on an entry. */
-  const asked = [...(messages ?? [])].reverse().find((said) => said.question)?.question;
-  const asking = asked !== undefined && openEntries(asked).length > 0;
+  /* A card stops asking three ways: the transcript closes it, the member answers it, or they say
+     something else instead — an ask the member spoke past is a choice they no longer have. */
+  const spoken = messages ?? [];
+  const at = spoken.reduce((found, said, index) => (said.question ? index : found), -1);
+  const asking =
+    at >= 0 &&
+    openEntries(spoken[at].question!).length > 0 &&
+    !spoken.slice(at + 1).some((said) => said.role === "user");
   /* The rows answer the thread's newest turn, which the surface reads for itself — so what asks for
      them again is a message landing, not a turn id the live path has yet to learn. */
   const said = messages?.length ?? 0;
@@ -400,6 +404,12 @@ export function FoundingChat({
 }) {
   const composer = useRef<HTMLTextAreaElement>(null);
   const [picked, setPicked] = useState<string | null>(null);
+  const pinned = useRef(agent.id);
+  useEffect(() => {
+    if (pinned.current === agent.id) return;
+    pinned.current = agent.id;
+    setPicked(null);
+  }, [agent.id]);
   const chatKey = "new:" + agent.id;
   const draftKey = member.id + "/" + chatKey;
   useEffect(() => readyToFound(chatKey), [chatKey]);

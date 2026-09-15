@@ -164,6 +164,31 @@ test("a read that says the rows are being written asks again, and stops once the
   vi.useRealTimers();
 });
 
+test("a card the member spoke past stops withholding the rows", async () => {
+  /* Only the transcript read closes a card, and a member who ignores one and types instead never
+     answers it — so a foot that waited on the newest card alone stayed shut for the session. */
+  wire({
+    ...transcript({
+      messages: [
+        SPOKEN[0],
+        {
+          ...SPOKEN[1],
+          question: {
+            turn_id: TURN_ID,
+            questions: [{ question: "Which terms?", options: [{ label: "A" }, { label: "B" }] }],
+          },
+        },
+        { role: "user", text: "Never mind, draft it anyway." },
+        { role: "assistant", text: "Drafted." },
+      ],
+    }),
+    ...OFFERED,
+  });
+  open();
+
+  expect(await screen.findByText("Draft the Acme reply")).toBeTruthy();
+});
+
 test("the rows land on the turn the member just watched, with no transcript read between", async () => {
   wire({
     ...transcript(),

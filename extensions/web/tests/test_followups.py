@@ -7,7 +7,7 @@ the next ones answers them itself.
 
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -40,7 +40,7 @@ from ufo.harness.models.interface import (
     ToolUseBlock,
 )
 from ufo.harness.models.pricing import Pricing
-from ufo.runtime.ext.context import ModelAccess, ScopedStore
+from ufo.runtime.ext.context import JsonValue, ModelAccess, ScopedStore
 from ufo.runtime.workspace import (
     PLATFORM_FUNDED,
     PLATFORM_PAYER,
@@ -267,6 +267,43 @@ async def test_a_second_reader_of_a_moved_thread_waits_rather_than_drawing_the_o
     # The loser polls every two seconds until the winner lands; projecting the thread before the
     # claim made each of those polls read the whole transcript and drop it.
     assert thread.reads == 1
+
+
+@dataclass(frozen=True)
+class _Ordered(ScopedStore):
+    """Records the order the cache writes in. A reader polls every two seconds while another writes,
+    so one landing between the release and the store found no rows and a free claim, and paid for
+    the same ranking again."""
+
+    wrote: list[str] = field(default_factory=list)
+
+    async def put(self, key: str, value: JsonValue) -> None:
+        self.wrote.append(f"put {key.split(':')[0]}")
+        await super().put(key, value)
+
+    async def delete(self, key: str) -> None:
+        self.wrote.append(f"delete {key.split(':')[0]}")
+        await super().delete(key)
+
+
+async def test_the_rows_are_stored_before_the_claim_is_let_go(db: None) -> None:
+    workspace_id = await _seed_workspace()
+    conversation_id, turn_id = uuid4(), uuid4()
+    client = _OffersClient(_written("Draft the Acme reply"))
+    store = _Ordered(extension="web")
+    with ws(workspace_id):
+        written = await FollowUpCache(
+            store=store,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            thread=_Thread(),
+            kinds=EVERY_KIND,
+            model=ModelAccess(_Resolver(client), "surface:web"),
+            solvent=True,
+        ).read()
+
+    assert written.offers
+    assert store.wrote == ["put follow-ups", "delete follow-ups-claim"]
 
 
 async def test_a_claim_older_than_its_lease_is_taken_over(db: None) -> None:

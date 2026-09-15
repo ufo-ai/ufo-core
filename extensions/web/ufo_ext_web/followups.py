@@ -123,8 +123,13 @@ class FollowUpCache:
     project the whole transcript and throw it away.
 
     Nothing here may raise: a read that has never answered stops the pane asking for the rest of the
-    session. Every failure answers nothing and stamps a cooldown, so the next read does not walk
-    into the same wall."""
+    session. Every failure answers nothing, stamps a cooldown so the next read does not walk into
+    the same wall, and names the class it failed on — a deterministic defect and a provider blip
+    cool off alike, and only the class tells them apart.
+
+    The rows are stored before the claim is released, never after: a reader polling every two
+    seconds that landed between the two found no rows and a free claim, and paid for the same
+    ranking twice."""
 
     store: ScopedStore
     conversation_id: UUID
@@ -148,13 +153,17 @@ class FollowUpCache:
             if not tail:
                 return Reading()
             made = await self._write(tail)
-        except Exception:
+            await self.store.put(offers_key(self.conversation_id), made.model_dump(mode="json"))
+        except Exception as error:
             await self._claim().cool(now)
-            warn("web.follow_ups_failed", conversation_id=str(self.conversation_id))
+            warn(
+                "web.follow_ups_failed",
+                conversation_id=str(self.conversation_id),
+                error_class=type(error).__name__,
+            )
             return Reading()
         finally:
             await self._claim().release()
-        await self.store.put(offers_key(self.conversation_id), made.model_dump(mode="json"))
         return Reading(offers=made.offers)
 
     async def _standing(self, now: datetime) -> bool:
