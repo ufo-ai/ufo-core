@@ -86,7 +86,7 @@ from ufo.runtime.engine import (
     SANDBOX_PROVIDER_RETRY_SECONDS,
     TRUNCATION_FEEDBACK,
 )
-from ufo.runtime.ext.context import context_for
+from ufo.runtime.ext.context import Trajectory, context_for
 from ufo.runtime.ext.manifest import (
     EmbedBackendSpec,
     IndexBackendSpec,
@@ -129,6 +129,7 @@ pytestmark = [
 STREAM_TIMEOUT_SECONDS = 30
 HOLD_RELEASE = threading.Event()
 HOLD_TWO_STARTED = threading.Event()
+SLOW_ROUND_STARTED = threading.Event()
 HOLD_STARTED: list[str] = []
 TRUNCATION_MESSAGE = (
     "Anthropic completion truncated at the max_tokens budget (stop_reason=max_tokens)"
@@ -408,6 +409,7 @@ class StandInModel:
         ):
             raise ModelResponseTruncated(TRUNCATION_MESSAGE)
         if "slow" in inbound:
+            SLOW_ROUND_STARTED.set()
             await asyncio.sleep(30)
         if "mute" in inbound or ("shy" in inbound and not nudged):
             yield Usage(input_tokens=5)
@@ -1551,6 +1553,16 @@ EVAL_OVERDUE_DEADLINE_SECONDS = 1.0
 EVAL_FOLLOWUP_WAIT_SECONDS = 60.0
 
 
+class _SettleAfterRoundStarts(WorkspaceDriver):
+    """A driver whose settle deadline starts once the turn is streaming its first model round.
+    The deadline otherwise races the turn's own start — the claim, the arrival drain and the
+    round's setup all run inside it."""
+
+    async def settle(self, conversation_id: UUID, turn_id: UUID) -> Trajectory | None:
+        await asyncio.to_thread(SLOW_ROUND_STARTED.wait, STREAM_TIMEOUT_SECONDS)
+        return await super().settle(conversation_id, turn_id)
+
+
 async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
     db: None, dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore]
 ) -> None:
@@ -1563,13 +1575,14 @@ async def test_eval_settle_deadline_cancels_the_turn_before_the_runner_advances(
     from the dispatch claim alone and its expiry belongs to the rig."""
     _, _, blob = dbos_runtime
     STREAM_GATE.reset()
+    SLOW_ROUND_STARTED.clear()
     await _bootstrap()
     async with workspace_tx() as connection:
         workspace_id = (await connection.execute(sa.select(tables.workspace.c.id))).scalar_one()
         agent_id = (await connection.execute(sa.select(tables.agent.c.id))).scalar_one()
     runtime = loop_queue._runtime
     assert runtime is not None
-    overdue_driver = WorkspaceDriver(
+    overdue_driver = _SettleAfterRoundStarts(
         workspace_id,
         agent_id,
         "be brief",
