@@ -3,7 +3,7 @@ title: Scheduled work
 description: Create recurring tasks, choose where results go, and inspect or change each run.
 ---
 
-Ask the agent to repeat work on a schedule. State the action, schedule, time zone, source, and result
+Ask your UFO to repeat work on a schedule. State the action, schedule, time zone, source, and result
 destination.
 
 > Every weekday at 9:00 AM Pacific time, check open pull requests in acme/web. Report failed checks,
@@ -30,7 +30,7 @@ run to read its conversation. You can stop a running web task there.
 
 ## Change a task
 
-Ask the agent to change, pause, resume, or delete a task. You can also use the **Scheduled** view on
+Ask your UFO to change, pause, resume, or delete a task. You can also use the **Scheduled** view on
 the **Tasks** screen. The **Triggers** view holds source triggers.
 
 > Pause the weekday pull request report.

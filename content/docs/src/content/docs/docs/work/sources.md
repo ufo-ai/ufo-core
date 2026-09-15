@@ -6,7 +6,7 @@ description: Keep documents and records searchable, choose their scope, and use 
 A synced source makes documents or records searchable across conversations. Examples include
 product documentation, customer notes, issues, and knowledge repositories.
 
-Ask the agent to connect and register the source:
+Ask your UFO to connect and register the source:
 
 > Connect our product documentation as a shared source. Use the docs repository on GitHub.
 
@@ -14,7 +14,7 @@ Ask the agent to connect and register the source:
 
 - A private source is searchable only in your conversations.
 - A shared source is searchable by the workspace's main agent.
-- An application or private agent needs its own grant to the source.
+- An application or private UFO needs its own grant to the source.
 
 State the scope when you ask for the source. Use a private source for material that some workspace
 members must not see.
@@ -26,7 +26,7 @@ Name the source and the expected evidence:
 > From the support source, list the three most common setup problems this month. Link each example
 > and state how many times it occurred.
 
-The agent can combine a source with a connected account. For example, it can compare product notes
+Your UFO can combine a source with a connected account. For example, it can compare product notes
 with open issues in a project tracker.
 
 ## Run work when a source changes

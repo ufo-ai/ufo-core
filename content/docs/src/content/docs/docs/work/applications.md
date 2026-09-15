@@ -13,13 +13,13 @@ Ask the main agent to create one:
 
 ## The creation flow
 
-1. The agent asks about the job and who can use the application.
+1. Your UFO asks about the job and who can use the application.
 2. It identifies the required connections, sources, and schedule.
 3. It shows the proposed homepage.
 4. You approve the design.
-5. The agent creates the application and reports the result.
+5. Your UFO creates the application and reports the result.
 
-If you do not name a job, the agent proposes one. Creation starts only after you approve the
+If you do not name a job, your UFO proposes one. Creation starts only after you approve the
 homepage.
 
 ## Visibility

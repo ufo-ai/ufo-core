@@ -1,6 +1,6 @@
 ---
 title: Ask for work
-description: Give the agent enough context to complete a task and verify the result.
+description: Give your UFO enough context to complete a task and verify the result.
 ---
 
 State the outcome. Add the context and limits that affect the work.
@@ -11,7 +11,7 @@ A request can include four parts:
 
 1. **Outcome.** State what must be true when the work is complete.
 2. **Context.** Name the repository, document, customer, date range, or system to inspect.
-3. **Limits.** State what the agent must not change or publish.
+3. **Limits.** State what your UFO must not change or publish.
 4. **Proof.** State how to verify the result.
 
 For example:
@@ -25,12 +25,12 @@ For example:
 Attach a file, paste a link, name a connected record, or point to a synced source. State which source
 is authoritative when two sources can disagree.
 
-If access is missing, ask the agent to connect the service. Use the connection or credential control
+If access is missing, ask your UFO to connect the service. Use the connection or credential control
 that it returns. Do not paste secrets into the conversation.
 
 ## Set decision boundaries
 
-State which actions the agent may take. Set clear limits for work that can affect customers,
+State which actions your UFO may take. Set clear limits for work that can affect customers,
 production, money, or another person.
 
 > Diagnose the production alert and give me the evidence. Do not change production.

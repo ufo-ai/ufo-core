@@ -3,7 +3,7 @@ title: Slack
 description: Connect Slack, start work in a channel or direct message, and understand thread and memory behavior.
 ---
 
-A workspace admin connects Slack. Ask the agent for the install control:
+A workspace admin connects Slack. Ask your UFO for the install control:
 
 > Connect this workspace to Slack.
 
@@ -14,12 +14,12 @@ is publicly installable but is not in the Slack directory.
 
 Invite ufo to the channel, then mention `@ufo` with a request. It replies in a thread.
 
-After the first mention, every reply in that thread reaches the agent. It answers requests. It does
+After the first mention, every reply in that thread reaches your UFO. It answers requests. It does
 not reply unless a message asks it to do something.
 
 ## Work in a direct message
 
-Send a direct message to start a private conversation. The agent always reads direct messages.
+Send a direct message to start a private conversation. Your UFO always reads direct messages.
 
 ## New members
 
@@ -38,4 +38,4 @@ there.
 Slack cannot stop a running turn. Work that starts in Slack runs to completion. Use the web portal
 to stop a turn or see a larger view of the result.
 
-If an install link fails, ask the agent for a new one. Install links are short-lived.
+If an install link fails, ask your UFO for a new one. Install links are short-lived.

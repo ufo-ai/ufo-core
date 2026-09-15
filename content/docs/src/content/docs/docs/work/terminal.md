@@ -3,7 +3,7 @@ title: Terminal
 description: Install the terminal client, start a conversation in a local directory, and stop a running turn.
 ---
 
-The terminal client gives the agent access to the directory where you start it. Use it for local
+The terminal client gives your UFO access to the directory where you start it. Use it for local
 code, files, and command-line work.
 
 ## Install
@@ -19,7 +19,7 @@ Sign in. Then start ufo from the directory that contains the work.
 ## Choose the directory
 
 The current directory is part of the request. Start the client from the repository or folder that
-the agent must use. State the required result and limits in your first message.
+Your UFO must use. State the required result and limits in your first message.
 
 For example:
 

@@ -3,12 +3,12 @@ title: Processes
 description: Understand the commands and local services that run in a cloud work session.
 ---
 
-For code, data, and file work, the agent uses an isolated computer attached to the conversation. It
+For code, data, and file work, your UFO uses an isolated computer attached to the conversation. It
 can read and write files, install project dependencies, run tests, and start local services.
 
 ## Commands
 
-The agent runs commands in the conversation workspace. Command output is evidence, but a successful
+Your UFO runs commands in the conversation workspace. Command output is evidence, but a successful
 command does not prove the user-facing result.
 
 Ask for the focused checks that match the work:
@@ -18,7 +18,7 @@ Ask for the focused checks that match the work:
 
 ## Local services
 
-The agent can start a local web server to inspect an application. A local address is not a result
+Your UFO can start a local web server to inspect an application. A local address is not a result
 you can open. Ask for a [hosted site](/docs/work/files-sites/) when other people need access.
 
 ## Files and persistence

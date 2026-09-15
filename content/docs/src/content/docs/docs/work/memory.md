@@ -1,6 +1,6 @@
 ---
 title: Knowledge and memory
-description: Understand what the agent remembers, where a fact is visible, and how to correct it.
+description: Understand what your UFO remembers, where a fact is visible, and how to correct it.
 ---
 
 Memory keeps facts that remain useful across conversations, such as preferences and decisions.

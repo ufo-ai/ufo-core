@@ -1,25 +1,25 @@
 ---
 title: Files and sites
-description: Give the agent source files and receive documents, spreadsheets, presentations, reports, or hosted sites.
+description: Give your UFO source files and receive documents, spreadsheets, presentations, reports, or hosted sites.
 ---
 
-Attach input files to the conversation. State what the agent must read, change, or produce.
+Attach input files to the conversation. State what your UFO must read, change, or produce.
 
 > Check the attached forecast for inconsistent totals. Fix the formulas and return the corrected
 > spreadsheet with a short list of changes.
 
-## Files the agent creates
+## Files your UFO creates
 
-The agent can create and return reports, spreadsheets, slide decks, PDFs, and documents. A file is
-delivered only when the agent shares it in the conversation. A path inside its working computer is
+Your UFO can create and return reports, spreadsheets, slide decks, PDFs, and documents. A file is
+delivered only when your UFO shares it in the conversation. A path inside its working computer is
 not a delivered file.
 
-State the file format and layout requirements. Ask the agent to verify the rendered result when
+State the file format and layout requirements. Ask your UFO to verify the rendered result when
 layout or visual quality matters.
 
 ## Hosted sites
 
-For a website, dashboard, or interactive tool, the agent returns a hosted link. State who needs
+For a website, dashboard, or interactive tool, your UFO returns a hosted link. State who needs
 access and whether the site needs durable data or a backend.
 
 > Build a private project status dashboard from the attached CSV. Include filters for owner and

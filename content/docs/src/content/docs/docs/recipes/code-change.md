@@ -1,6 +1,6 @@
 ---
 title: Make a code change
-description: Ask the agent to reproduce a defect, implement a focused fix, test it, and open a pull request.
+description: Ask your UFO to reproduce a defect, implement a focused fix, test it, and open a pull request.
 ---
 
 ## Connect first
@@ -17,9 +17,9 @@ State the repository when several are available.
 > focused checks, and verify the form in a browser. Open a draft pull request. Do not deploy or
 > merge it.
 
-## What the agent does
+## What your UFO does
 
-The agent reads the repository instructions and code. It reproduces the problem, changes the
+Your UFO reads the repository instructions and code. It reproduces the problem, changes the
 smallest relevant path, and runs focused checks. It can use a browser to check a visible result.
 
 The final reply should name the change, passed checks, pull request, and missing proof.
@@ -29,7 +29,7 @@ The final reply should name the change, passed checks, pull request, and missing
 State these when they matter:
 
 - The repository, branch, or issue in scope.
-- Whether the agent may commit, push, or open a pull request.
+- Whether your UFO may commit, push, or open a pull request.
 - Whether the pull request must be a draft.
 - Whether it may change a public API, database schema, or dependency.
 - Whether it may deploy or merge.

@@ -20,7 +20,7 @@ State:
 - Required segments, comparisons, and exclusions.
 - The output format.
 
-If a term has several possible definitions, ask the agent to show them before it selects one.
+If a term has several possible definitions, ask your UFO to show them before it selects one.
 
 ## Require reproducible work
 

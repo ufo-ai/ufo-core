@@ -31,13 +31,13 @@ work.
 Use the stop button in the conversation. The turn ends and does not resume. If you send another
 message before the turn stops, that message starts a new turn.
 
-## Agent access
+## UFO access
 
 Admins can open every agent. Other members can open workspace agents, agents they created, and
 private agents that were shared with them.
 
 To share a private agent, ask in that agent's conversation:
 
-> Let alex@ufo.ai use this agent on the web.
+> Let alex@ufo.ai use this UFO on the web.
 
 Ask in the same place to remove access.

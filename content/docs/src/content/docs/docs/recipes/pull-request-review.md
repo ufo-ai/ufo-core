@@ -8,7 +8,7 @@ description: Review each changed, non-draft pull request through a GitHub synced
 In the Code application, connect the GitHub account that will publish reviews. Share the connection
 with the workspace, then register its `pull_requests` stream as a synced source.
 
-Run one review by URL before you add the trigger. Confirm that the agent can fetch the head, read
+Run one review by URL before you add the trigger. Confirm that your UFO can fetch the head, read
 repository instructions, run focused checks, and publish a review.
 
 ## Create the source trigger
@@ -24,7 +24,7 @@ Ask in the Code application:
 
 ## Keep CI separate
 
-A pull request record does not change when only a check run finishes. If the agent must also watch
+A pull request record does not change when only a check run finishes. If your UFO must also watch
 checks, create a scheduled task in the same application:
 
 > Every 20 minutes, inspect pull requests this application reviewed that are still open. Report or

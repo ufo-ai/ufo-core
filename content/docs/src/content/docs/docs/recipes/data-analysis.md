@@ -8,10 +8,10 @@ description: Calculate, reconcile, and report one product measure on a fixed wee
 Connect the analytics service and the source that identifies internal or test accounts. Define the
 measure before you schedule it:
 
-> Define activation as a new workspace that completes one agent task within 24 hours of sign-up.
+> Define activation as a new workspace that completes one UFO task within 24 hours of sign-up.
 > Exclude internal workspaces. Use Pacific time and complete weeks only.
 
-Run the query for the last eight weeks. Ask the agent to show the query, reconcile counts with raw
+Run the query for the last eight weeks. Ask your UFO to show the query, reconcile counts with raw
 events, inspect sample rows, and explain missing or duplicate records.
 
 ## Create the scheduled task

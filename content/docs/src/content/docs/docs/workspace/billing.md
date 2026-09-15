@@ -11,7 +11,7 @@ private conversation for billing.
 
 ## Read the current state
 
-Ask the agent:
+Ask your UFO:
 
 > Show the workspace balance, reserve, card status, and automatic refill rule.
 
@@ -47,5 +47,5 @@ A scheduled run is refused. The task runs again at its next scheduled time.
 ## Your own model provider key
 
 A workspace can enter its own model provider key through a private credential control. It pays that
-provider directly for model use. Generated media and calls made by the agent's working environment
+provider directly for model use. Generated media and calls made by your UFO's working environment
 can still spend the ufo balance.

@@ -14,7 +14,7 @@ description: Product changes in ufo.
   monitor trigger.
 - **Slack** — tag `@ufo` to use personal and company context with its permissions.
 - **GBrain import** — sync an existing company brain to ufo.
-- **Terminal agent** — install on Mac, Linux, or Windows with
+- **Terminal UFO** — install on Mac, Linux, or Windows with
   `curl -fsSL https://ufo.ai/ufo | sh`.
 - **Browser** — visit websites, fill in forms, and download files.
 - **Connections** — connect Slack, Gmail, GitHub, Linear, HubSpot, Stripe, and GBrain.

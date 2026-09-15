@@ -17,7 +17,7 @@ identifiers, error text, and monitor links.
 
 ## Keep evidence separate
 
-Ask the agent to separate:
+Ask your UFO to separate:
 
 - Current observed state.
 - Events that happened before or during the incident.

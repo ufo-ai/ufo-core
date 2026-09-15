@@ -8,7 +8,7 @@ Start with [Ask for work](/docs/getting-started/ask/).
 ## State authority
 
 Use direct boundaries such as “do not send,” “do not merge,” or “production is read-only.” If the
-agent may publish or change external state, name the exact system and action.
+UFO may publish or change external state, name the exact system and action.
 
 ## Correct the course
 
@@ -17,7 +17,7 @@ the missing fact, and name the revised outcome. Start a new conversation for unr
 
 ## Ask for evidence
 
-Request sources for factual claims and a rendered check for visual output. Ask the agent to state
+Request sources for factual claims and a rendered check for visual output. Ask your UFO to state
 when a fact is missing. Do not let it replace the fact with an assumption.
 
 Use [Recipes](/docs/recipes/) for complete requests you can adapt.

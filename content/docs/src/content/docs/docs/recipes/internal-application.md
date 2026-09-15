@@ -10,7 +10,7 @@ description: Give customer health its own agent, connected systems, synced sourc
 > workspace can use it. The homepage needs a searchable account list with health state, reason,
 > owner, renewal date, last customer contact, open commitments, and source links.
 
-Before the agent creates the application, approve the homepage. Check the hierarchy, actions, empty
+Before your UFO creates the application, approve the homepage. Check the hierarchy, actions, empty
 states, and phone layout.
 
 ## Connect and sync its inputs

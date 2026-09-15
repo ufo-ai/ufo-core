@@ -4,7 +4,7 @@ description: Complete operating loops built from connected accounts, synced sour
 ---
 
 Run the work once before you automate it. Check the data, audience, links, and action limits. Then
-ask the agent to create the source trigger or scheduled task.
+ask your UFO to create the source trigger or scheduled task.
 
 ## Engineering and operations
 

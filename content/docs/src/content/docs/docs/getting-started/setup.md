@@ -26,7 +26,7 @@ and advisers who use another email domain.
 
 ## Add your team
 
-Ask the agent to add a member:
+Ask your UFO to add a member:
 
 > Add marshall@ufo.ai as a member and send the sign-in email.
 
@@ -40,11 +40,11 @@ Choose a first task. Connect only the accounts and knowledge that task needs.
 A pull request review needs a [GitHub connection](/docs/connectors/github/). A weekly product report may
 need your analytics service, issue tracker, and shared project notes.
 
-Ask the agent to start each connection:
+Ask your UFO to start each connection:
 
 > Connect my GitHub account so you can review pull requests.
 
-The agent returns the correct authorization control. See [Connecting your systems](/docs/connectors/).
+Your UFO returns the correct authorization control. See [Connecting your systems](/docs/connectors/).
 
 ## Run the first task
 
