@@ -111,6 +111,7 @@ for what earns one, is in docs/composio-provider-coverage.md."""
 
 CUSTOM_AUTH_CONFIGS: dict[str, str] = {
     "granola_mcp": "granola_mcp-8pqzpe",
+    "vercel": "vercel-ufo",
 }
 """Toolkits reached through an auth config an operator created on this deploy's Composio project,
 keyed by slug to that config's name.
@@ -119,8 +120,15 @@ Composio holds no managed credentials for these, so the managed route (`POST /au
 nothing and the open namespace would refuse the slug. Granola brokers its official MCP server and
 requires the member's own dynamically registered OAuth client, which no broker can mint — the
 operator registered that client with Granola and stored it in the named config, and Composio holds
-and refreshes the tokens from there. A slug listed here therefore rides its named config and never
-creates one: creating a managed config would bind a grant against credentials Granola refuses."""
+and refreshes the tokens from there. Vercel is the same shape reached from the other side: its API
+takes no key at all, and its own MCP server authorizes over OAuth whose registration endpoint
+admits loopback redirect URIs only, so no hosted deploy can register a client for it — this deploy
+registered a Vercel Integration instead, and the named config holds its credentials. A slug listed
+here therefore rides its named config and never creates one: creating a managed config would bind a
+grant against credentials the provider refuses.
+
+Each name must exist on every Composio project a deploy uses — `_named_auth_config` raises where it
+does not, so a config created against one project's key connects there and fails loud elsewhere."""
 
 
 def connectable(slug: str, toolkit: Mapping[str, object]) -> bool:
