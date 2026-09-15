@@ -11,7 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Checkbox, Field, Input, Label, Search } from "@/components/ui/field";
-import { Segmented } from "@/components/ui/filter";
+import { Segmented, type Segment } from "@/components/ui/filter";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,6 +24,7 @@ import {
   ItemContent,
   ItemDescription,
   ItemGroup,
+  ItemHead,
   ItemSeparator,
   ItemTitle,
   MarkTile,
@@ -202,7 +203,12 @@ function connectionFacts(
  *  reads as: that search matches a category too, which no spelling of a label here would keep. */
 function rowMatches(row: ConnectionRow, query: string, searched: Set<string>): boolean {
   if (!query || searched.has(row.name)) return true;
-  const said = [row.label, row.name, row.entry ? accountHeld(row.entry) : ""].join(" ");
+  const said = [
+    row.label,
+    row.name,
+    row.summary,
+    row.entry ? accountHeld(row.entry) : "",
+  ].join(" ");
   return said.toLowerCase().includes(query.toLowerCase());
 }
 
@@ -245,6 +251,16 @@ function mcpHeld(state: PanelState<CredentialsPayload>): Set<string> {
  *  viewer may manage the account, which a workspace admin may on every member's. */
 function ownAccount(row: ConnectionRow, viewer: string | null): boolean {
   return row.entry !== null && row.entry.owner_email !== null && row.entry.owner_email === viewer;
+}
+
+/** The catalog's own order, which the rows already stand in, so a category chip stands where its
+ *  first connector does. A row the catalog heads under nothing stands under All alone. */
+function categories(rows: ConnectionRow[]): Segment[] {
+  const counted = new Map<string, number>();
+  for (const row of rows) {
+    if (row.group) counted.set(row.group, (counted.get(row.group) ?? 0) + 1);
+  }
+  return [...counted].map(([group, count]) => ({ label: group, value: group, count }));
 }
 
 const SHELVES = ["available", "personal", "workspace"] as const;
@@ -547,6 +563,19 @@ const GITHUB = "github";
 type Handoff = { url: string; text: string };
 const CONNECTOR_BATCH_MIN = 25;
 const CONNECTOR_BATCH_CURSOR_LIMIT = 25;
+const SEARCH_REST_MS = 200;
+
+/** What the member has stopped typing: the catalogue search reaches the broker, so the keystrokes
+ *  of one word are one search. The rows already on the shelf narrow on every keystroke. */
+function useRested(said: string): string {
+  const [rested, setRested] = useState(said);
+  useEffect(() => {
+    if (said === rested) return;
+    const timer = window.setTimeout(() => setRested(said), SEARCH_REST_MS);
+    return () => window.clearTimeout(timer);
+  }, [said, rested]);
+  return rested;
+}
 
 function connectorCatalogPath(query: string, after?: string): string {
   const params = new URLSearchParams();
@@ -564,7 +593,7 @@ function useConnectorCatalog(query: string, reloads: number) {
   useEffect(() => {
     const current = ++generation.current;
     const request = new AbortController();
-    setState({ phase: "loading" });
+    setState((held) => (held.phase === "ready" ? held : { phase: "loading" }));
     setLoadingMore(false);
     setError(QUIET);
     getJson<ConnectorCatalogPayload>(connectorCatalogPath(query), request.signal).then((result) => {
@@ -697,8 +726,17 @@ export function Connectors({
     waiting ? WATCH_MS : undefined,
   );
   const pool = usePanelRead<PoolPayload>("/connections", reloads, waiting ? WATCH_MS : undefined);
-  const query = place.q ?? "";
-  const expanded = useConnectorCatalog(query, reloads);
+  const held = place.q ?? "";
+  const category = place.kind ?? "";
+  /** The field holds what is typed and the address what was rested on, so the rows narrow on every
+   *  keystroke while the address — and the link a member shares — takes one entry per word. */
+  const [query, setQuery] = useState(held);
+  useEffect(() => setQuery(held), [held]);
+  const rested = useRested(query);
+  useEffect(() => {
+    if (rested !== (place.q ?? "")) onPlace({ q: rested || undefined });
+  }, [rested]);
+  const expanded = useConnectorCatalog(rested, reloads);
   // The credential slots carry both halves a named MCP row needs: which servers this workspace
   // already holds, and the action that seals the prompt its token is typed into.
   const credentials = usePanelRead<CredentialsPayload>("/workspace/credentials", reloads);
@@ -842,11 +880,12 @@ export function Connectors({
             ),
           };
           const shelf = readShelf(place.chip, shelves);
-          const standing = shelves[shelf];
+          const shelved = shelves[shelf];
+          const groups = categories(shelved);
+          const picked = groups.some((one) => one.value === category) ? category : "";
+          const standing = picked ? shelved.filter((row) => row.group === picked) : shelved;
+          const narrowed = Boolean(query) || Boolean(picked);
           const more = shelf === "available" && expanded.state.phase === "ready" && expanded.state.payload.after;
-          // A search that matched nothing is the one moment the two open-ended paths are what the
-          // member wants, so they stand alone where the rows would have been.
-          const unmatched = query !== "" && standing.length === 0;
           return (
             <div className="@container flex flex-col gap-6xl">
               <Section title="Reach ufo from wherever you already work">
@@ -875,20 +914,39 @@ export function Connectors({
                 }
               >
                 <div className="flex flex-col gap-2xl">
-                  {unmatched ? (
-                    <>
-                      <PanelBlank body={"No connector matches " + query + "."} />
-                      <ItemGroup>
-                        <CredentialOffer />
-                        <ItemSeparator />
-                        <McpOffer />
-                      </ItemGroup>
-                    </>
-                  ) : standing.length || shelf === "available" ? (
+                  {standing.length || narrowed || shelf === "available" ? (
                     <ItemGroup>
-                      {standing.map((row, index) => (
+                      <ItemHead>
+                        <Search
+                          label="Search connectors"
+                          placeholder="Search"
+                          className="w-full"
+                          value={query}
+                          onChange={(event) => setQuery(event.target.value)}
+                        />
+                        {groups.length > 1 ? (
+                          <Segmented
+                            variant="tag"
+                            label="Category"
+                            segments={[{ label: "All", value: "", count: shelved.length }, ...groups]}
+                            value={picked}
+                            onPick={(next: string) => onPlace({ kind: next || undefined })}
+                          />
+                        ) : null}
+                      </ItemHead>
+                      {standing.length ? null : (
+                        <>
+                          <ItemSeparator />
+                          <Item>
+                            <ItemContent>
+                              <ItemDescription whole>No connector matches this search.</ItemDescription>
+                            </ItemContent>
+                          </Item>
+                        </>
+                      )}
+                      {standing.map((row) => (
                         <Fragment key={row.key}>
-                          {index ? <ItemSeparator /> : null}
+                          <ItemSeparator />
                           <ConnectionRowItem
                             row={row}
                             current={
@@ -949,8 +1007,16 @@ export function Connectors({
                       ))}
                       {shelf === "available" ? (
                         <>
-                          {standing.length ? <ItemSeparator /> : null}
+                          <ItemSeparator />
                           <CredentialOffer />
+                          {/* A search that matched nothing is the one moment the open-ended path is
+                              what the member wants, so it stands under the shelf's own offer. */}
+                          {standing.length ? null : (
+                            <>
+                              <ItemSeparator />
+                              <McpOffer />
+                            </>
+                          )}
                         </>
                       ) : null}
                     </ItemGroup>

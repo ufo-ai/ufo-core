@@ -1231,6 +1231,75 @@ test("the library adds providers from the broker catalog", async () => {
   expect(within(row("Salesforce")).getByText("Connect this account to use its tools.")).toBeTruthy();
 });
 
+test("the search narrows the shelf and asks the broker for the same words", async () => {
+  const asked: string[] = [];
+  location.hash = sectionHash("connectors", { chip: "available" });
+  library({
+    "/connector-catalog": (url) => {
+      const said = new URL(url, "https://ufo.test").searchParams.get("q") ?? "";
+      asked.push(said);
+      return json({
+        providers: said === "sales" ? [{ name: "salesforce", label: "Salesforce" }] : [],
+        after: null,
+      });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await offered();
+  await userEvent.type(screen.getByRole("searchbox", { name: "Search connectors" }), "sales");
+
+  expect(await screen.findByText("Salesforce")).toBeTruthy();
+  expect(rowsNamed("Slack")).toHaveLength(0);
+  expect(asked.at(-1)).toBe("sales");
+});
+
+test("a category narrows the shelf to its group and counts what it holds", async () => {
+  location.hash = sectionHash("connectors", { chip: "available" });
+  library({ "/connector-catalog": () => json({ providers: [], after: null }) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await offered();
+  const chip = screen.getByRole("button", { name: /Communication/ });
+  expect(within(chip).getByText("1")).toBeTruthy();
+  await userEvent.click(chip);
+
+  expect(connects("Slack")).toBeTruthy();
+  expect(rowsNamed("Gmail")).toHaveLength(0);
+});
+
+test("the category row offers no More where every category stands in its one line", async () => {
+  location.hash = sectionHash("connectors", { chip: "available" });
+  library({ "/connector-catalog": () => json({ providers: [], after: null }) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await offered();
+
+  expect(screen.getByRole("button", { name: /Communication/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^More/ })).toBeNull();
+});
+
+test("a search that matches nothing says so and still offers the credential path", async () => {
+  location.hash = sectionHash("connectors", { chip: "available" });
+  library({ "/connector-catalog": () => json({ providers: [], after: null }) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await offered();
+  await userEvent.type(screen.getByRole("searchbox", { name: "Search connectors" }), "quartz");
+
+  expect(await screen.findByText("No connector matches this search.")).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Add credential" })).toBeTruthy();
+});
+
+test("a shelf whose rows stand under one category draws no category row", async () => {
+  location.hash = sectionHash("connectors", { chip: "personal" });
+  library({ "/connections": () => json(POOLED_NOTION) });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await connected("Notion")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /^All/ })).toBeNull();
+});
+
 test("a broker catalog failure leaves held and fixed connectors available", async () => {
   location.hash = sectionHash("connectors");
   library({
@@ -1564,6 +1633,30 @@ test("a configured MCP server stands on the workspace shelf rather than offering
   expect(rowsNamed("Neon")).toHaveLength(0);
 });
 
+test("the All chip counts the shelf it narrows, not every shelf at once", async () => {
+  location.hash = sectionHash("connectors", { chip: "available" });
+  library({
+    "/workspace/credentials$": () =>
+      json({ actions: [], slots: [{ slot: "mcp_servers", entries: ["neon"] }] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await offered();
+
+  const counted = () => {
+    const row = within(screen.getByRole("group", { name: "Category" }));
+    const all = row.getAllByRole("button").find((chip) => (chip.textContent ?? "").startsWith("All"));
+    return Number((all?.textContent ?? "").match(/\d+$/)?.[0]);
+  };
+
+  await atShelf("available");
+  const available = counted();
+  expect(available).toBeGreaterThan(0);
+
+  await atShelf("workspace");
+  // Counting `found` rather than the shelf made this the same number on every shelf.
+  expect(counted()).toBeLessThan(available);
+});
+
 test("a search matching no connector offers the credential and MCP paths instead", async () => {
   location.hash = sectionHash("connectors", { chip: "available" });
   library();
@@ -1572,7 +1665,7 @@ test("a search matching no connector offers the credential and MCP paths instead
 
   await userEvent.type(screen.getByLabelText("Search connections"), "nothingnamedthis{Enter}");
 
-  expect(await screen.findByText("No connector matches nothingnamedthis.")).toBeTruthy();
+  expect(await screen.findByText("No connector matches this search.")).toBeTruthy();
   expect(screen.getByRole("link", { name: "Add credential" })).toBeTruthy();
   expect(screen.getByRole("link", { name: "Add MCP server" })).toBeTruthy();
 });

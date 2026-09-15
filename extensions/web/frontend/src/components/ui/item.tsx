@@ -39,6 +39,16 @@ export function ItemSeparator() {
   return <li aria-hidden className="border-t border-edge" />;
 }
 
+/** The controls that narrow a card's rows, standing inside the card above them. They belong to the
+ *  rows they narrow, so they hold their place while the rows under them change. */
+export function ItemHead({ children }: { children: ReactNode }) {
+  return (
+    <li data-slot="item-head" className="flex flex-col gap-2xl px-2xl py-2xl">
+      {children}
+    </li>
+  );
+}
+
 export function ItemMedia({ children }: { children: ReactNode }) {
   return (
     <div data-slot="item-media" className="flex shrink-0 items-center">
