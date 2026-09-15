@@ -285,50 +285,6 @@ test("an app page draws its homepage from the boot agent, without pulling its co
   expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
 });
 
-test("a shipped compose screen skips homepage and conversation reads", async () => {
-  const SITE = { state: "set", url: "https://ingress.test/chat", deploy_generation: 3 };
-  const CHAT = {
-    ...AGENT,
-    id: SECOND_ID,
-    name: "chat",
-    main: false,
-    app: "chat",
-    icon: "aten",
-    homepage: SITE,
-  };
-  const { calls } = wire({
-    "/api/agents": () => boot([AGENT, CHAT], ADMIN),
-  });
-  location.hash = "#/agents/" + SECOND_ID + "?open=compose";
-  render(<Portal />);
-
-  const region = await screen.findByRole("region", { name: /chat homepage/i });
-  expect(region.querySelector("iframe")?.getAttribute("src")).toBe("https://ingress.test/chat");
-  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/homepage"))).toBe(false);
-  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
-});
-
-test("a compose screen without a shipped page opens the portal composer without an index", async () => {
-  const CHAT = {
-    ...AGENT,
-    id: SECOND_ID,
-    name: "chat",
-    main: false,
-    app: "chat",
-    icon: "aten",
-    homepage: { state: "none" },
-  };
-  const { calls } = wire({
-    "/api/agents": () => boot([AGENT, CHAT], ADMIN),
-  });
-  location.hash = "#/agents/" + SECOND_ID + "?open=compose";
-  render(<Portal />);
-
-  expect(await screen.findByLabelText("Ask UFO")).toBeTruthy();
-  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/homepage"))).toBe(false);
-  expect(calls.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(false);
-});
-
 test("a conversation the composer founds after a failed opening send is still the run's", async () => {
   let opening = true;
   wire({
@@ -1730,7 +1686,8 @@ test("the app pane's header starts a chat with the app it shows, standing with t
 
   const pane = within(await screen.findByRole("region", { name: "Research" }));
   const act = pane.getByRole("button", { name: "New" });
-  const named = pane.getByRole("heading", { level: 2, name: FRESH });
+  const named = screen.getByRole("region", { name: "Research" }).querySelector("[data-slot=name]")!;
+  expect(named.textContent).toBe(FRESH);
   const menu = pane.getByRole("button", { name: "Menu for Research" });
   expect(named.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(menu.compareDocumentPosition(act) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();

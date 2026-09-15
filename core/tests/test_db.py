@@ -548,7 +548,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "coding_0004",
         "eval_env_0001",
         "sites_0008",
-        "web_0002",
+        "web_0003",
         "report_digest_0002",
         "enrichment_0002",
         "notification_0008",

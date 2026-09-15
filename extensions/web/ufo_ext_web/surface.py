@@ -29,7 +29,7 @@ import os
 import re
 from binascii import Error as Base64Error
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -59,7 +59,6 @@ from ufo.sdk.callback_page import callback_page
 from ufo.sdk.context import (
     CONNECTION_SCOPE_MAX,
     ExtensionContext,
-    ScopedStore,
     SourceReader,
     WorkspaceAgent,
 )
@@ -281,7 +280,6 @@ SUBAGENT_ACTIVITY_LIMIT = 40
 SUBAGENT_EVENT_LIMIT = 100
 HISTORY_PAGE_MESSAGE_LIMIT = 100
 HISTORY_PAGE_BYTE_LIMIT = 64 * 1024
-CHAT_STORE_PREFIX = "chat/"
 TITLE_JOB_NAME = "chat_titles"
 TITLE_JOB_SCHEDULE = "*/15 * * * * *"
 TITLE_BATCH = 5
@@ -920,10 +918,6 @@ def _agent_param(request: Request) -> UUID | None:
         return None
 
 
-def _chat_row_key(conversation_id: UUID) -> str:
-    return f"{CHAT_STORE_PREFIX}{conversation_id}"
-
-
 TITLE_DANGLERS = frozenset(
     "a an and are as at be but by for if in is it its my of on or our so that the their then "
     "this to we what when with you your".split()
@@ -949,15 +943,6 @@ def _chat_title(text: str, paths: tuple[str, ...]) -> str:
             break
         words.pop()
     return " ".join(words)
-
-
-class ChatRecord(BaseModel):
-    """One conversation this surface opened, as its store row persists it: the (agent, member)
-    binding the chat gate checks. Validated at construction — a row that fails to parse is a fault,
-    never a silent "no chat"."""
-
-    agent_id: UUID
-    email: str
 
 
 def _title_excerpt(messages: tuple[Message, ...]) -> str:
@@ -1161,71 +1146,42 @@ async def seed_homepages(ctx: ExtensionContext, bucket: str | None = None) -> No
 
 async def _open_conversation(
     ctx: SurfaceContext,
-    store: ScopedStore,
     agent_id: UUID,
     member_id: UUID,
-    email: str,
     queue_key: str,
     text: str,
     paths: tuple[str, ...],
 ) -> tuple[UUID, str]:
-    """Open a conversation under `queue_key`, its chat row written first, keyed by the id the
-    conversation is then created with — a crash between the two leaves an inert row, never a
-    conversation the rail must carry rowless. A lost creation race on the queue key lands on the
-    surviving conversation, whose winner wrote its row and named it, with the audience the winner
-    left it: asking for the member's audience does not narrow a conversation already shared.
+    """Open a conversation under `queue_key`. A lost creation race on the queue key lands on the
+    surviving conversation, whose winner named it, with the audience the winner left it: asking for
+    the member's audience does not narrow a conversation already shared. The survivor must be what
+    was asked for — this agent's, and one this member reads — or the key has been given to a
+    conversation this surface did not open, which is a fault and never a chat.
 
     A portal chat is its member's at birth. Its member can share it with the workspace from the
     title's visibility control (`share_conversation`), which is a turn like any other act.
 
     What the conversation is called is core's, so the opening turn names it and the rail, the index
-    and this reply all read the one string. The chat row is the (agent, member) binding this
-    surface gates its own chat on, and holds nothing a listing states."""
+    and this reply all read the one string."""
     title = _chat_title(text, paths)
     minted = uuid4()
-    await store.put(
-        _chat_row_key(minted),
-        ChatRecord(agent_id=agent_id, email=email).model_dump(mode="json"),
-    )
+    audience = conversation_audience(member_id)
     conversation_id = await ctx.conversation_for(
         queue_key,
-        conversation_audience(member_id),
+        audience,
         agent_id=agent_id,
         conversation_id=minted,
         preserve_existing_audience=True,
     )
     if conversation_id != minted:
-        await store.delete(_chat_row_key(minted))
-        if await _own_web_chat(store, agent_id, email, conversation_id) is None:
-            raise RuntimeError(f"conversation {conversation_id} has no chat row")
-        return conversation_id, await _named(ctx, agent_id, member_id, conversation_id)
+        listed = await ctx.list_agent_conversations(
+            agent_id, member_id, admin=False, limit=1, conversation_id=conversation_id
+        )
+        if not listed:
+            raise RuntimeError(f"conversation {conversation_id} under {queue_key} is not a chat")
+        return conversation_id, listed[0].title
     await ctx.retitle_conversation(conversation_id, title)
     return conversation_id, title
-
-
-async def _named(
-    ctx: SurfaceContext, agent_id: UUID, member_id: UUID, conversation_id: UUID
-) -> str:
-    """What one conversation is called, off the read every listing takes it from."""
-    listed = await ctx.list_agent_conversations(
-        agent_id, member_id, admin=False, limit=1, conversation_id=conversation_id
-    )
-    return listed[0].title if listed else ""
-
-
-async def _own_web_chat(
-    store: ScopedStore, agent_id: UUID, email: str, conversation_id: UUID
-) -> ChatRecord | None:
-    """The requested conversation's chat record, when it is this member's own chat with this
-    agent. Anything else — another member's, another agent's, a room's, an unknown id — is None,
-    and every caller answers not-found."""
-    value = await store.get(_chat_row_key(conversation_id))
-    if value is None:
-        return None
-    record = ChatRecord.model_validate(value)
-    if record.agent_id != agent_id or record.email != email:
-        return None
-    return record
 
 
 async def _spoken_conversation(
@@ -1909,7 +1865,6 @@ async def _chat_inbound(ctx: SurfaceContext, request: Request) -> _ChatInbound |
 
 async def _new_chat_target(
     ctx: SurfaceContext,
-    store: ScopedStore,
     audience: WebAudience,
     agent_id: UUID,
     member_id: UUID,
@@ -1924,10 +1879,8 @@ async def _new_chat_target(
         return Response("a stop names the conversation its turn runs in", status_code=400)
     conversation_id, title = await _open_conversation(
         ctx,
-        store,
         agent_id,
         member_id,
-        email,
         f"{agent_id}/{email}/{uuid4().hex}",
         inbound.text,
         inbound.paths,
@@ -1969,9 +1922,8 @@ async def _resolve_chat_target(
     requested = request.query_params.get("conversation", "").strip()
     if not requested:
         return Response("conversation is required", status_code=400)
-    store = web_extension().store
     if requested == NEW_CONVERSATION:
-        return await _new_chat_target(ctx, store, audience, agent_id, member_id, email, inbound)
+        return await _new_chat_target(ctx, audience, agent_id, member_id, email, inbound)
     try:
         conversation_id = UUID(requested)
     except ValueError:
@@ -2066,13 +2018,10 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     An `x-ufo-stop-turn` header over an empty body is the member ending a turn of this conversation
     rather than saying anything into it: nothing is admitted, so the transcript never mentions the
     press, and the cancelled terminal the stop publishes is what the member's live tail ends on."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    member_id, email, audience = resolved
-    agent_id = _agent_param(request)
-    if agent_id is None or not audience.allows_chat(agent_id):
-        return Response("no such agent", status_code=404)
+    gated = await _panel_gate(ctx, request, reach=WebAudience.allows_chat)
+    if isinstance(gated, Response):
+        return gated
+    member_id, email, audience, agent_id = gated
     counted = _count_click(request)
     if counted is not None:
         return counted
@@ -3185,26 +3134,41 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
     if not listed:
         return absent
     speakable = _speakable(audience, agent.id, listed[0], member_id)
-    if not audience.allows(agent.id) and not speakable:
+    if not _reaches(audience, agent.id, listed[0], member_id):
         return absent
     row = _conversation_row(listed[0], speakable, {"id": str(agent.id), "name": agent.name})
     return JSONResponse({"conversation": row})
 
 
 async def _panel_gate(
-    ctx: SurfaceContext, request: Request
+    ctx: SurfaceContext,
+    request: Request,
+    *,
+    reach: Callable[[WebAudience, UUID], bool] = WebAudience.allows,
 ) -> tuple[UUID, str, WebAudience, UUID] | Response:
-    """The shared entry of every per-agent panel read and the intent lane: the session's member,
-    their email, and audience, plus the path's agent — 404 when the agent is outside the viewer's
-    web audience, like every portal route."""
+    """The shared entry of every per-agent route: the session's member, their email, and audience,
+    plus the path's agent — 404 when the agent is outside the reach the route admits. A panel read
+    and the intent lane take web reach (`WebAudience.allows`); conversation content and the chat
+    lane take chat reach (`WebAudience.allows_chat`), which an agent held through a member-private
+    conversation alone also has — `_reaches` then says which of its conversations that opens."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     member_id, email, audience = resolved
     agent_id = _agent_param(request)
-    if agent_id is None or not audience.allows(agent_id):
+    if agent_id is None or not reach(audience, agent_id):
         return Response("no such agent", status_code=404)
     return member_id, email, audience, agent_id
+
+
+def _reaches(
+    audience: WebAudience, agent_id: UUID, conversation: ListedConversation, member_id: UUID
+) -> bool:
+    """Whether a conversation the agent's listing answered is this member's to open. An agent in
+    their web reach admits every row the listing answers them — `readable` on the row then says
+    whether its content may be read now. An agent in their chat reach alone, held through a
+    member-private conversation, admits the member's own conversation and no other."""
+    return audience.allows(agent_id) or _speakable(audience, agent_id, conversation, member_id)
 
 
 def _iso(moment: datetime | None) -> str | None:
@@ -3589,28 +3553,28 @@ async def _readable_conversation(
     ctx: SurfaceContext, request: Request, conversation_id: UUID | None = None
 ) -> tuple[UUID, UUID, "SlotViewer"] | Response:
     """The agent and conversation a content read is authorized for, or the 404 every unreadable
-    case answers: an agent outside the member's chat reach, a malformed id, another agent's
-    conversation, a room's, and another member's private one until an admin records a disclosure
-    against it. An agent reached through a member-private conversation alone grants that
-    conversation and no other. One gate, so content reads cannot disagree."""
-    resolved = await _audience_for(ctx, request)
-    if isinstance(resolved, Response):
-        return resolved
-    member_id, _email, audience = resolved
-    agent_id = _agent_param(request)
-    if agent_id is None or not audience.allows_chat(agent_id):
-        return Response("no such agent", status_code=404)
+    case answers: an agent outside the member's chat reach, a malformed id, a conversation
+    `_reaches` refuses, and under web reach one `readable_conversation` refuses — another agent's,
+    a room's, and another member's private one until an admin records a disclosure against it. One
+    gate, so content reads cannot disagree."""
+    gated = await _panel_gate(ctx, request, reach=WebAudience.allows_chat)
+    if isinstance(gated, Response):
+        return gated
+    member_id, _email, audience, agent_id = gated
     if conversation_id is None:
         try:
             conversation_id = UUID(request.path_params["conversation_id"])
         except ValueError:
             return Response("no such conversation", status_code=404)
-    readable = (
-        await ctx.readable_conversation(conversation_id, agent_id, member_id, admin=audience.admin)
-        if audience.allows(agent_id)
-        else await _spoken_conversation(ctx, audience, agent_id, member_id, conversation_id)
-        is not None
-    )
+    if audience.allows(agent_id):
+        readable = await ctx.readable_conversation(
+            conversation_id, agent_id, member_id, admin=audience.admin
+        )
+    else:
+        listed = await ctx.list_agent_conversations(
+            agent_id, member_id, admin=False, limit=1, conversation_id=conversation_id
+        )
+        readable = bool(listed) and _reaches(audience, agent_id, listed[0], member_id)
     if not readable:
         return Response("no such conversation", status_code=404)
     return agent_id, conversation_id, SlotViewer(member_id, audience.admin, _opens(audience))

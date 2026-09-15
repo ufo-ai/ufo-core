@@ -331,7 +331,10 @@ export function Header({
                   </BreadcrumbItem>
                   <BreadcrumbSeparator />
                   <BreadcrumbItem className="min-w-0">
-                    <Name className={cn("m-0 flex min-w-0 text-label", band.title)}>
+                    <Name
+                      data-slot="name"
+                      className={cn("m-0 flex min-w-0 text-label", band.title)}
+                    >
                       <BreadcrumbPage>{title}</BreadcrumbPage>
                     </Name>
                     {note}
@@ -341,6 +344,7 @@ export function Header({
             ) : (
               <>
                 <Name
+                  data-slot="name"
                   className={cn("m-0 min-w-0 flex-1 truncate text-label font-medium", band.title)}
                 >
                   {title}

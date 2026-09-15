@@ -3,6 +3,7 @@ import { afterEach, beforeEach, vi } from "vitest";
 
 import { resetAppStatusStore } from "@/lib/appStatusStore";
 import { resetChatStore } from "@/lib/chatStore";
+import { resetDisclosedStore } from "@/lib/disclosedStore";
 import { resetRailStore } from "@/lib/railStore";
 import { resetRouter } from "@/lib/router";
 import { resetScheme } from "@/lib/scheme";
@@ -115,6 +116,7 @@ afterEach(() => {
   keyFaults = [];
   resetAppStatusStore();
   resetChatStore();
+  resetDisclosedStore();
   resetRouter();
   resetScheme();
   resetStreams();

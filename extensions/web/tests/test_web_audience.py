@@ -555,40 +555,29 @@ async def test_open_conversation_mints_the_members_audience(db: None, tmp_path) 
     member_id = await _member(workspace_id, MEMBER_EMAIL)
     with ws(workspace_id):
         surface = _surface(workspace_id, tmp_path)
-        store = context_for(NAME, frozenset()).store
         opened, _title = await _open_conversation(
-            surface, store, main_agent, member_id, MEMBER_EMAIL, "agent/bob/1", "first words", ()
+            surface, main_agent, member_id, "agent/bob/1", "first words", ()
         )
         assert await _audience_row(opened) == (str(conversation_audience(member_id)), member_id)
-        assert await store.get(f"chat/{opened}") == {
-            "agent_id": str(main_agent),
-            "email": MEMBER_EMAIL,
-        }
 
 
-async def test_open_conversation_lands_a_lost_race_on_the_winner_and_its_row(
-    db: None, tmp_path
-) -> None:
-    """Two first messages racing one queue key converge: the loser's pre-written chat row is
-    deleted, the winner's conversation and row stand, and the loser's caller receives the
-    winner's identity and title. The winner's audience stands too, whichever it is by then — an
-    existing workspace chat is not narrowed."""
+async def test_open_conversation_lands_a_lost_race_on_the_winner(db: None, tmp_path) -> None:
+    """Two first messages racing one queue key converge: the winner's conversation stands and the
+    loser's caller receives the winner's identity and title. The winner's audience stands too,
+    whichever it is by then — an existing workspace chat is not narrowed."""
     workspace_id, main_agent, _second = await _seed()
     member_id = await _member(workspace_id, MEMBER_EMAIL)
     with ws(workspace_id):
         surface = _surface(workspace_id, tmp_path)
-        store = context_for(NAME, frozenset()).store
         key = f"{main_agent}/{MEMBER_EMAIL}"
         winner, winner_title = await _open_conversation(
-            surface, store, main_agent, member_id, MEMBER_EMAIL, key, "first words", ()
+            surface, main_agent, member_id, key, "first words", ()
         )
         loser, loser_title = await _open_conversation(
-            surface, store, main_agent, member_id, MEMBER_EMAIL, key, "second words", ()
+            surface, main_agent, member_id, key, "second words", ()
         )
         assert (loser, loser_title) == (winner, winner_title)
         assert winner_title == "first words"
-        rows = await store.list("chat/")
-        assert [key for key, _ in rows] == [f"chat/{winner}"]
         assert await _audience_row(winner) == (str(conversation_audience(member_id)), member_id)
 
         async with workspace_tx() as connection:
@@ -598,7 +587,7 @@ async def test_open_conversation_lands_a_lost_race_on_the_winner_and_its_row(
                 .values(audience=str(SHARED_AUDIENCE), member_id=None)
             )
         late, _late_title = await _open_conversation(
-            surface, store, main_agent, member_id, MEMBER_EMAIL, key, "third words", ()
+            surface, main_agent, member_id, key, "third words", ()
         )
         assert late == winner
         assert await _audience_row(winner) == (str(SHARED_AUDIENCE), None)

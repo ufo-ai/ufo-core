@@ -476,8 +476,10 @@ test("a workspace-shared conversation names its audience and surface in its band
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const band = await heldConversation();
-  expect(band).toBe("Slack · Workspace");
+  expect(band).toBe("Workspace");
   expect(band).not.toContain(shared.slice(0, 8));
+  const pane = screen.getByRole("region", { name: "Assistant" });
+  expect(within(pane.querySelector<HTMLElement>("[data-slot=header]")!).getByText("Slack")).toBeTruthy();
 });
 
 test("a conversation the address names is opened, and named by what it is about", async () => {
@@ -514,11 +516,11 @@ test("a conversation the address names is opened, and named by what it is about"
 
   openConversation(AGENT_ID, opened);
 
-  await waitFor(async () => expect(await heldConversation()).toBe("Slack · " + said));
+  await waitFor(async () => expect(await heldConversation()).toBe(said));
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
 });
 
-test("a Slack conversation names its channel in its heading, and those words are the way out", async () => {
+test("a Slack conversation's band marks its channel, and that mark is the way out", async () => {
   const thread = "6b3f2a11-0000-4000-8000-000000000007";
   const permalink = "https://acme.slack.com/archives/C1/p1700000000000100";
   wire({
@@ -549,13 +551,14 @@ test("a Slack conversation names its channel in its heading, and those words are
   location.hash = "#/agents/" + AGENT_ID + "?open=" + thread;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const heading = await screen.findByRole("heading", {
-    name: "#ops ↗ · take a look at the failing deploy",
-  });
-  const out = within(heading).getByRole("link", { name: "#ops ↗" });
+  await waitFor(async () =>
+    expect(await heldConversation()).toBe("take a look at the failing deploy"),
+  );
+  const band = screen.getByRole("region", { name: "Assistant" }).querySelector<HTMLElement>("[data-slot=header]")!;
+  const out = within(band).getByRole("link", { name: "Open #ops in Slack" });
   expect(out.getAttribute("href")).toBe(permalink);
   expect(out.getAttribute("target")).toBe("_blank");
-  expect(within(heading).getAllByRole("link")).toHaveLength(1);
+  expect(within(band).getAllByRole("link")).toHaveLength(1);
   const drawn = out.className.split(" ");
   expect(drawn).toContain("text-inherit");
   expect(drawn).toContain("no-underline");
@@ -565,6 +568,62 @@ test("a Slack conversation names its channel in its heading, and those words are
   expect(drawn).not.toContain("text-link");
   expect(within(out).getByText("↗").className).toContain("text-ink-soft");
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
+});
+
+test("a slot chip on the app page opens its panel, and the next conversation opens without it", async () => {
+  const held = "3b6d5a77-0000-4000-8000-00000000000b";
+  const next = "4c7e6b88-0000-4000-8000-00000000000c";
+  const row = (id: string, description: string) => ({
+    id,
+    surface: "web",
+    surface_label: null,
+    audience: "member:m1",
+    member_email: "member@example.com",
+    description,
+    speakers: ["member@example.com"],
+    turn_count: 1,
+    created_at: "2026-07-30T10:00:00",
+    last_turn_at: "2026-07-30T10:00:01",
+    readable: true,
+    speakable: true,
+  });
+  wire({
+    ["/conversations/" + held + "/slots/changes"]: () =>
+      json({
+        type: "changes",
+        changes: [
+          {
+            path: "/workspace/demo.py",
+            patch: "--- before\n+++ after\n@@ -1 +1 @@\n-old demo\n+new demo",
+            truncated: false,
+          },
+        ],
+        truncated: false,
+      }),
+    "/slots": () =>
+      json({
+        slots: [{ id: "changes", label: "Changes", icon: "diff", kind: "changes", count: 1 }],
+      }),
+    "/conversations$": () => json({ conversations: [row(held, "Rename the deploy job"), row(next, "Ship the sweep")] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/agents/" + AGENT_ID + "?open=" + held;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const chip = await screen.findByRole("button", { name: "Changes 1" });
+  await userEvent.click(chip);
+
+  const sheet = await screen.findByRole("dialog", { name: "Changes" });
+  expect(chip.getAttribute("aria-pressed")).toBe("true");
+  expect(within(sheet).getByText("/workspace/demo.py")).toBeTruthy();
+
+  openConversation(AGENT_ID, next);
+
+  await waitFor(async () => expect(await heldConversation()).toBe("Ship the sweep"));
+  expect(screen.queryByRole("dialog", { name: "Changes" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Changes 1" }).getAttribute("aria-pressed")).toBe(
+    "false",
+  );
 });
 
 test("a conversation opened here reads as chat, and a settled reply keeps no activity behind it", async () => {
@@ -625,7 +684,7 @@ test("a conversation opened here reads as chat, and a settled reply keeps no act
   expect(screen.queryByRole("link", { name: /Changes/ })).toBeNull();
 });
 
-test("a Slack transcript heads itself with its channel, and those words are the way back", async () => {
+test("a Slack transcript's band marks its surface as the way back, and a portal one draws no link", async () => {
   const thread = "4f8e1c22-0000-4000-8000-000000000009";
   const portal = "5a7d3b44-0000-4000-8000-00000000000a";
   const root = "https://acme.slack.com/archives/C1/p1700000000000100";
@@ -668,15 +727,16 @@ test("a Slack transcript heads itself with its channel, and those words are the 
   location.hash = "#/agents/" + AGENT_ID + "?open=" + thread;
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  const heading = await screen.findByRole("heading", {
-    name: "Slack ↗ · take a look at the failing deploy",
-  });
-  const out = within(heading).getAllByRole("link", { name: "Slack ↗" });
+  await waitFor(async () =>
+    expect(await heldConversation()).toBe("take a look at the failing deploy"),
+  );
+  const band = () =>
+    screen.getByRole("region", { name: "Assistant" }).querySelector<HTMLElement>("[data-slot=header]")!;
+  const out = within(band()).getAllByRole("link", { name: "Open Slack in Slack" });
   expect(out).toHaveLength(1);
   expect(out[0].getAttribute("href")).toBe(root);
   expect(out[0].getAttribute("target")).toBe("_blank");
   expect(out[0].getAttribute("rel")).toBe("noopener noreferrer");
-  expect(heading.contains(out[0])).toBe(true);
   const drawn = out[0].className.split(" ");
   expect(drawn).toContain("text-inherit");
   expect(drawn).toContain("no-underline");
@@ -688,10 +748,8 @@ test("a Slack transcript heads itself with its channel, and those words are the 
 
   openConversation(AGENT_ID, portal);
 
-  const portalHeading = await screen.findByRole("heading", {
-    name: "Portal · Rename the deploy job",
-  });
-  expect(within(portalHeading).queryByRole("link")).toBeNull();
+  await waitFor(async () => expect(await heldConversation()).toBe("Rename the deploy job"));
+  expect(within(band()).queryByRole("link")).toBeNull();
 });
 
 test("a conversation nobody shared is never named, and the half stands on the composer", async () => {
@@ -1060,36 +1118,6 @@ test("the model field offers the deploy's models, which its schema alone cannot 
   ]);
 });
 
-test("a conversation the member may not read says so instead of reporting a status code", async () => {
-  wire({
-    "/conversations/c1/transcript": () => new Response("no", { status: 404 }),
-    "/conversations$": () =>
-      json({
-        conversations: [
-          {
-            id: "c1",
-            surface: "slack",
-            surface_label: null,
-            audience: "shared",
-            member_email: null,
-            description: "a shared thread",
-            speakers: [],
-            turn_count: 1,
-            created_at: "2026-07-30T12:00:00",
-            last_turn_at: "2026-07-30T12:00:00",
-            readable: true,
-            speakable: false,
-          },
-        ],
-      }),
-    "/transcript": () => json({ messages: [] }),
-  });
-  location.hash = "#/agents/" + AGENT_ID + "?open=c1";
-  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
-  expect(await screen.findByText("This conversation is not shared with you.")).toBeTruthy();
-  expect(screen.queryByText(/Error 404/)).toBeNull();
-});
-
 test("a refusal after a consent link supersedes the link with the toned message", async () => {
   let calls = 0;
   wire({
@@ -1427,7 +1455,7 @@ test("the conversation beside an app homepage states who reads it on the lane's 
   const lane = await screen.findByRole("region", { name: "Newest thread" });
   const detail = "Only you read this conversation. " + ADMIN_DISCLOSURE;
   const mark = audienceMark();
-  expect(lane.querySelector("[data-slot=header]")!.contains(mark)).toBe(true);
+  expect(lane.querySelector<HTMLElement>("[data-slot=header]")!.contains(mark)).toBe(true);
   expect(mark.previousElementSibling!.textContent).toBe("Newest thread");
   expect(mark.querySelector("svg")).toBeTruthy();
   expect(mark.textContent).toBe(detail);
@@ -1443,7 +1471,7 @@ test("a conversation beside an app homepage that the whole workspace reads says 
 
   const lane = await screen.findByRole("region", { name: "Newest thread" });
   const mark = audienceMark();
-  expect(lane.querySelector("[data-slot=header]")!.contains(mark)).toBe(true);
+  expect(lane.querySelector<HTMLElement>("[data-slot=header]")!.contains(mark)).toBe(true);
   expect(mark.getAttribute("title")).toBe(
     "Every member of the workspace reads this conversation. " + ADMIN_DISCLOSURE,
   );

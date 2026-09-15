@@ -508,7 +508,7 @@ export function audienceMark(): HTMLElement {
 
 export async function heldConversation(app = "Assistant"): Promise<string> {
   const pane = await screen.findByRole("region", { name: app });
-  const band = pane.querySelector("[data-slot=header] h2");
+  const band = pane.querySelector("[data-slot=header] [data-slot=name]");
   if (!band) throw new Error("the half draws no band");
   return String(band.textContent);
 }

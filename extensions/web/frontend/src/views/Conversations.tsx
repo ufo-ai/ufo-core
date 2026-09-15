@@ -104,7 +104,7 @@ function origin(conversation: Conversation): string {
   return conversation.agent ? agentName(conversation.agent.name) : surfaceOrigin(conversation);
 }
 
-export function conversationTitle(conversation: Conversation, viewer: string | null): ReactNode {
+function conversationTitle(conversation: Conversation, viewer: string | null): ReactNode {
   const parts: ReactNode[] = [...originParts(conversation), subject(conversation, viewer)];
   return parts.flatMap((part, index) => (index ? [" · ", part] : part));
 }

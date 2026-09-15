@@ -917,7 +917,7 @@ test("a markdown file in a Slack conversation opens the attachment sheet", async
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
-test("the ask row opens the chat app at its start screen when one is shipped", async () => {
+test("the ask row opens a new chat with the main agent, whatever app is shipped", async () => {
   atPhoneWidth();
   location.hash = "#/";
   wire({});
@@ -926,7 +926,7 @@ test("the ask row opens the chat app at its start screen when one is shipped", a
   const rail = await openRail();
   await userEvent.click(rail.getByRole("button", { name: "New chat" }));
 
-  expect(location.hash).toBe("#/agents/" + CHAT_APP_ID + "?open=compose");
+  expect(location.hash).toBe("#/new/" + AGENT_ID);
 });
 
 test("the ask control targets the main agent, and offers no other", async () => {

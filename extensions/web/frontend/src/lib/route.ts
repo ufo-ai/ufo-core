@@ -470,13 +470,14 @@ export function framedNavigation(to: string): boolean {
 export type Stand =
   | `agent:${string}`
   | `open:${string}`
+  | "composing"
   | "workspace"
   | "automations"
   | "chats"
   | "store"
   | `section:${Section}`;
 
-export const COMPOSING: Stand = `open:${COMPOSE}`;
+export const COMPOSING: Stand = "composing";
 
 /** Exhaustive over the kinds the table declares, so a route it gains says where it stands rather than
  *  marking nothing. */

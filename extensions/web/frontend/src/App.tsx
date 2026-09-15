@@ -34,7 +34,6 @@ import {
 import { CHAT_SURFACE, chatSurface } from "@/lib/mainAgent";
 import { pickPinned, pickSectionShut, quietRail, railActivity, useRail } from "@/lib/railStore";
 import {
-  COMPOSE,
   COMPOSING,
   CONNECTION_TABS,
   standing,
@@ -45,7 +44,6 @@ import {
 import {
   forwardAgents,
   openAgent,
-  openAgentPlace,
   openAgents,
   openBuilder,
   openNewChat,
@@ -332,7 +330,6 @@ function WorkspaceSidebar({
   const surfaces = useSurfaces();
   const appsShut = rail.sectionsShut.includes(APPS);
   const pinned = rail.pinned ?? defaultPins(agents);
-  const chatApp = chatSurface(agents);
   return useDrawerList(
     <nav
       aria-label="Workspace"
@@ -348,11 +345,7 @@ function WorkspaceSidebar({
               <NavRow
                 icon={<AskGlyph />}
                 current={standing(route, COMPOSING)}
-                onClick={() =>
-                  chatApp
-                    ? openAgentPlace(chatApp.id, { opens: [COMPOSE] })
-                    : openNewChat(mainAgent.id)
-                }
+                onClick={() => openNewChat(mainAgent.id)}
               >
                 {NEW_CHAT}
               </NavRow>

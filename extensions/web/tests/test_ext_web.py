@@ -5356,16 +5356,6 @@ async def _seed_web_turn(
             )
         )
         await connection.execute(
-            sa.insert(tables.ext_store).values(
-                workspace_id=workspace_id,
-                extension="web",
-                key=f"chat/{conversation_id}",
-                value={"agent_id": str(agent_id), "email": email},
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
             sa.insert(tables.turn).values(
                 id=turn_id,
                 workspace_id=workspace_id,

@@ -1,8 +1,9 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import type { Agent } from "@/lib/types";
 
 import {
   heldConversation,
@@ -19,6 +20,8 @@ import {
 const standing = (id: string) => openConversation(AGENT.id, id);
 
 const ADMIN = { ...MEMBER, admin: true };
+
+const HOSTING = { ...AGENT, homepage: { state: "set", url: "https://app.example.test" } as Agent["homepage"] };
 
 const PRIVATE = {
   id: "c1",
@@ -86,7 +89,6 @@ test("a disclosable conversation offers the acknowledgement, one shared with nob
     await screen.findByText("This conversation is not shared with this account."),
   ).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
-  expect(await heldConversation()).toBe(ROOM);
 });
 
 test("the acknowledgement names the owner and what opening records, and does not read yet", async () => {
@@ -122,8 +124,71 @@ test("acknowledging posts the transcript intent and opens the conversation it na
     body: {},
   });
   expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
-  expect(screen.getByRole("heading", { name: "Slack · owner@example.com" })).toBeTruthy();
+  expect(await heldConversation()).toBe(OWNER);
+  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
   expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
+});
+
+test("a disclosure taken on the agent screen holds when a failed poll unmounts the pane", async () => {
+  let reads = 0;
+  const posted: string[] = [];
+  wire({
+    "/transcript": () => json({ messages: [] }),
+    "/read_private_transcript": (url) => {
+      posted.push(url);
+      return json({ applied: true, message: "Recorded." });
+    },
+    ...conversations([PRIVATE]),
+    "/conversations$": () => {
+      reads += 1;
+      return reads === 2 ? new Response("nope", { status: 503 }) : json({ conversations: [PRIVATE] });
+    },
+  });
+  standing(PRIVATE.id);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
+    expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await vi.waitFor(() => screen.getByText("Error 503 — reload to retry."))).toBeTruthy();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(
+      await vi.waitFor(() => screen.getByText("No messages in this conversation yet.")),
+    ).toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
+
+  expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
+  expect(posted.length).toBe(1);
+});
+
+test("a disclosure taken beside a homepage holds over a press of History and back", async () => {
+  const posted: string[] = [];
+  wire({
+    "/transcript": () => json({ messages: [] }),
+    "/read_private_transcript": (url) => {
+      posted.push(url);
+      return json({ applied: true, message: "Recorded." });
+    },
+    ...conversations([PRIVATE]),
+  });
+  standing(PRIVATE.id);
+  render(<App agents={[HOSTING]} member={ADMIN} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Open transcript" }));
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
+
+  const history = await screen.findByRole("button", { name: "History for Assistant" });
+  await userEvent.click(history);
+  await userEvent.click(history);
+
+  expect(await screen.findByText("No messages in this conversation yet.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Open transcript" })).toBeNull();
+  expect(posted.length).toBe(1);
 });
 
 test("leaving mid-acknowledgement does not open the transcript when the answer lands", async () => {

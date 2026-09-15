@@ -18,7 +18,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { PressRow } from "@/components/ui/pressrow";
-import { Header } from "@/kernel/pane";
 import { Panel, PanelEmpty, usePanelRead } from "@/kernel/panel";
 import { useSlot } from "@/kernel/slots";
 import { isPortalChat, subject, surfaceWord, useViewer } from "@/lib/audience";
@@ -30,15 +29,8 @@ import { cn } from "@/lib/cn";
 import { useNarrow } from "@/lib/narrow";
 import type { ChatRow } from "@/lib/rail";
 import type { SetupState } from "@/views/AgentSetup";
-import { Chat } from "@/views/Chat";
-import { ConversationDetail, Disclose, conversationTitle } from "@/views/Conversations";
-import {
-  COMPOSE,
-  agentSetupHash,
-  mergePlace,
-  type PlaceStep,
-  type WorkspacePlace,
-} from "@/lib/route";
+import { ChatPane } from "@/views/ChatPane";
+import { agentSetupHash, mergePlace, type PlaceStep, type WorkspacePlace } from "@/lib/route";
 import { navigate } from "@/lib/router";
 import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";
 import type { Agent, Conversation, Member } from "@/lib/types";
@@ -160,7 +152,7 @@ export function AgentPane({
     if (built) onAgents();
   }, [built, onAgents]);
   const listed = usePanelRead<{ conversations: Conversation[]; more: boolean }>(
-    !speaks && target !== COMPOSE && (target !== undefined || home.state !== "set")
+    !speaks && (target !== undefined || home.state !== "set")
       ? "/agents/" + agent.id + "/conversations"
       : null,
     settles,
@@ -178,7 +170,6 @@ export function AgentPane({
           (newest, row) => (newest === null || row.last_at > newest.last_at ? row : newest),
           null,
         );
-  const composeFallback = target === COMPOSE && home.state !== "set";
   // The two reads are bounded differently — the index answers one page of 100 rows over every surface
   // the app has spoken on, while the rail bounds the member's own chats — so a row can fall outside it.
   const railHeld =
@@ -187,16 +178,12 @@ export function AgentPane({
       : null;
   const conversational =
     !speaks &&
-    (composeFallback ||
-      (target !== undefined &&
-        (target === FRESH || rows.some((entry) => entry.id === target) || railHeld !== null)));
-  const held = composeFallback ? FRESH : conversational ? target : undefined;
+    target !== undefined &&
+    (target === FRESH || rows.some((entry) => entry.id === target) || railHeld !== null);
+  const held = conversational ? target : undefined;
   const wanted = held === FRESH;
   const named =
     held !== undefined && !wanted ? (rows.find((entry) => entry.id === held) ?? null) : null;
-  // The index answers `readable` from audience membership alone, so a conversation this member has just
-  // opened still arrives false, and every press would write another audit row for a disclosure made.
-  const [disclosed, setDisclosed] = useState<string | null>(null);
   const start = () => onPlace({ ...place, opens: [FRESH] }, "push");
   const buildPage = () => {
     setPendingAsk(agent.id, BUILD_ASK, false);
@@ -220,14 +207,6 @@ export function AgentPane({
     railHeld === null &&
     (live === null || listed.phase === "loading");
   const walled = opened !== null && !opened.readable && !opened.disclosable;
-  const gated = opened !== null && !walled && !opened.readable && disclosed !== opened.id;
-  const reading =
-    opened !== null &&
-    !walled &&
-    !gated &&
-    live !== null &&
-    !live.has(opened.id) &&
-    !opened.speakable;
 
   const url = home.state === "set" ? home.url : null;
   const generation = home.state === "set" ? (home.deploy_generation ?? 0) : 0;
@@ -247,69 +226,56 @@ export function AgentPane({
     listed.phase === "ready";
   const framed = mergePlace(place, conversational ? { opens: undefined } : {});
   const audience = opened ?? railHeld;
+  const settled = () => setSettles((count) => count + 1);
+  // The conversation is held beside the slot: the pane is remounted per conversation, so a bare
+  // slot id would reopen its panel over the next conversation this screen draws.
+  const [slotted, setSlotted] = useState<{ conversationId: string; slot: string } | null>(null);
+  const slotOn = (conversationId: string | null) =>
+    slotted !== null && slotted.conversationId === conversationId ? slotted.slot : undefined;
+  const selectSlot = (conversationId: string | null, next: string | null) =>
+    setSlotted(next !== null && conversationId !== null ? { conversationId, slot: next } : null);
+  const chatting = opened?.id ?? railHeld?.conversation_id ?? null;
+
+  const acts = (
+    <>
+      <Button variant="quiet" size="bar" onClick={buildPage}>
+        {BUILD_PAGE}
+      </Button>
+      <Button variant="send" size="bar" onClick={start}>
+        {NEW}
+      </Button>
+      <AppMenu name={agentName(agent.name)} onPick={onSettings} />
+    </>
+  );
 
   const conversation = (
     <section aria-label={agentName(agent.name)} className="flex min-h-0 min-w-0 flex-1 flex-col">
-      {beside ? null : (
-        <Header
-          heading={2}
-          title={
-            opened
-              ? opened.speakable
-                ? conversationTitle(opened, viewer)
-                : subject(opened, viewer)
-              : (railHeld?.title ?? NEW_CONVERSATION)
-          }
-          note={audience ? <AudienceMark entry={audience} /> : null}
-          acts={
-            <>
-              {beside ? null : (
-                <Button variant="quiet" size="bar" onClick={buildPage}>
-                  {BUILD_PAGE}
-                </Button>
-              )}
-              <Button variant="send" size="bar" onClick={start}>
-                {NEW}
-              </Button>
-              <AppMenu name={agentName(agent.name)} onPick={onSettings} />
-            </>
-          }
-          pinned
-        />
-      )}
       {listed.phase === "failed" ? (
         <PanelEmpty>{listed.message}</PanelEmpty>
       ) : missing ? (
         <PanelEmpty>This conversation is not in {agentName(agent.name)}.</PanelEmpty>
       ) : settling ? null : walled ? (
         <PanelEmpty>This conversation is not shared with this account.</PanelEmpty>
-      ) : gated ? (
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl">
-          <Disclose
-            key={opened.id}
-            agent={agent}
-            conversation={opened}
-            onOpened={() => setDisclosed(opened.id)}
-          />
-        </div>
-      ) : reading ? (
-        <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-stable p-2xl">
-          <ConversationDetail agent={agent} conversation={opened} />
-          <p className="mt-2xl max-w-hint text-ink-soft">This conversation is read-only.</p>
-        </div>
       ) : (
-        <Chat
-          key={opened?.id ?? railHeld?.conversation_id ?? "new"}
+        <ChatPane
+          key={chatting ?? "new"}
+          embedded
+          banded={!beside}
           agent={agent}
           member={member}
-          conversationId={opened?.id ?? railHeld?.conversation_id ?? null}
+          conversationId={chatting}
+          conversation={opened ?? undefined}
+          title={railHeld?.title ?? NEW_CONVERSATION}
+          acts={acts}
+          slot={slotOn(chatting)}
+          onSelectSlot={(next) => selectSlot(chatting, next)}
           focusComposer={!narrow && held !== undefined}
           onCreated={(conversationId, title) => {
             onCreated(conversationId, title);
-            setSettles((count) => count + 1);
+            settled();
             onPlace({ ...place, opens: [conversationId] }, "replace");
           }}
-          onSettled={() => setSettles((count) => count + 1)}
+          onSettled={settled}
         />
       )}
     </section>
@@ -429,7 +395,7 @@ export function AgentPane({
             banded={false}
             onFounded={(speaking, conversationId, title) => {
               onFounded(speaking, conversationId, title);
-              setSettles((count) => count + 1);
+              settled();
             }}
           />
         </section>
@@ -440,30 +406,21 @@ export function AgentPane({
 
   if (railRow && railAgent && target !== undefined) {
     return (
-      <section
-        aria-label={railRow.title}
-        className="flex min-h-0 min-w-0 flex-1 flex-col"
-      >
-        <Header
-          heading={2}
-          title={railRow.title}
-          note={<AudienceMark entry={railRow} />}
-          pinned
-        />
-        <Chat
+      <section aria-label={railRow.title} className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <ChatPane
           key={target}
+          embedded
           agent={railAgent}
           member={member}
           conversationId={target}
+          title={railRow.title}
+          slot={slotOn(target)}
+          onSelectSlot={(next) => selectSlot(target, next)}
           onCreated={onCreated}
-          onSettled={() => setSettles((count) => count + 1)}
+          onSettled={settled}
         />
       </section>
     );
   }
-  return (
-    <>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">{conversation}</div>
-    </>
-  );
+  return <div className="flex min-h-0 min-w-0 flex-1 flex-col">{conversation}</div>;
 }

@@ -28,6 +28,7 @@ import {
 } from "@/lib/audience";
 import { AudienceMark } from "@/lib/audienceMark";
 import { cn } from "@/lib/cn";
+import { markDisclosed, useDisclosed } from "@/lib/disclosedStore";
 import { changeRailVisibility, settleRailVisibility } from "@/lib/railStore";
 import { SurfaceMark } from "@/lib/surfaceMark";
 import type { Crumb } from "@/lib/title";
@@ -54,6 +55,15 @@ export type ChatPaneProps = ChatProps & {
   slot?: string;
   onSelectSlot?: (slot: string | null) => void;
   crumb?: Crumb;
+  /** The host's pane holds it: the agent page's column, and the lane beside its homepage. */
+  embedded?: boolean;
+  /** The lane beside a homepage is headed by its slot, so the pane draws no band of its own. */
+  banded?: boolean;
+  /** The band's name while no conversation is resolved: a chat not yet founded, or one the rail
+   *  alone carries. */
+  title?: ReactNode;
+  /** The host's acts, after the thread's. */
+  acts?: ReactNode;
 };
 
 const WORKSPACE = "Workspace";
@@ -254,7 +264,7 @@ function useThreadActs({
   };
 }
 
-/** The chat screen for one agent's conversation: a header with the slot acts, the transcript, and
+/** The chat screen for one agent's conversation: a band with the slot acts, the transcript, and
  * the composer; a conversation founded here is reported through `onCreated`. */
 export function ChatPane({
   agent,
@@ -267,12 +277,17 @@ export function ChatPane({
   focusRun,
   onCreated,
   onActivity,
+  onSettled,
   conversationOnly = false,
   slot,
   onSelectSlot,
   crumb,
+  embedded = false,
+  banded = true,
+  title,
+  acts: hostActs,
 }: ChatPaneProps) {
-  const [disclosed, setDisclosed] = useState(false);
+  const disclosed = useDisclosed(conversation?.id);
   const viewer = useViewer();
   const gate = conversation && !conversation.readable && !disclosed ? conversation : null;
   const { acts, selected, settled, shell } = useThreadActs({
@@ -282,48 +297,58 @@ export function ChatPane({
     slot,
     onSelectSlot,
   });
-  return (
-    <Pane>
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {conversation ? (
-          <Header
-            crumb={crumb}
-            title={subject(conversation, viewer)}
-            note={
-              visibilityOwned(conversation, member) ? (
-                <VisibilityControl agentId={agent.id} conversation={conversation} member={member} />
-              ) : (
-                <AudienceMark entry={conversation} />
-              )
-            }
-            acts={
-              <>
-                <SurfaceMark conversation={conversation} />
-                {acts}
-              </>
-            }
-            pinned
-          />
-        ) : null}
-        {gate === null ? (
-          <Chat
-            agent={agent}
-            member={member}
-            conversationId={conversationId}
-            focusComposer={focusComposer}
-            readOnly={readOnly || (conversation !== undefined && !conversation.speakable)}
-            stops={stops}
-            focusRun={focusRun}
-            onCreated={onCreated}
-            onActivity={onActivity}
-            onSettled={settled}
-          />
-        ) : (
-          <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
-            <Disclose agent={agent} conversation={gate} onOpened={() => setDisclosed(true)} />
-          </div>
-        )}
-      </div>
+  const band =
+    banded && (conversation !== undefined || title !== undefined) ? (
+      <Header
+        crumb={crumb}
+        title={conversation ? subject(conversation, viewer) : title}
+        note={
+          conversation ? (
+            visibilityOwned(conversation, member) ? (
+              <VisibilityControl agentId={agent.id} conversation={conversation} member={member} />
+            ) : (
+              <AudienceMark entry={conversation} />
+            )
+          ) : null
+        }
+        acts={
+          <>
+            {conversation ? <SurfaceMark conversation={conversation} /> : null}
+            {acts}
+            {hostActs}
+          </>
+        }
+        pinned
+      />
+    ) : null;
+  const column = (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {band}
+      {gate === null ? (
+        <Chat
+          agent={agent}
+          member={member}
+          conversationId={conversationId}
+          focusComposer={focusComposer}
+          readOnly={readOnly || (conversation !== undefined && !conversation.speakable)}
+          stops={stops}
+          focusRun={focusRun}
+          onCreated={onCreated}
+          onActivity={onActivity}
+          onSettled={() => {
+            settled();
+            onSettled?.();
+          }}
+        />
+      ) : (
+        <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")} data-testid="panel">
+          <Disclose agent={agent} conversation={gate} onOpened={() => markDisclosed(gate.id)} />
+        </div>
+      )}
+    </div>
+  );
+  const sheets = (
+    <>
       {shell}
       {gate === null && conversationId && slot ? (
         <ConversationSlot
@@ -334,6 +359,20 @@ export function ChatPane({
           onClose={() => onSelectSlot?.(null)}
         />
       ) : null}
+    </>
+  );
+  if (embedded) {
+    return (
+      <>
+        {column}
+        {sheets}
+      </>
+    );
+  }
+  return (
+    <Pane>
+      {column}
+      {sheets}
     </Pane>
   );
 }

@@ -3788,7 +3788,7 @@ test("the composer names the app it addresses, and the band can be taken away", 
 
 test("the chat app's composer does not name itself over its own words", async () => {
   wire(transcript());
-  location.hash = "#/agents/" + CHAT_APP_ID + "?open=compose";
+  location.hash = "#/agents/" + CHAT_APP_ID + "?open=new";
   render(<App agents={[AGENT, CHAT_APP]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByLabelText("Ask UFO");
