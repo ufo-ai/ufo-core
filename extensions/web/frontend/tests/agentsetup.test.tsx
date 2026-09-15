@@ -328,6 +328,7 @@ test("a need the app offers no cadence for still carries an act", async () => {
     text: "Connect the calendar.",
     send: false,
     meant: null,
+    starter: null,
   });
 });
 

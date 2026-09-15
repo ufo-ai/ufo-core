@@ -123,7 +123,7 @@ from ufo.sdk.models import (
     anthropic_client_id,
     openai_client_id,
 )
-from ufo.sdk.o11y import log
+from ufo.sdk.o11y import emit_metric, log
 from ufo.sdk.objects import (
     AGENT_KIND,
     ARTIFACT_KIND,
@@ -253,6 +253,13 @@ ANSWER_QUESTION_HEADER = "x-ufo-answer-question"
 TIMEZONE_HEADER = "x-ufo-timezone"
 STOP_TURN_HEADER = "x-ufo-stop-turn"
 MODEL_HEADER = "x-ufo-model"
+CLICK_HEADER = "x-ufo-click"
+CLICK_KIND_HEADER = "x-ufo-click-kind"
+STARTER_CLICK = "starter"
+THREAD_FOLLOWUP_CLICK = "thread-followup"
+STARTER_CLICK_METRIC = "starter_click_total"
+THREAD_FOLLOWUP_CLICK_METRIC = "thread_followup_click_total"
+STARTER_KINDS = frozenset({"app", "check_in", "unlock"})
 SESSION_FAULT_HEADER = "x-ufo-session-fault"
 REFUSAL_HEADER = "x-ufo-refusal"
 NO_MEMBER_FAULT = "no-member"
@@ -1803,6 +1810,24 @@ def _answer_headers(request: Request) -> tuple[UUID, int] | None | Response:
         return Response("malformed answer headers", status_code=400)
 
 
+def _count_click(request: Request) -> Response | None:
+    """Count the press this message came from: a starter row above the start screen's composer, or
+    a suggestion the thread offered under a question. The press happens in the page and this POST is
+    the one thing the fleet sees of it, so the header it rides is where the counter lives. A value
+    the page does not mint is refused rather than folded, so no browser mints a series."""
+    clicked = request.headers.get(CLICK_HEADER, "").strip()
+    if not clicked:
+        return None
+    if clicked == THREAD_FOLLOWUP_CLICK:
+        emit_metric(THREAD_FOLLOWUP_CLICK_METRIC)
+        return None
+    kind = request.headers.get(CLICK_KIND_HEADER, "").strip()
+    if clicked != STARTER_CLICK or kind not in STARTER_KINDS:
+        return Response(f"{CLICK_HEADER} names no press", status_code=400)
+    emit_metric(STARTER_CLICK_METRIC, kind=kind)
+    return None
+
+
 def _stop_header(request: Request) -> UUID | None | Response:
     """The turn a stop press names — validated before a body is read or a conversation opened, so a
     malformed press leaves nothing behind — or None for an ordinary message."""
@@ -2035,6 +2060,9 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     An `x-ufo-model` header is the model the composer picked for this thread, pinned on the turn
     this message founds and on nothing else — the agent's stored model stands.
 
+    An `x-ufo-click` header names the press this message came from — a starter row, named by kind in
+    `x-ufo-click-kind`, or a suggestion under a thread's question — and counts it.
+
     An `x-ufo-stop-turn` header over an empty body is the member ending a turn of this conversation
     rather than saying anything into it: nothing is admitted, so the transcript never mentions the
     press, and the cancelled terminal the stop publishes is what the member's live tail ends on."""
@@ -2045,6 +2073,9 @@ async def chat(ctx: SurfaceContext, request: Request) -> Response:
     agent_id = _agent_param(request)
     if agent_id is None or not audience.allows_chat(agent_id):
         return Response("no such agent", status_code=404)
+    counted = _count_click(request)
+    if counted is not None:
+        return counted
     inbound = await _chat_inbound(ctx, request)
     if isinstance(inbound, Response):
         return inbound

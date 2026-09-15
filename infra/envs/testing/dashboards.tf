@@ -1964,4 +1964,24 @@ resource "datadog_dashboard" "product" {
       }
     }
   }
+
+  widget {
+    timeseries_definition {
+      title = "starters pressed, by kind"
+      request {
+        q            = "sum:ufo.starter_click_total{$env} by {kind}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
+
+  widget {
+    timeseries_definition {
+      title = "thread suggestions pressed"
+      request {
+        q            = "sum:ufo.thread_followup_click_total{$env}.as_count()"
+        display_type = "bars"
+      }
+    }
+  }
 }

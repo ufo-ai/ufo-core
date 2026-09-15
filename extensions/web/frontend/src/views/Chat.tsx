@@ -636,7 +636,16 @@ async function deliver(
       .filter((value) => value !== "");
     if (!values.length) return [];
     const joined = values.join(", ");
-    return [{ index, body: asked.length === 1 ? joined : joined + " · " + entry.question }];
+    const options = entry.options ?? [];
+    return [
+      {
+        index,
+        body: asked.length === 1 ? joined : joined + " · " + entry.question,
+        picked:
+          choosable(entry) &&
+          values.every((value) => options.some((option) => option.label === value)),
+      },
+    ];
   });
   await answerQuestions(target, question.turn_id, given);
 }
@@ -676,9 +685,13 @@ function Composer({
   const state = useChat(target.key);
   const founding = target.conversationId === null;
   const committed = useRef<string | null>(null);
+  const pressed = useRef<string | null>(null);
   const [text, setText] = useState(() => {
     const handed = founding ? takePendingAsk(target.agentId, target.key) : null;
-    if (handed?.send) committed.current = handed.text;
+    if (handed?.send) {
+      committed.current = handed.text;
+      pressed.current = handed.starter;
+    }
     return handed?.text ?? readDraft(draftKey);
   });
   const [stopping, setStopping] = useState(false);
@@ -716,7 +729,10 @@ function Composer({
     const take = () => {
       const handed = takePendingAsk(target.agentId, target.key);
       if (!handed) return;
-      if (handed.send) committed.current = handed.text;
+      if (handed.send) {
+        committed.current = handed.text;
+        pressed.current = handed.starter;
+      }
       setText(handed.text);
     };
     take();
@@ -766,9 +782,11 @@ function Composer({
       for (const file of inline) form.append("file", file);
       body = form;
     }
+    const starter = pressed.current;
+    pressed.current = null;
     input.current?.focus();
     onSent?.();
-    void sendMessage(target, body, trimmed, attached, picked);
+    void sendMessage(target, body, trimmed, attached, picked, starter);
     return true;
   }
 
@@ -940,9 +958,9 @@ function Starters({ agentId }: { agentId: string }) {
   const answered = read.phase === "ready" ? read.payload : null;
   const rows = answered?.starters?.length ? answered.starters : FALLBACK_ROWS;
   const unlock = answered?.unlock?.providers?.length ? answered.unlock : null;
-  const start = (target: string | null | undefined, ask: string) => {
+  const start = (target: string | null | undefined, ask: string, kind: string) => {
     const next = target ?? agentId;
-    setPendingAsk(next, ask, true);
+    setPendingAsk(next, ask, true, null, kind);
     if (next !== agentId) navigate(newChatHash(next));
   };
   return (
@@ -952,7 +970,7 @@ function Starters({ agentId }: { agentId: string }) {
           key={row.agent_id ?? `${row.kind}:${row.ask}`}
           glyph={<StarterMark row={row} />}
           line={row.line}
-          onPress={() => start(row.agent_id, row.ask)}
+          onPress={() => start(row.agent_id, row.ask, row.kind)}
         />
       ))}
       {read.phase === "loading" ? (
@@ -967,7 +985,7 @@ function Starters({ agentId }: { agentId: string }) {
           }
           line={unlock.line}
           note={"Connect " + namedTiles(unlock.providers) + "."}
-          onPress={() => start(unlock.agent_id, unlock.ask)}
+          onPress={() => start(unlock.agent_id, unlock.ask, "unlock")}
         />
       ) : (
         <a href={sectionHash("connectors")} className={PRESS_ROW}>

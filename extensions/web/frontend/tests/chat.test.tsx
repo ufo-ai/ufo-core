@@ -1651,6 +1651,42 @@ test("a question submits its choice once, and says what is missing until there i
   await waitFor(() => expect(screen.queryByRole("radio", { name: "right" })).toBeNull());
 });
 
+test("a pressed suggestion counts the press on the answer it sends", async () => {
+  const posts: RequestInit[] = [];
+  wire({
+    ...transcript({ messages: [ASKING(ASKED)] }),
+    "/chat": (_url, init) => {
+      posts.push(init ?? {});
+      return json({ turn_id: REFUSED_TURN, body: "left" });
+    },
+  });
+  open();
+
+  await userEvent.click(await screen.findByRole("radio", { name: "left" }));
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+  await waitFor(() => expect(posts.length).toBe(1));
+  expect((posts[0].headers as Record<string, string>)["x-ufo-click"]).toBe("thread-followup");
+});
+
+test("a typed answer counts no press", async () => {
+  const posts: RequestInit[] = [];
+  wire({
+    ...transcript({ messages: [ASKING(ASKED)] }),
+    "/chat": (_url, init) => {
+      posts.push(init ?? {});
+      return json({ turn_id: REFUSED_TURN, body: "neither" });
+    },
+  });
+  open();
+
+  await userEvent.type(await screen.findByLabelText("Which?"), "neither");
+  await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+  await waitFor(() => expect(posts.length).toBe(1));
+  expect((posts[0].headers as Record<string, string>)["x-ufo-click"]).toBeUndefined();
+});
+
 test("a posted message reports the browser's timezone", async () => {
   const posts: RequestInit[] = [];
   wire({
@@ -3611,6 +3647,27 @@ test("a starter says its sentence on the press, and leaves with the start screen
   expect((screen.getByLabelText("Ask UFO") as HTMLTextAreaElement).value).toBe("");
   expect(location.hash).toBe(chatHash(CONVO_ID));
   expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
+});
+
+test("a pressed starter counts the press, by the kind of row it was", async () => {
+  const posts: RequestInit[] = [];
+  wire({
+    ...transcript(),
+    "/workspace/starters": () => json(SLATE),
+    "/chat": (_url, init) => {
+      posts.push(init ?? {});
+      return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" });
+    },
+  });
+  location.hash = newChatHash(AGENT_ID);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: /renewal was waiting on legal/ }));
+
+  await waitFor(() => expect(posts.length).toBe(1));
+  const headers = posts[0].headers as Record<string, string>;
+  expect(headers["x-ufo-click"]).toBe("starter");
+  expect(headers["x-ufo-click-kind"]).toBe("check_in");
 });
 
 test("the composer names the app it addresses, and the band can be taken away", async () => {

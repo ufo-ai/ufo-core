@@ -9,6 +9,7 @@ test("a pending ask reaches the composer for its own agent only", () => {
     text: "Connect the calendar.",
     send: false,
     meant: null,
+    starter: null,
   });
 });
 
@@ -19,6 +20,7 @@ test("an ask meant for one composer is not taken by another founding one", () =>
     text: "deploy the site",
     send: true,
     meant: "new:agent-1",
+    starter: null,
   });
 });
 
@@ -29,6 +31,7 @@ test("an ask keyed to the agent alone is meant for the new chat screen, not a la
     text: "Build it.",
     send: false,
     meant: null,
+    starter: null,
   });
 });
 
@@ -38,6 +41,7 @@ test("a pending ask is taken once, so a later chat opens on the member's own dra
     text: "set yourself up",
     send: false,
     meant: null,
+    starter: null,
   });
   expect(takePendingAsk("agent-1", "new:agent-1")).toBe(null);
 });
@@ -52,6 +56,7 @@ test("an ask states whether the composer sends it or stands it in the box", () =
     text: "summarise last week",
     send: true,
     meant: null,
+    starter: null,
   });
 });
 

@@ -7501,6 +7501,66 @@ async def test_malformed_answer_headers_are_refused(
 
 @pytest.mark.usefixtures("database_url")
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_pressed_starter_and_a_pressed_suggestion_are_counted(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    counted: list[tuple[str, dict[str, str]]] = []
+    monkeypatch.setattr(
+        "ufo_ext_web.surface.emit_metric",
+        lambda name, *_amount, **dimensions: counted.append((name, dimensions)),
+    )
+    STREAM_GATE.arm()
+    starter = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        content=b"Track the competitors I name.",
+        headers={**cookie, "x-ufo-click": "starter", "x-ufo-click-kind": "app"},
+    )
+    assert starter.status_code == 200
+    STREAM_GATE.arm()
+    suggestion = await client.post(
+        f"/surface/web/agents/{agent_id}/chat?conversation=new",
+        content=b"The second one.",
+        headers={**cookie, "x-ufo-click": "thread-followup"},
+    )
+    assert suggestion.status_code == 200
+    assert counted == [
+        ("starter_click_total", {"kind": "app"}),
+        ("thread_followup_click_total", {}),
+    ]
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_press_the_page_does_not_mint_admits_nothing(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    client, workspace_id, agent_id = web
+    _member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    for headers in (
+        {"x-ufo-click": "banner"},
+        {"x-ufo-click": "starter", "x-ufo-click-kind": "poster"},
+        {"x-ufo-click": "starter"},
+    ):
+        refused = await client.post(
+            f"/surface/web/agents/{agent_id}/chat?conversation=new",
+            content=b"hello",
+            headers={**cookie, **headers},
+        )
+        assert refused.status_code == 400
+    async with workspace_tx() as connection:
+        turns = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.turn))
+        ).scalar_one()
+    assert turns == 0
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_identify_never_parses_a_multipart_body(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:

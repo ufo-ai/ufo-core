@@ -21,6 +21,10 @@ const CANCELLED = "cancelled";
 const STOPPED = "Stopped.";
 const AUTO_MODEL = "auto";
 const MODEL_HEADER = "x-ufo-model";
+const CLICK_HEADER = "x-ufo-click";
+const CLICK_KIND_HEADER = "x-ufo-click-kind";
+const STARTER_CLICK = "starter";
+const THREAD_FOLLOWUP_CLICK = "thread-followup";
 
 export const NEW_CONVERSATION = "new";
 
@@ -615,6 +619,14 @@ export async function refreshTranscript(
   }
 }
 
+/** The press a message came from, counted where the fleet can see it: the page holds no metric
+ *  pipe of its own, so a click rides the POST it causes and the surface counts it there. */
+function starterHeaders(starter: string | null): Record<string, string> {
+  return starter === null
+    ? {}
+    : { [CLICK_HEADER]: STARTER_CLICK, [CLICK_KIND_HEADER]: starter };
+}
+
 function timezoneHeader(): Record<string, string> {
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return zone ? { "x-ufo-timezone": zone } : {};
@@ -648,6 +660,7 @@ export async function sendMessage(
   shown: string,
   attached: File[] = [],
   pinned: string | null = null,
+  starter: string | null = null,
 ): Promise<SendOutcome> {
   const chatKey = target.key;
   // The `new` sentinel opens a conversation per request, so a second send before the first answers
@@ -701,7 +714,11 @@ export async function sendMessage(
       method: "POST",
       body,
       credentials: "same-origin",
-      headers: { ...timezoneHeader(), ...(pinned ? { [MODEL_HEADER]: pinned } : {}) },
+      headers: {
+        ...timezoneHeader(),
+        ...starterHeaders(starter),
+        ...(pinned ? { [MODEL_HEADER]: pinned } : {}),
+      },
     });
   } catch {
     settled(chatKey, null);
@@ -757,7 +774,7 @@ export async function sendMessage(
 export async function answerQuestions(
   target: ChatTarget,
   turnId: string,
-  answers: readonly { index: number; body: string }[],
+  answers: readonly { index: number; body: string; picked: boolean }[],
 ): Promise<void> {
   const chatKey = target.key;
   const state = chatState(chatKey);
@@ -765,7 +782,7 @@ export async function answerQuestions(
   bumpEpoch(chatKey);
   holdTurn(chatKey, target.agentId);
   updateChat(chatKey, (current) => ({ ...current, busy: true, ended: null, live: liveTurn() }));
-  for (const { index, body } of answers) {
+  for (const { index, body, picked } of answers) {
     let res: Response;
     try {
       res = await fetch(chatUrl(target), {
@@ -775,6 +792,7 @@ export async function answerQuestions(
         headers: {
           "x-ufo-answer-turn": turnId,
           "x-ufo-answer-question": String(index),
+          ...(picked ? { [CLICK_HEADER]: THREAD_FOLLOWUP_CLICK } : {}),
           ...timezoneHeader(),
         },
       });

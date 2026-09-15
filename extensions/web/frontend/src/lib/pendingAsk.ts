@@ -1,4 +1,9 @@
-export type PendingAsk = { text: string; send: boolean; meant: string | null };
+export type PendingAsk = {
+  text: string;
+  send: boolean;
+  meant: string | null;
+  starter: string | null;
+};
 
 export const BUILD_ASK =
   "Build this workspace its own version of your page. Load your homepage skill and follow it.";
@@ -12,8 +17,9 @@ export function setPendingAsk(
   text: string,
   send: boolean,
   meant: string | null = null,
+  starter: string | null = null,
 ): void {
-  PENDING.set(agentId, { text, send, meant });
+  PENDING.set(agentId, { text, send, meant, starter });
   for (const wake of [...WAITING]) wake();
 }
 
