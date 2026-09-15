@@ -3454,6 +3454,35 @@ test("a workspace with nothing ranked reads the rows the screen ships with", asy
   ).toBeTruthy();
 });
 
+test("no connect act is drawn while the ranking is read", async () => {
+  let rank: (() => void) | null = null;
+  const ranked = new Promise<void>((settle) => {
+    rank = settle;
+  });
+  wire({
+    ...transcript(),
+    "/workspace/starters": async () => {
+      await ranked;
+      return json(SLATE);
+    },
+  });
+  location.hash = "#/";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const rows = (await screen.findByRole("button", { name: /competitors you name/ }))
+    .parentElement!;
+  expect(screen.queryByRole("link", { name: /Connect more accounts/ })).toBeNull();
+  expect(rows.querySelectorAll("[data-part=skeleton]")).toHaveLength(2);
+
+  rank!();
+
+  expect(
+    await screen.findByRole("button", { name: /one-page brief per account/ }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("link", { name: /Connect more accounts/ })).toBeNull();
+  expect(rows.querySelectorAll("[data-part=skeleton]")).toHaveLength(0);
+});
+
 test("a ranked slate replaces every row the screen ships with", async () => {
   wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
   location.hash = "#/";

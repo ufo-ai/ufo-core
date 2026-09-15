@@ -41,6 +41,7 @@ import {
   PromptInputTextarea,
   PromptInputToolbar,
 } from "@/components/ui/prompt-input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { SILENT, Toast } from "@/components/ui/toast";
 import {
   MessageLog,
@@ -954,7 +955,9 @@ function Starters({ agentId }: { agentId: string }) {
           onPress={() => start(row.agent_id, row.ask)}
         />
       ))}
-      {unlock ? (
+      {read.phase === "loading" ? (
+        <ConnectWaiting />
+      ) : unlock ? (
         <PressRow
           glyph={
             <BrandMark
@@ -975,6 +978,17 @@ function Starters({ agentId }: { agentId: string }) {
           <IconChevronRight className={PRESS_ROW_CHEVRON} aria-hidden />
         </a>
       )}
+    </div>
+  );
+}
+
+/** The connector row's place while the ranking is read: the ranking says whether this row names one
+ *  app's accounts or the connectors screen, so a connect act drawn before it lands is taken away. */
+function ConnectWaiting() {
+  return (
+    <div className={cn(PRESS_ROW, "hover:bg-transparent")} aria-hidden>
+      <Skeleton className="size-(--size-glyph) shrink-0" />
+      <Skeleton className="h-(--size-glyph) w-3/5" />
     </div>
   );
 }
