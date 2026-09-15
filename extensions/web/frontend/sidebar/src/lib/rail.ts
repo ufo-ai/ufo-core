@@ -100,8 +100,6 @@ export function railAudience(
   return rows.find((row) => row.conversation_id === conversationId) ?? linked[conversationId];
 }
 
-export type RailGroup = { label: string | null; rows: ChatRow[] };
-
 export type RailShown = {
   terminal: boolean;
   slack: boolean;
@@ -154,23 +152,6 @@ export function heldRailShown(): RailShown {
 export function holdRailShown(shown: RailShown): void {
   const named = RAIL_SHOWN_OPTIONS.filter((option) => shown[option.surface]);
   localStorage.setItem(HELD_SHOWN, named.map((option) => option.surface).join(","));
-}
-
-const HELD_SHUT = "rail-shut";
-
-/** A browser holding nothing has never had a heading clicked, which is not the same as one holding an
- *  empty set. */
-export function heldRailShut(): string[] | null {
-  const held = localStorage.getItem(HELD_SHUT);
-  return held === null ? null : held.split("\n").filter(Boolean);
-}
-
-export function holdRailShut(shut: string[]): void {
-  localStorage.setItem(HELD_SHUT, shut.join("\n"));
-}
-
-export function railShut(held: string[] | null, labels: (string | null)[]): string[] {
-  return held ?? labels.slice(1).filter((label) => label !== null);
 }
 
 const HELD_SIDEBAR = "sidebar";
@@ -267,23 +248,17 @@ function admits(row: ChatRow, shown: RailShown): boolean {
   return true;
 }
 
-const OTHER_MEMBERS = "Other members";
-
 /** The rail stands in one order, newest first: a chat is found by when it last moved. */
 const TURN_RANK: Record<RailTurn, number> = { parked: 0, running: 1, queued: 1, idle: 2 };
 
-export function railGroups(rows: ChatRow[], shown: RailShown, sort: RailSort): RailGroup[] {
-  const kept = rows.filter((row) => admits(row, shown));
-  const admitted =
-    sort === "recency"
-      ? kept
-      : [...kept].sort(
-          (one, two) => TURN_RANK[one.turn] - TURN_RANK[two.turn] || moment(two) - moment(one),
-        );
-  const own = admitted.filter((row) => row.mine);
-  const theirs = admitted.filter((row) => !row.mine);
-  const grouped: RailGroup[] = own.length ? [{ label: null, rows: own }] : [];
-  return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
+/** The conversations the member is in — `mine` is the listing's one participation fact — so one
+ *  shared with them that they never spoke in stands on the Home table and not here. */
+export function railRows(rows: ChatRow[], shown: RailShown, sort: RailSort): ChatRow[] {
+  const kept = rows.filter((row) => row.mine && admits(row, shown));
+  if (sort === "recency") return kept;
+  return [...kept].sort(
+    (one, two) => TURN_RANK[one.turn] - TURN_RANK[two.turn] || moment(two) - moment(one),
+  );
 }
 
 const MINUTE_MS = 60_000;

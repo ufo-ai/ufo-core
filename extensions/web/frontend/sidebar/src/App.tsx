@@ -1,5 +1,4 @@
 import {
-  Fragment,
   Suspense,
   lazy,
   useCallback,
@@ -12,7 +11,6 @@ import {
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   IconBook,
-  IconChevronRight,
   IconCirclePlusFilled,
   IconClockPlay,
   IconDeviceDesktop,
@@ -46,11 +44,6 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
@@ -87,7 +80,7 @@ import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
 import { Loading } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { ChatMark } from "./lib/chatMark";
-import { MainAgentProvider, chatSurface } from "@/lib/mainAgent";
+import { CHAT_SURFACE, MainAgentProvider, chatSurface } from "@/lib/mainAgent";
 import { rowMoment } from "@/lib/moments";
 import { cn } from "@/lib/cn";
 import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
@@ -110,10 +103,8 @@ import {
   RAIL_SHOWN_OPTIONS,
   RAIL_SORT_OPTIONS,
   railAudience,
-  railGroups,
-  railShut,
+  railRows,
   stampIso,
-  type RailGroup,
   type RailSort,
   type RailTurn,
 } from "@/lib/rail";
@@ -121,7 +112,6 @@ import {
   foldSidebar,
   pickRailSort,
   pickRailShown,
-  pickRailShut,
   quietRail,
   railActivity,
   railRead,
@@ -599,7 +589,7 @@ function AccountRow({ member, collapsed }: { member: Member; collapsed: boolean 
   );
 }
 
-const CHATS = "Chats";
+const RECENTS = "Recents";
 
 /** The placeholder rows are drawn for the eye alone, so the list states the wait for a reader who
  *  hears the page instead. */
@@ -1126,7 +1116,7 @@ function RailSettingsFlyout({ onCompose }: { onCompose: () => void }) {
   const host = useDrawerHost();
   return (
     <SectionHead
-      label={CHATS}
+      label={RECENTS}
       acts={
         <button
           type="button"
@@ -1215,6 +1205,8 @@ function useScrollMark(): void {
   }, []);
 }
 
+/** An app's own conversation opened in its app stood the app's page in front of the transcript,
+ *  and one from Slack drew no transcript at all; it opens as the conversation it is. */
 function openRailRow(
   agents: Agent[],
   chatApp: Agent | null,
@@ -1222,13 +1214,10 @@ function openRailRow(
   agentId: string,
 ): void {
   railRead(conversationId);
-  const owner = agents.find((agent) => agent.id === agentId);
-  const pane = owner?.app ? owner : chatApp;
-  if (!pane) {
-    openChat(conversationId);
-    return;
-  }
-  openAgentPlace(pane.id, { opens: [conversationId] });
+  const app = agents.find((agent) => agent.id === agentId)?.app ?? null;
+  const own = app !== null && app !== CHAT_SURFACE;
+  if (own || chatApp === null) openChat(conversationId);
+  else openAgentPlace(chatApp.id, { opens: [conversationId] });
 }
 
 const RAIL_SKELETON_TITLES = ["w-4/5", "w-3/5", "w-3/4", "w-1/2", "w-2/3", "w-2/5"];
@@ -1262,14 +1251,10 @@ function RailList({
   chatApp: Agent | null;
 }) {
   const rail = useRail();
-  const groups = railGroups(rail.rows, rail.shown, rail.sort);
-  const folded = railShut(
-    rail.shut,
-    groups.map((group) => group.label),
-  );
-  const rows = (group: RailGroup) => (
+  const rows = railRows(rail.rows, rail.shown, rail.sort);
+  const list = (
     <ul className="m-0 flex list-none flex-col gap-px p-0">
-      {group.rows.map((row) => {
+      {rows.map((row) => {
         const facts = [
           row.speaker ? speakerName(row.speaker) : null,
           isPortalChat(row.surface) ? null : origin(row),
@@ -1311,33 +1296,7 @@ function RailList({
           </button>
         </div>
       ) : null}
-      {groups.map((group) => {
-        const label = group.label;
-        if (label === null) return <Fragment key="rows">{rows(group)}</Fragment>;
-        return (
-          <Collapsible
-            key={label}
-            asChild
-            open={!folded.includes(label)}
-            onOpenChange={(open) =>
-              pickRailShut(open ? folded.filter((shut) => shut !== label) : [...folded, label])
-            }
-          >
-            <section>
-              <h2 className="m-0">
-                <CollapsibleTrigger className="group/rail mx-sm flex h-(--size-row) w-[calc(100%-var(--spacing-sm)*2)] items-center gap-2xs rounded-control border-0 bg-transparent px-sm text-left font-sans text-label font-medium text-ink-soft hover:bg-fill">
-                  <span className="min-w-0 truncate">{label}</span>
-                  <IconChevronRight
-                    aria-hidden
-                    className="size-icon shrink-0 transition-transform group-data-[state=open]/rail:rotate-90"
-                  />
-                </CollapsibleTrigger>
-              </h2>
-              <CollapsibleContent asChild>{rows(group)}</CollapsibleContent>
-            </section>
-          </Collapsible>
-        );
-      })}
+      {rows.length ? list : null}
     </>
   );
 }

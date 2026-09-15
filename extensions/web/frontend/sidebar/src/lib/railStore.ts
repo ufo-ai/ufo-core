@@ -12,19 +12,17 @@ import {
   heldPinned,
   heldRailShown,
   heldRailSort,
-  heldRailShut,
   heldSectionsShut,
   heldSidebar,
   holdAppsExpanded,
   holdPinned,
   holdRailShown,
   holdRailSort,
-  holdRailShut,
   holdSectionsShut,
   holdSidebar,
   chatRows,
   mergeChats,
-  railGroups,
+  railRows,
   readChat,
   type ChatRow,
   type ChatsPayload,
@@ -50,7 +48,6 @@ export type RailState = {
   cut: boolean;
   shown: RailShown;
   sort: RailSort;
-  shut: string[] | null;
   collapsed: boolean;
   pinned: string[] | null;
   appsExpanded: boolean;
@@ -67,7 +64,6 @@ function fresh(): RailState {
     cut: false,
     shown: heldRailShown(),
     sort: heldRailSort(),
-    shut: heldRailShut(),
     collapsed: heldSidebar(),
     pinned: heldPinned(),
     appsExpanded: heldAppsExpanded(),
@@ -166,8 +162,8 @@ let ticking: number | null = null;
 function poll(): void {
   if (ticking !== null || document.visibilityState === "hidden") return;
   const held = railState();
-  const live = railGroups(held.rows, held.shown, held.sort).some((group) =>
-    group.rows.some((row) => row.turn === "running" || row.turn === "queued"),
+  const live = railRows(held.rows, held.shown, held.sort).some(
+    (row) => row.turn === "running" || row.turn === "queued",
   );
   ticking = window.setTimeout(
     () => {
@@ -322,11 +318,6 @@ export function pickRailShown(shown: RailShown): void {
   holdRailShown(shown);
   update((held) => ({ ...held, shown }));
   wakeRail();
-}
-
-export function pickRailShut(shut: string[]): void {
-  holdRailShut(shut);
-  update((held) => ({ ...held, shut }));
 }
 
 export function foldSidebar(collapsed: boolean): void {

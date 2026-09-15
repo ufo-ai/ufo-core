@@ -13,6 +13,7 @@ import {
   atPhoneWidth,
   CONVO_ID,
   MEMBER,
+  SECOND,
   SECOND_ID,
   chatsOnWire,
   json,
@@ -22,6 +23,7 @@ import {
 
 const COLLEAGUE_ID = "66666666-6666-4666-8666-666666666666";
 const THIRD_ID = "77777777-7777-4777-8777-777777777777";
+const ALERT_ID = "99999999-9999-4999-8999-999999999999";
 
 const COLLEAGUE: ChatRow = {
   ...CHAT_ROW,
@@ -257,6 +259,25 @@ test("a press on a row opens that conversation", async () => {
   expect(location.hash).toBe("#/c/" + CONVO_ID);
 });
 
+test("a press on an app's own conversation opens that conversation, not the app's page", async () => {
+  const radar = { ...SECOND, name: "radar", app: "radar" };
+  const alert: ChatRow = {
+    ...CHAT_ROW,
+    conversation_id: ALERT_ID,
+    agent_id: SECOND_ID,
+    agent_name: "radar",
+    title: "Deploy alert",
+  };
+  wire({ ...chatsOnWire([CHAT_ROW, alert]), "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT, radar]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await userEvent.click(within(home).getByRole("row", { name: /Deploy alert/ }));
+
+  expect(location.hash).toBe("#/c/" + ALERT_ID);
+});
+
 test("the table says so when the member has no conversations", async () => {
   wire({ ...chatsOnWire([]), "/transcript": () => json({ messages: [] }) });
   location.hash = "#/chats";
@@ -310,7 +331,7 @@ test("an automation states itself beside its name, and the rail filter can drop 
   ).toBeNull();
 
   const rail = screen.getByRole("navigation", { name: "Workspace" });
-  await userEvent.click(within(rail).getByRole("button", { name: "Chats options" }));
+  await userEvent.click(within(rail).getByRole("button", { name: "Recents options" }));
   await userEvent.click(await screen.findByRole("menuitemcheckbox", { name: "Automations" }));
 
   expect(within(rail).queryByRole("button", { name: /Digest the night's changes/ })).toBeNull();

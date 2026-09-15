@@ -177,7 +177,7 @@ test("the sidebar names the shell's destinations and states the member at its fo
     "Connections",
     "Settings",
     "New chat",
-    "Chats options",
+    "Recents options",
     MEMBER.email,
   ]);
   const head = sidebar.firstElementChild as HTMLElement;
@@ -216,13 +216,13 @@ test("a section heading names its list and holds its menu behind a mark drawn un
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
-  expect(within(sidebar).getByRole("heading", { name: "Chats" })).toBeTruthy();
-  expect(within(sidebar).queryByRole("button", { name: "Chats" })).toBeNull();
+  expect(within(sidebar).getByRole("heading", { name: "Recents" })).toBeTruthy();
+  expect(within(sidebar).queryByRole("button", { name: "Recents" })).toBeNull();
 
   const compose = within(sidebar).getAllByRole("button", { name: "New chat" }).at(-1)!;
   expect(compose.getAttribute("class")).toContain("group-hover/head:opacity-100");
 
-  const options = within(sidebar).getByRole("button", { name: "Chats options" });
+  const options = within(sidebar).getByRole("button", { name: "Recents options" });
   expect(options.getAttribute("aria-haspopup")).toBe("menu");
   expect(options.getAttribute("class")).toContain("opacity-0");
   expect(options.getAttribute("class")).toContain("group-hover/head:opacity-100");
@@ -289,7 +289,7 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
     "Connections",
     "Settings",
     "New chat",
-    "Chats options",
+    "Recents options",
     MEMBER.email,
   ]);
 });
