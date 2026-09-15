@@ -32,11 +32,7 @@ test("the sheet states every key the launcher answers", async () => {
 
   expect(await screen.findByRole("dialog", { name: TITLE })).toBeTruthy();
   expect(keysFor("Open")).toEqual(["↵"]);
-  expect(keysFor("Open beside")).toEqual(["⌘", "↵"]);
-  expect(keysFor("Ask")).toEqual(["Tab"]);
   expect(keysFor("Back")).toEqual(["Esc"]);
-  expect(keysFor("Row 1–9")).toEqual(["⌘", "1…9"]);
-  expect(keysFor("Next page")).toEqual(["⌘", "K"]);
 });
 
 test("the chord typed into a field stays a character", async () => {

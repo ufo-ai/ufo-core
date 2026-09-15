@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -10,7 +10,8 @@ import { App } from "@/App";
 import { Portal } from "@/Portal";
 import { agentName } from "@/lib/agentName";
 import { SIGN_OUT_PATH } from "@/lib/api";
-import { chatHash } from "@/lib/route";
+import { agentHash, chatHash } from "@/lib/route";
+import { openAgents, placeAgent } from "@/lib/router";
 
 import {
   AGENT,
@@ -200,7 +201,7 @@ test("the desk shell is a rail of marks, each holding its name at the pointer", 
   await waitFor(() =>
     expect(names()).toEqual([
       "Home",
-      "Launcher",
+      "Search",
       agentName(AGENT.name),
       "New app",
       "Channels",
@@ -342,6 +343,22 @@ test("the menu drawer holds the whole sidebar and the act that starts a conversa
   ]);
 });
 
+test("the drawer rides an address the screen replaces, and shuts when the member moves", async () => {
+  atPhoneWidth();
+  wire({});
+  location.hash = agentHash(AGENT.id);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+  expect(await screen.findByRole("dialog")).toBeTruthy();
+
+  act(() => placeAgent({ q: "notes" }, "replace"));
+  expect(screen.getByRole("dialog")).toBeTruthy();
+
+  act(() => openAgents());
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
 test("the sidebar's foot states who is signed in and offers the way back out", async () => {
   atPhoneWidth();
   wire({});
@@ -362,6 +379,34 @@ test("the sidebar's foot states who is signed in and offers the way back out", a
   expect(await screen.findByRole("menuitemradio", { name: "System" })).toBeTruthy();
   expect(screen.getByRole("menuitemradio", { name: "Light" })).toBeTruthy();
   expect(screen.getByRole("menuitemradio", { name: "Dark" })).toBeTruthy();
+});
+
+async function documentationAct(host: string) {
+  vi.stubGlobal("location", { ...window.location, hostname: host });
+  wire({});
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(screen.getByRole("button", { name: MEMBER.email }));
+  return await screen.findByRole("menuitem", { name: "Documentation" });
+}
+
+test("a page served on the testing deploy opens the testing documentation", async () => {
+  const docs = await documentationAct("app.testing.ufo.ai");
+  expect(docs.getAttribute("href")).toBe("https://testing.ufo.ai/docs/");
+});
+
+test("the account's acts open the documentation in a tab of its own, over the divider above Theme", async () => {
+  const docs = await documentationAct("app.ufo.ai");
+  expect(docs.getAttribute("href")).toBe("https://ufo.ai/docs/");
+  expect(docs.getAttribute("target")).toBe("_blank");
+  expect(docs.getAttribute("rel")).toBe("noopener noreferrer");
+
+  const menu = screen.getByRole("menu");
+  const rows = [...menu.children];
+  const divider = menu.querySelector("[data-slot=dropdown-menu-separator]")!;
+  const theme = screen.getByRole("menuitem", { name: "Theme" });
+  expect(rows.indexOf(docs)).toBeLessThan(rows.indexOf(divider));
+  expect(rows.indexOf(divider)).toBeLessThan(rows.indexOf(theme));
 });
 
 test("a boot whose body is not json states the network fault, not a 200 error", async () => {
@@ -385,4 +430,3 @@ test("a boot still reading says Loading… rather than rendering an empty page",
 
   expect(screen.getByText("Loading…")).toBeTruthy();
 });
-

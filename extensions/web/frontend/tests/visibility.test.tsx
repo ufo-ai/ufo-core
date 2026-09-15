@@ -197,7 +197,7 @@ test("choosing Workspace toggles immediately and dispatches share_conversation",
   );
 });
 
-test("a refused optimistic change restores the server state and states the refusal", async () => {
+test("the visibility menu updates immediately and rolls a refused change back", async () => {
   let finish: (response: Response) => void = () => {};
   const pending = new Promise<Response>((resolve) => {
     finish = resolve;
@@ -208,9 +208,16 @@ test("a refused optimistic change restores the server state and states the refus
   });
   open();
 
-  await userEvent.click(await screen.findByRole("button", { name: "Visibility: Workspace" }));
+  const trigger = await screen.findByRole("button", { name: "Visibility: Workspace" });
+  const icon = trigger.querySelector("svg");
+  expect(icon).not.toBeNull();
+  expect(icon?.closest("button")).toBe(trigger);
+  await userEvent.click(icon!);
+  expect(await screen.findByRole("menuitemradio", { name: "Workspace" })).toBeTruthy();
   await userEvent.click(screen.getByRole("menuitemradio", { name: "Private" }));
+
   expect(screen.getByRole("button", { name: "Visibility: Private" })).toBeTruthy();
+  expect(screen.queryByRole("dialog")).toBeNull();
 
   finish(
     json({

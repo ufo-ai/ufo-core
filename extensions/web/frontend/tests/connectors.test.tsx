@@ -4,8 +4,9 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { BRAND_MARKS } from "@/lib/brandMark";
+import { HOME_CONNECTORS_LANE, HOME_NEW_LANE } from "@/lib/homeLanes";
 import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
-import { HOME_CONNECTORS_LANE, HOME_NEW_LANE, homeHash, sectionHash } from "@/lib/route";
+import { homeHash, sectionHash } from "@/lib/route";
 
 import {
   AGENT,
@@ -223,6 +224,18 @@ function connectors() {
   });
 }
 
+const SLACK_INSTALL_ACTIONS = {
+  actions: [
+    {
+      name: "slack_connect",
+      description: "",
+      input_schema: {},
+      call: { kind: "surface", name: "slack", action: "slack_connect", input: {} },
+      label: "Connect Slack",
+    },
+  ],
+};
+
 test("the connectors section lists the connection pool", async () => {
   location.hash = sectionHash("connectors");
   connectors();
@@ -280,7 +293,7 @@ test("coming back to the connectors screen does not state the arrival again", as
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
   expect(await screen.findByText("GitHub · octo connected.")).toBeTruthy();
 
-  location.hash = homeHash({ opens: [AGENT_ID] });
+  location.hash = "#/workspace/team";
   window.dispatchEvent(new HashChangeEvent("hashchange"));
   await waitFor(() => expect(screen.queryByText("GitHub · octo connected.")).toBeNull());
   location.hash = sectionHash("connectors");
@@ -898,8 +911,6 @@ test("a connector's consent opens in a window this page owns, so its return page
   expect(name).toBe("ufo-connect");
   expect(features).toContain("popup");
   expect(consent.focus).toHaveBeenCalled();
-  // A window opened this way starts with a copy of this tab's session storage, and the mark left in it is
-  // how the provider's return page knows it may close itself.
   expect(sessionStorage.getItem("ufo-consent-window")).toBe("1");
 
   StreamFake.last().emit("connect", { provider: "notion", label: "Notion", turn: TURN_ID });
@@ -1428,38 +1439,23 @@ test("a library consent the browser refuses still renders the link", async () =>
   expect(link.getAttribute("href")).toBe("/surface/web/turns/" + TURN_ID + "/connect");
 });
 
-test("a workspace install posts the surface object's own action and hands back its install page", async () => {
+test("a workspace install dispatches its own verb and hands back its install page", async () => {
   const posted: unknown[] = [];
   location.hash = sectionHash("connectors", { chip: "available" });
   library({
-    "/slack_connect": (url, init) => {
-      posted.push({ url, body: JSON.parse(String(init?.body)) });
+    "/actions/surface/slack$": () => json(SLACK_INSTALL_ACTIONS),
+    "/actions/surface/slack/slack_connect": (_url, init) => {
+      posted.push(JSON.parse(String(init?.body)));
       return json({ applied: true, message: "", url: SLACK_LINK });
     },
-    "/actions/surface/slack": () =>
-      json({
-        actions: [
-          {
-            name: "slack_connect",
-            description: "Install ufo in Slack.",
-            input_schema: { properties: {} },
-            call: { kind: "surface", action: "slack_connect", name: "slack", input: {} },
-            label: "Connect",
-          },
-        ],
-      }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   await offered();
   await userEvent.click(connects("Slack"));
 
-  await waitFor(() =>
-    expect(posted[0]).toEqual({
-      url: "/surface/web/agents/" + AGENT.id + "/actions/surface/slack/slack_connect",
-      body: {},
-    }),
-  );
+  await waitFor(() => expect(posted.length).toBe(1));
+  expect(posted[0]).toEqual({});
   const link = await screen.findByRole("link", { name: "Open the Slack install page" });
   expect(link.getAttribute("href")).toBe(SLACK_LINK);
 });
@@ -1467,20 +1463,9 @@ test("a workspace install posts the surface object's own action and hands back i
 test("a refused intent states itself and the row stays open", async () => {
   location.hash = sectionHash("connectors", { chip: "available" });
   library({
-    "/slack_connect": () =>
+    "/actions/surface/slack$": () => json(SLACK_INSTALL_ACTIONS),
+    "/actions/surface/slack/slack_connect": () =>
       json({ applied: false, message: "Only a workspace admin connects Slack." }),
-    "/actions/surface/slack": () =>
-      json({
-        actions: [
-          {
-            name: "slack_connect",
-            description: "Install ufo in Slack.",
-            input_schema: { properties: {} },
-            call: { kind: "surface", action: "slack_connect", name: "slack", input: {} },
-            label: "Connect",
-          },
-        ],
-      }),
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 

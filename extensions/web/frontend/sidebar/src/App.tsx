@@ -4,34 +4,23 @@ import {
   useCallback,
   useEffect,
   useId,
-  useMemo,
-  useRef,
   useState,
 } from "react";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
-  IconBook,
   IconCirclePlusFilled,
   IconClockPlay,
-  IconDeviceDesktop,
   IconDotsVertical,
   IconFile,
   IconFilter2,
   IconHome,
   IconLayoutSidebarRight,
-  IconLogout,
-  IconMenu2,
-  IconMoon,
   IconPencilPlus,
   IconPlug,
   IconRadar,
   IconSettings,
-  IconSun,
-  IconX,
 } from "@tabler/icons-react";
 
 import mark from "@brand/ufo-mark.svg";
-import logo from "@/assets/ufo-logo.svg";
 import {
   SIDEBAR_PRESS,
   SIDEBAR_ROW,
@@ -40,51 +29,59 @@ import {
   SidebarRow,
   SidebarTooltip,
   type Chord,
-} from "./components/Sidebar";
+} from "@/components/Sidebar";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
+
 import { Ticker } from "@/components/ui/ticker";
 import { SILENT, Toast } from "@/components/ui/toast";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { SignIn } from "@/views/SignIn";
+
 import { Spotlight } from "@/views/Spotlight";
-import { TabbedPane } from "@/views/TabbedPane";
 import {
-  CONNECTION_VIEWS,
-  SECTION_VIEWS,
-  AUTOMATIONS_TAB,
-  AUTOMATIONS_VIEWS,
-  WORKSPACE_VIEWS,
-  type PaneView,
-} from "@/views/registry";
+  AgentsPane,
+  AutomationsPane,
+  ChatRoutePane,
+  FirstRunPane,
+  InvalidLink,
+  NewChatPane,
+  NoSuchApp,
+  SectionPane,
+  SetupPane,
+  SlotPane,
+  StorePane,
+  WorkspacePane,
+  useAppsWithheld,
+  useCrumb,
+} from "@/views/routed";
 import {
-  Me,
-  MEMBER_SUBJECT,
-  WEB_SURFACE,
+  AccountActs,
+  GLYPH,
+  NarrowBar,
+  PaneLoading,
+  ShellProviders,
+  useShell,
+  type AppProps,
+} from "@/views/shell";
+import {
   isPortalChat,
-  Viewer,
-  WorkspaceId,
   origin,
   slackLink,
   surfaceWord,
   speakerName,
 } from "@/lib/audience";
-import { SIGN_OUT_PATH } from "@/lib/api";
-import { deployment, type Deployment } from "@/lib/mark";
+
 import { AppsProvider } from "@/lib/apps";
-import { useAppStatus } from "@/lib/appStatusStore";
-import { DrawerHost, useDrawerHost, useDrawerList, useDrawerSlot } from "@/kernel/drawer";
-import { COLUMN, Header, Pane, PaneFault, PaneNote } from "@/kernel/pane";
-import { Loading } from "@/kernel/panel";
+
+import {DrawerHost, useDrawerHost, useDrawerList} from "@/kernel/drawer";
+import {PaneFault} from "@/kernel/pane";
+
 import { agentName } from "@/lib/agentName";
-import { ChatMark } from "./lib/chatMark";
-import { MainAgentProvider } from "@/lib/mainAgent";
+import { ChatMark } from "@/lib/chatMark";
+
 import { rowMoment } from "@/lib/moments";
 import { cn } from "@/lib/cn";
-import { SCHEME_OPTIONS, pickScheme, useScheme, type Scheme } from "@/lib/scheme";
-import { HOME_TITLE, SETUP, pageCrumb, pageTitle } from "@/lib/title";
+import {HOME_TITLE} from "@/lib/title";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -94,17 +91,12 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
   RAIL_SHOWN_OPTIONS,
   RAIL_SORT_OPTIONS,
-  railAudience,
   railRows,
-  stampIso,
   type RailSort,
   type RailTurn,
 } from "@/lib/rail";
@@ -113,466 +105,105 @@ import {
   pickRailSort,
   pickRailShown,
   quietRail,
-  railActivity,
   railRead,
-  railFounded,
   readRail,
-  seekChat,
   useRail,
-  watchRail,
 } from "@/lib/railStore";
 import {
-  buildWanted,
   forwardAgents,
-  heldRoute,
-  openAgentPlace,
   openAgents,
-  openBuilder,
   openChat,
   openChats,
-  openHome,
   placeChats,
   openNewChat,
-  openSlot,
   openAutomations,
-  placeAgent,
-  placeFirstRun,
   placeSection,
-  placeAutomations,
   placeWorkspace,
-  startRouter,
-  useRoute,
-  useTravel,
 } from "@/lib/router";
 import {
   chatHash,
   COMPOSING,
   CONNECTION_TABS,
-  connectionTab,
   standing,
   type Route,
   type Section,
-  type WorkspacePlace,
 } from "@/lib/route";
-import { ALL_SURFACES, SurfacesProvider, useOfferedTabs, useSurfaces } from "@/lib/surfaces";
-import type { Agent, ArchivedApp, Member, Surfaces } from "@/lib/types";
+import {useOfferedTabs, useSurfaces} from "@/lib/surfaces";
+import type { Agent, Member } from "@/lib/types";
 
-/** One route's pane is one chunk: a member who opens the wizard, the store or a workspace tab never
- *  downloads the transcript renderer, and the sidebar paints before any of them arrives. */
-const AgentSetup = lazy(() =>
-  import("@/views/AgentSetup").then((module) => ({ default: module.AgentSetup })),
-);
-const Agents = lazy(() => import("@/views/Agents").then((module) => ({ default: module.Agents })));
-const ChatPane = lazy(() =>
-  import("@/views/ChatPane").then((module) => ({ default: module.ChatPane })),
-);
-const ConversationSlotPane = lazy(() =>
-  import("@/views/ConversationSlotPane").then((module) => ({
-    default: module.ConversationSlotPane,
-  })),
-);
-const FirstRun = lazy(() =>
-  import("@/views/FirstRun").then((module) => ({ default: module.FirstRun })),
-);
-const Store = lazy(() => import("./views/Store").then((module) => ({ default: module.Store })));
-const Chats = lazy(() => import("./views/Chats").then((module) => ({ default: module.Chats })));
-function PaneLoading() {
-  return (
-    <Pane className={COLUMN}>
-      <Loading />
-    </Pane>
+const Chats = lazy(() => import("@/views/Chats").then((module) => ({ default: module.Chats })));
+
+export function App({ agents, archived = [], member, surfaces, onAgents }: AppProps) {
+  const { route, rail, narrow, menu, setMenu, shutMenu, mainAgent, listed, chrome } = useShell(
+    agents,
+    onAgents,
   );
-}
-
-export type AppProps = {
-  agents: Agent[];
-  archived?: ArchivedApp[];
-  member: Member;
-  surfaces?: Surfaces;
-  onAgents: () => void;
-};
-
-function inSetup(route: Route, agents: Agent[]): boolean {
-  if (route.kind !== "agent" && route.kind !== "agent-setup") return false;
-  return agents.some((agent) => agent.id === route.agentId && agent.stands_on_setup === true);
-}
-
-/** The boot read that seeded the sidebar predates the apps a workspace ships on its first turn. Each id
- *  is asked about once: a re-read that comes back without it must not send the next tick asking again. */
-function useProvisioned(agents: Agent[], onAgents: () => void): void {
-  const { statuses } = useAppStatus();
-  const asked = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const known = new Set(agents.map((agent) => agent.id));
-    const gained = Object.keys(statuses).filter((id) => !known.has(id) && !asked.current.has(id));
-    if (!gained.length) return;
-    for (const id of gained) asked.current.add(id);
-    onAgents();
-  }, [statuses, agents, onAgents]);
-}
-
-export function App({
-  agents,
-  archived = [],
-  member,
-  surfaces = ALL_SURFACES,
-  onAgents,
-}: AppProps) {
-  const route = useRoute();
-  const travel = useTravel();
-  const rail = useRail();
-  const [menu, setMenu] = useState(false);
-  const shutMenu = useCallback(() => setMenu(false), []);
-  const narrow = useNarrow();
-  useScrollMark();
-  const mainAgent = agents.find((agent) => agent.main) ?? agents[0] ?? null;
-  /** A fresh array here re-runs every effect that depends on it — the palette's search aborts
-   *  and re-fires on each status poll, which the member sees as a second search. */
-  const listed = useMemo(() => agents.filter((agent) => !agent.hidden), [agents]);
-
-  useEffect(startRouter, []);
-
-  useEffect(readRail, []);
-
-  useEffect(watchRail, []);
-
-  useProvisioned(agents, onAgents);
-
-  /** Not `[route]`: the home screen replaces the address on its first commit to record its opened
-   *  lanes, which shut a drawer the member had opened in those same frames. */
-  useEffect(() => setMenu(false), [travel]);
-
-  /** A drawer left open while the window grows past the breakpoint would trap focus behind a hamburger
-   *  the layout no longer draws. */
-  useEffect(() => {
-    if (!narrow) setMenu(false);
-  }, [narrow]);
-
-  useEffect(() => {
-    document.title = pageTitle(route, agents, rail.linked, mainAgent);
-  }, [route, agents, rail.linked, mainAgent]);
-
-  useEffect(() => {
-    if (route.kind === "first-run" && !mainAgent) openHome();
-  }, [mainAgent, route.kind]);
-
-  const opened = route.kind === "chat" ? route.conversationId : null;
-  useEffect(() => {
-    if (opened !== null) seekChat(opened);
-  }, [opened]);
 
   if (route.kind === "first-run") {
     return (
-      <WorkspaceId.Provider value={member.workspace_id ?? null}>
-      <Viewer.Provider value={member.email}>
-      <Me.Provider value={member}>
-        <SurfacesProvider surfaces={surfaces}>
-          <MainAgentProvider agents={agents} onAgents={onAgents}>
-            {mainAgent ? (
-              <PaneFault at={route.kind}>
-                <Suspense fallback={<PaneLoading />}>
-                  <FirstRun
-                    agent={mainAgent}
-                    agents={agents}
-                    member={member}
-                    step={route.step}
-                    onStep={placeFirstRun}
-                    onOpenChat={(conversationId) =>
-                      conversationId ? openChat(conversationId) : openNewChat(mainAgent.id)
-                    }
-                  />
-                </Suspense>
-              </PaneFault>
-            ) : (
-              <PaneNote>No such app.</PaneNote>
-            )}
-          </MainAgentProvider>
-        </SurfacesProvider>
-      </Me.Provider>
-      </Viewer.Provider>
-      </WorkspaceId.Provider>
+      <ShellProviders member={member} surfaces={surfaces} agents={agents} onAgents={onAgents}>
+        <FirstRunPane
+          agents={agents}
+          member={member}
+          mainAgent={mainAgent}
+          step={route.step}
+          onClose={() => {
+            if (mainAgent) openNewChat(mainAgent.id);
+          }}
+          onDone={(conversationId) => {
+            if (conversationId) openChat(conversationId);
+            else if (mainAgent) openNewChat(mainAgent.id);
+          }}
+        />
+      </ShellProviders>
     );
   }
 
-  const shell = !inSetup(route, agents);
-
   return (
-    <WorkspaceId.Provider value={member.workspace_id ?? null}>
-    <Viewer.Provider value={member.email}>
-      <Me.Provider value={member}>
-      <SurfacesProvider surfaces={surfaces}>
-        <MainAgentProvider agents={agents} onAgents={onAgents}>
-          <TooltipProvider>
-          <DrawerHost hosted={narrow && shell} shut={shutMenu}>
-            <div
-              className={cn(
-                "grid h-dvh",
-                shell
-                  ? cn(
-                      "max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
-                      rail.collapsed
-                        ? "grid-cols-[var(--container-rail)_1fr]"
-                        : "grid-cols-[var(--container-sidebar)_1fr]",
-                    )
-                  : "grid-cols-1",
-              )}
-            >
-              {shell && narrow ? (
-                <NarrowBar agents={listed} member={member} menu={menu} onMenu={setMenu} />
-              ) : null}
-              {shell ? (
-                <WorkspaceSidebar
-                  route={route}
-                  agents={listed}
-                  member={member}
-                  mainAgent={mainAgent}
-                  narrow={narrow}
-                />
-              ) : null}
-              <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
-                <PaneFault at={route.kind}>
-                  <Suspense fallback={<PaneLoading />}>
-                    <RoutedPane
-                      route={route}
-                      agents={agents}
-                      member={member}
-                      mainAgent={mainAgent}
-                      onAgents={onAgents}
-                    />
-                  </Suspense>
-                </PaneFault>
-              </AppsProvider>
-              <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
-            </div>
-          </DrawerHost>
-          </TooltipProvider>
-        </MainAgentProvider>
-      </SurfacesProvider>
-    </Me.Provider>
-      </Viewer.Provider>
-    </WorkspaceId.Provider>
-  );
-}
-
-function founded(agent: Agent, member: Member, conversationId: string, title: string): void {
-  if (member.id === undefined) throw new Error("member id missing");
-  const at = stampIso(new Date());
-  const audience = MEMBER_SUBJECT + member.id;
-  railFounded(
-    {
-      conversation_id: conversationId,
-      agent_id: agent.id,
-      agent_name: agent.name,
-      title,
-      opening: null,
-      last_at: at,
-      surface: WEB_SURFACE,
-      surface_label: null,
-      audience,
-      member_email: member.email,
-      owner_email: member.email,
-      owner_name: null,
-      mine: true,
-      speaker: null,
-      source: null,
-      turn: "running",
-      automation_kind: null,
-      automation_name: null,
-      automation_title: null,
-      unread: false,
-    },
-    {
-      id: conversationId,
-      agent: { id: agent.id, name: agent.name },
-      surface: WEB_SURFACE,
-      surface_label: null,
-      audience,
-      member_email: member.email,
-      mine: true,
-      description: title,
-      source: null,
-      speakers: [member.email],
-      turn_count: 1,
-      created_at: at,
-      last_turn_at: at,
-      readable: true,
-      disclosable: false,
-      speakable: true,
-    },
-  );
-  const seen = heldRoute();
-  if (seen.kind === "home" || (seen.kind === "new-chat" && seen.agentId === agent.id)) {
-    openChat(conversationId);
-  }
-}
-
-function NarrowBar({
-  agents,
-  member,
-  menu,
-  onMenu,
-}: {
-  agents: Agent[];
-  member: Member;
-  menu: boolean;
-  onMenu: (open: boolean) => void;
-}) {
-  return (
-    <header className="relative flex items-center gap-md border-b border-edge bg-sidebar px-lg py-md">
-      <button
-        type="button"
-        aria-label="Menu"
-        aria-expanded={menu}
-        onClick={() => onMenu(true)}
-        className="flex size-(--size-control) shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 text-inherit hover:bg-fill"
-      >
-        <IconMenu2 className="size-(--size-glyph)" aria-hidden />
-      </button>
-      <button
-        type="button"
-        aria-label="ufo"
-        onClick={openHome}
-        className="absolute start-1/2 -translate-x-1/2 border-0 bg-transparent p-0 text-inherit rtl:translate-x-1/2"
-      >
-        <span
-          role="img"
-          aria-label="ufo"
-          className="block h-(--size-wordmark) w-(--size-logo) bg-current"
-          style={{ mask: `url(${logo}) center / contain no-repeat` }}
-        />
-      </button>
-      <Spotlight
-        agents={agents}
-        className="ml-auto flex h-(--size-row) items-center rounded-full border-0 bg-transparent px-md text-inherit hover:bg-fill"
-      />
-      <AccountMenu member={member} />
-      <NavDrawer open={menu} onClose={() => onMenu(false)} />
-    </header>
-  );
-}
-
-function NavDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const hold = useDrawerSlot();
-  return (
-    <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && onClose()}>
-      <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-10 bg-scrim animate-appear" />
-        <DialogPrimitive.Content
-          data-slot="nav-drawer"
-          aria-describedby={undefined}
+    <ShellProviders member={member} surfaces={surfaces} agents={agents} onAgents={onAgents}>
+      <DrawerHost hosted={narrow && chrome} shut={shutMenu}>
+        <div
           className={cn(
-            "fixed inset-y-0 left-0 z-10 w-sidebar overflow-y-auto",
-            "bg-sidebar border-r border-edge p-lg",
-            "flex flex-col gap-2xl animate-slide-in",
+            "grid h-dvh",
+            chrome
+              ? cn(
+                  "max-narrow:grid-cols-1 max-narrow:grid-rows-[auto_1fr]",
+                  rail.collapsed
+                    ? "grid-cols-[var(--container-rail)_1fr]"
+                    : "grid-cols-[var(--container-sidebar)_1fr]",
+                )
+              : "grid-cols-1",
           )}
         >
-          <header className="flex h-(--size-control) shrink-0 items-center gap-md">
-            <DialogPrimitive.Title asChild>
-              <span
-                role="img"
-                aria-label="ufo"
-                className="h-(--size-wordmark) w-(--size-logo) shrink-0 bg-current"
-                style={{ mask: `url(${logo}) center / contain no-repeat` }}
-              />
-            </DialogPrimitive.Title>
-            <DialogPrimitive.Close asChild>
-              <Button size="icon" className="ml-auto" aria-label="Close">
-                <IconX aria-hidden />
-              </Button>
-            </DialogPrimitive.Close>
-          </header>
-          <div ref={hold} className="flex min-h-0 flex-1 flex-col" />
-        </DialogPrimitive.Content>
-      </DialogPrimitive.Portal>
-    </DialogPrimitive.Root>
-  );
-}
-
-function signOut(): void {
-  window.location.assign(SIGN_OUT_PATH);
-}
-
-const SETTINGS_LABEL = "Settings";
-const DOCUMENTATION = "Documentation";
-const DOCUMENTATION_URLS: Record<Deployment, string> = {
-  production: "https://ufo.ai/docs/",
-  testing: "https://testing.ufo.ai/docs/",
-  local: "https://ufo.ai/docs/",
-};
-const THEME = "Theme";
-const SIGN_OUT = "Sign out";
-
-const MENU_ITEM = "flex items-center gap-sm";
-
-/** The header's avatar on a narrow viewport and the sidebar's own row read this one menu, so
- *  `container` follows the menu these acts stand in rather than the document. */
-function AccountActs({ container }: { container?: HTMLElement | null }) {
-  const scheme = useScheme();
-  return (
-    <>
-      <DropdownMenuItem asChild>
-        <a
-          href={DOCUMENTATION_URLS[deployment(location.hostname)]}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-inherit no-underline"
-        >
-          <span className={MENU_ITEM}>
-            <IconBook className={GLYPH} aria-hidden />
-            {DOCUMENTATION}
-          </span>
-        </a>
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
-      <DropdownMenuSub>
-        <DropdownMenuSubTrigger>
-          <span className={MENU_ITEM}>
-            <SchemeGlyph scheme={scheme} />
-            {THEME}
-          </span>
-        </DropdownMenuSubTrigger>
-        <DropdownMenuSubContent container={container}>
-          <DropdownMenuRadioGroup value={scheme} onValueChange={pickScheme}>
-            {SCHEME_OPTIONS.map((option) => (
-              <DropdownMenuRadioItem key={option.scheme} value={option.scheme}>
-                {option.label}
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-        </DropdownMenuSubContent>
-      </DropdownMenuSub>
-      <DropdownMenuSeparator />
-      <DropdownMenuItem onSelect={signOut}>
-        <span className={MENU_ITEM}>
-          <IconLogout className={GLYPH} aria-hidden />
-          {SIGN_OUT}
-        </span>
-      </DropdownMenuItem>
-    </>
-  );
-}
-
-function AccountMenu({ member }: { member: Member }) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label={member.email}
-          className="flex shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 max-narrow:size-(--size-control) data-[state=open]:outline data-[state=open]:outline-edge"
-        >
-          <Avatar>
-            <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
-          </Avatar>
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        <div className="flex flex-col p-sm">
-          <span className="truncate text-label">{member.email}</span>
+          {chrome && narrow ? (
+            <NarrowBar agents={listed} member={member} menu={menu} onMenu={setMenu} />
+          ) : null}
+          {chrome ? (
+            <WorkspaceSidebar
+              route={route}
+              agents={listed}
+              member={member}
+              mainAgent={mainAgent}
+              narrow={narrow}
+            />
+          ) : null}
+          <AppsProvider agents={listed} archived={archived} onRestored={onAgents}>
+            <PaneFault at={route.kind}>
+              <Suspense fallback={<PaneLoading />}>
+                <RoutedPane
+                  route={route}
+                  agents={agents}
+                  member={member}
+                  mainAgent={mainAgent}
+                  onAgents={onAgents}
+                />
+              </Suspense>
+            </PaneFault>
+          </AppsProvider>
+          <Toast state={rail.fault ?? SILENT} onDone={quietRail} />
         </div>
-        <AccountActs />
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </DrawerHost>
+    </ShellProviders>
   );
 }
 
@@ -608,6 +239,7 @@ function AccountRow({ member, collapsed }: { member: Member; collapsed: boolean 
   );
 }
 
+const SETTINGS_LABEL = "Settings";
 const RECENTS = "Recents";
 
 /** The placeholder rows are drawn for the eye alone, so the list states the wait for a reader who
@@ -622,8 +254,6 @@ const NEW_CHAT_CHORD: Chord = { key: "o", cap: "\u21e7\u2318O", aria: "Meta+Shif
 
 const SECTION_HEAD_GLYPH =
   "mr-xs shrink-0 rounded-control border-0 bg-transparent p-2xs text-ink-soft hover:bg-fill opacity-0 transition-opacity duration-100 ease-control motion-reduce:transition-none group-hover/head:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 data-[state=open]:bg-fill";
-
-const GLYPH = "size-(--size-glyph) shrink-0";
 
 const AskGlyph = () => <IconCirclePlusFilled className={cn(GLYPH, "text-primary")} aria-hidden />;
 
@@ -684,12 +314,6 @@ function NavRow({
       </SidebarTooltip>
     </SidebarRow>
   );
-}
-
-function SchemeGlyph({ scheme }: { scheme: Scheme }) {
-  if (scheme === "light") return <IconSun className={GLYPH} aria-hidden />;
-  if (scheme === "dark") return <IconMoon className={GLYPH} aria-hidden />;
-  return <IconDeviceDesktop className={GLYPH} aria-hidden />;
 }
 
 function SectionHead({
@@ -865,11 +489,8 @@ function WorkspaceSidebar({
   );
 }
 
-function SectionLanding({ agentId, place }: { agentId: string; place: WorkspacePlace }) {
-  useEffect(() => openAgentPlace(agentId, place), [agentId, place]);
-  return null;
-}
-
+/** The kinds this shell renders itself — home as a composer with the main agent, the agents address
+ *  as the main agent's screen, the chats listing — and the panes the two shells share for the rest. */
 function RoutedPane({
   route,
   agents,
@@ -883,35 +504,15 @@ function RoutedPane({
   mainAgent: Agent | null;
   onAgents: () => void;
 }) {
-  const rail = useRail();
-  const tabs = useOfferedTabs();
-  const surfaces = useSurfaces();
-  const narrow = useNarrow();
-  const crumb = pageCrumb(route, agents, rail.linked, mainAgent);
-  const appIndex =
-    route.kind === "agents" ||
-    route.kind === "store" ||
-    (route.kind === "workspace" && route.view === "apps");
-  if (appIndex && !surfaces.apps) return <PaneNote>This link is not valid.</PaneNote>;
+  const crumb = useCrumb(route, agents, mainAgent);
+  if (useAppsWithheld(route)) return <InvalidLink />;
   switch (route.kind) {
-    case "agent-setup": {
-      const app = agents.find((entry) => entry.id === route.agentId) ?? null;
-      if (!app) return <PaneNote>No such app.</PaneNote>;
-      return (
-        <Pane>
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <Header crumb={crumb} title={SETUP} pinned />
-            <div className={cn(COLUMN, "flex-1 overflow-y-auto p-2xl")}>
-              <AgentSetup agent={app} onBuilt={onAgents} />
-            </div>
-          </div>
-        </Pane>
-      );
-    }
+    case "agent-setup":
+      return <SetupPane route={route} agents={agents} crumb={crumb} onAgents={onAgents} />;
     case "bad-link":
-      return <PaneNote>This link is not valid.</PaneNote>;
+      return <InvalidLink />;
     case "store":
-      return <Store member={member} onBuild={openBuilder} />;
+      return <StorePane member={member} />;
     case "chats":
       return (
         <Chats
@@ -921,158 +522,28 @@ function RoutedPane({
         />
       );
     case "automations":
-      return (
-        <TabbedPane
-          group="automations"
-          tabs={[AUTOMATIONS_TAB]}
-          views={AUTOMATIONS_VIEWS}
-          view={AUTOMATIONS_TAB}
-          crumb={crumb}
-          place={route.place}
-          onPlace={(_tab, place, step) => placeAutomations(place, step)}
-        />
-      );
+      return <AutomationsPane route={route} crumb={crumb} />;
     case "workspace":
-      return (
-        <TabbedPane
-          group="workspace"
-          tabs={tabs}
-          views={WORKSPACE_VIEWS}
-          view={route.view}
-          crumb={crumb}
-          place={route.place}
-          onPlace={placeWorkspace}
-        />
-      );
-    case "section": {
-      if (connectionTab(route.section)) {
-        return (
-          <TabbedPane
-            group="connections"
-            tabs={CONNECTION_TABS}
-            views={CONNECTION_VIEWS}
-            view={route.section}
-            place={route.place}
-            onPlace={placeSection}
-          />
-        );
-      }
-      const view = SECTION_VIEWS[route.section];
-      if (view === undefined) {
-        const shipped = agents.find((agent) => agent.app === route.section);
-        if (!shipped) return <PaneNote>This link is not valid.</PaneNote>;
-        return <SectionLanding agentId={shipped.id} place={route.place} />;
-      }
-      return (
-        <TabbedPane
-          group="section"
-          tabs={[route.section]}
-          views={{ [route.section]: view } as Record<Section, PaneView>}
-          view={route.section}
-          crumb={crumb}
-          place={route.place}
-          onPlace={placeSection}
-        />
-      );
-    }
+      return <WorkspacePane view={route.view} place={route.place} crumb={crumb} />;
+    case "section":
+      return <SectionPane route={route} agents={agents} crumb={crumb} />;
     case "agents":
-    case "agent": {
-      const selected =
-        route.kind === "agent"
-          ? (agents.find((entry) => entry.id === route.agentId) ?? null)
-          : null;
-      if (route.kind === "agent" && !selected) return <PaneNote>No such app.</PaneNote>;
-      const shown = selected ?? mainAgent;
+    case "agent":
       return (
-        <Pane
-          opens={route.kind === "agent" ? (route.place.opens ?? []) : []}
-          onMove={(opens) =>
-            route.kind === "agent"
-              ? placeAgent({ ...route.place, opens }, "replace")
-              : shown
-                ? openAgentPlace(shown.id, { opens })
-                : undefined
-          }
-        >
-          <Agents
-            member={member}
-            selected={selected}
-            build={route.kind === "agents" && route.build === true}
-            chats={rail.phase === "ready" ? rail.rows : null}
-            onCreated={(agent, conversationId, title) =>
-              founded(agent, member, conversationId, title)
-            }
-            place={route.kind === "agent" ? route.place : {}}
-            onPlace={(place, step) =>
-              route.kind === "agent"
-                ? placeAgent(place, step)
-                : shown
-                  ? openAgentPlace(shown.id, place)
-                  : undefined
-            }
-            onAgents={onAgents}
-            onExitBuilder={openAgents}
-            onForwardAgents={forwardAgents}
-            buildWanted={buildWanted()}
-          />
-        </Pane>
-      );
-    }
-    case "conversation-slot": {
-      const agent = agents.find((entry) => entry.id === route.agentId);
-      if (!agent) return <PaneNote>No such app.</PaneNote>;
-      return (
-        <ConversationSlotPane
-          agent={agent}
-          conversationId={route.conversationId}
-          slot={route.slot}
-          rootConversationId={route.rootConversationId}
-          audience={railAudience(rail.rows, rail.linked, route.conversationId)}
-          crumb={crumb}
-        />
-      );
-    }
-    case "chat": {
-      const conversation = rail.linked[route.conversationId];
-      if (!conversation) {
-        const outcome = rail.sought[route.conversationId];
-        if (!outcome) return <PaneLoading />;
-        if (outcome.kind === "absent") return <NotShared />;
-        if (outcome.kind === "signed-out") {
-          return (
-            <Pane className={COLUMN}>
-              <div className="m-auto">
-                <SignIn />
-              </div>
-            </Pane>
-          );
-        }
-        return <PaneNote>{outcome.message}</PaneNote>;
-      }
-      if (!conversation.readable && !conversation.disclosable) return <NotShared />;
-      const listedAgent = agents.find((entry) => entry.id === conversation.agent.id);
-      const agent =
-        listedAgent ??
-        (conversation.surface.startsWith("extension:")
-          ? { id: conversation.agent.id, name: conversation.agent.name, model: "" }
-          : undefined);
-      if (!agent) return <PaneNote>No such app.</PaneNote>;
-      return (
-        <ChatPane
-          key={conversation.id}
-          agent={agent}
+        <AgentsPane
+          route={route}
+          agents={agents}
           member={member}
-          conversationId={conversation.id}
-          conversation={conversation}
-          focusComposer={!narrow}
-          onActivity={railActivity}
-          conversationOnly={!listedAgent}
-          crumb={crumb}
-          slot={route.slot}
-          onSelectSlot={(slot) => openSlot(route.conversationId, slot)}
+          mainAgent={mainAgent}
+          onAgents={onAgents}
+          onExitBuilder={openAgents}
+          onForwardAgents={forwardAgents}
         />
       );
-    }
+    case "conversation-slot":
+      return <SlotPane route={route} agents={agents} crumb={crumb} />;
+    case "chat":
+      return <ChatRoutePane route={route} agents={agents} member={member} crumb={crumb} />;
     case "home":
     case "first-run":
     case "new-chat": {
@@ -1080,26 +551,12 @@ function RoutedPane({
         route.kind === "new-chat"
           ? agents.find((entry) => entry.id === route.agentId)
           : (mainAgent ?? undefined);
-      if (!agent) return <PaneNote>No such app.</PaneNote>;
-      return (
-        <ChatPane
-          key="new"
-          agent={agent}
-          member={member}
-          conversationId={null}
-          focusComposer
-          onCreated={(conversationId, title) => founded(agent, member, conversationId, title)}
-          onActivity={railActivity}
-        />
-      );
+      if (!agent) return <NoSuchApp />;
+      return <NewChatPane agent={agent} member={member} />;
     }
   }
   const missed: never = route;
   return missed;
-}
-
-function NotShared() {
-  return <PaneNote>This conversation is not shared with this account.</PaneNote>;
 }
 
 function RailSettingsFlyout({ onCompose }: { onCompose: () => void }) {
@@ -1145,55 +602,6 @@ function RailSettingsFlyout({ onCompose }: { onCompose: () => void }) {
       </DropdownMenuContent>
     </SectionHead>
   );
-}
-
-export const NARROW = "(width < 720px)";
-
-function useNarrow(): boolean {
-  const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
-  useEffect(() => {
-    const query = window.matchMedia(NARROW);
-    const answer = () => setNarrow(query.matches);
-    query.addEventListener("change", answer);
-    return () => query.removeEventListener("change", answer);
-  }, []);
-  return narrow;
-}
-
-export const SCROLL_MARK = "data-scrolling";
-
-/** It covers the pause between two wheel notches and the pause in the middle of a drag, so one gesture
- *  draws one bar, and is short enough that a pane the member left alone is quiet before their eye returns. */
-export const SCROLL_QUIET_MS = 600;
-
-/** `scroll` does not bubble but it does capture, so one listener at the document reaches every scroller
- *  the portal draws, including one mounted after this ran. */
-function useScrollMark(): void {
-  useEffect(() => {
-    const quiet = new Map<Element, number>();
-    const mark = (event: Event) => {
-      const element = event.target;
-      if (!(element instanceof Element)) return;
-      const held = quiet.get(element);
-      if (held === undefined) element.setAttribute(SCROLL_MARK, "");
-      else clearTimeout(held);
-      quiet.set(
-        element,
-        window.setTimeout(() => {
-          quiet.delete(element);
-          element.removeAttribute(SCROLL_MARK);
-        }, SCROLL_QUIET_MS),
-      );
-    };
-    document.addEventListener("scroll", mark, { capture: true, passive: true });
-    return () => {
-      document.removeEventListener("scroll", mark, { capture: true });
-      for (const [element, held] of quiet) {
-        clearTimeout(held);
-        element.removeAttribute(SCROLL_MARK);
-      }
-    };
-  }, []);
 }
 
 /** Routed through an agent's page, a conversation landed on whatever site the workspace had bound

@@ -41,7 +41,7 @@ import {
   useChatLadder,
   type ChatLadder,
   type ChatRun,
-} from "@/lib/rail";
+} from "@/lib/chatRuns";
 import { seekChat, useRail } from "@/lib/railStore";
 import { heldRoute, placeHome } from "@/lib/router";
 import {
@@ -51,8 +51,8 @@ import {
   homeLaneAgent,
   homeLaneConversation,
   mintHomeLane,
-  type WorkspacePlace,
-} from "@/lib/route";
+} from "@/lib/homeLanes";
+import type { WorkspacePlace } from "@/lib/route";
 import { AgentSetup } from "@/views/AgentSetup";
 import { Chat, type ChatProps } from "@/views/Chat";
 import { HomepageFrame, useHomepage } from "@/views/HomepageFrame";

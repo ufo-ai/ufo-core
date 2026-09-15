@@ -1,16 +1,34 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
+import { NARROW } from "@/lib/narrow";
 import { agentName } from "@/lib/agentName";
+import { RESTING_STATUS_MS, WORKING_STATUS_MS } from "@/lib/appStatusStore";
 import { ADMIN_DISCLOSURE } from "@/lib/audience";
-import { appOrder, bumpChat, mergeChats, stampIso, type ChatRow } from "@/lib/rail";
-import { railState } from "@/lib/railStore";
+import {
+  appOrder,
+  appRun,
+  bumpChat,
+  heldAppsExpanded,
+  heldRailShown,
+  holdAppsExpanded,
+  holdRailShown,
+  mergeChats,
+  railRows,
+  type RailSort,
+  stampIso,
+  type ChatRow,
+} from "@/lib/rail";
+import { pickAppsExpanded, pickRailShown, railState, resetRailStore } from "@/lib/railStore";
 import { newChatHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 
-import { AGENT, AGENT_ID, atPhoneWidth, audienceMark, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, linked, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, atPhoneWidth, audienceMark, CHAT_APP, CHAT_APP_ID, CHAT_ROW, chatsOnWire, conversationObject, CONVO_ID, destination, json, linked, MEMBER, objectIndex, openAgentRow, SECOND, SECOND_ID, SETTINGS, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -26,8 +44,21 @@ const NOW = new Date(2026, 7, 1, 12, 0, 0);
 
 const NOT_SHARED = "This conversation is not shared with this account.";
 
+const RECENCY: RailSort = "recency";
+
+const PORTAL_ONLY = { terminal: false, slack: false, imessage: false, automations: true };
+const EVERY_SURFACE = { terminal: true, slack: true, imessage: true, automations: true };
+
 function hoursAgo(hours: number): string {
   return new Date(NOW.getTime() - hours * 3_600_000).toISOString();
+}
+
+async function settle(ms: number): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 }
 
 function row(id: string, last_at: string): ChatRow {
@@ -36,15 +67,93 @@ function row(id: string, last_at: string): ChatRow {
     agent_id: AGENT_ID,
     agent_name: "assistant",
     title: "chat " + id,
+    opening: null,
     last_at,
     surface: "web",
     surface_label: null,
     audience: "member:m1",
     member_email: "member@example.com",
+    owner_email: "member@example.com",
+    owner_name: null,
     mine: true,
     speaker: null,
+    source: null,
+    turn: "idle",
+    automation_kind: null,
+    automation_name: null,
+    automation_title: null,
+    unread: false,
   };
 }
+
+function theirs(id: string, last_at: string, speaker: string): ChatRow {
+  return { ...row(id, last_at), mine: false, speaker };
+}
+
+test("the rail is one run of rows in the order the listing gave, and none where none stand", () => {
+  const rows = [
+    row("a", hoursAgo(3)),
+    row("b", hoursAgo(20)),
+    row("c", hoursAgo(4 * 24)),
+    row("d", hoursAgo(90 * 24)),
+  ];
+  expect(railRows(rows, PORTAL_ONLY, RECENCY)).toEqual(rows);
+  expect(railRows([], PORTAL_ONLY, RECENCY)).toEqual([]);
+});
+
+test("a conversation the member is not in is not in the rail, whoever shared it", () => {
+  const rows = [
+    row("a", hoursAgo(1)),
+    theirs("t1", hoursAgo(2), "Pat Reyes (pat@example.com)"),
+    row("b", hoursAgo(20)),
+    { ...theirs("t2", hoursAgo(30 * 24), "sam@example.com"), audience: "shared" },
+  ];
+
+  expect(railRows(rows, PORTAL_ONLY, RECENCY).map((entry) => entry.conversation_id)).toEqual([
+    "a",
+    "b",
+  ]);
+  expect(railRows([theirs("t1", hoursAgo(2), "sam@example.com")], PORTAL_ONLY, RECENCY)).toEqual(
+    [],
+  );
+});
+
+function elsewhere(id: string, surface: string): ChatRow {
+  return { ...row(id, hoursAgo(1)), surface, title: surface + " " + id };
+}
+
+test("the rail holds portal conversations until the filter names another surface", () => {
+  const rows = [
+    row("a", hoursAgo(1)),
+    elsewhere("s1", "slack"),
+    elsewhere("u1", "ufo"),
+    { ...elsewhere("s2", "slack"), mine: false, speaker: "sam@example.com" },
+  ];
+
+  expect(railRows(rows, PORTAL_ONLY, RECENCY)).toEqual([rows[0]]);
+
+  const withSlack = railRows(rows, { terminal: false, slack: true, imessage: false, automations: true }, RECENCY);
+  expect(withSlack.map((entry) => entry.conversation_id)).toEqual(["a", "s1"]);
+
+  const withTerminal = railRows(rows, { terminal: true, slack: false, imessage: false, automations: true }, RECENCY);
+  expect(withTerminal.map((entry) => entry.conversation_id)).toEqual(["a", "u1"]);
+
+  const withBoth = railRows(rows, EVERY_SURFACE, RECENCY);
+  expect(withBoth.map((entry) => entry.conversation_id)).toEqual(["a", "s1", "u1"]);
+});
+
+test("a browser holding no filter admits every surface, and holds what a member names", () => {
+  expect(heldRailShown()).toEqual(EVERY_SURFACE);
+
+  holdRailShown({ terminal: true, slack: false, imessage: false, automations: true });
+  expect(heldRailShown()).toEqual({ terminal: true, slack: false, imessage: false, automations: true });
+
+  holdRailShown(EVERY_SURFACE);
+  expect(heldRailShown()).toEqual(EVERY_SURFACE);
+
+  holdRailShown(PORTAL_ONLY);
+  expect(heldRailShown()).toEqual(PORTAL_ONLY);
+});
 
 test("the rail walks the listing to its far page", async () => {
   const older = {
@@ -135,51 +244,115 @@ function ids(apps: Agent[]): string[] {
   return apps.map((one) => one.id);
 }
 
+const WORKED_AT: Record<string, number> = { radar: 300, wiki: 200, brief: 100 };
+
+function worked(agentId: string): number | null {
+  return WORKED_AT[agentId] ?? null;
+}
+
 test("pinned apps stand in the order the member pinned them, whatever their names", () => {
   const apps = [app("brief", "Brief"), app("radar", "Radar"), app("wiki", "Wiki")];
-  expect(ids(appOrder(apps, ["wiki", "brief", "radar"]))).toEqual(["wiki", "brief", "radar"]);
-  expect(ids(appOrder(apps, ["brief"]))).toEqual(["brief", "radar", "wiki"]);
+  expect(ids(appOrder(apps, ["wiki", "brief", "radar"], worked))).toEqual([
+    "wiki",
+    "brief",
+    "radar",
+  ]);
+  expect(ids(appOrder(apps, ["brief"], worked))).toEqual(["brief", "radar", "wiki"]);
 });
 
-test("the apps under the pins stand by name, whatever they have been doing", () => {
+test("an unpinned app that worked more recently stands above one that worked longer ago", () => {
+  const apps = [app("brief", "Brief"), app("radar", "Radar"), app("wiki", "Wiki")];
+  expect(ids(appOrder(apps, [], worked))).toEqual(["radar", "wiki", "brief"]);
+});
+
+test("an app that has never worked lands under the ones that have, by name", () => {
   const apps = [app("zed", "Zed"), app("radar", "Radar"), app("apollo", "Apollo")];
-  expect(ids(appOrder(apps, []))).toEqual(["apollo", "radar", "zed"]);
-  expect(ids(appOrder(apps, ["zed"]))).toEqual(["zed", "apollo", "radar"]);
+  expect(ids(appOrder(apps, [], worked))).toEqual(["radar", "apollo", "zed"]);
+});
+
+test("apps sharing a moment keep the order they arrived in", () => {
+  const apps = [app("zed", "Zed"), app("apollo", "Apollo"), app("brief", "Brief")];
+  expect(ids(appOrder(apps, [], () => 500))).toEqual(["zed", "apollo", "brief"]);
 });
 
 test("a pin no live app answers draws nothing", () => {
   const apps = [app("radar", "Radar")];
-  expect(ids(appOrder(apps, ["removed", "radar"]))).toEqual(["radar"]);
+  expect(ids(appOrder(apps, ["removed", "radar"], worked))).toEqual(["radar"]);
 });
 
-test("a pin moves an app to the top and hides nothing", () => {
+test("the collapsed run is the same length whatever the workspace is doing", () => {
   const many = "abcdefghij".split("").map((id) => app(id, id.toUpperCase()));
-  expect(ids(appOrder(many, []))).toEqual(ids(many));
 
-  expect(ids(appOrder(many, ["i"]))).toEqual([
-    "i",
-    "a",
-    "b",
-    "c",
-    "d",
-    "e",
-    "f",
-    "g",
-    "h",
-    "j",
-  ]);
-  expect(ids(appOrder(many, []))).toEqual(ids(many));
+  const idle = appRun(many, () => false);
+  expect(ids(idle.shown)).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"]);
+  expect(ids(idle.more)).toEqual(["i", "j"]);
+
+  const busy = appRun(many, (agentId) => agentId === "i");
+  expect(ids(busy.shown)).toEqual(["i", "a", "b", "c", "d", "e", "f", "g"]);
+  expect(ids(busy.more)).toEqual(["h", "j"]);
+});
+
+test("the tail behind More holds every app the run did not, however many there are", () => {
+  const many = Array.from({ length: 30 }, (_, at) => app("a" + at, "A" + at));
+  const run = appRun(many, () => false);
+  expect(run.shown.length).toBe(8);
+  expect(run.more.length).toBe(22);
+  expect(ids(run.shown.concat(run.more))).toEqual(ids(many));
 });
 
 test("every app the workspace has is drawn, however many there are", () => {
   const many = Array.from({ length: 30 }, (_, at) => app("a" + at, "A" + at));
-  expect(appOrder(many, []).length).toBe(30);
+  expect(appOrder(many, [], () => null).length).toBe(30);
 });
 
-test("bumping a conversation moves it to the top", () => {
-  const rows = [row("a", hoursAgo(3)), row("b", hoursAgo(4))];
-  const bumped = bumpChat(rows, "b", NOW);
-  expect(bumped.map((entry) => entry.conversation_id)).toEqual(["b", "a"]);
+test("a working app rises to the top and leaves the order under it alone", () => {
+  const apps = [app("brief", "Brief"), app("radar", "Radar"), app("wiki", "Wiki")];
+
+  const run = appRun(apps, (agentId) => agentId === "radar");
+  expect(ids(run.shown)).toEqual(["radar", "brief", "wiki"]);
+  expect(ids(run.more)).toEqual([]);
+
+  const rested = appRun(apps, () => false);
+  expect(ids(rested.shown)).toEqual(["brief", "radar", "wiki"]);
+});
+
+test("pinning moves an app up the order and draws the same number of rows", () => {
+  const many = "abcdefghij".split("").map((id) => app(id, id.toUpperCase()));
+  const unpinned = appRun(appOrder(many, [], () => null), () => false);
+  expect(ids(unpinned.shown)).toEqual(["a", "b", "c", "d", "e", "f", "g", "h"]);
+
+  const pinned = appRun(appOrder(many, ["i"], () => null), () => false);
+  expect(ids(pinned.shown)).toEqual(["i", "a", "b", "c", "d", "e", "f", "g"]);
+  expect(pinned.more.length).toBe(2);
+});
+
+test("the apps list opens collapsed, and the expansion the member asked for holds", () => {
+  expect(heldAppsExpanded()).toBe(false);
+
+  holdAppsExpanded(true);
+  expect(heldAppsExpanded()).toBe(true);
+
+  holdAppsExpanded(false);
+  expect(heldAppsExpanded()).toBe(false);
+});
+
+test("the store opens on the expansion this browser holds, and a pick writes it back", () => {
+  localStorage.setItem("apps-expanded", "expanded");
+  expect(railState().appsExpanded).toBe(true);
+
+  pickAppsExpanded(false);
+  expect(railState().appsExpanded).toBe(false);
+  expect(heldAppsExpanded()).toBe(false);
+
+  resetRailStore();
+  expect(railState().appsExpanded).toBe(false);
+});
+
+test("the query holding the narrow rail's groups open is the theme's own breakpoint", () => {
+  const theme = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
+  const declared = /--breakpoint-narrow:\s*(\d+)px/.exec(theme);
+  expect(declared).not.toBeNull();
+  expect(NARROW).toBe("(width < " + declared![1] + "px)");
 });
 
 test("merging keeps held rows the fetch does not know and prefers fetched rows it does", () => {
@@ -200,7 +373,7 @@ test("a deep link waits while its resolve is in flight instead of denying the co
   });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
-  expect(await screen.findAllByText("Loading…")).toHaveLength(1);
+  expect(await screen.findByText("Loading…")).toBeTruthy();
   expect(screen.queryByText(NOT_SHARED)).toBeNull();
 });
 
@@ -246,6 +419,7 @@ test("a first message opens a conversation, lands it in the rail, and routes to 
 
   await waitFor(() => expect(location.hash).toBe("#/c/" + CONVO_ID));
   expect(posts[0]).toContain("?conversation=new");
+  expect(await screen.findByRole("button", { name: "Visibility: Private" })).toBeTruthy();
   await waitFor(() =>
     expect(railState().rows.map((entry) => entry.conversation_id)).toContain(CONVO_ID),
   );
@@ -348,6 +522,48 @@ test("a first message sent before the rail resolves still lands, and the rail me
   expect(within(screen.getByTestId("log")).getByText("early words")).toBeTruthy();
 });
 
+test("a parked turn is not work in flight, so the rail waits out the resting cadence", async () => {
+  vi.useFakeTimers();
+  const { calls } = wire({
+    "/objects/conversation$": () =>
+      json({ objects: [conversationObject({ ...CHAT_ROW, turn: "parked" })] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await settle(0);
+  const listings = () => calls.filter((url) => url.includes("/objects/conversation")).length;
+  const walked = listings();
+
+  await settle(WORKING_STATUS_MS);
+  expect(listings()).toBe(walked);
+
+  await settle(RESTING_STATUS_MS - WORKING_STATUS_MS);
+  expect(listings()).toBe(walked + 1);
+  vi.useRealTimers();
+});
+
+test("a running turn the rail does not draw earns the working cadence only once shown", async () => {
+  vi.useFakeTimers();
+  holdRailShown(PORTAL_ONLY);
+  const slack = { ...CHAT_ROW, surface: "slack", surface_label: "DM", turn: "running" as const };
+  const { calls } = wire({
+    "/objects/conversation$": () => json({ objects: [conversationObject(slack)] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+  await settle(0);
+  const listings = () => calls.filter((url) => url.includes("/objects/conversation")).length;
+  const walked = listings();
+
+  await settle(WORKING_STATUS_MS);
+  expect(listings()).toBe(walked);
+
+  await act(async () => {
+    pickRailShown(EVERY_SURFACE);
+  });
+  await settle(WORKING_STATUS_MS);
+  expect(listings()).toBe(walked + 1);
+  vi.useRealTimers();
+});
+
 test("sending from an existing conversation posts to it and bumps its rail row", async () => {
   const older = { ...CHAT_ROW, last_at: "2026-08-01T08:00:00" };
   const newer = {
@@ -373,6 +589,55 @@ test("sending from an existing conversation posts to it and bumps its rail row",
   await waitFor(() =>
     expect(railState().rows.map((entry) => entry.title)[0]).toBe(older.title),
   );
+});
+
+test("an origin conversation opens a live comment chat", async () => {
+  const slack = {
+    ...CHAT_ROW,
+    surface: "slack",
+    surface_label: "DM",
+    title: "Slack question",
+  };
+  const resolved = {
+    id: CONVO_ID,
+    surface: "slack",
+    surface_label: "DM",
+    audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
+    member_email: MEMBER.email,
+    description: "",
+    speakers: [],
+    turn_count: 1,
+    created_at: "2026-07-30T10:00:00",
+    last_turn_at: "2026-07-30T11:00:00",
+    readable: true,
+    disclosable: false,
+    speakable: true,
+    agent: { id: AGENT.id, name: AGENT.name },
+  };
+  const { calls } = wire({
+    ...chatsOnWire([slack]),
+    "/api/chats": () => json({ conversation: resolved }),
+    "/transcript": () => json({ messages: [{ role: "user", text: "slack words" }] }),
+    "/chat": () =>
+      json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "Slack question" }),
+  });
+  location.hash = "#/c/" + CONVO_ID;
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("slack words")).toBeTruthy();
+  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
+
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "from the portal");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() =>
+    expect(calls.some((url) => url.includes("/chat?conversation=" + CONVO_ID))).toBe(true),
+  );
+  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
+  StreamFake.last().emit("comment", {
+    id: SECOND_ID,
+    text: "You commented from the portal.",
+  });
+  expect(screen.queryByText("You commented from the portal.")).toBeNull();
 });
 
 test("a private extension conversation opens the live chat", async () => {
@@ -438,6 +703,8 @@ function slackConversation(fields: Record<string, unknown> = {}) {
     surface_label: "#ops-warehouse",
     audience: "shared",
     member_email: null,
+    owner_email: null,
+    owner_name: null,
     description: "Warehouse restock plan",
     source: "https://acme.slack.com/archives/C1/p1700000000000100",
     turn_count: 1,
@@ -623,6 +890,8 @@ test("a markdown file in a Slack conversation opens the attachment sheet", async
           surface_label: "#ops-warehouse",
           audience: "shared",
           member_email: null,
+          owner_email: null,
+          owner_name: null,
           source: "https://acme.slack.com/archives/C1/p1700000000000100",
           turn_count: 1,
           created_at: "2026-08-01T08:00:00Z",
@@ -833,6 +1102,86 @@ test("the sidebar marks the destination the member is in and leaves the others o
   const index = within(connectors.getByRole("navigation", { name: "Apps" }));
   expect(index.getByRole("button", { name: "Assistant" })).toBeTruthy();
   expect(index.getByRole("button", { name: "Second" })).toBeTruthy();
+});
+
+test("bumping a conversation moves it to the top and states the turn it is now in", () => {
+  const rows = [row("a", hoursAgo(3)), row("b", hoursAgo(4))];
+  const bumped = bumpChat(rows, "b", NOW, "running");
+  expect(bumped.map((entry) => entry.conversation_id)).toEqual(["b", "a"]);
+  expect(bumped[0].turn).toBe("running");
+  expect(bumpChat(bumped, "b", NOW, "idle")[0].turn).toBe("idle");
+});
+
+test("priority leads with what is held, then what is working, then the rest by recency", () => {
+  const held = { ...row("held", hoursAgo(50)), turn: "parked" as const };
+  const working = { ...row("working", hoursAgo(30)), turn: "running" as const };
+  const queued = { ...row("queued", hoursAgo(80)), turn: "queued" as const };
+  const fresh = row("fresh", hoursAgo(1));
+  const stale = row("stale", hoursAgo(9));
+  const rows = [fresh, stale, working, held, queued];
+
+  const ranked = railRows(rows, PORTAL_ONLY, "priority");
+  expect(ranked.map((entry) => entry.conversation_id)).toEqual([
+    "held",
+    "working",
+    "queued",
+    "fresh",
+    "stale",
+  ]);
+
+  const recent = railRows(rows, PORTAL_ONLY, RECENCY);
+  expect(recent.map((entry) => entry.conversation_id)).toEqual(rows.map((r) => r.conversation_id));
+});
+
+test("a permalink the resolve refuses is unshared, whatever the rail lists", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    ...chatsOnWire([CHAT_ROW]),
+    "/api/chats": () => new Response("no such conversation", { status: 404 }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText(NOT_SHARED)).toBeTruthy();
+  await waitFor(() =>
+    expect(railState().rows.map((entry) => entry.conversation_id)).toContain(CONVO_ID),
+  );
+  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
+});
+
+test("a permalink to a conversation an admin may only disclose offers the acknowledgement first", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  const { calls } = wire({
+    "/api/chats": () =>
+      json({
+        conversation: slackConversation({
+          audience: "member:0a1b2c3d-0000-4000-8000-000000000009",
+          member_email: "mel@example.com",
+          readable: false,
+          disclosable: true,
+          speakable: false,
+        }),
+      }),
+    "/actions/conversation/": () => json({ actions: [] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  render(<App agents={[AGENT]} member={{ ...MEMBER, admin: true }} onAgents={() => {}} />);
+
+  expect(await screen.findByText(/private to mel@example.com/)).toBeTruthy();
+  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
+  expect(calls.some((url) => url.includes("/transcript"))).toBe(false);
+});
+
+test("a conversation the member reads but may not speak in draws no composer", async () => {
+  location.hash = "#/c/" + CONVO_ID;
+  wire({
+    "/api/chats": () => json({ conversation: slackConversation({ speakable: false }) }),
+    "/transcript": () => json({ messages: [{ role: "user", text: "from Slack" }] }),
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  expect(await screen.findByText("from Slack")).toBeTruthy();
+  expect(screen.queryByLabelText("Ask UFO")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
 });
 
 test("the rail's sound mark names the act it does, and this browser holds the pick", async () => {

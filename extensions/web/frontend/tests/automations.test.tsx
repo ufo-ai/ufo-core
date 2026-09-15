@@ -29,7 +29,20 @@ beforeEach(() => {
 const TRIGGER_NAME = "github-9f2c1a-4b8d21";
 const PULL_REQUEST = "https://github.com/metalcraftai/ufo/pull/3459";
 
-const NIGHTLY = owned({
+function mine(row: object) {
+  return owned({
+    ...row,
+    mine: true,
+    content_editable: true,
+    schedule_editable: true,
+    pausable: true,
+    resumable: true,
+    runnable: true,
+    deletable: true,
+  });
+}
+
+const NIGHTLY = mine({
   kind: "scheduled_task",
   name: "nightly-digest",
   summary: "0 9 * * * — the digest",
@@ -42,10 +55,9 @@ const NIGHTLY = owned({
   last_run_status: "done",
   paused: false,
   origin: "Portal",
-  mine: true,
 });
 
-const PAUSED_TASK = owned({
+const PAUSED_TASK = mine({
   kind: "scheduled_task",
   name: "weekly-roundup",
   summary: "0 9 * * 1 — the roundup",
@@ -58,10 +70,9 @@ const PAUSED_TASK = owned({
   last_run_status: null,
   paused: true,
   origin: "Portal",
-  mine: true,
 });
 
-const WATCHED_PULL = owned({
+const WATCHED_PULL = mine({
   kind: "source_trigger",
   name: TRIGGER_NAME,
   summary: PULL_REQUEST + " on github (github account 9f2c1a)",
@@ -75,10 +86,9 @@ const WATCHED_PULL = owned({
   paused: false,
   last_run_at: "2026-08-27T18:00:00+00:00",
   origin: "Portal",
-  mine: true,
 });
 
-const WATCHED_FEED = owned({
+const WATCHED_FEED = mine({
   kind: "source_trigger",
   name: "github-9f2c1a-77aa10",
   summary: "github (github account 9f2c1a), pull_requests only",
@@ -92,10 +102,9 @@ const WATCHED_FEED = owned({
   paused: false,
   last_run_at: "2026-08-26T18:00:00+00:00",
   origin: "Portal",
-  mine: true,
 });
 
-const WHOLE_CONNECTION = owned({
+const WHOLE_CONNECTION = mine({
   kind: "source_trigger",
   name: "github-9f2c1a-31c4b2",
   summary: "github (github account 9f2c1a)",
@@ -109,10 +118,9 @@ const WHOLE_CONNECTION = owned({
   paused: false,
   last_run_at: "2026-08-25T18:00:00+00:00",
   origin: "Portal",
-  mine: true,
 });
 
-const MANY_STREAMS = owned({
+const MANY_STREAMS = mine({
   kind: "source_trigger",
   name: "github-9f2c1a-5d20ff",
   summary: "github (github account 9f2c1a), issues and pull_requests",
@@ -126,7 +134,6 @@ const MANY_STREAMS = owned({
   paused: false,
   last_run_at: "2026-08-24T18:00:00+00:00",
   origin: "Portal",
-  mine: true,
 });
 
 const PRIVATE_TASK = owned({
@@ -169,6 +176,15 @@ const OLDER_RUN = {
   name: ARRIVAL_ID,
   created_at: "2026-08-26T09:00:00+00:00",
   text: "The night before was quiet too.",
+};
+
+const RUNNING = { ...RUN, summary: "nightly-digest, running", status: "running", text: "" };
+
+const FAILED_RUN = {
+  ...OLDER_RUN,
+  summary: "nightly-digest, failed",
+  status: "failed",
+  text: "The feed 502ed.",
 };
 
 const RUNS_CURSOR = "older-runs";
@@ -217,6 +233,7 @@ function automationsOnWire(
   posted: Record<string, unknown>[] = [],
   runsCursor: string | null = null,
   said: unknown = { messages: [] },
+  runs: unknown[] = [RUN],
 ) {
   let held = rows as Record<string, unknown>[];
   return wire({
@@ -231,7 +248,7 @@ function automationsOnWire(
     "/workspace/automations": () => json({ heroes: HEROES }),
     "/automations": () => automationsIndex(held),
     ["/objects/turn/" + TURN_ID]: () =>
-      json({ ...TURN_INDEX, name: TURN_ID, spec: null, status: RUN, links: [] }),
+      json({ ...TURN_INDEX, name: TURN_ID, spec: null, status: runs[0], links: [] }),
     ["/objects/turn/" + ARRIVAL_ID]: () =>
       json({ ...TURN_INDEX, name: ARRIVAL_ID, spec: null, status: OLDER_RUN, links: [] }),
     "/objects/turn": (url: string) => {
@@ -239,7 +256,7 @@ function automationsOnWire(
         return json({ ...TURN_INDEX, objects: [], next_cursor: null });
       if (url.includes("cursor=" + RUNS_CURSOR))
         return json({ ...TURN_INDEX, objects: [OLDER_RUN], next_cursor: null });
-      return json({ ...TURN_INDEX, objects: [RUN], next_cursor: runsCursor });
+      return json({ ...TURN_INDEX, objects: runs, next_cursor: runsCursor });
     },
     "/objects/scheduled_task/nightly-digest": () =>
       json({
@@ -483,18 +500,42 @@ test("an automation opens Details: the fields it runs under, with its runs under
   expect(decodeURIComponent(location.hash)).toBe(
     automationsHash() + "?open=automation/" + AGENT.id + "/scheduled_task/nightly-digest",
   );
-  expect(within(details).getByLabelText("Name")).toHaveProperty(
-    "value",
-    "Digest the night's changes",
-  );
-  const instructions = within(details).getByLabelText("Instructions");
-  expect(instructions.tagName).toBe("TEXTAREA");
-  expect(instructions).toHaveProperty("value", "digest the night");
-  expect(within(details).getByText("When to run")).toBeTruthy();
-  expect(within(details).getByText("Run history")).toBeTruthy();
+  expect(within(details).getByLabelText("Instructions").tagName).toBe("TEXTAREA");
   expect(await within(details).findByText(/Nothing changed overnight/)).toBeTruthy();
   expect(within(details).queryByRole("button", { name: "Older" })).toBeNull();
   expect(within(details).queryByRole("heading", { name: "Digest the night's changes" })).toBeNull();
+});
+
+test("the automation's Details carry its own fields, and a run there opens its transcript read-only", async () => {
+  const { calls } = automationsOnWire(
+    undefined,
+    [],
+    null,
+    { messages: [], turn: TURN_ID, turn_started_at: "2026-08-27T09:00:00Z" },
+    [RUNNING, FAILED_RUN],
+  );
+  location.hash = automationsHash();
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByText("Digest the night's changes"));
+
+  const pane = await screen.findByRole("dialog", { name: "Details" });
+  expect(within(pane).getByLabelText("Name")).toHaveProperty("value", "Digest the night's changes");
+  expect(within(pane).getByLabelText("Instructions")).toHaveProperty("value", "digest the night");
+  expect(within(pane).getByRole("button", { name: "When to run" })).toBeTruthy();
+  expect(within(pane).getByText("Run history")).toBeTruthy();
+  expect(await within(pane).findByText(/The feed 502ed\./)).toBeTruthy();
+  const read = calls.find((url) => url.includes("/objects/turn?"));
+  expect(read).toContain("fired=true");
+  expect(read).toContain("source_name=nightly-digest");
+
+  await userEvent.click((await within(pane).findByRole("img", { name: "Running" })).closest("li")!);
+
+  const run = await screen.findByRole("dialog", { name: "Run" });
+  expect(await within(run).findByRole("button", { name: "Stop" })).toBeTruthy();
+  expect(within(run).queryByRole("textbox")).toBeNull();
+  expect(decodeURIComponent(location.hash)).toContain("run/" + AGENT.id + "/" + TURN_ID);
+  expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
 });
 
 test("the instructions entry stands a few lines and grows on the press that expands it", async () => {
@@ -607,7 +648,6 @@ test("a run listed in Details opens its transcript read-only, beside the automat
 
   const run = await screen.findByRole("dialog", { name: "Run" });
   expect(await within(run).findByText("No messages in this conversation yet.")).toBeTruthy();
-  expect(within(run).queryByRole("textbox")).toBeNull();
   expect(within(run).queryByRole("button", { name: "Send" })).toBeNull();
   expect(decodeURIComponent(location.hash)).toBe(
     automationsHash() +
@@ -651,8 +691,8 @@ test("a row carries no gear, so Details is the one way into an automation", asyn
   ).toBeNull();
 
   await userEvent.click(screen.getByText("Digest the night's changes"));
-  const details = await screen.findByRole("dialog", { name: "Details" });
-  expect(within(details).getByLabelText("Name")).toBeTruthy();
+  const pane = await screen.findByRole("dialog", { name: "Details" });
+  expect(within(pane).getByLabelText("Name")).toBeTruthy();
 });
 
 test("a task another member wrote states the refusal and stands its cadence disabled", async () => {

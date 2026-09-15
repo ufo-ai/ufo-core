@@ -43,14 +43,17 @@ test("every type step the sheet declares is a size tailwind-merge knows", () => 
   expect(missing).toEqual([]);
 });
 
-test("a size stated beside a colour survives, which is the failure the lists exist to stop", () => {
+test("a size and a colour spelled text-* both survive", () => {
+  const said = cn("text-label", "text-ink-soft");
+  expect(said).toContain("text-label");
+  expect(said).toContain("text-ink-soft");
   for (const step of listed("TEXT")) {
     expect(cn(`text-${step} text-ink`)).toContain(`text-${step}`);
   }
 });
 
-test("a caller's own step still replaces the one a component states", () => {
-  expect(cn("text-label", "text-figure")).toBe("text-figure");
+test("two sizes still conflict, and the last one wins", () => {
+  expect(cn("text-label", "text-title")).toBe("text-title");
   expect(cn("gap-2xl", "gap-8xl")).toBe("gap-8xl");
   expect(cn("rounded-panel", "rounded-card")).toBe("rounded-card");
 });

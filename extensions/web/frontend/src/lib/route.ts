@@ -49,10 +49,12 @@ export type Route =
       rootConversationId?: string;
     }
   | { kind: "new-chat"; agentId: string }
-  | { kind: "builder" }
+  | { kind: "chats"; place: WorkspacePlace }
+  | { kind: "agents"; build?: boolean; place: WorkspacePlace }
+  | { kind: "store" }
+  | { kind: "automations"; place: WorkspacePlace }
   | { kind: "agent"; agentId: string; place: WorkspacePlace }
   | { kind: "agent-setup"; agentId: string }
-  | { kind: "automations"; place: WorkspacePlace }
   | { kind: "workspace"; view: WorkspaceTab; place: WorkspacePlace }
   | { kind: "section"; section: Section; place: WorkspacePlace }
   | { kind: "first-run"; step?: string }
@@ -63,38 +65,6 @@ export type RouteKind = Route["kind"];
 export type RouteOf<Kind extends RouteKind> = Extract<Route, { kind: Kind }>;
 
 export const COMPOSE = "compose";
-
-export const HOME_NEW_LANE = "new";
-
-export const HOME_CONNECTORS_LANE = "connectors";
-
-const HOME_LANE_INSTANCE = ".";
-
-export function mintHomeLane(agentId: string, taken: readonly string[]): string {
-  if (!taken.includes(agentId)) return agentId;
-  let instance = 2;
-  while (taken.includes(agentId + HOME_LANE_INSTANCE + instance)) instance += 1;
-  return agentId + HOME_LANE_INSTANCE + instance;
-}
-
-const HOME_LANE_CONVERSATION = "c:";
-
-export function homeConversationLane(conversationId: string): string {
-  return HOME_LANE_CONVERSATION + conversationId;
-}
-
-export function homeLaneConversation(lane: string): string | null {
-  return lane.startsWith(HOME_LANE_CONVERSATION)
-    ? lane.slice(HOME_LANE_CONVERSATION.length)
-    : null;
-}
-
-export function homeLaneAgent(lane: string): string | null {
-  if (lane === HOME_NEW_LANE || lane === HOME_CONNECTORS_LANE) return null;
-  if (lane.startsWith(HOME_LANE_CONVERSATION)) return null;
-  const [agentId] = lane.split(HOME_LANE_INSTANCE);
-  return agentId;
-}
 
 const TRACK_KEY = "open";
 const TRACK_SEPARATOR = "~";
@@ -118,25 +88,21 @@ function text(key: string): {
   };
 }
 
-/** The read admits exactly the rows a screen can be left holding; the write refuses a row that read
- *  would not admit, raising at the call that made it up rather than at the link a member is handed. */
 const TRACK: PlaceField<"opens"> = {
   read: (params) => {
     const track = params.get(TRACK_KEY);
-    if (track === null) return undefined;
-    if (track === "") return [];
+    if (!track) return undefined;
     const opens = track.split(TRACK_SEPARATOR);
     return holdableTrack(opens) ? opens : null;
   },
-  write: (params, opens) => {
-    if (opens === undefined) return;
+  write: (params, opens = []) => {
     const carried = opens.find((id) => id.includes(TRACK_SEPARATOR));
     if (carried !== undefined) {
       throw new Error("A slot id cannot hold " + TRACK_SEPARATOR + ": " + JSON.stringify(carried));
     }
     const fault = unholdable(opens);
     if (fault) throw new Error(fault);
-    params.set(TRACK_KEY, opens.join(TRACK_SEPARATOR));
+    if (opens.length) params.set(TRACK_KEY, opens.join(TRACK_SEPARATOR));
   },
 };
 
@@ -196,6 +162,8 @@ export function serializePlace(place: WorkspacePlace): string {
   return raw ? "?" + raw : "";
 }
 
+/** Total over the codec's own keys, so no place change can drop one: a merge that listed the keys by
+ *  hand omitted `range`, and every act on the usage tab erased the range from the address. */
 export function mergePlace(held: WorkspacePlace, patch: WorkspacePlace): WorkspacePlace {
   const next: WorkspacePlace = {};
   for (const key of PLACE_KEYS) carryKey(next, key in patch ? patch : held, key);
@@ -212,15 +180,20 @@ export const AGENTS_HASH = "#/agents";
 
 export const BUILDER_HASH = AGENTS_HASH + "/builder";
 
+export const STORE_HASH = AGENTS_HASH + "/store";
+
+const CHATS_HASH = "#/chats";
+
+const AUTOMATIONS_HASH = "#/automations";
+
 export const FIRST_RUN_HASH = "#/first-run";
 
-/** A pattern and the builder that answers it are built out of the same constant, so a prefix cannot be
- *  spelled one way in the regex and another way in the hash a screen hands the browser. */
+/** A pattern and the builder that answers it are built from the same constant, so a prefix cannot be
+ *  spelled one way in the regex and another in the hash a screen hands the browser. */
 const CHAT_PREFIX = "#/c/";
 const NEW_CHAT_PREFIX = "#/new/";
 const AGENT_PREFIX = AGENTS_HASH + "/";
 const WORKSPACE_PREFIX = "#/workspace/";
-const AUTOMATIONS_HASH = "#/automations";
 const CONVERSATIONS_PART = "/conversations/";
 const SLOTS_PART = "/slots/";
 const SLOT_PARAM = "slot";
@@ -242,6 +215,8 @@ const SETUP_SEGMENT = "/setup";
 const SLOT_ONLY = new RegExp("^" + SLOT_NAME + "$");
 const UUID_ONLY = new RegExp("^" + UUID + "$");
 
+/** It reads its own path whatever query the address arrived holding: a member sent `#/first-run?ref=mail`
+ *  asked for the first run. */
 function bare(path: string): RegExp {
   return new RegExp(`^${path}(?:\\?.*)?$`);
 }
@@ -253,6 +228,7 @@ type RouteRow<Kind extends RouteKind, Args extends unknown[]> = {
   write: (...args: Args) => string;
 };
 
+/** A read answering `null` means the address named this route and named it wrongly, which is a bad link. */
 function row<Kind extends RouteKind, Args extends unknown[]>(
   kind: Kind,
   pattern: RegExp,
@@ -262,7 +238,7 @@ function row<Kind extends RouteKind, Args extends unknown[]>(
   return { kind, pattern, read, write };
 }
 
-const HOME = row(
+const HOME = row<"home", [WorkspacePlace?]>(
   "home",
   new RegExp("^(?:#/?)?" + PLACE_TAIL),
   (match) => {
@@ -279,21 +255,48 @@ const FIRST_RUN = row(
   (step?: string) => FIRST_RUN_HASH + (step ? "/" + step : ""),
 );
 
-const APPS = row<"workspace", [WorkspacePlace?]>(
-  "workspace",
+const AGENTS = row<"agents", [WorkspacePlace?]>(
+  "agents",
   new RegExp(`^${AGENTS_HASH}${PLACE_TAIL}`),
   (match) => {
     const place = parsePlace(match[1]);
-    return place && { kind: "workspace", view: "apps", place };
+    return place && { kind: "agents", place };
   },
   (place: WorkspacePlace = {}) => AGENTS_HASH + serializePlace(place),
 );
 
 const BUILDER = row(
-  "builder",
+  "agents",
   bare(BUILDER_HASH),
-  () => ({ kind: "builder" }),
+  () => ({ kind: "agents", build: true, place: {} }),
   () => BUILDER_HASH,
+);
+
+const STORE = row(
+  "store",
+  bare(STORE_HASH),
+  () => ({ kind: "store" }),
+  () => STORE_HASH,
+);
+
+const CHATS = row<"chats", [WorkspacePlace?]>(
+  "chats",
+  new RegExp(`^${CHATS_HASH}${PLACE_TAIL}`),
+  (match) => {
+    const place = parsePlace(match[1]);
+    return place && { kind: "chats", place };
+  },
+  (place: WorkspacePlace = {}) => CHATS_HASH + serializePlace(place),
+);
+
+const AUTOMATIONS = row<"automations", [WorkspacePlace?]>(
+  "automations",
+  new RegExp(`^${AUTOMATIONS_HASH}${PLACE_TAIL}`),
+  (match) => {
+    const place = parsePlace(match[1]);
+    return place && { kind: "automations", place };
+  },
+  (place: WorkspacePlace = {}) => AUTOMATIONS_HASH + serializePlace(place),
 );
 
 const CHAT = row(
@@ -370,16 +373,6 @@ const AGENT = row(
     AGENT_PREFIX + agentId + serializePlace(place),
 );
 
-const AUTOMATIONS = row<"automations", [WorkspacePlace?]>(
-  "automations",
-  new RegExp(`^${AUTOMATIONS_HASH}${PLACE_TAIL}`),
-  (match) => {
-    const place = parsePlace(match[1]);
-    return place && { kind: "automations", place };
-  },
-  (place: WorkspacePlace = {}) => AUTOMATIONS_HASH + serializePlace(place),
-);
-
 const WORKSPACE = row<"workspace" | "section", [WorkspaceTab, WorkspacePlace?]>(
   "workspace",
   new RegExp(`^${WORKSPACE_PREFIX}(${TAB_NAME})${PLACE_TAIL}`),
@@ -401,26 +394,31 @@ const SECTION = row<"section", [Section, WorkspacePlace?]>(
   "section",
   new RegExp(`^#/(${SECTION_NAME})${PLACE_TAIL}`),
   (match) => {
+    const name = match[1];
     const place = parsePlace(match[2]);
-    if (!place || !isSection(match[1])) return null;
-    return { kind: "section", section: match[1], place };
+    if (!place) return null;
+    return isSection(name) ? { kind: "section", section: name, place } : null;
   },
   (section: Section, place: WorkspacePlace = {}) => "#/" + section + serializePlace(place),
 );
 
 type RouteReader = { pattern: RegExp; read: (match: RegExpMatchArray) => Route | null };
 
+/** A longer address stands before the shorter one it starts with, and a route carrying a place stands
+ *  after the singletons whose own names its pattern would otherwise swallow. */
 const ROUTES: readonly RouteReader[] = [
   HOME,
   FIRST_RUN,
   BUILDER,
-  APPS,
+  STORE,
+  AGENTS,
+  CHATS,
+  AUTOMATIONS,
   CHAT,
   CONVERSATION_SLOT,
   NEW_CHAT,
   AGENT_SETUP,
   AGENT,
-  AUTOMATIONS,
   WORKSPACE,
   SECTION,
 ];
@@ -446,18 +444,20 @@ export function routeIs<Kind extends RouteKind>(
   return route.kind === kind;
 }
 
-/** A column of the route table, typed over every kind it declares, so a route the table gains states
- *  whether a frame may reach it. The shell acts on a frame's request under the viewer's own session. */
+/** Typed over every kind the table declares, so a route the table gains states here whether a frame may
+ *  reach it, and one that states nothing is a compile error rather than a fence that admits it. */
 const FRAMED: { [Kind in RouteKind]: boolean } = {
   home: false,
   "first-run": false,
-  builder: false,
+  agents: false,
+  store: false,
+  chats: false,
+  automations: false,
   chat: true,
   "conversation-slot": false,
   "new-chat": true,
   agent: true,
   "agent-setup": true,
-  automations: false,
   workspace: false,
   section: true,
   "bad-link": false,
@@ -467,10 +467,19 @@ export function framedNavigation(to: string): boolean {
   return FRAMED[parseHash(to).kind];
 }
 
-export type Stand = `agent:${string}` | `open:${string}` | "workspace" | "automations" | `section:${Section}`;
+export type Stand =
+  | `agent:${string}`
+  | `open:${string}`
+  | "workspace"
+  | "automations"
+  | "chats"
+  | "store"
+  | `section:${Section}`;
 
 export const COMPOSING: Stand = `open:${COMPOSE}`;
 
+/** Exhaustive over the kinds the table declares, so a route it gains says where it stands rather than
+ *  marking nothing. */
 function stands(route: Route): Stand[] {
   switch (route.kind) {
     case "home":
@@ -486,13 +495,17 @@ function stands(route: Route): Stand[] {
     }
     case "agent-setup":
       return [`agent:${route.agentId}`];
+    case "workspace":
+      return ["workspace"];
     case "automations":
       return ["automations"];
-    case "workspace":
-      return route.view === "apps" ? [] : ["workspace"];
+    case "store":
+      return ["store"];
+    case "chats":
+      return ["chats"];
     case "section":
       return [`section:${route.section}`];
-    case "builder":
+    case "agents":
     case "first-run":
     case "bad-link":
       return [];
@@ -520,25 +533,27 @@ export function bootRoute(hash: string, search: string): Route {
   return route;
 }
 
-/** The address of the workspace home at a place. */
-export const homeHash = HOME.write;
 /** The address of one conversation, optionally at a slot, at a report, or at the run whose own
  *  words the transcript stands on. */
 export const chatHash = CHAT.write;
+/** The address of the workspace home at a place. */
+export const homeHash = HOME.write;
 /** The address of one slot in a conversation. */
 export const conversationSlotHash = CONVERSATION_SLOT.write;
 /** The address of a fresh chat with an agent. */
 export const newChatHash = NEW_CHAT.write;
 /** The address of an agent's screen at a place. */
 export const agentHash = AGENT.write;
+/** The address of the apps screen, optionally at a place. */
+export const agentsHash = AGENTS.write;
 /** The address of an agent's setup screen. */
 export const agentSetupHash = AGENT_SETUP.write;
 /** The address of a workspace tab, optionally at a place. */
-export function workspaceHash(view: WorkspaceTab, place: WorkspacePlace = {}): string {
-  return view === "apps" ? APPS.write(place) : WORKSPACE.write(view, place);
-}
+export const workspaceHash = WORKSPACE.write;
 /** The address of a section, optionally at a place. */
 export const sectionHash = SECTION.write;
+/** The address of the chats screen, optionally at a place. */
+export const chatsHash = CHATS.write;
 /** The address of the automations screen, optionally at a place. */
 export const automationsHash = AUTOMATIONS.write;
 /** The address of the first run, at a step or at its welcome. */

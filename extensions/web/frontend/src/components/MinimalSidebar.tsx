@@ -11,7 +11,6 @@ import {
   IconCirclePlus,
   IconBroadcast,
   IconX,
-  IconPlus,
   IconSettings,
   IconVolume,
   IconVolumeOff,
@@ -29,16 +28,16 @@ import { statusDot, useAppStatus } from "@/lib/appStatusStore";
 import { AgentIcon } from "@/lib/agentIcon";
 import { cn } from "@/lib/cn";
 import { agentName } from "@/lib/agentName";
-import { openHome, placeWorkspace } from "@/lib/router";
+import { openHomeLanes } from "@/lib/homeLanes";
+import { placeWorkspace } from "@/lib/router";
 import { setMuted, useMuted } from "@/lib/sound";
 import { useOfferedTabs, useSurfaces } from "@/lib/surfaces";
-import type { ChatRow } from "@/lib/rail";
 import { Spotlight } from "@/views/Spotlight";
 import type { Agent, Member } from "@/lib/types";
 import { GLYPH_STROKE } from "@/lib/glyph";
 
 const HOME = "Home";
-const LAUNCHER = "Launcher";
+const SEARCH = "Search";
 const NEW_APP = "New app";
 const CHANNELS = "Channels";
 const WORKSPACE = "Workspace";
@@ -129,21 +128,15 @@ export function MinimalSidebar({
   lanes,
   active,
   agents,
-  chats,
-  pinned,
   member,
   main,
   account,
-  onEnterLane,
   onLane,
   onBuild,
 }: {
   lanes: { lane: string; agent: Agent }[];
   active: string | undefined;
   agents: Agent[];
-  chats: ChatRow[];
-  pinned: string[];
-  onEnterLane: (lane: string, opens: string[]) => void;
   member: Member;
   main: Agent | null;
   account: ReactNode;
@@ -177,7 +170,7 @@ export function MinimalSidebar({
       className="flex min-h-0 flex-col items-center gap-2xl bg-sidebar px-lg py-2xl"
     >
       <RailTip label={HOME}>
-        <button type="button" aria-label={HOME} onClick={openHome} className={cn(TILE, "text-ink")}>
+        <button type="button" aria-label={HOME} onClick={openHomeLanes} className={cn(TILE, "text-ink")}>
           <svg width={12.5} height={11} viewBox="0 0 12.5 11" fill="currentColor" aria-hidden>
             <circle cx={2} cy={2} r={2} />
             <circle cx={10.5} cy={2} r={2} />
@@ -185,14 +178,9 @@ export function MinimalSidebar({
           </svg>
         </button>
       </RailTip>
-      <RailTip label={LAUNCHER}>
+      <RailTip label={SEARCH}>
         <Spotlight
           agents={agents}
-          chats={chats}
-          pinned={pinned}
-          onEnterLane={onEnterLane}
-          glyph={IconPlus}
-          title={LAUNCHER}
           className={cn(TILE, "size-(--size-lede) bg-fill")}
         />
       </RailTip>

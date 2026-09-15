@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { CommandKbd } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CLAIMED, DIALOG, LANE_NEXT, LANE_PRIOR, TYPING } from "@/kernel/slots";
-import { ASK_KEY, CHORD as SEARCH } from "@/views/Spotlight";
+import { CHORD as SEARCH } from "@/views/Spotlight";
 
 const CHORD = "?";
 
@@ -12,8 +12,6 @@ const COMMAND = "⌘";
 const LEAVE_FIELD = "Esc";
 
 const ENTER = "↵";
-
-const ROW_RANGE = "1…9";
 
 const TITLE = "Keyboard shortcuts";
 
@@ -29,11 +27,7 @@ const SHORTCUTS: { group: string; rows: { act: string; keys: string[] }[] }[] = 
     group: "Launcher",
     rows: [
       { act: "Open", keys: [ENTER] },
-      { act: "Open beside", keys: [COMMAND, ENTER] },
-      { act: "Ask", keys: [ASK_KEY] },
       { act: "Back", keys: [LEAVE_FIELD] },
-      { act: "Row 1–9", keys: [COMMAND, ROW_RANGE] },
-      { act: "Next page", keys: [COMMAND, SEARCH.toUpperCase()] },
     ],
   },
   {

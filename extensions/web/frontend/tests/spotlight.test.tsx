@@ -4,35 +4,16 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import { wakeAppStatus } from "@/lib/appStatusStore";
-import { homeConversationLane, homeHash, mintHomeLane, parseHash, sectionHash } from "@/lib/route";
+import { parseHash, sectionHash } from "@/lib/route";
 import { REST_MS } from "@/views/Spotlight";
 
-import { AGENT, AGENT_ID, atPhoneWidth, automationsIndex, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, StreamFake, TASK_KIND, TRIGGER_KIND, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, automationsIndex, CONVO_ID, json, MEMBER, objectIndex, owned, type Route, SECOND, SECOND_ID, SITE_KIND, TASK_KIND, TRIGGER_KIND, useStreamFake, wire } from "./harness";
 
 beforeEach(() => {
   location.hash = "";
-  atPhoneWidth();
   useStreamFake();
 });
 
-function atDeskWidth() {
-  vi.stubGlobal("matchMedia", (media: string) => ({
-    media,
-    matches: false,
-    onchange: null,
-    addListener: () => {},
-    removeListener: () => {},
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    dispatchEvent: () => false,
-  }));
-}
-
-const FOUNDED_ID = "77777777-7777-4777-8777-777777777777";
-const SHARED_ID = "66666666-6666-4666-8666-666666666666";
-const SLACK_ID = "99999999-9999-4999-8999-999999999999";
-const OWN_ID = "2b3c4d5e-6f70-4819-8a2b-3c4d5e6f7081";
-const OTHER_ID = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
 const GRANT = "0d1f2e3a-4b5c-4d6e-8f70-112233445566";
 
 const FOUND_CONVERSATION = {
@@ -42,7 +23,6 @@ const FOUND_CONVERSATION = {
   surface_label: null,
   audience: "shared",
   member_email: null,
-  mine: false,
   description: "Rename the deploy job",
   source: null,
   speakers: [],
@@ -52,23 +32,6 @@ const FOUND_CONVERSATION = {
   readable: true,
   disclosable: false,
   speakable: false,
-};
-
-const FOUND_OWN_CONVERSATION = {
-  ...FOUND_CONVERSATION,
-  id: OWN_ID,
-  audience: "member:" + MEMBER.id,
-  member_email: MEMBER.email,
-  mine: true,
-  description: "Roll the release back",
-};
-
-const FOUND_THEIR_CONVERSATION = {
-  ...FOUND_CONVERSATION,
-  id: OTHER_ID,
-  audience: "member:other",
-  member_email: "other@example.com",
-  description: "Rotate the signing key",
 };
 
 const FOUND_FILE = {
@@ -82,7 +45,6 @@ const FOUND_FILE = {
   preview_url: null,
   owner_email: MEMBER.email,
 };
-
 
 const FOUND_TASK = owned({
   name: "nightly-deploy",
@@ -135,34 +97,6 @@ function nothing() {
   return wire(QUIET);
 }
 
-const RECENT = new Date(Date.now() - 5 * 60_000).toISOString();
-
-const MINE_CHAT = { ...CHAT_ROW, last_at: RECENT };
-
-const SHARED_CHAT = {
-  ...CHAT_ROW,
-  conversation_id: SHARED_ID,
-  title: "Rollout notes",
-  mine: false,
-};
-
-const SLACK_CHAT = {
-  ...CHAT_ROW,
-  conversation_id: SLACK_ID,
-  agent_id: SECOND_ID,
-  agent_name: "second",
-  title: "Standup in ops",
-  surface: "slack",
-};
-
-const RAIL = [MINE_CHAT, SHARED_CHAT, SLACK_CHAT];
-
-function railed() {
-  return wire({ ...chatsOnWire(RAIL), ...QUIET });
-}
-
-const WIKI_PURPOSE = "Holds the workspace's written pages.";
-
 const WIKI_APP = {
   id: "7f1b9f6e-9f30-4f8f-9a6e-1d9d1c2b3a41",
   name: "wiki",
@@ -170,7 +104,6 @@ const WIKI_APP = {
   main: false,
   icon: "stele",
   app: "wiki",
-  purpose: WIKI_PURPOSE,
 };
 
 function portal() {
@@ -201,46 +134,6 @@ function rowsUnder(heading: string): string[] {
   if (!run) throw new Error("the palette draws no " + heading + " run");
   return [...run.querySelectorAll("[cmdk-item]")].map((row) => String(row.textContent));
 }
-
-function standing(): string[] {
-  const route = parseHash(location.hash);
-  if (route?.kind !== "home") throw new Error("the palette did not land home: " + location.hash);
-  return route.place.opens ?? [];
-}
-
-function foot(): string {
-  const bar = document.querySelector("[data-slot=command-foot]");
-  if (!bar) throw new Error("the palette draws no foot");
-  return String(bar.textContent);
-}
-
-async function intoScope(label: string) {
-  await userEvent.keyboard("{Meta>}k{/Meta}");
-  await userEvent.click(await screen.findByRole("option", { name: scopeRow(label) }));
-}
-
-function scopeRow(label: string): RegExp {
-  return new RegExp("^Search " + label + " threads");
-}
-
-test("one term reaches every kind the workspace holds, each hit under its own heading", async () => {
-  const { calls } = everything({ "/connections": REFUSED });
-  await open();
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
-  expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
-  expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Automations"]);
-  expect(found.queryByText(/Error 500/)).toBeNull();
-
-  const asked = calls.filter((url) => url.includes("q=deploy"));
-  expect(asked.some((url) => url.includes("/objects/artifact"))).toBe(true);
-  expect(asked.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(true);
-  expect(asked.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(true);
-  expect(asked.some((url) => url.includes("/objects/" + TASK_KIND.kind))).toBe(true);
-});
 
 test("a status read that moves a working app leaves the standing term alone", async () => {
   let activity = "reading the repo";
@@ -283,15 +176,33 @@ test("a status read that moves a working app leaves the standing term alone", as
   }
 });
 
+test("one term reaches every kind the workspace holds, each hit under its own heading", async () => {
+  const { calls } = everything();
+  await open();
+  await type("deploy");
+
+  const found = within(await screen.findByRole("dialog"));
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
+  expect(found.getByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
+  expect(headings()).toEqual(["Threads", "Artifacts", "Automations"]);
+
+  const asked = calls.filter((url) => url.includes("q=deploy"));
+  expect(asked.some((url) => url.includes("/objects/artifact"))).toBe(true);
+  expect(asked.some((url) => url.includes("/workspace/memory"))).toBe(false);
+  expect(asked.some((url) => url.includes("/agents/" + AGENT_ID + "/conversations"))).toBe(true);
+  expect(asked.some((url) => url.includes("/agents/" + SECOND_ID + "/conversations"))).toBe(true);
+  expect(asked.some((url) => url.includes("/objects/" + TASK_KIND.kind))).toBe(true);
+});
+
 test("an agent matches from the payload the shell holds, under its own heading", async () => {
   const { calls } = everything();
   await open();
   await type("second");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: "Second" })).toBeTruthy();
-  expect(found.queryByRole("option", { name: scopeRow("Second") })).toBeNull();
-  expect(headings().slice(0, 2)).toEqual(["Actions", "Applications"]);
+  expect(await found.findByRole("option", { name: "Second opus" })).toBeTruthy();
+  expect(headings()[0]).toBe("Apps");
   expect(calls.some((url) => url.includes("/api/agents?q="))).toBe(false);
 });
 
@@ -314,22 +225,8 @@ test("a hit opens the place that holds it", async () => {
   const found = within(await screen.findByRole("dialog"));
   await userEvent.click(await found.findByRole("option", { name: /Rename the deploy job/ }));
 
-  expect(standing()[0]).toBe(homeConversationLane(CONVO_ID));
+  expect(location.hash).toBe("#/c/" + CONVO_ID);
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-});
-
-
-test("a found file opens the Artifacts screen, which holds it without an app agent", async () => {
-  everything();
-  await open();
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(await found.findByRole("option", { name: /deploy-plan\.md/ }));
-
-  expect(decodeURIComponent(location.hash)).toBe(
-    sectionHash("artifacts", { opens: [FOUND_FILE.name] }),
-  );
 });
 
 test("a found file opens the Artifacts screen, which holds it without an app agent", async () => {
@@ -368,7 +265,6 @@ test("two agents' same-named records both stand, each opening its own", async ()
   );
 });
 
-
 test("an automation hit opens that automation's Details on the screen it lands on", async () => {
   everything({
     "/automations": () => automationsIndex([{ ...FOUND_TASK, kind: TASK_KIND.kind }]),
@@ -405,7 +301,7 @@ test("a term nothing answers says so once, not once per kind", async () => {
 
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByText("Nothing matches this search.")).toBeTruthy();
-  expect(headings()).toEqual(["Actions"]);
+  expect(headings()).toEqual([]);
 });
 
 test("a term states that it is being read until the reads answer", async () => {
@@ -428,20 +324,21 @@ function slow(answer: () => Response): { route: Route; lands: () => void } {
 }
 
 test("a kind stands as soon as it answers, while a slower kind is still being read", async () => {
-  const tasks = slow(() => objectIndex(TASK_KIND, [FOUND_TASK]));
-  everything({ ["/objects/" + TASK_KIND.kind]: tasks.route });
+  const conversations = slow(() => json({ conversations: [FOUND_CONVERSATION] }));
+  everything({ "/conversations$": conversations.route });
   await open();
   await type("deploy");
 
   const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
-  expect(found.getByRole("option", { name: /deploy-plan.md/ })).toBeTruthy();
-  expect(found.queryByRole("option", { name: /nightly-deploy/ })).toBeNull();
+  expect(await found.findByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
+  expect(found.queryByRole("option", { name: /Rename the deploy job/ })).toBeNull();
   expect(found.getByText("Searching…")).toBeTruthy();
 
-  tasks.lands();
-  expect(await found.findByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  await waitFor(() => expect(found.queryByText("Searching…")).toBeNull());
+  conversations.lands();
+  expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
+  await waitFor(() =>
+    expect(headings()).toEqual(["Threads", "Artifacts", "Automations"]),
+  );
 });
 
 test("a kind that answers last still stands in its own place", async () => {
@@ -452,32 +349,11 @@ test("a kind that answers last still stands in its own place", async () => {
 
   const found = within(await screen.findByRole("dialog"));
   expect(await found.findByRole("option", { name: /nightly-deploy/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Artifacts", "Automations"]);
+  expect(headings()).toEqual(["Artifacts", "Automations"]);
 
   conversations.lands();
   expect(await found.findByRole("option", { name: /Rename the deploy job/ })).toBeTruthy();
-  await waitFor(() =>
-    expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Automations"]),
-  );
-});
-
-test("the rail's threads and the read's hits stand in one run", async () => {
-  wire({
-    ...chatsOnWire(RAIL),
-    ...QUIET,
-    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION, FOUND_THEIR_CONVERSATION] }),
-  });
-  await open();
-  await type("thread");
-
-  const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: /Rotate the signing key/ })).toBeTruthy();
-  expect(headings()).toEqual(["Actions", "Threads"]);
-  expect(rowsUnder("Threads")).toEqual([
-    "Pick one thread",
-    "Rotate the signing keyAssistant",
-    "See more history",
-  ]);
+  await waitFor(() => expect(headings()).toEqual(["Threads", "Artifacts", "Automations"]));
 });
 
 test("the artifacts group stands on the read that landed and takes the other's hits", async () => {
@@ -493,7 +369,7 @@ test("the artifacts group stands on the read that landed and takes the other's h
   sites.lands();
   expect(await found.findByRole("option", { name: /deploy-board/ })).toBeTruthy();
   expect(rowsUnder("Artifacts")).toHaveLength(2);
-  expect(headings()).toEqual(["Actions", "Threads", "Artifacts", "Automations"]);
+  expect(headings()).toEqual(["Threads", "Artifacts", "Automations"]);
 });
 
 test("an empty box reads nothing at all", async () => {
@@ -505,6 +381,17 @@ test("an empty box reads nothing at all", async () => {
   expect(calls.some((url) => url.includes("q="))).toBe(false);
 });
 
+test("the chord opens the palette from anywhere, and closes it again", async () => {
+  everything();
+  portal();
+
+  await userEvent.keyboard("{Meta>}k{/Meta}");
+  expect(await screen.findByRole("combobox", { name: "Search" })).toBeTruthy();
+
+  await userEvent.keyboard("{Meta>}k{/Meta}");
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
 test("the chord opens the palette from anywhere, and Escape shuts it", async () => {
   everything();
   portal();
@@ -514,24 +401,6 @@ test("the chord opens the palette from anywhere, and Escape shuts it", async () 
 
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-});
-
-test("the chord walks the palette from the workspace to the scopes and back", async () => {
-  railed();
-  await open();
-
-  await screen.findByRole("dialog");
-  expect(foot()).toContain("Launcher");
-
-  await userEvent.keyboard("{Meta>}k{/Meta}");
-  expect(await screen.findByRole("option", { name: scopeRow("Assistant") })).toBeTruthy();
-  expect(headings()).toEqual(["Threads"]);
-  expect(foot()).toContain("Threads");
-
-  await userEvent.keyboard("{Meta>}k{/Meta}");
-  expect(await screen.findByRole("option", { name: "Assistant" })).toBeTruthy();
-  expect(screen.queryByRole("option", { name: scopeRow("Assistant") })).toBeNull();
-  expect(foot()).toContain("Launcher");
 });
 
 test("the ctrl chord leaves the palette shut", async () => {
@@ -548,178 +417,27 @@ test("the ctrl chord leaves the palette shut", async () => {
   expect(await screen.findByRole("combobox", { name: "Search" })).toBeTruthy();
 });
 
-test("an unopened box lists the apps and the places, and reads nothing", async () => {
+test("an unopened term lists what to do and where to go, and reads nothing", async () => {
   const { calls } = everything();
   await open();
 
   const found = within(await screen.findByRole("dialog"));
-  expect(headings()).toEqual(["Applications", "Places"]);
+  expect(found.getByRole("option", { name: "New chat" })).toBeTruthy();
+  expect(headings()).toEqual(["Actions", "Places"]);
   expect(
     found.getAllByRole("option").map((row) => row.textContent),
   ).toEqual([
-    "Assistant",
-    "Second",
-    "Wiki" + WIKI_PURPOSE,
-    "Home",
+    "New chat",
+    "Chat",
+    "Automations",
     "Apps",
+    "App Store",
+    "Radar",
+    "Artifacts",
     "Connections",
     "Workspace",
   ]);
   expect(calls.some((url) => url.includes("q="))).toBe(false);
-});
-
-test("an empty box lists what the member has and what they were saying", async () => {
-  railed();
-  await open();
-
-  const found = within(await screen.findByRole("dialog"));
-  expect(await found.findByRole("option", { name: /Pick one thread/ })).toBeTruthy();
-  expect(headings()).toEqual(["Applications", "Threads", "Places"]);
-  expect(rowsUnder("Threads")).toEqual([
-    "Pick one thread",
-    "Rollout notes",
-    "Standup in opsSecond",
-    "See more history",
-  ]);
-  expect(foot()).toBe("LauncherOpen↵Actions⌘K");
-});
-
-test("the last thread row opens the main app's scope over all of them", async () => {
-  railed();
-  await open();
-  await screen.findByRole("option", { name: /Pick one thread/ });
-
-  await userEvent.click(screen.getByRole("option", { name: "See more history" }));
-
-  expect(await screen.findByPlaceholderText("Search Assistant threads")).toBeTruthy();
-  expect(headings()).toEqual(["Result threads"]);
-  expect(foot()).toContain("Assistant threads");
-  expect(screen.queryByRole("option", { name: "See more history" })).toBeNull();
-});
-
-test("picking a scope stands the box inside it", async () => {
-  railed();
-  await open();
-  await screen.findByRole("dialog");
-
-  await intoScope("Assistant");
-
-  expect(await screen.findByPlaceholderText("Search Assistant threads")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
-  expect(headings()).toEqual(["Result threads"]);
-  expect(foot()).toContain("Assistant threads");
-  const rows = screen.getAllByRole("option").map((row) => row.textContent);
-  expect(rows.some((row) => row?.startsWith("Pick one thread"))).toBe(true);
-  expect(rows.some((row) => row?.startsWith("Rollout notes"))).toBe(true);
-  expect(rows.some((row) => row?.startsWith("Standup in ops"))).toBe(false);
-});
-
-test("entering a scope leaves the first row under the cursor, and Enter opens it", async () => {
-  railed();
-  await open();
-  await screen.findByRole("dialog");
-
-  await intoScope("Assistant");
-
-  await waitFor(() =>
-    expect(document.querySelector("[cmdk-item][aria-selected=true]")?.textContent).toBe(
-      "Pick one thread",
-    ),
-  );
-  expect(foot()).toContain("Open");
-
-  await userEvent.keyboard("{Enter}");
-
-  expect(standing()[0]).toBe(homeConversationLane(CONVO_ID));
-});
-
-test("a term inside a scope lists what the read found, each row its title alone", async () => {
-  wire({
-    ...chatsOnWire(RAIL),
-    ...QUIET,
-    "/conversations$": () => json({ conversations: [FOUND_CONVERSATION] }),
-  });
-  await open();
-  await screen.findByRole("dialog");
-  await intoScope("Assistant");
-  await type("deploy");
-
-  expect(await screen.findByRole("option", { name: "Rename the deploy job" })).toBeTruthy();
-  expect(rowsUnder("Result threads")).toEqual(["Rename the deploy job"]);
-});
-
-test("the scope's filter narrows a found thread the rail does not carry", async () => {
-  wire({
-    ...chatsOnWire(RAIL),
-    ...QUIET,
-    "/conversations$": () =>
-      json({ conversations: [FOUND_THEIR_CONVERSATION, FOUND_OWN_CONVERSATION] }),
-  });
-  await open();
-  await screen.findByRole("dialog");
-  await intoScope("Assistant");
-  await type("deploy");
-  await screen.findByRole("option", { name: "Rotate the signing key" });
-
-  await userEvent.click(screen.getByRole("button", { name: "Filter threads" }));
-  await userEvent.click(screen.getByRole("menuitemradio", { name: "Mine" }));
-
-  await waitFor(() => expect(rowsUnder("Result threads")).toEqual(["Roll the release back"]));
-
-  await userEvent.click(screen.getByRole("button", { name: "Filter threads" }));
-  await userEvent.click(screen.getByRole("menuitemradio", { name: "Shared" }));
-
-  await waitFor(() => expect(rowsUnder("Result threads")).toEqual(["Rotate the signing key"]));
-});
-
-test("the scope's filter narrows the threads to the member's own and to the shared", async () => {
-  railed();
-  await open();
-  await screen.findByRole("dialog");
-  await intoScope("Assistant");
-  await screen.findByRole("option", { name: /Pick one thread/ });
-
-  await userEvent.click(screen.getByRole("button", { name: "Filter threads" }));
-  expect(
-    screen.getAllByRole("menuitemradio").map((entry) => entry.textContent),
-  ).toEqual(["All", "Mine", "Shared"]);
-  await userEvent.click(screen.getByRole("menuitemradio", { name: "Mine" }));
-
-  await waitFor(() => expect(screen.queryByRole("option", { name: /Rollout notes/ })).toBeNull());
-  expect(screen.getByRole("option", { name: /Pick one thread/ })).toBeTruthy();
-
-  await userEvent.click(screen.getByRole("button", { name: "Filter threads" }));
-  await userEvent.click(screen.getByRole("menuitemradio", { name: "Shared" }));
-
-  await waitFor(() => expect(screen.queryByRole("option", { name: /Pick one thread/ })).toBeNull());
-  expect(screen.getByRole("option", { name: /Rollout notes/ })).toBeTruthy();
-});
-
-test("Escape leaves a scope before it shuts the palette", async () => {
-  railed();
-  await open();
-  await screen.findByRole("dialog");
-  await intoScope("Assistant");
-  await screen.findByPlaceholderText("Search Assistant threads");
-
-  await userEvent.keyboard("{Escape}");
-  expect(await screen.findByPlaceholderText("What are you looking for?")).toBeTruthy();
-
-  await userEvent.keyboard("{Escape}");
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-});
-
-test("Backspace on an empty box leaves the scope", async () => {
-  railed();
-  await open();
-  await screen.findByRole("dialog");
-  await intoScope("Assistant");
-  await screen.findByPlaceholderText("Search Assistant threads");
-
-  await userEvent.keyboard("{Backspace}");
-
-  expect(await screen.findByPlaceholderText("What are you looking for?")).toBeTruthy();
-  expect(screen.getByRole("option", { name: "Assistant" })).toBeTruthy();
 });
 
 test("the arrow keys move the cursor and Enter takes the row under it", async () => {
@@ -728,154 +446,10 @@ test("the arrow keys move the cursor and Enter takes the row under it", async ()
 
   await screen.findByRole("dialog");
   await userEvent.keyboard("{ArrowDown}");
-  await userEvent.keyboard("{ArrowDown}");
   await userEvent.keyboard("{Enter}");
 
-  expect(location.hash).toBe(homeHash({ opens: [WIKI_APP.id, AGENT_ID] }));
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-});
-
-test("the meta digit takes the row standing at that place", async () => {
-  everything();
-  await open();
-  await screen.findByRole("dialog");
-
-  await userEvent.keyboard("{Meta>}3{/Meta}");
-
-  expect(location.hash).toBe(homeHash({ opens: [WIKI_APP.id, AGENT_ID] }));
-  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-});
-
-test("an app row stands a new lane at the near end of the row home already holds", async () => {
-  everything();
-  location.hash = homeHash({ opens: [AGENT_ID] });
-  portal();
-  await screen.findByRole("region", { name: "Assistant" });
-  await userEvent.click(screen.getByRole("button", { name: "Search" }));
-  await screen.findByRole("dialog");
-
-  await userEvent.click(screen.getByRole("option", { name: "Assistant" }));
-
-  const second = mintHomeLane(AGENT_ID, [AGENT_ID]);
-  expect(location.hash).toBe(homeHash({ opens: [second, AGENT_ID] }));
-});
-
-test("the command held over Enter stands the row beside what home holds", async () => {
-  railed();
-  await open();
-  await screen.findByRole("option", { name: /Pick one thread/ });
-
-  await userEvent.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}");
-  expect(document.querySelector("[cmdk-item][aria-selected=true]")?.textContent).toContain(
-    "Pick one thread",
-  );
-
-  await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
-
   expect(parseHash(location.hash)).toMatchObject({ kind: "home" });
-  expect(decodeURIComponent(location.hash).endsWith("c:" + CONVO_ID)).toBe(true);
-});
-
-test("the ask row names the app and the term, and the foot names its key", async () => {
-  everything();
-  await open();
-  await type("deploy");
-
-  const row = await screen.findByRole("option", { name: "Ask Assistant: deploy" });
-  expect(row.querySelector("svg")).toBeNull();
-  expect(rowsUnder("Actions")).toEqual(["Ask Assistant: deploy"]);
-  expect(foot()).toBe("LauncherAsk Assistant↵Actions⌘K");
-
-  await screen.findByRole("option", { name: /Rename the deploy job/ });
-  await userEvent.keyboard("{ArrowDown}");
-
-  expect(foot()).toBe("LauncherOpen↵Actions⌘K");
-});
-
-test("the term is said to the agent, by the composer in the lane it lands in", async () => {
-  const { calls } = wire({
-    ...QUIET,
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
-  });
-  location.hash = "#/";
-  portal();
-  await userEvent.click(await screen.findByRole("button", { name: "Search" }));
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(found.getByRole("option", { name: "Ask Assistant: deploy" }));
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  const said = calls.filter((url) => url.includes("/chat?conversation="));
-  expect(said).toHaveLength(1);
-  expect(said[0]).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
-  expect(standing()).toEqual([mintHomeLane(AGENT_ID, [AGENT_ID]), AGENT_ID]);
-  expect(await screen.findAllByRole("region", { name: "Assistant" })).toHaveLength(2);
-});
-
-test("Tab says the term the box holds, in a lane of its own", async () => {
-  const { calls } = wire({
-    ...QUIET,
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
-  });
-  location.hash = "#/";
-  portal();
-  await userEvent.click(await screen.findByRole("button", { name: "Search" }));
-  const box = await type("deploy");
-
-  await userEvent.keyboard("{Tab}");
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  const said = calls.filter((url) => url.includes("/chat?conversation="));
-  expect(said).toHaveLength(1);
-  expect(said[0]).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
-  expect(standing()).toEqual([mintHomeLane(AGENT_ID, [AGENT_ID]), AGENT_ID]);
-  expect(box.isConnected).toBe(false);
-});
-
-test("the term is said to the agent the row names, from another agent's start screen", async () => {
-  const { calls } = wire({
-    ...QUIET,
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
-  });
-  location.hash = "#/new/" + SECOND_ID;
-  portal();
-  await screen.findByLabelText("Ask UFO");
-  await userEvent.click(screen.getByRole("button", { name: "Search" }));
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(found.getByRole("option", { name: "Ask Assistant: deploy" }));
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  const said = calls.filter((url) => url.includes("/chat?conversation="));
-  expect(said).toHaveLength(1);
-  expect(said[0]).toContain("/agents/" + AGENT_ID + "/chat?conversation=new");
-  expect(said[0]).not.toContain(SECOND_ID);
-  expect(standing()).toEqual([AGENT_ID]);
-});
-
-test("the term founds a new conversation, though the member was reading another", async () => {
-  const { calls } = wire({
-    ...chatsOnWire([CHAT_ROW]),
-    ...QUIET,
-    "/chat": () => json({ turn_id: TURN_ID, conversation_id: FOUNDED_ID, title: "deploys" }),
-  });
-  location.hash = "#/c/" + CONVO_ID;
-  portal();
-  await screen.findByLabelText("Ask UFO");
-  await userEvent.click(screen.getByRole("button", { name: "Search" }));
-  await type("deploy");
-
-  const found = within(await screen.findByRole("dialog"));
-  await userEvent.click(found.getByRole("option", { name: "Ask Assistant: deploy" }));
-
-  await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  const said = calls.filter((url) => url.includes("/chat?conversation="));
-  expect(said).toHaveLength(1);
-  expect(said[0]).toContain("conversation=new");
-  expect(said[0]).not.toContain(CONVO_ID);
-  expect(standing()).toEqual([AGENT_ID]);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
 
 test("a term reaches the accounts the workspace holds and the providers it could connect", async () => {
@@ -936,19 +510,17 @@ test("a pool that refuses states nothing, and the catalog still answers", async 
   expect(found.queryByText(/Error 500/)).toBeNull();
 });
 
-test("the rail's leading tile opens the launcher, and no tile searches beside it", async () => {
-  atDeskWidth();
-  railed();
+test("the rail's search tile opens the palette, and no tile searches beside it", async () => {
+  everything();
   portal();
 
   const rail = within(await screen.findByRole("navigation", { name: "Tabs" }));
-  expect(rail.queryByRole("button", { name: "Search" })).toBeNull();
+  expect(rail.getAllByRole("button", { name: "Search" })).toHaveLength(1);
   expect(rail.queryByRole("button", { name: "New tab" })).toBeNull();
 
-  await userEvent.click(rail.getByRole("button", { name: "Launcher" }));
+  await userEvent.click(rail.getByRole("button", { name: "Search" }));
 
   expect(await screen.findByRole("combobox", { name: "Search" })).toBeTruthy();
-  expect(await screen.findByRole("option", { name: /Pick one thread/ })).toBeTruthy();
 });
 
 const UNTITLED_CONVERSATION = { ...FOUND_CONVERSATION, description: "" };

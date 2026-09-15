@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, MEMBER, useStreamFake, wire } from "./harness";
+import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, MEMBER, useStreamFake, wire } from "../../tests/harness";
 
 beforeEach(() => {
   useStreamFake();

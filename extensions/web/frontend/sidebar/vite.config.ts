@@ -14,41 +14,6 @@ export default defineConfig({
     alias: [
       { find: "@/App", replacement: new URL("./src/App.tsx", import.meta.url).pathname },
       {
-        find: "@/components/Sidebar",
-        replacement: new URL("./src/components/Sidebar.tsx", import.meta.url).pathname,
-      },
-      { find: "@/lib/rail", replacement: new URL("./src/lib/rail.ts", import.meta.url).pathname },
-      {
-        find: "@/lib/railStore",
-        replacement: new URL("./src/lib/railStore.ts", import.meta.url).pathname,
-      },
-      { find: "@/lib/route", replacement: new URL("./src/lib/route.ts", import.meta.url).pathname },
-      {
-        find: "@/lib/router",
-        replacement: new URL("./src/lib/router.ts", import.meta.url).pathname,
-      },
-      { find: "@/lib/title", replacement: new URL("./src/lib/title.ts", import.meta.url).pathname },
-      {
-        find: "@/views/Agents",
-        replacement: new URL("./src/views/Agents.tsx", import.meta.url).pathname,
-      },
-      {
-        find: "@/views/Apps",
-        replacement: new URL("./src/views/Apps.tsx", import.meta.url).pathname,
-      },
-      {
-        find: "@/views/FirstRun",
-        replacement: new URL("./src/views/FirstRun.tsx", import.meta.url).pathname,
-      },
-      {
-        find: "@/views/Spotlight",
-        replacement: new URL("./src/views/Spotlight.tsx", import.meta.url).pathname,
-      },
-      {
-        find: "@/views/Store",
-        replacement: new URL("./src/views/Store.tsx", import.meta.url).pathname,
-      },
-      {
         find: "@",
         replacement: new URL("../src", import.meta.url).pathname,
       },

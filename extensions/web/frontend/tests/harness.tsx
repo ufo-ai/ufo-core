@@ -11,18 +11,24 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { TabbedPane } from "@/views/TabbedPane";
 import { SECTION_VIEWS, WORKSPACE_VIEWS, type PaneView } from "@/views/registry";
 import {
+  STORE_HASH,
   type Section,
   type WorkspacePlace,
   type WorkspaceTab,
   WORKSPACE_TABS,
 } from "@/lib/route";
-import { MEMBER_SUBJECT, SHARED_SUBJECT } from "@/lib/audience";
+import { MEMBER_SUBJECT, SHARED_SUBJECT, WorkspaceId } from "@/lib/audience";
 import type { ChatRow } from "@/lib/rail";
 import type { OwnedConversation } from "@/lib/types";
 
-/** A tooltip reads its delay from a provider above it and raises without one. */
+export const WORKSPACE_ID = "31b26b98-0000-4000-8000-000000000031";
+
 function Shell({ children }: { children: ReactNode }) {
-  return <TooltipProvider>{children}</TooltipProvider>;
+  return (
+    <WorkspaceId.Provider value={WORKSPACE_ID}>
+      <TooltipProvider>{children}</TooltipProvider>
+    </WorkspaceId.Provider>
+  );
 }
 
 export function PlacedWorkspace({ view }: { view: WorkspaceTab }) {
@@ -128,8 +134,6 @@ export class StreamFake {
   }
 }
 
-/** A streaming reply is drawn word by word and, at its head, character by character, so one line of
- *  prose lives in more than one element. `saying` matches the innermost whose whole text is that line. */
 export function saying(line: string | RegExp) {
   const matches = (text: string) =>
     typeof line === "string" ? text.trim() === line : line.test(text);
@@ -159,14 +163,13 @@ export function atPhoneWidth() {
 
 export type Route = (url: string, init?: RequestInit) => Response | Promise<Response>;
 
-/** A pattern matches anywhere in the url, except that one ending in `$` matches only a path ending
- *  there. Both are load-bearing: unanchored, `/conversations` also answers `/conversations/<id>/slots`. */
 export function wire(routes: Record<string, Route>) {
   const calls: string[] = [];
   const fallbacks: Record<string, Route> = {
     "/api/chats": () => NO_SUCH_CONVERSATION(),
     "/objects/conversation$": () => json({ objects: [] }),
     "/api/agents/status": () => json({ statuses: [], out_of_credit: false }),
+    "/shell$": () => json({ available: false, active: false }),
     "/connector-catalog": () => json({ providers: [], after: null }),
     "/connections": () => json({ connections: [] }),
     "/workspace/first-run": () =>
@@ -185,7 +188,6 @@ export function wire(routes: Record<string, Route>) {
     "/github/coverage": () => json({ api: false, sources: false }),
     "/homepage": () => json({ state: "none" }),
     "/conversations$": () => json({ conversations: [] }),
-    "/shell$": () => json({ available: false, active: false }),
   };
   /* Order is load-bearing: a longer path must be matched before the prefix it shares, so a named
      fallback keeps its place and only a differently anchored twin is dropped. */
@@ -244,7 +246,12 @@ export const CHAT_APP = {
   app: "chat",
 };
 
-export const MEMBER = { id: "m1", email: "member@example.com", admin: false };
+export const MEMBER = {
+  id: "m1",
+  email: "member@example.com",
+  admin: false,
+  workspace_id: WORKSPACE_ID,
+};
 
 export const SETTINGS = {
   agent: {
@@ -275,18 +282,27 @@ export const SETTINGS = {
   audience: [],
 };
 
-export const CHAT_ROW = {
+export const CHAT_ROW: ChatRow = {
   conversation_id: CONVO_ID,
   agent_id: AGENT_ID,
   agent_name: "assistant",
   title: "Pick one thread",
+  opening: "Pick one thread to carry the work.",
   last_at: "2026-08-01T09:00:00.000Z",
   surface: "web",
   surface_label: null,
   audience: "member:m1",
   member_email: "member@example.com",
+  owner_email: "member@example.com",
+  owner_name: null,
   mine: true,
   speaker: null,
+  source: null,
+  turn: "idle",
+  automation_kind: null,
+  automation_name: null,
+  automation_title: null,
+  unread: false,
 };
 
 export const json = (payload: unknown) => Response.json(payload);
@@ -329,8 +345,19 @@ const resolveOnWire =
     return row ? json({ conversation: linked(row) }) : NO_SUCH_CONVERSATION();
   };
 
+/** The listing searches on the server, scanning a row's string fields the way `object_page` does,
+ *  so a test's wire narrows where the real read narrows rather than answering every row to every
+ *  query. */
 export const chatsOnWire = (rows: RailRow[]): Record<string, Route> => ({
-  "/objects/conversation$": () => json({ objects: rows.map(conversationObject) }),
+  "/objects/conversation$": (url) => {
+    const said = new URLSearchParams(url.split("?")[1] ?? "").get("q")?.toLowerCase() ?? "";
+    const found = rows.filter((row) =>
+      Object.values(conversationObject(row)).some(
+        (value) => typeof value === "string" && value.toLowerCase().includes(said),
+      ),
+    );
+    return json({ objects: found.map(conversationObject) });
+  },
   "/api/chats": resolveOnWire(rows),
 });
 
@@ -405,18 +432,7 @@ export function automationsIndex(objects: unknown[], next: string | null = null)
 }
 
 export function owned(row: object, agent = AGENT) {
-  const mine = (row as { mine?: unknown }).mine === true;
-  return {
-    content_editable: mine,
-    schedule_editable: mine,
-    pausable: mine,
-    resumable: mine,
-    runnable: mine,
-    deletable: mine,
-    ...row,
-    agent_id: agent.id,
-    agent_name: agent.name,
-  };
+  return { ...row, agent_id: agent.id, agent_name: agent.name };
 }
 
 export async function opened(name: string): Promise<HTMLElement[]> {
@@ -450,8 +466,21 @@ export function agentIndex(): Promise<HTMLElement> {
   return screen.findByRole("navigation", { name: "Apps" });
 }
 
+export async function openAgentRow(name: string): Promise<void> {
+  const index = await agentIndex();
+  const row = new RegExp("^" + name);
+  await userEvent.click(await within(index).findByRole("button", { name: row }));
+}
+
+export async function openStore(): Promise<HTMLElement> {
+  location.hash = STORE_HASH;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+  return screen.findByRole("region", { name: "App Store" });
+}
+
 export async function openNewApplication(): Promise<void> {
-  await userEvent.click(await screen.findByRole("button", { name: "Create app" }));
+  const store = await openStore();
+  await userEvent.click(within(store).getByRole("row", { name: /^App Creator/ }));
 }
 
 export const FRESH = "New conversation";
@@ -472,12 +501,6 @@ export async function heldConversation(app = "Assistant"): Promise<string> {
   const band = pane.querySelector("[data-slot=header] h2");
   if (!band) throw new Error("the half draws no band");
   return String(band.textContent);
-}
-
-export async function openAgentRow(name: string): Promise<void> {
-  const index = await agentIndex();
-  const row = new RegExp("^" + name);
-  await userEvent.click(await within(index).findByRole("button", { name: row }));
 }
 
 export async function openAgentSettings(
@@ -509,7 +532,6 @@ export async function viewCard(name: string): Promise<HTMLElement> {
   return within(card).getByRole("button");
 }
 
-/** The one number here that is not a token, because no token states what a desktop is. */
 const DESKTOP = 1280;
 
 const TOKENS = readFileSync(join(import.meta.dirname, "..", "src", "theme.css"), "utf8");
@@ -520,8 +542,6 @@ function token(name: string): number {
   return Number(declared[1]);
 }
 
-/** `Page` reserves the scrollbar with `scrollbar-gutter-stable`. Blink's thin scrollbar, measured in the
- *  running portal: a table summing to the gutter budget exactly still scrolls without it. */
 const SCROLLBAR_GUTTER = 11;
 
 export function pageFits(minWidth: string): boolean {
@@ -536,8 +556,6 @@ export function pageFits(minWidth: string): boolean {
   return shell + tracks <= DESKTOP;
 }
 
-/** It rides a custom property rather than `min-width` itself, because a phone stacks the table into
- *  records and lifts the floor the tracks needed. */
 export function declaredFloor(table: Element): string {
   return (table as HTMLTableElement).style.getPropertyValue("--table-floor");
 }

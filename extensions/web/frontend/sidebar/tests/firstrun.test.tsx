@@ -8,7 +8,7 @@ import { BUILD_STEP_MS } from "@/views/FirstRun";
 import { resetChatStore } from "@/lib/chatStore";
 import { chatHash } from "@/lib/route";
 
-import { AGENT, chatsOnWire, CONVO_ID, json, MEMBER, type Route, TURN_ID, useStreamFake, wire } from "./harness";
+import { AGENT, chatsOnWire, CONVO_ID, json, MEMBER, type Route, TURN_ID, useStreamFake, wire } from "../../tests/harness";
 
 const ADMIN = { ...MEMBER, admin: true };
 
@@ -84,27 +84,4 @@ test("the run draws on this shell, and its thread is the chat the member lands o
   );
 
   await waitFor(() => expect(location.hash).toBe(chatHash(CONVO_ID)));
-});
-
-test("the pressed goal and a picked one each open a thread after the first task's, on this shell too", async () => {
-  mount();
-
-  await userEvent.click(await screen.findByRole("button", { name: "Get started" }));
-  await screen.findByRole("heading", { name: "What’s the website for your business?" });
-  await userEvent.click(screen.getByRole("button", { name: "Next" }));
-  await userEvent.type(await screen.findByLabelText("About your business"), "Design studio");
-  await userEvent.click(screen.getByRole("button", { name: "Next" }));
-  await screen.findByRole("button", { name: "Founder" });
-  await userEvent.click(screen.getByRole("button", { name: "Next" }));
-  await screen.findByRole("heading", { name: "Which tools do you work in?" });
-  await userEvent.click(screen.getByRole("button", { name: "Next" }));
-  await screen.findByRole("heading", { name: "What is top of mind right now?" });
-  await userEvent.click(screen.getByRole("button", { name: "Hiring" }));
-  await userEvent.click(screen.getByRole("button", { name: "Next" }));
-
-  await screen.findByRole("heading", { name: "Creating your business’s workspace" });
-  await waitFor(() => expect(sent.length).toBe(3));
-  expect(sent[1]).toContain("My role: Founder. My goal: growing revenue.");
-  expect(sent[2]).toContain("My role: Founder. My goal: hiring.");
-  expect(sent[2]).toContain("Ask me at most one thing.");
 });

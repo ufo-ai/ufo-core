@@ -1,12 +1,14 @@
 import { agentName } from "@/lib/agentName";
-import { agentHash, newChatHash, workspaceHash, type Route } from "@/lib/route";
+import { agentHash, newChatHash, type Route } from "@/lib/route";
 import type { Agent, OwnedConversation } from "@/lib/types";
-import { APP_CREATOR_TITLE } from "@/lib/wizard";
 import { SECTION_VIEWS, WORKSPACE_VIEWS } from "@/views/registry";
+
+export const APP_STORE_TITLE = "App Store";
+
+export const HOME_TITLE = "Home";
 
 const PRODUCT = "ufo";
 const TRAIL = " · ";
-const HOME = "Home";
 const NEW_CONVERSATION = "New conversation";
 const FIRST_RUN = "Set up this workspace";
 const WORKSPACE = "Workspace";
@@ -25,6 +27,7 @@ function chatCrumb(agent: { id: string; name: string }): Crumb {
   return { label: agentName(agent.name), at: newChatHash(agent.id) };
 }
 
+/** A tab truncates from the right, so the word that tells two of them apart stands first. */
 export function titled(...parts: string[]): string {
   return [...parts, PRODUCT].join(TRAIL);
 }
@@ -33,30 +36,38 @@ export function pageTitle(
   route: Route,
   agents: Agent[],
   linked: Record<string, OwnedConversation>,
+  main: Agent | null,
 ): string {
-  return titled(...trail(route, agents, linked).map((step) => step.label));
+  return titled(...trail(route, agents, linked, main).map((step) => step.label));
 }
 
 export function pageCrumb(
   route: Route,
   agents: Agent[],
   linked: Record<string, OwnedConversation>,
+  main: Agent | null,
 ): Crumb | undefined {
-  return trail(route, agents, linked)[1];
+  return trail(route, agents, linked, main)[1];
 }
 
 function trail(
   route: Route,
   agents: Agent[],
   linked: Record<string, OwnedConversation>,
+  main: Agent | null,
 ): Crumb[] {
-  return where(route, agents, linked).filter((step): step is Crumb => Boolean(step?.label));
+  return where(route, agents, linked, main).filter((step): step is Crumb =>
+    Boolean(step?.label),
+  );
 }
 
+/** The `never` at the end is what makes a route the table gains a compile error here, instead of a tab
+ *  that says `undefined`. */
 function where(
   route: Route,
   agents: Agent[],
   linked: Record<string, OwnedConversation>,
+  main: Agent | null,
 ): (Crumb | undefined)[] {
   const named = (agentId: string) => {
     const found = agents.find((agent) => agent.id === agentId);
@@ -64,7 +75,7 @@ function where(
   };
   switch (route.kind) {
     case "home":
-      return [{ label: HOME }];
+      return [{ label: NEW_CONVERSATION }, main ? agentCrumb(main) : undefined];
     case "first-run":
       return [{ label: FIRST_RUN }];
     case "new-chat":
@@ -80,12 +91,12 @@ function where(
     }
     case "conversation-slot":
       return [{ label: route.slot }, named(route.agentId)];
-    case "builder":
-      return [
-        { label: APP_CREATOR_TITLE },
-        { label: APPS, at: workspaceHash("apps") },
-        { label: WORKSPACE },
-      ];
+    case "agents":
+      return [{ label: APPS }];
+    case "store":
+      return [{ label: APP_STORE_TITLE }];
+    case "chats":
+      return [{ label: HOME_TITLE }];
     case "agent":
       return [named(route.agentId)];
     case "agent-setup":

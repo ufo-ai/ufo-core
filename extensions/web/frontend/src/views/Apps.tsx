@@ -9,6 +9,7 @@ import { Filter } from "@/components/ui/filter";
 import { ACTS, Lede, Td, TdActs, TdFact } from "@/components/ui/table";
 import { ObjectPane } from "@/kernel/objects";
 import type { Placement } from "@/kernel/pager";
+import { usePageAct } from "@/kernel/pane";
 import { OutcomeNotice, QUIET, outcomeNotice, Section, type NoticeState } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { AgentIcon } from "@/lib/agentIcon";
@@ -17,8 +18,11 @@ import { postObjectAction } from "@/lib/api";
 import { useApps } from "@/lib/apps";
 import { useMainAgent } from "@/lib/mainAgent";
 import { Moment } from "@/lib/moments";
-import { openAgent } from "@/lib/router";
+import { openAgent, openBuilder, openStore } from "@/lib/router";
+import { useSurfaces } from "@/lib/surfaces";
+import { APP_STORE_TITLE } from "@/lib/title";
 import type { Agent, ArchivedApp } from "@/lib/types";
+import { APP_CREATOR_TITLE } from "@/lib/wizard";
 import { AppSettings } from "@/views/Agents";
 import { SETTINGS_TABS, type SettingsTab } from "@/views/AgentPane";
 import { AgentConnectors } from "@/views/Connectors";
@@ -32,6 +36,34 @@ const FILTERS = [
 ];
 
 export function Apps({
+  place,
+  onPlace,
+}: {
+  place: Placement;
+  onPlace: (place: Placement) => void;
+}) {
+  const offered = useSurfaces();
+  const mainAgent = useMainAgent();
+  const act = usePageAct(
+    offered["app-store"] ? (
+      <Button variant="send" size="bar" onClick={openStore}>
+        {APP_STORE_TITLE}
+      </Button>
+    ) : mainAgent ? (
+      <Button variant="send" size="bar" onClick={openBuilder}>
+        {APP_CREATOR_TITLE}
+      </Button>
+    ) : null,
+  );
+  return (
+    <>
+      {act}
+      <AppsTable place={place} onPlace={onPlace} />
+    </>
+  );
+}
+
+function AppsTable({
   place,
   onPlace,
 }: {

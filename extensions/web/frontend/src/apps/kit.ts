@@ -165,8 +165,10 @@ import { Markdown } from "@/lib/markdown";
 import { Moment, day } from "@/lib/moments";
 import {
   agentHash,
+  agentsHash,
   agentSetupHash,
   chatHash,
+  chatsHash,
   conversationSlotHash,
   firstRunHash,
   homeHash,
@@ -359,8 +361,10 @@ export {
   Moment,
   day,
   agentHash,
+  agentsHash,
   agentSetupHash,
   chatHash,
+  chatsHash,
   conversationSlotHash,
   firstRunHash,
   homeHash,

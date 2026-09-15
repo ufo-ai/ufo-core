@@ -6,12 +6,8 @@ import { App } from "@/App";
 import { WATCH_MS, type FirstRunPayload } from "@/lib/firstRun";
 import { BUILD_STEP_MS } from "@/views/FirstRun";
 import { resetChatStore } from "@/lib/chatStore";
-import {
-  firstRunHash,
-  HOME_CONNECTORS_LANE,
-  homeConversationLane,
-  homeHash,
-} from "@/lib/route";
+import {HOME_CONNECTORS_LANE, homeConversationLane} from "@/lib/homeLanes";
+import {firstRunHash, homeHash} from "@/lib/route";
 
 import {
   AGENT,
@@ -240,7 +236,7 @@ beforeEach(() => {
   useStreamFake();
 });
 
-const ANSWERS_KEY = "ufo.first-run." + ADMIN.email;
+const ANSWERS_KEY = "ufo.first-run." + ADMIN.workspace_id;
 
 function stored(): Record<string, unknown> | null {
   const held = sessionStorage.getItem(ANSWERS_KEY);
@@ -1528,7 +1524,7 @@ test("a run with no goal picked still writes who the workspace is for", async ()
   expect(intents(acts.calls)).toEqual([{ lane: "actions/memory/record_first_run", body: { body: WHO } }]);
 });
 
-test("each picked goal opens a thread of its own, before the workspace screen", async () => {
+test("the pressed goal and a picked one each open a thread after the first task's", async () => {
   await open({}, ADMIN, NO_SLACK);
   await passWebsite();
   await describeBusiness();

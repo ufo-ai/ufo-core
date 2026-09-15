@@ -1,27 +1,35 @@
-import { useSyncExternalStore } from "react";
-
-import { agentName } from "@/lib/agentName";
 import {
   IMESSAGE_SURFACE,
   SLACK_SURFACE,
   UFO_SURFACE,
-  isPortalChat,
   type AudienceEntry,
 } from "@/lib/audience";
 import type { Agent, OwnedConversation } from "@/lib/types";
+
+/** The liveest turn a conversation holds, `idle` where it holds none. */
+export type RailTurn = "running" | "queued" | "parked" | "idle";
 
 export type ChatRow = {
   conversation_id: string;
   agent_id: string;
   agent_name: string;
   title: string;
+  opening: string | null;
   last_at: string;
   surface: string;
   surface_label: string | null;
   audience: string;
   member_email: string | null;
+  owner_email: string | null;
+  owner_name: string | null;
   mine: boolean;
   speaker: string | null;
+  source: string | null;
+  turn: RailTurn;
+  automation_kind: string | null;
+  automation_name: string | null;
+  automation_title: string | null;
+  unread: boolean;
 };
 
 export type ChatsPayload = { conversation: OwnedConversation };
@@ -31,16 +39,30 @@ export type ConversationRow = {
   agent_id: string;
   agent_name: string;
   title: string;
+  opening: string | null;
   last_at: string;
   surface: string;
   surface_label: string | null;
   audience: string;
   member_email: string | null;
+  owner_email: string | null;
+  owner_name: string | null;
   mine: boolean;
   speaker: string | null;
+  source: string | null;
+  turn: RailTurn;
+  automation_kind: string | null;
+  automation_name: string | null;
+  automation_title: string | null;
+  unread: boolean;
 };
 
-export type ConversationsPayload = { objects: ConversationRow[]; next_cursor?: string | null };
+export type ConversationsPayload = {
+  objects: ConversationRow[];
+  next_cursor?: string | null;
+  /** The workspace holds more than the read was allowed to build, so the rows are not all of them. */
+  cut?: boolean;
+};
 
 export function chatRows(payload: ConversationsPayload): ChatRow[] {
   return payload.objects.map((row) => ({
@@ -48,13 +70,22 @@ export function chatRows(payload: ConversationsPayload): ChatRow[] {
     agent_id: row.agent_id,
     agent_name: row.agent_name,
     title: row.title,
+    opening: row.opening,
     last_at: row.last_at,
     surface: row.surface,
     surface_label: row.surface_label,
     audience: row.audience,
     member_email: row.member_email,
+    owner_email: row.owner_email,
+    owner_name: row.owner_name,
     mine: row.mine,
     speaker: row.speaker,
+    source: row.source,
+    turn: row.turn,
+    automation_kind: row.automation_kind,
+    automation_name: row.automation_name,
+    automation_title: row.automation_title,
+    unread: row.unread,
   }));
 }
 
@@ -69,25 +100,25 @@ export function railAudience(
   return rows.find((row) => row.conversation_id === conversationId) ?? linked[conversationId];
 }
 
-export const CHAT_SHOWN_OPTIONS: { surface: string; label: string }[] = [
-  { surface: UFO_SURFACE, label: "Terminal" },
-  { surface: SLACK_SURFACE, label: "Slack" },
-  { surface: IMESSAGE_SURFACE, label: "iMessage" },
+export type RailShown = {
+  terminal: boolean;
+  slack: boolean;
+  imessage: boolean;
+  automations: boolean;
+};
+
+export type RailSort = "recency" | "priority";
+
+export const RAIL_SORT_OPTIONS: { sort: RailSort; label: string }[] = [
+  { sort: "recency", label: "Recency" },
+  { sort: "priority", label: "Priority" },
 ];
 
-export type ChatLadder = "recency" | "app";
-
-export const CHAT_LADDERS: { value: ChatLadder; label: string }[] = [
-  { value: "recency", label: "Recency" },
-  { value: "app", label: "App" },
-];
-
-const HELD_LADDER = "chat-ladder";
-const HELD_HIDDEN = "chat-hidden";
+const HELD_SORT = "rail-sort";
 
 /** An app page frame reaches this module, and a browser blocking third-party storage raises on the
  *  property itself rather than on the read. */
-function store(): Storage | null {
+export function heldStorage(): Storage | null {
   try {
     return globalThis.localStorage ?? null;
   } catch {
@@ -95,114 +126,52 @@ function store(): Storage | null {
   }
 }
 
-export function heldChatLadder(): ChatLadder {
-  return store()?.getItem(HELD_LADDER) === "app" ? "app" : "recency";
+export function heldRailSort(): RailSort {
+  return heldStorage()?.getItem(HELD_SORT) === "priority" ? "priority" : "recency";
 }
 
-export function holdChatLadder(ladder: ChatLadder): void {
-  store()?.setItem(HELD_LADDER, ladder);
-  told();
+export function holdRailSort(sort: RailSort): void {
+  heldStorage()?.setItem(HELD_SORT, sort);
 }
 
-let heldWord = "";
-let heldSurfaces: string[] = [];
+export const RAIL_SHOWN_OPTIONS: { surface: keyof RailShown; label: string }[] = [
+  { surface: "terminal", label: "Terminal" },
+  { surface: "slack", label: "Slack" },
+  { surface: "imessage", label: "iMessage" },
+  { surface: "automations", label: "Automations" },
+];
 
-export function heldChatHidden(): string[] {
-  const word = store()?.getItem(HELD_HIDDEN) ?? "";
-  if (word !== heldWord) {
-    heldWord = word;
-    heldSurfaces = word.split(",").filter(Boolean);
-  }
-  return heldSurfaces;
-}
+/** The key names the option set it spells: a comma list written for a shorter set cannot say
+ *  what a member chose about an option that set did not hold, so it is not read. */
+const HELD_SHOWN = "rail-shown-with-automations";
 
-export function holdChatHidden(hidden: string[]): void {
-  store()?.setItem(HELD_HIDDEN, hidden.join(","));
-  told();
-}
-
-const listeners = new Set<() => void>();
-
-function told(): void {
-  for (const listener of listeners) listener();
-}
-
-/** Another tab of the portal writes the same browser store, and it says so with a `storage` event
- *  rather than through this page's own writes. */
-function subscribe(listener: () => void): () => void {
-  listeners.add(listener);
-  if (listeners.size === 1) globalThis.addEventListener("storage", told);
-  return () => {
-    listeners.delete(listener);
-    if (listeners.size === 0) globalThis.removeEventListener("storage", told);
+/** A browser holding nothing has never opened the filter, and the rail it draws is every
+ *  conversation the member has; an empty set is a member who switched them all off. */
+export function heldRailShown(): RailShown {
+  const held = heldStorage()?.getItem(HELD_SHOWN) ?? null;
+  if (held === null) return { terminal: true, slack: true, imessage: true, automations: true };
+  const named = held.split(",");
+  return {
+    terminal: named.includes("terminal"),
+    slack: named.includes("slack"),
+    imessage: named.includes("imessage"),
+    automations: named.includes("automations"),
   };
 }
 
-export function useChatLadder(): ChatLadder {
-  return useSyncExternalStore(subscribe, heldChatLadder);
+export function holdRailShown(shown: RailShown): void {
+  const named = RAIL_SHOWN_OPTIONS.filter((option) => shown[option.surface]);
+  heldStorage()?.setItem(HELD_SHOWN, named.map((option) => option.surface).join(","));
 }
 
-export function useChatHidden(): string[] {
-  return useSyncExternalStore(subscribe, heldChatHidden);
+const HELD_SIDEBAR = "sidebar";
+
+export function heldSidebar(): boolean {
+  return heldStorage()?.getItem(HELD_SIDEBAR) === "collapsed";
 }
 
-export function chatShown(row: ChatRow, hidden: string[]): boolean {
-  return isPortalChat(row.surface) || !hidden.includes(row.surface);
-}
-
-const DAY_MS = 86_400_000;
-
-export const CHAT_DATE_RUNS = [
-  "Today",
-  "Yesterday",
-  "Previous 7 days",
-  "Previous 30 days",
-  "Older",
-];
-
-function dayOf(at: Date): number {
-  return Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()) / DAY_MS;
-}
-
-export function chatDateRun(raw: string, now: Date): string {
-  const at = new Date(raw);
-  if (Number.isNaN(at.getTime())) return "Older";
-  const days = dayOf(now) - dayOf(at);
-  if (days <= 0) return "Today";
-  if (days === 1) return "Yesterday";
-  if (days < 7) return "Previous 7 days";
-  if (days < 30) return "Previous 30 days";
-  return "Older";
-}
-
-export type ChatRun = { label: string; rows: ChatRow[] };
-
-export const OTHER_MEMBERS = "Other members";
-
-export function chatRuns(
-  rows: ChatRow[],
-  ladder: ChatLadder,
-  hidden: string[],
-  now: Date,
-): ChatRun[] {
-  const shown = rows.filter((row) => chatShown(row, hidden));
-  const own = shown.filter((row) => row.mine);
-  const theirs = shown.filter((row) => !row.mine);
-  const grouped = own.length ? bucketed(own, ladder, now) : [];
-  return theirs.length ? grouped.concat({ label: OTHER_MEMBERS, rows: theirs }) : grouped;
-}
-
-function bucketed(rows: ChatRow[], ladder: ChatLadder, now: Date): ChatRun[] {
-  const named = (row: ChatRow) =>
-    ladder === "app" ? agentName(row.agent_name) : chatDateRun(row.last_at, now);
-  const buckets = new Map<string, ChatRow[]>();
-  for (const row of rows) {
-    const label = named(row);
-    buckets.set(label, (buckets.get(label) ?? []).concat(row));
-  }
-  const order =
-    ladder === "recency" ? CHAT_DATE_RUNS.filter((run) => buckets.has(run)) : [...buckets.keys()];
-  return order.map((run) => ({ label: run, rows: buckets.get(run) ?? [] }));
+export function holdSidebar(collapsed: boolean): void {
+  heldStorage()?.setItem(HELD_SIDEBAR, collapsed ? "collapsed" : "expanded");
 }
 
 const HELD_PINNED = "pinned-rows";
@@ -210,31 +179,119 @@ const HELD_PINNED = "pinned-rows";
 /** A browser holding `null` has never had a pin touched, which is not the same as one holding an empty
  *  set. A stored id no live agent answers resolves to nothing rather than a row. */
 export function heldPinned(): string[] | null {
-  const held = store()?.getItem(HELD_PINNED) ?? null;
+  const held = heldStorage()?.getItem(HELD_PINNED) ?? null;
   return held === null ? null : held.split("\n").filter(Boolean);
 }
 
 export function holdPinned(pinned: string[]): void {
-  store()?.setItem(HELD_PINNED, pinned.join("\n"));
+  heldStorage()?.setItem(HELD_PINNED, pinned.join("\n"));
 }
 
-export function appOrder(apps: Agent[], pinned: string[]): Agent[] {
+/** Two apps sharing a moment keep the order they arrived in, so a read answering for neither settles
+ *  the column rather than shuffling it. */
+export function appOrder(
+  apps: Agent[],
+  pinned: string[],
+  lastActiveAt: (agentId: string) => number | null,
+): Agent[] {
   const byId = new Map(apps.map((app) => [app.id, app]));
   const stood = pinned.map((id) => byId.get(id)).filter((app) => app !== undefined);
   const drawn = new Set(stood);
-  const rest = apps.filter((app) => !drawn.has(app));
-  rest.sort((left, right) => left.name.localeCompare(right.name));
-  return stood.concat(rest);
+  const active: { app: Agent; at: number }[] = [];
+  const never: Agent[] = [];
+  for (const app of apps) {
+    if (drawn.has(app)) continue;
+    const at = lastActiveAt(app.id);
+    if (at === null) never.push(app);
+    else active.push({ app, at });
+  }
+  active.sort((left, right) => right.at - left.at);
+  never.sort((left, right) => left.name.localeCompare(right.name));
+  return stood.concat(
+    active.map((row) => row.app),
+    never,
+  );
+}
+
+export type AppRun = { shown: Agent[]; more: Agent[] };
+
+/** Opened, the list scrolls inside `--size-apps-open` rather than cutting its tail: an app the list
+ *  refused to draw is one the member has no way to reach. */
+const APPS_SHOWN = 8;
+
+/** The cut is a count, not a judgement about any one app: a run that admitted apps for being busy
+ *  would resize itself as work started, and the list would collapse under the member as they acted. */
+export function appRun(apps: Agent[], working: (agentId: string) => boolean): AppRun {
+  const busy = apps.filter((app) => working(app.id));
+  const risen = new Set(busy.map((app) => app.id));
+  const ladder = busy.concat(apps.filter((app) => !risen.has(app.id)));
+  return { shown: ladder.slice(0, APPS_SHOWN), more: ladder.slice(APPS_SHOWN) };
 }
 
 const HELD_SECTIONS_SHUT = "sections-shut";
 
 export function heldSectionsShut(): string[] {
-  return (store()?.getItem(HELD_SECTIONS_SHUT) ?? "").split("\n").filter(Boolean);
+  return (heldStorage()?.getItem(HELD_SECTIONS_SHUT) ?? "").split("\n").filter(Boolean);
 }
 
 export function holdSectionsShut(shut: string[]): void {
-  store()?.setItem(HELD_SECTIONS_SHUT, shut.join("\n"));
+  heldStorage()?.setItem(HELD_SECTIONS_SHUT, shut.join("\n"));
+}
+
+const HELD_APPS_EXPANDED = "apps-expanded";
+
+export function heldAppsExpanded(): boolean {
+  return heldStorage()?.getItem(HELD_APPS_EXPANDED) === "expanded";
+}
+
+export function holdAppsExpanded(expanded: boolean): void {
+  heldStorage()?.setItem(HELD_APPS_EXPANDED, expanded ? "expanded" : "collapsed");
+}
+
+/** An automation's conversation is admitted on that alone: what drove it is the thing a member
+ *  filters it out for, and the surface it reported on is beside the point. */
+function admits(row: ChatRow, shown: RailShown): boolean {
+  if (row.automation_name !== null) return shown.automations;
+  if (row.surface === UFO_SURFACE) return shown.terminal;
+  if (row.surface === SLACK_SURFACE) return shown.slack;
+  if (row.surface === IMESSAGE_SURFACE) return shown.imessage;
+  return true;
+}
+
+/** The rail stands in one order, newest first: a chat is found by when it last moved. */
+const TURN_RANK: Record<RailTurn, number> = { parked: 0, running: 1, queued: 1, idle: 2 };
+
+/** The conversations the member is in — `mine` is the listing's one participation fact — so one
+ *  shared with them that they never spoke in stands on the Home table and not here. */
+export function railRows(rows: ChatRow[], shown: RailShown, sort: RailSort): ChatRow[] {
+  const kept = rows.filter((row) => row.mine && admits(row, shown));
+  if (sort === "recency") return kept;
+  return [...kept].sort(
+    (one, two) => TURN_RANK[one.turn] - TURN_RANK[two.turn] || moment(two) - moment(one),
+  );
+}
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+const WEEK_MS = 604_800_000;
+const YEAR_MS = 31_536_000_000;
+
+/** The rail's own stamp, narrower than the `Moment` the rest of the portal draws: the sidebar's
+ *  width belongs to the titles, so a row spends one number and one letter on the age of its chat.
+ *  The whole moment is still the row's to state, and the `time` it sits in carries it. A stamp
+ *  ahead of now — a clock that disagrees with the server's — reads as `now` rather than as a
+ *  negative age. */
+export function railStamp(raw: string, now: Date): string {
+  const at = new Date(raw).getTime();
+  if (Number.isNaN(at)) return "";
+  const span = Math.max(0, now.getTime() - at);
+  if (span < MINUTE_MS) return "now";
+  if (span < HOUR_MS) return Math.floor(span / MINUTE_MS) + "m";
+  if (span < DAY_MS) return Math.floor(span / HOUR_MS) + "h";
+  if (span < WEEK_MS) return Math.floor(span / DAY_MS) + "d";
+  if (span < YEAR_MS) return Math.floor(span / WEEK_MS) + "w";
+  return Math.floor(span / YEAR_MS) + "y";
 }
 
 export function stampIso(at: Date): string {
@@ -246,12 +303,33 @@ function moment(row: ChatRow): number {
   return Number.isNaN(at) ? 0 : at;
 }
 
-export function bumpChat(rows: ChatRow[], conversationId: string, at: Date): ChatRow[] {
+/** A conversation this tab has just admitted a turn into: its row moves to the top and its dot
+ *  reads live, until the next listing read states the turn the engine holds. */
+export function bumpChat(
+  rows: ChatRow[],
+  conversationId: string,
+  at: Date,
+  turn: RailTurn,
+): ChatRow[] {
   const bumped = rows.map((row) =>
-    row.conversation_id === conversationId ? { ...row, last_at: stampIso(at) } : row,
+    row.conversation_id === conversationId ? { ...row, last_at: stampIso(at), turn } : row,
   );
   bumped.sort((a, b) => moment(b) - moment(a));
   return bumped;
+}
+
+/** A chat this tab has just opened: its mark stops reading unread as the member reaches it, ahead
+ *  of the transcript read that moves the cursor the next listing answers from. */
+export function readChat(rows: ChatRow[], conversationId: string): ChatRow[] {
+  return rows.map((row) =>
+    row.conversation_id === conversationId ? { ...row, unread: false } : row,
+  );
+}
+
+/** A turn that ends restates its row's mark alone: its moment is the turn it started, so a landing
+ *  turn must not reorder the rail under the member. */
+export function turnedChat(rows: ChatRow[], conversationId: string, turn: RailTurn): ChatRow[] {
+  return rows.map((row) => (row.conversation_id === conversationId ? { ...row, turn } : row));
 }
 
 export function mergeChats(fetched: ChatRow[], held: ChatRow[]): ChatRow[] {

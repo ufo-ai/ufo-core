@@ -9,7 +9,7 @@ import { Viewer } from "@/lib/audience";
 import { chatHash } from "@/lib/route";
 import { MainAgentProvider } from "@/lib/mainAgent";
 
-import { AGENT, AGENT_ID, CONVO_ID, MEMBER, json, linked, useStreamFake, wire } from "./harness";
+import { AGENT, AGENT_ID, CHAT_ROW, CONVO_ID, json, linked, MEMBER, useStreamFake, wire } from "./harness";
 
 const AFTER_SETTLE = { timeout: 3000 };
 
@@ -311,6 +311,7 @@ test("the conversation the task belongs to stands in the pane by its title", asy
       json({ ...TASK, status: { ...TASK.status, conversation: CONVO_ID } }),
   });
   const nightly = {
+    ...CHAT_ROW,
     conversation_id: CONVO_ID,
     agent_id: AGENT_ID,
     agent_name: "assistant",
@@ -403,6 +404,7 @@ test("a conversation the rail never gathered is sought, so an app page names it 
     "/api/chats": () =>
       json({
         conversation: linked({
+          ...CHAT_ROW,
           conversation_id: CONVO_ID,
           agent_id: AGENT_ID,
           agent_name: "assistant",

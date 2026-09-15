@@ -4,9 +4,11 @@
 
 `frontend/` builds two portal shells into one static tree: the lanes shell (`src/`, built to
 `static/index.html`) and the sidebar shell (`sidebar/`, apps and chats in one sidebar, built to
-`static/sidebar.html`). `src/` owns their portal, theme, components, kernel, views, assets, and
-entry point. `sidebar/src/` holds only the sidebar's navigation and route seams; its config resolves
-every other `@/` import to `src/`. `portal_page` serves the sidebar shell unless
+`static/sidebar.html`). `src/` owns their portal, theme, components, kernel, views, assets, entry
+point, route table, router, rail store and the shell chrome both draw (`src/views/shell.tsx`, the
+route panes in `src/views/routed.tsx`). `sidebar/src/` holds only that shell's `App.tsx` — its
+layout, navigation and route dispatch — and `main.tsx`; its config resolves every other `@/` import
+to `src/`. `portal_page` serves the sidebar shell unless
 `enable-lanes-shell` answers true for the workspace; every silence of the flag read serves the
 sidebar shell. Both shells share `package.json` and its lockfile, and `pnpm test` runs their suites
 as vitest projects (`lanes`, `sidebar`).

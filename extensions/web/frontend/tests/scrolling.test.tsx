@@ -1,7 +1,8 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { beforeEach, expect, onTestFinished, test, vi } from "vitest";
 
-import { App, SCROLL_MARK, SCROLL_QUIET_MS } from "@/App";
+import { App } from "@/App";
+import { SCROLL_MARK, SCROLL_QUIET_MS } from "@/views/shell";
 
 import { AGENT, MEMBER, useStreamFake, wire } from "./harness";
 

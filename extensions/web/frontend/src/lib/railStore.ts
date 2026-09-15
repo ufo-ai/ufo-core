@@ -2,18 +2,32 @@ import { useSyncExternalStore } from "react";
 
 import type { ToastState } from "@/components/ui/toast";
 import { getJson, type IntentOutcome } from "@/lib/api";
+import { RESTING_STATUS_MS, WORKING_STATUS_MS } from "@/lib/appStatusStore";
 import type { ChatTurn } from "@/lib/chatStore";
 import {
   bumpChat,
+  turnedChat,
+  heldAppsExpanded,
   heldPinned,
+  heldRailShown,
+  heldRailSort,
   heldSectionsShut,
+  heldSidebar,
+  holdAppsExpanded,
   holdPinned,
+  holdRailShown,
+  holdRailSort,
   holdSectionsShut,
+  holdSidebar,
   chatRows,
   mergeChats,
+  railRows,
+  readChat,
   type ChatRow,
   type ChatsPayload,
   type ConversationsPayload,
+  type RailShown,
+  type RailSort,
 } from "@/lib/rail";
 import type { OwnedConversation } from "@/lib/types";
 
@@ -31,11 +45,15 @@ export type RailState = {
   sought: Readonly<Record<string, Sought>>;
   linked: Readonly<Record<string, OwnedConversation>>;
   fault: ToastState | null;
+  cut: boolean;
+  shown: RailShown;
+  sort: RailSort;
+  collapsed: boolean;
   pinned: string[] | null;
+  appsExpanded: boolean;
   sectionsShut: string[];
 };
 
-/** Built on first read rather than at import, so the reads happen once the page is standing. */
 function fresh(): RailState {
   return {
     phase: "loading",
@@ -43,7 +61,12 @@ function fresh(): RailState {
     sought: {},
     linked: {},
     fault: null,
+    cut: false,
+    shown: heldRailShown(),
+    sort: heldRailSort(),
+    collapsed: heldSidebar(),
     pinned: heldPinned(),
+    appsExpanded: heldAppsExpanded(),
     sectionsShut: heldSectionsShut(),
   };
 }
@@ -90,14 +113,14 @@ export function useRail(): RailState {
 /** A retry answering after the read it replaced would otherwise put the older rows back. */
 let reads = 0;
 
-/** The listing pages, so the read follows the continuation until this many rows stand — comfortably
- *  past the conversations a member works from, so a workspace with thousands costs a bounded number of reads. */
+/** Comfortably past what the sidebar can usefully show, stated so a workspace with thousands of
+ *  conversations costs a bounded number of reads. */
 const RAIL_ROWS_MAX = 300;
 
 export function readRail(): void {
   const read = ++reads;
   update((held) => ({ ...held, phase: "loading" }));
-  void walkRail(read);
+  void walkRail(read).then(wakeRail);
 }
 
 /** Each page stands as it lands and the walk goes on behind it, so the rail is drawn on the first
@@ -128,6 +151,7 @@ async function walkRail(read: number): Promise<void> {
     update((held) => ({
       ...held,
       phase: "ready" as const,
+      cut: result.payload.cut === true,
       rows: mergeChats(gathered, held.rows),
     }));
     cursor = result.payload.next_cursor ?? "";
@@ -135,6 +159,64 @@ async function walkRail(read: number): Promise<void> {
   }
 }
 
+/** One page answers the whole rail's dots: a running turn's own updates put its conversation at
+ *  the head of the `last_at` order. */
+async function refreshRail(): Promise<void> {
+  const read = reads;
+  const params = new URLSearchParams({ order_by: "last_at", order: "desc" });
+  const result = await getJson<ConversationsPayload>("/objects/conversation?" + params.toString());
+  if (read !== reads || !result.ok) return;
+  const fetched = chatRows(result.payload).map((row) => applyVisibility(row.conversation_id, row));
+  update((held) => ({ ...held, rows: mergeChats(fetched, held.rows) }));
+}
+
+let ticking: number | null = null;
+
+function poll(): void {
+  if (ticking !== null || document.visibilityState === "hidden") return;
+  const held = railState();
+  const live = railRows(held.rows, held.shown, held.sort).some(
+    (row) => row.turn === "running" || row.turn === "queued",
+  );
+  ticking = window.setTimeout(
+    () => {
+      ticking = null;
+      void refreshRail().then(poll);
+    },
+    live ? WORKING_STATUS_MS : RESTING_STATUS_MS,
+  );
+}
+
+function woken(): void {
+  if (document.visibilityState === "hidden") {
+    if (ticking !== null) window.clearTimeout(ticking);
+    ticking = null;
+    return;
+  }
+  poll();
+}
+
+/** The cadence is read off the drawn rows, so whatever lands rows, starts a turn or changes what is
+ *  drawn measures the wait ahead of the next re-read again rather than leaving the one it set. */
+function wakeRail(): void {
+  if (ticking === null) return;
+  window.clearTimeout(ticking);
+  ticking = null;
+  poll();
+}
+
+export function watchRail(): () => void {
+  document.addEventListener("visibilitychange", woken);
+  poll();
+  return () => {
+    document.removeEventListener("visibilitychange", woken);
+    if (ticking !== null) window.clearTimeout(ticking);
+    ticking = null;
+  };
+}
+
+/** An outstanding read is not an outcome, so it is not state a screen draws from: a permalink whose
+ *  read has not answered is loading, never unshared. */
 const seeking = new Set<string>();
 
 /** Every visit reads the conversation again, so its title line follows a rename or a change of
@@ -172,6 +254,7 @@ export function railFounded(row: ChatRow, conversation: OwnedConversation): void
     rows: mergeChats(held.rows, [row]),
     linked: { ...held.linked, [conversation.id]: conversation },
   }));
+  wakeRail();
 }
 
 export function changeRailVisibility(
@@ -213,15 +296,39 @@ export function settleRailVisibility(conversationId: string, outcome: IntentOutc
   readRail();
 }
 
-/** A row's moment is the turn it started, never the turn it finished: a send that failed leaves the
- *  rail where it stood. */
+export function railRead(conversationId: string): void {
+  update((held) => ({ ...held, rows: readChat(held.rows, conversationId) }));
+}
+
 export function railActivity(conversationId: string, turn: ChatTurn): void {
-  if (turn !== "running") return;
-  update((held) => ({ ...held, rows: bumpChat(held.rows, conversationId, new Date()) }));
+  update((held) => ({
+    ...held,
+    rows:
+      turn === "running"
+        ? bumpChat(held.rows, conversationId, new Date(), turn)
+        : turnedChat(held.rows, conversationId, turn),
+  }));
+  wakeRail();
+}
+
+export function pickRailSort(sort: RailSort): void {
+  holdRailSort(sort);
+  update((held) => ({ ...held, sort }));
 }
 
 export function quietRail(): void {
   update((held) => ({ ...held, fault: null }));
+}
+
+export function pickRailShown(shown: RailShown): void {
+  holdRailShown(shown);
+  update((held) => ({ ...held, shown }));
+  wakeRail();
+}
+
+export function foldSidebar(collapsed: boolean): void {
+  holdSidebar(collapsed);
+  update((held) => ({ ...held, collapsed }));
 }
 
 export function pickPinned(pinned: string[]): void {
@@ -236,9 +343,17 @@ export function pickSectionShut(label: string, shut: boolean): void {
   update((state) => ({ ...state, sectionsShut: next }));
 }
 
+export function pickAppsExpanded(appsExpanded: boolean): void {
+  holdAppsExpanded(appsExpanded);
+  update((held) => ({ ...held, appsExpanded }));
+}
+
 export function resetRailStore(): void {
   state = null;
   reads = 0;
   seeking.clear();
   visibilityChanges.clear();
+  if (ticking !== null) window.clearTimeout(ticking);
+  ticking = null;
+  document.removeEventListener("visibilitychange", woken);
 }

@@ -162,8 +162,9 @@ test("the workspace row lands a member on the first tab they are drawn", async (
   expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "apps", place: {} });
 });
 
-test("the palette carries no second name for the workspace", async () => {
+test("the palette's workspace row opens the first tab the member is drawn", async () => {
   location.hash = "";
+  wire({ "/transcript": () => json({ messages: [] }) });
   render(
     <App
       agents={[AGENT]}
@@ -173,12 +174,9 @@ test("the palette carries no second name for the workspace", async () => {
     />,
   );
 
-  await userEvent.click(await screen.findByRole("button", { name: "Launcher" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Search" }));
+  await userEvent.click(await screen.findByRole("option", { name: "Workspace" }));
 
-  expect(await screen.findByRole("option", { name: "Apps" })).toBeTruthy();
-  expect(screen.queryByRole("option", { name: "Workspace" })).toBeNull();
-
-  await userEvent.click(screen.getByRole("option", { name: "Apps" }));
   expect(parseHash(location.hash)).toEqual({ kind: "workspace", view: "apps", place: {} });
 });
 
@@ -195,9 +193,6 @@ test("the apps flag takes away every control that opens an apps address", async 
 
   const rail = within(await screen.findByRole("navigation", { name: "Tabs" }));
   expect(rail.queryByRole("button", { name: "New app" })).toBeNull();
-  await userEvent.click(rail.getByRole("button", { name: "Launcher" }));
-  expect(await screen.findByRole("option", { name: "Home" })).toBeTruthy();
-  expect(screen.queryByRole("option", { name: "Apps" })).toBeNull();
   desk.unmount();
 
   location.hash = "";
@@ -229,9 +224,33 @@ test("the sidebar's create-app row goes with the apps flag", async () => {
   expect(offered.getByRole("button", { name: "Create app" })).toBeTruthy();
 });
 
-test("the apps tab is withheld with the flag off, and stands with it on", async () => {
+test("the apps tab, the app index and the store are withheld with the flag off", async () => {
+  location.hash = "#/agents";
+  const index = render(
+    <App
+      agents={[AGENT]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
+  index.unmount();
+
+  location.hash = "#/agents/store";
+  const store = render(
+    <App
+      agents={[AGENT]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+  expect(await screen.findByText("This link is not valid.")).toBeTruthy();
+  store.unmount();
+
   location.hash = "#/workspace/apps";
-  const off = render(
+  render(
     <App
       agents={[AGENT]}
       member={ADMIN}
@@ -241,14 +260,41 @@ test("the apps tab is withheld with the flag off, and stands with it on", async 
   );
   expect(await screen.findByText("This link is not valid.")).toBeTruthy();
   expect(screen.queryByRole("tab", { name: "Apps" })).toBeNull();
-  off.unmount();
+});
 
+test("the apps tab and the app index stand with the flag on", async () => {
+  location.hash = "#/workspace/apps";
   render(<App agents={[AGENT]} member={ADMIN} surfaces={ALL_SURFACES} onAgents={() => {}} />);
 
   expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
+  expect(screen.queryByText("This link is not valid.")).toBeNull();
 });
 
-test("the lanes shell draws no app control while the flag withholds apps", async () => {
+test("the palette offers the apps index and the store only where both flags stand", async () => {
+  location.hash = "";
+  wire({ "/transcript": () => json({ messages: [] }) });
+  const withheld = render(
+    <App
+      agents={[AGENT]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, apps: false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Search" }));
+  expect(screen.queryByRole("option", { name: "Apps" })).toBeNull();
+  expect(screen.queryByRole("option", { name: "App Store" })).toBeNull();
+  withheld.unmount();
+
+  render(<App agents={[AGENT]} member={ADMIN} surfaces={ALL_SURFACES} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "Search" }));
+  expect(await screen.findByRole("option", { name: "Apps" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "App Store" })).toBeTruthy();
+});
+
+test("no app control is drawn while the flag withholds apps", async () => {
   atPhoneWidth();
   render(
     <App

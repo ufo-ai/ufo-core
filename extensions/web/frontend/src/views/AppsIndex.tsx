@@ -159,7 +159,7 @@ export function AppsIndex({
 }) {
   const mainAgent = useMainAgent();
   const { statuses } = useAppStatus();
-  const shown = appOrder(agents, pinned);
+  const shown = appOrder(agents, pinned, () => null);
   const key = mainAgent ? wizardKey(mainAgent.id) : null;
   const held = useChat(key ?? "");
   const running =

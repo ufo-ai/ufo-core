@@ -115,7 +115,6 @@ afterEach(() => {
   keyFaults = [];
   resetAppStatusStore();
   resetChatStore();
-  resetRailStore();
   resetRouter();
   resetScheme();
   resetStreams();
@@ -123,6 +122,7 @@ afterEach(() => {
   if (typeof sessionStorage !== "undefined") sessionStorage.clear();
   vi.unstubAllGlobals();
   if (typeof document !== "undefined") {
+    resetRailStore();
     cleanup();
     history.replaceState(null, "", location.pathname);
   }

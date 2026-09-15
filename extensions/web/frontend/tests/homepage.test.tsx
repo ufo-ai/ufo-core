@@ -5,7 +5,8 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import { attachBridge } from "@/lib/bridge";
 import { MainAgentProvider } from "@/lib/mainAgent";
-import { chatHash, homeConversationLane, homeHash } from "@/lib/route";
+import { homeConversationLane } from "@/lib/homeLanes";
+import { chatHash, homeHash } from "@/lib/route";
 import type { Agent } from "@/lib/types";
 import { HomepageFrame } from "@/views/HomepageFrame";
 
@@ -146,8 +147,6 @@ test("focusing the tab refreshes an ended homepage session", async () => {
   hasFocus.mockRestore();
 });
 
-/** The swap must never show the arriving copy's blank document, so the standing frame holds the screen
- *  until the fresh one has loaded. The bridge is the arriving frame's from the moment it mounts. */
 test("a redeploy keeps the standing page until the fresh frame loads, then swaps", async () => {
   let generation = 1;
   location.hash = "#/agents/" + AGENT_ID;
@@ -341,7 +340,7 @@ test("the chat toggle opens the composer when no directive conversation exists",
 });
 
 /** An app accumulates conversations no member opened, and the index answers one bounded page over all
- *  of them — so a member's own chat can fall outside it while the rail still carries it. */
+ *  of them, so a member's own chat can fall outside it while the rail still carries it. */
 function openApp(routes: Parameters<typeof wire>[0] = {}) {
   const wired = wire({
     "/transcript": () => json({ messages: [] }),

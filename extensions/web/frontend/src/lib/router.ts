@@ -1,13 +1,15 @@
 import { useSyncExternalStore } from "react";
 
 import {
+  AGENTS_HASH,
   BUILDER_HASH,
-  HOME_CONNECTORS_LANE,
-  HOME_NEW_LANE,
+  STORE_HASH,
   agentHash,
+  agentsHash,
   artifactTarget,
   bootRoute,
   chatHash,
+  chatsHash,
   firstRunHash,
   homeHash,
   newChatHash,
@@ -86,8 +88,16 @@ function standingOn(route: Route | null): Standing | null {
   return null;
 }
 
-/** An address stating a track wins and the store is written to match; stating none, the store hands
- *  back the track the screen was left holding and the address is written in the same tick. */
+export type Fleeting = (screen: TrackScreen, lane: string) => boolean;
+
+const NOTHING_FLEETING: Fleeting = () => false;
+
+/** A shell names the lanes it stands a member in rather than ones they carried: such a lane rides an
+ *  address the member pressed for, and is dropped from one they arrived at from elsewhere. */
+let fleeting = NOTHING_FLEETING;
+
+/** An address stating a track wins and the store is written to match; stating none, the held track
+ *  lands and the address is written in the same tick. It never runs while a screen renders. */
 function arrive(next: Route, before: Route | null, pressed = false): Route {
   const standing = standingOn(next);
   if (!standing) return next;
@@ -105,15 +115,15 @@ function arrive(next: Route, before: Route | null, pressed = false): Route {
     history.replaceState(null, "", landed.hash);
     return landed.route;
   }
+  if (same) {
+    holdTrack(standing.screen, []);
+    return next;
+  }
   const kept = heldTrack(standing.screen);
   if (!kept.length) return next;
   const landed = standing.land(kept);
   history.replaceState(null, "", landed.hash);
   return landed.route;
-}
-
-function fleeting(screen: TrackScreen, lane: string): boolean {
-  return screen === "home" && lane === HOME_NEW_LANE;
 }
 
 let held: Route | null = null;
@@ -154,7 +164,8 @@ export function useTravel(): number {
  *  states where the page would stand, and the browser lands on the entry that already says it. */
 export function navigate(hash: string, step: PlaceStep = "push"): void {
   if (step === "back") {
-    arrive(parseHash(hash), heldRoute(), true);
+    const target = parseHash(hash);
+    if (standingOn(target)?.opens !== undefined) arrive(target, heldRoute(), true);
     history.back();
     return;
   }
@@ -167,11 +178,14 @@ const readAddress = () => publish(arrive(parseHash(location.hash), heldRoute()))
 
 const CONNECTED_PARAM = "connected";
 
+/** The grant landed in a document this one replaced, so the address is all the screen it lands on has
+ *  to say what happened. `startRouter` takes it off the address as the page opens, which spends it. */
 export function connectArrival(): string {
   return new URLSearchParams(location.search).get(CONNECTED_PARAM) ?? "";
 }
 
-export function startRouter(): () => void {
+export function startRouter(options: { fleeting?: Fleeting } = {}): () => void {
+  fleeting = options.fleeting ?? NOTHING_FLEETING;
   const target = artifactTarget(location.search);
   if (target) location.replace(target);
   const booted = heldRoute();
@@ -197,8 +211,8 @@ export function openHome(): void {
   navigate(homeHash());
 }
 
-export function openHomeWithConnectors(lane: string): void {
-  navigate(homeHash({ opens: [lane, HOME_CONNECTORS_LANE] }));
+export function placeHome(place: WorkspacePlace, step: PlaceStep = "push"): void {
+  stepPlace(step, heldRoute().kind === "home", () => homeHash(place));
 }
 
 export function openChat(conversationId: string): void {
@@ -213,16 +227,43 @@ export function openNewChat(agentId: string): void {
   navigate(newChatHash(agentId));
 }
 
-export function openApps(): void {
-  navigate(workspaceHash("apps"));
+/** The wizard mounts only behind a member's press or a run already in flight: its address alone must
+ *  not found a conversation, or Back and reload would send model turns nobody asked for. */
+let building = false;
+
+export function buildWanted(): boolean {
+  return building;
 }
 
-export function forwardApps(): void {
-  navigate(workspaceHash("apps"), "replace");
+export function openAgents(): void {
+  building = false;
+  navigate(AGENTS_HASH);
+}
+
+export function forwardAgents(): void {
+  building = false;
+  navigate(AGENTS_HASH, "replace");
 }
 
 export function openBuilder(): void {
+  building = true;
   navigate(BUILDER_HASH);
+}
+
+export function openStore(): void {
+  navigate(STORE_HASH);
+}
+
+export function openChats(): void {
+  navigate(chatsHash());
+}
+
+export function placeChats(place: WorkspacePlace, step: PlaceStep): void {
+  stepPlace(step, heldRoute().kind === "chats", () => chatsHash(place));
+}
+
+export function openAutomations(): void {
+  navigate(automationsHash());
 }
 
 export function openAgent(agentId: string): void {
@@ -233,15 +274,13 @@ export function openAgentPlace(agentId: string, place: WorkspacePlace): void {
   navigate(agentHash(agentId, place));
 }
 
+/** Pushed from anywhere, but replaced or unwound only by the screen the member is standing on: a pane
+ *  reporting a place it was already leaving must not rewrite where they went. */
 function stepPlace(step: PlaceStep, standing: boolean, hash: () => string | null): void {
   if (step !== "push" && !standing) return;
   const to = hash();
   if (to === null) return;
   navigate(to, step);
-}
-
-export function placeHome(place: WorkspacePlace, step: PlaceStep = "push"): void {
-  stepPlace(step, heldRoute().kind === "home", () => homeHash(place));
 }
 
 export function placeAgent(place: WorkspacePlace, step: PlaceStep): void {
@@ -251,12 +290,8 @@ export function placeAgent(place: WorkspacePlace, step: PlaceStep): void {
   );
 }
 
-export function placeAutomations(place: WorkspacePlace, step: PlaceStep): void {
-  stepPlace(step, heldRoute().kind === "automations", () => automationsHash(place));
-}
-
-export function openAutomations(): void {
-  navigate(automationsHash());
+export function placeAgents(place: WorkspacePlace, step: PlaceStep): void {
+  stepPlace(step, heldRoute().kind === "agents", () => agentsHash(place));
 }
 
 export function placeWorkspace(view: WorkspaceTab, place: WorkspacePlace, step: PlaceStep): void {
@@ -273,6 +308,10 @@ export function placeSection(section: Section, place: WorkspacePlace, step: Plac
   );
 }
 
+export function placeAutomations(place: WorkspacePlace, step: PlaceStep): void {
+  stepPlace(step, heldRoute().kind === "automations", () => automationsHash(place));
+}
+
 export function placeFirstRun(step: string | undefined): void {
   stepPlace("replace", heldRoute().kind === "first-run", () => firstRunHash(step));
 }
@@ -280,4 +319,6 @@ export function placeFirstRun(step: string | undefined): void {
 export function resetRouter(): void {
   held = null;
   travelled = 0;
+  building = false;
+  fleeting = NOTHING_FLEETING;
 }

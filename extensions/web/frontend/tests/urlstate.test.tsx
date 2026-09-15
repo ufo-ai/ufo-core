@@ -5,12 +5,15 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "@/App";
 import type { Placement } from "@/kernel/pager";
 import { usePlaceRecorder } from "@/kernel/place";
+import { HOME_NEW_LANE, homeLaneAgent, mintHomeLane } from "@/lib/homeLanes";
 import { TRACK_MAX_SLOTS } from "@/lib/tracks";
 import {
   AGENTS_HASH,
+  agentsHash,
   BUILDER_HASH,
+  STORE_HASH,
+  automationsHash,
   FIRST_RUN_HASH,
-  HOME_NEW_LANE,
   agentHash,
   artifactTarget,
   bootRoute,
@@ -19,13 +22,10 @@ import {
   conversationSlotHash,
   firstRunHash,
   homeHash,
-  homeLaneAgent,
-  mintHomeLane,
   parseHash,
   routeIs,
   sectionHash,
   standing,
-  automationsHash,
   workspaceHash,
   type PlaceStep,
   type WorkspacePlace,
@@ -99,7 +99,6 @@ function serve() {
               description: "OpenAI API key",
               extension: "models",
               filled: true,
-              entries: [],
             },
           ],
         });
@@ -144,9 +143,9 @@ test("a workspace tab and a section carry their place and parse back to it", () 
   expect(parseHash("#/memory")).toEqual({ kind: "bad-link" });
 });
 
-test("the app list writes one address and reads links to its workspace tab", () => {
-  expect(workspaceHash("apps")).toBe(AGENTS_HASH);
-  expect(workspaceHash("apps", { chip: "Archived" })).toBe(AGENTS_HASH + "?chip=Archived");
+test("the app list is a workspace tab, and its chip rides the address", () => {
+  expect(workspaceHash("apps")).toBe("#/workspace/apps");
+  expect(workspaceHash("apps", { chip: "Archived" })).toBe("#/workspace/apps?chip=Archived");
   expect(parseHash("#/workspace/apps?chip=Archived")).toEqual({
     kind: "workspace",
     view: "apps",
@@ -154,9 +153,9 @@ test("the app list writes one address and reads links to its workspace tab", () 
   });
 });
 
-test("the app list does not mark the Workspace row as current", () => {
+test("the apps address stands on no workspace row, and its workspace tab does", () => {
   expect(standing(parseHash(AGENTS_HASH), "workspace")).toBe(false);
-  expect(standing(parseHash("#/workspace/apps"), "workspace")).toBe(false);
+  expect(standing(parseHash("#/workspace/apps"), "workspace")).toBe(true);
   expect(standing(parseHash("#/workspace/team"), "workspace")).toBe(true);
 });
 
@@ -197,8 +196,31 @@ test("an address naming an inherited property of an object names no workspace ta
   expect(parseHash("#/constructor")).toEqual({ kind: "bad-link" });
 });
 
+test("the automations screen carries one place, and the workspace holds none of it", () => {
+  expect(parseHash(automationsHash())).toEqual({ kind: "automations", place: {} });
+  expect(parseHash(automationsHash() + "?runs=older&open=run%2Fa%2Fturn1")).toEqual({
+    kind: "automations",
+    place: { runs: "older", opens: ["run/a/turn1"] },
+  });
+  expect(
+    parseHash(
+      automationsHash() +
+        "?open=automation%2Fa%2Fscheduled_task%2Fnightly~run%2Fa%2Fscheduled_task%2Fnightly%2Fturn1",
+    ),
+  ).toEqual({
+    kind: "automations",
+    place: {
+      opens: ["automation/a/scheduled_task/nightly", "run/a/scheduled_task/nightly/turn1"],
+    },
+  });
+  expect(parseHash(automationsHash({ opens: ["object/a/scheduled_task/nightly"] }))).toEqual({
+    kind: "automations",
+    place: { opens: ["object/a/scheduled_task/nightly"] },
+  });
+  expect(parseHash("#/workspace/automations")).toEqual({ kind: "bad-link" });
+});
+
 test("the automations screen is one address, carrying both its list pages and its open lane", () => {
-  expect(parseHash("#/automations")).toEqual({ kind: "automations", place: {} });
   expect(parseHash("#/automations?after=page2&runs=older")).toEqual({
     kind: "automations",
     place: { after: "page2", runs: "older" },
@@ -216,7 +238,6 @@ test("the automations screen is one address, carrying both its list pages and it
   ).toBe(
     "#/automations?open=automation%2Fa%2Fscheduled_task%2Fnightly%7Eobject%2Fa%2Fscheduled_task%2Fnightly",
   );
-  expect(parseHash("#/workspace/automations")).toEqual({ kind: "bad-link" });
 });
 
 test("a conversation slot has a builder, and it writes the address its own read takes", () => {
@@ -256,19 +277,24 @@ test("a chat address names the run it stands on, and refuses a run that is not a
 });
 
 test("a screen that carries no place is read whatever the address arrived holding", () => {
-  expect(parseHash(AGENTS_HASH + "?x=1")).toEqual({
-    kind: "workspace",
-    view: "apps",
-    place: {},
-  });
-  expect(parseHash(BUILDER_HASH + "?x=1")).toEqual({ kind: "builder" });
+  expect(parseHash(BUILDER_HASH + "?x=1")).toEqual({ kind: "agents", build: true, place: {} });
+  expect(parseHash(STORE_HASH + "?x=1")).toEqual({ kind: "store" });
   expect(parseHash(FIRST_RUN_HASH + "?x=1")).toEqual({ kind: "first-run" });
-});
-
-test("home carries its lanes, and the bare address is home standing none", () => {
   expect(parseHash("")).toEqual({ kind: "home", place: {} });
   expect(parseHash("#")).toEqual({ kind: "home", place: {} });
   expect(parseHash("#/")).toEqual({ kind: "home", place: {} });
+});
+
+test("the apps screen carries its place, and a filter rides its address", () => {
+  expect(agentsHash()).toBe(AGENTS_HASH);
+  expect(parseHash(AGENTS_HASH + "?x=1")).toEqual({ kind: "agents", place: {} });
+
+  const filtered: WorkspacePlace = { chip: "Archived" };
+  expect(agentsHash(filtered)).toBe(AGENTS_HASH + "?chip=Archived");
+  expect(parseHash(agentsHash(filtered))).toEqual({ kind: "agents", place: filtered });
+});
+
+test("home carries its lanes, and the bare address is home standing none", () => {
   expect(parseHash("#/?ref=mail")).toEqual({ kind: "home", place: {} });
 
   const lanes: WorkspacePlace = { opens: [AGENT.id, HOME_NEW_LANE] };
@@ -544,11 +570,7 @@ test("a hash under the torn-out subagent namespace names no route", () => {
 
 test("a conversation named as a query target boots on that conversation", () => {
   expect(bootRoute("", "?c=" + CONVO_ID)).toEqual({ kind: "chat", conversationId: CONVO_ID });
-  expect(bootRoute("#/agents", "?c=" + CONVO_ID)).toEqual({
-    kind: "workspace",
-    view: "apps",
-    place: {},
-  });
+  expect(bootRoute("#/agents", "?c=" + CONVO_ID)).toEqual({ kind: "agents", place: {} });
   expect(bootRoute("", "")).toEqual({ kind: "home", place: {} });
 });
 
@@ -566,11 +588,7 @@ test("the sign-in that founded the workspace boots on its opening chat", () => {
     kind: "chat",
     conversationId: CONVO_ID,
   });
-  expect(bootRoute("#/agents", "?first=1")).toEqual({
-    kind: "workspace",
-    view: "apps",
-    place: {},
-  });
+  expect(bootRoute("#/agents", "?first=1")).toEqual({ kind: "agents", place: {} });
   expect(bootRoute("", "")).toEqual({ kind: "home", place: {} });
 });
 
@@ -619,11 +637,6 @@ test("an address the portal cannot read reports a bad link, whichever part is ma
 
   expect(await screen.findByText("This link is not valid.")).toBeTruthy();
 });
-
-
-
-
-
 
 test("a search rides the hash by replacement, never as a history entry", async () => {
   location.hash = "#/agents";
@@ -707,10 +720,6 @@ test("the usage range rides the address, and a link naming one lands on it", asy
   expect(reloaded.some((url) => url.includes("/workspace/usage?range=90d"))).toBe(true);
 });
 
-
-
-
-
 test("a refused memory cursor leaves a way back to the first page", async () => {
   location.hash = workspaceHash("memory", { after: "not-a-cursor" });
   vi.stubGlobal(
@@ -779,8 +788,6 @@ test("a search cleared from a kind returns to that kind rather than page one", a
   await waitFor(() => expect(location.hash).toBe("#/workspace/memory?kind=fact"));
   expect(screen.getByRole("tab", { name: "Fact" }).getAttribute("aria-selected")).toBe("true");
 });
-
-
 
 test("a reloaded memory search prefills the box and fetches the query", async () => {
   location.hash = workspaceHash("memory", { q: "roadmap" });

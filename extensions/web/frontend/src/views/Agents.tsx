@@ -1,19 +1,20 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { IconChevronDown } from "@tabler/icons-react";
 
-import { Sheet } from "@/components/ui/sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Sheet } from "@/components/ui/sheet";
 import { ObjectPane } from "@/kernel/objects";
+import { Empty } from "@/kernel/panel";
 import { agentName } from "@/lib/agentName";
 import { chatState, clearChat, updateChat, useChat } from "@/lib/chatStore";
 import { cn } from "@/lib/cn";
 import { useMainAgent } from "@/lib/mainAgent";
-import { openApps } from "@/lib/router";
-import { wizardKey } from "@/lib/wizard";
+import { openAgents, openHome } from "@/lib/router";
+import { useSurfaces } from "@/lib/surfaces";
 import {
   AgentPane,
   SETTINGS_TABS,
@@ -22,6 +23,7 @@ import {
   type SettingsTab,
 } from "@/views/AgentPane";
 import { AppBuilder } from "@/views/AppBuilder";
+import { wizardKey } from "@/lib/wizard";
 import { AgentConnectors } from "@/views/Connectors";
 import { Settings } from "@/views/Settings";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
@@ -30,26 +32,22 @@ import type { Agent, Member } from "@/lib/types";
 
 export type AgentsProps = {
   member: Member;
-  selected: Agent;
+  selected: Agent | null;
+  build: boolean;
   chats: ChatRow[] | null;
   place: WorkspacePlace;
   onPlace: (place: WorkspacePlace, step: PlaceStep) => void;
   onCreated: (agent: Agent, conversationId: string, title: string) => void;
   onAgents: () => void;
-};
-
-export type AgentBuilderProps = {
-  member: Member;
-  onAgents: () => void;
   onExitBuilder: () => void;
-  onForwardApps: () => void;
+  onForwardAgents: () => void;
   buildWanted: boolean;
 };
 
+/** Work outranks the rest: an app that is running is telling the member something is happening now,
+ *  and that is true whether or not its setup is finished. */
 const TASK_KIND = "scheduled_task";
 
-/** It stays out of the modal state radix would take: a record opened from the tasks read raises the
- *  shared sheet over this panel, and a modal layer under it would hold the pointer away from it. */
 export function AppSettings({
   agent,
   tab,
@@ -95,107 +93,107 @@ export function AppSettings({
   );
 }
 
-export function AgentBuilder({
+export function Agents({
   member,
+  selected,
+  build,
+  chats,
+  place,
+  onPlace,
+  onCreated,
   onAgents,
   onExitBuilder,
-  onForwardApps,
+  onForwardAgents,
   buildWanted,
-}: AgentBuilderProps) {
+}: AgentsProps) {
   const mainAgent = useMainAgent();
+  const surfaces = useSurfaces();
+  const shown = selected ?? mainAgent;
   const key = mainAgent ? wizardKey(mainAgent.id) : null;
   const held = useChat(key ?? "");
   const running =
     key !== null &&
     !held.closed &&
     (held.busy || (held.messages ?? []).length > 0 || held.founded !== null);
-  const building = mainAgent !== null && (buildWanted || running);
-  const forwarding = !building;
+  const building = mainAgent !== null && build && (buildWanted || running);
+  const forwarding = build && !building;
   useEffect(() => {
-    if (forwarding) onForwardApps();
-  }, [forwarding, onForwardApps]);
-
-  if (!building || !mainAgent) return null;
-
-  return (
-    <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-1">
-      <AppBuilder
-        agent={mainAgent}
-        member={member}
-        onSettled={onAgents}
-        onClose={() => {
-          if (key !== null) {
-            if (chatState(key).busy) updateChat(key, (state) => ({ ...state, closed: true }));
-            else clearChat(key);
-          }
-          onExitBuilder();
-        }}
-      />
-    </div>
-  );
-}
-
-export function Agents({
-  member,
-  selected,
-  chats,
-  place,
-  onPlace,
-  onCreated,
-  onAgents,
-}: AgentsProps) {
+    if (forwarding) onForwardAgents();
+  }, [forwarding, onForwardAgents]);
   const [settling, setSettling] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>(SETTINGS_TABS[0]);
   const [scheduled, setScheduled] = useState<string[]>([]);
 
+  if (forwarding) return null;
+
   return (
     <div className="relative grid min-h-0 min-w-0 flex-1 grid-cols-1">
-      <AgentPane
-        key={selected.id}
-        agent={selected}
-        member={member}
-        chats={chats}
-        onCreated={(conversationId, title) => onCreated(selected, conversationId, title)}
-        onFounded={onCreated}
-        onAgents={onAgents}
-        onSettings={(tab) => {
-          setSettingsTab(tab);
-          setScheduled([]);
-          setSettling(true);
-        }}
-        place={place}
-        onPlace={onPlace}
-      />
-      <AppSettings
-        agent={selected}
-        tab={settingsTab}
-        open={settling}
-        onTab={setSettingsTab}
-        onClose={() => setSettling(false)}
-      >
-        {settingsTab === "settings" ? (
-          <Settings
-            key={selected.id}
-            agent={selected}
-            onArchived={() => {
-              setSettling(false);
-              openApps();
-              onAgents();
-            }}
-          />
-        ) : null}
-        {settingsTab === "connectors" ? <AgentConnectors agent={selected} /> : null}
-        {settingsTab === "scheduled" ? (
-          <ObjectPane
-            key={selected.id}
-            agentId={selected.id}
-            kind={TASK_KIND}
-            makes={false}
-            opens={scheduled}
-            onPlace={(next) => setScheduled(next.opens ?? [])}
-          />
-        ) : null}
-      </AppSettings>
+      {building && mainAgent ? (
+        <AppBuilder
+          agent={mainAgent}
+          member={member}
+          onSettled={onAgents}
+          onClose={() => {
+            if (key !== null) {
+              if (chatState(key).busy) updateChat(key, (state) => ({ ...state, closed: true }));
+              else clearChat(key);
+            }
+            onExitBuilder();
+          }}
+        />
+      ) : shown ? (
+        <AgentPane
+          key={shown.id}
+          agent={shown}
+          member={member}
+          chats={chats}
+          onCreated={(conversationId, title) => onCreated(shown, conversationId, title)}
+          onFounded={onCreated}
+          onAgents={onAgents}
+          onSettings={(tab) => {
+            setSettingsTab(tab);
+            setScheduled([]);
+            setSettling(true);
+          }}
+          place={place}
+          onPlace={onPlace}
+        />
+      ) : (
+        <Empty>No app is visible to you.</Empty>
+      )}
+      {shown && !building ? (
+        <AppSettings
+          agent={shown}
+          tab={settingsTab}
+          open={settling}
+          onTab={setSettingsTab}
+          onClose={() => setSettling(false)}
+        >
+          {settingsTab === "settings" ? (
+            <Settings
+              key={shown.id}
+              agent={shown}
+              onArchived={() => {
+                setSettling(false);
+                if (surfaces.apps) openAgents();
+                else openHome();
+                onAgents();
+              }}
+            />
+          ) : null}
+          {settingsTab === "connectors" ? <AgentConnectors agent={shown} /> : null}
+          {settingsTab === "scheduled" ? (
+            <ObjectPane
+              key={shown.id}
+              agentId={shown.id}
+              kind={TASK_KIND}
+              makes={false}
+              opens={scheduled}
+              onPlace={(next) => setScheduled(next.opens ?? [])}
+            />
+          ) : null}
+        </AppSettings>
+      ) : null}
     </div>
   );
 }

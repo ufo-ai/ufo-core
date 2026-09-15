@@ -127,6 +127,7 @@ test("ready is answered with the member's own init payload", async () => {
     agentId: AGENT_ID,
     banded: false,
     place: {},
+    crumb: undefined,
     portal: location.origin,
   });
 });
@@ -297,6 +298,41 @@ test("a text row posts the member's message and returns the admission", async ()
     refusal: null,
     fault: null,
   });
+});
+
+test("an intent rides through only when its verb is a page's own control", async () => {
+  const applied = { applied: true, message: "Saved." };
+  const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(applied));
+  vi.stubGlobal("fetch", fetchMock);
+  const { iframe, posted } = fakeFrame();
+  bridge = attachBridge({ iframe, member: MEMBER, agentId: AGENT_ID });
+  deliver(
+    {
+      ufo: "call",
+      id: "i1",
+      method: "POST",
+      path: "agents/" + AGENT_ID + "/intents",
+      body: { verb: "apply", kind: "scheduled_task", name: "daily-brief", spec: { paused: true } },
+    },
+    iframe.contentWindow,
+  );
+  await vi.waitFor(() => expect(posted).toHaveLength(1));
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(posted[0]).toMatchObject({ ufo: "data", id: "i1", ok: true });
+
+  deliver(
+    {
+      ufo: "call",
+      id: "i2",
+      method: "POST",
+      path: "agents/" + AGENT_ID + "/intents",
+      body: { verb: "add_member", email: "x@example.com", admin: true },
+    },
+    iframe.contentWindow,
+  );
+  await vi.waitFor(() => expect(posted).toHaveLength(2));
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(posted[1]).toMatchObject({ ufo: "data", id: "i2", ok: false });
 });
 
 test("an action from a page is marked for the server's presentation gate", async () => {

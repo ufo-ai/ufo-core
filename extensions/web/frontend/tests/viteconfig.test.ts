@@ -49,29 +49,13 @@ test("the sidebar shell's page is named under the base the server publishes", as
   expect(routed("GET", "/surface/web/api/agents")).toBeUndefined();
 });
 
-test("the sidebar shell contains only its entry, navigation, and route seams", async () => {
+test("the sidebar shell holds its entry and its own App, and nothing with a src twin", async () => {
   const source = join(import.meta.dirname, "..", "sidebar", "src");
   expect(
     readdirSync(source, { recursive: true, encoding: "utf8" })
       .filter((path) => /\.[tj]sx?$/.test(path))
       .sort()
-  ).toEqual([
-    "App.tsx",
-    "components/Sidebar.tsx",
-    "lib/chatMark.tsx",
-    "lib/rail.ts",
-    "lib/railStore.ts",
-    "lib/route.ts",
-    "lib/router.ts",
-    "lib/title.ts",
-    "main.tsx",
-    "views/Agents.tsx",
-    "views/Apps.tsx",
-    "views/Chats.tsx",
-    "views/FirstRun.tsx",
-    "views/Spotlight.tsx",
-    "views/Store.tsx",
-  ]);
+  ).toEqual(["App.tsx", "main.tsx"]);
 
   const loaded = await loadConfigFromFile(
     { command: "build", mode: "production" },

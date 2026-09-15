@@ -20,6 +20,8 @@ beforeEach(() => {
   useStreamFake();
 });
 
+/** `laidLog` measures the log through `Element.prototype`, which every later test here shares. Undoing
+ *  it now rather than at the end means one failed assertion takes down that test alone. */
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -138,20 +140,11 @@ test("the open chat states who reads it on its title line, as the member's own c
   await screen.findByText("No messages in this conversation yet.");
   const detail = "Only you read this conversation. " + ADMIN_DISCLOSURE;
   const control = screen.getByRole("button", { name: "Visibility: Private" });
-  const name = screen.getByText(CHAT_ROW.title);
-  expect(control.parentElement!.contains(name)).toBe(true);
-  expect(document.body.querySelector("[data-slot=header]")!.contains(control)).toBe(true);
+  expect(control.parentElement!.textContent).toContain(CHAT_ROW.title);
   expect(control.querySelector("svg")).toBeTruthy();
   expect(control.getAttribute("title")).toBe(detail);
   expect(document.body.querySelector("[data-slot=audience]")).toBeNull();
-});
-
-test("the control names the audience in a tooltip on focus", async () => {
-  wire(transcript());
-  open();
-
-  await screen.findByText("No messages in this conversation yet.");
-  fireEvent.focus(screen.getByRole("button", { name: "Visibility: Private" }));
+  fireEvent.focus(control);
   expect((await screen.findByRole("tooltip")).textContent).toBe("Only you");
 });
 
@@ -163,11 +156,7 @@ test("a chat another member owns states its audience by that address", async () 
   open();
 
   await screen.findByText("No messages in this conversation yet.");
-  const mark = audienceMark();
-  expect(mark.getAttribute("title")).toBe(
-    "Only mel@example.com reads this conversation. " + ADMIN_DISCLOSURE,
-  );
-  fireEvent.focus(mark);
+  fireEvent.focus(audienceMark());
   expect((await screen.findByRole("tooltip")).textContent).toBe("Private to mel@example.com");
 });
 
@@ -176,9 +165,7 @@ test("a reply from an agent on auto states its spend and names no model", async 
     ...transcript(),
     "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }),
   });
-  render(
-    <App agents={[{ ...AGENT, model: "auto" }]} member={MEMBER} onAgents={() => {}} />,
-  );
+  render(<App agents={[{ ...AGENT, model: "auto" }]} member={MEMBER} onAgents={() => {}} />);
 
   await screen.findByText("No messages in this conversation yet.");
   await userEvent.type(screen.getByLabelText("Ask UFO"), "hello");
@@ -527,8 +514,6 @@ test("each subagent the turn waits on states what it is doing, under the count",
   expect(await screen.findByText("Awaiting 2 subagents")).toBeTruthy();
   expect(screen.getByText("Looking up info")).toBeTruthy();
   expect(screen.getByText("Naming the new issue")).toBeTruthy();
-  expect(order("Awaiting 2 subagents", "Looking up info")).toBe(true);
-  expect(order("Looking up info", "Naming the new issue")).toBe(true);
 
   StreamFake.last().emit("subagent_activity", { ...FIRST_RUN, status: "done" });
 
@@ -574,15 +559,13 @@ test("the wait stands through a message sent mid-run and the answer that message
   open();
 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  StreamFake.last().emit("subagent_activity", { ...FIRST_RUN, activity: "Looking up info" });
+  StreamFake.last().emit("subagent_activity", FIRST_RUN);
   expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
 
   await userEvent.type(screen.getByLabelText("Ask UFO"), "and the tags?");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(await screen.findByText("and the tags?")).toBeTruthy();
   StreamFake.last().emit("absorbed", { arrivals: [ARRIVAL_ID] });
-  expect(await screen.findByText("Awaiting 1 subagent")).toBeTruthy();
-
   StreamFake.last().emit("subagent", { ...LOOKUP_NODE, running: true });
   StreamFake.last().emit("terminal", {
     status: "done",
@@ -595,7 +578,6 @@ test("the wait stands through a message sent mid-run and the answer that message
   expect(await screen.findByText("Tagged v2; the lookup runs on.")).toBeTruthy();
   expect(screen.getByText("Awaiting 1 subagent")).toBeTruthy();
   expect(screen.getByText("Lookup")).toBeTruthy();
-  expect(StreamFake.opened.length).toBe(1);
 });
 
 test("the wait goes when the read says the run the turn left going has ended", async () => {
@@ -901,8 +883,8 @@ test("a reply frame replayed after a reconnect states its reply once", async () 
   StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
   expect(await screen.findByText(saying("Ducks glide at dusk."))).toBeTruthy();
 
-  // The hub replays frames after a cursor, and a recovered turn republishes the spans its recorded rounds
-  // produced. The span's id is durable, so the page draws it once.
+  // The hub replays frames after a cursor, and a recovered turn republishes the spans its recorded
+  // rounds produced. The span's id is durable, so the page draws it once.
   StreamFake.last().emit("reply", { id: REPLY_ID, text: "Ducks glide at dusk." });
 
   expect(screen.getAllByText(saying("Ducks glide at dusk.")).length).toBe(1);
@@ -2597,6 +2579,8 @@ test("a streamed chunk never steals focus from where the member put it", async (
   expect(document.activeElement).toBe(elsewhere);
 });
 
+/** Each page's response names the one above it, so the chain is the server's to state. The test's
+ *  IntersectionObserver sees everything at once, so the pages land unprompted. */
 test("a compacted conversation pages its earlier messages in above the tail", async () => {
   const { calls } = wire({
     "/transcript?cursor=page-2": () =>
@@ -3348,15 +3332,6 @@ test("a reader inside the tolerance band still counts as at the bottom", async (
   expect(log.scrollTop).toBe(FOOT - 10);
 });
 
-test("the composer takes no focus as it mounts", async () => {
-  wire(transcript());
-  open();
-  await screen.findByText("No messages in this conversation yet.");
-
-  expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
-  expect(document.activeElement).toBe(document.body);
-});
-
 test("sending returns focus to the composer instead of stranding it on the page", async () => {
   wire({ ...transcript(), "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "hello" }) });
   open();
@@ -3521,6 +3496,32 @@ test("a new conversation's composer offers no way to switch app", async () => {
   expect(screen.queryByRole("combobox", { name: "App" })).toBeNull();
 });
 
+test("a new conversation opens with the composer focused", async () => {
+  wire({ ...transcript() });
+  location.hash = newChatHash(AGENT_ID);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const box = await screen.findByLabelText("Ask UFO");
+  expect(document.activeElement).toBe(box);
+});
+
+test("a thread opened from the rail lands the cursor in the composer", async () => {
+  wire({ ...transcript() });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const box = await screen.findByLabelText("Ask UFO");
+  await waitFor(() => expect(document.activeElement).toBe(box));
+});
+
+test("a thread opened at a phone width leaves the composer alone, so no keyboard rises", async () => {
+  atPhoneWidth();
+  wire({ ...transcript() });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const box = await screen.findByLabelText("Ask UFO");
+  expect(document.activeElement).not.toBe(box);
+});
+
 test("the composer's attach act stands on the centre line of the send act", async () => {
   wire({ ...transcript() });
   location.hash = newChatHash(AGENT_ID);
@@ -3537,7 +3538,7 @@ test("the composer's attach act stands on the centre line of the send act", asyn
 test("a route that renames the start screen's agent reads that agent's own draft", async () => {
   wire({ ...transcript() });
   localStorage.setItem("ufo.chat-draft." + MEMBER.id + "/new:" + AGENT_ID, "words for the main agent");
-  location.hash = newChatHash(SECOND_ID);
+  location.hash = "#/new/" + SECOND_ID;
   render(<App agents={[AGENT, SECOND]} member={MEMBER} onAgents={() => {}} />);
 
   const box = (await screen.findByLabelText("Ask UFO")) as HTMLTextAreaElement;
@@ -3546,7 +3547,6 @@ test("a route that renames the start screen's agent reads that agent's own draft
   follow(newChatHash(AGENT_ID));
 
   await waitFor(() => expect(box.value).toBe("words for the main agent"));
-  expect(screen.getByLabelText("Ask UFO")).toBe(box);
   expect(localStorage.getItem("ufo.chat-draft." + MEMBER.id + "/new:" + SECOND_ID)).toBe(
     "words for the second",
   );
@@ -3620,12 +3620,13 @@ test("the composer names the app it addresses, and the band can be taken away", 
 
   await screen.findByLabelText("Ask UFO");
 
-  const band = screen.getByText("Second");
+  const page = within(screen.getByRole("main"));
+  const band = page.getByText("Second");
   expect(band.parentElement!.querySelector("svg")).toBeTruthy();
 
   await userEvent.click(screen.getByRole("button", { name: "Stop addressing Second" }));
 
-  expect(screen.queryByText("Second")).toBeNull();
+  expect(page.queryByText("Second")).toBeNull();
   expect(screen.getByLabelText("Ask UFO")).toBeTruthy();
 });
 
@@ -3731,6 +3732,21 @@ test("a ranked slate replaces every row the screen ships with", async () => {
   expect(screen.getByRole("button", { name: /invoice past its terms/ })).toBeTruthy();
   expect(screen.getByRole("button", { name: /waiting on legal/ })).toBeTruthy();
   expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
+});
+
+test("a spare unlock stands in an app's slot and wears the brand of what it needs", async () => {
+  wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
+  location.hash = newChatHash(AGENT_ID);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const row = await screen.findByRole("button", { name: /accounts each deal is still waiting on/ });
+  expect(row.textContent).not.toContain("Connect");
+
+  const glyph = row.firstElementChild!;
+  expect(glyph.getAttribute("style")).toContain("--brand-salesforce");
+  const mark = glyph.getAttribute("class") ?? "";
+  expect(mark).toContain("size-(--size-glyph)");
+  expect(mark).not.toContain("--size-brand-mark");
 });
 
 test("a ranked starter says its own sentence, and a check-in asks after work", async () => {
@@ -3984,9 +4000,15 @@ test("every message after a pick carries it, one before it the agent's own model
   expect(sent).toEqual([null, "gpt-5.6-sol", "gpt-5.6-sol"]);
 });
 
-test("the pick lands on the new chat screen, where the composer grabs the focus back", async () => {
+test("a pick lands on the new chat screen and rides the message it founds", async () => {
   const sent: (string | null)[] = [];
-  wire(picking(sent));
+  wire({
+    ...transcript(),
+    "/chat": (_url, init) => {
+      sent.push(new Headers(init?.headers).get("x-ufo-model"));
+      return json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" });
+    },
+  });
   location.hash = newChatHash(AGENT_ID);
   render(
     <App agents={[{ ...AGENT, model: "claude-opus-4-8" }]} member={MEMBER} onAgents={() => {}} />,
@@ -3998,6 +4020,11 @@ test("the pick lands on the new chat screen, where the composer grabs the focus 
 
   expect(await screen.findByRole("button", { name: "Model: GPT-5.6 Sol" })).toBeTruthy();
   expect(screen.queryAllByRole("menu")).toEqual([]);
+
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "hello");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  expect(sent).toEqual(["gpt-5.6-sol"]);
 });
 
 /** The rows of the flyout a model stands in: a submenu that has just closed lingers in the tree

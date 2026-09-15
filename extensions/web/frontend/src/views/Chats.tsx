@@ -10,7 +10,7 @@ import { Header, PageToolbar, Pane } from "@/kernel/pane";
 import { Notice, PanelEmpty, PanelSkeleton, Section, usePanelRead } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { SHARED_SUBJECT } from "@/lib/audience";
-import { AutomationMark, ChannelMark, ChatStatus } from "../lib/chatMark";
+import { AutomationMark, ChannelMark, ChatStatus } from "@/lib/chatMark";
 import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
 import { chatRows, type ChatRow, type ConversationsPayload } from "@/lib/rail";

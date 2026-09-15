@@ -13,6 +13,8 @@ import {
   type AgentStatus,
 } from "@/lib/appStatusStore";
 import { chatState } from "@/lib/chatStore";
+import { homeHash } from "@/lib/route";
+import { ALL_SURFACES } from "@/lib/surfaces";
 import { sendMessage } from "@/lib/turnStream";
 
 import {
@@ -126,7 +128,6 @@ async function shutDrawer(): Promise<void> {
 }
 
 async function openWizard() {
-  await openDrawer();
   await openNewApplication();
   return screen.findByRole("region", { name: "App Creator" });
 }
@@ -179,7 +180,38 @@ test("apps the workspace ships on its first turn reach the sidebar with no reloa
   }
 });
 
-test("New application opens the wizard speaking in the pane, and the apps list keeps its rows", async () => {
+test("an app the workspace ships on its first turn is read in with no reload", async () => {
+  let shipped = [AGENT];
+  const { calls } = wire({
+    "/api/agents": () => boot(shipped, ADMIN),
+    "/api/agents/status": () =>
+      json({ statuses: shipped.map((agent) => status(agent.id, {})) }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  vi.useFakeTimers();
+  try {
+    render(<Portal />);
+    const settle = async (ms: number) => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+    const reads = () => calls.filter((url) => url.endsWith("/api/agents")).length;
+    await settle(0);
+    expect(reads()).toBe(1);
+
+    shipped = [AGENT, RESEARCH];
+
+    await settle(RESTING_STATUS_MS);
+    expect(reads()).toBe(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("App Creator opens the wizard speaking in the pane, and the apps list keeps its rows", async () => {
   const sent: { url: string; body: string }[] = [];
   wire({
     "/api/agents": () => boot([AGENT], ADMIN),
@@ -200,7 +232,6 @@ test("New application opens the wizard speaking in the pane, and the apps list k
   expect(within(wizard).getByText(OPENING)).toBeTruthy();
   expect(within(wizard).getByLabelText("Ask UFO")).toBeTruthy();
   expect(within(await shownIndex()).getByText("Assistant")).toBeTruthy();
-
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(StreamFake.last().url).toBe("/surface/web/turns/" + TURN_ID + "/stream");
   StreamFake.last().emit("message", { text: "A finances dashboard, then." });
@@ -323,7 +354,6 @@ test("a conversation the composer founds after a failed opening send is still th
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(within(wizard).getByText(saying("A finances dashboard."))).toBeTruthy();
   expect(await waitFor(progress)).toBeTruthy();
-  expect(within(await shownIndex()).getByText("App Creator: " + TITLE)).toBeTruthy();
 });
 
 test("the rail names the run in flight and takes the conversation's own title", async () => {
@@ -423,8 +453,7 @@ test("an answer to the wizard's question rides the turn that asked it", async ()
 
   await openWizard();
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  expect(await within(await shownIndex()).findByText("App Creator: " + TITLE)).toBeTruthy();
-  await shutDrawer();
+  expect(await waitFor(progress)).toBeTruthy();
   StreamFake.last().emit("terminal", {
     ...ASKED,
     question: {
@@ -464,10 +493,9 @@ test("the app the last phase creates reaches the rail when the turn settles", as
 
   await waitFor(() => expect(progress().getAttribute("aria-valuenow")).toBe("5"));
   await userEvent.click(screen.getByRole("button", { name: "Close" }));
-  await shownIndex();
-  await openAgentRow("Research");
+  location.hash = "#/agents/" + SECOND_ID;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
 
-  expect(location.hash).toBe("#/agents/" + SECOND_ID);
   expect(screen.queryByText("No such app.")).toBeNull();
   expect(await screen.findByRole("region", { name: "Research" })).toBeTruthy();
 });
@@ -592,7 +620,6 @@ test("a close before the founding send answers keeps the pane closed and founds 
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
   expect(sent).toEqual([OPENING]);
   expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull();
-  expect(within(await shownIndex()).queryByText(/App Creator/)).toBeNull();
 });
 
 test("a wizard reopened during its founding send binds to the run the first mount opened", async () => {
@@ -627,7 +654,6 @@ test("a wizard reopened during its founding send binds to the run the first moun
   );
   expect(sent).toEqual([OPENING]);
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
-  expect(within(await shownIndex()).getByText("App Creator: " + TITLE)).toBeTruthy();
 });
 
 test("the run survives leaving the screen and comes back bound, sending nothing twice", async () => {
@@ -646,15 +672,13 @@ test("the run survives leaving the screen and comes back bound, sending nothing 
   await openWizard();
   await waitFor(() => expect(sent).toEqual([OPENING]));
 
-  await openDrawer();
-  await userEvent.click(screen.getByRole("button", { name: "New chat" }));
+  location.hash = homeHash();
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
   await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
-  const index = await shownIndex();
-  await userEvent.click(within(index).getByRole("button", { name: /App Creator/ }));
+  await openNewApplication();
 
   const wizard = await screen.findByRole("region", { name: "App Creator" });
   expect(await within(wizard).findByText(saying(OPENING))).toBeTruthy();
-  expect(await within(await shownIndex()).findByText("App Creator: " + TITLE)).toBeTruthy();
   expect(sent).toEqual([OPENING]);
 });
 
@@ -682,6 +706,31 @@ test("an app row leaves the run standing, and the rail's own row returns to it",
   const row = await within(index).findByRole("button", { name: /App Creator/ });
 
   await userEvent.click(row);
+  expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
+  expect(sent).toEqual([OPENING]);
+});
+
+test("another app's page leaves the run standing, and App Creator returns to it", async () => {
+  const sent: string[] = [];
+  wire({
+    "/api/agents": () => boot([AGENT, RESEARCH], ADMIN),
+    "/chat": (_url, init) => {
+      sent.push(String(init?.body));
+      return json(OPENED);
+    },
+    "/slots/tasks": NO_BOARD,
+    "/transcript": () => json({ messages: [] }),
+    "/homepage": () => json({ state: "none" }),
+  });
+  render(<Portal />);
+
+  await openWizard();
+  await waitFor(() => expect(sent).toEqual([OPENING]));
+
+  location.hash = "#/agents/" + SECOND_ID;
+  window.dispatchEvent(new HashChangeEvent("hashchange"));
+  await waitFor(() => expect(screen.queryByRole("region", { name: "App Creator" })).toBeNull());
+  await openNewApplication();
   expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
   expect(sent).toEqual([OPENING]);
 });
@@ -719,7 +768,6 @@ test("a founding send from the chat screen never blocks the wizard's own", async
 
   answerChat();
   await waitFor(() => expect(within(wizard).queryByText("About our numbers.")).toBeNull());
-  expect(within(await shownIndex()).getByText("App Creator: " + TITLE)).toBeTruthy();
 });
 
 test("a second founding send on a busy key is refused and the key wears the fault", async () => {
@@ -843,29 +891,33 @@ test("the main app has no Archive action in Settings", async () => {
 });
 
 test("the workspace Apps tab restores an archived app the sidebar does not list", async () => {
-  const posted: unknown[] = [];
+  const posted: { url: string; body: unknown }[] = [];
   const onAgents = vi.fn();
-  const restore = {
-    name: "restore_application",
-    description: "Bring an archived app back under a live name.",
-    input_schema: {},
-    call: {
-      kind: "agent",
-      action: "restore_application",
-      name: `~archived-${SECOND_ID}`,
-      input: {},
-    },
-    label: "Restore",
-  };
   wire({
-    "/actions/agent/": (url, init) => {
-      if (init?.method !== "POST") return json({ actions: [restore] });
-      posted.push({ url, body: JSON.parse(String(init.body)) });
+    "/actions/agent/invoice-intake$": () =>
+      json({
+        actions: [
+          {
+            name: "restore_application",
+            description: "",
+            input_schema: {},
+            call: {
+              kind: "agent",
+              name: "invoice-intake",
+              action: "restore_application",
+              input: {},
+            },
+            label: "Restore",
+          },
+        ],
+      }),
+    "/actions/agent/invoice-intake/restore_application": (url, init) => {
+      posted.push({ url, body: JSON.parse(String(init?.body)) });
       return json({ applied: true, message: "Applied." });
     },
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents?chip=Archived";
+  location.hash = "#/workspace/apps?chip=Archived";
   render(
     <App
       agents={[AGENT]}
@@ -873,7 +925,7 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
         {
           id: SECOND_ID,
           name: "invoice-intake",
-          object: `~archived-${SECOND_ID}`,
+          object: "invoice-intake",
           icon: "aten",
           archived_at: "2026-08-20T12:00:00Z",
         },
@@ -882,14 +934,13 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
       onAgents={onAgents}
     />,
   );
-  const index = within(await shownIndex());
-  expect(index.queryByText("Invoice Intake")).toBeNull();
+  expect(within(await shownIndex()).queryByText("Invoice Intake")).toBeNull();
   await shutDrawer();
   expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
 
-  await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Restore" }));
   const dialog = await screen.findByRole("dialog");
-  const name = await within(dialog).findByRole("textbox", { name: "Name" });
+  const name = within(dialog).getByRole("textbox", { name: "Name" });
   expect((name as HTMLInputElement).value).toBe("invoice-intake");
   await userEvent.clear(name);
   await userEvent.type(name, "invoice-intake-2");
@@ -898,7 +949,7 @@ test("the workspace Apps tab restores an archived app the sidebar does not list"
   await waitFor(() => expect(onAgents).toHaveBeenCalledOnce());
   expect(posted).toEqual([
     {
-      url: `/surface/web/agents/${AGENT_ID}/actions/agent/~archived-${SECOND_ID}/restore_application`,
+      url: `/surface/web/agents/${AGENT_ID}/actions/agent/invoice-intake/restore_application`,
       body: { new_name: "invoice-intake-2" },
     },
   ]);
@@ -914,7 +965,7 @@ test("each workspace app opens its own settings", async () => {
       }),
     "/transcript": () => json({ messages: [] }),
   });
-  location.hash = "#/agents";
+  location.hash = "#/workspace/apps";
   render(<App agents={[AGENT, RESEARCH]} archived={[]} member={ADMIN} onAgents={() => {}} />);
 
   expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
@@ -929,7 +980,7 @@ test("each workspace app opens its own settings", async () => {
 
 test("the workspace Apps tab lists every app and narrows to the member's own", async () => {
   wire({ "/transcript": () => json({ messages: [] }) });
-  location.hash = "#/agents";
+  location.hash = "#/workspace/apps";
   render(
     <App
       agents={[AGENT, { ...RESEARCH, mine: true }]}
@@ -951,6 +1002,83 @@ test("the workspace Apps tab lists every app and narrows to the member's own", a
 
   await userEvent.click(screen.getByRole("tab", { name: "Archived" }));
   expect(await screen.findByText("No apps are archived.")).toBeTruthy();
+});
+
+test("the apps screen at the agents address filters, and the filter rides the address", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/agents";
+  render(
+    <App
+      agents={[AGENT, { ...RESEARCH, mine: true }]}
+      archived={[
+        {
+          id: SECOND_ID,
+          name: "invoice-intake",
+          object: "invoice-intake",
+          icon: "aten",
+          archived_at: "2026-08-20T12:00:00Z",
+        },
+      ]}
+      member={ADMIN}
+      onAgents={() => {}}
+    />,
+  );
+  await shutDrawer();
+  expect(await screen.findByRole("heading", { name: "Apps" })).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("tab", { name: "Created by me" }));
+  const own = within(await screen.findByRole("table"));
+  await waitFor(() => expect(own.queryByText("Assistant")).toBeNull());
+  expect(own.getByText("Research")).toBeTruthy();
+  expect(location.hash).toBe("#/agents?chip=Created+by+me");
+
+  await userEvent.click(screen.getByRole("tab", { name: "Archived" }));
+  expect(await screen.findByText("Invoice-Intake")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Restore" })).toBeTruthy();
+  expect(location.hash).toBe("#/agents?chip=Archived");
+});
+
+test("the workspace Apps tab opens the App Store", async () => {
+  wire({ "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/workspace/apps";
+  render(<App agents={[AGENT, RESEARCH]} archived={[]} member={ADMIN} onAgents={() => {}} />);
+
+  await userEvent.click(await screen.findByRole("button", { name: "App Store" }));
+
+  expect(await screen.findByRole("region", { name: "App Store" })).toBeTruthy();
+  expect(location.hash).toBe("#/agents/store");
+});
+
+test("a deploy that withholds the store raises the wizard from the workspace Apps tab", async () => {
+  wire({
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: TITLE }),
+    "/slots/tasks": () =>
+      json({
+        type: "tasks",
+        title: "",
+        tasks: [],
+        total_count: 0,
+        completed_count: 0,
+        truncated: false,
+      }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/workspace/apps";
+  render(
+    <App
+      agents={[AGENT, RESEARCH]}
+      archived={[]}
+      member={ADMIN}
+      surfaces={{ ...ALL_SURFACES, "app-store": false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: "App Store" })).toBeNull();
+  await userEvent.click(await screen.findByRole("button", { name: "App Creator" }));
+
+  expect(await screen.findByRole("region", { name: "App Creator" })).toBeTruthy();
+  expect(location.hash).toBe("#/agents/builder");
 });
 
 test("scheduled task sheets close back to their settings list", async () => {
@@ -1285,6 +1413,7 @@ test("a status read that fails after answering keeps polling and recovers", asyn
       });
     };
     await settle(0);
+    expect(answers).toBe(1);
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Menu" }));
     });
@@ -1442,7 +1571,8 @@ test("a built app's setup screen keeps the sidebar", async () => {
   );
 
   await screen.findByText(/Set up your .* app/);
-  expect(await shownIndex()).toBeTruthy();
+  await openDrawer();
+  expect(screen.getByRole("navigation", { name: "Workspace" })).toBeTruthy();
 });
 
 test("a shipped app that declares no setup stands on its page", async () => {
@@ -1581,7 +1711,8 @@ test("an app that has been built once stands on its page, and the setup screen i
 
   expect(await screen.findByLabelText(/^Menu for/)).toBeTruthy();
   expect(location.hash).toBe("#/agents/" + AGENT_ID);
-  expect(await shownIndex()).toBeTruthy();
+  await openDrawer();
+  expect(screen.getByRole("navigation", { name: "Workspace" })).toBeTruthy();
 });
 
 test("the app pane's header starts a chat with the app it shows, standing with the acts at the far end", async () => {
@@ -1693,6 +1824,7 @@ test("the app's panel switches reads from its own band, without going back to th
   const panel = within(await openAgentSettings("Research", "Settings"));
   expect(document.querySelector("[data-slot=sheet-content]")).toBeTruthy();
   expect(await screen.findByRole("dialog", { name: "Research" })).toBeTruthy();
+  expect(panel.getByRole("button", { name: "Settings" })).toBeTruthy();
 
   await userEvent.click(panel.getByRole("button", { name: "Settings" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: "Scheduled" }));
