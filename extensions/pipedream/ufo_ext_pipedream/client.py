@@ -15,13 +15,23 @@ rides the same way), one Composio withholds by judgment where Pipedream's action
 (Linear: `linear-search-issues` and `linear-list-workflow-states` reach issue state, which
 Composio's toolkit cannot filter by; Attio: `attio-create-update-record` and the person/task/note
 writes reach what Composio's read-only grant cannot; Discord: the `discord-send-message` family
-posts to a channel, which Composio's identity-only user OAuth cannot), or one Composio holds no
+posts to a channel, which Composio's identity-only user OAuth cannot; Square:
+`square-create-invoice`, `square-create-order` and `square-send-invoice` reach the money surface
+Composio's customer-directory-only grant omits; Confluence: `confluence-create-page` and
+`confluence-list-spaces` are the exact two acts Composio's grant lacks `read:space` for;
+DigitalOcean: `digital_ocean-create-droplet`, `-create-domain` and `-create-snapshot` provision,
+which Composio's read-only grant cannot), or one Composio holds no
 managed credentials for while Pipedream operates its own OAuth client (Ramp, Brex, Xero, DocuSign,
-PandaDoc: each is bring-your-own-credentials on Composio, so its connect leg dies at
+PandaDoc, Pipedrive, Shopify, Webflow, Help Scout: each is bring-your-own-credentials on Composio,
+so its connect leg dies at
 `POST /auth_configs`, and Pipedream's hosted consent is the only managed route — the evidence per
 app is in `docs/composio-provider-coverage.md`). A provider no broker holds managed auth for at all
 is not an entry here — it authenticates with a workspace key through the `keyed_connectors`
 extension.
+
+A Composio ban stands even where a row here serves the same provider: the ban is what keeps
+Composio's open namespace from claiming the slug and minting the crippled grant, and this row is
+the route that works.
 
 `connect_token` mints the hosted consent leg (pinning the success/error return legs);
 `newest_account` and `connected_account` correlate its return to the state-scoped external user,
@@ -91,8 +101,11 @@ class ConnectorSpec:
 CONNECTORS: dict[str, ConnectorSpec] = {
     "attio": ConnectorSpec("Attio", "attio", "api.attio.com"),
     "brex": ConnectorSpec("Brex", "brex", "platform.brexapis.com"),
+    "confluence": ConnectorSpec("Confluence", "confluence", "api.atlassian.com"),
+    "digital_ocean": ConnectorSpec("DigitalOcean", "digital_ocean", "api.digitalocean.com"),
     "discord": ConnectorSpec("Discord", "discord", "discord.com"),
     "docusign": ConnectorSpec("DocuSign", "docusign", ""),
+    "help_scout": ConnectorSpec("Help Scout", "help_scout", "api.helpscout.net"),
     "github": ConnectorSpec(
         "GitHub",
         "github",
@@ -105,7 +118,13 @@ CONNECTORS: dict[str, ConnectorSpec] = {
     ),
     "linear": ConnectorSpec("Linear", "linear", "api.linear.app"),
     "pandadoc": ConnectorSpec("PandaDoc", "pandadoc", "api.pandadoc.com"),
+    # Pipedrive and Shopify pin their API host per account — a Pipedrive company domain, a Shopify
+    # shop — so neither names one, exactly as DocuSign does not.
+    "pipedrive": ConnectorSpec("Pipedrive", "pipedrive", ""),
     "ramp": ConnectorSpec("Ramp", "ramp", "api.ramp.com"),
+    "shopify": ConnectorSpec("Shopify", "shopify", ""),
+    "square": ConnectorSpec("Square", "square", "connect.squareup.com"),
+    "webflow": ConnectorSpec("Webflow", "webflow", "api.webflow.com"),
     "xero": ConnectorSpec("Xero", "xero_accounting_api", "api.xero.com"),
 }
 
