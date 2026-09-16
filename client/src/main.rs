@@ -53,6 +53,7 @@ Options:
                  overrides file uploaded once, or its sha256: digest.
   --json         Read and write JSON events on stdin and stdout.
   -h, --help     Show this help.
+  -v, --version  Show the client version.
 ";
 
 const GATEWAY_URL_DEFAULT: &str = "https://ufo.ai";
@@ -90,6 +91,10 @@ fn main() {
         match rest.first().map(String::as_str) {
             Some("--help") | Some("-h") => {
                 print!("{HELP}");
+                return;
+            }
+            Some("--version") | Some("-version") | Some("-v") => {
+                println!("ufo {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             Some("logout") => {

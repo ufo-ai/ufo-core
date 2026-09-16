@@ -849,11 +849,32 @@ fn help_prints_usage_and_never_touches_the_wire() {
             "{flag} prints usage:\n{stdout}"
         );
         for named in [
-            "login", "logout", "--resume", "--remote", "--json", "--help",
+            "login",
+            "logout",
+            "--resume",
+            "--remote",
+            "--json",
+            "--help",
+            "--version",
         ] {
             assert!(stdout.contains(named), "{flag} names {named}:\n{stdout}");
         }
     }
+}
+
+#[test]
+fn version_prints_the_client_version_and_never_touches_the_wire() {
+    let home = scratch_home("version");
+    for flag in ["--version", "-version", "-v"] {
+        let (stdout, code) = run_client("http://127.0.0.1:9", &[flag], "", &home);
+        assert_eq!(code, 0, "{flag} exits 0");
+        assert_eq!(
+            stdout.trim_end(),
+            format!("ufo {}", env!("CARGO_PKG_VERSION")),
+            "{flag} prints the version"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]
