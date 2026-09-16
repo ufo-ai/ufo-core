@@ -15,7 +15,7 @@ from ufo.harness.o11y import warn
 from ufo.harness.sandbox.session import SENTINEL_MODEL_KEY
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialSlotUnset, CredentialStore, credential_host
-from ufo.runtime.access.grants import Grant, grant_sentinel, scoped_cli_accounts
+from ufo.runtime.access.grants import Grant, cli_accounts, grant_sentinel
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.ext.manifest import Manifest, open_connector_namespace
 
@@ -240,7 +240,7 @@ async def derive_credential_rules(
 def derive_grant_rules(
     grants: tuple[Grant, ...],
     transfer_hosts: "ConnectorTransferHosts | None" = None,
-    connections: tuple[UUID, ...] = (),
+    member_id: UUID | None = None,
 ) -> tuple[Rule, ...]:
     """Each active grant admits its provider's own host — plus the broker file-store hosts
     `transfer_hosts` resolves for it, where the sandbox fetches a tool's presigned file outputs and
@@ -249,10 +249,11 @@ def derive_grant_rules(
     at the broker, and the one grant whose token reaches the wire is a CLI credential's, derived
     by `derive_cli_rules`. A brokered grant admits no provider host of its own (its `host` is
     empty), so only its transfer hosts scope; an ungranted host derives no exact ScopeRule,
-    MeterRule, or authenticated path. An exact connection scope admits only its listed grants."""
+    MeterRule, or authenticated path. A private grant admits for its owner alone; a shared one for
+    every member."""
     rules: list[Rule] = []
     for grant in grants:
-        if grant.connection_id not in connections:
+        if not (grant.connection_shared or grant.owner_member_id == member_id):
             continue
         extra = transfer_hosts.of(grant.provider) if transfer_hosts is not None else ()
         hosts = tuple(dict.fromkeys(host for host in (grant.host, *extra) if host))
@@ -266,13 +267,14 @@ async def derive_cli_rules(
     grants: tuple[Grant, ...],
     clis: Mapping[str, CliCredential],
     workspace_id: UUID,
-    connections: tuple[UUID, ...],
+    member_id: UUID | None,
 ) -> tuple[Rule, ...]:
-    """The preferred tier of each exact connector scope whose connector declares a CLI credential
-    swaps its real token in for the grant's sentinel: private capabilities outrank shared ones,
-    matching the static sandbox environment's selection. On the provider host the CLI sends it as
-    ordinary auth, and on the connector's git host — admitted and metered here, since a grant's own
-    rules scope only the API host — the sandbox's git helper sends it as the password half of a
+    """The preferred tier of each connector the acting member may use whose connector declares a
+    CLI credential swaps its real token in for the grant's sentinel: the member's own accounts
+    outrank shared ones, matching the static sandbox environment's selection. On the provider host
+    the CLI sends it as ordinary auth, and on the connector's git host — admitted and metered here,
+    since a grant's own rules scope only the API host — the sandbox's git helper sends it as the
+    password half of a
     Basic credential, which the proxy re-encodes around the token.
 
     The token is read from the broker per grant, and one grant's fault withholds that grant alone:
@@ -283,7 +285,7 @@ async def derive_cli_rules(
     usable = {
         (provider, account)
         for provider in clis
-        for account in scoped_cli_accounts(grants, provider, connections)
+        for account in cli_accounts(grants, provider, member_id)
     }
     for grant in grants:
         if (grant.provider, grant.account_id) not in usable:

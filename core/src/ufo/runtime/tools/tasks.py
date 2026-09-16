@@ -130,7 +130,7 @@ async def run_task(
     probe = await ctx.sandbox.sh(TASK_PROBE, base, timeout_s=TASK_PROBE_TIMEOUT_SECONDS)
     pid = probe.stdout.strip() if probe.exit_code == 0 else ""
     if pid:
-        await mark_detached(ctx.turn, task, display_base, ctx.sandbox_capability_id)
+        await mark_detached(ctx.turn, task, display_base)
     else:
         await _record_exec_timeout(ctx, command, result.timed_out_after_s, requested_s)
     return TaskRun(

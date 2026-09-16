@@ -27,7 +27,7 @@ from ufo.runtime.access.egress_rules import (
     derive_credential_rules,
     derive_grant_rules,
 )
-from ufo.runtime.access.grants import GrantStore, scoped_cli_accounts
+from ufo.runtime.access.grants import GrantStore, cli_accounts
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_HOST, ToolBridgePrincipal
@@ -43,14 +43,14 @@ other."""
 
 @dataclass(frozen=True, slots=True)
 class _Scope:
-    """The agent, internet policy, and exact resolved connection capabilities. `running` is
+    """The agent, internet policy, and the member the principal acts for. `running` is
     whether a turn is still executing: a run token also answers for the detached commands a turn
     left behind until its `detached_until`, and those keep the turn's network but never the
     deployment's model key or the tool bridge, which only a live turn can hold."""
 
     agent_id: UUID
     internet_access_allowed: bool
-    connections: tuple[UUID, ...]
+    member_id: UUID | None
     running: bool
 
 
@@ -140,12 +140,9 @@ class PerAgentRules:
                     granted = await self.grants.active_grants()
                     rules = (
                         *rules,
-                        *derive_grant_rules(granted, self.transfer_hosts, scope.connections),
+                        *derive_grant_rules(granted, self.transfer_hosts, scope.member_id),
                         *await derive_cli_rules(
-                            granted,
-                            self.clis,
-                            principal.workspace_id,
-                            scope.connections,
+                            granted, self.clis, principal.workspace_id, scope.member_id
                         ),
                     )
                 if not scope.running:
@@ -181,7 +178,7 @@ class PerAgentRules:
             for provider, cli in self.clis.items():
                 if cli.git is None or cli.git.host != host:
                     continue
-                accounts = scoped_cli_accounts(granted, provider, scope.connections)
+                accounts = cli_accounts(granted, provider, scope.member_id)
                 if len(accounts) != 1:
                     continue
                 try:
@@ -204,7 +201,7 @@ class PerAgentRules:
         return (
             None
             if scope is None or not scope.running
-            else ToolBridgePrincipal(run.workspace_id, run.turn_id, scope.connections)
+            else ToolBridgePrincipal(run.workspace_id, run.turn_id, scope.member_id)
         )
 
     async def _turn_of(self, run: RunToken) -> _Scope | None:
@@ -212,6 +209,7 @@ class PerAgentRules:
         query = (
             sa.select(
                 tables.turn.c.agent_id,
+                tables.turn.c.member_id,
                 tables.turn.c.runtime_config,
                 tables.agent.c.internet_access_allowed,
                 (tables.turn.c.status == RUNNING).label("running"),
@@ -229,19 +227,6 @@ class PerAgentRules:
                 tables.agent.c.workspace_id == run.workspace_id,
             )
         )
-        if run.capability_id is not None:
-            query = query.add_columns(
-                tables.sandbox_call_capability.c.connections.label("capability_connections")
-            ).join(
-                tables.sandbox_call_capability,
-                sa.and_(
-                    tables.sandbox_call_capability.c.id == run.capability_id,
-                    tables.sandbox_call_capability.c.turn_id == run.turn_id,
-                    tables.sandbox_call_capability.c.workspace_id == run.workspace_id,
-                ),
-            )
-        else:
-            query = query.add_columns(sa.null().label("capability_connections"))
         async with workspace_tx() as connection:
             row = (await connection.execute(query)).one_or_none()
         if row is None:
@@ -254,24 +239,23 @@ class PerAgentRules:
         internet_access_allowed = row.internet_access_allowed and (
             runtime_config is None or runtime_config.internet_access is None
         )
-        connections = (
-            tuple(UUID(value) for value in row.capability_connections)
-            if run.capability_id is not None
-            else ()
-            if runtime_config is None or runtime_config.connections is None
-            else runtime_config.connections
-        )
         return _Scope(
             row.agent_id,
             internet_access_allowed,
-            connections,
+            (
+                row.member_id
+                if run.acts_for == "turn"
+                else None
+                if run.acts_for == "nobody"
+                else run.acts_for
+            ),
             running=bool(row.running),
         )
 
     async def _conversation_of(self, probe: ProbeToken) -> _Scope | None:
         """The probed conversation's agent and snapshotted internet policy — the same two columns
         a turn's read answers, reached through the conversation because a probe names no turn. The
-        exact connector capabilities come off the token rather than a row."""
+        member it acts for comes off the token rather than a row."""
         if probe.expires_at <= int(datetime.now(UTC).timestamp()):
             return None
         async with workspace_tx() as connection:
@@ -299,7 +283,7 @@ class PerAgentRules:
         return _Scope(
             row.agent_id,
             row.internet_access_allowed and probe.internet_access is None,
-            probe.connections,
+            probe.member_id,
             running=False,
         )
 
@@ -341,16 +325,6 @@ class PerAgentRules:
                     _turn_answers(datetime.now(UTC)),
                 )
             )
-            if run.capability_id is not None:
-                query = query.where(
-                    sa.exists(
-                        sa.select(tables.sandbox_call_capability.c.id).where(
-                            tables.sandbox_call_capability.c.id == run.capability_id,
-                            tables.sandbox_call_capability.c.turn_id == run.turn_id,
-                            tables.sandbox_call_capability.c.workspace_id == run.workspace_id,
-                        )
-                    )
-                )
             async with workspace_tx() as connection:
                 row = (await connection.execute(query)).one_or_none()
         if row is None:

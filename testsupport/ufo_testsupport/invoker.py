@@ -36,6 +36,7 @@ class RecordedTurn:
     standalone: bool
     runtime_config: TurnRuntimeConfig | None = None
     context: TurnContext | None = None
+    acting_member_id: UUID | None = None
 
 
 @dataclass
@@ -66,6 +67,7 @@ class RecordingInvoker:
         runtime_config: TurnRuntimeConfig | None = None,
         model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
+        acting_member_id: UUID | None = None,
     ) -> UUID | None:
         self.turns.append(
             RecordedTurn(
@@ -76,6 +78,7 @@ class RecordingInvoker:
                 standalone=standalone,
                 runtime_config=runtime_config,
                 context=context,
+                acting_member_id=acting_member_id,
             )
         )
         return uuid4()

@@ -419,11 +419,7 @@ async def _tick(ctx: ExtensionContext) -> None:
     await ctx.store.put(JOB_WORKSPACE_KEY, {"path": path})
     if ctx.probes is None:
         return
-    probed = await ctx.probes.run(
-        target.conversation_id,
-        JOB_PROBE_COMMAND,
-        connections=(),
-    )
+    probed = await ctx.probes.run(target.conversation_id, JOB_PROBE_COMMAND)
     await ctx.store.put(JOB_PROBE_KEY, {"stdout": probed.stdout, "exit_code": probed.exit_code})
 
 

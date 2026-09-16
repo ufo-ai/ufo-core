@@ -13,7 +13,6 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.db import workspace_tx
-from ufo.harness.auth.token_signing import sign_token
 from ufo.harness.models.catalog import CORE_PRICING
 from ufo.harness.sandbox.cache import CACHE_HOST
 from ufo.harness.sandbox.preview import PREVIEW_AUTH_HEADER, PREVIEW_HOST, PREVIEW_SENTINEL
@@ -45,7 +44,7 @@ from ufo.runtime.tools.bridge import (
 )
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import CONNECTION_SCOPE_MAX, TurnRuntimeConfig
+from ufo.schema.records import TurnRuntimeConfig
 
 CONTROL_TOKEN = "egress-control-secret"
 CACHE_TOKEN = "egress-cache-secret"
@@ -200,6 +199,21 @@ async def _seed_turn(
     return _Seeded(workspace_id, turn_id, agent_id, member_id, conversation_id)
 
 
+async def _seed_member(connection: AsyncConnection, workspace_id: UUID) -> UUID:
+    member_id = uuid4()
+    await connection.execute(
+        sa.insert(tables.member).values(
+            id=member_id,
+            workspace_id=workspace_id,
+            email="other@b.c",
+            seated_at=sa.func.now(),
+            created_at=sa.func.now(),
+            updated_at=sa.func.now(),
+        )
+    )
+    return member_id
+
+
 async def test_turn_runtime_config_can_disable_but_not_enable_public_egress(db: None) -> None:
     runtime_config = TurnRuntimeConfig(model="claude-opus-4-8", internet_access=False)
     async with workspace_tx() as connection:
@@ -211,15 +225,6 @@ async def test_turn_runtime_config_can_disable_but_not_enable_public_egress(db: 
     assert InternetRule() not in rules
     with pytest.raises(ValueError, match="False"):
         TurnRuntimeConfig.model_validate({"model": "claude-opus-4-8", "internet_access": True})
-    connection_id = uuid4()
-    with pytest.raises(ValueError, match="duplicate"):
-        TurnRuntimeConfig(connections=(connection_id, connection_id))
-    with pytest.raises(ValueError, match="50"):
-        TurnRuntimeConfig(connections=tuple(uuid4() for _ in range(CONNECTION_SCOPE_MAX + 1)))
-    connection_ids = tuple(uuid4() for _ in range(2))
-    assert TurnRuntimeConfig(connections=tuple(reversed(connection_ids))).connections == tuple(
-        sorted(connection_ids, key=str)
-    )
 
 
 async def test_a_probe_preserves_a_narrowed_internet_scope(db: None) -> None:
@@ -351,110 +356,6 @@ async def test_an_ended_turn_answers_for_its_detached_commands_until_the_stamp(d
     assert await resolver.live_bridge_principal(followed_run) is None
 
 
-async def test_an_ended_turn_answers_for_its_detached_call_capability(db: None) -> None:
-    capability_id = uuid4()
-    async with workspace_tx() as connection:
-        followed = await _seed_turn(
-            connection, status="done", detached_until=datetime.now(UTC) + timedelta(hours=1)
-        )
-        await connection.execute(
-            sa.insert(tables.sandbox_call_capability).values(
-                id=capability_id,
-                workspace_id=followed.workspace_id,
-                turn_id=followed.turn_id,
-                call="bash/scoped",
-                connections=[],
-                created_at=sa.func.now(),
-            )
-        )
-    run = RunToken(followed.workspace_id, followed.turn_id, capability_id=capability_id)
-    resolver = PerAgentRules(base=(ScopeRule(allowed_hosts=frozenset({HOST})),), grants=None)
-
-    assert await resolver.turn_live(run) == 0
-    assert ScopeRule(allowed_hosts=frozenset({HOST})) in await resolver.resolve(run)
-    assert await resolver.live_bridge_principal(run) is None
-
-
-async def test_call_capability_requires_a_liveness_proxy_and_dies_with_its_row(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-        capability_id = uuid4()
-        await connection.execute(
-            sa.insert(tables.sandbox_call_capability).values(
-                id=capability_id,
-                workspace_id=seeded.workspace_id,
-                turn_id=seeded.turn_id,
-                call="hub/request",
-                connections=[],
-                created_at=sa.func.now(),
-            )
-        )
-    token = _basic(
-        RUN_TOKENS.encode(
-            RunToken(
-                seeded.workspace_id,
-                seeded.turn_id,
-                capability_id=capability_id,
-            )
-        )
-    )
-    resolver = PerAgentRules(base=(), grants=None)
-    bridge = _Bridge()
-    async with _client(_control(resolver, bridge)) as client:
-        unmarked_authorize = await client.post(
-            "/internal/egress/authorize",
-            headers=_auth(),
-            json={"proxy_auth": token},
-        )
-        unmarked_resolve = await client.post(
-            "/internal/egress/resolve",
-            headers=_auth(),
-            json={"proxy_auth": token},
-        )
-        unmarked_bridge = await client.post(
-            "/internal/egress/tool-bridge",
-            headers=_auth(),
-            json={
-                "proxy_auth": token,
-                "request": {
-                    "request_id": str(uuid4()),
-                    "action": "get_schema",
-                    "tool_name": "sample",
-                    "arguments": {},
-                },
-            },
-        )
-        live = await client.post(
-            "/internal/egress/authorize",
-            headers=_auth(),
-            json={
-                "proxy_auth": token,
-                "capabilities": {"call_liveness": True},
-            },
-        )
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.delete(tables.sandbox_call_capability).where(
-                    tables.sandbox_call_capability.c.id == capability_id
-                )
-            )
-        copied = await client.post(
-            "/internal/egress/authorize",
-            headers=_auth(),
-            json={
-                "proxy_auth": token,
-                "capabilities": {"call_liveness": True},
-            },
-        )
-
-    assert unmarked_authorize.json() == {"authorized": False, "generation": None}
-    assert unmarked_resolve.json() == {"rules": []}
-    assert unmarked_bridge.status_code == 403
-    assert live.json() == {"authorized": True, "generation": 0}
-    assert copied.json() == {"authorized": False, "generation": None}
-    assert bridge.received == []
-
-
 async def test_authorize_admits_a_probe_until_its_deadline(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
@@ -487,16 +388,19 @@ async def test_authorize_admits_a_probe_until_its_deadline(db: None) -> None:
     assert refused.json() == {"authorized": False, "generation": None}
 
 
-async def test_run_and_probe_capabilities_do_not_encode_member_seat_identity(db: None) -> None:
+async def test_run_and_probe_tokens_do_not_encode_member_seat_identity(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
-    run = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
+    run = RUN_TOKENS.encode(
+        RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
+    )
     probe = PROBE_TOKENS.encode(
         ProbeToken(
             seeded.workspace_id,
             seeded.conversation_id,
             uuid4(),
             int(datetime.now(UTC).timestamp()) + 300,
+            member_id=seeded.member_id,
         )
     )
     resolver = PerAgentRules(base=(), grants=None)
@@ -535,12 +439,13 @@ async def test_tool_bridge_passes_only_a_run_principal_to_the_bridge(db: None) -
         "tool_name": "object_list",
         "arguments": {},
     }
-    run = RunToken(seeded.workspace_id, seeded.turn_id)
+    run = RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
     probe = ProbeToken(
         seeded.workspace_id,
         seeded.conversation_id,
         uuid4(),
         int(datetime.now(UTC).timestamp()) + 300,
+        member_id=seeded.member_id,
     )
     async with _client(_control(resolver, bridge=bridge)) as client:
         admitted = await client.post(
@@ -557,7 +462,7 @@ async def test_tool_bridge_passes_only_a_run_principal_to_the_bridge(db: None) -
     assert refused.status_code == 403
     assert bridge.received == [
         (
-            ToolBridgePrincipal(run.workspace_id, run.turn_id, ()),
+            ToolBridgePrincipal(run.workspace_id, run.turn_id, seeded.member_id),
             ToolBridgeRequest(
                 request_id=request_id,
                 action="get_schema",
@@ -571,24 +476,12 @@ async def test_resolve_returns_the_seeded_grant_and_injection_rules(db: None) ->
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     with ws(seeded.workspace_id), agent(seeded.agent_id):
-        connection_id = await GrantStore().record(
+        await GrantStore().record(
             provider=PROVIDER,
             account_id=ACCOUNT,
             host=HOST,
             grantor_member_id=seeded.member_id,
             shared=False,
-        )
-    capability_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.sandbox_call_capability).values(
-                id=capability_id,
-                workspace_id=seeded.workspace_id,
-                turn_id=seeded.turn_id,
-                call="sample/request",
-                connections=[str(connection_id)],
-                created_at=sa.func.now(),
-            )
         )
     tokens = _Tokens()
     clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens)}
@@ -600,14 +493,9 @@ async def test_resolve_returns_the_seeded_grant_and_injection_rules(db: None) ->
             json={
                 "proxy_auth": _basic(
                     RUN_TOKENS.encode(
-                        RunToken(
-                            seeded.workspace_id,
-                            seeded.turn_id,
-                            capability_id=capability_id,
-                        )
+                        RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
                     )
                 ),
-                "capabilities": {"call_liveness": True},
             },
         )
     rules = response.json()["rules"]
@@ -625,54 +513,62 @@ async def test_resolve_returns_the_seeded_grant_and_injection_rules(db: None) ->
     assert tokens.asked == [(seeded.workspace_id, ACCOUNT)]
 
 
-async def test_run_without_a_nonce_resolves_its_durable_connection_scope(db: None) -> None:
+async def test_a_principal_reaches_its_members_private_connections_and_the_shared_ones(
+    db: None,
+) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
+        other_member = await _seed_member(connection, seeded.workspace_id)
+    store = GrantStore()
     with ws(seeded.workspace_id), agent(seeded.agent_id):
-        connection_id = await GrantStore().record(
+        await store.record(
             provider=PROVIDER,
             account_id=ACCOUNT,
-            host=HOST,
+            host="api.own.test",
             grantor_member_id=seeded.member_id,
             shared=False,
         )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == seeded.turn_id)
-            .values(
-                runtime_config=TurnRuntimeConfig(connections=(connection_id,)).model_dump(
-                    mode="json"
-                )
-            )
+        await store.record(
+            provider=PROVIDER,
+            account_id="acct-other",
+            host="api.other.test",
+            grantor_member_id=other_member,
+            shared=False,
         )
+        await store.record(
+            provider=PROVIDER,
+            account_id="acct-shared",
+            host="api.shared.test",
+            grantor_member_id=other_member,
+            shared=True,
+        )
+    resolver = PerAgentRules(base=(), grants=store)
+    expires_at = int(datetime.now(UTC).timestamp()) + 300
 
-    rules = await PerAgentRules(base=(), grants=GrantStore()).resolve(
-        RunToken(seeded.workspace_id, seeded.turn_id)
+    def scoped(rules: tuple[object, ...]) -> set[str]:
+        return {
+            host for rule in rules if isinstance(rule, ScopeRule) for host in rule.allowed_hosts
+        }
+
+    acting_run = await resolver.resolve(
+        RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
+    )
+    nobody_run = await resolver.resolve(RunToken(seeded.workspace_id, seeded.turn_id))
+    acting_probe = await resolver.resolve(
+        ProbeToken(
+            seeded.workspace_id,
+            seeded.conversation_id,
+            uuid4(),
+            expires_at,
+            member_id=seeded.member_id,
+        )
+    )
+    nobody_probe = await resolver.resolve(
+        ProbeToken(seeded.workspace_id, seeded.conversation_id, uuid4(), expires_at)
     )
 
-    assert ScopeRule(allowed_hosts=frozenset({HOST})) in rules
-
-
-async def test_an_unrecognized_run_nonce_has_no_connection_capabilities(db: None) -> None:
-    async with workspace_tx() as connection:
-        seeded = await _seed_turn(connection)
-    with ws(seeded.workspace_id), agent(seeded.agent_id):
-        await GrantStore().record(
-            provider=PROVIDER,
-            account_id=ACCOUNT,
-            host=HOST,
-            grantor_member_id=seeded.member_id,
-            shared=False,
-        )
-    payload = f"ufo-run/{seeded.workspace_id}/{seeded.turn_id}/{uuid4()}".encode()
-    token = sign_token(RUN_TOKENS.secret, payload)
-    principal = RUN_TOKENS.from_proxy_auth(_basic(token))
-
-    rules = await PerAgentRules(base=(), grants=GrantStore()).resolve(principal)
-
-    assert principal.capability_id is not None
-    assert not any(isinstance(rule, ScopeRule) and HOST in rule.allowed_hosts for rule in rules)
+    assert scoped(acting_run) == scoped(acting_probe) == {"api.own.test", "api.shared.test"}
+    assert scoped(nobody_run) == scoped(nobody_probe) == {"api.shared.test"}
 
 
 async def test_resolve_rechecks_turn_and_probe_liveness(db: None) -> None:
@@ -972,30 +868,20 @@ async def test_meter_emits_the_sandbox_egress_counter_per_host_and_dimension(mon
 
 async def _seed_git_cli(
     shared: bool = True, fault: Exception | None = None
-) -> tuple[_Seeded, UUID, PerAgentRules, _Tokens]:
+) -> tuple[_Seeded, PerAgentRules, _Tokens]:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     with ws(seeded.workspace_id), agent(seeded.agent_id):
-        connection_id = await GrantStore().record(
+        await GrantStore().record(
             provider=PROVIDER,
             account_id=ACCOUNT,
             host=HOST,
             grantor_member_id=seeded.member_id,
             shared=shared,
         )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == seeded.turn_id)
-            .values(
-                runtime_config=TurnRuntimeConfig(connections=(connection_id,)).model_dump(
-                    mode="json"
-                )
-            )
-        )
     tokens = _Tokens(fault=fault)
     clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
-    return seeded, connection_id, PerAgentRules(base=(), grants=GrantStore(), clis=clis), tokens
+    return seeded, PerAgentRules(base=(), grants=GrantStore(), clis=clis), tokens
 
 
 async def test_git_credential_answers_the_granted_accounts_token_for_the_wired_host(
@@ -1004,7 +890,7 @@ async def test_git_credential_answers_the_granted_accounts_token_for_the_wired_h
     """The cache daemon presents the run token the proxy stamped on the relay and gets exactly the
     credential the proxy would inject for that principal on the host: the wire's Basic username,
     the granted account's token, and the account as the mirror principal."""
-    seeded, _, resolver, tokens = await _seed_git_cli()
+    seeded, resolver, tokens = await _seed_git_cli()
     token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
     async with _client(_control(resolver)) as client:
         response = await client.post(
@@ -1021,62 +907,8 @@ async def test_git_credential_answers_the_granted_accounts_token_for_the_wired_h
     assert tokens.asked == [(seeded.workspace_id, ACCOUNT)]
 
 
-async def test_git_credential_accepts_a_live_call_capability_and_rechecks_its_row(
-    db: None,
-) -> None:
-    seeded, connection_id, resolver, tokens = await _seed_git_cli(shared=False)
-    capability_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == seeded.turn_id)
-            .values(runtime_config=TurnRuntimeConfig(connections=()).model_dump(mode="json"))
-        )
-        await connection.execute(
-            sa.insert(tables.sandbox_call_capability).values(
-                id=capability_id,
-                workspace_id=seeded.workspace_id,
-                turn_id=seeded.turn_id,
-                call="bash/private-git",
-                connections=[str(connection_id)],
-                created_at=datetime.now(UTC),
-            )
-        )
-    token = RUN_TOKENS.encode(
-        RunToken(seeded.workspace_id, seeded.turn_id, capability_id=capability_id)
-    )
-    body = {"proxy_auth": _basic(token), "host": GIT.host}
-    async with _client(_control(resolver)) as client:
-        live = await client.post(
-            "/internal/git-credential",
-            headers=_cache_auth(),
-            json=body,
-        )
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.delete(tables.sandbox_call_capability).where(
-                    tables.sandbox_call_capability.c.id == capability_id
-                )
-            )
-        revoked = await client.post(
-            "/internal/git-credential",
-            headers=_cache_auth(),
-            json=body,
-        )
-
-    assert live.status_code == 200
-    assert live.json() == {
-        "username": "x-access-token",
-        "token": f"token-{ACCOUNT}",
-        "principal": f"w{seeded.workspace_id}-{ACCOUNT}",
-    }
-    assert revoked.status_code == 200
-    assert revoked.json() == {"credential": None, "principal": "public"}
-    assert tokens.asked == [(seeded.workspace_id, ACCOUNT)]
-
-
 async def test_git_credential_is_public_without_a_principal(db: None) -> None:
-    _, _, resolver, tokens = await _seed_git_cli()
+    _, resolver, tokens = await _seed_git_cli()
     async with _client(_control(resolver)) as client:
         response = await client.post(
             "/internal/git-credential", headers=_cache_auth(), json={"host": GIT.host}
@@ -1087,7 +919,7 @@ async def test_git_credential_is_public_without_a_principal(db: None) -> None:
 
 
 async def test_git_credential_is_public_for_a_host_no_cli_clones_through(db: None) -> None:
-    seeded, _, resolver, tokens = await _seed_git_cli()
+    seeded, resolver, tokens = await _seed_git_cli()
     token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
     async with _client(_control(resolver)) as client:
         response = await client.post(
@@ -1100,16 +932,10 @@ async def test_git_credential_is_public_for_a_host_no_cli_clones_through(db: Non
     assert tokens.asked == []
 
 
-async def test_git_credential_is_public_without_the_connection_capability(
+async def test_git_credential_is_public_for_a_private_grant_the_principal_cannot_use(
     db: None,
 ) -> None:
-    seeded, _, resolver, tokens = await _seed_git_cli(shared=False)
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == seeded.turn_id)
-            .values(runtime_config=TurnRuntimeConfig(connections=()).model_dump(mode="json"))
-        )
+    seeded, resolver, tokens = await _seed_git_cli(shared=False)
     token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
     async with _client(_control(resolver)) as client:
         response = await client.post(
@@ -1137,7 +963,7 @@ async def test_git_credential_is_public_when_the_broker_will_not_answer(
     every clone in the workspace fails, including a public one that needs no credential at all. The
     fault costs the account its authentication and nothing else: the daemon fetches anonymously,
     and the warn names the account so the withholding is visible."""
-    seeded, _, resolver, tokens = await _seed_git_cli(fault=fault)
+    seeded, resolver, tokens = await _seed_git_cli(fault=fault)
     token = RUN_TOKENS.encode(RunToken(seeded.workspace_id, seeded.turn_id))
     with caplog.at_level(logging.WARNING, logger="ufo"):
         async with _client(_control(resolver)) as client:
@@ -1176,18 +1002,22 @@ async def test_git_credential_is_gated_by_the_cache_token_not_the_egress_token()
     assert cross.status_code == 401
 
 
-async def test_proxy_and_git_credentials_prefer_private_run_token_capability(db: None) -> None:
+def _injected(rules: tuple[object, ...]) -> set[str]:
+    return {rule.sentinel for rule in rules if isinstance(rule, InjectionRule)}
+
+
+async def test_proxy_and_git_credentials_prefer_the_members_private_account(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     with ws(seeded.workspace_id), agent(seeded.agent_id):
-        listed = await GrantStore().record(
+        await GrantStore().record(
             provider=PROVIDER,
             account_id=ACCOUNT,
             host=HOST,
             grantor_member_id=seeded.member_id,
             shared=False,
         )
-        other = await GrantStore().record(
+        await GrantStore().record(
             provider=PROVIDER,
             account_id="acct-other",
             host=HOST,
@@ -1197,52 +1027,26 @@ async def test_proxy_and_git_credentials_prefer_private_run_token_capability(db:
     tokens = _Tokens()
     clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
     resolver = PerAgentRules(base=(), grants=GrantStore(), clis=clis)
-    broad_id, narrow_id = uuid4(), uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.sandbox_call_capability),
-            [
-                {
-                    "id": broad_id,
-                    "workspace_id": seeded.workspace_id,
-                    "turn_id": seeded.turn_id,
-                    "call": "sample/broad",
-                    "connections": [str(listed), str(other)],
-                    "created_at": datetime.now(UTC),
-                },
-                {
-                    "id": narrow_id,
-                    "workspace_id": seeded.workspace_id,
-                    "turn_id": seeded.turn_id,
-                    "call": "sample/narrow",
-                    "connections": [str(listed)],
-                    "created_at": datetime.now(UTC),
-                },
-            ],
-        )
-    broad = RunToken(seeded.workspace_id, seeded.turn_id, capability_id=broad_id)
-    narrow = RunToken(seeded.workspace_id, seeded.turn_id, capability_id=narrow_id)
+    acting = RunToken(seeded.workspace_id, seeded.turn_id, acts_for=seeded.member_id)
+    nobody = RunToken(seeded.workspace_id, seeded.turn_id)
 
-    unrestricted_rules = await resolver.resolve(broad)
-    unrestricted_credential = await resolver.git_credential(broad, GIT.host)
-    restricted_rules = await resolver.resolve(narrow)
-    restricted_credential = await resolver.git_credential(narrow, GIT.host)
+    acting_rules = await resolver.resolve(acting)
+    acting_credential = await resolver.git_credential(acting, GIT.host)
+    nobody_rules = await resolver.resolve(nobody)
+    nobody_credential = await resolver.git_credential(nobody, GIT.host)
 
-    def injected(rules: tuple[object, ...]) -> set[str]:
-        return {rule.sentinel for rule in rules if isinstance(rule, InjectionRule)}
-
-    assert injected(unrestricted_rules) == {grant_sentinel(ACCOUNT)}
-    assert unrestricted_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)
-    assert injected(restricted_rules) == {grant_sentinel(ACCOUNT)}
-    assert restricted_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)
+    assert _injected(acting_rules) == {grant_sentinel(ACCOUNT)}
+    assert acting_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)
+    assert _injected(nobody_rules) == {grant_sentinel("acct-other")}
+    assert nobody_credential == (GIT, "token-acct-other", "acct-other")
 
 
-async def test_probe_scope_excludes_later_connections_and_rechecks_removal(db: None) -> None:
+async def test_a_probe_acting_for_a_member_loses_a_disconnected_grant(db: None) -> None:
     async with workspace_tx() as connection:
         seeded = await _seed_turn(connection)
     store = GrantStore()
     with ws(seeded.workspace_id), agent(seeded.agent_id):
-        listed = await store.record(
+        connection_id = await store.record(
             provider=PROVIDER,
             account_id=ACCOUNT,
             host=HOST,
@@ -1254,31 +1058,20 @@ async def test_probe_scope_excludes_later_connections_and_rechecks_removal(db: N
         seeded.conversation_id,
         uuid4(),
         int(datetime.now(UTC).timestamp()) + 300,
-        (listed,),
+        member_id=seeded.member_id,
     )
-    with ws(seeded.workspace_id), agent(seeded.agent_id):
-        await store.record(
-            provider=PROVIDER,
-            account_id="acct-later",
-            host=HOST,
-            grantor_member_id=seeded.member_id,
-            shared=False,
-        )
     tokens = _Tokens()
     clis = {PROVIDER: CliCredential(env="SAMPLE_TOKEN", header=CLI_HEADER, secret=tokens, git=GIT)}
     resolver = PerAgentRules(base=(), grants=store, clis=clis)
 
-    scoped_rules = await resolver.resolve(probe)
-    scoped_credential = await resolver.git_credential(probe, GIT.host)
+    granted_rules = await resolver.resolve(probe)
+    granted_credential = await resolver.git_credential(probe, GIT.host)
     with ws(seeded.workspace_id), agent(seeded.agent_id):
-        assert await store.disconnect(listed, actor_member_id=seeded.member_id) is True
+        assert await store.disconnect(connection_id, actor_member_id=seeded.member_id) is True
     removed_rules = await resolver.resolve(probe)
     removed_credential = await resolver.git_credential(probe, GIT.host)
 
-    def injected(rules: tuple[object, ...]) -> set[str]:
-        return {rule.sentinel for rule in rules if isinstance(rule, InjectionRule)}
-
-    assert injected(scoped_rules) == {grant_sentinel(ACCOUNT)}
-    assert scoped_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)
-    assert injected(removed_rules) == set()
+    assert _injected(granted_rules) == {grant_sentinel(ACCOUNT)}
+    assert granted_credential == (GIT, f"token-{ACCOUNT}", ACCOUNT)
+    assert _injected(removed_rules) == set()
     assert removed_credential is None

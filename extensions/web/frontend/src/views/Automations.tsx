@@ -251,9 +251,6 @@ type AutomationsPayload = {
   objects: (IndexRow & { kind: string })[];
   next_cursor: string | null;
 };
-type ConnectionsPayload = {
-  connection_scope: string[];
-};
 type RunsPayload = { objects: IndexRow[]; next_cursor: string | null };
 
 function said(value: ObjectValue | undefined): string {
@@ -891,13 +888,9 @@ function NewAutomation({
   const [schedule, setSchedule] = useState(DEFAULT_SCHEDULE);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(QUIET);
-  const connections = usePanelRead<ConnectionsPayload>("/agents/" + lane + "/connections", 0);
-  const connectionIds =
-    connections.phase === "ready" ? connections.payload.connection_scope : null;
-  const ready = description.trim() !== "" && prompt.trim() !== "" && connectionIds !== null;
+  const ready = description.trim() !== "" && prompt.trim() !== "";
 
   async function create() {
-    if (connectionIds === null) throw new Error("connections are not loaded");
     setBusy(true);
     const name = await freeName(description, lane);
     if (name === null) {
@@ -913,7 +906,6 @@ function NewAutomation({
         description: description.trim(),
         prompt: prompt.trim(),
         schedule,
-        connections: connectionIds,
       },
     });
     setBusy(false);

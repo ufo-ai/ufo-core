@@ -390,9 +390,7 @@ async def test_bind_failure_keeps_dispatch_step_count_stable_on_recovery(
     second_bind_started = asyncio.Event()
     binds = 0
 
-    async def authorize(
-        authorizer: loop_queue.SandboxAuthorizer, connections: tuple[UUID, ...], call: str
-    ):
+    async def authorize(authorizer: loop_queue.SandboxAuthorizer, acting_member_id: UUID | None):
         nonlocal binds
         binds += 1
         if binds == 1:
@@ -400,7 +398,7 @@ async def test_bind_failure_keeps_dispatch_step_count_stable_on_recovery(
                 await second_bind_started.wait()
             raise RuntimeError("transient bind")
         second_bind_started.set()
-        return await original_authorize(authorizer, connections, call)
+        return await original_authorize(authorizer, acting_member_id)
 
     monkeypatch.setattr(loop_queue.SandboxAuthorizer, "authorize", authorize)
     saved = loop_queue._runtime

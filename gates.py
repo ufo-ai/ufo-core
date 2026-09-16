@@ -80,6 +80,14 @@ ADMISSION_FACTORY = CORE_SRC / "serve.py"
 ADMISSION_FACTORY_NAME = "_admission"
 ADMISSION_HARNESS_ROOT = "evals"
 ENVELOPE_COLUMNS = {"workspace_id", "created_at", "updated_at"}
+# Written only by the image a deploy replaces; the revision after that release drops them.
+OUTGOING_IMAGE_COLUMNS = {
+    ("detached_task", "capability_id"),
+    ("sandbox_call_capability", "id"),
+    ("sandbox_call_capability", "turn_id"),
+    ("sandbox_call_capability", "call"),
+    ("sandbox_call_capability", "connections"),
+}
 SCHEMA_TABLES = CORE_SRC / "schema" / "tables.py"
 SCHEDULING_MODULE = Path("extensions/scheduled_tasks/ufo_ext_scheduled_tasks/schedules.py")
 AMBIENT_SCHEDULE_METHODS = frozenset({"create", "update", "cancel", "list", "inspect"})
@@ -712,7 +720,7 @@ def _wiring_failures(trees: dict[Path, ast.Module]) -> list[str]:
                     produced.add(value)
     failures = []
     for table, column in columns:
-        if column in ENVELOPE_COLUMNS:
+        if column in ENVELOPE_COLUMNS or (table, column) in OUTGOING_IMAGE_COLUMNS:
             continue
         if column not in write_columns:
             failures.append(f"schema: {table}.{column} has no write site")

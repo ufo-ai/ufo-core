@@ -70,6 +70,7 @@ async def _invoke(
     unless_member_since: int | None = None,
     unless_member_arrival_since: int | None = None,
     runtime_config: TurnRuntimeConfig | None = None,
+    acting_member_id: UUID | None = None,
 ) -> UUID | None:
     return await admission.invoke(
         workspace_id,
@@ -84,6 +85,7 @@ async def _invoke(
         unless_member_since=unless_member_since,
         unless_member_arrival_since=unless_member_arrival_since,
         runtime_config=runtime_config,
+        acting_member_id=acting_member_id,
     )
 
 
@@ -221,19 +223,19 @@ async def test_each_opening_turn_persists_its_own_runtime_config(db: None) -> No
     )
 
 
-@pytest.mark.parametrize("live_is_unrestricted", [True, False])
-async def test_paid_work_within_the_live_turns_scope_folds_into_it(
-    db: None, live_is_unrestricted: bool
+@pytest.mark.parametrize(
+    "runtime_config",
+    [None, TurnRuntimeConfig(internet_access=False)],
+    ids=["unpinned", "pinned"],
+)
+async def test_paid_work_under_the_live_turns_runtime_config_folds_into_it(
+    db: None, runtime_config: TurnRuntimeConfig | None
 ) -> None:
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    connection_id = uuid4()
-    live_config = (
-        None if live_is_unrestricted else TurnRuntimeConfig(connections=(connection_id, uuid4()))
-    )
     live = await admission.admit_member(
-        workspace_id, conversation_id, "dequeue", member_id, runtime_config=live_config
+        workspace_id, conversation_id, "dequeue", member_id, runtime_config=runtime_config
     )
     assert await _claim_turn(live.turn_id, str(live.turn_id))
 
@@ -245,7 +247,7 @@ async def test_paid_work_within_the_live_turns_scope_folds_into_it(
         "<spawn_result>done</spawn_result>",
         "subagent-result:child",
         holds_work_already_done=True,
-        runtime_config=TurnRuntimeConfig(connections=(connection_id,)),
+        runtime_config=runtime_config,
     )
 
     assert delivered == live.turn_id
@@ -254,17 +256,18 @@ async def test_paid_work_within_the_live_turns_scope_folds_into_it(
     assert dbos.enqueued == [str(live.turn_id)]
 
 
-@pytest.mark.parametrize("delivered_is_unrestricted", [False, True])
-async def test_paid_work_outside_the_live_turns_scope_waits_in_its_own_turn(
-    db: None, delivered_is_unrestricted: bool
+@pytest.mark.parametrize(
+    "delivered_config",
+    [TurnRuntimeConfig(environment="sha256:" + "1" * 64), None],
+    ids=["pinned-elsewhere", "unpinned"],
+)
+async def test_paid_work_under_another_runtime_config_waits_in_its_own_turn(
+    db: None, delivered_config: TurnRuntimeConfig | None
 ) -> None:
     workspace_id, member_id, agent_id, conversation_id = await _seed()
     dbos = StubDbos()
     admission = Admission(dbos=dbos, durable_surfaces=frozenset())
-    delivered_config = (
-        None if delivered_is_unrestricted else TurnRuntimeConfig(connections=(uuid4(),))
-    )
-    live_config = TurnRuntimeConfig(connections=(uuid4(),))
+    live_config = TurnRuntimeConfig(internet_access=False)
     live = await admission.admit_member(
         workspace_id,
         conversation_id,
@@ -324,6 +327,58 @@ async def test_paid_work_outside_the_live_turns_scope_waits_in_its_own_turn(
             runtime_config=live_config if delivered_config is None else None,
         )
     assert dbos.enqueued == [str(live.turn_id)]
+
+
+async def test_paid_work_acting_for_another_member_waits_in_its_own_turn(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    other = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=other,
+                workspace_id=workspace_id,
+                email="other@example.com",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    dbos = StubDbos()
+    admission = Admission(dbos=dbos, durable_surfaces=frozenset())
+    live = await admission.admit_member(workspace_id, conversation_id, "new request", member_id)
+
+    waiting = await _invoke(
+        admission,
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "<spawn_result>theirs</spawn_result>",
+        "subagent-result:other-member",
+        holds_work_already_done=True,
+        acting_member_id=other,
+    )
+    folded = await _invoke(
+        admission,
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "<spawn_result>ours</spawn_result>",
+        "subagent-result:same-member",
+        holds_work_already_done=True,
+        acting_member_id=member_id,
+    )
+
+    assert waiting is not None and waiting != live.turn_id
+    assert folded == live.turn_id
+    assert await _queued_bodies(conversation_id) == ["<spawn_result>ours</spawn_result>"]
+    async with workspace_tx() as connection:
+        row = (
+            await connection.execute(
+                sa.select(tables.turn.c.status, tables.turn.c.member_id).where(
+                    tables.turn.c.id == waiting
+                )
+            )
+        ).one()
+    assert (row.status, row.member_id) == ("queued", other)
 
 
 async def test_member_admission_cannot_mint_a_model_account_capability(db: None) -> None:
@@ -2001,3 +2056,39 @@ async def test_an_internal_turn_leaves_the_archive_mark(db: None) -> None:
         ).scalar_one()
     assert archived_at is not None
     assert await _turn_count(task_lane) == 1
+
+
+async def test_a_turn_records_the_member_it_acts_for(db: None) -> None:
+    workspace_id, member_id, agent_id, conversation_id = await _seed()
+    admission = Admission(dbos=StubDbos(), durable_surfaces=frozenset())
+    spoken = await admission.admit_member(workspace_id, conversation_id, "hi", member_id)
+    fired = await admission.invoke(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        "fire",
+        "task:1",
+        as_scheduled=True,
+        acting_member_id=member_id,
+    )
+    unattributed = await admission.invoke(
+        workspace_id, conversation_id, agent_id, "notice", "notice:1", as_scheduled=True
+    )
+    async with workspace_tx() as connection:
+        rows = {
+            row.id: row
+            for row in (
+                await connection.execute(
+                    sa.select(
+                        tables.turn.c.id, tables.turn.c.member_id, tables.turn.c.speaker_member_id
+                    ).where(tables.turn.c.conversation_id == conversation_id)
+                )
+            ).all()
+        }
+    assert fired is not None and unattributed is not None
+    assert (rows[fired].member_id, rows[fired].speaker_member_id) == (member_id, None)
+    assert (rows[unattributed].member_id, rows[unattributed].speaker_member_id) == (None, None)
+    assert (rows[spoken.turn_id].member_id, rows[spoken.turn_id].speaker_member_id) == (
+        member_id,
+        member_id,
+    )

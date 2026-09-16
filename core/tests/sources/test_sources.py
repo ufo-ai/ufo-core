@@ -118,7 +118,7 @@ from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws, ws_current
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
-from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
+from ufo.schema.records import Agent, Turn
 
 TOOL_NARRATION = "looking through what they synced"
 
@@ -2070,9 +2070,9 @@ async def test_making_a_connection_private_takes_its_streams_off_the_main_agent(
     }
 
 
-async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db: None) -> None:
-    """The owner exception is the live speaker's alone. A scheduled run or subagent carries no
-    member identity, so the main agent reaches only the shared source."""
+async def test_a_turn_acting_for_nobody_reaches_only_the_shared_source(db: None) -> None:
+    """The owner exception follows the member a call acts for; a turn acting for nobody reaches
+    only the shared source."""
     state = await _authority()
     ctx = ToolContext(
         sandbox=None,
@@ -2098,7 +2098,38 @@ async def test_a_turn_with_no_live_speaker_never_inherits_the_owner_exception(db
     assert await _reachable(state, ctx.source_reader()) == {state.unowned_source_id}
 
 
-async def test_a_turn_connection_scope_is_an_exact_source_read_allowlist(db: None) -> None:
+async def test_an_unbound_call_on_a_members_turn_acts_for_nobody(db: None) -> None:
+    state = await _authority()
+    ctx = ToolContext(
+        sandbox=None,
+        blob=None,
+        turn=Turn(
+            id=uuid4(),
+            workspace_id=state.workspace_id,
+            conversation_id=uuid4(),
+            agent_id=state.main_agent_id,
+            seq=1,
+            status="running",
+            inbound="summarise what changed",
+            created_at=datetime(2026, 7, 27, tzinfo=UTC),
+            speaker_member_id=state.owner_id,
+            member_id=state.owner_id,
+        ),
+        agent=Agent(prompt="p", model="claude-opus-4-8"),
+        spawn=_unavailable_spawn,
+        speaker_member_id=None,
+        audience=conversation_audience(None),
+        artifact_token_secret="",
+    )
+    assert ctx.acting_member_id is None
+    assert ctx.read_subjects == frozenset({SHARED_SUBJECT})
+    assert ctx.source_reader().requesting_member_id is None
+    assert await _reachable(state, ctx.source_reader()) == {state.unowned_source_id}
+
+
+async def test_source_reads_follow_the_acting_member_and_the_conversations_audience(
+    db: None,
+) -> None:
     state = await _authority()
     owned_page_id, shared_page_id = uuid7(), uuid7()
     async with workspace_tx() as connection:
@@ -2124,17 +2155,30 @@ async def test_a_turn_connection_scope_is_an_exact_source_read_allowlist(db: Non
                 )
             ],
         )
-    for connections, expected_sources, expected_pages in (
+    for agent_id, speaker_id, room_member_id, expected_sources, expected_pages in (
         (
+            state.main_agent_id,
+            state.owner_id,
+            state.owner_id,
+            {state.owned_source_id, state.unowned_source_id},
+            {owned_page_id, shared_page_id},
+        ),
+        (
+            state.main_agent_id,
+            state.stranger_id,
+            state.stranger_id,
+            {state.unowned_source_id},
+            {shared_page_id},
+        ),
+        (
+            state.main_agent_id,
+            None,
             None,
             {state.owned_source_id, state.unowned_source_id},
             {owned_page_id, shared_page_id},
         ),
-        ((state.owned_connection_id,), {state.owned_source_id}, {owned_page_id}),
-        ((state.shared_connection_id,), {state.unowned_source_id}, {shared_page_id}),
-        ((), set(), set()),
+        (state.granted_agent_id, None, state.owner_id, {state.owned_source_id}, {owned_page_id}),
     ):
-        runtime_config = None if connections is None else TurnRuntimeConfig(connections=connections)
         ctx = ToolContext(
             sandbox=None,
             blob=None,
@@ -2142,21 +2186,21 @@ async def test_a_turn_connection_scope_is_an_exact_source_read_allowlist(db: Non
                 id=uuid4(),
                 workspace_id=state.workspace_id,
                 conversation_id=uuid4(),
-                agent_id=state.main_agent_id,
+                agent_id=agent_id,
                 seq=1,
                 status="running",
                 inbound="summarise what changed",
                 created_at=datetime(2026, 7, 27, tzinfo=UTC),
-                runtime_config=runtime_config,
+                member_id=state.owner_id,
             ),
             agent=Agent(prompt="p", model="claude-opus-4-8"),
             spawn=_unavailable_spawn,
-            speaker_member_id=state.owner_id,
-            audience=conversation_audience(state.owner_id),
+            speaker_member_id=speaker_id,
+            audience=conversation_audience(room_member_id),
             artifact_token_secret="",
         )
         reader = ctx.source_reader()
-        assert reader.connections == connections
+        assert reader.requesting_member_id == (state.owner_id if speaker_id is None else speaker_id)
         with ws(state.workspace_id):
             ext = context_for("probe", frozenset())
             assert await ext.readable_source_ids(reader) == expected_sources
@@ -2165,33 +2209,6 @@ async def test_a_turn_connection_scope_is_an_exact_source_read_allowlist(db: Non
                 set(await ext.readable_page_states((owned_page_id, shared_page_id), reader))
                 == expected_pages
             )
-
-    automatic = ToolContext(
-        sandbox=None,
-        blob=None,
-        turn=Turn(
-            id=uuid4(),
-            workspace_id=state.workspace_id,
-            conversation_id=uuid4(),
-            agent_id=state.granted_agent_id,
-            seq=1,
-            status="running",
-            inbound="summarise what changed",
-            created_at=datetime(2026, 7, 27, tzinfo=UTC),
-            runtime_config=TurnRuntimeConfig(connections=(state.owned_connection_id,)),
-        ),
-        agent=Agent(prompt="p", model="claude-opus-4-8"),
-        spawn=_unavailable_spawn,
-        speaker_member_id=None,
-        audience=conversation_audience(None),
-        artifact_token_secret="",
-    )
-    with ws(state.workspace_id):
-        ext = context_for("probe", frozenset())
-        assert await ext.readable_source_ids(automatic.source_reader()) == {state.owned_source_id}
-        assert {page.id for page in await ext.source_pages(automatic.source_reader())} == {
-            owned_page_id
-        }
 
 
 async def test_a_failing_source_is_isolated_and_released(

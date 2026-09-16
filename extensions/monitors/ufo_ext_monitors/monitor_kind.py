@@ -47,7 +47,6 @@ class MonitorSpec(BaseModel):
     interval_minutes: int = Field(title="Interval", description="Minimum minutes between probes.")
     deadline_at: datetime = Field(description="UTC instant the monitor fires at whatever happened.")
     reason: str = Field(title="Reason", description="What is being watched and why.")
-    connections: tuple[UUID, ...]
     internet_access: Literal[False] | None
 
 
@@ -118,7 +117,6 @@ class MonitorObjects(MemberReadableObjects[MonitorSpec, GeneratedObjectOwner]):
                 interval_minutes=row.interval_minutes,
                 deadline_at=row.deadline_at,
                 reason=row.reason,
-                connections=row.connections,
                 internet_access=row.internet_access,
             ),
             created_at=row.created_at,

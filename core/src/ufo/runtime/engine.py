@@ -346,15 +346,7 @@ FINISH_SCHEMA_ERROR = (
 )
 
 
-@dataclass(frozen=True)
-class SandboxAccess:
-    sandbox: Sandbox
-    revoke: Callable[[], Awaitable[None]] | None = None
-    capability_id: UUID | None = None
-
-
-SandboxFor = Callable[[tuple[UUID, ...], str], Awaitable[SandboxAccess]]
-SubagentsFor = Callable[[tuple[UUID, ...]], tuple[Spawn, SubagentControl | None]]
+SandboxFor = Callable[[UUID | None], Awaitable[Sandbox]]
 SCHEDULED_MEMORY_CONTEXT = "<recalled_memory>\n{recalled}\n</recalled_memory>"
 SCHEDULED_MEMORY_SEARCH_TIMEOUT_SECONDS = 4.0
 _NOTHING_SPENT = TurnCost(tokens=0, micro_usd=0, model="", cache_percent=0)
@@ -673,7 +665,6 @@ class _DispatchReady:
     effective: EffectiveCall
     args: BaseModel
     target: ObjectActionTarget | None
-    sandbox_access: SandboxAccess
 
 
 @dataclass(frozen=True)
@@ -1947,7 +1938,6 @@ class TurnEngine:
     previous_turn_ended_at: datetime | None = None
     lineage: RunLineage | None = None
     sandbox_for: SandboxFor | None = None
-    subagents_for: SubagentsFor | None = None
     requestable_credentials: CredentialRequests | None = None
     workspace_slots: WorkspaceSlots | None = None
     """The slots an extension resolves for this workspace alone, which no manifest names — None
@@ -2524,13 +2514,8 @@ class TurnEngine:
                 matches = await self.memory.search(
                     SourceReader(
                         agent_id=self.turn.agent_id,
-                        requesting_member_id=None,
+                        requesting_member_id=self.turn.member_id,
                         subjects=audience_subjects(self.audience),
-                        connections=(
-                            None
-                            if self.turn.runtime_config is None
-                            else self.turn.runtime_config.connections
-                        ),
                     ),
                     (self.turn.inbound,),
                 )
@@ -4087,7 +4072,6 @@ class TurnEngine:
             else bound.effective.meter_dimensions()
         )
         target = resume_target
-        sandbox_access: SandboxAccess | None = None
         with span("tool.dispatch", tool=call.name, call=semantic.get("call", call.name)):
             try:
                 if isinstance(bound, _RejectedToolCall):
@@ -4103,17 +4087,9 @@ class TurnEngine:
                 ready = gate.ready
                 if ready is None:
                     raise RuntimeError("dispatch gate returned no result or ready call")
-                sandbox_access = ready.sandbox_access
                 handled = await self._invoke_dispatch(bound, ready, find_usages)
                 outcome, error_class = handled.outcome, handled.error_class
                 result = await self._finish_dispatch(ready, handled, find_usages)
-                if (
-                    not result.is_error
-                    and ready.effective.tool.retains_sandbox_authority
-                    and sandbox_access.revoke is not None
-                ):
-                    ready.context.cleanup.register(sandbox_access.revoke)
-                    sandbox_access = None
                 return result
             except asyncio.CancelledError:
                 outcome, error_class = "step_failed", "CancelledError"
@@ -4131,8 +4107,6 @@ class TurnEngine:
                 raise
             finally:
                 TOOL_CALL_ID.reset(issuing)
-                if sandbox_access is not None and sandbox_access.revoke is not None:
-                    await sandbox_access.revoke()
                 _meter_dispatch(
                     self.tools, call, started, outcome, error_class, self.profile, semantic
                 )
@@ -4307,10 +4281,7 @@ class TurnEngine:
         context = authorized.context
         final_args = authorized.args
         try:
-            context, sandbox_access = await self._authorize_context(
-                context,
-                effective.dispatch_key(self.turn.id),
-            )
+            context = await self._authorize_context(context)
         except TerminalAbsent as error:
             raise TerminalGone(str(error)) from error
         except Exception as error:
@@ -4325,35 +4296,23 @@ class TurnEngine:
                 outcome="authority_failed",
                 error_class=type(error).__name__,
             )
-        handed_off = False
-        try:
-            if effective.action is not None and target is None:
-                try:
-                    target = await self.verbs.action_target(context, tool, effective.action)
-                except ValueError as error:
-                    return _DispatchGate(
-                        target,
-                        result=DispatchResult(
-                            tool_use_id=call.id,
-                            text=_error_text(call.name, error, bound.member_refs),
-                            is_error=True,
-                            activity=True,
-                        ),
-                        outcome="invalid_call",
-                        error_class=type(error).__name__,
-                    )
-            ready = _DispatchReady(
-                context,
-                effective,
-                final_args,
-                target,
-                sandbox_access,
-            )
-            handed_off = True
-            return _DispatchGate(target, ready=ready)
-        finally:
-            if not handed_off and sandbox_access.revoke is not None:
-                await sandbox_access.revoke()
+        if effective.action is not None and target is None:
+            try:
+                target = await self.verbs.action_target(context, tool, effective.action)
+            except ValueError as error:
+                return _DispatchGate(
+                    target,
+                    result=DispatchResult(
+                        tool_use_id=call.id,
+                        text=_error_text(call.name, error, bound.member_refs),
+                        is_error=True,
+                        activity=True,
+                    ),
+                    outcome="invalid_call",
+                    error_class=type(error).__name__,
+                )
+        ready = _DispatchReady(context, effective, final_args, target)
+        return _DispatchGate(target, ready=ready)
 
     async def _authorize_member_dispatch(
         self,
@@ -4536,33 +4495,13 @@ class TurnEngine:
             answer=bound.authorization_answer,
         )
 
-    async def _authorize_context(
-        self, context: ToolContext, call: str
-    ) -> tuple[ToolContext, SandboxAccess]:
-        connections = await context.connector_connection_ids()
-        spawn, subagents = (
-            (context.spawn, context.subagents)
-            if self.subagents_for is None
-            else self.subagents_for(connections)
-        )
-        sandbox_access = (
-            SandboxAccess(self.sandbox)
+    async def _authorize_context(self, context: ToolContext) -> ToolContext:
+        sandbox = (
+            self.sandbox
             if self.sandbox_for is None
-            else await self.sandbox_for(connections, call)
+            else await self.sandbox_for(context.acting_member_id)
         )
-        try:
-            authorized = replace(
-                context,
-                sandbox=sandbox_access.sandbox,
-                sandbox_capability_id=sandbox_access.capability_id,
-                spawn=spawn,
-                subagents=subagents,
-            )
-        except BaseException:
-            if sandbox_access.revoke is not None:
-                await sandbox_access.revoke()
-            raise
-        return authorized, sandbox_access
+        return replace(context, sandbox=sandbox)
 
     async def _invoke_dispatch(
         self,

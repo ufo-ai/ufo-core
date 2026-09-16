@@ -5,8 +5,6 @@ from uuid import UUID
 import sqlalchemy as sa
 from alembic import op
 
-from ufo.sdk.context import CONNECTION_SCOPE_MAX
-
 revision: str = "scheduled_tasks_0002"
 down_revision: str | None = "scheduled_tasks_0001"
 branch_labels: tuple[str, ...] | None = None
@@ -34,6 +32,9 @@ connection = sa.table(
     sa.column("shared", sa.Boolean()),
 )
 pause = sa.table("pause", sa.column("connections", sa.JSON(none_as_null=True)))
+
+
+CONNECTION_SCOPE_MAX = 50
 
 
 def upgrade() -> None:

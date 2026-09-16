@@ -39,7 +39,7 @@ from ufo_ext_memory.store import (
 
 from ufo.blob import FilesystemBlobStore
 from ufo.db import workspace_tx
-from ufo.runtime.ext.context import ExtensionContext, SourceReader, context_for
+from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, TextChunker
 from ufo.runtime.objects import (
     ObjectListQuery,
@@ -50,7 +50,7 @@ from ufo.runtime.turns.subjects import SHARED_SUBJECT, member_subject
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
-from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
+from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import (
     SHARED_AUDIENCE,
     Audience,
@@ -448,35 +448,6 @@ async def test_recall_hook_serves_a_member_message_folded_onto_an_internal_root(
     record = next(record for record in caplog.records if record.message == MEMORY_RECALL_EVENT)
     assert "skipped" not in record.ufo
     assert calls == 1
-
-
-async def test_recall_hook_carries_the_turn_connection_scope(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen: tuple[UUID, ...] | None = None
-
-    class StubStore:
-        async def recall(
-            self,
-            query: str,
-            subjects: frozenset[str],
-            limit: int,
-            *,
-            source_reader: SourceReader,
-        ) -> tuple[Recalled, ...]:
-            nonlocal seen
-            seen = source_reader.connections
-            return ()
-
-    monkeypatch.setattr(memory, "store_for", lambda ext: StubStore())
-    workspace_id = uuid4()
-    connection_scope = (uuid4(),)
-    turn = _stub_turn(workspace_id).model_copy(
-        update={"runtime_config": TurnRuntimeConfig(connections=connection_scope)}
-    )
-    with ws(workspace_id):
-        await memory.recall_hook(_hook(workspace_id, turn, speaker_member_id=uuid4()))
-    assert seen == connection_scope
 
 
 async def test_recall_hook_bounds_injected_bytes(monkeypatch: pytest.MonkeyPatch) -> None:

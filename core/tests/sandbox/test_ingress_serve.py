@@ -1355,9 +1355,7 @@ async def test_a_page_read_from_a_site_that_stopped_tells_the_conversation_that_
     assert got.status_code == 503
     assert [turn.conversation_id for turn in reported.turns] == [conversation_id]
     assert reported.turns[0].message == SITE_NOT_ANSWERING_FIRE.format(port=8000)
-    assert reported.turns[0].runtime_config == TurnRuntimeConfig(
-        connections=(), internet_access=False
-    )
+    assert reported.turns[0].runtime_config == TurnRuntimeConfig(internet_access=False)
 
 
 async def test_reloads_of_the_waiting_page_carry_one_idempotency_key(

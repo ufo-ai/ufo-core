@@ -193,6 +193,7 @@ async def deliver(ctx: ToolContext, args: DeliverInput) -> ToolResult:
                 holds_work_already_done=True,
                 as_scheduled=True,
                 runtime_config=ctx.turn.runtime_config,
+                acting_member_id=member_id,
             )
         except AgentArchived:
             remaining = tuple(

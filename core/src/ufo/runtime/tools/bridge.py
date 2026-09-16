@@ -90,7 +90,7 @@ type ToolBridgeResponse = ToolBridgeSuccess | ToolBridgeFailure
 class ToolBridgePrincipal:
     workspace_id: UUID
     turn_id: UUID
-    connections: tuple[UUID, ...]
+    member_id: UUID | None
 
 
 class ToolBridgeRequester(Protocol):

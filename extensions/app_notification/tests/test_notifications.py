@@ -36,7 +36,6 @@ from ufo_ext_app_notification.store import notification as notification_table
 
 from ufo.db import workspace_tx
 from ufo.host.ext.loader import turn_tools
-from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.agent_scope import agent
 from ufo.runtime.ext.context import context_for
 from ufo.runtime.objects import UnknownObject, VerbNotSupported
@@ -232,51 +231,7 @@ async def test_notify_writes_one_row_for_the_member_the_turn_acts_for(db: None) 
     assert row["produced_by_turn_id"] == ctx.turn.id
     assert row["produced_in_conversation_id"] == conversation_id
     assert ctx.turn.model_accounts
-    assert stored.runtime_config == TurnRuntimeConfig(connections=())
-
-
-async def test_notify_snapshots_only_the_selected_members_private_connection(db: None) -> None:
-    workspace_id, member_id, agent_id, _, conversation_id = await _seed()
-    other = await _member(workspace_id)
-    grants = GrantStore()
-    parent_config = TurnRuntimeConfig(
-        model="claude-opus-4-8",
-        internet_access=False,
-        environment=f"sha256:{'a' * 64}",
-    )
-    with ws(workspace_id), agent(agent_id):
-        selected = await grants.record(
-            provider="hub",
-            account_id="selected",
-            host="api.hub.test",
-            grantor_member_id=member_id,
-            shared=False,
-        )
-        outside = await grants.record(
-            provider="hub",
-            account_id="outside",
-            host="api.hub.test",
-            grantor_member_id=other,
-            shared=False,
-        )
-        ctx = replace(
-            _tool_ctx(
-                workspace_id,
-                conversation_id,
-                agent_id,
-                speaker_member_id=member_id,
-                runtime_config=parent_config,
-            ),
-            grants=grants,
-            other_members_active=True,
-            member_messages_active=True,
-        )
-        result = await notify(ctx, NotifyInput(subject=SOURCE, body="14 deals moved"))
-        [row] = await NotificationStore(ctx.ext).rows()
-
-    assert result.is_error is False
-    assert row.runtime_config == parent_config.model_copy(update={"connections": (selected,)})
-    assert outside not in row.runtime_config.connections
+    assert stored.runtime_config == TurnRuntimeConfig()
 
 
 async def test_the_inbox_is_the_provisioned_agent_whatever_name_it_landed_under(
@@ -325,43 +280,20 @@ async def test_a_repeat_on_a_subject_already_raised_folds_and_counts(db: None) -
     """The page-revision rule: one subject is one row, the body is the latest revision, and the
     count is the number of times it was raised — across turns and across agents."""
     workspace_id, member_id, agent_id, _, conversation_id = await _seed()
-    grants = GrantStore()
     with ws(workspace_id), agent(agent_id):
-        first_connection = await grants.record(
-            provider="hub",
-            account_id="first",
-            host="api.hub.test",
-            grantor_member_id=member_id,
-            shared=False,
+        first = _tool_ctx(
+            workspace_id,
+            conversation_id,
+            agent_id,
+            speaker_member_id=member_id,
+            runtime_config=TurnRuntimeConfig(),
         )
-        second_connection = await grants.record(
-            provider="hub",
-            account_id="second",
-            host="api.hub.test",
-            grantor_member_id=member_id,
-            shared=False,
-        )
-        first = replace(
-            _tool_ctx(
-                workspace_id,
-                conversation_id,
-                agent_id,
-                speaker_member_id=member_id,
-                runtime_config=TurnRuntimeConfig(connections=(first_connection,)),
-            ),
-            grants=grants,
-        )
-        second = replace(
-            _tool_ctx(
-                workspace_id,
-                conversation_id,
-                agent_id,
-                speaker_member_id=member_id,
-                runtime_config=TurnRuntimeConfig(
-                    internet_access=False, connections=(second_connection,)
-                ),
-            ),
-            grants=grants,
+        second = _tool_ctx(
+            workspace_id,
+            conversation_id,
+            agent_id,
+            speaker_member_id=member_id,
+            runtime_config=TurnRuntimeConfig(internet_access=False),
         )
         await notify(first, NotifyInput(subject=SOURCE, body="14 deals moved"))
         result = await notify(second, NotifyInput(subject=SOURCE, body="now 400 pages changed"))
@@ -382,7 +314,7 @@ async def test_a_missing_or_stale_runtime_config_fails_closed(db: None) -> None:
         conversation_id,
         agent_id,
         speaker_member_id=member_id,
-        runtime_config=TurnRuntimeConfig(connections=(uuid4(),)),
+        runtime_config=TurnRuntimeConfig(),
     )
     with ws(workspace_id), agent(agent_id):
         await notify(ctx, NotifyInput(subject=SOURCE, body="first"))
@@ -416,10 +348,8 @@ async def test_a_missing_or_stale_runtime_config_fails_closed(db: None) -> None:
         rows = {row.subject: row for row in await NotificationStore(ctx.ext).rows()}
 
     assert rows[SOURCE].body == "folded without scope"
-    assert rows[SOURCE].runtime_config == TurnRuntimeConfig(internet_access=False, connections=())
-    assert rows["source/outgoing"].runtime_config == TurnRuntimeConfig(
-        internet_access=False, connections=()
-    )
+    assert rows[SOURCE].runtime_config == TurnRuntimeConfig(internet_access=False)
+    assert rows["source/outgoing"].runtime_config == TurnRuntimeConfig(internet_access=False)
 
 
 def test_notify_is_offered_by_the_apps_flag() -> None:
@@ -467,13 +397,12 @@ async def test_a_turn_past_the_subject_cap_is_refused_a_new_subject_but_may_fold
 
 async def test_a_speakerless_turn_notifies_nobody(db: None) -> None:
     workspace_id, _member_id, agent_id, _, conversation_id = await _seed()
-    connections = (uuid4(), uuid4())
     ctx = _tool_ctx(
         workspace_id,
         conversation_id,
         agent_id,
         speaker_member_id=None,
-        runtime_config=TurnRuntimeConfig(internet_access=False, connections=connections),
+        runtime_config=TurnRuntimeConfig(internet_access=False),
     )
     with ws(workspace_id), agent(agent_id):
         result = await notify(ctx, NotifyInput(subject=SOURCE, body="auth failed 3 nights"))
@@ -586,20 +515,19 @@ async def test_the_kind_reads_the_members_own_rows_and_dismisses_them(db: None) 
 
 async def test_a_member_reads_and_dismisses_notifications_across_origin_scopes(db: None) -> None:
     workspace_id, member_id, agent_id, _, conversation_id = await _seed()
-    first_connection, second_connection = uuid4(), uuid4()
     first = _tool_ctx(
         workspace_id,
         conversation_id,
         agent_id,
         speaker_member_id=member_id,
-        runtime_config=TurnRuntimeConfig(connections=(first_connection,)),
+        runtime_config=TurnRuntimeConfig(),
     )
     second = _tool_ctx(
         workspace_id,
         conversation_id,
         agent_id,
         speaker_member_id=member_id,
-        runtime_config=TurnRuntimeConfig(connections=(second_connection,)),
+        runtime_config=TurnRuntimeConfig(internet_access=False),
     )
     reader = _tool_ctx(
         workspace_id,

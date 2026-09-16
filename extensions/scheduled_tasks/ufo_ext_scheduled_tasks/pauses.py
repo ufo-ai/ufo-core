@@ -41,12 +41,12 @@ pause = sa.Table(
     sa.Column("workspace_id", sa.Uuid, nullable=False),
     sa.Column("conversation_id", sa.Uuid, nullable=False),
     sa.Column("agent_id", sa.Uuid, nullable=False),
+    sa.Column("created_by_member_id", sa.Uuid, nullable=True),
     sa.Column("resume_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("origin_seq", sa.Integer, nullable=False),
     sa.Column("origin_arrival_seq", sa.Integer, nullable=False),
     sa.Column("prompt", sa.Text, nullable=False),
     sa.Column("user_description", sa.Text, nullable=False),
-    sa.Column("connections", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("internet_access", sa.Boolean, nullable=False),
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
@@ -69,6 +69,7 @@ class Pause:
     origin_seq: int
     origin_arrival_seq: int
     prompt: str
+    created_by_member_id: UUID | None
     claim_id: str | None
     created_at: datetime
     updated_at: datetime
@@ -90,6 +91,7 @@ def _row(row: sa.RowMapping) -> Pause:
         origin_seq=row["origin_seq"],
         origin_arrival_seq=row["origin_arrival_seq"],
         prompt=row["prompt"],
+        created_by_member_id=row["created_by_member_id"],
         claim_id=row["claimed_by"],
         created_at=_aware(row["created_at"]),
         updated_at=_aware(row["updated_at"]),
@@ -135,6 +137,7 @@ class PauseStore:
         origin_seq: int,
         origin_arrival_seq: int,
         prompt: str,
+        created_by_member_id: UUID | None,
         internet_access: Literal[False] | None,
     ) -> Pause:
         """Arm the conversation's pause, replacing whatever it was waiting on before. A workflow
@@ -155,7 +158,7 @@ class PauseStore:
             "origin_arrival_seq": origin_arrival_seq,
             "prompt": prompt,
             "user_description": prompt,
-            "connections": [],
+            "created_by_member_id": created_by_member_id,
             "internet_access": internet_access is not False,
             "claimed_by": None,
             "claim_expires_at": None,

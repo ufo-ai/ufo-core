@@ -440,7 +440,7 @@ async def _bash_background(ctx: ToolContext, command: str) -> ToolResult:
             content=(TextContent(text=started.stderr or "the command did not detach"),),
             is_error=True,
         )
-    await mark_detached(ctx.turn, task, display_base, ctx.sandbox_capability_id)
+    await mark_detached(ctx.turn, task, display_base)
     return ToolResult(
         content=(TextContent(text=task_handles(task, started.stdout.strip(), display_base)),)
     )

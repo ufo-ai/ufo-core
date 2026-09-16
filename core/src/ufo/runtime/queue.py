@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Any, Protocol
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, Queue
@@ -75,7 +75,6 @@ from ufo.runtime.engine import (
     MAIN_ROUND_LIMIT,
     AdoptionReplay,
     RunLineage,
-    SandboxAccess,
     TranscriptRepair,
     TurnEngine,
     TurnParked,
@@ -115,7 +114,7 @@ from ufo.runtime.subagents import (
     Subagents,
 )
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
-from ufo.runtime.tools.context import SPAWN_CONNECT_PATH, Spawn, UnknownSubagentProfile
+from ufo.runtime.tools.context import SPAWN_CONNECT_PATH, UnknownSubagentProfile
 from ufo.runtime.tools.registry import ACTION_READ_TOOLS, OBJECT_ACTION_TOOL, ToolDef, ToolRegistry
 from ufo.runtime.transcript import Transcript
 from ufo.runtime.turns.activity import (
@@ -1058,12 +1057,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             member_accounts_connectable=_member_accounts_connectable(runtime),
         )
 
-        def subagents_for(
-            connections: tuple[UUID, ...],
-        ) -> tuple[Spawn, Subagents]:
-            scoped = replace(subagents, connection_scope=connections)
-            return scoped.spawn, scoped
-
         payload: dict[str, Any] = (
             json.loads(turn.inbound) if turn.subagent_profile is not None and turn.seq == 1 else {}
         )
@@ -1283,7 +1276,6 @@ async def _run_turn(runtime: Runtime, turn_id: str) -> str:
             blob=runtime.blob,
             spawn=subagents.spawn,
             subagents=subagents,
-            subagents_for=subagents_for,
             audience=audience,
             artifact_token_secret=runtime.artifact_token_secret,
             site_previewer=runtime.site_previewer,
@@ -1419,6 +1411,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
                     tables.turn.c.admission_source,
                     tables.turn.c.idempotency_key,
                     tables.turn.c.speaker_member_id,
+                    tables.turn.c.member_id,
                     tables.turn.c.created_at,
                     tables.turn.c.updated_at,
                     tables.turn.c.context,
@@ -1466,6 +1459,7 @@ async def _load_turn(turn_id: UUID) -> tuple[Turn, Agent, Audience]:
         admission_source=row.admission_source,
         idempotency_key=row.idempotency_key,
         speaker_member_id=row.speaker_member_id,
+        member_id=row.member_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
         context=None if row.context is None else TurnContext.model_validate(row.context),
@@ -1684,10 +1678,7 @@ async def _open_sandbox(
 
     The credential derivations run here rather than at the turn's start, so a turn that never
     touches the sandbox reads no credential slot either."""
-    run = RunToken(
-        workspace_id=turn.workspace_id,
-        turn_id=turn.id,
-    )
+    run = RunToken(workspace_id=turn.workspace_id, turn_id=turn.id)
     cache_config = cache_git_config() if cache_rewrite else ()
     with span("sandbox.open"):
         return await sandboxes.open(
@@ -1711,89 +1702,20 @@ class SandboxAuthorizer:
     clis: Mapping[str, CliCredential]
     turn: Turn
 
-    async def authorize(
-        self,
-        connections: tuple[UUID, ...],
-        call: str,
-    ) -> SandboxAccess:
-        env = await _grant_cli_env(
-            self.grants,
-            self.clis,
-            self.turn.id,
-            connections,
-        )
-        runtime_connections = (
-            ()
-            if self.turn.runtime_config is None or self.turn.runtime_config.connections is None
-            else self.turn.runtime_config.connections
-        )
-        capability_id: UUID | None = None
-        if connections != runtime_connections:
-            async with workspace_tx() as connection:
-                retained = sa.exists(
-                    sa.select(tables.detached_task.c.turn_id).where(
-                        tables.detached_task.c.capability_id == tables.sandbox_call_capability.c.id
-                    )
-                )
-                capability_id = (
-                    await connection.execute(
-                        sa.select(tables.sandbox_call_capability.c.id).where(
-                            tables.sandbox_call_capability.c.workspace_id == self.turn.workspace_id,
-                            tables.sandbox_call_capability.c.turn_id == self.turn.id,
-                            tables.sandbox_call_capability.c.call == call,
-                            retained,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if capability_id is None:
-                    capability_id = uuid4()
-                    await connection.execute(
-                        sa.delete(tables.sandbox_call_capability).where(
-                            tables.sandbox_call_capability.c.workspace_id == self.turn.workspace_id,
-                            tables.sandbox_call_capability.c.turn_id == self.turn.id,
-                            tables.sandbox_call_capability.c.call == call,
-                        )
-                    )
-                    await connection.execute(
-                        sa.insert(tables.sandbox_call_capability).values(
-                            id=capability_id,
-                            workspace_id=self.turn.workspace_id,
-                            turn_id=self.turn.id,
-                            call=call,
-                            connections=[str(connection) for connection in connections],
-                            created_at=datetime.now(UTC),
-                        )
-                    )
+    async def authorize(self, acting_member_id: UUID | None) -> Sandbox:
         run = RunToken(
             workspace_id=self.turn.workspace_id,
             turn_id=self.turn.id,
-            capability_id=capability_id,
+            acts_for=(
+                "turn"
+                if acting_member_id == self.turn.member_id
+                else "nobody"
+                if acting_member_id is None
+                else acting_member_id
+            ),
         )
-        sandbox = self.sandbox.authorize(
+        return self.sandbox.authorize(
             self.run_tokens.encode(run),
             frozenset(cli.env for cli in self.clis.values()) | GIT_IDENTITY_ENV,
-            env,
+            await _grant_cli_env(self.grants, self.clis, self.turn.id, acting_member_id),
         )
-        if capability_id is None:
-            return SandboxAccess(sandbox)
-        return SandboxAccess(
-            sandbox,
-            partial(self._revoke, capability_id),
-            capability_id,
-        )
-
-    async def _revoke(self, capability_id: UUID) -> None:
-        async with workspace_tx() as connection:
-            retained = sa.exists(
-                sa.select(tables.detached_task.c.turn_id).where(
-                    tables.detached_task.c.capability_id == capability_id
-                )
-            )
-            await connection.execute(
-                sa.delete(tables.sandbox_call_capability).where(
-                    tables.sandbox_call_capability.c.id == capability_id,
-                    tables.sandbox_call_capability.c.workspace_id == self.turn.workspace_id,
-                    tables.sandbox_call_capability.c.turn_id == self.turn.id,
-                    ~retained,
-                )
-            )

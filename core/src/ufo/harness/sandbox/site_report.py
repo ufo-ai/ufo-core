@@ -11,7 +11,7 @@ The waiting page a stopped site answers with reloads on a fixed interval, so a s
 reports itself again on every reload. `REPORT_BUCKET_SECONDS` is what makes that one turn rather
 than dozens: the bucket in the report's idempotency key advances on that period and on nothing
 else, so admission's own idempotency check is the whole of this report's memory. The invocation is
-standalone, so its connection and internet boundary never folds into a broader live turn."""
+standalone, so its internet boundary never folds into a broader live turn."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -114,9 +114,10 @@ class SiteReports:
     session for, signed with the deploy secret this process holds too, under a kind neither hop of
     a visit accepts — so a session cookie cannot be posted here and this token opens no site.
 
-    The conversation names its own agent. The recovery turn is standalone with no connection or
-    public-internet access, so it keeps only the model and sandbox it needs even beside a broader
-    live turn. A missing site row founds nothing.
+    The conversation names its own agent. The recovery turn is standalone, acts for nobody — so
+    it reaches the agent's shared connections alone — and has no public-internet access, so it
+    keeps only the model and sandbox it needs even beside a broader live turn. A missing site row
+    founds nothing.
     A conversation this workspace does not hold answers 404 — a shipped app page's origin is a
     synthetic anchor with no conversation behind it, so there is no agent to tell."""
 
@@ -152,7 +153,7 @@ class SiteReports:
                     f"site-down:{claims.conversation_id.hex}:{claims.port}:{bucket}",
                     holds_work_already_done=True,
                     standalone=True,
-                    runtime_config=TurnRuntimeConfig(connections=(), internet_access=False),
+                    runtime_config=TurnRuntimeConfig(internet_access=False),
                 )
             except AgentArchived:
                 return Response(status_code=204)

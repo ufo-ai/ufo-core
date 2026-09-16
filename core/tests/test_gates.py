@@ -570,6 +570,18 @@ def _check_wiring_gate_does_not_count_column_declaration_as_a_write() -> None:
     assert gates._wiring_failures(trees) == ["schema: page.revision has no write site"]
 
 
+def _check_wiring_gate_accepts_a_column_only_the_outgoing_image_writes() -> None:
+    trees = {
+        gates.SCHEMA_TABLES: ast.parse(
+            "detached_task = sa.Table(\n"
+            "    'detached_task', metadata, sa.Column('capability_id', sa.Uuid)\n"
+            ")\n"
+        ),
+        CORE_FILE: ast.parse("select(detached_task.c.turn_id)\n"),
+    }
+    assert gates._wiring_failures(trees) == []
+
+
 WEB_SURFACE = Path("extensions/web/ufo_ext_web/surface.py")
 
 
@@ -1057,6 +1069,7 @@ def test_repository_gates() -> None:
         _check_schedule_authority_gate_allows_ambient_agent_selection,
         _check_wiring_gate_counts_database_program_reads_and_writes,
         _check_wiring_gate_does_not_count_column_declaration_as_a_write,
+        _check_wiring_gate_accepts_a_column_only_the_outgoing_image_writes,
         _check_set_cookie_gate_flags_raw_set_cookie_outside_the_factory,
         _check_set_cookie_gate_exempts_the_factory_module,
         _check_set_cookie_gate_allows_the_factory_helper_at_call_sites,

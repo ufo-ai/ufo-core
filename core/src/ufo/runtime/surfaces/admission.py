@@ -124,6 +124,13 @@ class _Inbound:
     speaker_member_id: UUID | None
     context: TurnContext | None
     admitted_at: datetime | None = None
+    acting_member_id: UUID | None = None
+
+    @property
+    def member_id(self) -> UUID | None:
+        return (
+            self.speaker_member_id if self.speaker_member_id is not None else self.acting_member_id
+        )
 
 
 @dataclass(frozen=True)
@@ -150,10 +157,9 @@ class _FoldResult:
     """The arrival founds its own turn and that turn waits for the live one to end. The turn is
     left unstamped rather than enqueued, so the live turn's own exit offers it — a conversation
     runs one turn at a time, and work that could not fold does not become a second runner. Work
-    already done folds when its connection scope reaches nothing the live turn cannot — a live turn
-    pinned to no scope covers every scope, and its other pins are the ones a fold runs under, as a
-    redispatch already folds a stale pin under the live one's — and waits only when it reaches a
-    connection the live turn lacks, so the causal scope its result needs stays with it."""
+    already done folds when it acts for nobody or for the live turn's member, under the live turn's
+    runtime config and model accounts, and waits otherwise, so the member and pins its result needs
+    stay with it."""
 
 
 @dataclass(frozen=True)
@@ -279,6 +285,7 @@ class Admission:
                         tables.inbound_message.c.body,
                         tables.inbound_message.c.context,
                         tables.inbound_message.c.speaker_member_id,
+                        tables.inbound_message.c.member_id,
                         tables.inbound_message.c.idempotency_key,
                     )
                     .where(
@@ -328,6 +335,7 @@ class Admission:
                     ModelAccountCapability.model_validate(account)
                     for account in ended.model_accounts
                 ),
+                acting_member_id=row.member_id,
             )
         except AgentArchived:
             return None
@@ -355,6 +363,7 @@ class Admission:
         runtime_config: TurnRuntimeConfig | None = None,
         model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
+        acting_member_id: UUID | None = None,
     ) -> UUID | None:
         """Admit an internal turn. A turn founded on a spawned conversation inherits that
         conversation's spawn identity from
@@ -423,6 +432,7 @@ class Admission:
                 runtime_config=runtime_config,
                 model_accounts=model_accounts,
                 fired_by=fired_by,
+                acting_member_id=acting_member_id,
             )
         except _SupersededByMember:
             return None
@@ -457,6 +467,7 @@ class Admission:
         runtime_config: TurnRuntimeConfig | None = None,
         model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
+        acting_member_id: UUID | None = None,
     ) -> Admitted:
         self._validate_member_watermarks(unless_member_since, unless_member_arrival_since)
         dispatch_now = False
@@ -467,7 +478,7 @@ class Admission:
         status: TurnStatus | None = None
         arrival_id: UUID | None = None
         redispatch_workflow_id: str | None = None
-        inbound = _Inbound(body, speaker_member_id, context)
+        inbound = _Inbound(body, speaker_member_id, context, acting_member_id=acting_member_id)
         async with workspace_tx() as connection:
             conversation = (
                 await connection.execute(
@@ -831,6 +842,7 @@ class Admission:
                     tables.inbound_message.c.body,
                     tables.inbound_message.c.context,
                     tables.inbound_message.c.speaker_member_id,
+                    tables.inbound_message.c.member_id,
                     tables.inbound_message.c.created_at,
                 ).where(
                     tables.inbound_message.c.workspace_id == workspace_id,
@@ -883,6 +895,7 @@ class Admission:
                 ),
                 speaker_member_id=queued.speaker_member_id,
                 admitted_at=queued.created_at,
+                acting_member_id=queued.member_id,
             ),
         )
 
@@ -908,6 +921,7 @@ class Admission:
                     tables.turn.c.id,
                     tables.turn.c.status,
                     tables.turn.c.speaker_member_id,
+                    tables.turn.c.member_id,
                     tables.turn.c.runtime_config,
                     tables.turn.c.model_accounts,
                     sa.or_(
@@ -932,17 +946,18 @@ class Admission:
         )
         if live_turn is not None and live_runtime_config != runtime_config:
             if holds_work_already_done:
-                arrival_scope = None if runtime_config is None else runtime_config.connections
-                live_scope = (
-                    None if live_runtime_config is None else live_runtime_config.connections
-                )
-                covered = arrival_scope is not None and (
-                    live_scope is None or set(arrival_scope) <= set(live_scope)
-                )
-                if not covered:
-                    return _FoldResult(waits_for_live_turn=True)
-            elif runtime_config is not None:
+                return _FoldResult(waits_for_live_turn=True)
+            if runtime_config is not None:
                 raise ValueError("running turn has a different runtime config")
+        if (
+            live_turn is not None
+            and inbound.speaker_member_id is None
+            and inbound.acting_member_id is not None
+            and live_turn.member_id != inbound.acting_member_id
+        ):
+            if holds_work_already_done:
+                return _FoldResult(waits_for_live_turn=True)
+            raise ValueError("running turn acts for another member")
         if (
             live_turn is not None
             and tuple(
@@ -1047,6 +1062,7 @@ class Admission:
                     )
                 ),
                 speaker_member_id=inbound.speaker_member_id,
+                member_id=inbound.member_id,
                 idempotency_key=idempotency_key,
                 admitted_turn_id=live_turn.id,
                 created_at=(
@@ -1189,6 +1205,7 @@ class Admission:
                 inbound=inbound.body,
                 admission_source=admission_source,
                 speaker_member_id=inbound.speaker_member_id,
+                member_id=inbound.member_id,
                 fired_by_kind=None if fired_by is None else fired_by.kind,
                 fired_by_name=None if fired_by is None else fired_by.name,
                 fired_by_title=None if fired_by is None else fired_by.title,
@@ -1433,6 +1450,7 @@ class AdmissionInvoker:
         runtime_config: TurnRuntimeConfig | None = None,
         model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
+        acting_member_id: UUID | None = None,
     ) -> UUID | None:
         return await self.admission.invoke(
             self.workspace_id,
@@ -1449,6 +1467,7 @@ class AdmissionInvoker:
             runtime_config=runtime_config,
             model_accounts=model_accounts,
             fired_by=fired_by,
+            acting_member_id=acting_member_id,
         )
 
     async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None:

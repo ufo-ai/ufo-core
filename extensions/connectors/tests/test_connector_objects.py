@@ -1,6 +1,7 @@
 """Connection and connector-grant objects through the real object verbs."""
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -47,7 +48,7 @@ from ufo.runtime.tools.context import SpawnResult, SpeakerRequired, ToolContext
 from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
+from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 
 pytestmark = [
@@ -162,7 +163,6 @@ def _tool_context(
     agent_id: UUID,
     speaker_member_id: UUID | None = None,
     conversation_id: UUID | None = None,
-    connections: tuple[UUID, ...] | None = None,
 ) -> ToolContext:
     return ToolContext(
         sandbox=SandboxSession(
@@ -179,9 +179,6 @@ def _tool_context(
             status="running",
             inbound="hi",
             created_at=datetime(2026, 7, 16, tzinfo=UTC),
-            runtime_config=(
-                None if connections is None else TurnRuntimeConfig(connections=connections)
-            ),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
@@ -244,49 +241,6 @@ async def test_granted_accounts_list_and_read_through_the_verbs(db: None) -> Non
         assert datetime.fromisoformat(fetched["updated_at"]).replace(tzinfo=UTC) == datetime(
             2026, 7, 11, tzinfo=UTC
         )
-
-
-async def test_turn_connection_scope_filters_connection_and_grant_objects(db: None) -> None:
-    workspace_id, agent_id, conversation_id, _admin, grantor_id, _other = await _seed()
-    with ws(workspace_id), agent(agent_id):
-        await _grant(workspace_id, agent_id, conversation_id, grantor_id, "gmail", "allowed")
-        await _grant(workspace_id, agent_id, conversation_id, grantor_id, "gmail", "withheld")
-        summaries = {row.account_id: row for row in await connection_summaries()}
-        names = {
-            account: account_object_name("gmail", account) for account in ("allowed", "withheld")
-        }
-        ordinary = _tool_context(workspace_id, agent_id, grantor_id)
-        scoped = _tool_context(
-            workspace_id,
-            agent_id,
-            grantor_id,
-            connections=(summaries["allowed"].id,),
-        )
-        closed = _tool_context(workspace_id, agent_id, grantor_id, connections=())
-        for kind in (CONNECTION_KIND, CONNECTOR_GRANT_KIND):
-            ordinary_list = json.loads(
-                await _text(_object_tool("object_list"), ordinary, kind=kind)
-            )
-            scoped_list = json.loads(await _text(_object_tool("object_list"), scoped, kind=kind))
-            closed_list = json.loads(await _text(_object_tool("object_list"), closed, kind=kind))
-            assert {row["name"] for row in ordinary_list["objects"]} == set(names.values())
-            assert [row["name"] for row in scoped_list["objects"]] == [names["allowed"]]
-            assert closed_list["objects"] == []
-            allowed = yaml.safe_load(
-                await _text(
-                    _object_tool("object_get"),
-                    scoped,
-                    ref=f"{kind}/{names['allowed']}",
-                )
-            )
-            assert allowed["spec"]["account_id"] == "allowed"
-            with pytest.raises(UnknownObject):
-                await _object_tool("object_get").handler(
-                    scoped,
-                    _object_tool("object_get").input_model.model_validate(
-                        {"ref": f"{kind}/{names['withheld']}"}
-                    ),
-                )
 
 
 async def test_a_grant_links_to_its_agent_and_the_connection_it_opens(db: None) -> None:
@@ -1588,8 +1542,8 @@ async def test_portal_reads_hide_other_members_private_connectors(db: None) -> N
 
 async def test_sharing_changes_and_revoke_need_a_live_speaker(db: None) -> None:
     """Changing sharing and revoking a connector are grant acts: a speakerless
-    scheduled/subagent turn cannot perform them, even when its exact capabilities admit the
-    grantor's private connections. Granting stays speaker-only (RFC 0012)."""
+    scheduled/subagent turn cannot perform them, even when it acts for the grantor and so reaches
+    their private connections. Granting stays speaker-only (RFC 0012)."""
     workspace_id, agent_id, conversation_id, _owner, grantor_id, _other = await _seed()
     apply_tool = _object_tool("object_apply")
     delete_tool = _object_tool("object_delete")
@@ -1604,7 +1558,10 @@ async def test_sharing_changes_and_revoke_need_a_live_speaker(db: None) -> None:
                 .where(tables.connection.c.id == grant.connection_id)
                 .values(shared=True)
             )
-        speakerless = _tool_context(workspace_id, agent_id, connections=(grant.connection_id,))
+        unattended = _tool_context(workspace_id, agent_id)
+        speakerless = replace(
+            unattended, turn=unattended.turn.model_copy(update={"member_id": grantor_id})
+        )
         with pytest.raises(SpeakerRequired):
             await apply_tool.handler(
                 speakerless,

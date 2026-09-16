@@ -62,7 +62,7 @@ from ufo.runtime.turns.subjects import SHARED_SUBJECT
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
-from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn, TurnRuntimeConfig
+from ufo.schema.records import Agent, ConnectRequest, TerminalFrame, Turn
 from ufo.schema.tables import MAX_BACKFILL_DAYS
 from ufo.sdk.callback_page import (
     CLOSE_THIS_PAGE,
@@ -220,17 +220,6 @@ async def test_grant_store_requires_an_agent_boundary(db: None) -> None:
 TRANSFER_HOST = "stash.broker.test"
 
 
-async def _scope_turn(turn_id: UUID, connections: tuple[UUID, ...]) -> None:
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .where(tables.turn.c.id == turn_id)
-            .values(
-                runtime_config=TurnRuntimeConfig(connections=connections).model_dump(mode="json")
-            )
-        )
-
-
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) -> None:
     """The per-turn resolver carries the manifests' provider→transfer-hosts map, so a granted
@@ -240,7 +229,7 @@ async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) 
     conversation_id = await _conversation(workspace_id, member_id)
     turn_id = await _turn(workspace_id, agent_id, conversation_id)
     store = GrantStore()
-    connection_id = await _record(
+    await _record(
         store,
         workspace_id,
         agent_id,
@@ -254,8 +243,7 @@ async def test_resolver_folds_the_transfer_hosts_into_the_turns_rules(db: None) 
     resolver = PerAgentRules(
         base=(), grants=store, transfer_hosts=ConnectorTransferHosts({"stub": (TRANSFER_HOST,)})
     )
-    await _scope_turn(turn_id, (connection_id,))
-    rules = await resolver.resolve(RunToken(workspace_id, turn_id))
+    rules = await resolver.resolve(RunToken(workspace_id, turn_id, acts_for=member_id))
     assert any(isinstance(r, ScopeRule) and TRANSFER_HOST in r.allowed_hosts for r in rules)
     assert not any(isinstance(r, InjectionRule) for r in rules)
 
@@ -736,7 +724,7 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
     conversation_id = await _conversation(workspace_id, member_id)
     turn_a = await _turn(workspace_id, agent_a, conversation_id)
     store = GrantStore()
-    connection_a = await _record(
+    await _record(
         store,
         workspace_id,
         agent_a,
@@ -766,8 +754,7 @@ async def test_agent_a_authenticates_only_to_its_own_granted_host(db: None) -> N
             "stub": CliCredential(env="STUB_TOKEN", header="authorization", secret=_UnaskedSecret())
         },
     )
-    await _scope_turn(turn_a, (connection_a,))
-    rules_a = await resolver.resolve(RunToken(workspace_id, turn_a))
+    rules_a = await resolver.resolve(RunToken(workspace_id, turn_a, acts_for=member_id))
     assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_a)
     assert not any(isinstance(r, ScopeRule) and HOST_B in r.allowed_hosts for r in rules_a)
     assert not any(isinstance(r, InjectionRule) and r.host == HOST_B for r in rules_a)
@@ -786,9 +773,9 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
     store = GrantStore()
     resolver = PerAgentRules(base=(), grants=store)
 
-    rules_1 = await resolver.resolve(RunToken(workspace_id, turn_1))
+    rules_1 = await resolver.resolve(RunToken(workspace_id, turn_1, acts_for=member_id))
     assert not any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_1)
-    connection_id = await _record(
+    await _record(
         store,
         workspace_id,
         agent_id,
@@ -799,8 +786,7 @@ async def test_a_grant_recorded_after_start_is_live_for_the_next_turn(db: None) 
         conversation_id=conversation_id,
         shared=False,
     )
-    await _scope_turn(turn_2, (connection_id,))
-    rules_2 = await resolver.resolve(RunToken(workspace_id, turn_2))
+    rules_2 = await resolver.resolve(RunToken(workspace_id, turn_2, acts_for=member_id))
     assert any(isinstance(r, ScopeRule) and HOST_A in r.allowed_hosts for r in rules_2)
 
 
@@ -813,9 +799,8 @@ def _turn_context(
     main: bool = False,
 ) -> ToolContext:
     """A tool context whose only live fields the connect tool reads are the turn (workspace, agent,
-    conversation) and the speaking member; the sandbox and other capabilities the tool never touches
-    stay unset. `main` says the turn runs on the workspace's main agent, which is what decides
-    whether a speakerless call reads the agent's own attachments or shared connections alone."""
+    conversation) and the speaking member; the sandbox and the other seams the tool never touches
+    stay unset. `main` says the turn runs on the workspace's main agent."""
     turn = Turn(
         id=uuid4(),
         workspace_id=workspace_id,
@@ -1753,16 +1738,9 @@ async def _conversation(workspace_id: UUID, member_id: UUID) -> UUID:
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_shipped_agent_spends_the_attachments_it_was_given(db: None) -> None:
-    """A shipped agent with no member in the turn spends the connections attached to it, private
-    ones included. The member who attached a connector to that agent attached it for exactly the
-    work it does on its own initiative, and there is no speaker whose ladder could name it — a
-    scheduled run would otherwise reach nothing and the attachment would mean nothing.
-
-    The main agent is not that case: it holds every member's connections at once, so a speakerless
-    turn on it still sees shared connections alone. And the moment a member IS acting, that member's
-    own ladder decides whichever agent it is, so an agent several members reach never spends one
-    member's private account on another member's request."""
+async def test_a_shipped_agent_acting_for_nobody_reaches_shared_connections_alone(
+    db: None,
+) -> None:
     workspace_id = await _workspace()
     grantor_id, agent_id = await _member_agent(workspace_id)
     speaker_id = uuid4()
@@ -1794,8 +1772,9 @@ async def test_a_shipped_agent_spends_the_attachments_it_was_given(db: None) -> 
         shipped = replace(
             _turn_context(workspace_id, agent_id, conversation_id, None), grants=store
         )
-        assert await shipped.connector_accounts("stub") == ("acct-attached", "acct-shared")
-        assert await shipped.connector_account("stub", "acct-attached") == "acct-attached"
+        assert await shipped.connector_accounts("stub") == ("acct-shared",)
+        with pytest.raises(SpeakerRequired, match="acct-attached"):
+            await shipped.connector_account("stub", "acct-attached")
 
         shared_turn = replace(shipped, other_members_active=True)
         assert await shared_turn.connector_accounts("stub") == ("acct-shared",)
@@ -1826,14 +1805,9 @@ async def test_a_shipped_agent_spends_the_attachments_it_was_given(db: None) -> 
 
 
 async def test_connector_accounts_admit_only_the_speakers_own_and_shared_grants(db: None) -> None:
-    """The runtime check on the MAIN agent: a private grant resolves only for its grantor's turns;
-    a shared grant for anyone's; a speakerless (scheduled/internal) turn sees only shared grants,
-    because the main agent holds every member's connections at once and so must spend the speaker's.
-    A speakerless miss that a member ref would have unlocked is `SpeakerRequired`; a provider nobody
-    connected is a plain refusal.
-
-    A shipped agent answers the speakerless case differently — see
-    `test_a_shipped_agent_spends_the_attachments_it_was_given`."""
+    """A private grant resolves only for its grantor's turns; a shared grant for anyone's; a turn
+    acting for nobody sees only shared grants. A speakerless miss that a member ref would have
+    unlocked is `SpeakerRequired`; a provider nobody connected is a plain refusal."""
     workspace_id = await _workspace()
     grantor_id, agent_id = await _member_agent(workspace_id)
     other_id = uuid4()
@@ -1938,19 +1912,14 @@ async def test_a_colleagues_private_account_is_named_only_while_they_hold_a_mess
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_connector_accounts_resolve_exact_capabilities_for_speakerless_turns(
+async def test_connector_accounts_follow_the_member_a_speakerless_turn_acts_for(
     db: None,
 ) -> None:
-    """A scheduled fire or subagent carries the exact connection capabilities it was granted. A
-    turn with no capability on the MAIN agent sees only shared grants — that agent holds every
-    member's connections at once, so it cannot infer one from a creator identity. A shipped agent
-    answers that case from its own attachments instead; see
-    `test_a_shipped_agent_spends_the_attachments_it_was_given`."""
     workspace_id = await _workspace()
     initiator_id, agent_id = await _member_agent(workspace_id)
     conversation_id = await _conversation(workspace_id, initiator_id)
     store = GrantStore()
-    connection_id = await _record(
+    await _record(
         store,
         workspace_id,
         agent_id,
@@ -1961,16 +1930,16 @@ async def test_connector_accounts_resolve_exact_capabilities_for_speakerless_tur
         conversation_id=conversation_id,
         shared=False,
     )
-    scoped = replace(
-        _turn_context(workspace_id, agent_id, conversation_id, None),
+    speakerless = _turn_context(workspace_id, agent_id, conversation_id, None)
+    fired = replace(
+        speakerless,
         grants=store,
-        turn=_turn_context(workspace_id, agent_id, conversation_id, None).turn.model_copy(
-            update={"runtime_config": TurnRuntimeConfig(connections=(connection_id,))}
-        ),
+        turn=speakerless.turn.model_copy(update={"member_id": initiator_id}),
     )
-    assert scoped.speaker_member_id is None
+    assert fired.speaker_member_id is None
+    assert fired.acting_member_id == initiator_id
     with ws(workspace_id), agent(agent_id):
-        assert await scoped.connector_accounts("stub") == ("acct-initiator-private",)
+        assert await fired.connector_accounts("stub") == ("acct-initiator-private",)
     anonymous = replace(
         _turn_context(workspace_id, agent_id, conversation_id, None, main=True),
         grants=store,
@@ -1988,11 +1957,7 @@ async def test_a_channel_call_asks_for_the_member_a_private_connector_needs(db: 
     A channel shared outside the workspace asks the same way but names no member address: the
     refusal is read back into a room another organization sits in. The owner's own call resolves
     the connection. A member's own conversation names nobody else, so a miss there stays the plain
-    refusal.
-
-    The memberless calls run on the main agent, because asking for a member is only the right answer
-    where the speaker's account is what a call spends. A shipped agent with no member in the turn
-    spends its own attachments and has nobody to ask for."""
+    refusal."""
     workspace_id = await _workspace()
     owner_id, agent_id = await _member_agent(workspace_id)
     asker_id = uuid4()

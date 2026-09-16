@@ -106,10 +106,6 @@ RESULT_INVALID = (
     "The spawn's final answer does not match its output schema, so it was dropped rather than "
     "delivered. Failures: {faults}"
 )
-RESULT_SCOPE_EXCEEDED = (
-    "The spawn used a connection outside the parent scope, so its answer was withheld."
-)
-RESULT_SCOPE_EXCEEDED_ERROR = "ConnectionScopeExceeded"
 AGENT_SPAWN_REFUSAL = (
     "agent {name!r} is not yours to spawn — spawn an agent you own, or have a workspace admin "
     "run it"
@@ -250,7 +246,6 @@ class Subagents:
     `subagents` would have to import the registry to hold."""
     models: tuple[str, ...] = ()
     member_accounts_connectable: bool = True
-    connection_scope: tuple[UUID, ...] | None = None
 
     async def spawn(
         self,
@@ -556,6 +551,7 @@ class Subagents:
                         tables.turn.c.subagent_profile,
                         tables.turn.c.runtime_config,
                         tables.turn.c.model_accounts,
+                        tables.turn.c.member_id,
                     ).where(tables.turn.c.id == turn_id)
                 )
             ).one()
@@ -587,6 +583,7 @@ class Subagents:
             model_accounts=tuple(
                 ModelAccountCapability.model_validate(account) for account in child.model_accounts
             ),
+            acting_member_id=child.member_id,
         )
         if admitted is None:
             raise RuntimeError("follow-up admission answered no turn")
@@ -811,13 +808,10 @@ class Subagents:
         named = next((one for one in self.registry.profiles if one.name == profile), None)
         return named.model if named is not None else None
 
-    def _child_runtime_config(
-        self,
-        model: str | None,
-    ) -> TurnRuntimeConfig | None:
-        """The runtime config the child turn is admitted with: the parent's, narrowed to the exact
-        connections the spawning call held, with a requested model taking the pin an unpinned tree
-        leaves empty. The internet and environment pins stay the turn tree's.
+    def _child_runtime_config(self, model: str | None) -> TurnRuntimeConfig | None:
+        """The runtime config the child turn is admitted with: the parent's, with a requested model
+        taking the pin an unpinned tree leaves empty. The internet and environment pins stay the
+        turn tree's.
 
         A tree that already carries a model pin keeps it. That pin is the member's own selection
         (`ufo --model`, `x-ufo-model`), which replaces every agent and subagent profile model in the
@@ -828,29 +822,14 @@ class Subagents:
         unregistered id would reach the child's setup, fail every attempt of that turn, and leave
         the caller nothing to repair."""
         inherited = self.parent.runtime_config
-        connections = (
-            self.connection_scope
-            if self.connection_scope is not None
-            else (
-                () if inherited is None or inherited.connections is None else inherited.connections
-            )
-        )
-        if (
-            inherited is not None
-            and inherited.connections is not None
-            and not set(connections).issubset(inherited.connections)
-        ):
-            raise RuntimeError("spawn connection scope exceeds its parent")
-        if model is None and (inherited is not None and inherited.connections == connections):
+        if model is None:
             return inherited
-        if model is not None and inherited is not None and inherited.model is not None:
+        if inherited is not None and inherited.model is not None:
             raise SpawnModelRejected.pinned_tree(model, inherited.model)
-        if model is not None and self.models and model not in self.models:
+        if self.models and model not in self.models:
             raise SpawnModelRejected.unknown(model, self.models)
         base = {} if inherited is None else inherited.model_dump(mode="json")
-        if model is not None:
-            base["model"] = model
-        base["connections"] = connections
+        base["model"] = model
         return TurnRuntimeConfig.model_validate(base)
 
     async def _require_balance(
@@ -946,6 +925,11 @@ class Subagents:
                     inbound=inbound,
                     admission_source=INTERNAL_ADMISSION,
                     speaker_member_id=None,
+                    member_id=(
+                        requester_member_id
+                        if requester_member_id is not None
+                        else self.parent.member_id
+                    ),
                     context=(
                         None
                         if requesting_message_ref is None
@@ -1306,11 +1290,9 @@ class SubagentResult:
     next pass re-posts under the same key, which admits nothing. Stamping first would let that same
     crash retire a delivery no parent ever received.
 
-    The arrival carries the child's exact connection scope back into the spawning turn's other
-    runtime settings. A parent holding no live turn takes this arrival as a whole new turn, so the
-    child-only model and model-account pins stay behind while its causal connector scope does not
-    widen. A child outside its parent's connection scope returns a failure with no output and only
-    the parent's scope."""
+    The arrival carries the spawning turn's own runtime settings and acts for the member that turn
+    acted for. A parent holding no live turn takes this arrival as a whole new turn, so the
+    child-only model and model-account pins stay behind."""
 
     invoker: TurnInvoker
     registry: SubagentRegistry
@@ -1328,6 +1310,7 @@ class SubagentResult:
                         tables.turn.c.agent_id,
                         tables.turn.c.runtime_config,
                         tables.turn.c.model_accounts,
+                        tables.turn.c.member_id,
                     ).where(
                         tables.turn.c.id == child.parent_turn_id,
                         tables.turn.c.workspace_id == child.workspace_id,
@@ -1350,39 +1333,14 @@ class SubagentResult:
             if parent.runtime_config is None
             else TurnRuntimeConfig.model_validate(parent.runtime_config)
         )
-        delivered_child = child
-        returned_runtime = parent_runtime
-        if child.runtime_config is not None and child.runtime_config.connections is not None:
-            if (
-                parent_runtime is not None
-                and parent_runtime.connections is not None
-                and not set(child.runtime_config.connections).issubset(parent_runtime.connections)
-            ):
-                log(
-                    "subagent.result_scope_refused",
-                    turn_id=str(child.id),
-                    parent_turn_id=str(child.parent_turn_id),
-                )
-                delivered_child = child.model_copy(
-                    update={
-                        "terminal": TerminalFrame(
-                            status="failed",
-                            error_class=RESULT_SCOPE_EXCEEDED_ERROR,
-                            error_message=RESULT_SCOPE_EXCEEDED,
-                        )
-                    }
-                )
-            else:
-                returned = {} if parent_runtime is None else parent_runtime.model_dump(mode="json")
-                returned["connections"] = child.runtime_config.connections
-                returned_runtime = TurnRuntimeConfig.model_validate(returned)
         await self.invoker.invoke(
             parent.conversation_id,
             parent.agent_id,
-            self._body(delivered_child, child_agent),
+            self._body(child, child_agent),
             f"{SPAWN_RESULT_KEY_PREFIX}{child.id}",
             holds_work_already_done=True,
-            runtime_config=returned_runtime,
+            runtime_config=parent_runtime,
+            acting_member_id=parent.member_id,
             context=(
                 None
                 if child.context is None or child.context.requesting_message_ref is None

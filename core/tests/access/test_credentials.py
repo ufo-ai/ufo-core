@@ -652,36 +652,21 @@ def _connector_grant(
     )
 
 
-def test_scoped_cli_accounts_use_only_exact_connection_capabilities() -> None:
+def test_cli_accounts_use_the_members_private_tier_else_the_shared_one() -> None:
     mine, theirs = uuid4(), uuid4()
     grants = (
         _connector_grant("acct-shared", theirs, shared=True),
-        _connector_grant("acct-mine", mine, shared=False),
+        _connector_grant("acct-mine-b", mine, shared=False),
+        _connector_grant("acct-mine-a", mine, shared=False),
         _connector_grant("acct-theirs", theirs, shared=False),
         _connector_grant("acct-other-provider", mine, shared=False, provider="gitlab"),
     )
-    assert grants_module.scoped_cli_accounts(
-        grants, "github", (grants[1].connection_id, grants[2].connection_id)
-    ) == ("acct-mine", "acct-theirs")
-    assert grants_module.scoped_cli_accounts(grants, "github", ()) == ()
-    assert grants_module.scoped_cli_accounts(grants, "gitlab", (grants[3].connection_id,)) == (
-        "acct-other-provider",
-    )
-
-
-def test_scoped_cli_accounts_prefer_private_capabilities_independent_of_owner() -> None:
-    mine = uuid4()
-    grants = (
-        _connector_grant("acct-b", mine, shared=False),
-        _connector_grant("acct-a", uuid4(), shared=False),
-        _connector_grant("acct-shared", uuid4(), shared=True),
-    )
-    assert grants_module.scoped_cli_accounts(
-        grants, "github", tuple(grant.connection_id for grant in grants)
-    ) == ("acct-a", "acct-b")
-    assert grants_module.scoped_cli_accounts(grants, "github", (grants[2].connection_id,)) == (
-        "acct-shared",
-    )
+    assert grants_module.cli_accounts(grants, "github", mine) == ("acct-mine-a", "acct-mine-b")
+    assert grants_module.cli_accounts(grants, "github", theirs) == ("acct-theirs",)
+    assert grants_module.cli_accounts(grants, "github", None) == ("acct-shared",)
+    assert grants_module.cli_accounts(grants, "github", uuid4()) == ("acct-shared",)
+    assert grants_module.cli_accounts(grants, "gitlab", mine) == ("acct-other-provider",)
+    assert grants_module.cli_accounts(grants, "gitlab", None) == ()
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

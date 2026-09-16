@@ -76,7 +76,7 @@ class MonitorRunner:
                 row.conversation_id,
                 row.command,
                 PROBE_TIMEOUT_SECONDS,
-                connections=row.connections,
+                acting_member_id=row.created_by_member_id,
                 internet_access=row.internet_access,
             )
         except TerminalGone:
@@ -125,10 +125,8 @@ class MonitorRunner:
                 holds_work_already_done=True,
                 standalone=True,
                 requesting_message_ref=row.requesting_message_ref,
-                runtime_config=TurnRuntimeConfig(
-                    connections=row.connections,
-                    internet_access=row.internet_access,
-                ),
+                runtime_config=TurnRuntimeConfig(internet_access=row.internet_access),
+                acting_member_id=row.created_by_member_id,
             )
         except AgentArchived:
             return

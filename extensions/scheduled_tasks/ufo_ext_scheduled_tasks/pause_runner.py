@@ -2,9 +2,8 @@
 
 It runs as a recurring job, so it fires on the clock. Each tick claims the due pauses under a lease
 (an overlapping tick never fires one twice) and invokes each one's stored resume body as a scheduled
-turn with no connections and the stored internet ceiling — guarded by the two watermarks the arm
-recorded, which ask admission under the conversation lock whether a member has spoken since the
-wait began.
+turn under the arming turn's internet ceiling — guarded by the two watermarks the arm recorded,
+which ask admission under the conversation lock whether a member has spoken since the wait began.
 
 That guard is the whole convergence. Answered with a turn, the timer resumed the workflow. Answered
 `None`, a member already did, and there is nothing left to resume — a member's message and the timer
@@ -54,10 +53,8 @@ class PauseRunner:
                 as_scheduled=True,
                 unless_member_since=row.origin_seq,
                 unless_member_arrival_since=row.origin_arrival_seq,
-                runtime_config=TurnRuntimeConfig(
-                    connections=(),
-                    internet_access=row.internet_access,
-                ),
+                runtime_config=TurnRuntimeConfig(internet_access=row.internet_access),
+                acting_member_id=row.created_by_member_id,
             )
         except AgentArchived:
             return

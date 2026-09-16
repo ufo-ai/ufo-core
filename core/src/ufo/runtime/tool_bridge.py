@@ -186,7 +186,7 @@ class ToolBridge:
             TurnRuntimeConfig()
             if parent.runtime_config is None
             else TurnRuntimeConfig.model_validate(parent.runtime_config)
-        ).model_copy(update={"connections": run.connections})
+        )
         async with workspace_tx() as connection:
             live = (
                 await connection.execute(
@@ -233,6 +233,7 @@ class ToolBridge:
                     inbound=intent,
                     admission_source=INTENT_ADMISSION,
                     speaker_member_id=None,
+                    member_id=run.member_id,
                     terminal=None,
                     parent_turn_id=run.turn_id,
                     subagent_profile=parent.subagent_profile,

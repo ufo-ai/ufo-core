@@ -6,14 +6,12 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use uuid::Uuid;
 
-use crate::types::{Principal, ProbeToken, RunToken};
+use crate::types::{Principal, ProbeToken, RunActor, RunToken};
 
 type HmacSha256 = Hmac<Sha256>;
 
 const RUN_TOKEN_KIND: &str = "ufo-run";
 const PROBE_TOKEN_KIND: &str = "ufo-probe";
-const CONNECTION_CAPABILITY: &str = "connections";
-const CONNECTION_SCOPE_MAX: usize = 50;
 
 const BASIC_AUTH_DECODER: GeneralPurpose = GeneralPurpose::new(
     &alphabet::STANDARD,
@@ -80,40 +78,40 @@ fn basic_username(header: &str) -> Result<String, TokenError> {
         .to_string())
 }
 
-fn connection_field(connections: &[Uuid]) -> String {
-    if connections.is_empty() {
-        return "-".to_string();
-    }
-    connections
-        .iter()
-        .map(|connection| connection.simple().to_string())
-        .collect::<Vec<_>>()
-        .join(",")
+fn member_field(member_id: Option<Uuid>) -> String {
+    member_id
+        .map(|member| member.to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
-fn parse_connections(field: &str) -> Result<Vec<Uuid>, TokenError> {
+/// The image a deploy replaces writes this where the member goes; it decodes as no member.
+const OUTGOING_PROBE_MEMBER_FIELD: &str = "connections";
+
+fn actor_field(actor: RunActor) -> String {
+    match actor {
+        RunActor::Turn => "-".to_string(),
+        RunActor::Nobody => "~".to_string(),
+        RunActor::Member(member) => member.to_string(),
+    }
+}
+
+fn parse_actor(field: &str) -> Result<RunActor, TokenError> {
+    match field {
+        "-" => Ok(RunActor::Turn),
+        "~" => Ok(RunActor::Nobody),
+        _ => Uuid::parse_str(field)
+            .map(RunActor::Member)
+            .map_err(|_| TokenError::BadPayload),
+    }
+}
+
+fn parse_member(field: &str) -> Result<Option<Uuid>, TokenError> {
     if field == "-" {
-        return Ok(Vec::new());
+        return Ok(None);
     }
-    let mut connections = field
-        .split(',')
-        .map(|connection| Uuid::parse_str(connection).map_err(|_| TokenError::BadPayload))
-        .collect::<Result<Vec<_>, _>>()?;
-    if connections.len() > CONNECTION_SCOPE_MAX {
-        return Err(TokenError::BadPayload);
-    }
-    connections.sort_unstable();
-    if connections.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(TokenError::BadPayload);
-    }
-    Ok(connections)
-}
-
-fn validate_discarded_member(field: &str) -> Result<(), TokenError> {
-    if field != "-" {
-        Uuid::parse_str(field).map_err(|_| TokenError::BadPayload)?;
-    }
-    Ok(())
+    Uuid::parse_str(field)
+        .map(Some)
+        .map_err(|_| TokenError::BadPayload)
 }
 
 pub struct RunTokenCodec {
@@ -126,9 +124,7 @@ impl RunTokenCodec {
             "{RUN_TOKEN_KIND}/{}/{}/{}",
             run.workspace_id,
             run.turn_id,
-            run.capability_id
-                .map(|capability| capability.to_string())
-                .unwrap_or_else(|| "-".to_string()),
+            actor_field(run.acts_for),
         );
         sign_token(&self.secret, payload.as_bytes())
     }
@@ -138,8 +134,8 @@ impl RunTokenCodec {
         let payload = verify_token(&username, &self.secret)?;
         let text = String::from_utf8(payload).map_err(|_| TokenError::BadPayload)?;
         let parts: Vec<&str> = text.split('/').collect();
-        let (kind, workspace, turn, nonce) = match parts.as_slice() {
-            [kind, workspace, turn, nonce] => (*kind, *workspace, *turn, *nonce),
+        let (kind, workspace, turn, actor) = match parts.as_slice() {
+            [kind, workspace, turn, actor] => (*kind, *workspace, *turn, *actor),
             _ => return Err(TokenError::BadPayload),
         };
         if kind != RUN_TOKEN_KIND {
@@ -148,11 +144,7 @@ impl RunTokenCodec {
         Ok(RunToken {
             workspace_id: Uuid::parse_str(workspace).map_err(|_| TokenError::BadPayload)?,
             turn_id: Uuid::parse_str(turn).map_err(|_| TokenError::BadPayload)?,
-            capability_id: if nonce == "-" {
-                None
-            } else {
-                Some(Uuid::parse_str(nonce).map_err(|_| TokenError::BadPayload)?)
-            },
+            acts_for: parse_actor(actor)?,
         })
     }
 }
@@ -164,12 +156,12 @@ pub struct ProbeTokenCodec {
 impl ProbeTokenCodec {
     pub fn encode(&self, probe: &ProbeToken) -> String {
         let payload = format!(
-            "{PROBE_TOKEN_KIND}/{}/{}/{}/{CONNECTION_CAPABILITY}/{}/{}/{}",
+            "{PROBE_TOKEN_KIND}/{}/{}/{}/{}/{}/-/{}",
             probe.workspace_id,
             probe.conversation_id,
             probe.probe_id,
+            member_field(probe.member_id),
             probe.expires_at,
-            connection_field(&probe.connections),
             if probe.internet_access { "-" } else { "0" },
         );
         sign_token(&self.secret, payload.as_bytes())
@@ -180,33 +172,15 @@ impl ProbeTokenCodec {
         let payload = verify_token(&username, &self.secret)?;
         let text = String::from_utf8(payload).map_err(|_| TokenError::BadPayload)?;
         let parts: Vec<&str> = text.split('/').collect();
-        let (kind, workspace, conversation, probe, expires, connections, internet) = match parts
-            .as_slice()
-        {
-            [kind, workspace, conversation, probe, discarded_member, expires] => {
-                validate_discarded_member(discarded_member)?;
-                (*kind, *workspace, *conversation, *probe, *expires, "-", "0")
-            }
-            [kind, workspace, conversation, probe, capability, expires, connections, internet] => {
-                if *capability != CONNECTION_CAPABILITY {
-                    validate_discarded_member(capability)?;
-                }
-                (
-                    *kind,
-                    *workspace,
-                    *conversation,
-                    *probe,
-                    *expires,
-                    *connections,
-                    *internet,
-                )
-            }
-            _ => return Err(TokenError::BadPayload),
-        };
-        if !matches!(internet, "-" | "0") {
+        let [kind, workspace, conversation, probe, member, expires, _connections, internet] =
+            parts.as_slice()
+        else {
             return Err(TokenError::BadPayload);
         };
-        if kind != PROBE_TOKEN_KIND {
+        if !matches!(*internet, "-" | "0") {
+            return Err(TokenError::BadPayload);
+        }
+        if *kind != PROBE_TOKEN_KIND {
             return Err(TokenError::WrongDomain);
         }
         Ok(ProbeToken {
@@ -214,8 +188,12 @@ impl ProbeTokenCodec {
             conversation_id: Uuid::parse_str(conversation).map_err(|_| TokenError::BadPayload)?,
             probe_id: Uuid::parse_str(probe).map_err(|_| TokenError::BadPayload)?,
             expires_at: expires.parse().map_err(|_| TokenError::BadPayload)?,
-            connections: parse_connections(connections)?,
-            internet_access: internet == "-",
+            member_id: if *member == OUTGOING_PROBE_MEMBER_FIELD {
+                None
+            } else {
+                parse_member(member)?
+            },
+            internet_access: *internet == "-",
         })
     }
 }
@@ -258,10 +236,11 @@ mod tests {
 
     const RUN_ENCODED: &str = "dWZvLXJ1bi8xMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEvMjIyMjIyMjItMjIyMi0yMjIyLTIyMjItMjIyMjIyMjIyMjIyLzU1NTU1NTU1LTU1NTUtNTU1NS01NTU1LTU1NTU1NTU1NTU1NQ.pJ2JfiGJUhBglEDEuFnp_kOGjtWDq5Flrn5YLZWmKlA";
     const RUN_ENCODED_EMPTY: &str = "dWZvLXJ1bi8xMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEvMjIyMjIyMjItMjIyMi0yMjIyLTIyMjItMjIyMjIyMjIyMjIyLy0.JHEdgNA7dR1LyTRQUsdhGom8Kjgpf0EW8382drNMsgY";
+    const RUN_ENCODED_NOBODY: &str = "dWZvLXJ1bi8xMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEvMjIyMjIyMjItMjIyMi0yMjIyLTIyMjItMjIyMjIyMjIyMjIyL34.HX71N4qcWsBTyzQNMHB0wHNQl5xUxlZAvDPB_TuORTM";
 
-    const PROBE_ENCODED: &str = "dWZvLXByb2JlLzExMTExMTExLTExMTEtMTExMS0xMTExLTExMTExMTExMTExMS8zMzMzMzMzMy0zMzMzLTMzMzMtMzMzMy0zMzMzMzMzMzMzMzMvNDQ0NDQ0NDQtNDQ0NC00NDQ0LTQ0NDQtNDQ0NDQ0NDQ0NDQ0L2Nvbm5lY3Rpb25zLzE4OTM0NTYwMDAvNTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTUvLQ.FjWCzN62EDs8F8NeWkbb_tgw84192FdAgrV4RXjRngo";
-    const PROBE_ENCODED_EMPTY: &str = "dWZvLXByb2JlLzExMTExMTExLTExMTEtMTExMS0xMTExLTExMTExMTExMTExMS8zMzMzMzMzMy0zMzMzLTMzMzMtMzMzMy0zMzMzMzMzMzMzMzMvNDQ0NDQ0NDQtNDQ0NC00NDQ0LTQ0NDQtNDQ0NDQ0NDQ0NDQ0L2Nvbm5lY3Rpb25zLzE4OTM0NTYwMDAvLS8w.96qFcq_VXDTo0YlRa95AyE6-H0-puijm3xrCWnPovcI";
-    const OLD_PROBE_MEMBER_ENCODED: &str = "dWZvLXByb2JlLzExMTExMTExLTExMTEtMTExMS0xMTExLTExMTExMTExMTExMS8zMzMzMzMzMy0zMzMzLTMzMzMtMzMzMy0zMzMzMzMzMzMzMzMvNDQ0NDQ0NDQtNDQ0NC00NDQ0LTQ0NDQtNDQ0NDQ0NDQ0NDQ0LzU1NTU1NTU1LTU1NTUtNTU1NS01NTU1LTU1NTU1NTU1NTU1NS8xODkzNDU2MDAw.eUycmsfqQHnHNr84eX8p7JcJgbovmFYBTCcI43jYF8Q";
+    const PROBE_ENCODED: &str = "dWZvLXByb2JlLzExMTExMTExLTExMTEtMTExMS0xMTExLTExMTExMTExMTExMS8zMzMzMzMzMy0zMzMzLTMzMzMtMzMzMy0zMzMzMzMzMzMzMzMvNDQ0NDQ0NDQtNDQ0NC00NDQ0LTQ0NDQtNDQ0NDQ0NDQ0NDQ0LzU1NTU1NTU1LTU1NTUtNTU1NS01NTU1LTU1NTU1NTU1NTU1NS8xODkzNDU2MDAwLy0vLQ.29BTU20UhOIY2_fCic_WChh1LdNbiFnwIID2792lMpQ";
+    const PROBE_ENCODED_EMPTY: &str = "dWZvLXByb2JlLzExMTExMTExLTExMTEtMTExMS0xMTExLTExMTExMTExMTExMS8zMzMzMzMzMy0zMzMzLTMzMzMtMzMzMy0zMzMzMzMzMzMzMzMvNDQ0NDQ0NDQtNDQ0NC00NDQ0LTQ0NDQtNDQ0NDQ0NDQ0NDQ0Ly0vMTg5MzQ1NjAwMC8tLzA.hEI8STHlTxbP6PVBA4WbhHMG6Bfd9zKbCbwRg2VLyqU";
+    const PROBE_ENCODED_OUTGOING: &str = "dWZvLXByb2JlLzExMTExMTExLTExMTEtMTExMS0xMTExLTExMTExMTExMTExMS8zMzMzMzMzMy0zMzMzLTMzMzMtMzMzMy0zMzMzMzMzMzMzMzMvNDQ0NDQ0NDQtNDQ0NC00NDQ0LTQ0NDQtNDQ0NDQ0NDQ0NDQ0L2Nvbm5lY3Rpb25zLzE4OTM0NTYwMDAvNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYsNzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3NzcvLQ.cCT0aHCGBlMA0td7nGhWYcoZsp_IivuOYKWpQ0SLw_E";
 
     fn u(text: &str) -> Uuid {
         Uuid::parse_str(text).unwrap()
@@ -316,12 +295,12 @@ mod tests {
         let scoped = RunToken {
             workspace_id: u(WORKSPACE),
             turn_id: u(TURN),
-            capability_id: Some(u(MEMBER)),
+            acts_for: RunActor::Member(u(MEMBER)),
         };
         let empty = RunToken {
             workspace_id: u(WORKSPACE),
             turn_id: u(TURN),
-            capability_id: None,
+            acts_for: RunActor::Turn,
         };
         let codec = RunTokenCodec {
             secret: SECRET.to_vec(),
@@ -338,7 +317,7 @@ mod tests {
         let expected = RunToken {
             workspace_id: u(WORKSPACE),
             turn_id: u(TURN),
-            capability_id: Some(u(MEMBER)),
+            acts_for: RunActor::Member(u(MEMBER)),
         };
         let recovered = codec.from_proxy_auth(&basic_header(RUN_ENCODED)).unwrap();
         assert_eq!(recovered, expected);
@@ -346,12 +325,32 @@ mod tests {
         let expected_empty = RunToken {
             workspace_id: u(WORKSPACE),
             turn_id: u(TURN),
-            capability_id: None,
+            acts_for: RunActor::Turn,
         };
         let recovered_empty = codec
             .from_proxy_auth(&basic_header(RUN_ENCODED_EMPTY))
             .unwrap();
         assert_eq!(recovered_empty, expected_empty);
+    }
+
+    #[test]
+    fn run_token_names_nobody_with_a_tilde() {
+        let codec = RunTokenCodec {
+            secret: SECRET.to_vec(),
+        };
+        let nobody = RunToken {
+            workspace_id: u(WORKSPACE),
+            turn_id: u(TURN),
+            acts_for: RunActor::Nobody,
+        };
+        assert_eq!(codec.encode(&nobody), RUN_ENCODED_NOBODY);
+        assert_eq!(
+            codec
+                .from_proxy_auth(&basic_header(RUN_ENCODED_NOBODY))
+                .unwrap(),
+            nobody
+        );
+        assert!(parse_actor("nobody").is_err());
     }
 
     #[test]
@@ -361,7 +360,7 @@ mod tests {
             conversation_id: u(CONVERSATION),
             probe_id: u(PROBE),
             expires_at: EXPIRES_AT,
-            connections: vec![u(MEMBER)],
+            member_id: Some(u(MEMBER)),
             internet_access: true,
         };
         let empty = ProbeToken {
@@ -369,7 +368,7 @@ mod tests {
             conversation_id: u(CONVERSATION),
             probe_id: u(PROBE),
             expires_at: EXPIRES_AT,
-            connections: vec![],
+            member_id: None,
             internet_access: false,
         };
         let codec = ProbeTokenCodec {
@@ -389,14 +388,14 @@ mod tests {
             conversation_id: u(CONVERSATION),
             probe_id: u(PROBE),
             expires_at: EXPIRES_AT,
-            connections: vec![u(MEMBER)],
+            member_id: Some(u(MEMBER)),
             internet_access: true,
         };
         let recovered = codec.from_proxy_auth(&basic_header(PROBE_ENCODED)).unwrap();
         assert_eq!(recovered, expected);
 
         let expected_empty = ProbeToken {
-            connections: vec![],
+            member_id: None,
             internet_access: false,
             ..expected.clone()
         };
@@ -404,21 +403,34 @@ mod tests {
             .from_proxy_auth(&basic_header(PROBE_ENCODED_EMPTY))
             .unwrap();
         assert_eq!(recovered_empty, expected_empty);
-        let recovered_old = codec
-            .from_proxy_auth(&basic_header(OLD_PROBE_MEMBER_ENCODED))
-            .unwrap();
-        assert_eq!(recovered_old, expected_empty);
     }
 
     #[test]
-    fn connection_capabilities_are_bounded_and_distinct() {
-        let repeated = format!("{MEMBER},{MEMBER}");
-        assert!(parse_connections(&repeated).is_err());
-        let oversized = (0..=CONNECTION_SCOPE_MAX)
-            .map(|value| Uuid::from_u128(value as u128 + 1).simple().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        assert!(parse_connections(&oversized).is_err());
+    fn probe_reads_the_outgoing_images_connection_list_as_no_member() {
+        let codec = ProbeTokenCodec {
+            secret: SECRET.to_vec(),
+        };
+        let recovered = codec
+            .from_proxy_auth(&basic_header(PROBE_ENCODED_OUTGOING))
+            .unwrap();
+        assert_eq!(
+            recovered,
+            ProbeToken {
+                workspace_id: u(WORKSPACE),
+                conversation_id: u(CONVERSATION),
+                probe_id: u(PROBE),
+                expires_at: EXPIRES_AT,
+                member_id: None,
+                internet_access: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_member_field_is_a_uuid_or_a_dash() {
+        assert_eq!(parse_member("-").unwrap(), None);
+        assert_eq!(parse_member(MEMBER).unwrap(), Some(u(MEMBER)));
+        assert!(parse_member("nobody").is_err());
     }
 
     #[test]
@@ -439,7 +451,7 @@ mod tests {
             Some(Principal::Run(token)) => {
                 assert_eq!(token.workspace_id, u(WORKSPACE));
                 assert_eq!(token.turn_id, u(TURN));
-                assert_eq!(token.capability_id, Some(u(MEMBER)));
+                assert_eq!(token.acts_for, RunActor::Member(u(MEMBER)));
             }
             other => panic!("expected run principal, got {other:?}"),
         }
@@ -448,7 +460,7 @@ mod tests {
                 assert_eq!(token.conversation_id, u(CONVERSATION));
                 assert_eq!(token.probe_id, u(PROBE));
                 assert_eq!(token.expires_at, EXPIRES_AT);
-                assert_eq!(token.connections, vec![u(MEMBER)]);
+                assert_eq!(token.member_id, Some(u(MEMBER)));
                 assert!(token.internet_access);
             }
             other => panic!("expected probe principal, got {other:?}"),
@@ -490,8 +502,8 @@ mod tests {
             secret: SECRET.to_vec(),
         };
         assert_eq!(
-            codec.from_proxy_auth(&header).unwrap().capability_id,
-            Some(u(MEMBER))
+            codec.from_proxy_auth(&header).unwrap().acts_for,
+            RunActor::Member(u(MEMBER))
         );
         assert!(matches!(
             principal_from_proxy_auth(SECRET, &header),

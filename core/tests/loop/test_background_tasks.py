@@ -295,43 +295,6 @@ async def test_a_finished_task_is_posted_once_and_the_stamp_clears(
     assert rig.turn.workspace_id not in await rig.sweep.candidate_workspaces()
 
 
-async def test_a_finished_task_retires_its_exact_capability(tmp_path: Path, db: None) -> None:
-    rig = await _rig(tmp_path)
-    task = await _launch(rig, "echo scoped-marker")
-    capability_id = uuid4()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.sandbox_call_capability).values(
-                id=capability_id,
-                workspace_id=rig.turn.workspace_id,
-                turn_id=rig.turn.id,
-                call="bash/scoped",
-                connections=[],
-                created_at=sa.func.now(),
-            )
-        )
-        await connection.execute(
-            sa.update(tables.detached_task)
-            .where(
-                tables.detached_task.c.turn_id == rig.turn.id,
-                tables.detached_task.c.task == task,
-            )
-            .values(capability_id=capability_id)
-        )
-    await _wait_for_exit(rig, task)
-
-    await _sweep(rig)
-
-    async with workspace_tx() as connection:
-        assert (
-            await connection.execute(
-                sa.select(tables.sandbox_call_capability.c.id).where(
-                    tables.sandbox_call_capability.c.id == capability_id
-                )
-            )
-        ).scalar_one_or_none() is None
-
-
 async def test_a_task_whose_supervisor_died_is_posted_as_lost(tmp_path: Path, db: None) -> None:
     rig = await _rig(tmp_path)
     task = await _launch(rig, "sleep 30")

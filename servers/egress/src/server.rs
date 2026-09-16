@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -55,7 +55,7 @@ use rustls::pki_types::ServerName;
 use rustls::ClientConfig;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -67,7 +67,8 @@ use crate::meter::MeterSink;
 use crate::tls::{upstream_client_config, LeafStore};
 use crate::token::principal_from_proxy_auth;
 use crate::types::{
-    MeterRecord, Principal, Rule, ToolBridgeResponse, REQUEST_METER_DIMENSION, TOKENS_DIMENSION,
+    MeterRecord, Principal, Rule, RunActor, ToolBridgeResponse, REQUEST_METER_DIMENSION,
+    TOKENS_DIMENSION,
 };
 use crate::usage::HttpTokenUsage;
 
@@ -78,7 +79,6 @@ const MAX_PROXY_CONNECTIONS: usize = 512;
 const MAX_PROXY_CONNECTIONS_PER_WORKSPACE: usize = 64;
 const CONNECT_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 const RELAY_RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-const CALL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_HTTPS_PORT: u16 = 443;
 const RULE_CACHE_MAX: usize = 4096;
 const RULE_CACHE_TTL: Duration = Duration::from_secs(240);
@@ -222,7 +222,6 @@ impl EgressProxy {
             dns,
             caps: Arc::new(Caps::new()),
             rule_cache: Mutex::new(HashMap::new()),
-            call_liveness: Arc::new(CallLivenessRegistry::default()),
             residential: self.residential.clone(),
         });
         let mut tasks: JoinSet<()> = JoinSet::new();
@@ -266,7 +265,6 @@ struct Shared {
     dns: Arc<Dns>,
     caps: Arc<Caps>,
     rule_cache: Mutex<HashMap<RuleKey, CachedRules>>,
-    call_liveness: Arc<CallLivenessRegistry>,
     residential: Option<Arc<ResidentialExit>>,
 }
 
@@ -276,7 +274,7 @@ struct CachedRules {
     rules: Arc<Vec<Rule>>,
 }
 
-/// The rule cache key: a run token is its own key (workspace, turn, connections are exactly what
+/// The rule cache key: a run token is its own key (workspace, turn and member are exactly what
 /// its rules derive from); a probe keys on the things its rules depend on so two execs of one
 /// watch share a resolution rather than churning the cache per single-use token.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -284,12 +282,12 @@ enum RuleKey {
     Run {
         workspace_id: Uuid,
         turn_id: Uuid,
-        capability_id: Option<Uuid>,
+        acts_for: RunActor,
     },
     Probe {
         workspace_id: Uuid,
         conversation_id: Uuid,
-        connections: Vec<Uuid>,
+        member_id: Option<Uuid>,
         internet_access: bool,
     },
 }
@@ -299,12 +297,12 @@ fn rule_key(principal: &Principal) -> RuleKey {
         Principal::Run(t) => RuleKey::Run {
             workspace_id: t.workspace_id,
             turn_id: t.turn_id,
-            capability_id: t.capability_id,
+            acts_for: t.acts_for,
         },
         Principal::Probe(t) => RuleKey::Probe {
             workspace_id: t.workspace_id,
             conversation_id: t.conversation_id,
-            connections: t.connections.clone(),
+            member_id: t.member_id,
             internet_access: t.internet_access,
         },
     }
@@ -441,7 +439,6 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
             return;
         }
     };
-    let call_liveness = CallLiveness::subscribe(&shared, &principal, &proxy_auth);
     let _workspace = match shared.caps.acquire_workspace(principal.workspace_id()) {
         Some(guard) => guard,
         None => {
@@ -466,7 +463,7 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
     // The preview service originates its own host, so it takes the service path with no daemon
     // configured; the cache fronts real origins, so its host dispatches as ordinary egress.
     if host == TOOL_BRIDGE_HOST && find_service(&rules, &host).is_some() {
-        tool_bridge(&shared, stream, &host, &proxy_auth, call_liveness).await;
+        tool_bridge(&shared, stream, &host, &proxy_auth).await;
         return;
     }
     if let Some(daemon_prefix) = find_service(&rules, &host) {
@@ -482,7 +479,6 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
                 daemon_prefix,
                 ServiceTarget::Preview(daemon),
                 injections,
-                call_liveness.clone(),
             )
             .await;
             return;
@@ -497,7 +493,6 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
                 daemon_prefix,
                 ServiceTarget::Cache(daemon),
                 injections,
-                call_liveness.clone(),
             )
             .await;
             return;
@@ -583,19 +578,10 @@ async fn handle_connection(shared: Arc<Shared>, mut stream: TcpStream) {
         exit: exit.as_deref(),
     };
 
-    if injections.is_empty() && call_liveness.is_none() {
-        tunnel(&shared, stream, target, principal, &metering, call_liveness).await;
+    if injections.is_empty() {
+        tunnel(&shared, stream, target, principal, &metering).await;
     } else {
-        mitm(
-            &shared,
-            stream,
-            target,
-            &injections,
-            principal,
-            &metering,
-            call_liveness,
-        )
-        .await;
+        mitm(&shared, stream, target, &injections, principal, &metering).await;
     }
 }
 
@@ -762,7 +748,6 @@ async fn tunnel(
     target: ConnectTarget<'_>,
     principal: Principal,
     metering: &Metering,
-    liveness: Option<CallLiveness>,
 ) {
     let upstream = match dial_upstream(target).await {
         Some(sock) => sock,
@@ -771,11 +756,6 @@ async fn tunnel(
             return;
         }
     };
-    if let Some(check) = &liveness {
-        if !check.revalidate().await {
-            return;
-        }
-    }
     if stream
         .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
         .await
@@ -795,7 +775,6 @@ async fn tunnel(
         upstream_read,
         upstream_write,
         None,
-        liveness,
     )
     .await;
 }
@@ -809,7 +788,6 @@ async fn mitm(
     injections: &[Inj<'_>],
     principal: Principal,
     metering: &Metering,
-    liveness: Option<CallLiveness>,
 ) {
     let server_config = match shared.leaves.server_config(target.host).await {
         Ok(config) => config,
@@ -842,11 +820,6 @@ async fn mitm(
         }
         ReadHead::Closed => return,
     };
-    if let Some(check) = &liveness {
-        if !check.revalidate().await {
-            return;
-        }
-    }
 
     // The counter fires once the tunnel is up and the request head is read — for a token-metered
     // host, before any usage is teed off the wire.
@@ -874,11 +847,6 @@ async fn mitm(
     head.extend_from_slice(&inject(&headers, injections));
     head.extend_from_slice(b"\r\n");
     head.extend_from_slice(&leftover);
-    if let Some(check) = &liveness {
-        if check.revoked() {
-            return;
-        }
-    }
     if upstream_write.write_all(&head).await.is_err() {
         return;
     }
@@ -893,7 +861,6 @@ async fn mitm(
         upstream_read,
         upstream_write,
         accumulator,
-        liveness,
     )
     .await;
     if let Some(usage) = accumulator {
@@ -901,13 +868,7 @@ async fn mitm(
     }
 }
 
-async fn tool_bridge(
-    shared: &Arc<Shared>,
-    stream: TcpStream,
-    host: &str,
-    proxy_auth: &str,
-    liveness: Option<CallLiveness>,
-) {
+async fn tool_bridge(shared: &Arc<Shared>, stream: TcpStream, host: &str, proxy_auth: &str) {
     let server_config = match shared.leaves.server_config(host).await {
         Ok(config) => config,
         Err(error) => {
@@ -953,11 +914,6 @@ async fn tool_bridge(
             return;
         }
     };
-    if let Some(check) = &liveness {
-        if !check.revalidate().await {
-            return;
-        }
-    }
     let response = match shared.control.tool_bridge(proxy_auth, &body).await {
         Ok(response) => response,
         Err(error) => {
@@ -967,11 +923,6 @@ async fn tool_bridge(
             return;
         }
     };
-    if let Some(check) = &liveness {
-        if !check.revalidate().await {
-            return;
-        }
-    }
     let _ = client
         .write_all(&tool_bridge_response_bytes(&response))
         .await;
@@ -993,7 +944,6 @@ async fn service(
     daemon_prefix: Option<String>,
     target: ServiceTarget,
     injections: Vec<Inj<'_>>,
-    liveness: Option<CallLiveness>,
 ) {
     let (daemon, allow_origin_fallthrough) = match target {
         ServiceTarget::Cache(daemon) => (Some(daemon), true),
@@ -1027,11 +977,6 @@ async fn service(
         }
         ReadHead::Closed => return,
     };
-    if let Some(check) = &liveness {
-        if !check.revalidate().await {
-            return;
-        }
-    }
     let (daemon_line, billed_host, fallthrough) = match &daemon_prefix {
         // A host that fronts real origins re-originates by the request's own path; a host that IS
         // the origin fails inside the tunnel. See the module doc.
@@ -1070,10 +1015,7 @@ async fn service(
             // fails the request in the tunnel.
             match fallthrough {
                 Some(origin) => {
-                    service_direct(
-                        shared, client, origin, &headers, leftover, principal, liveness,
-                    )
-                    .await
+                    service_direct(shared, client, origin, &headers, leftover, principal).await
                 }
                 None => {
                     let _ = respond(&mut client, 502, &format!("cannot reach {host}")).await;
@@ -1099,25 +1041,12 @@ async fn service(
     ));
     head.extend_from_slice(b"\r\n");
     head.extend_from_slice(&leftover);
-    if let Some(check) = &liveness {
-        if check.revoked() {
-            return;
-        }
-    }
     if daemon_conn.write_all(&head).await.is_err() {
         return;
     }
     let (client_read, client_write) = tokio::io::split(client);
     let (daemon_read, daemon_write) = daemon_conn.into_split();
-    relay(
-        client_read,
-        client_write,
-        daemon_read,
-        daemon_write,
-        None,
-        liveness,
-    )
-    .await;
+    relay(client_read, client_write, daemon_read, daemon_write, None).await;
 }
 
 async fn service_direct(
@@ -1127,7 +1056,6 @@ async fn service_direct(
     headers: &[Vec<u8>],
     leftover: Vec<u8>,
     principal: Principal,
-    liveness: Option<CallLiveness>,
 ) {
     let (host, origin_line) = origin;
     let tcp = match timeout(
@@ -1168,11 +1096,6 @@ async fn service_direct(
     head.extend_from_slice(&direct_headers(headers, &host));
     head.extend_from_slice(b"\r\n");
     head.extend_from_slice(&leftover);
-    if let Some(check) = &liveness {
-        if check.revoked() {
-            return;
-        }
-    }
     if upstream_write.write_all(&head).await.is_err() {
         return;
     }
@@ -1183,7 +1106,6 @@ async fn service_direct(
         upstream_read,
         upstream_write,
         None,
-        liveness,
     )
     .await;
 }
@@ -1686,113 +1608,12 @@ fn is_globally_routable(ip: &Ipv4Addr) -> bool {
 
 // --- relay ------------------------------------------------------------------------------------
 
-#[derive(Default)]
-struct CallLivenessRegistry {
-    calls: Mutex<HashMap<Uuid, Weak<CallLivenessState>>>,
-}
-
-struct CallLivenessState {
-    changed: watch::Sender<bool>,
-    control: Arc<Control>,
-    proxy_auth: String,
-}
-
-#[derive(Clone)]
-struct CallLiveness(Arc<CallLivenessState>);
-
-impl CallLiveness {
-    fn subscribe(shared: &Arc<Shared>, principal: &Principal, proxy_auth: &str) -> Option<Self> {
-        let capability_id = match principal {
-            Principal::Run(run) => run.capability_id?,
-            Principal::Probe(_) => return None,
-        };
-        Some(
-            shared
-                .call_liveness
-                .subscribe(capability_id, shared.control.clone(), proxy_auth),
-        )
-    }
-
-    fn revoked(&self) -> bool {
-        !*self.0.changed.borrow()
-    }
-
-    async fn revalidate(&self) -> bool {
-        if self.revoked() {
-            return false;
-        }
-        match self.0.control.authorize(&self.0.proxy_auth).await {
-            Ok(Some(_)) => !self.revoked(),
-            Ok(None) => {
-                self.0.changed.send_replace(false);
-                false
-            }
-            Err(error) => {
-                tracing::error!(error = %error, "egress.call_liveness_failed");
-                self.0.changed.send_replace(false);
-                false
-            }
-        }
-    }
-
-    async fn cancelled(&self) {
-        let mut changed = self.0.changed.subscribe();
-        let _ = changed.wait_for(|active| !*active).await;
-    }
-}
-
-impl CallLivenessRegistry {
-    fn subscribe(
-        self: &Arc<Self>,
-        capability_id: Uuid,
-        control: Arc<Control>,
-        proxy_auth: &str,
-    ) -> CallLiveness {
-        let mut calls = self.calls.lock().unwrap();
-        if let Some(state) = calls.get(&capability_id).and_then(Weak::upgrade) {
-            return CallLiveness(state);
-        }
-        let (changed, _) = watch::channel(true);
-        let state = Arc::new(CallLivenessState {
-            changed,
-            control,
-            proxy_auth: proxy_auth.to_string(),
-        });
-        let weak = Arc::downgrade(&state);
-        calls.insert(capability_id, weak.clone());
-        drop(calls);
-        let registry = self.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(CALL_LIVENESS_POLL_INTERVAL);
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let Some(state) = weak.upgrade() else {
-                    break;
-                };
-                if !CallLiveness(state).revalidate().await {
-                    break;
-                }
-            }
-            let mut calls = registry.calls.lock().unwrap();
-            if calls
-                .get(&capability_id)
-                .is_some_and(|current| Weak::ptr_eq(current, &weak))
-            {
-                calls.remove(&capability_id);
-            }
-        });
-        CallLiveness(state)
-    }
-}
-
 async fn relay<CR, CW, UR, UW>(
     client_read: CR,
     client_write: CW,
     upstream_read: UR,
     upstream_write: UW,
     usage: Option<HttpTokenUsage>,
-    liveness: Option<CallLiveness>,
 ) -> Option<HttpTokenUsage>
 where
     CR: AsyncRead + Unpin + Send + 'static,
@@ -1801,49 +1622,24 @@ where
     UW: AsyncWrite + Unpin + Send + 'static,
 {
     let (done_tx, done_rx) = oneshot::channel();
-    let mut liveness_watch = Box::pin(wait_until_revoked(liveness.clone()));
-    let mut down = tokio::spawn(pump_down(
-        upstream_read,
-        client_write,
-        usage,
-        done_rx,
-        liveness.clone(),
-    ));
+    let mut down = tokio::spawn(pump_down(upstream_read, client_write, usage, done_rx));
     // Mirror Python's FIRST_COMPLETED relay; the module doc names which branch abandons which pump.
     tokio::select! {
-        _ = pump_up(client_read, upstream_write, done_tx, liveness) => down.await.ok().flatten(),
+        _ = pump_up(client_read, upstream_write, done_tx) => down.await.ok().flatten(),
         result = &mut down => result.ok().flatten(),
-        _ = &mut liveness_watch => {
-            down.abort();
-            None
-        },
     }
-}
-
-async fn wait_until_revoked(liveness: Option<CallLiveness>) {
-    let Some(check) = liveness else {
-        std::future::pending::<()>().await;
-        return;
-    };
-    check.cancelled().await;
 }
 
 async fn pump_up<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     mut reader: R,
     mut writer: W,
     done: oneshot::Sender<()>,
-    liveness: Option<CallLiveness>,
 ) {
     let mut buf = vec![0u8; RELAY_CHUNK_BYTES];
     loop {
         match reader.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                if let Some(check) = &liveness {
-                    if check.revoked() {
-                        break;
-                    }
-                }
                 if writer.write_all(&buf[..n]).await.is_err() {
                     break;
                 }
@@ -1859,11 +1655,9 @@ async fn pump_down<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     mut writer: W,
     mut usage: Option<HttpTokenUsage>,
     mut done: oneshot::Receiver<()>,
-    liveness: Option<CallLiveness>,
 ) -> Option<HttpTokenUsage> {
     let mut buf = vec![0u8; RELAY_CHUNK_BYTES];
     let mut client_finished = false;
-    let mut response_admitted = liveness.is_none();
     loop {
         let read = if client_finished {
             match timeout(RELAY_RESPONSE_IDLE_TIMEOUT, reader.read(&mut buf)).await {
@@ -1882,18 +1676,6 @@ async fn pump_down<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         match read {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                if !response_admitted {
-                    if let Some(check) = &liveness {
-                        if !check.revalidate().await {
-                            break;
-                        }
-                        response_admitted = true;
-                    } else {
-                        break;
-                    }
-                } else if liveness.as_ref().is_some_and(CallLiveness::revoked) {
-                    break;
-                }
                 if writer.write_all(&buf[..n]).await.is_err() {
                     break;
                 }
@@ -2260,12 +2042,12 @@ mod tests {
     }
 
     #[test]
-    fn service_headers_stamp_capability_token_and_strip_container_claims() {
-        use crate::types::RunToken;
+    fn service_headers_stamp_the_member_token_and_strip_container_claims() {
+        use crate::types::{RunActor, RunToken};
         let principal = Principal::Run(RunToken {
             workspace_id: Uuid::from_u128(7),
             turn_id: Uuid::from_u128(8),
-            capability_id: Some(Uuid::from_u128(9)),
+            acts_for: RunActor::Member(Uuid::from_u128(9)),
         });
         let headers = header_lines(&[
             "x-ufo-workspace: forged",
@@ -2290,34 +2072,22 @@ mod tests {
     }
 
     #[test]
-    fn rule_cache_keys_include_exact_capabilities() {
-        use crate::types::RunToken;
+    fn rule_cache_keys_include_the_acting_member() {
+        use crate::types::{RunActor, RunToken};
 
         let workspace_id = Uuid::from_u128(7);
         let turn_id = Uuid::from_u128(8);
         let first = Principal::Run(RunToken {
             workspace_id,
             turn_id,
-            capability_id: Some(Uuid::from_u128(9)),
+            acts_for: RunActor::Member(Uuid::from_u128(9)),
         });
         let second = Principal::Run(RunToken {
             workspace_id,
             turn_id,
-            capability_id: Some(Uuid::from_u128(10)),
+            acts_for: RunActor::Member(Uuid::from_u128(10)),
         });
         assert!(rule_key(&first) != rule_key(&second));
-    }
-
-    #[tokio::test]
-    async fn one_nonce_shares_one_liveness_watcher_across_tunnels() {
-        let registry = Arc::new(CallLivenessRegistry::default());
-        let control = Arc::new(Control::new("http://127.0.0.1:1", "control"));
-        let capability_id = Uuid::from_u128(9);
-        let first = registry.subscribe(capability_id, control.clone(), "Basic token");
-        let second = registry.subscribe(capability_id, control, "Basic token");
-
-        assert!(Arc::ptr_eq(&first.0, &second.0));
-        assert_eq!(registry.calls.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -2426,7 +2196,6 @@ mod tests {
                 client_write,
                 upstream_read,
                 upstream_write,
-                None,
                 None,
             ),
         )

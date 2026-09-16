@@ -346,7 +346,6 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
         "expires_at",
         "paused",
         "run_now",
-        "connections",
     }
     rows = {row["name"]: row for row in creator_view.json()["objects"]}
     assert set(rows) == {"daily-brief", "creatorless-sweep"}
@@ -356,13 +355,11 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     assert row["next_run_at"] == NEXT_RUN.isoformat()
     assert row["summary"] == "0 9 * * * — daily brief"
     assert row["prompt"] == "write the daily brief"
-    assert row["connections"] == []
     assert (row["agent_id"], row["agent_name"]) == (str(agent_a), "assistant")
     mine = await client.get(
         f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=creator_headers
     )
     assert mine.json()["spec"]["prompt"] == "write the daily brief"
-    assert mine.json()["spec"]["connections"] == []
     assert mine.json()["spec"]["expires_at"].startswith("2027-06-01T00:00:00")
 
     admin_view = await client.get(index, headers=admin_headers)
@@ -371,8 +368,6 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
     assert by_name["creatorless-sweep"]["summary"] == "0 3 * * * — creatorless-sweep"
     assert by_name["daily-brief"]["prompt"] == PRIVATE_PROMPT
     assert by_name["creatorless-sweep"]["prompt"] == PRIVATE_PROMPT
-    assert by_name["daily-brief"]["connections"] is None
-    assert by_name["creatorless-sweep"]["connections"] is None
     management = await client.get(
         f"/surface/web/objects/scheduled_task/daily-brief?agent={agent_a}", headers=admin_headers
     )
@@ -414,7 +409,6 @@ async def test_task_pages_shape_by_viewer_and_wall_by_agent(portal) -> None:
         f"/surface/web/objects/scheduled_task/channel-digest?agent={agent_a}", headers=other_headers
     )
     assert read.json()["spec"]["prompt"] == "post the channel digest"
-    assert read.json()["spec"]["connections"] == []
 
     sprawling = "Weekly customer and prospect signal digest, proposals only. " * 6
     sprawling_prompt = "Post the long digest, then thread the open proposals under it. " * 8

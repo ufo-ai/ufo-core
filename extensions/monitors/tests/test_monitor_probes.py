@@ -112,6 +112,34 @@ async def _seed() -> tuple[UUID, UUID, UUID, UUID]:
     return workspace_id, agent_id, conversation_id, member_id
 
 
+async def _member(workspace_id: UUID) -> UUID:
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id.hex[:8]}@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
+
+
+async def _connection(
+    workspace_id: UUID, agent_id: UUID, owner: UUID, account: str, *, shared: bool
+) -> UUID:
+    with ws(workspace_id), agent(agent_id):
+        return await GrantStore().record(
+            provider="hub",
+            account_id=account,
+            host="api.hub.test",
+            grantor_member_id=owner,
+            shared=shared,
+        )
+
+
 def _sandboxes(root: Path) -> ConversationSandbox:
     return ConversationSandbox(
         carrier=LocalCarrier(),
@@ -165,7 +193,6 @@ async def _arm(
     command: str = PROBE,
     interval_minutes: int = 5,
     due: bool = True,
-    connections: tuple[UUID, ...] = (),
     internet_access: Literal[False] | None = None,
 ) -> Monitor:
     now = datetime.now(UTC)
@@ -184,7 +211,6 @@ async def _arm(
         requesting_message_ref=requesting_message_ref,
         baseline=baseline,
         next_probe_at=now - timedelta(seconds=1) if due else now + timedelta(minutes=5),
-        connections=connections,
         internet_access=internet_access,
     )
     return row
@@ -237,23 +263,24 @@ async def _due_again(row_id: UUID) -> None:
 
 
 @pytest.mark.parametrize("armed_by_a_member", [True, False])
-async def test_a_probe_carries_the_watchs_exact_connection_capabilities(
+async def test_a_probe_acts_for_the_monitors_creator(
     db: None, tmp_path: Path, armed_by_a_member: bool
 ) -> None:
-    """The runner hands the persisted capability snapshot to both enforcement surfaces."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
-    await _probe_state(tmp_path, conversation_id, "queued\n")
+    other = await _member(workspace_id)
+    await _connection(workspace_id, agent_id, member_id, "acct-own", shared=False)
+    await _connection(workspace_id, agent_id, other, "acct-shared", shared=True)
+    await _connection(workspace_id, agent_id, other, "acct-private", shared=False)
     creator = member_id if armed_by_a_member else None
-    env = ProbeEnv()
-    asked: list[tuple[UUID, ...]] = []
+    env = ProbeEnv(
+        grants=GrantStore(),
+        clis={"hub": CliCredential(env="HUB_TOKEN", header="authorization", secret=_NeverSecret())},
+    )
+    asked: list[UUID | None] = []
 
-    async def recording(
-        conversation: UUID,
-        probe_id: UUID,
-        connections: tuple[UUID, ...],
-    ) -> dict[str, str]:
-        asked.append(connections)
-        return await env.exports(conversation, probe_id, connections)
+    async def recording(conversation: UUID, probe_id: UUID, member: UUID | None) -> dict[str, str]:
+        asked.append(member)
+        return await env.exports(conversation, probe_id, member)
 
     sandboxes = _sandboxes(tmp_path)
     ext = context_for(
@@ -266,22 +293,24 @@ async def test_a_probe_carries_the_watchs_exact_connection_capabilities(
         ),
     )
     with ws(workspace_id), agent(agent_id):
-        scope = tuple(sorted((uuid4(), uuid4()), key=str))
         armed = await _arm(
             ext,
             conversation_id,
             agent_id,
             creator,
-            baseline="queued\n",
-            connections=scope,
+            baseline=grant_sentinel("acct-own" if armed_by_a_member else "acct-shared"),
+            command='printf "$HUB_TOKEN"',
             internet_access=False,
         )
         await MonitorRunner(ctx=ext).run()
         row = await _row(armed.id)
+        turns = await _turns(conversation_id)
 
-    assert asked == [scope]
+    assert asked == [creator]
+    assert turns == []
     assert row is not None
     assert row["probes_run"] == 1
+    assert row["quiet_streak"] == 1
     assert row["internet_access"] is False
 
 
@@ -311,66 +340,6 @@ async def test_a_quiet_tick_posts_nothing_and_counts_the_probe(db: None, tmp_pat
     assert row["next_probe_at"].replace(tzinfo=UTC) - tick_at > timedelta(minutes=4)
 
 
-async def test_a_probe_keeps_its_arming_scope_when_an_account_is_connected_later(
-    db: None, tmp_path: Path
-) -> None:
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
-    store = GrantStore()
-    with ws(workspace_id), agent(agent_id):
-        listed = await store.record(
-            provider="hub",
-            account_id="acct-listed",
-            host="api.hub.test",
-            grantor_member_id=member_id,
-            shared=False,
-        )
-    expected = grant_sentinel("acct-listed")
-    sandboxes = _sandboxes(tmp_path)
-    ext = context_for(
-        NAME,
-        frozenset(),
-        invoker=_invoker(workspace_id, StubDbos()),
-        sandboxes=sandboxes,
-        probes=ConversationProbes(
-            sandboxes,
-            ProbeTokenCodec(secret=b"probe-test-secret"),
-            ProbeEnv(
-                grants=store,
-                clis={
-                    "hub": CliCredential(
-                        env="HUB_TOKEN", header="authorization", secret=_NeverSecret()
-                    )
-                },
-            ).exports,
-        ),
-    )
-    with ws(workspace_id), agent(agent_id):
-        armed = await _arm(
-            ext,
-            conversation_id,
-            agent_id,
-            member_id,
-            baseline=expected,
-            command='printf "$HUB_TOKEN"',
-            connections=(listed,),
-        )
-        await store.record(
-            provider="hub",
-            account_id="acct-later",
-            host="api.hub.test",
-            grantor_member_id=member_id,
-            shared=False,
-        )
-        await MonitorRunner(ctx=ext).run()
-        row = await _row(armed.id)
-        turns = await _turns(conversation_id)
-
-    assert row is not None
-    assert row["probes_run"] == 1
-    assert row["quiet_streak"] == 1
-    assert turns == []
-
-
 async def test_changed_output_founds_one_turn_and_retires_the_monitor(
     db: None, tmp_path: Path
 ) -> None:
@@ -391,6 +360,7 @@ async def test_changed_output_founds_one_turn_and_retires_the_monitor(
     [turn] = turns
     assert dbos.enqueued == [str(turn["id"])]
     assert turn["admission_source"] == "internal"
+    assert turn["member_id"] == member_id
     assert TurnContext.model_validate(turn["context"]).requesting_message_ref == (
         armed.requesting_message_ref
     )

@@ -218,11 +218,6 @@ const HEROES = [
 
 const LONG_NAME =
   "Digest every change that landed on the nightly branch and everything it touched downstream";
-const AUTOMATION_CONNECTIONS = [
-  "0199ae37-2c6a-70de-8491-87ecf678985f",
-  "0199ae37-31cb-7677-b92c-80bf21eb00de",
-];
-
 const OPEN_TRANSCRIPT = {
   name: "read_private_transcript",
   description: "Record that an admin opened another member's private conversation.",
@@ -1020,10 +1015,7 @@ function creationOnWire(
     },
     "/workspace/automations": () => json({ heroes: HEROES }),
     "/connections": () =>
-      json({
-        connections: [],
-        connection_scope: AUTOMATION_CONNECTIONS,
-      }),
+      json({ connections: [] }),
     "/automations": () =>
       json({ kinds: [TASK_KIND, TRIGGER_KIND], objects: rows, next_cursor: null }),
     "/objects/turn": () => json({ ...TURN_INDEX, objects: [], next_cursor: null }),
@@ -1082,7 +1074,6 @@ test("a new automation is filed under the name it is given, slugged", async () =
       description: "Weekday morning engineering digest!",
       prompt: "digest the night",
       schedule: "0 9 * * *",
-      connections: AUTOMATION_CONNECTIONS,
     },
   });
 });

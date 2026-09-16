@@ -676,7 +676,7 @@ async def test_a_spend_refusal_defers_the_job_and_tells_the_member_once(
     assert told.agent_id == agent_id
     assert "this workspace has no credit left" in told.message
     assert key in told.message
-    assert told.runtime_config == TurnRuntimeConfig(connections=(), internet_access=False)
+    assert told.runtime_config == TurnRuntimeConfig(internet_access=False)
 
     await runner.fire(key, workspace_id)
     assert len(invoker.turns) == 1

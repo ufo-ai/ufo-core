@@ -20,7 +20,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
-from ufo.sdk.context import CONNECTION_SCOPE_MAX, ExtensionContext
+from ufo.sdk.context import ExtensionContext
 from ufo.sdk.o11y import log
 from ufo.sdk.objects import (
     CONVERSATION_KIND,
@@ -107,15 +107,6 @@ class ScheduledTaskSpec(BaseModel):
             "stored, and an apply that omits it leaves the next fire where the schedule puts it."
         ),
     )
-    connections: tuple[UUID, ...] | None = Field(
-        default=None,
-        max_length=CONNECTION_SCOPE_MAX,
-        title="Connections",
-        description=(
-            "Connection ids the task may use. Required on create; [] allows none; omitted on an "
-            "update preserves the list. object_list connection returns the ids."
-        ),
-    )
 
     @field_validator("expires_at")
     @classmethod
@@ -123,15 +114,6 @@ class ScheduledTaskSpec(BaseModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() != timedelta(0)):
             raise ValueError("expires_at must be a UTC timestamp")
         return value
-
-    @field_validator("connections")
-    @classmethod
-    def validate_distinct_connections(
-        cls, value: tuple[UUID, ...] | None
-    ) -> tuple[UUID, ...] | None:
-        if value is not None and len(set(value)) != len(value):
-            raise ValueError("connections cannot contain duplicate ids")
-        return None if value is None else tuple(sorted(value, key=str))
 
 
 class PauseAndWaitInput(BaseModel):
@@ -189,10 +171,6 @@ def _content_readable(
         admin=False,
         disclosed=listed.task.conversation_id in disclosed,
     )
-
-
-def _connections_in_scope(stored: tuple[UUID, ...], scope: tuple[UUID, ...] | None) -> bool:
-    return scope is None or frozenset(stored) <= frozenset(scope)
 
 
 def _internet_in_scope(stored: Literal[False] | None, scope: Literal[False] | None) -> bool:
@@ -375,7 +353,6 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             ctx.ext,
             member_id=ctx.speaker_member_id,
             prompt_max=PROMPT_EXCERPT_MAX,
-            connections=ctx.connection_scope,
             internet_access=(
                 None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.internet_access
             ),
@@ -389,7 +366,6 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         prompt_max: int | None,
         conversation_id: UUID | None = None,
         admin: bool = False,
-        connections: tuple[UUID, ...] | None = None,
         internet_access: Literal[False] | None = None,
     ) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         scheduler = _require_scheduler(ext)
@@ -397,8 +373,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         listed_rows = tuple(
             listed
             for listed in listed_rows
-            if _connections_in_scope(listed.task.connections, connections)
-            and _internet_in_scope(listed.task.internet_access, internet_access)
+            if _internet_in_scope(listed.task.internet_access, internet_access)
         )
         disclosed = await self._disclosed(ext, listed_rows, member_id=member_id, admin=admin)
         emails = await owner_emails(row.task.created_by_member_id for row in listed_rows)
@@ -438,11 +413,6 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                         "prompt": (
                             listed.task.prompt[:prompt_max] if content_readable else PRIVATE_PROMPT
                         ),
-                        "connections": (
-                            [str(connection_id) for connection_id in listed.task.connections]
-                            if content_readable
-                            else None
-                        ),
                     },
                 )
             )
@@ -468,7 +438,6 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 description=task.description,
                 expires_at=task.expires_at,
                 paused=task.paused,
-                connections=task.connections,
             ),
             created_at=task.created_at,
             updated_at=task.updated_at,
@@ -537,9 +506,7 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
         now = datetime.now(UTC)
         if owner is None:
             if existing is not None:
-                if not _connections_in_scope(
-                    existing.connections, ctx.connection_scope
-                ) or not _internet_in_scope(
+                if not _internet_in_scope(
                     existing.internet_access,
                     (
                         None
@@ -551,21 +518,8 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 raise ValueError(f"scheduled task {name!r} changed while editing")
             if old is not None:
                 raise ValueError(f"scheduled task {name!r} changed while editing")
-            if validated_schedule is None or spec.prompt is None or spec.connections is None:
-                raise ValueError(
-                    "creating a scheduled task requires schedule, prompt, and connections"
-                )
-            available = frozenset(await ctx.connector_connection_ids())
-            unavailable = tuple(
-                connection_id
-                for connection_id in spec.connections
-                if connection_id not in available
-            )
-            if unavailable:
-                raise ValueError(
-                    f"connections are outside this turn's scope: "
-                    f"{', '.join(str(connection_id) for connection_id in unavailable)}"
-                )
+            if validated_schedule is None or spec.prompt is None:
+                raise ValueError("creating a scheduled task requires schedule and prompt")
             next_run_at = now if spec.run_now else next_fire(validated_schedule, now)
             paused = bool(spec.paused)
             _validate_future_fire(next_run_at, spec.expires_at, paused=paused)
@@ -579,7 +533,6 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
                 created_by_member_id=acting_member,
                 expires_at=spec.expires_at,
                 paused=paused,
-                connections=spec.connections,
                 internet_access=(
                     None
                     if ctx.turn.runtime_config is None
@@ -610,17 +563,6 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             spec.expires_at if "expires_at" in spec.model_fields_set else existing.expires_at
         )
         paused = existing.paused if spec.paused is None else spec.paused
-        connections = existing.connections if spec.connections is None else spec.connections
-        if spec.connections is not None:
-            available = frozenset(await ctx.connector_connection_ids())
-            unavailable = tuple(
-                connection_id for connection_id in connections if connection_id not in available
-            )
-            if unavailable:
-                raise ValueError(
-                    f"connections are outside this turn's scope: "
-                    f"{', '.join(str(connection_id) for connection_id in unavailable)}"
-                )
         _validate_future_fire(next_run_at, expires_at, paused=paused)
         await scheduler.update(
             expected=existing,
@@ -630,7 +572,6 @@ class ScheduledTaskObjects(MemberReadableObjects[ScheduledTaskSpec, GeneratedObj
             next_run_at=next_run_at,
             expires_at=expires_at,
             paused=paused,
-            connections=connections,
         )
 
     async def _delete_owned(self, ctx: ToolContext, name: str, owner: GeneratedObjectOwner) -> None:
@@ -705,7 +646,6 @@ SCHEDULED_TASK_OBJECT = ObjectKind(
             "mine",
             "readable",
             "prompt",
-            "connections",
         }
     ),
     agent_target_verbs=frozenset({"list", "get", "update", "delete"}),
@@ -739,6 +679,7 @@ async def pause_and_wait(ctx: ToolContext, args: PauseAndWaitInput) -> ToolResul
         origin_seq=ctx.turn.seq,
         origin_arrival_seq=await ext.conversation_arrival_seq(ctx.turn.conversation_id),
         prompt="Resume the paused workflow.\n" + json.dumps(wakeup),
+        created_by_member_id=ctx.acting_member_id,
         internet_access=(
             None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.internet_access
         ),

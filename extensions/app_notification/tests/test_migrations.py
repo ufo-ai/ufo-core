@@ -394,12 +394,7 @@ def test_notification_runtime_backfill_and_outgoing_writes_fail_closed(tmp_path:
     command.upgrade(config, BRIEF)
     engine = sa.create_engine(f"sqlite:///{database_path}")
     workspace_id, member_id, producer_id, inbox_id, conversation_id = (uuid4() for _ in range(5))
-    scoped_turn, ordinary_turn, relay_turn, connection_id = (
-        uuid4(),
-        uuid4(),
-        uuid4(),
-        uuid4(),
-    )
+    scoped_turn, ordinary_turn, relay_turn = (uuid4() for _ in range(3))
     now = datetime.now(UTC)
     with engine.connect() as connection:
         connection.execute(
@@ -463,9 +458,9 @@ def test_notification_runtime_backfill_and_outgoing_writes_fail_closed(tmp_path:
                     "inbound": "scoped",
                     "idempotency_key": None,
                     "speaker_member_id": member_id,
-                    "runtime_config": TurnRuntimeConfig(
-                        internet_access=False, connections=(connection_id,)
-                    ).model_dump(mode="json"),
+                    "runtime_config": TurnRuntimeConfig(internet_access=False).model_dump(
+                        mode="json"
+                    ),
                     "created_at": now,
                     "updated_at": now,
                 },
@@ -594,7 +589,7 @@ def test_notification_runtime_backfill_and_outgoing_writes_fail_closed(tmp_path:
 
     assert TurnRuntimeConfig.model_validate(
         json.loads(migrated["source/scoped"].runtime_config)
-    ) == TurnRuntimeConfig(internet_access=False, connections=(connection_id,))
+    ) == TurnRuntimeConfig(internet_access=False)
     assert migrated["source/scoped"].scope_occurrences == 1
     assert delivery.delivery_key == f"notify-deliver:{ordinary_turn.hex}"
     assert delivery.request_digest is None
@@ -604,7 +599,7 @@ def test_notification_runtime_backfill_and_outgoing_writes_fail_closed(tmp_path:
     assert delivery.relay_turn_id == relay_turn
     assert TurnRuntimeConfig.model_validate(
         json.loads(migrated["source/folded"].runtime_config)
-    ) == TurnRuntimeConfig(internet_access=False, connections=())
+    ) == TurnRuntimeConfig(internet_access=False)
     assert migrated["source/folded"].scope_occurrences == 2
     assert rolling["source/outgoing"].runtime_config is None
     assert rolling["source/outgoing"].scope_occurrences is None

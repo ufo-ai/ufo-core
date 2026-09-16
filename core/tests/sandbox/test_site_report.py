@@ -173,9 +173,7 @@ async def test_a_signed_report_founds_a_turn_in_the_conversation_it_names(
         (conversation_id, agent_id)
     ]
     assert invoker.turns[0].standalone is True
-    assert invoker.turns[0].runtime_config == TurnRuntimeConfig(
-        connections=(), internet_access=False
-    )
+    assert invoker.turns[0].runtime_config == TurnRuntimeConfig(internet_access=False)
 
 
 @pytest.mark.parametrize("kind", [INGRESS_VIEW_KIND, INGRESS_SESSION_KIND])
@@ -343,7 +341,7 @@ async def test_a_report_persists_a_turn_that_reaches_no_ambient_egress(
             sa.update(tables.turn).where(tables.turn.c.id == turn.id).values(status="running")
         )
     assert TurnRuntimeConfig.model_validate(turn.runtime_config) == TurnRuntimeConfig(
-        connections=(), internet_access=False
+        internet_access=False
     )
     rules = await PerAgentRules(base=(), grants=GrantStore(), internet=(InternetRule(),)).resolve(
         RunToken(workspace_id, turn.id)

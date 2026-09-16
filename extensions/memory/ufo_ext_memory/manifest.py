@@ -595,9 +595,6 @@ async def recall_hook(ctx: HookContext) -> HookOutcome:
         agent_id=ctx.turn.agent_id,
         requesting_member_id=None,
         subjects=subjects,
-        connections=(
-            None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.connections
-        ),
     )
     recalled: tuple[Recalled, ...] = ()
     error_class: str | None = None

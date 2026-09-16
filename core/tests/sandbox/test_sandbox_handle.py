@@ -60,7 +60,6 @@ from ufo.runtime.access.egress_rules import ScopeRule
 from ufo.runtime.access.grants import CommitIdentity, GrantStore, grant_sentinel
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.background_tasks import mark_detached
 from ufo.runtime.ext.manifest import CarrierSpec, CredentialSlot, InjectionTarget
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES, GENERAL_PURPOSE
 from ufo.runtime.queue import (
@@ -72,7 +71,7 @@ from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL, TOOL_BRIDGE_URL_ENV
 from ufo.runtime.turns.audience import SHARED_AUDIENCE
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import Turn, TurnRuntimeConfig
+from ufo.schema.records import Turn
 
 PROXY = ProxyEndpoint(port=8080, ca_cert="ca-pem")
 RUN_TOKENS = RunTokenCodec(b"sandbox-handle-test-secret")
@@ -516,12 +515,11 @@ async def _seed_grant(
     return agent_id, member_id, connection_id
 
 
-async def test_sandbox_cli_env_uses_exact_connection_capabilities(db: None, tmp_path: Path) -> None:
-    """The base sandbox carries no first-speaker grant; a message-bound call derives it."""
+async def test_sandbox_cli_env_derives_the_acting_members_grant_after_open(
+    db: None, tmp_path: Path
+) -> None:
     workspace_id, conversation_id = await _conversation()
-    agent_id, member_id, connection_id = await _seed_grant(
-        workspace_id, conversation_id, shared=False
-    )
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     turn = _turn(workspace_id, conversation_id).model_copy(
         update={"agent_id": agent_id, "speaker_member_id": member_id}
@@ -536,19 +534,17 @@ async def test_sandbox_cli_env_uses_exact_connection_capabilities(db: None, tmp_
             None,
             (),
         )
-        scoped = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, turn.id, (connection_id,))
+        scoped = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, turn.id, member_id)
 
     assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
     assert scoped == {"HUB_TOKEN": grant_sentinel("acct-1")}
 
 
-async def test_sandbox_authorizer_binds_run_token_and_cli_env_to_exact_capabilities(
+async def test_sandbox_authorizer_binds_the_run_token_and_cli_env_to_the_acting_member(
     db: None,
 ) -> None:
     workspace_id, conversation_id = await _conversation()
-    agent_id, _member_id, connection_id = await _seed_grant(
-        workspace_id, conversation_id, shared=False
-    )
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
     common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
     proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
@@ -576,134 +572,40 @@ async def test_sandbox_authorizer_binds_run_token_and_cli_env_to_exact_capabilit
     await _store_turn(turn)
 
     with ws(workspace_id), agent(agent_id):
-        access = await authorizer.authorize((connection_id,), "hub/request")
-    authorized = access.sandbox
+        authorized = cast(SandboxSession, await authorizer.authorize(member_id))
+        nobody = cast(SandboxSession, await authorizer.authorize(None))
 
-    basic = (
-        "Basic "
-        + base64.b64encode(f"{authorized.handle.run_token}:{PROXY_PASSWORD}".encode()).decode()
-    )
-    run = RUN_TOKENS.from_proxy_auth(basic)
-    assert run.workspace_id == workspace_id
-    assert run.turn_id == turn.id
-    assert run.capability_id is not None
-    async with workspace_tx() as connection:
-        stored = (
-            (
-                await connection.execute(
-                    sa.select(tables.sandbox_call_capability).where(
-                        tables.sandbox_call_capability.c.id == run.capability_id
-                    )
-                )
-            )
-            .mappings()
-            .one()
+    def decoded(sandbox: SandboxSession) -> RunToken:
+        basic = (
+            "Basic "
+            + base64.b64encode(f"{sandbox.handle.run_token}:{PROXY_PASSWORD}".encode()).decode()
         )
-    assert stored["call"] == "hub/request"
-    assert stored["connections"] == [str(connection_id)]
+        return RUN_TOKENS.from_proxy_auth(basic)
+
+    run = decoded(authorized)
+    assert run == RunToken(workspace_id, turn.id, acts_for=member_id)
     rules = await PerAgentRules(base=(), grants=GrantStore()).resolve(run)
     assert ScopeRule(allowed_hosts=frozenset({"api.hub.test"})) in rules
     assert authorized.handle.egress_env["HUB_TOKEN"] == grant_sentinel("acct-1")
     assert "HUB_TOKEN" not in base.handle.egress_env
-    assert access.revoke is not None
-    await access.revoke()
-    async with workspace_tx() as connection:
-        assert (
-            await connection.execute(
-                sa.select(tables.sandbox_call_capability.c.id).where(
-                    tables.sandbox_call_capability.c.id == run.capability_id
-                )
-            )
-        ).scalar_one_or_none() is None
-    durable = replace(
-        authorizer,
-        turn=turn.model_copy(
-            update={"runtime_config": TurnRuntimeConfig(connections=(connection_id,))}
-        ),
-    )
-    with ws(workspace_id), agent(agent_id):
-        durable_access = await durable.authorize((connection_id,), "hub/durable")
-    durable_basic = (
-        "Basic "
-        + base64.b64encode(
-            f"{durable_access.sandbox.handle.run_token}:{PROXY_PASSWORD}".encode()
-        ).decode()
-    )
-    assert RUN_TOKENS.from_proxy_auth(durable_basic).capability_id is None
-    assert durable_access.revoke is None
+    assert decoded(nobody) == RunToken(workspace_id, turn.id)
+    assert "HUB_TOKEN" not in nobody.handle.egress_env
 
-
-async def test_a_detached_task_retains_and_recovers_its_exact_capability(db: None) -> None:
-    workspace_id, conversation_id = await _conversation()
-    agent_id, _member_id, connection_id = await _seed_grant(
-        workspace_id, conversation_id, shared=False
-    )
-    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
-    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
-    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
-    authorizer = SandboxAuthorizer(
-        sandbox=SandboxSession(
-            carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
-            handle=SandboxHandle(
-                conversation_id=conversation_id,
-                container_id="sbx-1",
-                run_token=common_token,
-                egress_env={
-                    "HTTP_PROXY": proxy,
-                    "HTTPS_PROXY": proxy,
-                    "http_proxy": proxy,
-                    "https_proxy": proxy,
-                },
-            ),
-        ),
+    own = SandboxAuthorizer(
+        sandbox=base,
         run_tokens=RUN_TOKENS,
         grants=GrantStore(),
         clis={"hub": HUB_CLI},
-        turn=turn,
+        turn=turn.model_copy(update={"member_id": member_id}),
     )
-    await _store_turn(turn)
-
     with ws(workspace_id), agent(agent_id):
-        access = await authorizer.authorize((connection_id,), "hub/request")
-        token = access.sandbox.handle.run_token
-        assert token is not None
-        capability_id = RUN_TOKENS.from_proxy_auth(
-            "Basic " + base64.b64encode(f"{token}:{PROXY_PASSWORD}".encode()).decode()
-        ).capability_id
-        assert capability_id is not None
-        await mark_detached(
-            turn,
-            "abcdef12",
-            "$UFO_HOME/runs/terminal-runtime/tasks/abcdef12",
-            capability_id,
-        )
-        assert access.revoke is not None
-        await access.revoke()
-        recovered = await authorizer.authorize((connection_id,), "hub/request")
-
-    recovered_token = recovered.sandbox.handle.run_token
-    assert recovered_token is not None
-    recovered_id = RUN_TOKENS.from_proxy_auth(
-        "Basic " + base64.b64encode(f"{recovered_token}:{PROXY_PASSWORD}".encode()).decode()
-    ).capability_id
-    assert recovered_id == capability_id
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.delete(tables.detached_task).where(
-                tables.detached_task.c.turn_id == turn.id,
-                tables.detached_task.c.task == "abcdef12",
-            )
-        )
-    assert recovered.revoke is not None
-    await recovered.revoke()
-    async with workspace_tx() as connection:
-        assert (
-            await connection.execute(
-                sa.select(tables.sandbox_call_capability.c.id).where(
-                    tables.sandbox_call_capability.c.id == capability_id
-                )
-            )
-        ).scalar_one_or_none() is None
+        as_its_turn = cast(SandboxSession, await own.authorize(member_id))
+        as_nobody = cast(SandboxSession, await own.authorize(None))
+        nobody_rules = await PerAgentRules(base=(), grants=GrantStore()).resolve(decoded(as_nobody))
+    assert decoded(as_its_turn) == RunToken(workspace_id, turn.id)
+    assert decoded(as_nobody) == RunToken(workspace_id, turn.id, acts_for="nobody")
+    assert ScopeRule(allowed_hosts=frozenset({"api.hub.test"})) not in nobody_rules
+    assert "HUB_TOKEN" not in as_nobody.handle.egress_env
 
 
 async def test_open_sandbox_exports_the_conversation_identity_stable_across_turns(
@@ -715,13 +617,11 @@ async def test_open_sandbox_exports_the_conversation_identity_stable_across_turn
     the same container and the same clone, and opens under the same value, so the name the first
     turn pushed still holds.
 
-    Re-authorization holds it too: a message-bound call re-signs the run token for its exact
-    connections, and `SandboxSession.authorize` rewrites only the proxy vars and drops only the
-    connector CLI vars it is handed."""
+    Re-authorization holds it too: a call re-signs the run token for the member it acts for, and
+    `SandboxSession.authorize` rewrites only the proxy vars and drops only the connector CLI vars
+    it is handed."""
     workspace_id, conversation_id = await _conversation()
-    agent_id, _member_id, connection_id = await _seed_grant(
-        workspace_id, conversation_id, shared=False
-    )
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
     common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
@@ -730,7 +630,7 @@ async def test_open_sandbox_exports_the_conversation_identity_stable_across_turn
 
     with ws(workspace_id), agent(agent_id):
         await _open_sandbox(_sandboxes(carrier, "e2b", tmp_path), RUN_TOKENS, turn, {}, None, ())
-        access = await SandboxAuthorizer(
+        authorized = await SandboxAuthorizer(
             sandbox=SandboxSession(
                 carrier=carrier,
                 handle=SandboxHandle(
@@ -750,8 +650,8 @@ async def test_open_sandbox_exports_the_conversation_identity_stable_across_turn
             grants=GrantStore(),
             clis={"hub": HUB_CLI},
             turn=turn,
-        ).authorize((connection_id,), "hub/request")
-        authorized = access.sandbox
+        ).authorize(member_id)
+        authorized = cast(SandboxSession, authorized)
 
     followup = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
     with ws(workspace_id), agent(agent_id):
@@ -772,9 +672,8 @@ async def test_open_sandbox_exports_the_conversation_identity_stable_across_turn
 async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
     db: None, tmp_path: Path
 ) -> None:
-    """A private grant of another member is not the turn's to use: a speakerless turn with no
-    exact connection capability exports no sentinel, so the CLI runs unauthenticated rather than
-    drawing a foreign account."""
+    """A private grant of another member is not the turn's to use: a turn acting for nobody
+    exports no sentinel, so the CLI runs unauthenticated rather than drawing a foreign account."""
     workspace_id, conversation_id = await _conversation()
     agent_id, _, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     carrier = _ResumeRecordingCarrier(container_id="sbx-1")
@@ -793,15 +692,13 @@ async def test_open_sandbox_exports_nothing_for_a_foreign_private_grant(
     assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
 
 
-async def test_sandbox_cli_env_prefers_private_over_shared_capability(
+async def test_sandbox_cli_env_prefers_the_members_private_account_over_a_shared_one(
     db: None, tmp_path: Path
 ) -> None:
     workspace_id, conversation_id = await _conversation()
-    agent_id, member_id, connection_id = await _seed_grant(
-        workspace_id, conversation_id, shared=False
-    )
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     with ws(workspace_id), agent(agent_id):
-        shared = await GrantStore().record(
+        await GrantStore().record(
             provider="hub",
             account_id="acct-shared",
             host="api.hub.test",
@@ -822,21 +719,21 @@ async def test_sandbox_cli_env_prefers_private_over_shared_capability(
             None,
             (),
         )
-        scoped = await _grant_cli_env(
-            GrantStore(), {"hub": HUB_CLI}, turn.id, (connection_id, shared)
-        )
+        own = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, turn.id, member_id)
+        nobody = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, turn.id, None)
 
     assert _derived_env(carrier.specs[0]) == GIT_PROXY_AUTH_ENV
-    assert scoped == {"HUB_TOKEN": grant_sentinel("acct-1")}
+    assert own == {"HUB_TOKEN": grant_sentinel("acct-1")}
+    assert nobody == {"HUB_TOKEN": grant_sentinel("acct-shared")}
 
 
-async def test_sandbox_cli_env_exports_nothing_when_capabilities_are_ambiguous(db: None) -> None:
+async def test_sandbox_cli_env_exports_nothing_when_the_members_accounts_are_ambiguous(
+    db: None,
+) -> None:
     workspace_id, conversation_id = await _conversation()
-    agent_id, member_id, connection_id = await _seed_grant(
-        workspace_id, conversation_id, shared=False
-    )
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     with ws(workspace_id), agent(agent_id):
-        second = await GrantStore().record(
+        await GrantStore().record(
             provider="hub",
             account_id="acct-2",
             host="api.hub.test",
@@ -844,9 +741,7 @@ async def test_sandbox_cli_env_exports_nothing_when_capabilities_are_ambiguous(d
             shared=False,
         )
     with ws(workspace_id), agent(agent_id):
-        scoped = await _grant_cli_env(
-            GrantStore(), {"hub": HUB_CLI}, uuid4(), (connection_id, second)
-        )
+        scoped = await _grant_cli_env(GrantStore(), {"hub": HUB_CLI}, uuid4(), member_id)
 
     assert scoped == {}
 
@@ -1132,11 +1027,9 @@ async def test_open_sandbox_exports_the_committer_identity_of_the_pushing_accoun
     that clones through no git host exports none, so the identity never outlives the grant that
     pushes."""
     workspace_id, conversation_id = await _conversation()
-    agent_id, member_id, connection_id = await _seed_grant(
-        workspace_id, conversation_id, shared=False
-    )
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     with ws(workspace_id), agent(agent_id):
-        github = await GrantStore().record(
+        await GrantStore().record(
             provider="github",
             account_id="acct-gh",
             host="api.github.com",
@@ -1149,10 +1042,7 @@ async def test_open_sandbox_exports_the_committer_identity_of_the_pushing_accoun
             ),
         )
         scoped = await _grant_cli_env(
-            GrantStore(),
-            {"github": GIT_CLI, "hub": HUB_CLI},
-            uuid4(),
-            (connection_id, github),
+            GrantStore(), {"github": GIT_CLI, "hub": HUB_CLI}, uuid4(), member_id
         )
 
     assert scoped == {
@@ -1175,7 +1065,7 @@ async def test_open_sandbox_exports_no_identity_for_a_connection_that_recorded_n
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     with ws(workspace_id), agent(agent_id):
-        github = await GrantStore().record(
+        await GrantStore().record(
             provider="github",
             account_id="acct-gh",
             host="api.github.com",
@@ -1183,7 +1073,7 @@ async def test_open_sandbox_exports_no_identity_for_a_connection_that_recorded_n
             shared=False,
             account_label="alexg-ufo",
         )
-        scoped = await _grant_cli_env(GrantStore(), {"github": GIT_CLI}, uuid4(), (github,))
+        scoped = await _grant_cli_env(GrantStore(), {"github": GIT_CLI}, uuid4(), member_id)
 
     assert scoped == {"GH_TOKEN": grant_sentinel("acct-gh")}
 
@@ -1195,7 +1085,7 @@ async def test_reauthorization_drops_the_committer_identity_of_another_authority
     them: a member holding no GitHub grant commits under no identity rather than under the identity
     the open exported for somebody else."""
     workspace_id, conversation_id = await _conversation()
-    agent_id, _, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
     common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
     proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
@@ -1220,14 +1110,16 @@ async def test_reauthorization_drops_the_committer_identity_of_another_authority
     )
 
     with ws(workspace_id), agent(agent_id):
-        access = await SandboxAuthorizer(
-            sandbox=base,
-            run_tokens=RUN_TOKENS,
-            grants=GrantStore(),
-            clis={"github": GIT_CLI},
-            turn=turn,
-        ).authorize((), "github/request")
-        authorized = access.sandbox
+        authorized = cast(
+            SandboxSession,
+            await SandboxAuthorizer(
+                sandbox=base,
+                run_tokens=RUN_TOKENS,
+                grants=GrantStore(),
+                clis={"github": GIT_CLI},
+                turn=turn,
+            ).authorize(member_id),
+        )
 
     assert "GH_TOKEN" not in authorized.handle.egress_env
     assert GIT_IDENTITY_ENV.isdisjoint(authorized.handle.egress_env)
@@ -1375,13 +1267,9 @@ async def test_racing_first_operations_create_the_shared_sandbox_once(
     assert await _stored_handle(member_conversation) == "e2b:sbx-1"
 
 
-async def test_an_exact_capability_view_binds_the_turns_one_create(
-    db: None, tmp_path: Path
-) -> None:
+async def test_an_authorized_view_binds_the_turns_one_create(db: None, tmp_path: Path) -> None:
     workspace_id, conversation_id = await _conversation()
-    agent_id, _member_id, connection_id = await _seed_grant(
-        workspace_id, conversation_id, shared=False
-    )
+    agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=False)
     turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
     carrier = _UniqueIdCarrier()
     await _store_turn(turn)
@@ -1395,26 +1283,15 @@ async def test_an_exact_capability_view_binds_the_turns_one_create(
             clis={"hub": HUB_CLI},
             turn=turn,
         )
-        access = await authorizer.authorize((connection_id,), "hub/request")
-        authorized = access.sandbox
+        authorized = await authorizer.authorize(member_id)
         assert carrier.created == 0
         await authorized.bash("true")
         await sandbox.bash("true")
 
     assert carrier.created == 1
-    scoped_token, turn_token = (run_token for _, run_token in carrier.execs)
-    assert scoped_token is not None and turn_token is not None
-    basic = "Basic " + base64.b64encode(f"{scoped_token}:".encode()).decode()
-    run = RUN_TOKENS.from_proxy_auth(basic)
-    assert run.workspace_id == workspace_id
-    assert run.turn_id == turn.id
-    assert run.capability_id is not None
-    assert turn_token == RUN_TOKENS.encode(
-        RunToken(
-            workspace_id=workspace_id,
-            turn_id=turn.id,
-        )
-    )
+    member_token, turn_token = (run_token for _, run_token in carrier.execs)
+    assert member_token == RUN_TOKENS.encode(RunToken(workspace_id, turn.id, acts_for=member_id))
+    assert turn_token == RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
 
 
 async def test_a_recovered_cancel_stops_commands_without_creating_a_sandbox(
@@ -1746,7 +1623,7 @@ async def test_open_sandbox_commits_as_the_shared_account_another_member_connect
     workspace_id, conversation_id = await _conversation()
     agent_id, member_id, _ = await _seed_grant(workspace_id, conversation_id, shared=True)
     with ws(workspace_id), agent(agent_id):
-        github = await GrantStore().record(
+        await GrantStore().record(
             provider="github",
             account_id="acct-gh",
             host="api.github.com",
@@ -1758,7 +1635,7 @@ async def test_open_sandbox_commits_as_the_shared_account_another_member_connect
                 email="12345+alexg-ufo@users.noreply.github.com",
             ),
         )
-        scoped = await _grant_cli_env(GrantStore(), {"github": GIT_CLI}, uuid4(), (github,))
+        scoped = await _grant_cli_env(GrantStore(), {"github": GIT_CLI}, uuid4(), uuid4())
 
     assert scoped == {
         "GH_TOKEN": grant_sentinel("acct-gh"),
@@ -1782,25 +1659,22 @@ async def test_open_sandbox_withdraws_the_identity_when_two_clis_claim_it(
         name="Alex Graveley", email="12345+alexg-ufo@users.noreply.github.com"
     )
     with ws(workspace_id), agent(agent_id):
-        connections = []
         for provider, account in (("github", "acct-gh"), ("gitlab", "acct-gl")):
-            connections.append(
-                await GrantStore().record(
-                    provider=provider,
-                    account_id=account,
-                    host=f"api.{provider}.test",
-                    grantor_member_id=member_id,
-                    shared=False,
-                    account_label="alexg-ufo",
-                    commit=identity,
-                )
+            await GrantStore().record(
+                provider=provider,
+                account_id=account,
+                host=f"api.{provider}.test",
+                grantor_member_id=member_id,
+                shared=False,
+                account_label="alexg-ufo",
+                commit=identity,
             )
         with caplog.at_level(logging.INFO):
             scoped = await _grant_cli_env(
                 GrantStore(),
                 {"github": GIT_CLI, "gitlab": replace(GIT_CLI, env="GITLAB_TOKEN")},
                 uuid4(),
-                tuple(connections),
+                member_id,
             )
 
     assert scoped == {
@@ -1808,55 +1682,3 @@ async def test_open_sandbox_withdraws_the_identity_when_two_clis_claim_it(
         "GITLAB_TOKEN": grant_sentinel("acct-gl"),
     }
     assert [r.getMessage() for r in caplog.records if "git_identity_ambiguous" in r.getMessage()]
-
-
-async def test_sandbox_cli_export_stops_at_exact_connection_capabilities(db: None) -> None:
-    workspace_id, conversation_id = await _conversation()
-    agent_id, member_id, connection_id = await _seed_grant(
-        workspace_id, conversation_id, shared=False
-    )
-    with ws(workspace_id), agent(agent_id):
-        listed = await GrantStore().record(
-            provider="hub",
-            account_id="acct-2",
-            host="api.hub.test",
-            grantor_member_id=member_id,
-            shared=False,
-        )
-    turn = _turn(workspace_id, conversation_id).model_copy(update={"agent_id": agent_id})
-    common_token = RUN_TOKENS.encode(RunToken(workspace_id, turn.id))
-    proxy = f"http://{common_token}:{PROXY_PASSWORD}@proxy:8080"
-    base = SandboxSession(
-        carrier=_ResumeRecordingCarrier(container_id="sbx-1"),
-        handle=SandboxHandle(
-            conversation_id=conversation_id,
-            container_id="sbx-1",
-            run_token=common_token,
-            egress_env={
-                "HTTP_PROXY": proxy,
-                "HTTPS_PROXY": proxy,
-                "http_proxy": proxy,
-                "https_proxy": proxy,
-            },
-        ),
-    )
-
-    def authorizer(selected: Turn) -> SandboxAuthorizer:
-        return SandboxAuthorizer(
-            sandbox=base,
-            run_tokens=RUN_TOKENS,
-            grants=GrantStore(),
-            clis={"hub": HUB_CLI},
-            turn=selected,
-        )
-
-    await _store_turn(turn)
-    with ws(workspace_id), agent(agent_id):
-        ambiguous_access = await authorizer(turn).authorize(
-            (connection_id, listed), "hub/ambiguous"
-        )
-        pinned_access = await authorizer(turn).authorize((listed,), "hub/pinned")
-        ambiguous = ambiguous_access.sandbox
-        pinned = pinned_access.sandbox
-    assert "HUB_TOKEN" not in ambiguous.handle.egress_env
-    assert pinned.handle.egress_env["HUB_TOKEN"] == grant_sentinel("acct-2")

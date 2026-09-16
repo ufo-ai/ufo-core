@@ -626,6 +626,7 @@ class _RecordingInvoker:
         runtime_config: TurnRuntimeConfig | None = None,
         model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
+        acting_member_id: UUID | None = None,
     ) -> UUID | None:
         return await self.admission.invoke(
             self.workspace_id,

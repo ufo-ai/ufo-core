@@ -1164,8 +1164,7 @@ async def test_spawn_model_pins_the_child_turn_under_an_unpinned_tree(
     parent turn carries ride along unchanged. A spawn that names none inherits the parent's config
     whole."""
     workspace_id, agent_id = await _workspace_agent()
-    connection_id = uuid4()
-    inherited = TurnRuntimeConfig(internet_access=False, connections=(connection_id,))
+    inherited = TurnRuntimeConfig(internet_access=False)
     parent = (await _parent(workspace_id, agent_id)).model_copy(
         update={"runtime_config": inherited}
     )
@@ -1183,9 +1182,7 @@ async def test_spawn_model_pins_the_child_turn_under_an_unpinned_tree(
     inheriting = await subagents.spawn("research", {"task": "beta"}, background=True)
 
     child, _, _ = await _load_turn(pinned.turn_id)
-    assert child.runtime_config == TurnRuntimeConfig(
-        model="gpt-5.6-sol", internet_access=False, connections=(connection_id,)
-    )
+    assert child.runtime_config == TurnRuntimeConfig(model="gpt-5.6-sol", internet_access=False)
     sibling, _, _ = await _load_turn(inheriting.turn_id)
     assert sibling.runtime_config == inherited
 
@@ -1758,7 +1755,7 @@ async def test_a_finished_child_delivers_validated_output_as_the_parents_next_tu
     )
 
 
-async def test_a_delivery_returns_connection_scope_without_child_model_capabilities(
+async def test_a_delivery_posts_under_the_parents_config_without_child_model_capabilities(
     db: None,
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
@@ -1767,12 +1764,10 @@ async def test_a_delivery_returns_connection_scope_without_child_model_capabilit
         provider=PROVIDER_ANTHROPIC,
         slot=member_slot(ANTHROPIC_KEY_SLOT, uuid4()),
     )
-    parent_environment = "sha256:" + "0" * 64
     parent_config = TurnRuntimeConfig(
         internet_access=False,
-        environment=parent_environment,
+        environment="sha256:" + "0" * 64,
     )
-    child_connection = uuid4()
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.turn)
@@ -1792,7 +1787,6 @@ async def test_a_delivery_returns_connection_scope_without_child_model_capabilit
         runtime_config=TurnRuntimeConfig(
             model="gpt-5.6-sol",
             environment="sha256:" + "1" * 64,
-            connections=(child_connection,),
         ),
         model_accounts=(
             ModelAccountCapability(
@@ -1812,11 +1806,7 @@ async def test_a_delivery_returns_connection_scope_without_child_model_capabilit
         ).all()
     assert [row.runtime_config for row in rows] == [
         parent_config.model_dump(mode="json"),
-        TurnRuntimeConfig(
-            internet_access=False,
-            environment=parent_environment,
-            connections=(child_connection,),
-        ).model_dump(mode="json"),
+        parent_config.model_dump(mode="json"),
     ]
     assert [row.model_accounts for row in rows] == [
         [parent_account.model_dump(mode="json")],
@@ -1843,15 +1833,17 @@ async def test_a_finished_child_folds_into_the_parents_live_turn_as_an_arrival(d
     assert '{"finding":"acme ships"}' in arrival
 
 
-async def test_a_finished_child_cannot_spend_a_live_siblings_private_connection(db: None) -> None:
+async def test_a_finished_child_waits_behind_a_live_turn_under_another_runtime_config(
+    db: None,
+) -> None:
     workspace_id, agent_id = await _workspace_agent()
-    child_config = TurnRuntimeConfig(connections=(uuid4(),))
-    live_config = TurnRuntimeConfig(connections=(uuid4(),))
+    parent_config = TurnRuntimeConfig(internet_access=False)
+    live_config = TurnRuntimeConfig(environment="sha256:" + "1" * 64)
     parent = await _parent_turn(
         workspace_id,
         agent_id,
         "done",
-        runtime_config=child_config,
+        runtime_config=parent_config,
     )
     async with workspace_tx() as connection:
         await connection.execute(
@@ -1862,7 +1854,7 @@ async def test_a_finished_child_cannot_spend_a_live_siblings_private_connection(
                 agent_id=agent_id,
                 seq=2,
                 status="running",
-                inbound="automatic work under another member's account",
+                inbound="automatic work under another runtime config",
                 runtime_config=live_config.model_dump(mode="json"),
                 created_at=sa.func.now(),
                 updated_at=sa.func.now(),
@@ -1875,7 +1867,6 @@ async def test_a_finished_child_cannot_spend_a_live_siblings_private_connection(
         TerminalFrame(status="done", text='{"finding": "acme ships"}'),
         "plain",
         SubagentRegistry((_profile("plain"),)),
-        runtime_config=child_config,
     )
 
     assert [seq for seq, _ in await _conversation_turns(parent.conversation_id)] == [1, 2, 3]
@@ -1890,7 +1881,7 @@ async def test_a_finished_child_cannot_spend_a_live_siblings_private_connection(
             )
         ).one()
     assert queued.status == "queued"
-    assert TurnRuntimeConfig.model_validate(queued.runtime_config) == child_config
+    assert TurnRuntimeConfig.model_validate(queued.runtime_config) == parent_config
 
 
 async def test_a_failed_child_delivers_its_diagnostic_rather_than_an_answer(db: None) -> None:
@@ -3831,7 +3822,7 @@ async def test_an_own_account_spawn_persists_only_its_profiles_provider_slots(
     assert grandchild.model_accounts == expected
 
 
-async def test_spawn_persists_the_selected_speakers_exact_connections(
+async def test_a_spawned_child_reaches_the_connections_of_the_member_it_acts_for(
     db: None, dbos_launched: Config
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
@@ -3874,6 +3865,13 @@ async def test_spawn_persists_the_selected_speakers_exact_connections(
             grantor_member_id=second,
             shared=False,
         )
+        shared_connection = await grants.record(
+            provider="hub",
+            account_id="shared-account",
+            host="api.hub.test",
+            grantor_member_id=second,
+            shared=True,
+        )
 
     parent = await _parent(workspace_id, agent_id)
     spawner = Subagents(
@@ -3882,53 +3880,55 @@ async def test_spawn_persists_the_selected_speakers_exact_connections(
         parent=parent,
         audience=SHARED_AUDIENCE,
     )
-    context = ToolContext(
-        sandbox=cast(Sandbox, None),
-        blob=cast(WorkspaceBlobStore, None),
-        turn=parent,
-        agent=Agent(prompt="p", model="m"),
-        spawn=spawner.spawn,
-        speaker_member_id=first,
-        audience=SHARED_AUDIENCE,
-        artifact_token_secret="",
-        other_members_active=True,
-        member_messages_active=True,
-        grants=grants,
-    )
     with ws(workspace_id), bind_agent(agent_id):
-        selected = await context.connector_connection_ids()
-        spawned = await replace(spawner, connection_scope=selected).spawn(
+        spawned = await spawner.spawn(
             "research",
             {"task": "acme"},
             background=True,
             requester_member_id=first,
         )
+        unattributed = await spawner.spawn("research", {"task": "beta"}, background=True)
 
-    assert selected == (first_connection,)
-    assert second_connection not in selected
+    def context_of(turn: Turn, turn_agent: Agent, audience: Audience) -> ToolContext:
+        return ToolContext(
+            sandbox=cast(Sandbox, None),
+            blob=cast(WorkspaceBlobStore, None),
+            turn=turn,
+            agent=turn_agent,
+            spawn=spawner.spawn,
+            speaker_member_id=None,
+            audience=audience,
+            artifact_token_secret="",
+            grants=grants,
+        )
+
     child, child_agent, child_audience = await _load_turn(spawned.turn_id)
-    assert child.runtime_config == TurnRuntimeConfig(connections=(first_connection,))
-    child_context = ToolContext(
-        sandbox=cast(Sandbox, None),
-        blob=cast(WorkspaceBlobStore, None),
-        turn=child,
-        agent=child_agent,
-        spawn=spawner.spawn,
-        speaker_member_id=None,
-        audience=child_audience,
-        artifact_token_secret="",
-        grants=grants,
-    )
+    orphan, orphan_agent, orphan_audience = await _load_turn(unattributed.turn_id)
+    assert child.member_id == first
+    assert orphan.member_id is None
     with ws(workspace_id), bind_agent(agent_id):
-        usable = await child_context.usable_connector_accounts()
-    assert {account.connection_id for account in usable} == {first_connection}
+        usable = {
+            account.connection_id
+            for account in await context_of(
+                child, child_agent, child_audience
+            ).usable_connector_accounts()
+        }
+        shared_only = {
+            account.connection_id
+            for account in await context_of(
+                orphan, orphan_agent, orphan_audience
+            ).usable_connector_accounts()
+        }
+    assert usable == {first_connection, shared_connection}
+    assert second_connection not in usable
+    assert shared_only == {shared_connection}
 
 
-async def test_spawn_inherits_an_automatic_parents_exact_connections(
+async def test_spawn_inherits_an_automatic_parents_runtime_config(
     db: None, dbos_launched: Config
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
-    runtime_config = TurnRuntimeConfig(connections=(uuid4(),), internet_access=False)
+    runtime_config = TurnRuntimeConfig(internet_access=False)
     parent = (await _parent(workspace_id, agent_id)).model_copy(
         update={"runtime_config": runtime_config}
     )
@@ -3944,7 +3944,7 @@ async def test_spawn_inherits_an_automatic_parents_exact_connections(
     assert child.runtime_config == runtime_config
 
 
-async def test_old_own_account_spawn_replay_does_not_mint_a_new_capability(
+async def test_old_own_account_spawn_replay_keeps_the_admitted_runtime_config(
     db: None, dbos_launched: Config
 ) -> None:
     workspace_id, agent_id = await _workspace_agent()
@@ -4044,3 +4044,21 @@ def test_subagent_prompt_fails_loud_on_an_unfilled_slot() -> None:
     )
     with pytest.raises(ValueError, match="unresolved slots: mystery"):
         subagent_system_prompt(profile)
+
+
+async def test_a_spawned_child_acts_as_the_member_its_parent_acts_for(
+    db: None, dbos_launched: Config
+) -> None:
+    workspace_id, agent_id = await _workspace_agent()
+    member_id = await _seeded_member(workspace_id)
+    parent = (await _parent(workspace_id, agent_id)).model_copy(update={"member_id": member_id})
+    subagents = Subagents(
+        client=_RecordingClient(),
+        registry=SubagentRegistry((_profile("research"),)),
+        parent=parent,
+        audience=conversation_audience(None),
+    )
+    spawned = await subagents.spawn("research", {"task": "acme"}, background=True)
+    child, _, _ = await _load_turn(spawned.turn_id)
+    assert child.member_id == member_id
+    assert child.speaker_member_id is None

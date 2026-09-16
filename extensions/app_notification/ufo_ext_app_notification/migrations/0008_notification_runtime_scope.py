@@ -45,7 +45,7 @@ notification_delivery = sa.table(
 )
 
 
-FAIL_CLOSED_RUNTIME_CONFIG = TurnRuntimeConfig(internet_access=False, connections=())
+FAIL_CLOSED_RUNTIME_CONFIG = TurnRuntimeConfig(internet_access=False)
 
 
 def upgrade() -> None:

@@ -55,21 +55,22 @@ def grant_sentinel(account_id: str) -> str:
     return f"{GRANT_SENTINEL_PREFIX}{account_id}"
 
 
-def scoped_cli_accounts(
+def cli_accounts(
     grants: "tuple[Grant, ...]",
     provider: str,
-    connections: tuple[UUID, ...],
+    member_id: UUID | None,
 ) -> tuple[str, ...]:
-    """The preferred account tier one provider's CLI may use from an exact capability set. A
-    private capability outranks every shared capability regardless of its owner; within the
-    winning tier every consumer sees the same sorted ambiguity."""
-    scoped = tuple(
+    """The account tier one provider's CLI may use for the member it acts for: that member's own
+    private accounts, else the shared ones; within the tier every consumer sees the same sorted
+    ambiguity. Acting for nobody reaches the shared tier alone."""
+    granted = tuple(grant for grant in grants if grant.provider == provider)
+    private = tuple(
         grant
-        for grant in grants
-        if grant.provider == provider and grant.connection_id in connections
+        for grant in granted
+        if not grant.connection_shared and grant.owner_member_id == member_id
     )
-    private = tuple(grant for grant in scoped if not grant.connection_shared)
-    return tuple(sorted(grant.account_id for grant in (private or scoped)))
+    shared = tuple(grant for grant in granted if grant.connection_shared)
+    return tuple(sorted(grant.account_id for grant in (private or shared)))
 
 
 class UnknownProvider(LookupError):

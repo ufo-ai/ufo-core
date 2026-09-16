@@ -18,7 +18,7 @@ from ufo.runtime.subagents import SubagentRegistry, SubagentResult
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import TerminalFrame, TurnRuntimeConfig
+from ufo.schema.records import TerminalFrame
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -248,53 +248,6 @@ async def test_a_fan_out_landing_together_wakes_the_conversation_once(db: None) 
     named = "".join([turns[1][1], *folded])
     assert all(f'spawn_id="{child}"' in named for child in children)
     assert [await _delivery_state(child) for child in children] == ["delivered"] * 3
-
-
-async def test_a_scope_violation_fails_that_result_and_the_sweep_continues(db: None) -> None:
-    workspace_id, agent_id = await _workspace_agent()
-    refused_parent, refused_conversation = await _parent(workspace_id, agent_id)
-    healthy_parent, healthy_conversation = await _parent(workspace_id, agent_id)
-    refused_child = await _child(
-        workspace_id,
-        agent_id,
-        refused_parent,
-        TerminalFrame(status="done", text='{"finding": "private"}'),
-    )
-    healthy_child = await _child(
-        workspace_id,
-        agent_id,
-        healthy_parent,
-        TerminalFrame(status="done", text='{"finding": "public"}'),
-    )
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(
-                runtime_config=TurnRuntimeConfig(connections=(uuid4(),)).model_dump(mode="json")
-            )
-            .where(tables.turn.c.id == refused_parent)
-        )
-        await connection.execute(
-            sa.update(tables.turn)
-            .values(
-                runtime_config=TurnRuntimeConfig(connections=(uuid4(),)).model_dump(mode="json")
-            )
-            .where(tables.turn.c.id == refused_child)
-        )
-
-    with ws(workspace_id):
-        await _sweep(workspace_id).run()
-
-    refused_turns = await _conversation_turns(refused_conversation)
-    healthy_turns = await _conversation_turns(healthy_conversation)
-    assert [seq for seq, _ in refused_turns] == [1, 2]
-    assert 'status="failed"' in refused_turns[1][1]
-    assert "ConnectionScopeExceeded" in refused_turns[1][1]
-    assert "private" not in refused_turns[1][1]
-    assert [seq for seq, _ in healthy_turns] == [1, 2]
-    assert "public" in healthy_turns[1][1]
-    assert await _delivery_state(refused_child) == "delivered"
-    assert await _delivery_state(healthy_child) == "delivered"
 
 
 async def test_a_conversation_woken_this_moment_keeps_its_children_for_the_next_sweep(

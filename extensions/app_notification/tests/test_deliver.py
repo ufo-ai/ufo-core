@@ -462,13 +462,13 @@ async def test_scoped_notifications_keep_exact_capabilities_through_triage_and_d
     db: None,
 ) -> None:
     workspace_id, member_id, main_id, inbox_id = await _seed()
-    allowed = await _connection(workspace_id, main_id, member_id, "allowed")
-    outside = await _connection(workspace_id, main_id, member_id, "outside")
+    await _connection(workspace_id, main_id, member_id, "allowed")
+    await _connection(workspace_id, main_id, member_id, "outside")
     dm = await _spoke_on(workspace_id, main_id, member_id, "slack")
     dbos = StubDbos()
     ext = _ext(workspace_id, dbos)
-    allowed_config = TurnRuntimeConfig(internet_access=False, connections=(allowed,))
-    outside_config = TurnRuntimeConfig(connections=(outside,))
+    allowed_config = TurnRuntimeConfig(internet_access=False)
+    outside_config = TurnRuntimeConfig()
     with ws(workspace_id), agent(main_id):
         await notify(
             replace(
@@ -542,16 +542,18 @@ async def test_scoped_notifications_keep_exact_capabilities_through_triage_and_d
         settled = {row.subject: row for row in await NotificationStore(ext).rows()}
 
     relay_config = TurnRuntimeConfig.model_validate(relay["runtime_config"])
+    relayed = _tool_ctx(
+        ext,
+        workspace_id,
+        main_id,
+        member_id,
+        turn_id=relay["id"],
+        conversation_id=dm,
+        runtime_config=relay_config,
+    )
     relay_ctx = replace(
-        _tool_ctx(
-            ext,
-            workspace_id,
-            main_id,
-            member_id,
-            turn_id=relay["id"],
-            conversation_id=dm,
-            runtime_config=relay_config,
-        ),
+        relayed,
+        turn=relayed.turn.model_copy(update={"member_id": relay["member_id"]}),
         grants=GrantStore(),
     )
     with ws(workspace_id), agent(main_id):
@@ -567,7 +569,8 @@ async def test_scoped_notifications_keep_exact_capabilities_through_triage_and_d
     assert refused.content[0].text == NOTHING_TO_DELIVER
     assert delivered.is_error is False
     assert relay_config == allowed_config
-    assert accounts == ("allowed",)
+    assert relay["member_id"] == member_id
+    assert accounts == ("allowed", "outside")
     assert InternetRule() not in rules
     assert settled["source/outside"].delivered_turn_id is None
 
@@ -614,9 +617,8 @@ async def test_a_fold_during_relay_admission_keeps_the_new_occurrence_and_the_lo
 ) -> None:
     workspace_id, member_id, main_id, inbox_id = await _seed()
     dm = await _spoke_on(workspace_id, main_id, member_id, "slack")
-    first_connection, second_connection = uuid4(), uuid4()
-    first_config = TurnRuntimeConfig(internet_access=False, connections=(first_connection,))
-    second_config = TurnRuntimeConfig(internet_access=False, connections=(second_connection,))
+    first_config = TurnRuntimeConfig(internet_access=False)
+    second_config = TurnRuntimeConfig()
     dbos = StubDbos()
     ext = _ext(workspace_id, dbos)
     store = NotificationStore(ext)

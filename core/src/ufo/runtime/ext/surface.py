@@ -5516,6 +5516,7 @@ class SurfaceContext:
             tables.turn.c.admission_source,
             tables.turn.c.idempotency_key,
             tables.turn.c.speaker_member_id,
+            tables.turn.c.member_id,
             tables.turn.c.fired_by_kind,
             tables.turn.c.fired_by_name,
             tables.turn.c.fired_by_title,
@@ -5549,6 +5550,7 @@ class SurfaceContext:
             admission_source=row.admission_source,
             idempotency_key=row.idempotency_key,
             speaker_member_id=row.speaker_member_id,
+            member_id=row.member_id,
             fired_by=(
                 None
                 if row.fired_by_kind is None

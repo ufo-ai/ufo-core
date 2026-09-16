@@ -56,9 +56,9 @@ def test_a_turn_carries_at_most_one_account_per_model_provider() -> None:
         Turn.model_validate(fields)
 
 
-def test_runtime_choices_cannot_carry_model_account_capabilities() -> None:
-    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        TurnRuntimeConfig.model_validate({"model_accounts": []})
+def test_a_stored_runtime_config_loads_without_the_keys_this_release_does_not_know() -> None:
+    stored = {"internet_access": False, "connections": [str(uuid4())], "model_accounts": []}
+    assert TurnRuntimeConfig.model_validate(stored) == TurnRuntimeConfig(internet_access=False)
 
 
 def test_ledger_id_deterministic() -> None:

@@ -529,65 +529,6 @@ async def test_a_paused_trigger_keeps_its_row_and_wakes_nothing_until_it_resumes
         assert (await _get(_context(state), name))["spec"]["paused"] is False
 
 
-async def test_turns_only_read_and_manage_triggers_in_their_connection_scope(db: None) -> None:
-    state = await _workspace()
-    allowed, _ = await _feed_with_stream(state)
-    outside, _ = await _feed_with_stream(state, account="acct-two")
-    allowed_name = trigger_name(allowed.name, state.conversation_id)
-    outside_name = trigger_name(outside.name, state.conversation_id)
-    with ws(state.workspace_id), agent(state.agent_id):
-        await _apply(_context(state), _trigger_manifest(allowed, state.conversation_id))
-        await _apply(_context(state), _trigger_manifest(outside, state.conversation_id))
-        base = _context(state)
-        scoped = replace(
-            base,
-            turn=base.turn.model_copy(
-                update={"runtime_config": TurnRuntimeConfig(connections=(allowed.id,))}
-            ),
-        )
-
-        list_tool = _TOOLS["object_list"]
-        listed = await list_tool.handler(
-            scoped,
-            list_tool.input_model.model_validate({"kind": SOURCE_TRIGGER_KIND}),
-        )
-        assert [row["name"] for row in json.loads(listed.content[0].text)["objects"]] == [
-            allowed_name
-        ]
-        assert (await _get(scoped, allowed_name))["status"]["connection"] == allowed.name
-
-        get_tool = _TOOLS["object_get"]
-        with pytest.raises(UnknownObject):
-            await get_tool.handler(
-                scoped,
-                get_tool.input_model.model_validate(
-                    {"ref": f"{SOURCE_TRIGGER_KIND}/{outside_name}"}
-                ),
-            )
-
-        apply_tool = _TOOLS["object_apply"]
-        with pytest.raises(UnknownObject):
-            await apply_tool.handler(
-                scoped,
-                apply_tool.input_model.model_validate(
-                    {"manifest": _trigger_manifest(outside, state.conversation_id, paused=True)}
-                ),
-            )
-
-        delete_tool = _TOOLS["object_delete"]
-        with pytest.raises(UnknownObject):
-            await delete_tool.handler(
-                scoped,
-                delete_tool.input_model.model_validate(
-                    {"kind": SOURCE_TRIGGER_KIND, "name": outside_name}
-                ),
-            )
-
-        await _apply(scoped, _trigger_manifest(allowed, state.conversation_id, paused=True))
-        assert await _woken(state, allowed) == {}
-        assert await _woken(state, outside) == {state.conversation_id: state.agent_id}
-
-
 async def test_a_trigger_pauses_after_its_stream_stops_syncing(db: None) -> None:
     """A stream the connection stopped syncing is exactly when a member reaches for Pause, so a
     standing trigger's pause is weighed against the row it names rather than the feed's streams
@@ -954,9 +895,7 @@ async def test_page_change_alerts_only_woken_conversations_idempotently(db: None
         turn = next(row for row in turns if feed.name in row["inbound"])
         assert turn["speaker_member_id"] is None
         assert TurnContext.model_validate(turn["context"]).requesting_message_ref is not None
-        assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
-            connections=(feed.id,)
-        )
+        assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig()
         assert turn["fired_by_kind"] == SOURCE_TRIGGER_KIND
         assert turn["fired_by_name"] == trigger_name(feed.name, state.conversation_id)
         assert turn["fired_by_title"].startswith(feed.name)
@@ -1157,12 +1096,12 @@ async def test_a_stream_the_connection_does_not_sync_is_refused(db: None) -> Non
             )
 
 
-async def test_shared_trigger_carries_exact_capabilities_without_a_human_principal(
+async def test_a_shared_trigger_fires_under_the_agents_connections_without_a_human_principal(
     db: None,
 ) -> None:
     state = await _workspace()
     feed, source_id = await _feed_with_stream(state)
-    other, other_source_id = await _feed_with_stream(state, account="acct-two")
+    _other, other_source_id = await _feed_with_stream(state, account="acct-two")
     async with workspace_tx() as connection:
         await connection.execute(
             sa.update(tables.conversation)
@@ -1192,9 +1131,10 @@ async def test_shared_trigger_carries_exact_capabilities_without_a_human_princip
 
     [turn] = await _turns(state.conversation_id)
     assert turn["speaker_member_id"] is None
-    runtime_config = TurnRuntimeConfig.model_validate(turn["runtime_config"])
-    assert runtime_config == TurnRuntimeConfig(connections=(feed.id,), internet_access=False)
-    assert other.id not in runtime_config.connections
+    assert turn["member_id"] == state.member_id
+    assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
+        internet_access=False
+    )
     fired = replace(
         _context(state),
         turn=Turn.model_validate(dict(turn)),
@@ -1203,23 +1143,20 @@ async def test_shared_trigger_carries_exact_capabilities_without_a_human_princip
         grants=GrantStore(),
     )
     with ws(state.workspace_id), agent(state.agent_id):
-        assert await fired.connector_accounts(ASANA) == (ACCOUNT,)
-        with pytest.raises(ValueError, match="acct-two"):
-            await fired.connector_account(ASANA, account_id="acct-two")
+        assert set(await fired.connector_accounts(ASANA)) == {ACCOUNT, "acct-two"}
+        assert await fired.connector_account(ASANA, account_id="acct-two") == "acct-two"
         assert fired.ext is not None
         readable = await fired.ext.readable_source_ids(fired.source_reader())
-        assert readable == frozenset({source_id})
-        assert other_source_id not in readable
+        assert readable == frozenset({source_id, other_source_id})
         assert await GrantStore().disconnect(feed.id, actor_member_id=state.owner_id) is True
     replacement = await _connect(state)
     assert replacement.id != feed.id
     replacement_source_id = await _stream(state, replacement)
     with ws(state.workspace_id), agent(state.agent_id):
-        assert await fired.connector_accounts(ASANA) == ()
+        assert set(await fired.connector_accounts(ASANA)) == {ACCOUNT, "acct-two"}
         assert fired.ext is not None
         readable = await fired.ext.readable_source_ids(fired.source_reader())
-        assert readable == frozenset()
-        assert replacement_source_id not in readable
+        assert readable == frozenset({other_source_id, replacement_source_id})
 
 
 async def test_an_unattributed_trigger_is_retired_without_blocking_valid_wakes(db: None) -> None:
@@ -1831,16 +1768,11 @@ async def _seen(
     state: _Workspace,
     payload: UserPromptSubmit | PostToolUse,
     conversation_id: UUID | None = None,
-    connections: tuple[UUID, ...] | None = None,
 ) -> HookOutcome:
     """Show one message or one tool result to the link hook, as the turn it lands on would."""
     turn = _context(state).turn
     if conversation_id is not None:
         turn = turn.model_copy(update={"conversation_id": conversation_id})
-    if connections is not None:
-        turn = turn.model_copy(
-            update={"runtime_config": TurnRuntimeConfig(connections=connections)}
-        )
     return await on_link_seen(
         HookContext(
             ext=context_for(NAME, DECLARED_PROVIDERS),
@@ -1889,30 +1821,6 @@ async def test_a_link_to_a_synced_resource_is_offered_to_the_conversation(db: No
         applied = await _apply(_context(state), manifest_text)
         assert applied["result"] == "created"
         assert await _watches(state, feed) == [PR_URL]
-
-
-async def test_a_link_offer_reveals_only_connections_in_the_turn_scope(db: None) -> None:
-    state = await _workspace()
-    allowed, _ = await _github_feed(state)
-    withheld, _ = await _feed_with_stream(
-        state,
-        account="acct-two",
-        provider=GITHUB,
-        stream="pull_requests",
-    )
-    payload = UserPromptSubmit(text=f"Keep an eye on {PR_URL}.")
-    with ws(state.workspace_id), agent(state.agent_id):
-        ordinary = await _seen(state, payload)
-        scoped = await _seen(state, payload, connections=(allowed.id,))
-        closed = await _seen(state, payload, connections=())
-
-    assert isinstance(ordinary, InjectContext)
-    assert repr(allowed.name) in ordinary.text
-    assert repr(withheld.name) in ordinary.text
-    assert isinstance(scoped, InjectContext)
-    assert repr(allowed.name) in scoped.text
-    assert repr(withheld.name) not in scoped.text
-    assert closed is None
 
 
 async def test_each_offer_is_its_own_fenced_block(db: None) -> None:

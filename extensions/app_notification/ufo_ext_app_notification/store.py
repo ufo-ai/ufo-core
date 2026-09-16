@@ -55,7 +55,7 @@ def _parsed_runtime_config(encoded: str) -> TurnRuntimeConfig | None:
     return None if decoded is None else TurnRuntimeConfig.model_validate(decoded)
 
 
-FAIL_CLOSED_RUNTIME_CONFIG = TurnRuntimeConfig(internet_access=False, connections=())
+FAIL_CLOSED_RUNTIME_CONFIG = TurnRuntimeConfig(internet_access=False)
 ENCODED_FAIL_CLOSED_RUNTIME_CONFIG = _encoded_runtime_config(FAIL_CLOSED_RUNTIME_CONFIG)
 
 _metadata = sa.MetaData()
@@ -122,11 +122,14 @@ def _effective_runtime_config() -> sa.ColumnElement[str]:
 
 @dataclass(frozen=True)
 class Lane:
-    """One inbox for one member under one exact runtime config."""
+    """One inbox for one member under one exact runtime config. `stored` is every text that config
+    is stored as: the image a deploy replaces encodes keys this release drops, and its rows claim
+    with the rest."""
 
     agent_id: UUID
     member_id: UUID
     runtime_config: TurnRuntimeConfig | None
+    stored: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -174,6 +177,7 @@ class Notification:
             agent_id=self.to_agent_id,
             member_id=self.member_id,
             runtime_config=self.runtime_config,
+            stored=frozenset({_encoded_runtime_config(self.runtime_config)}),
         )
 
 
@@ -424,15 +428,23 @@ class NotificationStore:
                     .distinct()
                 )
             ).all()
-        cooling = {(row.to_agent_id, row.member_id, row.runtime_config) for row in recent}
+        cooling = {
+            (row.to_agent_id, row.member_id, _parsed_runtime_config(row.runtime_config))
+            for row in recent
+        }
+        stored: dict[tuple[UUID, UUID, TurnRuntimeConfig | None], set[str]] = {}
+        for row in open_lanes:
+            key = (row.to_agent_id, row.member_id, _parsed_runtime_config(row.runtime_config))
+            stored.setdefault(key, set()).add(row.runtime_config)
         return tuple(
             Lane(
-                agent_id=row.to_agent_id,
-                member_id=row.member_id,
-                runtime_config=_parsed_runtime_config(row.runtime_config),
+                agent_id=agent_id,
+                member_id=member_id,
+                runtime_config=runtime_config,
+                stored=frozenset(texts),
             )
-            for row in open_lanes
-            if (row.to_agent_id, row.member_id, row.runtime_config) not in cooling
+            for (agent_id, member_id, runtime_config), texts in stored.items()
+            if (agent_id, member_id, runtime_config) not in cooling
         )
 
     async def claim(self, lane: Lane, limit: int, lease_seconds: int) -> tuple[Notification, ...]:
@@ -443,7 +455,7 @@ class NotificationStore:
             notification.c.workspace_id == self.ctx.workspace_id,
             notification.c.to_agent_id == lane.agent_id,
             notification.c.member_id == lane.member_id,
-            _effective_runtime_config() == _encoded_runtime_config(lane.runtime_config),
+            _effective_runtime_config().in_(lane.stored),
         )
         selected = (
             sa.select(notification.c.id)

@@ -159,14 +159,13 @@ def _portal_actions(
     }
 
 
-def _shared_reader(agent_id: UUID, connections: tuple[UUID, ...] | None = None) -> SourceReader:
+def _shared_reader(agent_id: UUID) -> SourceReader:
     """Which feeds one agent may read of what the whole workspace shares. An alert and an offer both
     ask it, and neither has a live speaker whose private content could widen the answer."""
     return SourceReader(
         agent_id=agent_id,
         requesting_member_id=None,
         subjects=frozenset({SHARED_SUBJECT}),
-        connections=connections,
     )
 
 
@@ -354,10 +353,6 @@ class SourceTriggerObjects(MemberReadableObjects[SourceTriggerSpec, GeneratedObj
 
     async def _owned_rows(self, ctx: ToolContext) -> tuple[OwnedRow[GeneratedObjectOwner], ...]:
         watched = await self._watched(ctx.ext)
-        connections = ctx.connection_scope
-        if connections is not None:
-            allowed = frozenset(connections)
-            watched = tuple(row for row in watched if row.listed.trigger.connection_id in allowed)
         return await self._rows(watched, member_id=ctx.speaker_member_id)
 
     async def _rows(
@@ -690,13 +685,7 @@ async def on_link_seen(ctx: HookContext) -> HookOutcome:
         ext.store.extension,
     ):
         return None
-    feeds = await _reachable_feeds(
-        ext,
-        _shared_reader(
-            ctx.turn.agent_id,
-            None if ctx.turn.runtime_config is None else ctx.turn.runtime_config.connections,
-        ),
-    )
+    feeds = await _reachable_feeds(ext, _shared_reader(ctx.turn.agent_id))
     if not feeds:
         return None
     named = [
@@ -794,10 +783,8 @@ async def _fire_trigger(
         standalone=True,
         requesting_message_ref=trigger.requesting_message_ref,
         fired_by=fired_by,
-        runtime_config=TurnRuntimeConfig(
-            connections=(trigger.connection_id,),
-            internet_access=trigger.internet_access,
-        ),
+        runtime_config=TurnRuntimeConfig(internet_access=trigger.internet_access),
+        acting_member_id=trigger.created_by_member_id,
     )
 
 

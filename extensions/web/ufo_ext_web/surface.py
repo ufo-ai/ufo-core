@@ -57,7 +57,6 @@ from ufo.sdk.balance import spend_admitted
 from ufo.sdk.bearer import LOGIN_PATH, SESSION_COOKIE, verify_token, workspace_claim
 from ufo.sdk.callback_page import callback_page
 from ufo.sdk.context import (
-    CONNECTION_SCOPE_MAX,
     ExtensionContext,
     SourceReader,
     WorkspaceAgent,
@@ -1131,7 +1130,7 @@ class HomepageSeed:
             SEED_PROMPT,
             f"homepage-seed:{agent.id}:{self.bucket}",
             as_scheduled=True,
-            runtime_config=TurnRuntimeConfig(connections=(), internet_access=False),
+            runtime_config=TurnRuntimeConfig(internet_access=False),
         )
         if turn_id is None:
             raise RuntimeError(f"homepage seed for agent {agent.id} answered no turn")
@@ -3436,17 +3435,9 @@ async def connections(ctx: SurfaceContext, request: Request) -> Response:
     gated = await _panel_gate(ctx, request)
     if isinstance(gated, Response):
         return gated
-    member_id, email, audience, agent_id = gated
+    member_id, _email, audience, agent_id = gated
     listed = await ctx.list_agent_connections(agent_id, member_id, admin=audience.admin)
-    connection_scope = sorted(
-        (entry.id for entry in listed if entry.shared or entry.owner_email == email), key=str
-    )[:CONNECTION_SCOPE_MAX]
-    return JSONResponse(
-        {
-            "connections": [entry.model_dump(mode="json") for entry in listed],
-            "connection_scope": [str(connection_id) for connection_id in connection_scope],
-        }
-    )
+    return JSONResponse({"connections": [entry.model_dump(mode="json") for entry in listed]})
 
 
 async def connection_pool(ctx: SurfaceContext, request: Request) -> Response:

@@ -87,7 +87,7 @@ from ufo.runtime.turns.audience import (
 from ufo.runtime.turns.contracts import ValidatedJson
 from ufo.runtime.turns.subjects import member_subject
 from ufo.schema import tables
-from ufo.schema.records import CONNECTION_SCOPE_MAX, Agent, AgentVisibility, TerminalFrame, Turn
+from ufo.schema.records import Agent, AgentVisibility, TerminalFrame, Turn
 
 if TYPE_CHECKING:
     from ufo.runtime.access.workspace_slots import WorkspaceSlots
@@ -635,7 +635,6 @@ class ToolContext:
     subagents: SubagentControl | None = None
     touched_paths: set[str] = field(default_factory=set)
     idempotency_key: str | None = None
-    sandbox_capability_id: UUID | None = None
     target: ObjectActionTarget | None = None
     granted_actions: frozenset[str] = frozenset()
     skills: SkillRegistry = CORE_SKILL_REGISTRY
@@ -678,12 +677,13 @@ class ToolContext:
 
     @property
     def read_subjects(self) -> frozenset[str]:
-        """What the conversation and exact requester may jointly read: the conversation's own
-        subjects plus the requester's private one. The requester contributes only their own subject,
-        never the workspace-shared atom their private audience also reads — a Slack Connect
-        audience is sealed against internal content, and speaking there does not unseal it."""
+        """What the conversation and the member a call acts for may jointly read: the
+        conversation's own subjects plus that member's private one. The member contributes only
+        their own subject, never the workspace-shared atom their private audience also reads — a
+        Slack Connect audience is sealed against internal content, and speaking there does not
+        unseal it."""
         subjects = audience_subjects(self.audience)
-        acting = self.speaker_member_id
+        acting = self.acting_member_id
         if acting is None:
             return subjects
         return subjects | {member_subject(acting)}
@@ -746,22 +746,22 @@ class ToolContext:
         return await self.site_previewer.render(conversation_id, port, name, width, height)
 
     def source_reader(self) -> SourceReader:
-        """Who is asking for a source's synced pages: this turn's agent, the member speaking right
-        now, and what the two may jointly read. An exact connection scope is the durable capability
-        for automatic work; without one, the main agent's private-owner exception belongs only to
-        the live speaker and every other read follows the agent's grants and audience."""
+        """Who is asking for a source's synced pages: this turn's agent, the member the call acts
+        for, and what the two may jointly read."""
         return SourceReader(
             agent_id=self.turn.agent_id,
-            requesting_member_id=self.speaker_member_id,
+            requesting_member_id=self.acting_member_id,
             subjects=self.read_subjects,
-            connections=self.connection_scope,
         )
 
     @property
-    def connection_scope(self) -> tuple[UUID, ...] | None:
-        """This turn's exact durable connection capabilities; None derives them from the live
-        requester and current grants."""
-        return None if self.turn.runtime_config is None else self.turn.runtime_config.connections
+    def acting_member_id(self) -> UUID | None:
+        """The member this call acts for: the speaker bound to it; on a turn nobody spoke in, the
+        member the turn acts for; on a turn a member founded, nobody — the engine left the call
+        unbound because more than one member is active and none was named."""
+        if self.speaker_member_id is not None:
+            return self.speaker_member_id
+        return self.turn.member_id if self.turn.speaker_member_id is None else None
 
     async def meter_images(self, model: str, images: int, micro_usd: int) -> None:
         """Book a generated image's provider charge onto this turn under the ledger's `images`
@@ -1067,29 +1067,17 @@ class ToolContext:
         )
 
     async def usable_connector_accounts(self) -> tuple[ConnectorAccount, ...]:
-        """Every connected account this call may discover or select, after its requester and any
-        automatic-turn allowlist are applied. Owner and sharing metadata describe only those usable
-        accounts; an empty tuple discloses none."""
+        """Every connected account this call may discover or select for the member it acts for.
+        Owner and sharing metadata describe only those usable accounts; an empty tuple discloses
+        none."""
         if self.grants is None:
             return ()
-        acting = self.speaker_member_id
-        connections = self.connection_scope
+        acting = self.acting_member_id
         granted = [
             grant
             for grant in await self.grants.active_grants()
-            if connections is None or grant.connection_id in connections
+            if grant.connection_shared or grant.owner_member_id == acting
         ]
-        if connections is None and (
-            acting is not None
-            or self.agent.is_main
-            or self.other_members_active
-            or self.member_messages_active
-        ):
-            granted = [
-                grant
-                for grant in granted
-                if grant.connection_shared or grant.owner_member_id == acting
-            ]
         return tuple(
             ConnectorAccount(
                 connection_id=grant.connection_id,
@@ -1104,25 +1092,16 @@ class ToolContext:
             )
         )
 
-    async def connector_connection_ids(self) -> tuple[UUID, ...]:
-        """The bounded connection scope this call may persist after requester scoping."""
-        return tuple(
-            sorted(
-                {account.connection_id for account in await self.usable_connector_accounts()},
-                key=str,
-            )[:CONNECTION_SCOPE_MAX]
-        )
-
     async def _connector_account_tiers(
         self, provider: str
     ) -> tuple[list[Grant], list[Grant], list[Grant]]:
         """The provider's grants this call may use, private then shared, and third the private
         grants this call cannot use — the ones a member ref would have unlocked.
 
-        A non-main agent acting with no member-admitted message reads its own attachments first: the
-        member who attached a connector to a shipped agent attached it for the work that agent does
-        on its own initiative, and there is no speaker whose ladder could name it. The main agent is
-        not that case — it holds every member's connections at once, so it must spend the speaker's.
+        A call with no speaker acts for the member its turn acts for — the creator of the task,
+        trigger, monitor or pause that fired it, or the member a spawn's parent acted for — and
+        reads that member's private attachments beside the shared ones. A turn acting for nobody
+        reads the shared attachments alone, whichever agent it is.
 
         The moment a member IS acting, that member's own ladder below decides whichever agent it is.
         An agent several members reach therefore never spends one member's private account on
@@ -1135,44 +1114,10 @@ class ToolContext:
         nobody else, so their call withholds nothing and its miss stays the plain refusal."""
         if self.grants is None:
             raise ConnectUnavailable("grants unavailable: no credential key configured")
-        acting = self.speaker_member_id
-        connections = self.connection_scope
+        acting = self.acting_member_id
         granted = [
-            grant
-            for grant in await self.grants.active_grants()
-            if grant.provider == provider
-            and (connections is None or grant.connection_id in connections)
+            grant for grant in await self.grants.active_grants() if grant.provider == provider
         ]
-        if connections is not None:
-            return (
-                sorted(
-                    (grant for grant in granted if not grant.connection_shared),
-                    key=lambda grant: grant.account_id,
-                ),
-                sorted(
-                    (grant for grant in granted if grant.connection_shared),
-                    key=lambda grant: grant.account_id,
-                ),
-                [],
-            )
-        if (
-            granted
-            and acting is None
-            and not self.agent.is_main
-            and not self.other_members_active
-            and not self.member_messages_active
-        ):
-            return (
-                sorted(
-                    (grant for grant in granted if not grant.connection_shared),
-                    key=lambda grant: grant.account_id,
-                ),
-                sorted(
-                    (grant for grant in granted if grant.connection_shared),
-                    key=lambda grant: grant.account_id,
-                ),
-                [],
-            )
         private = sorted(
             (
                 grant

@@ -43,7 +43,6 @@ async def mark_detached(
     turn: Turn,
     task: str,
     runtime_base: str,
-    capability_id: UUID | None = None,
 ) -> None:
     """Follow one detached task for the next `DETACHED_FOLLOW`."""
     if runtime_base.rsplit("/", 1)[-1] != task:
@@ -66,7 +65,6 @@ async def mark_detached(
                 sandbox_conversation_id=turn.sandbox_conversation_id or turn.conversation_id,
                 task=task,
                 runtime_base=runtime_base,
-                capability_id=capability_id,
                 follow_until=until,
                 created_at=now,
             )
@@ -74,7 +72,6 @@ async def mark_detached(
                 index_elements=[tables.detached_task.c.turn_id, tables.detached_task.c.task],
                 set_={
                     "runtime_base": runtime_base,
-                    "capability_id": capability_id,
                     "follow_until": until,
                 },
             )
@@ -97,7 +94,6 @@ class _Followed:
     turn_id: UUID
     task: str
     runtime_base: str
-    capability_id: UUID | None
     until: datetime
 
 
@@ -131,7 +127,6 @@ class BackgroundTaskSweep:
                         tables.detached_task.c.turn_id,
                         tables.detached_task.c.task,
                         tables.detached_task.c.runtime_base,
-                        tables.detached_task.c.capability_id,
                         tables.detached_task.c.follow_until,
                     ).where(tables.detached_task.c.workspace_id == workspace_id)
                 )
@@ -143,7 +138,6 @@ class BackgroundTaskSweep:
                 turn_id=row.turn_id,
                 task=row.task,
                 runtime_base=row.runtime_base,
-                capability_id=row.capability_id,
                 until=(
                     row.follow_until
                     if row.follow_until.tzinfo is not None
@@ -211,6 +205,12 @@ class BackgroundTaskSweep:
         body = f"{headline} Log: {followed.runtime_base}.log"
         if tail.stdout.strip():
             body = f"{body}\n{tail.stdout.rstrip()}"
+        async with workspace_tx() as connection:
+            acting_member_id = (
+                await connection.execute(
+                    sa.select(tables.turn.c.member_id).where(tables.turn.c.id == followed.turn_id)
+                )
+            ).scalar_one()
         try:
             await self.invoker_for(workspace_id).invoke(
                 followed.conversation_id,
@@ -218,6 +218,7 @@ class BackgroundTaskSweep:
                 body,
                 f"{BACKGROUND_TASK_KEY_PREFIX}{followed.turn_id.hex}:{followed.task}",
                 holds_work_already_done=True,
+                acting_member_id=acting_member_id,
             )
         except AgentArchived:
             return
@@ -264,19 +265,6 @@ class BackgroundTaskSweep:
                 )
                 .values(detached_until=remaining)
             )
-            if followed.capability_id is not None:
-                still_used = sa.exists(
-                    sa.select(tables.detached_task.c.turn_id).where(
-                        tables.detached_task.c.capability_id == followed.capability_id
-                    )
-                )
-                await connection.execute(
-                    sa.delete(tables.sandbox_call_capability).where(
-                        tables.sandbox_call_capability.c.id == followed.capability_id,
-                        tables.sandbox_call_capability.c.workspace_id == workspace_id,
-                        ~still_used,
-                    )
-                )
         log(
             "background_tasks.cleared",
             conversation_id=str(followed.conversation_id),

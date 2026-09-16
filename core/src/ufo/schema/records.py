@@ -55,7 +55,6 @@ BACKGROUND_TASK_KEY_PREFIX = "background-task:"
 SUBAGENT_SURFACE = "subagent"
 PORTAL_SURFACE = "web"
 EXTENSION_SURFACE_PREFIX = "extension:"
-CONNECTION_SCOPE_MAX = 50
 
 TABLER_ICON_MAX_LENGTH = 64
 TABLER_ICON_PATTERN = r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*"
@@ -529,22 +528,14 @@ class TurnRuntimeConfig(BaseModel):
     """The runtime choices one turn tree pins without changing its deployed runtime, each
     independently optional: a concrete model, narrowed sandbox internet access, and the digest of a
     stored environment document the host applies while assembling the turn's prompt, tools, and
-    skills, plus the connections an automatic turn may use. A connection scope is an allowlist;
-    None leaves ordinary turns unrestricted and an empty tuple reaches no connection."""
+    skills. A stored row loads without any key this release does not know: the image a deploy
+    replaces writes rows until its pods drain."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     model: str | None = Field(default=None, min_length=1)
     internet_access: Literal[False] | None = None
     environment: str | None = None
-    connections: tuple[UUID, ...] | None = Field(default=None, max_length=CONNECTION_SCOPE_MAX)
-
-    @field_validator("connections")
-    @classmethod
-    def _canonical_connections(cls, value: tuple[UUID, ...] | None) -> tuple[UUID, ...] | None:
-        if value is not None and len(set(value)) != len(value):
-            raise ValueError("connection scope cannot contain duplicate ids")
-        return None if value is None else tuple(sorted(value, key=str))
 
     @model_validator(mode="after")
     def _pinned_values(self) -> "TurnRuntimeConfig":
@@ -682,6 +673,10 @@ class Turn(BaseModel):
     admission_source: TurnAdmissionSource = INTERNAL_ADMISSION
     idempotency_key: str | None = None
     speaker_member_id: UUID | None = None
+    member_id: UUID | None = None
+    """The member this turn acts for: its speaker, or the creator of the automation that fired it,
+    inherited by the turns it spawns. Private connections follow it; an act that needs a person
+    present reads `speaker_member_id`."""
     fired_by: FiredBy | None = None
     context: TurnContext | None = None
     terminal: TerminalFrame | None = None

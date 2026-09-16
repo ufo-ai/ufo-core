@@ -285,7 +285,6 @@ from ufo.schema.records import (
     Usage,
 )
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
-from ufo.sdk.context import CONNECTION_SCOPE_MAX
 from ufo.sdk.jobs import unseeded_agent_workspaces
 from ufo.sdk.manifest import (
     SCHEDULE_KIND,
@@ -2441,15 +2440,11 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
     member_m, token_m = await _seed_member(workspace_id, "m@example.com")
     member_n, token_n = await _seed_member(workspace_id, "n@example.com")
     _admin, token_admin = await _seed_member(workspace_id, "boss@example.com", admin=True)
-    private_id = await _seed_connection(workspace_id, agent_id, member_m, "github", shared=False)
-    shared_id = await _seed_connection(workspace_id, agent_id, member_n, "slack", shared=True)
+    await _seed_connection(workspace_id, agent_id, member_m, "github", shared=False)
+    await _seed_connection(workspace_id, agent_id, member_n, "slack", shared=True)
     await _seed_connection(workspace_id, second_agent, member_m, "asana", shared=True)
     path = f"/surface/web/agents/{agent_id}/connections"
     m_view = await client.get(path, headers={"cookie": f"{SESSION_COOKIE}={token_m}"})
-    assert m_view.json()["connection_scope"] == [
-        str(connection_id)
-        for connection_id in sorted((private_id, shared_id), key=str)[:CONNECTION_SCOPE_MAX]
-    ]
     assert [
         (c["provider"], c["shared"], c["owner_email"], c["own"])
         for c in m_view.json()["connections"]
@@ -2463,7 +2458,6 @@ async def test_connections_panel_holds_the_member_gate_and_the_wall(
         ("github", "m@example.com"),
         ("slack", "n@example.com"),
     ]
-    assert admin_view.json()["connection_scope"] == [str(shared_id)]
     other = await client.get(
         f"/surface/web/agents/{second_agent}/connections",
         headers={"cookie": f"{SESSION_COOKIE}={token_admin}"},
@@ -7830,7 +7824,6 @@ async def test_a_task_intent_creates_pauses_resumes_and_deletes(
             "spec": {
                 "schedule": "0 9 * * *",
                 "prompt": "write the daily brief",
-                "connections": [],
             },
         },
         headers=cookie,
@@ -7841,7 +7834,6 @@ async def test_a_task_intent_creates_pauses_resumes_and_deletes(
     assert row is not None
     assert row.schedule == "0 9 * * *"
     assert row.prompt == "write the daily brief"
-    assert row.connections == []
     assert row.created_by_member_id == member_id
     assert row.paused is False
 
@@ -7913,7 +7905,6 @@ async def test_anothers_task_content_refuses_but_its_cadence_is_the_admins(
             "spec": {
                 "schedule": "0 7 * * *",
                 "prompt": "assemble the digest",
-                "connections": [],
             },
         },
         headers={"cookie": f"{SESSION_COOKIE}={creator_token}"},
@@ -8797,7 +8788,7 @@ async def test_homepage_seed_queues_without_borrowing_its_unseated_recipients_au
         assert all(row.speaker_member_id is None for row in turns)
         assert all(
             TurnRuntimeConfig.model_validate(row.runtime_config)
-            == TurnRuntimeConfig(connections=(), internet_access=False)
+            == TurnRuntimeConfig(internet_access=False)
             for row in turns
         )
 

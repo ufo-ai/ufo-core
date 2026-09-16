@@ -146,9 +146,7 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
     reaches = None if ctx.turn.context is None else ctx.turn.context.reply_reaches
     if reaches is not None and reaches != REPLY_REACHES_NOBODY:
         return _refusal(NOTIFY_REPLY_REACHES.format(surface=reaches))
-    runtime_config = (ctx.turn.runtime_config or TurnRuntimeConfig()).model_copy(
-        update={"connections": await ctx.connector_connection_ids()}
-    )
+    runtime_config = ctx.turn.runtime_config or TurnRuntimeConfig()
     posted = await store.post(
         to_agent_id=inbox,
         member_id=member_id,

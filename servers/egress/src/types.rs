@@ -93,22 +93,30 @@ pub enum MeterRecord {
     },
 }
 
-/// The turn and exact connection capabilities one sandbox process tree carries.
+/// Whom one exec acts for: its turn's own member (`-`), a named member, or nobody (`~`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RunActor {
+    Turn,
+    Nobody,
+    Member(Uuid),
+}
+
+/// The turn one sandbox process tree carries, and whom it acts for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunToken {
     pub workspace_id: Uuid,
     pub turn_id: Uuid,
-    pub capability_id: Option<Uuid>,
+    pub acts_for: RunActor,
 }
 
-/// The conversation and exact connection capabilities one off-turn sandbox exec carries.
+/// The conversation one off-turn sandbox exec carries, and the member it acts for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeToken {
     pub workspace_id: Uuid,
     pub conversation_id: Uuid,
     pub probe_id: Uuid,
     pub expires_at: i64,
-    pub connections: Vec<Uuid>,
+    pub member_id: Option<Uuid>,
     pub internet_access: bool,
 }
 

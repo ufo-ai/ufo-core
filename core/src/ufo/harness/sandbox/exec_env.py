@@ -23,7 +23,7 @@ from ufo.runtime.access.credentials import (
     HostChoice,
     credential_host,
 )
-from ufo.runtime.access.grants import Grant, GrantStore, grant_sentinel, scoped_cli_accounts
+from ufo.runtime.access.grants import Grant, GrantStore, cli_accounts, grant_sentinel
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
 from ufo.runtime.tools.bridge import TOOL_BRIDGE_URL_ENV
 from ufo.runtime.workspace import ws_current
@@ -54,8 +54,8 @@ class ProbeEnv:
     BYOK model key needs nothing here either — those slots declare no injection target at all and
     are read in-process by the model registry, never exported to a sandbox.
 
-    The probe's immutable connection capabilities select connector CLI sentinels exactly as a
-    turn's re-authorization does."""
+    The member the probe acts for selects connector CLI sentinels exactly as a turn's
+    re-authorization does."""
 
     grants: GrantStore | None = None
     clis: Mapping[str, CliCredential] = field(default_factory=dict)
@@ -66,13 +66,13 @@ class ProbeEnv:
         self,
         conversation_id: UUID,
         probe_id: UUID,
-        connections: tuple[UUID, ...] = (),
+        member_id: UUID | None = None,
     ) -> dict[str, str]:
         workspace_id = ws_current().workspace_id
         return {
             CONVERSATION_ID_ENV: str(conversation_id),
             **_git_config_env((*GIT_PROXY_AUTH_CONFIG, *cli_git_config(self.clis))),
-            **await _grant_cli_env(self.grants, self.clis, probe_id, connections),
+            **await _grant_cli_env(self.grants, self.clis, probe_id, member_id),
             **await _keyed_provider_env(self.credentials, self.slots, workspace_id),
         }
 
@@ -187,16 +187,15 @@ async def _grant_cli_env(
     grants: GrantStore | None,
     clis: Mapping[str, CliCredential],
     run_id: UUID,
-    connections: tuple[UUID, ...],
+    member_id: UUID | None,
 ) -> dict[str, str]:
-    """Each connector-declared CLI env var whose provider this process may use from its exact
-    connection capabilities, set to that grant's sentinel so the CLI inside the sandbox
-    authenticates and the proxy swaps the account's token in by the same sentinel. A static env
-    var names no account, so two accounts cannot be disambiguated per request: rather than pick —
-    `connector_account` fails loud on the same ambiguity — the export is skipped and logged
-    against `run_id`, whichever run this open serves, so the CLI fails visibly to authenticate
-    instead of acting as an unintended account. An exact connection scope admits only its listed
-    accounts and is independent of their owners; a private capability outranks every shared one.
+    """Each connector-declared CLI env var whose provider the member this process acts for may
+    use — that member's own account, else a shared one — set to that grant's sentinel so the CLI
+    inside the sandbox authenticates and the proxy swaps the account's token in by the same
+    sentinel. A static env var names no account, so two accounts cannot be disambiguated per
+    request: rather than pick — `connector_account` fails loud on the same ambiguity — the export
+    is skipped and logged against `run_id`, whichever run this open serves, so the CLI fails
+    visibly to authenticate instead of acting as an unintended account.
 
     One sandbox has one git identity, because git reads one pair of variables however many hosts a
     turn clones from. Two CLIs claiming it would otherwise resolve by dict order, so the second
@@ -207,7 +206,7 @@ async def _grant_cli_env(
     granted = await grants.active_grants()
     env: dict[str, str] = {}
     for provider, cli in clis.items():
-        accounts = scoped_cli_accounts(granted, provider, connections)
+        accounts = cli_accounts(granted, provider, member_id)
         if len(accounts) > 1:
             log(
                 "sandbox.cli_grant_ambiguous",

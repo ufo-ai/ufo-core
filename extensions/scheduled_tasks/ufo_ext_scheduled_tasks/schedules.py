@@ -49,7 +49,6 @@ scheduled_task = sa.Table(
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("paused", sa.Boolean, nullable=False, server_default=sa.false()),
-    sa.Column("connections", sa.JSON(none_as_null=True), nullable=True),
     sa.Column("internet_access", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -78,7 +77,6 @@ class ScheduledTask:
     created_at: datetime
     updated_at: datetime
     created_by_member_id: UUID | None = None
-    connections: tuple[UUID, ...] = ()
     internet_access: Literal[False] | None = None
 
 
@@ -121,7 +119,6 @@ _COLUMNS = (
     scheduled_task.c.expires_at,
     scheduled_task.c.claimed_by,
     scheduled_task.c.paused,
-    scheduled_task.c.connections,
     scheduled_task.c.internet_access,
     scheduled_task.c.created_at,
     scheduled_task.c.updated_at,
@@ -167,7 +164,6 @@ def _task(row: sa.RowMapping) -> ScheduledTask:
         expires_at=_utc_opt(row["expires_at"]),
         claim_id=row["claimed_by"],
         paused=row["paused"],
-        connections=tuple(UUID(item) for item in (row["connections"] or ())),
         internet_access=None if row["internet_access"] else False,
         created_at=_utc(row["created_at"]),
         updated_at=_utc(row["updated_at"]),
@@ -222,7 +218,6 @@ class ScheduleStore:
         prompt: str,
         description: str,
         next_run_at: datetime,
-        connections: tuple[UUID, ...] = (),
         internet_access: Literal[False] | None = None,
         created_by_member_id: UUID | None = None,
         expires_at: datetime | None = None,
@@ -257,7 +252,6 @@ class ScheduleStore:
                             claimed_by=None,
                             claim_expires_at=None,
                             paused=paused,
-                            connections=[str(connection_id) for connection_id in connections],
                             internet_access=internet_access is not False,
                             created_at=sa.func.now(),
                             updated_at=sa.func.now(),
@@ -289,7 +283,6 @@ class ScheduleStore:
         expires_at: datetime | None = None,
         *,
         paused: bool,
-        connections: tuple[UUID, ...] = (),
     ) -> ScheduledTask:
         """Update one exact recurring task without changing its immutable identity — `paused` has
         no preserving default, so every caller states whether the task keeps firing.
@@ -324,7 +317,6 @@ class ScheduleStore:
                             claimed_by=None,
                             claim_expires_at=None,
                             paused=paused,
-                            connections=[str(connection_id) for connection_id in connections],
                             updated_at=sa.func.now(),
                         )
                         .returning(*_COLUMNS)

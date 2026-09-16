@@ -7,11 +7,10 @@ Only then does the row persist; a refused arm leaves nothing behind."""
 
 import json
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from ufo.sdk.context import CONNECTION_SCOPE_MAX, ExtensionContext
+from ufo.sdk.context import ExtensionContext
 from ufo.sdk.tools import ObjectBinding, TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_monitors.monitors import (
     ARMED_MAX,
@@ -71,16 +70,6 @@ class MonitorInput(BaseModel):
     metadata: dict[str, JsonValue] | None = Field(
         default=None, description="State the fired turn needs."
     )
-    connections: tuple[UUID, ...] = Field(
-        max_length=CONNECTION_SCOPE_MAX,
-    )
-
-    @field_validator("connections")
-    @classmethod
-    def canonical_connections(cls, value: tuple[UUID, ...]) -> tuple[UUID, ...]:
-        if len(set(value)) != len(value):
-            raise ValueError("connections cannot contain duplicate ids")
-        return tuple(sorted(value, key=str))
 
 
 def _require_ext(ext: ExtensionContext | None) -> ExtensionContext:
@@ -108,15 +97,6 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
             f"a monitor named {args.slug!r} is already armed in this conversation; delete it or "
             "choose another name"
         )
-    available = frozenset(await ctx.connector_connection_ids())
-    unavailable = tuple(
-        connection_id for connection_id in args.connections if connection_id not in available
-    )
-    if unavailable:
-        return _refusal(
-            "connections are outside this turn's scope: "
-            + ", ".join(str(connection_id) for connection_id in unavailable)
-        )
     if ext.probes is None:
         raise RuntimeError("the monitor action requires the probes capability; none is wired")
     internet_access = (
@@ -126,7 +106,7 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
         ctx.turn.conversation_id,
         args.command,
         PROBE_TIMEOUT_SECONDS,
-        connections=args.connections,
+        acting_member_id=ctx.acting_member_id,
         internet_access=internet_access,
     )
     if probe.exit_code != 0:
@@ -147,11 +127,10 @@ async def monitor(ctx: ToolContext, args: MonitorInput) -> ToolResult:
         reason=args.reason,
         next_steps=args.next_steps,
         metadata=args.metadata,
-        created_by_member_id=ctx.speaker_member_id,
+        created_by_member_id=ctx.acting_member_id,
         requesting_message_ref=ctx.require_requesting_message(),
         baseline=baseline,
         next_probe_at=now + timedelta(minutes=args.interval_minutes),
-        connections=args.connections,
         internet_access=internet_access,
     )
     payload: dict[str, JsonValue] = {

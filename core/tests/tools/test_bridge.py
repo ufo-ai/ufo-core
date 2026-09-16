@@ -51,8 +51,8 @@ class _DBOS:
 async def _seed(
     tools: tuple[str, ...] | None = None,
 ) -> tuple[ToolBridgePrincipal, UUID, UUID, UUID]:
-    workspace_id, member_id, agent_id, conversation_id, sandbox_id, turn_id, connection_id = (
-        uuid4() for _ in range(7)
+    workspace_id, member_id, agent_id, conversation_id, sandbox_id, turn_id = (
+        uuid4() for _ in range(6)
     )
     async with workspace_tx() as connection:
         await connection.execute(
@@ -110,7 +110,7 @@ async def _seed(
             )
         )
     return (
-        ToolBridgePrincipal(workspace_id, turn_id, (connection_id,)),
+        ToolBridgePrincipal(workspace_id, turn_id, member_id),
         conversation_id,
         sandbox_id,
         member_id,
@@ -199,6 +199,7 @@ async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: 
                         tables.turn.c.inbound,
                         tables.turn.c.parent_turn_id,
                         tables.turn.c.speaker_member_id,
+                        tables.turn.c.member_id,
                         tables.turn.c.admission_source,
                         tables.turn.c.runtime_config,
                         tables.conversation.c.sandbox_conversation_id,
@@ -230,7 +231,8 @@ async def test_execute_admits_a_durable_child_and_returns_its_json_terminal(db: 
     assert intent.input == {"kind": "agent"}
     assert child.parent_turn_id == run.turn_id
     assert child.speaker_member_id is None
-    assert TurnRuntimeConfig.model_validate(child.runtime_config).connections == run.connections
+    assert child.member_id == run.member_id
+    assert TurnRuntimeConfig.model_validate(child.runtime_config) == TurnRuntimeConfig()
     assert child.admission_source == "intent"
     assert child.sandbox_conversation_id == sandbox_id
     assert dbos.options["queue_name"] == EXPRESS_QUEUE_NAME
@@ -275,9 +277,11 @@ async def test_a_parked_bridge_child_is_cancelled_before_the_caller_returns(db: 
     assert TerminalFrame.model_validate(child.terminal).status == CANCELLED
 
 
-async def test_a_bridge_child_inherits_its_parent_connection_scope(db: None) -> None:
+async def test_a_bridge_child_inherits_its_parent_runtime_config_and_model_accounts(
+    db: None,
+) -> None:
     run, _, _, _ = await _seed()
-    config = TurnRuntimeConfig(connections=run.connections)
+    config = TurnRuntimeConfig(internet_access=False)
     account = ModelAccountCapability(provider="openai", slot=f"openai_api_key:member:{uuid4()}")
     async with workspace_tx() as connection:
         await connection.execute(

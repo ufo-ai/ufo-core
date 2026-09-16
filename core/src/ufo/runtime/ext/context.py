@@ -102,7 +102,6 @@ from ufo.runtime.workspace import PLATFORM_FUNDED, ResolvedModelClient, ws_curre
 from ufo.schema import tables
 from ufo.schema.ids import uuid7
 from ufo.schema.records import (
-    CONNECTION_SCOPE_MAX,
     MEMBER_ADMISSION,
     SUBAGENT_SURFACE,
     AgentChange,
@@ -554,11 +553,11 @@ async def conversation_agent_id(workspace_id: UUID, conversation_id: UUID) -> UU
 PROBE_TIMEOUT_SECONDS = 60
 PROBE_TIMEOUT_MAX_SECONDS = 120
 
-ProbeEnvironment = Callable[[UUID, UUID, tuple[UUID, ...]], Awaitable[dict[str, str]]]
-"""What a probe's sandbox open exports, answered for one conversation, one probe id, one exact
-connection scope: git proxy-auth and credential config, the scoped connector CLI sentinels, and the
-conversation id. The derivation reads the deploy's declared credential slots, so it is wired in by
-the deploy that holds them rather than reached from here."""
+ProbeEnvironment = Callable[[UUID, UUID, UUID | None], Awaitable[dict[str, str]]]
+"""What a probe's sandbox open exports, answered for one conversation, one probe id, and the
+member the probe acts for: git proxy-auth and credential config, that member's connector CLI
+sentinels, and the conversation id. The derivation reads the deploy's declared credential slots,
+so it is wired in by the deploy that holds them rather than reached from here."""
 
 
 @dataclass(frozen=True)
@@ -572,11 +571,10 @@ class ConversationProbes:
     under a token this deployment signs for that one exec, and hands back what the command reported.
 
     Its capability is the conversation's agent, that agent's snapshotted internet policy, the
-    workspace's keyed credentials, and only the connector grants in the caller's total
-    `connections` scope. The one thing it
-    deliberately lacks is the deployment's model key: no sentinel is exported and the proxy
-    resolves no injection for it, so an unattended exec cannot spend the deployment's model
-    budget.
+    workspace's keyed credentials, and the connector grants of the member the caller acts for.
+    The one thing it deliberately lacks is the deployment's model key: no sentinel is exported and
+    the proxy resolves no injection for it, so an unattended exec cannot spend the deployment's
+    model budget.
 
     A conversation bound to a member's terminal raises `TerminalGone` when that terminal is not
     connected. That reaches the caller rather than reading as an empty result: a probe that could
@@ -592,17 +590,16 @@ class ConversationProbes:
         command: str,
         timeout_s: int = PROBE_TIMEOUT_SECONDS,
         *,
-        connections: tuple[UUID, ...] = (),
+        acting_member_id: UUID | None = None,
         internet_access: Literal[False] | None = None,
     ) -> ExecResult:
         """Run `command` under `bash -lc` in the conversation's sandbox and return its captured
         stdout, stderr, and exit code. A nonzero exit is a result, not an error — reading what a
         command reports is the whole point of running it.
 
-        `connections` is the caller's immutable total allowlist: an empty tuple reaches no
-        connector, and a listed connection must still be live. A grant connected, attached, or
-        shared after the work armed stays outside the list.
-        `internet_access=False` preserves a caller's narrower internet policy.
+        `acting_member_id` names the member the exec acts for — the creator of the watch that runs
+        it — so that member's private connections reach it beside the shared ones; None reaches the
+        shared ones alone. `internet_access=False` preserves a caller's narrower internet policy.
 
         The exec runs bound to the conversation's own agent. A job binds a workspace and no agent —
         nothing has an agent to bind, since a probe answers to no turn — yet the environment is
@@ -619,11 +616,6 @@ class ConversationProbes:
             raise ValueError(
                 f"a probe timeout of {timeout_s}s is outside 1..{PROBE_TIMEOUT_MAX_SECONDS}s"
             )
-        if len(connections) > CONNECTION_SCOPE_MAX:
-            raise ValueError(f"a probe connection scope exceeds {CONNECTION_SCOPE_MAX} connections")
-        if len(set(connections)) != len(connections):
-            raise ValueError("a probe connection scope cannot contain duplicate ids")
-        connections = tuple(sorted(connections, key=str))
         workspace_id = ws_current().workspace_id
         agent_id = await conversation_agent_id(workspace_id, conversation_id)
         if agent_id is None:
@@ -633,7 +625,7 @@ class ConversationProbes:
             conversation_id=conversation_id,
             probe_id=uuid4(),
             expires_at=int(datetime.now(UTC).timestamp()) + timeout_s,
-            connections=connections,
+            member_id=acting_member_id,
             internet_access=internet_access,
         )
         with agent(agent_id):
@@ -641,7 +633,7 @@ class ConversationProbes:
                 conversation_id,
                 None,
                 self._probe_tokens.encode(probe),
-                await self._env(conversation_id, probe.probe_id, probe.connections),
+                await self._env(conversation_id, probe.probe_id, probe.member_id),
             )
             return await session.bash(command, timeout_s=timeout_s)
 
@@ -884,6 +876,7 @@ class TurnInvoker(Protocol):
         runtime_config: TurnRuntimeConfig | None = None,
         model_accounts: tuple[ModelAccountCapability, ...] = (),
         fired_by: FiredBy | None = None,
+        acting_member_id: UUID | None = None,
     ) -> UUID | None: ...
 
     async def redispatch(self, conversation_id: UUID, ended_turn_id: UUID) -> UUID | None: ...
@@ -1104,7 +1097,6 @@ class SourceReader:
     agent_id: UUID
     requesting_member_id: UUID | None
     subjects: frozenset[str]
-    connections: tuple[UUID, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -1192,19 +1184,15 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
         for subject in reader.subjects
         if subject.startswith(MEMBER_SUBJECT_PREFIX)
     )
-    disclosed = (
-        sa.true()
-        if reader.connections is not None
-        else sa.or_(
-            sa.and_(
-                tables.connection.c.shared,
-                sa.true() if SHARED_SUBJECT in reader.subjects else sa.false(),
-            ),
-            sa.and_(
-                tables.connection.c.shared.is_(False),
-                tables.connection.c.owner_member_id.in_(admitted) if admitted else sa.false(),
-            ),
-        )
+    disclosed = sa.or_(
+        sa.and_(
+            tables.connection.c.shared,
+            sa.true() if SHARED_SUBJECT in reader.subjects else sa.false(),
+        ),
+        sa.and_(
+            tables.connection.c.shared.is_(False),
+            tables.connection.c.owner_member_id.in_(admitted) if admitted else sa.false(),
+        ),
     )
     speaker_owns = (
         sa.false()
@@ -1215,13 +1203,6 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
         granted,
         sa.and_(reader_is_main, sa.or_(tables.connection.c.shared, speaker_owns)),
     )
-    in_scope = (
-        sa.true()
-        if reader.connections is None
-        else tables.connection.c.id.in_(reader.connections)
-        if reader.connections
-        else sa.false()
-    )
     return sa.and_(
         tables.source.c.workspace_id == workspace_id,
         sa.exists(
@@ -1230,7 +1211,6 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
             .where(
                 tables.connection.c.workspace_id == workspace_id,
                 tables.connection.c.id == tables.source.c.connection_id,
-                in_scope,
                 disclosed,
                 reachable,
             )
@@ -1240,9 +1220,7 @@ def _source_readable(workspace_id: UUID, reader: SourceReader) -> sa.ColumnEleme
 
 
 def _page_disclosed(reader: SourceReader) -> sa.ColumnElement[bool]:
-    return (
-        sa.true() if reader.connections is not None else tables.page.c.subject.in_(reader.subjects)
-    )
+    return tables.page.c.subject.in_(reader.subjects)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2081,6 +2059,7 @@ class ExtensionContext:
         unless_member_arrival_since: int | None = None,
         runtime_config: TurnRuntimeConfig | None = None,
         fired_by: FiredBy | None = None,
+        acting_member_id: UUID | None = None,
     ) -> UUID | None:
         """Kick an internal turn in `conversation_id`, asserting the conversation is bound to
         `agent_id` — admission refuses a mismatch, so a stored binding can never fire into another
@@ -2095,8 +2074,10 @@ class ExtensionContext:
         counter space). An archived agent raises `AgentArchived` rather than answering None, which
         means a member ended the wait: the caller catches it and leaves its row for a restore to
         run. `fired_by` names the object whose fire this is, stamped on the turn so the `run` kind
-        lists it and addresses that object's settings. Fails loud when no invoker is wired rather
-        than silently dropping the invocation."""
+        lists it and addresses that object's settings. `acting_member_id` names the member the
+        turn acts for — the creator of the automation firing it — so that member's private
+        connections follow it. Fails loud when no invoker is wired rather than silently dropping
+        the invocation."""
         if self.invoker is None:
             raise RuntimeError("invoke requires a turn invoker; none is wired")
         return await self.invoker.invoke(
@@ -2116,6 +2097,7 @@ class ExtensionContext:
             unless_member_arrival_since=unless_member_arrival_since,
             runtime_config=runtime_config,
             fired_by=fired_by,
+            acting_member_id=acting_member_id,
         )
 
     async def member_reach(

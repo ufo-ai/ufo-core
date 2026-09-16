@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,7 +14,6 @@ use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Notify};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use uuid::Uuid;
 
@@ -24,7 +23,7 @@ use ufo_egress::meter::Meter;
 use ufo_egress::server::{Dns, EgressProxy, ServiceDaemons};
 use ufo_egress::tls::{generate_ca, LeafStore};
 use ufo_egress::token::RunTokenCodec;
-use ufo_egress::types::{MeterRecord, RunToken};
+use ufo_egress::types::{MeterRecord, RunActor, RunToken};
 
 const SECRET: &[u8] = b"proxy-it-signing-secret";
 const WORKSPACE: u128 = 0x1111;
@@ -37,34 +36,24 @@ const VETTED_PUBLIC_ADDRESS: Ipv4Addr = Ipv4Addr::new(93, 184, 216, 34);
 
 struct ControlState {
     authorized: AtomicBool,
-    authorize_calls: AtomicUsize,
     authorize_status: u16,
     generation: i64,
     rules_json: String,
     bridge_json: String,
     bridge_requests: Mutex<Vec<serde_json::Value>>,
-    hold_bridge: AtomicBool,
-    bridge_seen: Notify,
-    bridge_release: Notify,
     meter_records: Mutex<Vec<serde_json::Value>>,
-    revocation_seen: Notify,
 }
 
 impl ControlState {
     fn new(rules_json: &str) -> Arc<ControlState> {
         Arc::new(ControlState {
             authorized: AtomicBool::new(true),
-            authorize_calls: AtomicUsize::new(0),
             authorize_status: 200,
             generation: 0,
             rules_json: rules_json.to_string(),
             bridge_json: String::new(),
             bridge_requests: Mutex::new(Vec::new()),
-            hold_bridge: AtomicBool::new(false),
-            bridge_seen: Notify::new(),
-            bridge_release: Notify::new(),
             meter_records: Mutex::new(Vec::new()),
-            revocation_seen: Notify::new(),
         })
     }
 }
@@ -85,32 +74,20 @@ async fn spawn_control(state: Arc<ControlState>) -> String {
                     None => return,
                 };
                 let (status, payload) = if path.ends_with("/authorize") {
-                    state.authorize_calls.fetch_add(1, Ordering::SeqCst);
-                    let value = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
-                    if value["capabilities"]["call_liveness"] != true {
-                        (400, "{}".to_string())
-                    } else if state.authorize_status != 200 {
+                    if state.authorize_status != 200 {
                         (state.authorize_status, "{}".to_string())
                     } else {
-                        let authorized = state.authorized.load(Ordering::SeqCst);
-                        if !authorized {
-                            state.revocation_seen.notify_one();
-                        }
                         (
                             200,
                             format!(
                                 "{{\"authorized\":{},\"generation\":{}}}",
-                                authorized, state.generation
+                                state.authorized.load(Ordering::SeqCst),
+                                state.generation
                             ),
                         )
                     }
                 } else if path.ends_with("/resolve") {
-                    let value = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
-                    if value["capabilities"]["call_liveness"] != true {
-                        (400, "{}".to_string())
-                    } else {
-                        (200, format!("{{\"rules\":{}}}", state.rules_json))
-                    }
+                    (200, format!("{{\"rules\":{}}}", state.rules_json))
                 } else if path.ends_with("/meter") {
                     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
                         if let Some(records) = value.get("records").and_then(|r| r.as_array()) {
@@ -124,16 +101,8 @@ async fn spawn_control(state: Arc<ControlState>) -> String {
                     (200, "{}".to_string())
                 } else if path.ends_with("/tool-bridge") {
                     let value = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
-                    if value["capabilities"]["call_liveness"] != true {
-                        (400, "{}".to_string())
-                    } else {
-                        state.bridge_requests.lock().unwrap().push(value);
-                        if state.hold_bridge.load(Ordering::SeqCst) {
-                            state.bridge_seen.notify_one();
-                            state.bridge_release.notified().await;
-                        }
-                        (200, state.bridge_json.clone())
-                    }
+                    state.bridge_requests.lock().unwrap().push(value);
+                    (200, state.bridge_json.clone())
                 } else {
                     (404, "{}".to_string())
                 };
@@ -268,25 +237,14 @@ async fn start_proxy_exiting(
 
 // --- CONNECT client ---------------------------------------------------------------------------
 
-fn run_token(_connections: Vec<Uuid>) -> String {
+fn run_token() -> String {
     RunTokenCodec {
         secret: SECRET.to_vec(),
     }
     .encode(&RunToken {
         workspace_id: Uuid::from_u128(WORKSPACE),
         turn_id: Uuid::from_u128(TURN),
-        capability_id: None,
-    })
-}
-
-fn call_token(capability_id: Uuid) -> String {
-    RunTokenCodec {
-        secret: SECRET.to_vec(),
-    }
-    .encode(&RunToken {
-        workspace_id: Uuid::from_u128(WORKSPACE),
-        turn_id: Uuid::from_u128(TURN),
-        capability_id: Some(capability_id),
+        acts_for: RunActor::Turn,
     })
 }
 
@@ -399,44 +357,6 @@ async fn spawn_tls_origin(
         let _ = tls.shutdown().await;
     });
     (addr, ca_pem, seen)
-}
-
-async fn spawn_held_tls_origin(
-    host: &str,
-) -> (
-    SocketAddr,
-    String,
-    oneshot::Receiver<()>,
-    oneshot::Sender<()>,
-) {
-    let (ca_pem, ca_key) = generate_ca().unwrap();
-    let leaves = LeafStore::new(&ca_pem, &ca_key).unwrap();
-    let server_config = leaves.server_config(host).await.unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (seen_tx, seen_rx) = oneshot::channel();
-    let (release_tx, release_rx) = oneshot::channel();
-    tokio::spawn(async move {
-        let (sock, _) = listener.accept().await.unwrap();
-        let mut tls = TlsAcceptor::from(server_config).accept(sock).await.unwrap();
-        let mut request = Vec::new();
-        let mut chunk = [0u8; 1024];
-        while find(&request, b"\r\n\r\n").is_none() {
-            let read = tls.read(&mut chunk).await.unwrap();
-            if read == 0 {
-                return;
-            }
-            request.extend_from_slice(&chunk[..read]);
-        }
-        let _ = seen_tx.send(());
-        let _ = release_rx.await;
-        let _ = tls
-            .write_all(
-                b"HTTP/1.1 200 OK\r\ncontent-length: 9\r\nconnection: close\r\n\r\nsensitive",
-            )
-            .await;
-    });
-    (addr, ca_pem, seen_rx, release_tx)
 }
 
 /// Complete a TLS handshake to the proxy's MITM leaf and exchange one inner HTTP request.
@@ -601,7 +521,7 @@ async fn authorize_denial_refuses_the_connect() {
         ..control_defaults("[]")
     });
     let proxy = start_proxy(denied).await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
     let (_sock, head) = connect(&proxy, "api.example.com:443", Some(&auth)).await;
     assert_eq!(
         status_of(&head),
@@ -617,88 +537,9 @@ async fn authorize_rpc_error_answers_503() {
         ..control_defaults("[]")
     });
     let proxy = start_proxy(faulty).await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
     let (_sock, head) = connect(&proxy, "api.example.com:443", Some(&auth)).await;
     assert_eq!(status_of(&head), 503, "authorize fault was not 503: {head}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_revoked_call_token_closes_its_established_tunnel_and_cannot_reconnect() {
-    let (origin, origin_ca, seen, release) = spawn_held_tls_origin("localhost").await;
-    let state = ControlState::new(r#"[{"kind":"scope","hosts":["localhost"]}]"#);
-    let proxy =
-        start_proxy_trusting(state.clone(), Some(origin_ca), ServiceDaemons::default()).await;
-    let auth = basic(&call_token(Uuid::from_u128(0x3333)));
-    let target = format!("localhost:{}", origin.port());
-    let (sock, head) = connect(&proxy, &target, Some(&auth)).await;
-    assert_eq!(status_of(&head), 200, "call CONNECT was refused: {head}");
-    let connector = TlsConnector::from(client_config_trusting(&proxy.ca_pem));
-    let name = ServerName::try_from("localhost".to_string()).unwrap();
-    let mut tls = connector.connect(name, sock).await.unwrap();
-    tls.write_all(b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n")
-        .await
-        .unwrap();
-    seen.await.unwrap();
-    state.authorized.store(false, Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(2), state.revocation_seen.notified())
-        .await
-        .expect("proxy did not observe call revocation");
-    release.send(()).unwrap();
-    let response = tokio::time::timeout(Duration::from_secs(2), async {
-        let mut response = Vec::new();
-        let mut chunk = [0u8; 1024];
-        while let Ok(read) = tls.read(&mut chunk).await {
-            if read == 0 {
-                break;
-            }
-            response.extend_from_slice(&chunk[..read]);
-        }
-        response
-    })
-    .await
-    .expect("revoked tunnel remained open");
-    assert!(
-        !response
-            .windows(b"sensitive".len())
-            .any(|part| part == b"sensitive"),
-        "a revoked call tunnel delivered protected bytes"
-    );
-    let (_sock, refused) = connect(&proxy, &target, Some(&auth)).await;
-    assert_eq!(
-        status_of(&refused),
-        403,
-        "revoked token reconnected: {refused}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_large_call_response_revalidates_at_its_boundary_not_per_chunk() {
-    let body = vec![b'x'; 2 * 1_048_576];
-    let (origin, origin_ca, _) = spawn_tls_origin("localhost", body.clone()).await;
-    let state = ControlState::new(r#"[{"kind":"scope","hosts":["localhost"]}]"#);
-    let proxy =
-        start_proxy_trusting(state.clone(), Some(origin_ca), ServiceDaemons::default()).await;
-    let auth = basic(&call_token(Uuid::from_u128(0x3333)));
-    let target = format!("localhost:{}", origin.port());
-    let (sock, head) = connect(&proxy, &target, Some(&auth)).await;
-    assert_eq!(status_of(&head), 200, "call CONNECT was refused: {head}");
-
-    let response = mitm_request(
-        &proxy,
-        sock,
-        "localhost",
-        b"GET / HTTP/1.1\r\nhost: localhost\r\n\r\n",
-    )
-    .await;
-
-    assert_eq!(
-        response.bytes().filter(|byte| *byte == b'x').count(),
-        body.len()
-    );
-    assert!(
-        state.authorize_calls.load(Ordering::SeqCst) <= 8,
-        "large response caused per-chunk authorization"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -707,7 +548,7 @@ async fn a_scoped_host_tunnels_and_meters_one_egress_request() {
     let target = format!("127.0.0.1:{}", origin.port());
     let rules = r#"[{"kind":"scope","hosts":["127.0.0.1"]},{"kind":"meter","host":"127.0.0.1","dimension":"requests"}]"#;
     let proxy = start_proxy(ControlState::new(rules)).await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
     let (mut sock, head) = connect(&proxy, &target, Some(&auth)).await;
     assert_eq!(
         status_of(&head),
@@ -748,7 +589,7 @@ async fn a_pinned_scope_refuses_a_host_that_answers_a_private_address() {
     let target = format!("127.0.0.1:{}", origin.port());
     let pinned = r#"[{"kind":"scope","hosts":["127.0.0.1"],"pinned":true}]"#;
     let proxy = start_proxy(ControlState::new(pinned)).await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
     let (_sock, head) = connect(&proxy, &target, Some(&auth)).await;
     assert_eq!(
         status_of(&head),
@@ -771,7 +612,7 @@ async fn a_pinned_scope_with_an_injection_rule_mitms_the_vetted_address_alone() 
         Some(("localhost", VETTED_PUBLIC_ADDRESS)),
     )
     .await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
     let (sock, head) = connect(&proxy, &target, Some(&auth)).await;
     assert_eq!(
         status_of(&head),
@@ -803,7 +644,7 @@ async fn a_pinned_scope_with_an_injection_rule_mitms_the_vetted_address_alone() 
 async fn an_internet_rule_refuses_a_private_destination() {
     let rules = r#"[{"kind":"internet"}]"#;
     let proxy = start_proxy(ControlState::new(rules)).await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
     let (_a, private) = connect(&proxy, "10.1.2.3:443", Some(&auth)).await;
     assert_eq!(
         status_of(&private),
@@ -882,7 +723,7 @@ async fn a_residential_rule_carries_its_host_through_the_provider_gateway() {
         }),
     )
     .await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
     let (mut sock, head) = connect(&proxy, &target, Some(&auth)).await;
     assert_eq!(
         status_of(&head),
@@ -914,7 +755,7 @@ async fn a_residential_host_is_refused_where_the_deploy_configures_no_gateway() 
     let rules =
         r#"[{"kind":"scope","hosts":["127.0.0.1"]},{"kind":"residential","host":"127.0.0.1"}]"#;
     let proxy = start_proxy(ControlState::new(rules)).await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
     let (_sock, head) = connect(&proxy, &target, Some(&auth)).await;
     assert_eq!(
         status_of(&head),
@@ -934,7 +775,7 @@ async fn an_injection_host_mitms_and_swaps_the_real_secret_upstream() {
         ServiceDaemons::default(),
     )
     .await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
     let (sock, head) = connect(&proxy, &target, Some(&auth)).await;
     assert_eq!(
         status_of(&head),
@@ -964,7 +805,7 @@ async fn an_injection_host_mitms_and_swaps_the_real_secret_upstream() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_tool_bridge_request_reaches_core_with_the_proxy_run_capabilities() {
+async fn a_tool_bridge_request_reaches_core_under_its_run_token() {
     let state = Arc::new(ControlState {
         bridge_json: r#"{"ok":true,"result":{"objects":[]}}"#.to_string(),
         ..control_defaults(
@@ -972,7 +813,7 @@ async fn a_tool_bridge_request_reaches_core_with_the_proxy_run_capabilities() {
         )
     });
     let proxy = start_proxy(state.clone()).await;
-    let auth = basic(&run_token(vec![Uuid::from_u128(0x3333)]));
+    let auth = basic(&run_token());
     let (sock, head) = connect(&proxy, "tools.ufo.internal:443", Some(&auth)).await;
     assert_eq!(status_of(&head), 200, "bridge CONNECT was refused: {head}");
     let body = r#"{"request_id":"00000000-0000-0000-0000-000000004444","action":"get_schema","tool_name":"object_list","arguments":{}}"#;
@@ -992,49 +833,6 @@ async fn a_tool_bridge_request_reaches_core_with_the_proxy_run_capabilities() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_revoked_call_withholds_a_held_tool_bridge_response() {
-    let state = Arc::new(ControlState {
-        bridge_json: r#"{"ok":true,"result":{"secret":"private"}}"#.to_string(),
-        hold_bridge: AtomicBool::new(true),
-        ..control_defaults(
-            r#"[{"kind":"service","host":"tools.ufo.internal","daemon_prefix":null}]"#,
-        )
-    });
-    let proxy = start_proxy(state.clone()).await;
-    let auth = basic(&call_token(Uuid::from_u128(0x3333)));
-    let (sock, head) = connect(&proxy, "tools.ufo.internal:443", Some(&auth)).await;
-    assert_eq!(status_of(&head), 200, "bridge CONNECT was refused: {head}");
-    let connector = TlsConnector::from(client_config_trusting(&proxy.ca_pem));
-    let name = ServerName::try_from("tools.ufo.internal".to_string()).unwrap();
-    let mut tls = connector.connect(name, sock).await.unwrap();
-    let body = r#"{"request_id":"00000000-0000-0000-0000-000000004444","action":"get_schema","tool_name":"object_list","arguments":{}}"#;
-    let request = format!(
-        "POST /request HTTP/1.1\r\nhost: tools.ufo.internal\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    tls.write_all(request.as_bytes()).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), state.bridge_seen.notified())
-        .await
-        .expect("bridge control did not receive the request");
-    state.authorized.store(false, Ordering::SeqCst);
-    tokio::time::timeout(Duration::from_secs(2), state.revocation_seen.notified())
-        .await
-        .expect("proxy did not observe call revocation");
-    state.bridge_release.notify_one();
-    let mut response = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_secs(2), tls.read_to_end(&mut response))
-        .await
-        .expect("revoked bridge remained open");
-
-    assert!(
-        !response
-            .windows(b"private".len())
-            .any(|part| part == b"private"),
-        "a revoked bridge delivered its held private result"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn each_service_rule_relays_to_the_daemon_that_owns_its_host() {
     let (cache, cached) = spawn_daemon("packed refs").await;
     let (preview, rendered) = spawn_daemon("png bytes").await;
@@ -1048,7 +846,7 @@ async fn each_service_rule_relays_to_the_daemon_that_owns_its_host() {
         },
     )
     .await;
-    let auth = basic(&run_token(vec![]));
+    let auth = basic(&run_token());
 
     let (sock, head) = connect(&proxy, "cache.ufo.internal:443", Some(&auth)).await;
     assert_eq!(status_of(&head), 200, "cache CONNECT was refused: {head}");
@@ -1111,7 +909,7 @@ async fn a_preview_request_fails_in_the_tunnel_when_its_daemon_is_gone() {
         let (sock, head) = connect(
             &proxy,
             "preview.ufo.internal:443",
-            Some(&basic(&run_token(vec![]))),
+            Some(&basic(&run_token())),
         )
         .await;
         assert_eq!(status_of(&head), 200, "preview CONNECT was refused: {head}");
@@ -1137,7 +935,7 @@ async fn a_git_path_through_the_preview_host_never_reaches_an_origin() {
     let (sock, head) = connect(
         &proxy,
         "preview.ufo.internal:443",
-        Some(&basic(&run_token(vec![]))),
+        Some(&basic(&run_token())),
     )
     .await;
     assert_eq!(status_of(&head), 200, "preview CONNECT was refused: {head}");
@@ -1177,16 +975,11 @@ async fn shutdown_flushes_the_queued_meter_batch() {
 fn control_defaults(rules_json: &str) -> ControlState {
     ControlState {
         authorized: AtomicBool::new(true),
-        authorize_calls: AtomicUsize::new(0),
         authorize_status: 200,
         generation: 0,
         rules_json: rules_json.to_string(),
         bridge_json: String::new(),
         bridge_requests: Mutex::new(Vec::new()),
-        hold_bridge: AtomicBool::new(false),
-        bridge_seen: Notify::new(),
-        bridge_release: Notify::new(),
         meter_records: Mutex::new(Vec::new()),
-        revocation_seen: Notify::new(),
     }
 }

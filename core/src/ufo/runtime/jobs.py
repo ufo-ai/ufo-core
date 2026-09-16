@@ -1344,7 +1344,7 @@ class JobRunner:
             "once the spend is allowed. Do nothing else.",
             f"{SPEND_REFUSAL_NOTICE_KEY}:{uuid4().hex}",
             as_scheduled=True,
-            runtime_config=TurnRuntimeConfig(connections=(), internet_access=False),
+            runtime_config=TurnRuntimeConfig(internet_access=False),
         )
 
     def _registered(self, key: str) -> _Binding | None:

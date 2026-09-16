@@ -89,6 +89,7 @@ class InboxDrain:
                 holds_work_already_done=True,
                 standalone=True,
                 runtime_config=lane.runtime_config,
+                acting_member_id=lane.member_id,
             )
             if turn_id is not None:
                 await store.mark_triaged(batch, turn_id)

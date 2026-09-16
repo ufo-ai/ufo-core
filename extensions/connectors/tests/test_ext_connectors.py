@@ -56,7 +56,7 @@ from ufo.runtime.access.grants import Grant, GrantStore
 from ufo.runtime.engine import MAX_TOOL_RESULT_CHARS
 from ufo.runtime.ext.context import JsonValue
 from ufo.runtime.tools.context import SpeakerRequired, ToolContext
-from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
+from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.authproxy import Credential
 
@@ -238,7 +238,6 @@ def _ctx(
     provider: str = sample.CONNECTOR_PROVIDER,
     connector_read_only: bool = False,
     revoked: asyncio.Event | None = None,
-    connections: tuple[UUID, ...] | None = None,
     is_main: bool = False,
     private_accounts: frozenset[str] = frozenset(),
 ) -> ToolContext:
@@ -253,9 +252,6 @@ def _ctx(
             seq=1,
             status="running",
             inbound="use a connector",
-            runtime_config=(
-                None if connections is None else TurnRuntimeConfig(connections=connections)
-            ),
             created_at=datetime(2026, 7, 9, tzinfo=UTC),
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8", is_main=is_main),
@@ -441,22 +437,6 @@ async def test_list_external_tools_names_each_connected_account_owner_and_sharin
     assert row["connected_accounts"] == [
         {"account_id": "acct-1", "owner": GRANT_OWNER_EMAIL, "shared": True},
         {"account_id": "acct-2", "owner": GRANT_OWNER_EMAIL, "shared": True},
-    ]
-
-
-async def test_list_external_tools_stops_at_the_turn_connection_scope() -> None:
-    allowed = uuid5(NAMESPACE_URL, f"connection/{sample.CONNECTOR_PROVIDER}/acct-1")
-    result = await list_external_tools(
-        _ctx(
-            _registry(),
-            accounts=("acct-1", "acct-2"),
-            connections=(allowed,),
-        ),
-        ListExternalToolsInput(queries=(f"select:{sample.CONNECTOR_PROVIDER}",)),
-    )
-    (row,) = _payload(result)["connectors"]
-    assert row["connected_accounts"] == [
-        {"account_id": "acct-1", "owner": GRANT_OWNER_EMAIL, "shared": True}
     ]
 
 

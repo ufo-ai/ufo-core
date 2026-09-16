@@ -3,6 +3,7 @@ conversation through the real admission seam, the batch rides the inbound as wal
 read inside the cooldown waits, a lapsed lease is the retry, and a post after triage reopens the
 row. Only the DBOS enqueue stands in, recording the workflow id a live queue would receive."""
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -27,6 +28,7 @@ from ufo_ext_app_notification.store import (
     Notification,
     NotificationStore,
     Posted,
+    _encoded_runtime_config,
 )
 from ufo_ext_app_notification.store import notification as notification_table
 from ufo_ext_flags_open import build
@@ -244,9 +246,8 @@ async def test_a_lanes_open_rows_become_one_turn_on_its_own_conversation(db: Non
 
 async def test_exact_runtime_configs_become_separate_triage_turns(db: None) -> None:
     workspace_id, member_id, agent_id, inbox_id = await _seed()
-    first_connection, second_connection = uuid4(), uuid4()
-    first_config = TurnRuntimeConfig(internet_access=False, connections=(first_connection,))
-    second_config = TurnRuntimeConfig(connections=(second_connection,))
+    first_config = TurnRuntimeConfig(internet_access=False)
+    second_config = TurnRuntimeConfig()
     dbos = StubDbos()
     ctx = _drain_ctx(workspace_id, dbos)
     with ws(workspace_id), agent(inbox_id):
@@ -273,6 +274,7 @@ async def test_exact_runtime_configs_become_separate_triage_turns(db: None) -> N
         rows = await NotificationStore(ctx).rows()
 
     assert len(turns) == 2
+    assert all(turn["member_id"] == member_id for turn in turns)
     configs = {
         turn["id"]: TurnRuntimeConfig.model_validate(turn["runtime_config"]) for turn in turns
     }
@@ -282,37 +284,36 @@ async def test_exact_runtime_configs_become_separate_triage_turns(db: None) -> N
         assert configs[row.triaged_turn_id] == row.runtime_config
 
 
-async def test_a_cooling_connection_scope_does_not_delay_another_scope(db: None) -> None:
+async def test_a_row_the_outgoing_image_encoded_claims_into_its_lane(db: None) -> None:
     workspace_id, member_id, agent_id, inbox_id = await _seed()
-    first_connection, second_connection = uuid4(), uuid4()
+    config = TurnRuntimeConfig(internet_access=False)
     dbos = StubDbos()
     ctx = _drain_ctx(workspace_id, dbos)
     with ws(workspace_id), agent(inbox_id):
-        await _post(
-            ctx,
-            inbox_id,
-            member_id,
-            agent_id,
-            "source/crm",
-            "changed",
-            runtime_config=TurnRuntimeConfig(connections=(first_connection,)),
-        )
-        await InboxDrain(ctx=ctx).run()
-        await _post(
-            ctx,
-            inbox_id,
-            member_id,
-            agent_id,
-            "source/github",
-            "failed",
-            runtime_config=TurnRuntimeConfig(connections=(second_connection,)),
-        )
+        await _post(ctx, inbox_id, member_id, agent_id, "source/crm", "a", runtime_config=config)
+        await _post(ctx, inbox_id, member_id, agent_id, "source/github", "b", runtime_config=config)
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(notification_table)
+                .where(notification_table.c.subject == "source/crm")
+                .values(
+                    runtime_config=json.dumps(
+                        {"connections": [str(uuid4())], "internet_access": False},
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+            )
         await InboxDrain(ctx=ctx).run()
         turns = await _turns(workspace_id)
+        rows = await NotificationStore(ctx).rows()
 
-    assert {
-        TurnRuntimeConfig.model_validate(turn["runtime_config"]).connections for turn in turns
-    } == {(first_connection,), (second_connection,)}
+    assert len(turns) == 1
+    assert TurnRuntimeConfig.model_validate(turns[0]["runtime_config"]) == config
+    assert {row.subject for row in rows if row.triaged_turn_id == turns[0]["id"]} == {
+        "source/crm",
+        "source/github",
+    }
 
 
 async def test_two_members_are_two_lanes_and_a_cooling_lane_waits(db: None) -> None:
@@ -355,7 +356,12 @@ async def test_a_fold_during_the_claim_keeps_the_row_open_for_the_next_tick(db: 
     dbos = StubDbos()
     ctx = _drain_ctx(workspace_id, dbos)
     store = NotificationStore(ctx)
-    lane = Lane(agent_id=inbox_id, member_id=member_id, runtime_config=None)
+    lane = Lane(
+        agent_id=inbox_id,
+        member_id=member_id,
+        runtime_config=None,
+        stored=frozenset({_encoded_runtime_config(None)}),
+    )
     with ws(workspace_id), agent(inbox_id):
         await _post(ctx, inbox_id, member_id, agent_id, "source/crm", "first")
         await _post(ctx, inbox_id, member_id, agent_id, "source/github", "deploy failed")
@@ -466,7 +472,12 @@ async def test_a_post_after_triage_reopens_the_row_as_a_new_notification(db: Non
 async def test_a_lapsed_lease_hands_the_rows_to_the_next_tick(db: None) -> None:
     workspace_id, member_id, agent_id, inbox_id = await _seed()
     ctx = _drain_ctx(workspace_id, StubDbos())
-    lane = Lane(agent_id=inbox_id, member_id=member_id, runtime_config=None)
+    lane = Lane(
+        agent_id=inbox_id,
+        member_id=member_id,
+        runtime_config=None,
+        stored=frozenset({_encoded_runtime_config(None)}),
+    )
     with ws(workspace_id), agent(inbox_id):
         await _post(ctx, inbox_id, member_id, agent_id, "source/crm", "a")
         store = NotificationStore(ctx)

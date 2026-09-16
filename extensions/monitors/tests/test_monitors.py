@@ -1,6 +1,6 @@
-"""End-to-end proof of monitor creation and fire: the tool probes through the real scoped sandbox
-seam and persists what it captured, the caps refuse, the deadline fires exactly one arrival through
-the real invoke seam, and the `monitor` kind reads, refuses, and disarms.
+"""End-to-end proof of monitor creation and fire: the tool probes through the real sandbox seam as
+the member who armed it and persists what it captured, the caps refuse, the deadline fires exactly
+one arrival through the real invoke seam, and the `monitor` kind reads, refuses, and disarms.
 
 The fire drives the real `Admission` (real spend preflight, real turn row, real seq allocation);
 only the DBOS enqueue stands in, recording the workflow id a live queue would receive."""
@@ -55,9 +55,15 @@ from ufo.harness.sandbox.session import (
 )
 from ufo.harness.untrusted import UNTRUSTED_CLOSE, UNTRUSTED_CLOSE_ESCAPE
 from ufo.host.ext.loader import turn_tools
-from ufo.runtime.access.grants import GrantStore
+from ufo.runtime.access.connectors import CliCredential
+from ufo.runtime.access.grants import GrantStore, grant_sentinel
 from ufo.runtime.agent_scope import agent
-from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, context_for
+from ufo.runtime.ext.context import (
+    ConversationProbes,
+    ExtensionContext,
+    ProbeEnvironment,
+    context_for,
+)
 from ufo.runtime.objects import AdminRequired
 from ufo.runtime.surfaces.admission import Admission, AdmissionInvoker
 from ufo.runtime.tools.context import SpawnResult, ToolContext
@@ -65,7 +71,7 @@ from ufo.runtime.tools.registry import ToolDef
 from ufo.runtime.turns.audience import SHARED_AUDIENCE, Audience, conversation_audience
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
-from ufo.schema.records import CONNECTION_SCOPE_MAX, Agent, Turn, TurnRuntimeConfig
+from ufo.schema.records import Agent, Turn, TurnRuntimeConfig
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -96,6 +102,16 @@ class StubDbos:
 
     async def enqueue_async(self, options: object, workspace_id: str, turn_id: str) -> None:
         self.enqueued.append(turn_id)
+
+
+@dataclass(frozen=True)
+class _NeverSecret:
+    async def secret(self, workspace_id: UUID, account_id: str) -> str:
+        raise AssertionError("the probe environment exports a sentinel, not the account token")
+
+
+HUB_CLI = {"hub": CliCredential(env="HUB_TOKEN", header="authorization", secret=_NeverSecret())}
+HUB_PROBE = 'printf "$HUB_TOKEN"'
 
 
 async def _unavailable_spawn(
@@ -206,7 +222,9 @@ async def _tool_ctx(
     root: Path,
     *,
     speaker_member_id: UUID | None = None,
+    acting_member_id: UUID | None = None,
     audience: Audience = SHARED_AUDIENCE,
+    probe_env: ProbeEnvironment | None = None,
 ) -> ToolContext:
     """A tool context over a real sandbox, because the arming probe is a real command run in one."""
     turn_id = uuid4()
@@ -233,11 +251,14 @@ async def _tool_ctx(
             status="running",
             inbound="watch the run",
             created_at=datetime(2026, 8, 14, tzinfo=UTC),
+            member_id=acting_member_id,
         ),
         agent=Agent(prompt="p", model="claude-opus-4-8"),
         spawn=_unavailable_spawn,
         speaker_member_id=speaker_member_id,
-        requesting_message_ref=turn_id if speaker_member_id is not None else None,
+        requesting_message_ref=(
+            turn_id if speaker_member_id is not None or acting_member_id is not None else None
+        ),
         audience=audience,
         artifact_token_secret="",
         ext=context_for(
@@ -247,7 +268,7 @@ async def _tool_ctx(
             probes=ConversationProbes(
                 sandboxes,
                 ProbeTokenCodec(secret=b"probe-test-secret"),
-                ProbeEnv().exports,
+                ProbeEnv().exports if probe_env is None else probe_env,
             ),
         ),
     )
@@ -278,7 +299,6 @@ def _input(slug: str, command: str, **overrides: object) -> MonitorInput:
             "reason": "the CI run for pull request 42",
             "next_steps": "Read the new status and report it.",
             "metadata": {"pr": 42},
-            "connections": [],
             **overrides,
         }
     )
@@ -373,6 +393,7 @@ async def test_arming_runs_the_probe_inline_and_persists_its_baseline(
     assert row["agent_id"] == agent_id
     assert row["created_by_member_id"] == member_id
     assert row["metadata"] == {"pr": 42}
+    assert row["internet_access"] is True
     assert row["probes_run"] == 0
     assert row["last_probe_at"] is None
     assert row["claimed_by"] is None
@@ -382,131 +403,65 @@ async def test_arming_runs_the_probe_inline_and_persists_its_baseline(
     assert timedelta(minutes=59) < deadline_at - armed_at < timedelta(minutes=61)
 
 
-async def test_monitor_connections_are_total_canonical_and_within_the_turn_scope(
-    db: None, tmp_path: Path
-) -> None:
+async def test_the_arming_probe_acts_for_the_speaker(db: None, tmp_path: Path) -> None:
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     other = await _member(workspace_id)
-    own = await _connection(workspace_id, agent_id, member_id, "acct-own", shared=False)
-    shared = await _connection(workspace_id, agent_id, other, "acct-shared", shared=True)
-    private = await _connection(workspace_id, agent_id, other, "acct-private", shared=False)
-    base = replace(
-        await _tool_ctx(
-            workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-        ),
-        grants=GrantStore(),
-    )
-    base = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={"runtime_config": TurnRuntimeConfig(internet_access=False)}
-        ),
-    )
-    asked: list[tuple[UUID, tuple[UUID, ...]]] = []
+    await _connection(workspace_id, agent_id, member_id, "acct-own", shared=False)
+    await _connection(workspace_id, agent_id, other, "acct-shared", shared=True)
+    await _connection(workspace_id, agent_id, other, "acct-private", shared=False)
+    env = ProbeEnv(grants=GrantStore(), clis=HUB_CLI)
+    asked: list[UUID | None] = []
 
-    async def recording(
-        conversation: UUID,
-        probe_id: UUID,
-        connections: tuple[UUID, ...],
-    ) -> dict[str, str]:
-        asked.append((conversation, connections))
-        return await ProbeEnv().exports(conversation, probe_id, connections)
+    async def recording(conversation: UUID, probe_id: UUID, member: UUID | None) -> dict[str, str]:
+        asked.append(member)
+        return await env.exports(conversation, probe_id, member)
 
-    sandboxes = _sandboxes(tmp_path)
-    base = replace(
-        base,
-        ext=context_for(
-            NAME,
-            frozenset(),
-            sandboxes=sandboxes,
-            probes=ConversationProbes(
-                sandboxes,
-                ProbeTokenCodec(secret=b"probe-test-secret"),
-                recording,
-            ),
-        ),
-    )
-    restricted = replace(
-        base,
-        turn=base.turn.model_copy(
-            update={
-                "runtime_config": TurnRuntimeConfig(
-                    internet_access=False,
-                    connections=(own,),
-                )
-            }
-        ),
-    )
-    with pytest.raises(ValueError, match="connections"):
-        MonitorInput.model_validate(
-            {
-                "slug": "missing",
-                "command": ALPHA,
-                "deadline_minutes": 60,
-                "ai_response": "Watching.",
-                "reason": "CI",
-                "next_steps": "Report.",
-            }
-        )
-    with pytest.raises(ValueError, match="duplicate"):
-        _input("duplicate", ALPHA, connections=[str(own), str(own)])
-    with pytest.raises(ValueError, match=str(CONNECTION_SCOPE_MAX)):
-        _input(
-            "too-many",
-            ALPHA,
-            connections=[str(uuid4()) for _ in range(CONNECTION_SCOPE_MAX + 1)],
-        )
-    with ws(workspace_id), agent(agent_id):
-        for refused in (private, uuid4()):
-            result = await monitor(base, _input("refused", ALPHA, connections=[str(refused)]))
-            assert result.is_error is True
-            assert str(refused) in result.content[0].text
-        parent_leak = await monitor(
-            restricted, _input("parent-leak", ALPHA, connections=[str(shared)])
-        )
-        scoped = await monitor(base, _input("scoped", ALPHA, connections=[str(shared), str(own)]))
-        closed = await monitor(base, _input("closed", ALPHA, connections=[]))
-        rows = {row.name: row for row in await MonitorStore(base.ext).armed()}
-    assert parent_leak.is_error is True
-    assert str(shared) in parent_leak.content[0].text
-    assert scoped.is_error is False
-    assert closed.is_error is False
-    assert rows[qualified_name(conversation_id, "scoped")].connections == tuple(
-        sorted((own, shared), key=str)
-    )
-    assert rows[qualified_name(conversation_id, "closed")].connections == ()
-    assert rows[qualified_name(conversation_id, "scoped")].internet_access is False
-    assert rows[qualified_name(conversation_id, "closed")].internet_access is False
-    assert asked == [
-        (conversation_id, tuple(sorted((own, shared), key=str))),
-        (conversation_id, ()),
-    ]
-
-
-async def test_a_monitor_row_without_a_scope_reads_as_no_connections(
-    db: None, tmp_path: Path
-) -> None:
-    workspace_id, agent_id, conversation_id, member_id = await _seed()
     ctx = await _tool_ctx(
-        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
+        workspace_id,
+        conversation_id,
+        agent_id,
+        tmp_path,
+        speaker_member_id=member_id,
+        probe_env=recording,
     )
     with ws(workspace_id), agent(agent_id):
-        await monitor(ctx, _input("outgoing", ALPHA))
-        [stored] = await MonitorStore(ctx.ext).armed()
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.update(monitor_table)
-                .where(monitor_table.c.id == stored.id)
-                .values(connections=None)
-            )
-        [read] = await MonitorStore(ctx.ext).armed()
-        async with workspace_tx() as connection:
-            internet_access = await connection.scalar(
-                sa.select(monitor_table.c.internet_access).where(monitor_table.c.id == stored.id)
-            )
-    assert read.connections == ()
-    assert read.internet_access is None
-    assert internet_access is True
+        result = await monitor(ctx, _input("ci-run", HUB_PROBE))
+        [row] = await MonitorStore(ctx.ext).armed()
+
+    assert result.is_error is False
+    assert asked == [member_id]
+    assert row.baseline == grant_sentinel("acct-own")
+    assert row.created_by_member_id == member_id
+
+
+async def test_a_speakerless_turn_arms_for_the_member_it_acts_for(db: None, tmp_path: Path) -> None:
+    workspace_id, agent_id, conversation_id, member_id = await _seed()
+    other = await _member(workspace_id)
+    await _connection(workspace_id, agent_id, member_id, "acct-own", shared=False)
+    await _connection(workspace_id, agent_id, other, "acct-private", shared=False)
+    env = ProbeEnv(grants=GrantStore(), clis=HUB_CLI)
+    asked: list[UUID | None] = []
+
+    async def recording(conversation: UUID, probe_id: UUID, member: UUID | None) -> dict[str, str]:
+        asked.append(member)
+        return await env.exports(conversation, probe_id, member)
+
+    ctx = await _tool_ctx(
+        workspace_id,
+        conversation_id,
+        agent_id,
+        tmp_path,
+        acting_member_id=member_id,
+        probe_env=recording,
+    )
+    with ws(workspace_id), agent(agent_id):
+        result = await monitor(ctx, _input("ci-run", HUB_PROBE))
+        [row] = await MonitorStore(ctx.ext).armed()
+
+    assert result.is_error is False
+    assert asked == [member_id]
+    assert row.baseline == grant_sentinel("acct-own")
+    assert row.created_by_member_id == member_id
 
 
 async def test_a_failing_probe_fails_the_arm_and_persists_nothing(db: None, tmp_path: Path) -> None:
@@ -574,15 +529,15 @@ def test_the_monitor_input_refuses_an_unknown_field() -> None:
 
 async def test_the_deadline_fires_once_and_retires_the_monitor(db: None, tmp_path: Path) -> None:
     """The watch's ceiling: nothing changed, no probe failed, and the arming turn still gets its one
-    arrival — carrying the reason, next steps, metadata, and exact capabilities it armed with, with
-    the row gone afterwards."""
+    arrival — carrying the reason, next steps, and metadata it armed with and acting for the member
+    who armed it, with the row gone afterwards."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
-    connection_id = await _connection(workspace_id, agent_id, member_id, "acct-own", shared=False)
-    ctx = replace(
-        await _tool_ctx(
-            workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-        ),
-        grants=GrantStore(),
+    other = await _member(workspace_id)
+    await _connection(workspace_id, agent_id, member_id, "acct-own", shared=False)
+    await _connection(workspace_id, agent_id, other, "acct-shared", shared=True)
+    await _connection(workspace_id, agent_id, other, "acct-private", shared=False)
+    ctx = await _tool_ctx(
+        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
     )
     ctx = replace(
         ctx,
@@ -595,20 +550,25 @@ async def test_the_deadline_fires_once_and_retires_the_monitor(db: None, tmp_pat
         admission=Admission(dbos=dbos, durable_surfaces=frozenset()), workspace_id=workspace_id
     )
     with ws(workspace_id), agent(agent_id):
-        await monitor(ctx, _input("ci-run", ALPHA, connections=[str(connection_id)]))
+        await monitor(ctx, _input("ci-run", ALPHA))
         [row] = await _rows(workspace_id)
         await _overdue(row["id"])
         await MonitorRunner(ctx=_runner_ctx(invoker, tmp_path)).run()
         turns = await _turns(conversation_id)
         remaining = await _rows(workspace_id)
+        [turn] = turns
+        fired = replace(
+            ctx, turn=Turn.model_validate(dict(turn)), speaker_member_id=None, grants=GrantStore()
+        )
+        accounts = await fired.connector_accounts("hub")
 
-    [turn] = turns
     assert remaining == []
     assert turn["admission_source"] == "internal"
     assert turn["speaker_member_id"] is None
+    assert turn["member_id"] == member_id
+    assert accounts == ("acct-own", "acct-shared")
     assert TurnRuntimeConfig.model_validate(turn["runtime_config"]) == TurnRuntimeConfig(
-        connections=(connection_id,),
-        internet_access=False,
+        internet_access=False
     )
     assert dbos.enqueued == [str(turn["id"])]
     body = turn["inbound"]
@@ -623,16 +583,10 @@ async def test_the_deadline_fires_once_and_retires_the_monitor(db: None, tmp_pat
     assert body.endswith("</monitor_fired>")
 
 
-async def test_a_replayed_fire_keeps_one_turn_and_one_connection_scope(
-    db: None, tmp_path: Path
-) -> None:
+async def test_a_replayed_fire_keeps_one_turn(db: None, tmp_path: Path) -> None:
     workspace_id, agent_id, conversation_id, member_id = await _seed()
-    connection_id = await _connection(workspace_id, agent_id, member_id, "acct-own", shared=False)
-    ctx = replace(
-        await _tool_ctx(
-            workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-        ),
-        grants=GrantStore(),
+    ctx = await _tool_ctx(
+        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
     )
     ctx = replace(
         ctx,
@@ -646,7 +600,7 @@ async def test_a_replayed_fire_keeps_one_turn_and_one_connection_scope(
     )
     runner = MonitorRunner(ctx=_runner_ctx(invoker, tmp_path))
     with ws(workspace_id), agent(agent_id):
-        await monitor(ctx, _input("ci-run", ALPHA, connections=[str(connection_id)]))
+        await monitor(ctx, _input("ci-run", ALPHA))
         [stored] = await MonitorStore(ctx.ext).armed()
         await _overdue(stored.id)
         [claimed] = await MonitorStore(runner.ctx).claim_due(datetime.now(UTC), 300)
@@ -662,17 +616,14 @@ async def test_a_replayed_fire_keeps_one_turn_and_one_connection_scope(
 
     assert len(turns) == 1
     assert dbos.enqueued == [str(turns[0]["id"]), str(turns[0]["id"])]
+    assert turns[0]["member_id"] == member_id
     assert TurnRuntimeConfig.model_validate(turns[0]["runtime_config"]) == TurnRuntimeConfig(
-        connections=(connection_id,),
-        internet_access=False,
+        internet_access=False
     )
     assert remaining == []
 
 
-async def test_a_deadline_fire_uses_capabilities_without_the_creators_seat(
-    db: None, tmp_path: Path
-) -> None:
-    """The deadline fire does not depend on the management row creator's current seat."""
+async def test_a_deadline_fire_lands_without_the_creators_seat(db: None, tmp_path: Path) -> None:
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     ctx = await _tool_ctx(
         workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
@@ -693,6 +644,7 @@ async def test_a_deadline_fire_uses_capabilities_without_the_creators_seat(
     [turn] = turns
     assert remaining == []
     assert turn["speaker_member_id"] is None
+    assert turn["member_id"] == member_id
     assert turn["status"] == "queued"
     assert dbos.enqueued == [str(turn["id"])]
 
@@ -750,17 +702,11 @@ async def test_a_non_creator_cannot_disarm_another_members_monitor(
     conversation, and disarmed only by its creator or a workspace admin."""
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     other = await _member(workspace_id)
-    connection_id = await _connection(
-        workspace_id, agent_id, member_id, "creator-account", shared=False
-    )
-    ctx = replace(
-        await _tool_ctx(
-            workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
-        ),
-        grants=GrantStore(),
+    ctx = await _tool_ctx(
+        workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id
     )
     with ws(workspace_id), agent(agent_id):
-        await monitor(ctx, _input("ci-run", ALPHA, connections=[str(connection_id)]))
+        await monitor(ctx, _input("ci-run", ALPHA))
         onlooker = replace(ctx, speaker_member_id=other)
         listed = json.loads(
             await _dispatch(_object_tool("object_list"), onlooker, kind=MONITOR_KIND)
@@ -790,7 +736,6 @@ async def test_a_non_creator_cannot_disarm_another_members_monitor(
 
     assert [row["name"] for row in listed["objects"]] == [qualified_name(conversation_id, "ci-run")]
     assert [row["mine"] for row in listed["objects"]] == [False]
-    assert detail["spec"]["connections"] == [str(connection_id)]
     assert detail["spec"]["internet_access"] is None
     assert remaining == []
 
@@ -922,10 +867,7 @@ async def _unseat(member_id: UUID) -> None:
         )
 
 
-async def test_a_probe_uses_its_capabilities_without_the_creators_seat(
-    db: None, tmp_path: Path
-) -> None:
-    """A probe runs from the stored capabilities, not from its management row creator."""
+async def test_a_probe_runs_without_the_creators_seat(db: None, tmp_path: Path) -> None:
     workspace_id, agent_id, conversation_id, member_id = await _seed()
     ctx = await _tool_ctx(
         workspace_id, conversation_id, agent_id, tmp_path, speaker_member_id=member_id

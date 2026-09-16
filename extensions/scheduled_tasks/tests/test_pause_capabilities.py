@@ -145,6 +145,7 @@ async def test_pause_generation_preserves_only_capabilities_written_by_its_arm(d
             origin_seq=1,
             origin_arrival_seq=1,
             prompt="resume",
+            created_by_member_id=member_id,
             internet_access=None,
         )
         [claimed] = await store.claim_due(now, 300)
@@ -158,6 +159,7 @@ async def test_pause_generation_preserves_only_capabilities_written_by_its_arm(d
             origin_seq=2,
             origin_arrival_seq=2,
             prompt="resume again",
+            created_by_member_id=member_id,
             internet_access=False,
         )
         assert replaced.id != unrestricted.id
@@ -170,6 +172,7 @@ async def test_pause_generation_preserves_only_capabilities_written_by_its_arm(d
             origin_seq=2,
             origin_arrival_seq=2,
             prompt="resume without a ceiling",
+            created_by_member_id=member_id,
             internet_access=None,
         )
 
@@ -186,7 +189,6 @@ async def test_pause_generation_preserves_only_capabilities_written_by_its_arm(d
             sa.Column("prompt", sa.Text),
             sa.Column("user_description", sa.Text),
             sa.Column("created_by_member_id", sa.Uuid),
-            sa.Column("connections", sa.JSON(none_as_null=True)),
             sa.Column("claimed_by", sa.Text),
             sa.Column("claim_expires_at", sa.DateTime(timezone=True)),
             sa.Column("created_at", sa.DateTime(timezone=True)),
@@ -202,7 +204,6 @@ async def test_pause_generation_preserves_only_capabilities_written_by_its_arm(d
             "prompt": "outgoing arm",
             "user_description": "outgoing arm",
             "created_by_member_id": member_id,
-            "connections": [str(uuid4())],
             "claimed_by": None,
             "claim_expires_at": None,
             "updated_at": now,

@@ -83,7 +83,7 @@ from ufo.runtime.workspace import (
     ws,
 )
 from ufo.schema import tables
-from ufo.schema.records import CONNECTION_SCOPE_MAX, SUBAGENT_SURFACE, Usage
+from ufo.schema.records import SUBAGENT_SURFACE, Usage
 
 MODEL = "claude-opus-4-8"
 JOB = "memory:memory_consolidate"
@@ -902,35 +902,31 @@ async def test_probe_runs_in_the_conversations_own_sandbox(db: None, tmp_path: P
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_probes_connection_capabilities_reach_the_environment_and_token(
+async def test_a_probes_acting_member_reaches_the_environment_and_token(
     db: None, tmp_path: Path
 ) -> None:
-    asked: list[tuple[UUID, tuple[UUID, ...]]] = []
+    asked: list[tuple[UUID, UUID | None]] = []
 
-    async def env(
-        conversation_id: UUID,
-        probe_id: UUID,
-        connections: tuple[UUID, ...],
-    ) -> dict[str, str]:
-        asked.append((probe_id, connections))
+    async def env(conversation_id: UUID, probe_id: UUID, member_id: UUID | None) -> dict[str, str]:
+        asked.append((probe_id, member_id))
         return {}
 
     workspace_id = await _workspace()
     carrier = _RecordingProbeCarrier()
     codec = ProbeTokenCodec(b"probe-token-test-secret")
+    member_id = uuid4()
     with ws(workspace_id):
         conversation_id = await _conversation(workspace_id)
         probes = ConversationProbes(_sandboxes(tmp_path / "workspaces", carrier), codec, env)
-        first, second = sorted((uuid4(), uuid4()), key=str)
         await probes.run(
             conversation_id,
             "true",
-            connections=(second, first),
+            acting_member_id=member_id,
             internet_access=False,
         )
         await probes.run(conversation_id, "true")
 
-    assert [connections for _, connections in asked] == [(first, second), ()]
+    assert [member for _, member in asked] == [member_id, None]
     assert len({probe_id for probe_id, _ in asked}) == 2
     assert len(carrier.specs) == 2
     principals = tuple(
@@ -942,31 +938,11 @@ async def test_a_probes_connection_capabilities_reach_the_environment_and_token(
         conversation_id=conversation_id,
         probe_id=asked[0][0],
         expires_at=principals[0].expires_at,
-        connections=(first, second),
+        member_id=member_id,
         internet_access=False,
     )
+    assert principals[1].member_id is None
     assert principals[1].internet_access is None
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_probe_connection_scope_is_bounded_and_distinct(db: None, tmp_path: Path) -> None:
-    workspace_id = await _workspace()
-    with ws(workspace_id):
-        conversation_id = await _conversation(workspace_id)
-        probes = _probes(_sandboxes(tmp_path / "workspaces"))
-        with pytest.raises(ValueError, match=str(CONNECTION_SCOPE_MAX)):
-            await probes.run(
-                conversation_id,
-                "true",
-                connections=tuple(uuid4() for _ in range(CONNECTION_SCOPE_MAX + 1)),
-            )
-        repeated = uuid4()
-        with pytest.raises(ValueError, match="duplicate"):
-            await probes.run(
-                conversation_id,
-                "true",
-                connections=(repeated, repeated),
-            )
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -996,9 +972,9 @@ async def test_the_probe_environment_exports_keyed_connectors_but_never_a_model_
     )
     with ws(workspace_id):
         exports = await ProbeEnv(credentials=store, slots=WorkspaceSlots(deploy=slots)).exports(
-            uuid4(), uuid4(), ()
+            uuid4(), uuid4()
         )
-        bare = await ProbeEnv().exports(uuid4(), uuid4(), ())
+        bare = await ProbeEnv().exports(uuid4(), uuid4())
 
     assert exports["DD_API_KEY"] == "UFO_SENTINEL_DATADOG_API_KEY"
     assert "dd-real" not in exports.values()
