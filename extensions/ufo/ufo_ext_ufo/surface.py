@@ -50,7 +50,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ValidationError
 
-from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
+from ufo.sdk.audience import conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.credentials import CredentialValueInvalid
 from ufo.sdk.http import PlainTextResponse, Request, Response, StreamingResponse
@@ -1101,11 +1101,12 @@ async def conversation(ctx: SurfaceContext, request: Request) -> Response:
     surface and with whatever agent it lives. The same requests the channel takes mean the same
     here: an empty body replays history and tails, a message admits a turn as this member, a stop
     ends the running one, a send admits without holding. What differs is what the id may name and
-    how a message enters: the agent must be one the member reaches and the conversation one they
-    read, and a message enters a Slack or terminal thread with the notice the portal sends, a
-    portal or extension conversation of their own plainly, and any other surface not at all. No
-    terminal is claimed — a joined conversation keeps the sandbox it has — so a claim and an op
-    reply, which only a channel's terminal answers, are refused."""
+    how a message enters: the agent must be one the member reaches and the conversation one they may
+    speak in — their own or the workspace-shared one, as the portal admits it — and a message enters
+    a Slack or terminal thread with the notice the portal sends, a portal or extension conversation
+    plainly, and any other surface not at all. No terminal is claimed — a joined conversation keeps
+    the sandbox it has — so a claim and an op reply, which only a channel's terminal answers, are
+    refused."""
     authenticated = await _authenticated_member(ctx, request)
     if authenticated is None:
         return PlainTextResponse("unauthorized", status_code=401)
@@ -1203,10 +1204,12 @@ async def _joined_conversation(
 
 def _posting(entry: ListedConversation, member_id: UUID, email: str) -> _Posting:
     surface = entry.summary.surface
-    own = entry.audience == str(conversation_audience(member_id))
-    if own and (surface == PORTAL_SURFACE or surface.startswith(EXTENSION_SURFACE_PREFIX)):
+    if not entry.speakable:
+        return _ReadOnly(surface)
+    if surface == PORTAL_SURFACE or surface.startswith(EXTENSION_SURFACE_PREFIX):
         return _Plain()
-    if surface in COMMENT_SURFACES and (own or entry.audience == str(SHARED_AUDIENCE)):
+    if surface in COMMENT_SURFACES:
+        own = entry.audience == str(conversation_audience(member_id))
         return _Comment(_comment_author(entry, email, own))
     return _ReadOnly(surface)
 

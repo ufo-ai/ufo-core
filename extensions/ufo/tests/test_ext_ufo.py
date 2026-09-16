@@ -93,7 +93,7 @@ from ufo.schema.records import (
     TerminalFrame,
     Usage,
 )
-from ufo.sdk.audience import conversation_audience
+from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.record import frame_event, frame_payload
 from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth, with_agent_detail
@@ -3008,6 +3008,58 @@ async def test_a_conversation_opened_by_id_admits_plainly_into_the_members_own_w
             f"/surface/ufo/conversation/{web}",
             content=b"ship it",
             headers={"authorization": f"Bearer {token}"},
+        )
+
+    assert posted.status_code == 200
+    async with workspace_tx() as connection:
+        comments = (
+            await connection.execute(sa.select(sa.func.count()).select_from(tables.mid_turn_reply))
+        ).scalar_one()
+        seqs = (
+            (
+                await connection.execute(
+                    sa.select(tables.turn.c.seq).where(tables.turn.c.conversation_id == web)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert comments == 0
+    assert sorted(seqs) == [1, 2]
+
+
+async def test_a_conversation_opened_by_id_admits_plainly_into_a_shared_web_chat(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """A workspace-shared portal chat another member opened takes the member's message plainly,
+    as the portal itself admits it — the audience is theirs to speak in, and the message carries
+    its sender — so the row lists as postable and no comment notice is written."""
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    nate = await _seed_member(workspace_id, "nate@example.com")
+    main = await _main_agent_id(workspace_id)
+    web = await _seed_conversation_row(
+        workspace_id,
+        main,
+        surface="web",
+        queue_key=f"{main}/nate@example.com/2",
+        audience=str(SHARED_AUDIENCE),
+        member_id=None,
+        title="Launch checklist",
+    )
+    await _seed_done_turn(
+        workspace_id, web, main, inbound="Launch checklist", speaker_member_id=nate
+    )
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    bearer = {"authorization": f"Bearer {token}"}
+
+    listed = await client.get("/surface/ufo/conversations", headers=bearer)
+    assert listed.status_code == 200
+    rows = {row["id"]: row for row in listed.json()["conversations"]}
+    assert rows[str(web)]["postable"] is True
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        posted = await client.post(
+            f"/surface/ufo/conversation/{web}", content=b"add the rollback step", headers=bearer
         )
 
     assert posted.status_code == 200
