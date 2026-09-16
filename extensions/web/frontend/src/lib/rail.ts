@@ -318,6 +318,12 @@ export function readChat(rows: Conversation[], conversationId: string): Conversa
   );
 }
 
+/** A chat filed out of the listing — archived or deleted: its row leaves, because the listing read
+ *  behind the rail answers without it and `mergeChats` holds every row a read does not name. */
+export function filedChat(rows: Conversation[], conversationId: string): Conversation[] {
+  return rows.filter((row) => row.conversation_id !== conversationId);
+}
+
 /** A turn that ends restates its row's mark alone: its moment is the turn it started, so a landing
  *  turn must not reorder the rail under the member. */
 export function turnedChat(rows: Conversation[], conversationId: string, turn: ConversationTurn): Conversation[] {

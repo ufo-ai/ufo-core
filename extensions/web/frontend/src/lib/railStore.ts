@@ -20,6 +20,7 @@ import {
   holdSectionsShut,
   holdSidebar,
   chatRows,
+  filedChat,
   mergeChats,
   railRows,
   readChat,
@@ -308,6 +309,12 @@ export function settleRailVisibility(conversationId: string, outcome: IntentOutc
         }),
   }));
   readRail();
+}
+
+/** A conversation this member just filed out of the listing: its row leaves as the act lands. The
+ *  reads behind the rail stop naming it, and a merge holds every row a read does not name. */
+export function railFiled(conversationId: string): void {
+  update((held) => ({ ...held, rows: filedChat(held.rows, conversationId) }));
 }
 
 export function railRead(conversationId: string): void {

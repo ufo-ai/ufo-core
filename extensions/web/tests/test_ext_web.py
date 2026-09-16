@@ -4263,8 +4263,8 @@ async def test_an_app_page_resolves_the_conversation_it_opens(
     web: tuple[AsyncClient, UUID, UUID],
 ) -> None:
     """A Chat app homepage reads `api/chats?conversation=` for the conversation it opens, and the
-    row answers under the field names its kit carries. A read naming no conversation is refused,
-    and another member's conversation is not found."""
+    row answers under the field names its kit carries, filing marks included. A read naming no
+    conversation is refused, and another member's conversation is not found."""
     client, workspace_id, agent_id = web
     member_id, token = await _seed_member(workspace_id, "owner@example.com", admin=True)
     _peer_id, peer_token = await _seed_member(workspace_id, "peer@example.com")
@@ -4288,6 +4288,7 @@ async def test_an_app_page_resolves_the_conversation_it_opens(
     assert row["audience"] == f"member:{member_id}"
     assert (row["mine"], row["readable"], row["speakable"]) == (True, True, True)
     assert row["disclosable"] is False
+    assert (row["archived"], row["deleted"], row["pinned"]) == (False, False, False)
 
     bare = await client.get("/surface/web/api/chats", headers=cookie)
     assert bare.status_code == 400

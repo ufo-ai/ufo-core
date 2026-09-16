@@ -3117,7 +3117,10 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
 
     An agent reached through a member-private conversation alone resolves that conversation and no
     other, and a row an admin may only disclose resolves with `readable` false rather than as a
-    conversation that does not exist."""
+    conversation that does not exist.
+
+    `archived` and `deleted` are the conversation's own filing marks; `pinned` is this viewer's
+    own, so two members reading one row read their own pin."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
@@ -3156,6 +3159,9 @@ async def chats_index(ctx: SurfaceContext, request: Request) -> Response:
                 "turn_count": entry.summary.turn_count,
                 "created_at": _iso(entry.summary.created_at),
                 "last_turn_at": _iso(entry.summary.last_turn_at),
+                "archived": entry.archived,
+                "deleted": entry.deleted,
+                "pinned": entry.pinned,
                 "readable": entry.readable,
                 "disclosable": entry.disclosable,
                 "speakable": entry.speakable,

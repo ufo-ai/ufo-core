@@ -1,6 +1,6 @@
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import type { Conversation } from "@/lib/types";
@@ -107,7 +107,7 @@ test("the Home row stands a table of the chats the member reaches, whoever owns 
     within(home)
       .getAllByRole("columnheader")
       .map((head) => head.textContent),
-  ).toEqual(["Chat", "Owner", "Time"]);
+  ).toEqual(["Chat", "Owner", "Time", ""]);
   expect(cells(/Pick one thread/)[1]).toBe("M");
   expect(cells(/Deploy question/)[1]).toBe("D");
   expect(cells(/Migration run/)[1]).toBe("S");
@@ -576,7 +576,7 @@ test("a filter that leaves nothing says so, and the bar stays put", async () => 
   const home = await screen.findByRole("region", { name: "Home" });
   expect(await within(home).findByText("No conversations match.")).toBeTruthy();
   expect(within(home).getByRole("tab", { name: "All" })).toBeTruthy();
-  expect(within(home).getAllByRole("columnheader").length).toBe(3);
+  expect(within(home).getAllByRole("columnheader").length).toBe(4);
 });
 
 test("a phone draws the chat alone, and the columns beside it are not stacked under it", async () => {
@@ -645,6 +645,7 @@ test("a search reaches past the bound, so it never reports a chat it did not loo
   wire({
     "/objects/conversation$": (url) => {
       calls.push(url);
+      if (url.includes("archived=true")) return json({ objects: [] });
       const said = new URLSearchParams(url.split("?")[1] ?? "").get("q") ?? "";
       const rows = said ? [older] : [CHAT_ROW];
       return json({
@@ -672,6 +673,7 @@ test("a search that matches more than one page offers the step to the rest", asy
   wire({
     "/objects/conversation$": (url) => {
       reads.push(url);
+      if (url.includes("archived=true")) return json({ objects: [] });
       const stepped = new URLSearchParams(url.split("?")[1] ?? "").get("cursor");
       const rows = stepped ? [older] : [CHAT_ROW];
       return json({
@@ -704,8 +706,10 @@ test("a search that matches more than one page offers the step to the rest", asy
 
 test("a listing the workspace holds more than says so rather than truncating in silence", async () => {
   wire({
-    "/objects/conversation$": () =>
-      json({ objects: [conversationObject(CHAT_ROW)], next_cursor: null, cut: true }),
+    "/objects/conversation$": (url) =>
+      url.includes("archived=true")
+        ? json({ objects: [] })
+        : json({ objects: [conversationObject(CHAT_ROW)], next_cursor: null, cut: true }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/chats";
@@ -718,17 +722,19 @@ test("a listing the workspace holds more than says so rather than truncating in 
 test("a listing holding a step to the rest is not cut, because the step is the way to them", async () => {
   wire({
     "/objects/conversation$": (url) =>
-      json({
-        objects: [
-          conversationObject(
-            url.includes("cursor=")
-              ? { ...CHAT_ROW, conversation_id: SECOND_ID, title: "Second page thread" }
-              : CHAT_ROW,
-          ),
-        ],
-        next_cursor: url.includes("cursor=") ? null : "page-two",
-        cut: true,
-      }),
+      url.includes("archived=true")
+        ? json({ objects: [] })
+        : json({
+            objects: [
+              conversationObject(
+                url.includes("cursor=")
+                  ? { ...CHAT_ROW, conversation_id: SECOND_ID, title: "Second page thread" }
+                  : CHAT_ROW,
+              ),
+            ],
+            next_cursor: url.includes("cursor=") ? null : "page-two",
+            cut: true,
+          }),
     "/transcript": () => json({ messages: [] }),
   });
   location.hash = "#/chats?q=thread";
@@ -768,4 +774,173 @@ test("a row a colleague founded opens their conversation, with the composer to s
       url.includes("/agents/" + AGENT_ID + "/conversations/" + COLLEAGUE_ID + "/transcript"),
     ),
   ).toBe(true);
+});
+
+const FILING_ACTIONS = [
+  "archive_conversation",
+  "unarchive_conversation",
+  "pin_conversation",
+  "unpin_conversation",
+  "delete_conversation",
+  "restore_conversation",
+];
+
+/** The conversation kind's own action projection for one row, as the portal reads it before
+ *  dispatching an act the page did not declare itself. */
+function filingActions(url: string) {
+  const conversationId = url.split("/actions/conversation/")[1].split("?")[0];
+  return json({
+    actions: FILING_ACTIONS.map((name) => ({
+      name,
+      description: "",
+      input_schema: { properties: {} },
+      call: { kind: "conversation", name: conversationId, action: name },
+      label: name,
+    })),
+  });
+}
+
+const PINNED: Conversation = {
+  ...CHAT_ROW,
+  conversation_id: THIRD_ID,
+  title: "Ship the plan",
+  last_at: "2026-07-20T08:00:00.000Z",
+  pinned: true,
+};
+
+const FILED: Conversation = {
+  ...CHAT_ROW,
+  conversation_id: ALERT_ID,
+  title: "Old runbook",
+  last_at: "2026-07-10T08:00:00.000Z",
+  archived: true,
+};
+
+/** The acts land on the rows the reads answer from, so a filed conversation leaves the listing the
+ *  way the workspace's own reads report it. */
+function filingWire(rows: Conversation[], posted: string[]) {
+  return {
+    ...chatsOnWire(rows),
+    "/actions/conversation/": (url: string, init?: RequestInit) => {
+      if (init?.method !== "POST") return filingActions(url);
+      const filed = url.split("/actions/conversation/")[1];
+      posted.push(filed);
+      const [conversationId, action] = filed.split("/");
+      const held = rows.findIndex((row) => row.conversation_id === conversationId);
+      if (action === "delete_conversation") rows.splice(held, 1);
+      if (action === "archive_conversation") rows[held] = { ...rows[held], archived: true };
+      if (action === "unarchive_conversation") rows[held] = { ...rows[held], archived: false };
+      return json({ applied: true, message: "Saved." });
+    },
+    "/transcript": () => json({ messages: [] }),
+  };
+}
+
+function mainTable(home: HTMLElement): HTMLElement {
+  return home.querySelectorAll("table")[0] as HTMLElement;
+}
+
+test("a chat row files its conversation away, holds it above the list, or deletes it", async () => {
+  const posted: string[] = [];
+  wire(filingWire([CHAT_ROW, PINNED, FILED, COLLEAGUE], posted));
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  expect(titles(home)[0]).toBe("Ship the plan");
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Ship the plan" }));
+  expect(await screen.findByRole("menuitem", { name: "Archive" })).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "Unpin" })).toBeTruthy();
+  await userEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+  await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", {
+    name: "Delete",
+  }));
+
+  expect(posted).toEqual([THIRD_ID + "/delete_conversation"]);
+});
+
+test("the archived conversations stand in their own section, and unarchive from it", async () => {
+  const posted: string[] = [];
+  wire(filingWire([CHAT_ROW, FILED], posted));
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  const archived = await within(home).findByRole("heading", { name: "Archived" });
+  const section = archived.closest("section")!;
+  expect(within(section).getByRole("row", { name: /Old runbook/ })).toBeTruthy();
+  expect(titles(home)).toContain("Pick one thread");
+
+  await userEvent.click(within(section).getByRole("button", { name: "Actions for Old runbook" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Unarchive" }));
+
+  await vi.waitFor(() => expect(posted).toEqual([ALERT_ID + "/unarchive_conversation"]));
+});
+
+test("a filed row leaves the main table, and an archived one stands once, under Archived", async () => {
+  const posted: string[] = [];
+  const rows = [CHAT_ROW, PINNED];
+  wire(filingWire(rows, posted));
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  expect(titles(home)).toEqual(["Ship the plan", "Pick one thread"]);
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Ship the plan" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+
+  const archived = await within(home).findByRole("heading", { name: "Archived" });
+  await vi.waitFor(() =>
+    expect(within(mainTable(home)).queryByRole("row", { name: /Ship the plan/ })).toBeNull(),
+  );
+  expect(screen.getAllByRole("row", { name: /Ship the plan/ })).toHaveLength(1);
+  expect(
+    within(archived.closest("section")!).getByRole("row", { name: /Ship the plan/ }),
+  ).toBeTruthy();
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Pick one thread" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+  await userEvent.click(
+    within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }),
+  );
+
+  await vi.waitFor(() =>
+    expect(screen.queryByRole("row", { name: /Pick one thread/ })).toBeNull(),
+  );
+  expect(posted).toEqual([THIRD_ID + "/archive_conversation", CONVO_ID + "/delete_conversation"]);
+});
+
+test("an archived listing the workspace holds more than says so rather than truncating", async () => {
+  wire({
+    "/objects/conversation$": (url) =>
+      url.includes("archived=true")
+        ? json({ objects: [conversationObject(FILED)], next_cursor: null, cut: true })
+        : json({ objects: [conversationObject(CHAT_ROW)] }),
+    "/transcript": () => json({ messages: [] }),
+  });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  const archived = await within(home).findByRole("heading", { name: "Archived" });
+  expect(
+    within(archived.closest("section")!).getByText("Search to reach older chats."),
+  ).toBeTruthy();
+  expect(within(mainTable(home)).queryByText("Search to reach older chats.")).toBeNull();
+});
+
+test("Delete is offered on a conversation this member owns and on no other", async () => {
+  const posted: string[] = [];
+  wire(filingWire([CHAT_ROW, COLLEAGUE], posted));
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Deploy question" }));
+
+  expect(await screen.findByRole("menuitem", { name: "Archive" })).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "Pin" })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
 });
