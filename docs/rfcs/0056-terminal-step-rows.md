@@ -100,8 +100,11 @@ committed-blocks-first with the open tail live; once the done frame lands its te
 stands in that passage's place, as RFC 0055's `answerOf` has it — so the surface never says a done
 frame's text, and an answer whose stream an op or a resume cut before the frame reads once. `N`
 counts labelled tool steps, the words that preceded one, unbound drawn ops, and runs that stated a
-step. Runs draw under the last segment as `label · latest ▸` rows that open by click. Rolling a turn
-up closes its words, so a turn ended by a detach or a stop keeps them.
+step. Blocks inside a segment stand a blank row apart. A bare command — an exec op no label heads —
+stands until the next bare command follows, which takes its place; `N` still counts every one. Runs
+draw under the last segment once the turn has ended, as `label ▸` rows that open by click; while the
+turn runs, the bottom line alone carries a run's latest step. Rolling a turn up closes its words, so a
+turn ended by a detach or a stop keeps them.
 
 ### The row
 
@@ -120,7 +123,7 @@ up closes its words, so a turn ended by a detach or a stop keeps them.
 | Command text | `safety_argv`'s command as the model wrote it: first line, `…` when more follow, a leading `cd <cwd> && ` dropped by path equality |
 | Suffix | ` · 12s` while running once ≥ 2 s, ticking; kept on completion when ≥ 2 s; ` · timed out after 60s` from the reply's `timed_out` and the op's `timeout_s`; ` · stopped` when the turn ends over a running op |
 | Edit header | `edit <path> +A −R` from the same diff the body draws |
-| Bottom line | always the turn spinner, the latest label and the turn clock |
+| Bottom line | always the turn spinner, the latest label and the turn clock, under one blank row |
 
 ### Transitions
 

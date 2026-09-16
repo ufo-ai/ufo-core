@@ -5,6 +5,7 @@ use std::time::Instant;
 use ratatui::text::{Line, Span};
 
 use crate::fold::{self, Frame, DONE};
+use crate::ops::OP_EXEC;
 use crate::record::{Step, SubagentRun, TurnEnd, TurnRecord};
 use crate::ui::theme::Theme;
 use crate::ui::toolrender::OpRow;
@@ -163,10 +164,16 @@ impl Retained {
         }
     }
 
+    /// What arrives while the live turn's open segment still holds nothing stands above it, so
+    /// the rows the turn draws follow it instead of carrying it down.
     pub fn push(&mut self, entry: Entry) {
-        self.entries.push(entry);
-        self.drawn.push(None);
-        self.shapes.push(None);
+        let at = match entry {
+            Entry::Segment(_) => self.entries.len(),
+            _ => self.empty_open_segment().unwrap_or(self.entries.len()),
+        };
+        self.entries.insert(at, entry);
+        self.drawn.insert(at, None);
+        self.shapes.insert(at, None);
         if self.entries.len() > ENTRY_MAX {
             let evicted = self.entries.remove(0);
             self.drawn.remove(0);
@@ -256,36 +263,24 @@ impl Retained {
     /// Called once a member's message stands in the transcript mid-turn: the turn's open words
     /// close, as a drain closes them, the live segment closes where the record stands, and the
     /// next opens under the message, so what the turn writes and does after the message stands
-    /// below it. A segment nothing has been drawn in moves whole.
+    /// below it. A segment nothing has been drawn in already stands under the message.
     pub fn split_segment(&mut self) {
         let Some(turn) = self.live else {
             return;
         };
         fold::close_open(&mut self.turns[turn].record.steps);
+        if self.empty_open_segment().is_some() {
+            return;
+        }
         let at = self.turns[turn].record.steps.len();
         let mut ordinal = self.turns[turn].segments - 1;
         if let Some(index) = self.open_segment(turn) {
-            let Entry::Segment(open) = self.entries[index] else {
-                return;
-            };
-            let empty = open.from == at
-                && !self.turns[turn]
-                    .ops
-                    .iter()
-                    .any(|row| row.segment == open.ordinal);
-            if empty {
-                self.entries.remove(index);
-                self.drawn.remove(index);
-                self.shapes.remove(index);
-                self.dirty = true;
-            } else {
-                if let Entry::Segment(segment) = &mut self.entries[index] {
-                    segment.to = Some(at);
-                }
-                self.invalidate(index);
-                ordinal = self.turns[turn].segments;
-                self.turns[turn].segments += 1;
+            if let Entry::Segment(segment) = &mut self.entries[index] {
+                segment.to = Some(at);
             }
+            self.invalidate(index);
+            ordinal = self.turns[turn].segments;
+            self.turns[turn].segments += 1;
         }
         self.push(Entry::Segment(Segment {
             turn,
@@ -417,6 +412,18 @@ impl Retained {
         self.entries.iter().rposition(
             |entry| matches!(entry, Entry::Segment(segment) if segment.turn == turn && segment.to.is_none()),
         )
+    }
+
+    fn empty_open_segment(&self) -> Option<usize> {
+        let turn = self.live?;
+        let index = self.open_segment(turn)?;
+        let Entry::Segment(open) = &self.entries[index] else {
+            return None;
+        };
+        let held = &self.turns[turn];
+        let empty = open.from == held.record.steps.len()
+            && !held.ops.iter().any(|row| row.segment == open.ordinal);
+        empty.then_some(index)
     }
 
     fn last_segment_of(&self, turn: usize) -> Option<usize> {
@@ -764,7 +771,7 @@ fn segment_lines(
     let disclosed = segment.fold == Fold::Opened;
     let indent = if disclosed { STEP_INDENT } else { "" };
     let room = width.saturating_sub(indent.len() as u16);
-    let mut inside: Vec<(Line<'static>, Option<Toggle>)> = Vec::new();
+    let mut inside = Blocks::default();
     let mut after: Vec<Line<'static>> = Vec::new();
     let mut count = 0;
     let mut words = 0;
@@ -772,12 +779,16 @@ fn segment_lines(
     let now = Instant::now();
     let draw_op = |row: &OpRow,
                    label: Option<&str>,
-                   inside: &mut Vec<(Line<'static>, Option<Toggle>)>,
+                   inside: &mut Blocks,
                    count: &mut usize,
                    words: &mut usize| {
-        for line in row.rows(label, cwd, phase, now, theme) {
-            inside.push((indented(clipped(&line, room), indent), None));
-        }
+        let bare = label.is_none_or(|said| said.trim().is_empty());
+        let block = row
+            .rows(label, cwd, phase, now, theme)
+            .into_iter()
+            .map(|line| (indented(clipped(&line, room), indent), None))
+            .collect();
+        inside.push(block, bare && row.op.kind == OP_EXEC);
         *count += *words + 1;
         *words = 0;
     };
@@ -801,9 +812,11 @@ fn segment_lines(
         match &steps[index] {
             Step::Text { text, .. } => {
                 words += 1;
-                for line in markdown::render(text, theme, room) {
-                    inside.push((indented(line, indent), None));
-                }
+                let block = markdown::render(text, theme, room)
+                    .into_iter()
+                    .map(|line| (indented(line, indent), None))
+                    .collect();
+                inside.push(block, false);
             }
             Step::Tool { label: None, .. } | Step::Drain { .. } => {}
             Step::Tool {
@@ -820,10 +833,13 @@ fn segment_lines(
                     &mut words,
                 ),
                 None => {
-                    inside.push((
-                        Line::styled(format!("{indent}{CALL_MARKER}{label}"), theme.tool_title),
-                        None,
-                    ));
+                    inside.push(
+                        vec![(
+                            Line::styled(format!("{indent}{CALL_MARKER}{label}"), theme.tool_title),
+                            None,
+                        )],
+                        false,
+                    );
                     count += words + 1;
                     words = 0;
                 }
@@ -831,10 +847,13 @@ fn segment_lines(
             Step::Reply { text, .. } | Step::Comment { text, .. } => {
                 after.extend(markdown::render(text, theme, width));
             }
-            Step::Resumed { .. } => inside.push((
-                Line::styled(format!("{indent}{RESUMED_NOTE}"), theme.muted),
-                None,
-            )),
+            Step::Resumed { .. } => inside.push(
+                vec![(
+                    Line::styled(format!("{indent}{RESUMED_NOTE}"), theme.muted),
+                    None,
+                )],
+                false,
+            ),
         }
     }
     for (op_index, row) in ops.iter().enumerate().skip(next_op) {
@@ -873,28 +892,64 @@ fn segment_lines(
         after.extend(markdown::render(text, theme, width));
     }
     if last {
-        for run in &turn.record.runs {
-            run_rows(run, turn, segment.fold, indent, theme, &mut inside);
+        if segment.fold != Fold::Live {
+            for run in &turn.record.runs {
+                inside.push(run_rows(run, turn, indent, theme), false);
+            }
         }
         count += fold::runs_that_worked(&turn.record.runs);
     }
+    let answers = !after.is_empty()
+        || steps[answer_from..to].iter().any(|step| {
+            matches!(
+                step,
+                Step::Text { .. } | Step::Reply { .. } | Step::Comment { .. }
+            )
+        });
     let summary = |mark: &str| Line::styled(format!("{} {mark}", rollup_line(count)), theme.muted);
     let mut rows = Vec::new();
     match segment.fold {
-        Fold::Live => rows.extend(inside),
+        Fold::Live => {
+            rows.extend(inside.rows);
+            if !rows.is_empty() && answers {
+                rows.push((Line::raw(""), None));
+            }
+        }
         Fold::Rolled if count > 0 => {
             rows.push((summary(FOLD_ROLLED), Some(Toggle::Fold)));
             rows.push((Line::raw(""), None));
         }
         Fold::Opened if count > 0 => {
             rows.push((summary(FOLD_OPENED), Some(Toggle::Fold)));
-            rows.extend(inside);
+            rows.extend(inside.rows);
             rows.push((Line::raw(""), None));
         }
         Fold::Rolled | Fold::Opened => {}
     }
     rows.extend(after.into_iter().map(|line| (line, None)));
     rows
+}
+
+/// The blocks a segment draws inside its fold, a blank row apart. A bare command — an exec op no
+/// label heads — stands only until the next bare command follows it, which takes its place.
+#[derive(Default)]
+struct Blocks {
+    rows: Vec<(Line<'static>, Option<Toggle>)>,
+    command_at: Option<usize>,
+}
+
+impl Blocks {
+    fn push(&mut self, block: Vec<(Line<'static>, Option<Toggle>)>, command: bool) {
+        if let (true, Some(at)) = (command, self.command_at) {
+            self.rows.truncate(at);
+        }
+        let at = self.rows.len();
+        if at > 0 {
+            self.rows.push((Line::raw(""), None));
+        }
+        self.rows.extend(block);
+        self.command_at = command.then_some(at);
+    }
 }
 
 /// The labelled tool step each op of the segment serves, by the call they share; the first op
@@ -975,34 +1030,21 @@ fn run_label(run: &SubagentRun) -> &str {
 fn run_rows(
     run: &SubagentRun,
     turn: &TurnState,
-    fold: Fold,
     indent: &str,
     theme: &Theme,
-    inside: &mut Vec<(Line<'static>, Option<Toggle>)>,
-) {
+) -> Vec<(Line<'static>, Option<Toggle>)> {
     let key = run_key(run);
     let opened = turn.opened_runs.contains(&key);
-    let label = run_label(run);
-    let latest = run
-        .current
-        .as_deref()
-        .or_else(|| run.events.last().map(|event| event.text.as_str()));
-    let row = match (opened, fold, latest) {
-        (false, Fold::Live, Some(latest)) if run.running => {
-            format!("{label} · {latest} {FOLD_ROLLED}")
-        }
-        (false, ..) => format!("{label} {FOLD_ROLLED}"),
-        (true, ..) => format!("{label} {FOLD_OPENED}"),
-    };
-    inside.push((
-        Line::styled(format!("{indent}{row}"), theme.muted),
+    let mark = if opened { FOLD_OPENED } else { FOLD_ROLLED };
+    let mut rows = vec![(
+        Line::styled(format!("{indent}{} {mark}", run_label(run)), theme.muted),
         Some(Toggle::Run(key)),
-    ));
+    )];
     if !opened {
-        return;
+        return rows;
     }
     for event in &run.events {
-        inside.push((
+        rows.push((
             Line::styled(
                 format!("{indent}{RUN_INDENT}{CALL_MARKER}{}", event.text),
                 theme.tool_title,
@@ -1012,8 +1054,9 @@ fn run_rows(
     }
     let deeper = format!("{indent}{RUN_INDENT}");
     for nested in &run.subagents {
-        run_rows(nested, turn, fold, &deeper, theme, inside);
+        rows.extend(run_rows(nested, turn, &deeper, theme));
     }
+    rows
 }
 
 fn clipped(line: &Line<'static>, width: u16) -> Line<'static> {
@@ -1432,7 +1475,7 @@ mod tests {
         label(&mut retained, "done");
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["one two", "", "next", "⏺ done"]
+            ["one two", "", "next", "", "⏺ done"]
         );
         assert_eq!(retained.open_answer_tail(), None);
     }
@@ -1614,7 +1657,9 @@ mod tests {
             texts(&retained.document(&theme)),
             [
                 "reading the calendar next",
+                "",
                 "⏺ the calendar",
+                "",
                 "⏺ loading skill: office/pptx",
             ]
         );
@@ -1630,7 +1675,8 @@ mod tests {
         words(&mut retained, "and now ends.");
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["The answer has started", "⏺ Checking the result."]
+            ["The answer has started", "", "⏺ Checking the result.", ""],
+            "the live answer stands a row under the last step"
         );
         assert_eq!(retained.open_answer_tail(), Some("and now ends."));
         retained.roll_up_steps();
@@ -1761,6 +1807,7 @@ mod tests {
             [
                 "Completed 2 steps ▾",
                 "  first the calendar",
+                "",
                 "  ⏺ the calendar",
                 "",
                 "the answer",
@@ -1814,29 +1861,42 @@ mod tests {
         retained.toggle_steps();
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 2 steps ▾", "  ⏺ reviewer", "  reviewer ▸", ""]
+            [
+                "Completed 2 steps ▾",
+                "  ⏺ reviewer",
+                "",
+                "  reviewer ▸",
+                ""
+            ]
         );
-        assert!(retained.toggle(2, 0, &theme));
+        assert!(retained.toggle(3, 0, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
             [
                 "Completed 2 steps ▾",
                 "  ⏺ reviewer",
+                "",
                 "  reviewer ▾",
                 "    ⏺ the diff",
                 "    ⏺ cargo test",
                 "",
             ]
         );
-        assert!(retained.toggle(2, 0, &theme));
+        assert!(retained.toggle(3, 0, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 2 steps ▾", "  ⏺ reviewer", "  reviewer ▸", ""]
+            [
+                "Completed 2 steps ▾",
+                "  ⏺ reviewer",
+                "",
+                "  reviewer ▸",
+                ""
+            ]
         );
     }
 
     #[test]
-    fn a_live_runs_row_states_its_latest_call_and_opens_to_them_all() {
+    fn a_live_run_draws_no_row_until_the_turn_ends() {
         let theme = theme();
         let mut retained = Retained::new(60);
         retained.begin_turn();
@@ -1844,17 +1904,25 @@ mod tests {
         run(&mut retained, "cargo test");
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["reviewer · cargo test ▸"]
+            Vec::<String>::new(),
+            "the bottom line alone carries a running run"
         );
-        assert!(retained.toggle(0, 2, &theme));
+        retained.roll_up_steps();
+        retained.toggle_steps();
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["reviewer ▾", "  ⏺ the diff", "  ⏺ cargo test",]
+            ["Completed 1 step ▾", "  reviewer ▸", ""]
         );
-        assert!(retained.toggle(0, 2, &theme));
+        assert!(retained.toggle(1, 2, &theme));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["reviewer · cargo test ▸"]
+            [
+                "Completed 1 step ▾",
+                "  reviewer ▾",
+                "    ⏺ the diff",
+                "    ⏺ cargo test",
+                "",
+            ]
         );
     }
 
@@ -1897,7 +1965,12 @@ mod tests {
         run(&mut retained, "late");
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Completed 1 step ▸", "", "reviewer · late ▸"]
+            ["Completed 1 step ▸", ""]
+        );
+        retained.roll_up_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["Completed 1 step ▸", "", "Completed 1 step ▸", ""]
         );
     }
 
@@ -1926,7 +1999,7 @@ mod tests {
         assert_eq!(texts(&retained.document(&theme)), Vec::<String>::new());
         assert_eq!(retained.open_answer_tail(), Some("a thought"));
         label(&mut retained, "ls");
-        assert_eq!(texts(&retained.document(&theme)), ["a thought", "⏺ ls"]);
+        assert_eq!(texts(&retained.document(&theme)), ["a thought", "", "⏺ ls"]);
     }
 
     #[test]
@@ -1974,12 +2047,102 @@ mod tests {
         retained.op_finished(&op("op1", "", "make"), &exec_reply(0, "built\n"), &theme);
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["building", "⏺ $ make", "  built"]
+            ["building", "", "⏺ $ make", "  built"]
         );
         retained.roll_up_steps();
         assert_eq!(
             texts(&retained.document(&theme)),
             ["Completed 2 steps ▸", ""]
+        );
+    }
+
+    #[test]
+    fn contiguous_bare_commands_stand_as_the_latest_and_all_count() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.begin_turn();
+        retained.op_finished(&op("op1", "", "ls"), &exec_reply(0, "a\n"), &theme);
+        retained.op_finished(&op("op2", "", "cat a"), &exec_reply(0, "one\n"), &theme);
+        retained.op_started(&op("op3", "", "grep one a"));
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["⏺ $ grep one a"],
+            "a bare command takes the place of the bare command before it"
+        );
+        retained.op_finished(&op("op3", "", "grep one a"), &exec_reply(1, ""), &theme);
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["⏺ $ grep one a", "  exit 1"]
+        );
+        retained.roll_up_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["Completed 3 steps ▸", ""],
+            "the count is the record's, not the rows'"
+        );
+    }
+
+    #[test]
+    fn a_bare_command_stays_when_another_block_stands_between() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.begin_turn();
+        retained.op_finished(&op("op1", "", "ls"), &exec_reply(0, "a\n"), &theme);
+        let read = OpRequest {
+            op_id: "op2".to_string(),
+            kind: "fileop".to_string(),
+            name: "read".to_string(),
+            timeout_s: 30,
+            arg: String::new(),
+            params: r#"{"path":"a"}"#.to_string(),
+            call_id: "c2".to_string(),
+        };
+        retained.op_finished(&read, &Ok(b"{}".to_vec()), &theme);
+        retained.op_finished(&op("op3", "", "cat a"), &exec_reply(0, "one\n"), &theme);
+        label(&mut retained, "the notes");
+        retained.op_finished(&op("op4", "", "wc a"), &exec_reply(0, "1\n"), &theme);
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "⏺ $ ls",
+                "  a",
+                "",
+                "⏺ read a",
+                "",
+                "⏺ $ cat a",
+                "  one",
+                "",
+                "⏺ the notes",
+                "",
+                "⏺ $ wc a",
+                "  1",
+            ]
+        );
+    }
+
+    #[test]
+    fn what_arrives_before_the_turn_draws_stands_above_its_rows() {
+        let theme = theme();
+        let mut retained = Retained::new(40);
+        retained.begin_turn();
+        retained.push(Entry::Member("go".into()));
+        retained.split_segment();
+        retained.push(Entry::Note("Workspace: /w".into()));
+        label(&mut retained, "first");
+        retained.push(Entry::Note("late".into()));
+        words(&mut retained, "the answer");
+        retained.roll_up_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            [
+                "› go",
+                "",
+                "Workspace: /w",
+                "Completed 1 step ▸",
+                "",
+                "the answer",
+                "late",
+            ]
         );
     }
 
@@ -2002,7 +2165,16 @@ mod tests {
         words(&mut retained, "after");
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["⏺ first", "before", "", "› the message", "", "⏺ second"]
+            [
+                "⏺ first",
+                "",
+                "before",
+                "",
+                "› the message",
+                "",
+                "⏺ second",
+                ""
+            ]
         );
         assert_eq!(retained.open_answer_tail(), Some("after"));
         retained.roll_up_steps();
@@ -2133,7 +2305,7 @@ mod tests {
         retained.op_started(&op("op1", "", "wc"));
         assert_eq!(
             texts(&retained.document(&theme)),
-            ["Let me check", "⏺ $ wc"],
+            ["Let me check", "", "⏺ $ wc"],
             "the words the op followed stand whole inside the turn"
         );
         assert_eq!(
@@ -2157,6 +2329,7 @@ mod tests {
                 "⏺ Starting the server",
                 "  $ serve",
                 "  up",
+                "",
                 "⏺ $ stop",
                 "  down"
             ]
@@ -2178,6 +2351,7 @@ mod tests {
                 "⏺ Starting the server",
                 "  $ serve",
                 "  up",
+                "",
                 "⏺ $ stop",
                 "  down"
             ]

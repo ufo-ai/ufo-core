@@ -1290,6 +1290,13 @@ impl<W: Write> App<W> {
             self.paint_conversations();
             return;
         }
+        let (frame, cursor) = self.compose();
+        self.present(frame, cursor);
+    }
+
+    /// The screen: the transcript window over the dock, which holds the bottom line under a blank
+    /// row whenever it has something to say, the rule, the queue, the entry, and the footer.
+    fn compose(&mut self) -> (Vec<Line<'static>>, Option<(u16, u16)>) {
         let cols = self.cols as usize;
         let mut dock: Vec<Line> = Vec::new();
         let below = self.retained.scrolled();
@@ -1300,7 +1307,11 @@ impl<W: Write> App<W> {
                 self.theme.accent,
             ));
         }
-        dock.push(self.activity_line(cols));
+        let activity = self.activity_line(cols);
+        if painted_width(&activity) > 0 {
+            dock.push(Line::raw(""));
+        }
+        dock.push(activity);
         let rule = || Line::styled("─".repeat(cols.saturating_sub(1)), self.theme.prompt);
         dock.push(rule());
         self.queued_rows(&mut dock, cols);
@@ -1347,7 +1358,7 @@ impl<W: Write> App<W> {
         frame.extend(dock);
         let cursor =
             cursor_in_entry.map(|(row, col)| ((avail + entry_at + row) as u16, col as u16));
-        self.present(frame, cursor);
+        (frame, cursor)
     }
 
     fn present(&mut self, mut frame: Vec<Line<'static>>, cursor: Option<(u16, u16)>) {
@@ -2164,7 +2175,7 @@ mod tests {
     }
 
     #[test]
-    fn every_call_this_terminal_ran_stays_in_the_transcript() {
+    fn contiguous_commands_stand_as_the_latest_and_every_one_counts() {
         let mut app = app_on_memory();
         app.begin_turn();
         for run in [
@@ -2178,20 +2189,54 @@ mod tests {
             );
         }
         let document = transcript(&mut app);
-        for run in ["alpha", "theta"] {
-            assert!(
-                document.contains(&format!("⏺ $ make {run}")),
-                "the call is a step of the turn: {document}"
-            );
-            assert!(
-                document.contains(&format!("built {run}")),
-                "and its output stands under it: {document}"
-            );
-        }
+        assert!(
+            document.contains("⏺ $ make theta") && document.contains("built theta"),
+            "the latest command stands with its output: {document}"
+        );
+        assert!(
+            !document.contains("make alpha") && !document.contains("built alpha"),
+            "the commands before it gave up their place: {document}"
+        );
         app.end_turn(false);
         assert!(
             transcript(&mut app).contains("Completed 8 steps"),
-            "the turn's end rolls the calls up with its other steps"
+            "the turn's end counts every call it ran"
+        );
+    }
+
+    #[test]
+    fn the_bottom_line_stands_under_a_blank_row_only_while_it_says_something() {
+        let mut app = app_on_memory();
+        for index in 0..40 {
+            app.note(&format!("line {index}"));
+        }
+        let (idle, _) = app.compose();
+        let rule = idle
+            .iter()
+            .position(|line| line.to_string().starts_with('─'))
+            .expect("the rule");
+        assert_eq!(
+            idle[rule - 1].to_string(),
+            "",
+            "idle: the empty bottom line"
+        );
+        assert!(
+            idle[rule - 2].to_string().starts_with("line "),
+            "the transcript reaches the bottom line: {}",
+            idle[rule - 2]
+        );
+        app.begin_turn();
+        app.status_text("Reading the notes");
+        let (working, _) = app.compose();
+        let spinner = working
+            .iter()
+            .position(|line| line.to_string().contains("Reading the notes"))
+            .expect("the bottom line");
+        assert_eq!(working[spinner - 1].to_string(), "");
+        assert!(
+            working[spinner - 2].to_string().starts_with("line "),
+            "one blank row stands between the transcript and the bottom line: {}",
+            working[spinner - 2]
         );
     }
 
