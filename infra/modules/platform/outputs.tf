@@ -78,6 +78,7 @@ output "founder_email" {
     configuration_set  = local.founder_configuration_set
     contact_list       = local.founder_contact_list
     topic              = local.founder_topic
+    product_topic      = local.product_topic
     feedback_queue_url = local.founder_queue_url
   }
 }

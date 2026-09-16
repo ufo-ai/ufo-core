@@ -189,6 +189,7 @@ async fn worker(
             sender: EmailSender::Ses(Box::new(SesEmailSender {
                 source: "no-reply@flyingobject.ai".to_string(),
                 configuration_set: "ufo-testing-transactional".to_string(),
+                contact_list: "ufo-users".to_string(),
                 region: "us-east-1".to_string(),
                 role_arn: "arn:aws:iam::111122223333:role/ufo-testing-gateway-ses".to_string(),
                 token_file,

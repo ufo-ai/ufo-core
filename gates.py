@@ -140,6 +140,11 @@ GATEWAY_MODULES = (
 )
 RUST_WIRE_MODULE = Path("client/src/wire.rs")
 ONBOARD_WEB_MODULE = Path("servers/control/src/login.html")
+
+SES_CLIENT = Path("servers/control/src/email.rs")
+SES_POLICY = Path("infra/modules/platform/ses.tf")
+SES_OPERATION = re.compile(r'pub const ([A-Z_]+): &str = "(\w+)";')
+SES_SIGNED_CALL = re.compile(r"ses_(?:call|verb)\(\s*&?\w+,\s*([A-Z_]+)\s*[,)]")
 RUST_DIRECTIVE_CALL = re.compile(r'\bdirective\(\s*"([a-z]+)"')
 TERMINAL_DROPPED_VERBS = frozenset({"debugger", "first"})
 ONBOARD_WEB_DROPPED_VERBS = frozenset({"install"})
@@ -1029,6 +1034,25 @@ def _stripped_dump(tree: ast.Module, function: str) -> str | None:
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
         body = body[1:]
     return ast.dump(ast.Module(body=body, type_ignores=[]))
+
+
+def _aws_grant_failures() -> list[str]:
+    """Every SES operation the gateway signs, against the policy its role holds. An ungranted call
+    answers 403 and the caller reads it as the operation failing, which is how a resume that reads
+    the contact before it writes one shipped with no `ses:GetContact`."""
+    source = SES_CLIENT.read_text()
+    named = dict(SES_OPERATION.findall(source))
+    granted = SES_POLICY.read_text()
+    failures: list[str] = []
+    for const in sorted(set(SES_SIGNED_CALL.findall(source))):
+        operation = named.get(const)
+        if operation is None:
+            failures.append(f"{SES_CLIENT}: {const} is signed as an SES operation and names none")
+        elif f"ses:{operation}" not in granted:
+            failures.append(
+                f"{SES_POLICY}: the gateway signs ses:{operation} and no statement grants it"
+            )
+    return failures
 
 
 def _drawn_mark_failures() -> list[str]:
@@ -2381,6 +2405,7 @@ def main() -> int:
     failures.extend(_directive_wire_failures(trees))
     failures.extend(_consent_mark_failures(trees))
     failures.extend(_silence_sentinel_failures(trees))
+    failures.extend(_aws_grant_failures())
     failures.extend(_drawn_mark_failures())
     failures.extend(_to_thread_failures(trees))
     failures.extend(_log_field_failures(trees))

@@ -115,11 +115,14 @@ spec:
             # Transactional mail names its own configuration set, which is what makes SES publish a
             # delivery event for it into the queue this pod drains.
             - {name: UFO_SES_CONFIGURATION_SET, value: "${ses_configuration_set}"}
+            # The account's one contact list, and the topic product news is sent under. Naming the
+            # topic on a send is what makes SES add `List-Unsubscribe` and host the page it opens.
+            - {name: UFO_SES_CONTACT_LIST, value: "${founder_email.contact_list}"}
+            - {name: UFO_SES_PRODUCT_TOPIC, value: "${founder_email.product_topic}"}
             # Founder campaigns: every From the same identity may send as, with the configuration
             # set that publishes each delivery event into the queue the gateway drains.
             - {name: UFO_FOUNDER_SENDERS, value: "${founder_email.senders}"}
             - {name: UFO_FOUNDER_CONFIGURATION_SET, value: "${founder_email.configuration_set}"}
-            - {name: UFO_FOUNDER_CONTACT_LIST, value: "${founder_email.contact_list}"}
             - {name: UFO_FOUNDER_TOPIC, value: "${founder_email.topic}"}
             - {name: UFO_FOUNDER_FEEDBACK_QUEUE_URL, value: "${founder_email.feedback_queue_url}"}
             # The gateway's own role: granted the `ufo_control` schema and no privilege on any

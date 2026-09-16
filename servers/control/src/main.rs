@@ -8,9 +8,9 @@ use ufo_control::campaign_send::{self, CampaignSends};
 use ufo_control::db;
 use ufo_control::email::{
     apex_host, email_sender_from_env, founder_sender_from_env, invite_email,
-    public_apex_host_from_env, DEFAULT_PUBLIC_BASE_URL, PUBLIC_BASE_URL_ENV,
+    public_apex_host_from_env, DEFAULT_PUBLIC_BASE_URL, PUBLIC_BASE_URL_ENV, SES_PRODUCT_TOPIC_ENV,
 };
-use ufo_control::email_send::{EmailSends, FOUNDER_UPDATES};
+use ufo_control::email_send::{EmailSends, FOUNDER_UPDATES, PRODUCT_NEWS};
 use ufo_control::gateway::{
     parse_invite_required, router, stamped_script, GatewayState, Onboarding, CLIENT_BIN_DIR_ENV,
     GATEWAY_PORT_ENV, INVITE_REQUIRED_ENV, SIGNUP_KEY_ENV,
@@ -200,6 +200,18 @@ async fn gateway() -> Result<(), String> {
     let core_for_campaigns = core_for_invites.clone();
     let sender = email_sender_from_env().map_err(|error| error.to_string())?;
     let founder = founder_sender_from_env().map_err(|error| error.to_string())?;
+    let product_topic = std::env::var(SES_PRODUCT_TOPIC_ENV)
+        .ok()
+        .filter(|value| !value.is_empty());
+    // Each SES contact-list topic this deploy sends under, against the name our own preference
+    // table holds. An unsubscribe arrives naming SES's spelling; what it bars is decided by ours.
+    let mut topics = std::collections::BTreeMap::new();
+    if let Some(topic) = product_topic.clone() {
+        topics.insert(topic, PRODUCT_NEWS.to_string());
+    }
+    if let Some((founder_sender, _)) = founder.as_ref() {
+        topics.insert(founder_sender.topic.clone(), FOUNDER_UPDATES.to_string());
+    }
     let campaigns = founder.as_ref().map(|(sender, _)| Campaigns {
         pool: pool_for_campaigns,
         core: core_for_campaigns,
@@ -231,6 +243,7 @@ async fn gateway() -> Result<(), String> {
             pool: pool_for_sends_route,
             sender: sender.clone(),
             apex_host: apex_for_send_route,
+            product_topic,
         },
         sequences: Sequences {
             pool: pool_for_sequences,
@@ -255,10 +268,6 @@ async fn gateway() -> Result<(), String> {
 
     match founder {
         Some((sender, queue_url)) => {
-            let topics = std::collections::BTreeMap::from([(
-                sender.topic.clone(),
-                FOUNDER_UPDATES.to_string(),
-            )]);
             let queue = FeedbackQueue {
                 url: queue_url,
                 region: sender.region.clone(),
@@ -380,6 +389,7 @@ async fn invite(
             &message.subject,
             &message.text,
             Some(&message.html),
+            None,
         )
         .await
     {

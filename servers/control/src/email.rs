@@ -690,13 +690,19 @@ const THROTTLED_SES_ERRORS: &[&str] = &["TooManyRequestsException", "ThrottlingE
 
 pub const SEND_EMAIL: &str = "SendEmail";
 pub const LIST_CONTACTS: &str = "ListContacts";
+pub const GET_CONTACT: &str = "GetContact";
+pub const UPDATE_CONTACT: &str = "UpdateContact";
+
+const OPT_IN: &str = "OPT_IN";
+const OPT_OUT: &str = "OPT_OUT";
 
 pub const SES_SENDER_ENV: &str = "UFO_SES_SENDER";
 pub const SES_CONFIGURATION_SET_ENV: &str = "UFO_SES_CONFIGURATION_SET";
 pub const SES_REGION_ENV: &str = "UFO_SES_REGION";
 pub const FOUNDER_SENDERS_ENV: &str = "UFO_FOUNDER_SENDERS";
 pub const FOUNDER_CONFIGURATION_SET_ENV: &str = "UFO_FOUNDER_CONFIGURATION_SET";
-pub const FOUNDER_CONTACT_LIST_ENV: &str = "UFO_FOUNDER_CONTACT_LIST";
+pub const SES_CONTACT_LIST_ENV: &str = "UFO_SES_CONTACT_LIST";
+pub const SES_PRODUCT_TOPIC_ENV: &str = "UFO_SES_PRODUCT_TOPIC";
 pub const FOUNDER_TOPIC_ENV: &str = "UFO_FOUNDER_TOPIC";
 pub const FOUNDER_FEEDBACK_QUEUE_ENV: &str = "UFO_FOUNDER_FEEDBACK_QUEUE_URL";
 pub const AWS_ROLE_ARN_ENV: &str = "AWS_ROLE_ARN";
@@ -993,11 +999,19 @@ impl AwsEndpoints {
 pub struct AwsCall<'a> {
     pub service: &'static str,
     pub operation: &'static str,
+    /// The verb, which SigV4 signs as the first line of the canonical request. Every call here is
+    /// a POST but the two that address one contact: SES takes the read as a GET and the write of a
+    /// topic preference as a PUT.
+    pub method: &'static str,
     pub url: &'a str,
     pub content_type: &'a str,
     pub target: Option<&'a str>,
     pub timeout_seconds: u64,
 }
+
+pub const POST: &str = "POST";
+pub const PUT: &str = "PUT";
+pub const GET: &str = "GET";
 
 /// The projected token is exchanged for `role_arn` at STS on every call: `AssumeRoleWithWebIdentity`
 /// is unsigned, so no bootstrap credential exists.
@@ -1047,7 +1061,13 @@ pub async fn signed_post(
     credentials: &SesCredentials,
 ) -> Result<String, AwsError> {
     let headers = sigv4_headers(call, &body, region, credentials, Utc::now());
-    let mut request = client(call.timeout_seconds)?.post(call.url).body(body);
+    let client = client(call.timeout_seconds)?;
+    let mut request = match call.method {
+        PUT => client.put(call.url),
+        GET => client.get(call.url),
+        _ => client.post(call.url),
+    }
+    .body(body);
     for (name, value) in &headers {
         request = request.header(name, value);
     }
@@ -1069,10 +1089,15 @@ pub async fn signed_post(
 /// The transactional sender. `configuration_set` is what makes a send reportable: SES publishes a
 /// delivery event only for a message sent under one, and every event lands in the queue
 /// `CampaignFeedback` already drains.
+///
+/// `contact_list` is the account's one list, shared with the campaign sender. A send that names a
+/// topic on it is the send a member can leave: SES adds `List-Unsubscribe`, hosts the page the
+/// header and the footer link point at, and refuses the next send to a contact who used it.
 #[derive(Debug, Clone)]
 pub struct SesEmailSender {
     pub source: String,
     pub configuration_set: String,
+    pub contact_list: String,
     pub region: String,
     pub role_arn: String,
     pub token_file: PathBuf,
@@ -1080,6 +1105,87 @@ pub struct SesEmailSender {
 }
 
 impl SesEmailSender {
+    /// Put this address back on a topic it left through SES's own hosted page.
+    ///
+    /// SES holds that opt-out on its contact, and SES is what refuses the send — so deleting our
+    /// row lifts nothing, and a member who asked to hear from us again would hear nothing and be
+    /// told otherwise. An address SES holds no contact for has left no topic, so a `NotFound` is
+    /// the same answer as a write: there is nothing to lift.
+    ///
+    /// `UnsubscribeAll` is cleared beside the topic because SES applies it over every topic
+    /// preference the contact holds: the hosted page's "unsubscribe from all" sets it, and a write
+    /// that opted the topic back in without lifting it would leave the send refused. Clearing it
+    /// alone would resume every other topic too, and `UpdateContact` replaces the preference list
+    /// it is given, so the contact is read first and the whole list is written back: the flag
+    /// becomes an explicit `OPT_OUT` on each topic the member did not name.
+    pub async fn resubscribe(&self, email: &str, topic: &str) -> Result<(), AwsError> {
+        let credentials =
+            assume_role(&self.endpoints.sts, &self.role_arn, &self.token_file).await?;
+        let url = format!(
+            "{}/v2/email/contact-lists/{}/contacts/{}",
+            self.endpoints.ses,
+            self.contact_list,
+            path_segment(email)
+        );
+        let held = match signed_post(
+            &ses_verb(&url, GET_CONTACT, GET),
+            Vec::new(),
+            &self.region,
+            &credentials,
+        )
+        .await
+        {
+            Ok(answered) => answered,
+            Err(AwsError::Api { status: 404, .. }) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let contact: HeldContact =
+            serde_json::from_str(&held).map_err(|_| AwsError::Unreadable {
+                service: SES_SERVICE,
+                field: "TopicPreferences",
+                body: clipped(&held),
+            })?;
+        let mut preferences: BTreeMap<&str, &str> = contact
+            .topic_preferences
+            .iter()
+            .map(|held| (held.topic_name.as_str(), held.subscription_status.as_str()))
+            .collect();
+        if contact.unsubscribe_all {
+            for held in contact
+                .topic_default_preferences
+                .iter()
+                .chain(&contact.topic_preferences)
+            {
+                preferences.insert(&held.topic_name, OPT_OUT);
+            }
+        }
+        preferences.insert(topic, OPT_IN);
+        let body = serde_json::json!({
+            "UnsubscribeAll": false,
+            "TopicPreferences": preferences
+                .into_iter()
+                .map(|(name, status)| serde_json::json!({
+                    "TopicName": name,
+                    "SubscriptionStatus": status,
+                }))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
+        .into_bytes();
+        match signed_post(
+            &ses_verb(&url, UPDATE_CONTACT, PUT),
+            body,
+            &self.region,
+            &credentials,
+        )
+        .await
+        {
+            Ok(_) => Ok(()),
+            Err(AwsError::Api { status: 404, .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The SES message id, which every delivery event this send later produces is keyed by.
     pub async fn send(
         &self,
@@ -1087,6 +1193,7 @@ impl SesEmailSender {
         subject: &str,
         text: &str,
         html: Option<&str>,
+        topic: Option<&str>,
     ) -> Result<String, AwsError> {
         let credentials =
             assume_role(&self.endpoints.sts, &self.role_arn, &self.token_file).await?;
@@ -1095,7 +1202,7 @@ impl SesEmailSender {
         if let Some(html) = html {
             content.insert("Html".to_string(), serde_json::json!({"Data": html}));
         }
-        let body = serde_json::json!({
+        let mut asked = serde_json::json!({
             "FromEmailAddress": self.source,
             "Destination": {"ToAddresses": [email]},
             "Content": {
@@ -1105,9 +1212,14 @@ impl SesEmailSender {
                 }
             },
             "ConfigurationSetName": self.configuration_set,
-        })
-        .to_string()
-        .into_bytes();
+        });
+        if let Some(topic) = topic {
+            asked["ListManagementOptions"] = serde_json::json!({
+                "ContactListName": self.contact_list,
+                "TopicName": topic,
+            });
+        }
+        let body = asked.to_string().into_bytes();
         let url = format!("{}{SES_OUTBOUND_PATH}", self.endpoints.ses);
         let answered = signed_post(
             &ses_call(&url, SEND_EMAIL),
@@ -1287,9 +1399,14 @@ impl FounderSender {
 }
 
 fn ses_call<'a>(url: &'a str, operation: &'static str) -> AwsCall<'a> {
+    ses_verb(url, operation, POST)
+}
+
+fn ses_verb<'a>(url: &'a str, operation: &'static str, method: &'static str) -> AwsCall<'a> {
     AwsCall {
         service: SES_SERVICE,
         operation,
+        method,
         url,
         content_type: JSON_CONTENT_TYPE,
         target: None,
@@ -1317,6 +1434,24 @@ struct Contact {
     email_address: String,
 }
 
+#[derive(Deserialize)]
+struct HeldContact {
+    #[serde(rename = "TopicPreferences", default)]
+    topic_preferences: Vec<HeldTopic>,
+    #[serde(rename = "TopicDefaultPreferences", default)]
+    topic_default_preferences: Vec<HeldTopic>,
+    #[serde(rename = "UnsubscribeAll", default)]
+    unsubscribe_all: bool,
+}
+
+#[derive(Deserialize)]
+struct HeldTopic {
+    #[serde(rename = "TopicName")]
+    topic_name: String,
+    #[serde(rename = "SubscriptionStatus")]
+    subscription_status: String,
+}
+
 fn client(timeout_seconds: u64) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_seconds))
@@ -1342,6 +1477,28 @@ fn host_of(url: &str) -> String {
         .map(|(_, rest)| rest.split('/').next().unwrap_or_default())
         .unwrap_or_default()
         .to_string()
+}
+
+/// SigV4 signs the path it is given, so the encoded form is what both the signature and SES read.
+fn path_segment(raw: &str) -> String {
+    raw.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+/// The canonical URI SigV4 signs, which for every service but S3 is the request path encoded a
+/// second time: AWS re-encodes what it received before it signs, so an address already carrying
+/// `%40` has to reach the signature as `%2540` or SES answers 403 SignatureDoesNotMatch.
+pub fn canonical_path(path: &str) -> String {
+    path.split('/')
+        .map(path_segment)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn path_of(url: &str) -> String {
@@ -1432,8 +1589,9 @@ pub fn sigv4_headers(
         .map(|(key, value)| format!("{key}:{value}\n"))
         .collect::<String>();
     let canonical_request = format!(
-        "POST\n{}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
-        path_of(call.url)
+        "{}\n{}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
+        call.method,
+        canonical_path(&path_of(call.url))
     );
     let scope = format!("{date_stamp}/{region}/{}/aws4_request", call.service);
     let string_to_sign = format!(
@@ -1482,9 +1640,10 @@ impl EmailSender {
         subject: &str,
         text: &str,
         html: Option<&str>,
+        topic: Option<&str>,
     ) -> Result<String, AwsError> {
         match self {
-            Self::Ses(sender) => sender.send(email, subject, text, html).await,
+            Self::Ses(sender) => sender.send(email, subject, text, html, topic).await,
             Self::Console => {
                 tracing::info!(
                     target: "ufo_control::email",
@@ -1508,6 +1667,7 @@ pub fn email_sender_from_env() -> Result<EmailSender, EmailConfigError> {
     Ok(EmailSender::Ses(Box::new(SesEmailSender {
         source: require_env(SES_SENDER_ENV)?,
         configuration_set: require_env(SES_CONFIGURATION_SET_ENV)?,
+        contact_list: require_env(SES_CONTACT_LIST_ENV)?,
         endpoints: AwsEndpoints::for_region(&region),
         region,
         role_arn: require_env(AWS_ROLE_ARN_ENV)?,
@@ -1529,7 +1689,7 @@ pub fn founder_sender_from_env() -> Result<Option<(FounderSender, String)>, Emai
         FounderSender {
             senders: parse_senders(&configured)?,
             configuration_set: require_env(FOUNDER_CONFIGURATION_SET_ENV)?,
-            contact_list: require_env(FOUNDER_CONTACT_LIST_ENV)?,
+            contact_list: require_env(SES_CONTACT_LIST_ENV)?,
             topic: require_env(FOUNDER_TOPIC_ENV)?,
             endpoints: AwsEndpoints::for_region(&region),
             region,

@@ -5,12 +5,12 @@ use chrono::{TimeZone, Utc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use ufo_control::email::{
-    apex_host, email_sender_from_env, invite_email, normalize_email, parse_assume_role_credentials,
-    sigv4_headers, AwsCall, AwsEndpoints, EmailError, EmailSender, SesCredentials, SesEmailSender,
-    SignupEmailPolicy, AWS_ROLE_ARN_ENV, AWS_TIMEOUT_SECONDS, AWS_WEB_IDENTITY_TOKEN_FILE_ENV,
-    CONSOLE_EMAIL_MODE, DEFAULT_SES_REGION, DISPOSABLE_EMAIL_DOMAINS, EMAIL_MODE_ENV,
-    FREE_EMAIL_DOMAINS, JSON_CONTENT_TYPE, SEND_EMAIL, SES_CONFIGURATION_SET_ENV, SES_REGION_ENV,
-    SES_SENDER_ENV, SES_SERVICE,
+    apex_host, canonical_path, email_sender_from_env, invite_email, normalize_email,
+    parse_assume_role_credentials, sigv4_headers, AwsCall, AwsEndpoints, EmailError, EmailSender,
+    SesCredentials, SesEmailSender, SignupEmailPolicy, AWS_ROLE_ARN_ENV, AWS_TIMEOUT_SECONDS,
+    AWS_WEB_IDENTITY_TOKEN_FILE_ENV, CONSOLE_EMAIL_MODE, DEFAULT_SES_REGION,
+    DISPOSABLE_EMAIL_DOMAINS, EMAIL_MODE_ENV, FREE_EMAIL_DOMAINS, JSON_CONTENT_TYPE, SEND_EMAIL,
+    SES_CONFIGURATION_SET_ENV, SES_CONTACT_LIST_ENV, SES_REGION_ENV, SES_SENDER_ENV, SES_SERVICE,
 };
 
 const STS_RESPONSE: &str = r#"<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -118,6 +118,21 @@ fn a_missing_credential_field_raises() {
 }
 
 #[test]
+fn the_canonical_path_encodes_a_contact_address_a_second_time() {
+    assert_eq!(
+        canonical_path("/v2/email/contact-lists/ufo/contacts/member%40acme.com"),
+        "/v2/email/contact-lists/ufo/contacts/member%2540acme.com",
+        "AWS re-encodes the path it received before it signs, so an address already carrying %40 \
+         has to reach the signature as %2540"
+    );
+    assert_eq!(
+        canonical_path("/v2/email/outbound-emails"),
+        "/v2/email/outbound-emails",
+        "a path of unreserved characters is its own canonical form"
+    );
+}
+
+#[test]
 fn sigv4_headers_sign_the_session_token() {
     let credentials = SesCredentials {
         access_key: "ASIAEXAMPLE".to_string(),
@@ -126,6 +141,7 @@ fn sigv4_headers_sign_the_session_token() {
     };
     let headers = sigv4_headers(
         &AwsCall {
+            method: ufo_control::email::POST,
             service: SES_SERVICE,
             operation: SEND_EMAIL,
             url: "https://email.us-east-1.amazonaws.com/v2/email/outbound-emails",
@@ -286,6 +302,7 @@ fn sender(base: &str, token_file: PathBuf) -> SesEmailSender {
     SesEmailSender {
         source: "no-reply@flyingobject.ai".to_string(),
         configuration_set: "ufo-testing-transactional".to_string(),
+        contact_list: "ufo-users".to_string(),
         region: "us-east-1".to_string(),
         role_arn: "arn:aws:iam::111122223333:role/ufo-testing-gateway-ses".to_string(),
         token_file,
@@ -317,6 +334,7 @@ async fn send_exchanges_the_projected_token_then_posts_the_rendered_message() {
             "Your invitation",
             "body text",
             Some("<p>body markup</p>"),
+            None,
         )
         .await
         .unwrap();
@@ -376,7 +394,13 @@ async fn a_send_with_no_html_alternative_posts_a_text_only_body() {
     .await;
     let (_directory, token_file) = projected_token();
     sender(&base, token_file)
-        .send("founder@acme.com", "Your ufo invite", "body text", None)
+        .send(
+            "founder@acme.com",
+            "Your ufo invite",
+            "body text",
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -403,7 +427,7 @@ async fn send_surfaces_the_ses_denial_body() {
     .await;
     let (_directory, token_file) = projected_token();
     let refused = sender(&base, token_file)
-        .send("founder@acme.com", "s", "t", Some("<p>t</p>"))
+        .send("founder@acme.com", "s", "t", Some("<p>t</p>"), None)
         .await
         .unwrap_err()
         .to_string();
@@ -417,7 +441,7 @@ async fn assume_role_surfaces_the_sts_error_body() {
     let (base, _log) = serve(vec![(403, denial.to_string())]).await;
     let (_directory, token_file) = projected_token();
     let refused = sender(&base, token_file)
-        .send("founder@acme.com", "s", "t", Some("<p>t</p>"))
+        .send("founder@acme.com", "s", "t", Some("<p>t</p>"), None)
         .await
         .unwrap_err()
         .to_string();
@@ -432,7 +456,7 @@ async fn assume_role_surfaces_the_sts_error_body() {
 async fn an_unreadable_token_file_fails_loud_before_any_call() {
     let (base, log) = serve(vec![(200, STS_RESPONSE.to_string())]).await;
     let refused = sender(&base, PathBuf::from("/nonexistent/token"))
-        .send("founder@acme.com", "s", "t", Some("<p>t</p>"))
+        .send("founder@acme.com", "s", "t", Some("<p>t</p>"), None)
         .await
         .unwrap_err()
         .to_string();
@@ -471,6 +495,7 @@ fn the_sender_is_built_from_the_pods_irsa_identity() {
             (EMAIL_MODE_ENV, None),
             (SES_SENDER_ENV, Some("no-reply@flyingobject.ai")),
             (SES_CONFIGURATION_SET_ENV, Some("ufo-testing-transactional")),
+            (SES_CONTACT_LIST_ENV, Some("ufo-users")),
             (SES_REGION_ENV, None),
             (AWS_ROLE_ARN_ENV, Some("arn:aws:iam::111122223333:role/ses")),
             (AWS_WEB_IDENTITY_TOKEN_FILE_ENV, Some("/var/run/token")),
@@ -483,6 +508,7 @@ fn the_sender_is_built_from_the_pods_irsa_identity() {
     };
     assert_eq!(sender.source, "no-reply@flyingobject.ai");
     assert_eq!(sender.configuration_set, "ufo-testing-transactional");
+    assert_eq!(sender.contact_list, "ufo-users");
     assert_eq!(sender.region, DEFAULT_SES_REGION);
     assert_eq!(sender.role_arn, "arn:aws:iam::111122223333:role/ses");
     assert_eq!(sender.token_file, PathBuf::from("/var/run/token"));
@@ -499,6 +525,7 @@ fn the_sender_fails_loud_without_irsa() {
             (EMAIL_MODE_ENV, None),
             (SES_SENDER_ENV, Some("no-reply@flyingobject.ai")),
             (SES_CONFIGURATION_SET_ENV, Some("ufo-testing-transactional")),
+            (SES_CONTACT_LIST_ENV, Some("ufo-users")),
             (AWS_ROLE_ARN_ENV, None),
             (AWS_WEB_IDENTITY_TOKEN_FILE_ENV, None),
         ],
@@ -529,6 +556,7 @@ async fn console_mode_needs_no_ses_configuration() {
             "Your invitation",
             "body",
             Some("<p>body</p>"),
+            None,
         )
         .await
         .unwrap();

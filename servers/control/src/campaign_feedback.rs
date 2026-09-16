@@ -123,6 +123,7 @@ impl FeedbackQueue {
         AwsCall {
             service: SQS_SERVICE,
             operation: target.trim_start_matches(SQS_TARGET_PREFIX),
+            method: crate::email::POST,
             url: &self.url,
             content_type: SQS_CONTENT_TYPE,
             target: Some(target),

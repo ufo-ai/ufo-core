@@ -161,6 +161,11 @@ pub struct EmailSends {
     pub pool: Pool,
     pub sender: EmailSender,
     pub apex_host: String,
+    /// The SES contact-list topic `product_news` is sent under, or None where this deploy has no
+    /// list. It decides the footer as much as the header: SES fills the unsubscribe placeholder
+    /// only for a send that names a topic, so a message drawn with the footer and sent without the
+    /// topic would reach the member with the raw braces in it.
+    pub product_topic: Option<String>,
 }
 
 impl EmailSends {
@@ -178,13 +183,14 @@ impl EmailSends {
                 topic: asked.topic.clone(),
             });
         }
+        let ses_topic = self.ses_topic(&asked.topic);
         let message = render(
             &Words {
                 subject: &asked.subject,
                 body: &asked.body,
                 action_label: asked.action_label.as_deref(),
                 action_url: asked.action_url.as_deref(),
-                unsubscribe: false,
+                unsubscribe: ses_topic.is_some(),
             },
             &self.apex_host,
         );
@@ -195,6 +201,7 @@ impl EmailSends {
                 &message.subject,
                 &message.text,
                 Some(&message.html),
+                ses_topic,
             )
             .await?;
         self.record(&asked.kind, &address, &message_id).await?;
@@ -230,6 +237,9 @@ impl EmailSends {
                 asked.topic
             )));
         }
+        if !asked.silenced {
+            self.resubscribe(&address, &asked.topic).await?;
+        }
         let connection = self.pool.get().await?;
         let statement = match asked.silenced {
             true => format!(
@@ -245,6 +255,26 @@ impl EmailSends {
             topic: asked.topic,
             silenced: asked.silenced,
         })
+    }
+
+    /// SES refuses the send while it holds the opt-out, so this runs before the delete: a lift that
+    /// fails leaves both records saying off, where the other order opens our gate alone.
+    async fn resubscribe(&self, address: &str, topic: &str) -> Result<(), SendError> {
+        let Some(ses_topic) = self.ses_topic(topic) else {
+            return Ok(());
+        };
+        match &self.sender {
+            EmailSender::Ses(sender) => Ok(sender.resubscribe(address, ses_topic).await?),
+            EmailSender::Console => Ok(()),
+        }
+    }
+
+    /// The SES contact-list topic one of ours is sent under, where this deploy sends it under one.
+    fn ses_topic(&self, topic: &str) -> Option<&str> {
+        match topic {
+            PRODUCT_NEWS => self.product_topic.as_deref(),
+            _ => None,
+        }
     }
 
     async fn silenced(&self, address: &str, topic: &str) -> Result<bool, SendError> {

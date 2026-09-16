@@ -61,6 +61,13 @@ alike, so the frame lives in control beside the sender that carries it and a sec
 in Python. It also means the unsubscribe footer is added where the topic is known, which is the
 only place it can be: SES fills the placeholder only for a send that names a contact list.
 
+There is no unsubscribe page of ours, and no header of ours. A send on a topic a member may silence
+names the account's contact list and that topic, and SES does the rest: it adds `List-Unsubscribe`
+and `List-Unsubscribe-Post`, hosts the page the header and the footer link both open, and refuses
+the next send to a contact who used it. `product_news` gets a topic on the list beside the founder
+one. The footer and the list are set from the same condition, because a message drawn with the
+placeholder and sent without the topic reaches the member with the raw braces in it.
+
 Transactional mail gains its own SES configuration set, on the topic and queue the campaign set
 already publishes to. A configuration set is what makes SES publish a delivery event at all, so
 without one the seam could send and never report; the set is separate because the identity and the
@@ -75,7 +82,10 @@ told their balance ran out, because that is what their workspace is doing with t
 send names a topic. `transactional` is the one a member cannot silence; `product_news` and
 `founder_updates` are the two they can — but only `product_news` is ours to set. SES holds the
 founder list's opt-out on its own contact and applies it to the send, so lifting our row alone
-would report a resume that never happens; the hosted page is what lifts it.
+would report a resume that never happens; the hosted page is what lifts it. A resume we do make
+reads the contact first and writes its whole preference list back: `UpdateContact` replaces the
+list it is given, and the hosted page's unsubscribe-from-all sets one flag over every topic, so
+clearing that flag for the named topic has to bar the rest by name.
 
 The preference is a row in `ufo_control` beside the suppression it joins, and two paths write it.
 In chat, the agent holds a tool and calls it for the speaker's own address. In the mail, SES's
@@ -179,6 +189,7 @@ Each lands with both ends and its own proof.
 | 4 | The operator editor, revisions and approval | drip copy changes without a deploy and cannot go out unapproved |
 | 5 | Member topic preferences | a member silences product news in chat and still receives transactional |
 | 6 | An unsubscribe becomes a topic preference | a member who leaves the founder list is barred from the next campaign and still gets their balance notice |
+| 7 | Product news on its own contact-list topic | a product message carries `List-Unsubscribe` and the footer SES fills, and a transactional one carries neither |
 
 ## Non-goals
 

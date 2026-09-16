@@ -1,9 +1,10 @@
 locals {
-  ses_region       = "us-east-1"
-  ses_domain       = "ufo.ai"
-  ses_mail_from    = "bounce.ufo.ai"
-  ses_contact_list = "ufo-users"
-  ses_topic        = "founder-updates"
+  ses_region        = "us-east-1"
+  ses_domain        = "ufo.ai"
+  ses_mail_from     = "bounce.ufo.ai"
+  ses_contact_list  = "ufo-users"
+  ses_topic         = "founder-updates"
+  ses_product_topic = "product-news"
 }
 
 resource "aws_sesv2_email_identity" "ufo_ai" {
@@ -66,6 +67,13 @@ resource "aws_sesv2_contact_list" "ufo_users" {
     topic_name                  = local.ses_topic
     display_name                = "Founder updates"
     description                 = "Occasional notes from the people building ufo."
+    default_subscription_status = "OPT_IN"
+  }
+
+  topic {
+    topic_name                  = local.ses_product_topic
+    display_name                = "Product email"
+    description                 = "Reminders about a workspace you were added to and have not set up."
     default_subscription_status = "OPT_IN"
   }
 }

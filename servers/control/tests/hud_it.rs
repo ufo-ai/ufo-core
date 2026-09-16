@@ -79,6 +79,7 @@ async fn rig(sends: bool) -> (String, String) {
             pool: sends_pool.clone(),
             sender: EmailSender::Console,
             apex_host: "ufo.ai".to_string(),
+            product_topic: None,
         },
         sequences: Sequences { pool: sends_pool },
     };

@@ -341,7 +341,13 @@ impl InviteDeliveries {
         let (text, html) = self.message(delivery)?;
         self.mark_sending(delivery).await?;
         self.sender
-            .send(&delivery.email, INVITATION_SUBJECT, &text, Some(&html))
+            .send(
+                &delivery.email,
+                INVITATION_SUBJECT,
+                &text,
+                Some(&html),
+                None,
+            )
             .await
             .map_err(|error| Carried::Send(verdict(error)))?;
         self.write(

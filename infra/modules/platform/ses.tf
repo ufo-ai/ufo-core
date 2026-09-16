@@ -42,6 +42,13 @@ locals {
 }
 
 locals {
+  # The topic product news is sent under, on the account's one contact list. Naming it is what makes
+  # SES add `List-Unsubscribe`, host the page it points at, and refuse the next send to a contact who
+  # used it. Its own locals block so the grant lines around it keep their alignment.
+  product_topic = "product-news"
+}
+
+locals {
   # Transactional mail carries its own configuration set on the topic and queue the campaign set
   # already publishes to: a configuration set is what makes SES publish a delivery event at all, and
   # the identity and the From condition differ from a campaign's while the consumer does not. Its
@@ -317,6 +324,23 @@ data "aws_iam_policy_document" "gateway_ses" {
   statement {
     sid       = "ReadTheContactList"
     actions   = ["ses:ListContacts"]
+    resources = ["${local.ses_arn_prefix}:contact-list/${local.founder_contact_list}"]
+  }
+
+  # The one contact a resume is about to rewrite: UpdateContact replaces the preference list it is
+  # given, so the write reads the contact first to keep every topic the member did not name.
+  statement {
+    sid       = "ReadOneContact"
+    actions   = ["ses:GetContact"]
+    resources = ["${local.ses_arn_prefix}:contact-list/${local.founder_contact_list}"]
+  }
+
+  # Write alone on one field: a member who left a topic through SES's hosted page is opted out on
+  # SES's contact, and SES is the gate that refuses the send. Without this, asking the agent for
+  # product email again deletes a row and changes nothing a member can see.
+  statement {
+    sid       = "ResubscribeAContactToATopic"
+    actions   = ["ses:UpdateContact"]
     resources = ["${local.ses_arn_prefix}:contact-list/${local.founder_contact_list}"]
   }
 
