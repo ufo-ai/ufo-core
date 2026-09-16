@@ -32,7 +32,7 @@ use crossterm::tty::IsTty as _;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::fold::{self, Frame};
+use crate::fold::{self, Frame, DONE};
 use crate::pr::Pr;
 use crate::record::TurnRecord;
 use crate::ui::conversations::{labeled, Cache, Conversations, Fetch, Pick, Slot, NEW_CHAT_LABEL};
@@ -503,6 +503,11 @@ impl<W: Write> App<W> {
                 cost_micro_usd,
             } => self.status_text(&meter_line(tokens, cost_micro_usd)),
             Frame::Reply { text, .. } | Frame::Comment { text, .. } => self.last_reply = text,
+            Frame::Terminal(frame) if frame.status == DONE => {
+                if let Some(text) = frame.text.filter(|text| !text.is_empty()) {
+                    self.last_reply = text;
+                }
+            }
             Frame::Activity { .. }
             | Frame::SubagentActivity(_)
             | Frame::Resumed { .. }

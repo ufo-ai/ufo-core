@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 
-use crate::fold::{self, Frame};
+use crate::fold::{self, Frame, DONE};
 use crate::record::TurnRecord;
 use crate::ui::retained::rollup_line;
 use crate::ui::{meter_line, RESUMED_NOTE, SENT_BY_UFO};
@@ -35,7 +35,7 @@ impl Plain {
         let Some(frame) = Frame::decode(event, data) else {
             return;
         };
-        fold::fold(&mut self.record, &frame, &fold::utc_now_rfc3339());
+        fold::fold_next(&mut self.record, &frame, &fold::utc_now_rfc3339());
         match frame {
             Frame::Message { text } => self.txt(&text),
             Frame::Activity { text, .. } if !text.is_empty() => self.say(&text),
@@ -50,6 +50,13 @@ impl Plain {
             } => self.status(&meter_line(tokens, cost_micro_usd)),
             Frame::Resumed { .. } => self.say(RESUMED_NOTE),
             Frame::Reply { text, .. } | Frame::Comment { text, .. } => self.say(&text),
+            Frame::Terminal(frame)
+                if frame.status == DONE && !fold::closing_streamed(&self.record) =>
+            {
+                if let Some(text) = frame.text.filter(|text| !text.is_empty()) {
+                    self.say(&text);
+                }
+            }
             Frame::Sources { .. } | Frame::Terminal(_) | Frame::Parked { .. } => {}
         }
     }

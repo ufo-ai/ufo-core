@@ -1221,6 +1221,105 @@ fn remote_json_mode_keeps_closed_stdin_with_a_controlling_terminal() {
 }
 
 #[test]
+fn a_resumed_done_frame_prints_its_answer_once() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &[
+            "frame\tterminal\t{\"status\": \"done\", \"text\": \"Here it is.\"}",
+            "exit\t0",
+        ],
+    }]);
+    let home = scratch_home("resume-done");
+    let (stdout, code) = run_client(&served.url, &[], "", &home);
+    served.gateway.done();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert_eq!(stdout.matches("Here it is.").count(), 1, "stdout: {stdout}");
+}
+
+#[test]
+fn a_streamed_answer_is_not_printed_again_on_its_done_frame() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &[
+            "frame\tmessage\t{\"text\": \"Here it is.\"}",
+            "frame\tterminal\t{\"status\": \"done\", \"text\": \"Here it is.\"}",
+            "exit\t0",
+        ],
+    }]);
+    let home = scratch_home("streamed-done");
+    let (stdout, code) = run_client(&served.url, &["go"], "", &home);
+    served.gateway.done();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert_eq!(stdout.matches("Here it is.").count(), 1, "stdout: {stdout}");
+}
+
+#[test]
+fn json_mode_publishes_a_done_frames_answer_that_never_streamed() {
+    let served = serve(vec![Exchange {
+        delay_ms: 0,
+        status: 200,
+        reply_lines: &[
+            "frame\tterminal\t{\"status\": \"done\", \"text\": \"Here it is.\"}",
+            "exit\t0",
+        ],
+    }]);
+    let home = scratch_home("json-done-unstreamed");
+    let (stdout, code) = run_client(&served.url, &["--json", "go"], "", &home);
+    served.gateway.done();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event line is JSON"))
+        .collect();
+    let answers: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|event| event["text"] == "Here it is.")
+        .collect();
+    assert_eq!(answers.len(), 1, "stdout: {stdout}");
+    assert_eq!(answers[0]["type"], "message", "stdout: {stdout}");
+}
+
+#[test]
+fn a_stream_that_moves_on_to_a_newer_turn_prints_that_turns_answer_once() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "frame\tterminal\t{\"status\": \"done\", \"text\": \"First answer.\"}",
+                "since\tturn-1\tc1",
+                "poll\t0",
+            ],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "frame\tmessage\t{\"text\": \"Second answer.\"}",
+                "frame\tterminal\t{\"status\": \"done\", \"text\": \"Second answer.\"}",
+                "exit\t0",
+            ],
+        },
+    ]);
+    let home = scratch_home("moved-on");
+    let (stdout, code) = run_client(&served.url, &["go"], "", &home);
+    served.gateway.done();
+    assert_eq!(code, 0, "stdout: {stdout}");
+    assert_eq!(
+        stdout.matches("First answer.").count(),
+        1,
+        "stdout: {stdout}"
+    );
+    assert_eq!(
+        stdout.matches("Second answer.").count(),
+        1,
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn resume_replays_history_before_the_tail() {
     let served = serve(vec![Exchange {
         delay_ms: 0,
@@ -1242,6 +1341,51 @@ fn resume_replays_history_before_the_tail() {
     let reply = stdout.find("earlier answer").expect("reply line");
     let latest = stdout.find("the latest reply").expect("tail line");
     assert!(member < reply && reply < latest, "stdout: {stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_done_frame_on_a_later_hold_reads_once_with_its_file() {
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "frame\tmessage\t{\"text\": \"Sent: [note.md](/workspace/note.md)\"}",
+                "since\tturn-1\tc9",
+                "poll\t0",
+            ],
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &[
+                "frame\tterminal\t{\"status\": \"done\", \"text\": \"Sent: note.md\", \"model\": \"m\"}",
+                "file\tnote.md\t242\thttps://ws.example/a",
+                "ask\t>",
+            ],
+        },
+    ]);
+    let home = scratch_home("done-later-hold");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
+    served.arrived.recv_timeout(ARRIVAL_WAIT).expect("post");
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the poll reconnect");
+    thread::sleep(Duration::from_millis(1200));
+    let screen = session.screen();
+    assert_eq!(screen.matches("Sent: note.md").count(), 1, "{screen}");
+    assert_eq!(
+        screen.matches("shared note.md (242 bytes)").count(),
+        1,
+        "{screen}"
+    );
+    session.press(b"\x03");
+    let _ = session.ended();
+    served.gateway.done();
+    session.reaped();
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]

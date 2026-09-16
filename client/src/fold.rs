@@ -10,6 +10,20 @@ use crate::record::{
     ActivityEvent, Meter, SourceRef, Step, SubagentRun, TerminalFrame, TurnEnd, TurnRecord,
 };
 
+/// The status a turn ends on when its words are its answer.
+pub const DONE: &str = "done";
+
+/// Whether the closing passage streamed: a text step stands after the last tool step, so a printer
+/// that wrote the deltas as they came has the answer already and a done frame's text adds nothing.
+pub fn closing_streamed(record: &TurnRecord) -> bool {
+    record
+        .steps
+        .iter()
+        .rev()
+        .take_while(|step| !matches!(step, Step::Tool { .. }))
+        .any(|step| matches!(step, Step::Text { .. }))
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct RunFrame {
     pub turn_id: String,
@@ -275,6 +289,15 @@ fn apply_run_frame(runs: &mut Vec<SubagentRun>, frame: &RunFrame, owner: Option<
     runs.push(fresh);
 }
 
+/// The record a surface holding one turn at a time folds into: a frame after the record's end is
+/// the next turn's first, so it begins a fresh record rather than being refused by the ended one.
+pub fn fold_next(record: &mut TurnRecord, frame: &Frame, at: &str) -> bool {
+    if record.end.is_some() {
+        *record = empty(None);
+    }
+    fold(record, frame, at)
+}
+
 /// The record after one frame, or false when the frame is a fault the record cannot hold — a frame
 /// after the turn's end, a reply with no words — and the record stands as it was. A run naming a
 /// parent the record does not hold is kept at the root and reported the same way.
@@ -497,6 +520,20 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_after_the_records_end_begins_the_next_turns_record() {
+        let mut record = empty(None);
+        let done = Frame::decode("terminal", r#"{"status":"done","text":"First."}"#).unwrap();
+        assert!(fold_next(&mut record, &done, "2026-09-16T00:00:00Z"));
+        assert!(record.end.is_some());
+        let words = Frame::Message {
+            text: "Second.".into(),
+        };
+        assert!(fold_next(&mut record, &words, "2026-09-16T00:00:01Z"));
+        assert!(record.end.is_none());
+        assert!(matches!(record.steps.as_slice(), [Step::Text { text, .. }] if text == "Second."));
+    }
     use serde_json::Value;
 
     const FOLD_FIXTURE: &str =

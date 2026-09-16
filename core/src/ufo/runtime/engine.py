@@ -1906,6 +1906,7 @@ class _CarriedFile:
     key: str
     filename: str
     size_bytes: int
+    digest: str
     subject: str | None
 
 
@@ -2855,7 +2856,10 @@ class TurnEngine:
         report and is logged, never the answer: the words the model wrote still deliver, since a
         failed terminal would lose them with nothing a re-run could recover. The key is the turn,
         attempt and link position, as a spoken reply's identity is, so a replayed run puts the same
-        bytes under the same key and the rows it already landed keep them."""
+        bytes under the same key and the rows it already landed keep them. A file whose bytes a
+        row of this turn already shares — `share_file` ran on it — is staged no second time: the
+        member has it once, and every surface lists it once."""
+        shared = await self._shared_digests()
         staged = []
         for index, artifact in enumerate(carried):
             artifact_id = uuid5(
@@ -2865,6 +2869,14 @@ class TurnEngine:
             try:
                 scoped = workspace_path(artifact.path)
                 measured = await measure_file(self.sandbox, scoped)
+                if measured.digest in shared:
+                    log(
+                        "turn.carried_file_already_shared",
+                        turn_id=str(self.turn.id),
+                        path=artifact.path,
+                        digest=measured.digest,
+                    )
+                    continue
                 if measured.size_bytes > SHARED_BYTES_LIMIT:
                     raise ValueError(
                         f"carried artifact {artifact.name!r} exceeds {SHARED_BYTES_LIMIT} bytes"
@@ -2880,15 +2892,27 @@ class TurnEngine:
                     error_class=type(error).__name__,
                 )
                 continue
+            shared.add(measured.digest)
             staged.append(
                 _CarriedFile(
                     key=key,
                     filename=artifact.name,
                     size_bytes=measured.size_bytes,
+                    digest=measured.digest,
                     subject=artifact.text,
                 )
             )
         return tuple(staged)
+
+    async def _shared_digests(self) -> set[str]:
+        async with workspace_tx() as connection:
+            rows = await connection.execute(
+                sa.select(tables.shared_artifact.c.digest).where(
+                    tables.shared_artifact.c.turn_id == self.turn.id,
+                    tables.shared_artifact.c.digest.is_not(None),
+                )
+            )
+            return set(rows.scalars())
 
     async def _discard_unreferenced(
         self, connection: AsyncConnection, staged: tuple[_CarriedFile, ...]
@@ -4915,6 +4939,7 @@ class TurnEngine:
                         subject=file.subject,
                         media_type=artifact_media_type(file.filename),
                         size_bytes=file.size_bytes,
+                        digest=file.digest,
                         role="details",
                         created_at=stamp,
                         updated_at=stamp,

@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use ratatui::text::{Line, Span};
 
-use crate::fold::{self, Frame};
-use crate::record::{Step, SubagentRun, TurnRecord};
+use crate::fold::{self, Frame, DONE};
+use crate::record::{Step, SubagentRun, TurnEnd, TurnRecord};
 use crate::ui::theme::Theme;
 use crate::ui::toolrender::OpRow;
 use crate::ui::{markdown, masthead, wrap, PROMPT_IDLE, RESUMED_NOTE, SENT_BY_UFO};
@@ -214,7 +214,10 @@ impl Retained {
     }
 
     fn live_turn(&mut self) -> usize {
-        if self.live.is_none() {
+        let ended = self
+            .live
+            .is_some_and(|turn| self.turns[turn].record.end.is_some());
+        if self.live.is_none() || ended {
             self.begin_turn();
         }
         self.live.expect("a turn is live")
@@ -845,8 +848,13 @@ fn segment_lines(
             _ => draw_op(row, None, &mut inside, &mut count, &mut words),
         }
     }
-    for step in &steps[answer_from..to] {
+    let stated = stated_answer(&turn.record);
+    let closing = stated.and_then(|_| closing_step(steps));
+    for (index, step) in steps.iter().enumerate().take(to).skip(answer_from) {
         match step {
+            Step::Text { .. } if stated.is_some() && Some(index) == closing => {
+                after.extend(markdown::render(stated.unwrap_or_default(), theme, width));
+            }
             Step::Text { text, open } => {
                 let shown = if *open && last {
                     markdown::committed_split(text).0
@@ -860,6 +868,9 @@ fn segment_lines(
             }
             _ => {}
         }
+    }
+    if let (true, Some(text), None) = (last, stated, closing) {
+        after.extend(markdown::render(text, theme, width));
     }
     if last {
         for run in &turn.record.runs {
@@ -909,6 +920,29 @@ fn bindings(
         }
     }
     bound
+}
+
+/// The turn's closing passage: the text step past its last tool step, wherever a member's message
+/// split the segments; replies and drains after it do not move it.
+fn closing_step(steps: &[Step]) -> Option<usize> {
+    let index = steps.iter().rposition(|step| {
+        !matches!(
+            step,
+            Step::Reply { .. } | Step::Comment { .. } | Step::Drain { .. }
+        )
+    })?;
+    matches!(steps[index], Step::Text { .. }).then_some(index)
+}
+
+/// A done frame's words are the answer and stand where the closing passage streamed, as the
+/// portal's `answerOf` has it: a resume that streamed nothing and a stream an op cut read once.
+fn stated_answer(record: &TurnRecord) -> Option<&str> {
+    match &record.end {
+        Some(TurnEnd::Terminal { frame, .. }) if frame.status == DONE => {
+            frame.text.as_deref().filter(|text| !text.is_empty())
+        }
+        _ => None,
+    }
 }
 
 fn label_of(step: &Step) -> Option<&str> {
@@ -1174,12 +1208,16 @@ mod tests {
     const AT: &str = "2026-09-16T00:00:00Z";
 
     fn words(retained: &mut Retained, text: &str) {
+        words_fold(retained, text);
+    }
+
+    fn words_fold(retained: &mut Retained, text: &str) -> bool {
         retained.fold(
             &Frame::Message {
                 text: text.to_string(),
             },
             AT,
-        );
+        )
     }
 
     fn label(retained: &mut Retained, text: &str) {
@@ -1613,6 +1651,74 @@ mod tests {
             texts(&retained.document(&theme)),
             ["\u{203a} draft the post", "", "⏺ the drafts"],
             "one row stands between the ask and the first thing the turn did"
+        );
+    }
+
+    fn done(retained: &mut Retained, text: &str) {
+        let frame = Frame::decode(
+            "terminal",
+            &format!(r#"{{"status":"done","text":{}}}"#, serde_json::json!(text)),
+        )
+        .expect("a done frame");
+        retained.fold(&frame, AT);
+    }
+
+    #[test]
+    fn a_done_frames_text_replaces_the_words_that_streamed() {
+        let theme = theme();
+        let mut retained = Retained::new(60);
+        retained.begin_turn();
+        label(&mut retained, "Sharing the note");
+        words(&mut retained, "Sending the note.");
+        done(&mut retained, "Sent: note.md");
+        retained.roll_up_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["Completed 1 step ▸", "", "Sent: note.md"]
+        );
+    }
+
+    #[test]
+    fn a_done_frame_states_the_answer_a_resume_never_streamed() {
+        let theme = theme();
+        let mut retained = Retained::new(60);
+        retained.begin_turn();
+        done(&mut retained, "Here it is.");
+        retained.roll_up_steps();
+        assert_eq!(texts(&retained.document(&theme)), ["Here it is."]);
+    }
+
+    #[test]
+    fn a_done_frame_replaces_a_closing_passage_a_member_message_split_off() {
+        let theme = theme();
+        let mut retained = Retained::new(60);
+        retained.begin_turn();
+        label(&mut retained, "Sharing the note");
+        words(&mut retained, "Sent: the note.");
+        retained.push(Entry::Member("thanks".into()));
+        retained.split_segment();
+        done(&mut retained, "Sent: note.md");
+        retained.roll_up_steps();
+        let drawn = texts(&retained.document(&theme));
+        assert_eq!(
+            drawn.iter().filter(|line| line.contains("Sent:")).count(),
+            1,
+            "{drawn:?}"
+        );
+        assert!(drawn.contains(&"Sent: note.md".to_string()), "{drawn:?}");
+    }
+
+    #[test]
+    fn a_frame_after_the_turns_end_begins_the_next_turn() {
+        let theme = theme();
+        let mut retained = Retained::new(60);
+        retained.begin_turn();
+        done(&mut retained, "First answer.");
+        assert!(words_fold(&mut retained, "Second answer."));
+        retained.roll_up_steps();
+        assert_eq!(
+            texts(&retained.document(&theme)),
+            ["First answer.", "Second answer."]
         );
     }
 

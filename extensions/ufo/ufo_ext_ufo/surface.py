@@ -297,7 +297,6 @@ def _history_text(message: Message) -> str:
 
 def directives_for(
     frame: LiveFrame,
-    streamed: bool,
     collect: tuple[CredentialPrompt, ...] = (),
     connect_message: str | None = None,
     files: tuple[SharedFile, ...] = (),
@@ -312,9 +311,9 @@ def directives_for(
     conformance fixture carry — so the client folds the one record every surface holds. The
     terminal frame crosses first, without its question and credential request — each rides its own
     directive below, gated to the member it names, so a second member tailing the turn reads
-    neither the prompt nor the seal — and then caps the turn (`streamed` says the answer already
-    reached the transcript as a text frame, `collect` names the credential prompts still awaiting
-    values, `files` the ones it shared); a park crosses and then says why. A wordless text frame,
+    neither the prompt nor the seal — and then caps the turn: its text is the answer and rides the
+    frame alone, `collect` names the credential prompts still awaiting values, `files` the ones it
+    shared; a park crosses and then says why. A wordless text frame,
     an empty drain and an empty sources step cross as nothing. A reply the turn delivered
     mid-flight crosses unless `comments` is off and it is the linked notice of a member's own
     portal comment — the stream that admitted the comment keeps from reading the member their own
@@ -333,7 +332,6 @@ def directives_for(
         case Terminal():
             capped = _answer(
                 frame,
-                streamed,
                 collect,
                 connect_message,
                 files,
@@ -387,7 +385,6 @@ def _run(op: TerminalOp) -> bytes:
 
 def _answer(
     terminal: Terminal,
-    streamed: bool,
     collect: tuple[CredentialPrompt, ...] = (),
     connect_message: str | None = None,
     files: tuple[SharedFile, ...] = (),
@@ -395,10 +392,11 @@ def _answer(
     runtime: RuntimeIdentity | None = None,
     viewer_member_id: UUID | None = None,
 ) -> tuple[bytes, ...]:
-    """Cap a turn. A done turn prompts (`ask`) after its answer — already streamed as `txt`, else
-    said now, followed by one `file` line per file the turn shared and one `secret` line per
-    still-unanswered credential prompt, so the shell collects exactly the missing values privately;
-    a failure says what to do next and prompts.
+    """Cap a turn. A done turn prompts (`ask`) after one `file` line per file the turn shared and
+    one `secret` line per still-unanswered credential prompt, so the shell collects exactly the
+    missing values privately — its answer is the frame's own text, which the client draws in place
+    of the words that streamed, so an answer whose stream an op or a resume cut is never said
+    twice; a failure says what to do next and prompts.
 
     A cancel divides on whether it carries words. An admission refusal cancels with its reason: the
     member reads it and, on the stream whose request admitted the refused turn (`exits`), the
@@ -439,7 +437,6 @@ def _answer(
         question = (directive("say", frame.question.title), *choices)
     match frame.status:
         case "done":
-            said = () if streamed else (directive("say", frame.text),)
             sealed = "" if frame.credential_request is None else frame.credential_request.sealed
             secrets = tuple(
                 directive("secret", sealed, prompt.slot, prompt.prompt) for prompt in collect
@@ -447,7 +444,6 @@ def _answer(
             connect = () if connect_message is None else (directive("say", connect_message),)
             return (
                 *attestation,
-                *said,
                 *shared,
                 *secrets,
                 *connect,
@@ -497,14 +493,12 @@ def _question_directives(question: AskUserInput) -> tuple[bytes, ...]:
 @dataclass(frozen=True)
 class _RenderedFrame:
     lines: tuple[bytes, ...]
-    streamed: bool
     terminated: bool
     prompting: bool
 
 
 async def _render_stream_frame(
     frame: LiveFrame,
-    streamed: bool,
     pending: Callable[[str, str], Awaitable[bool]] | None,
     connect: Callable[[], Awaitable[str]] | None,
     files: Callable[[], Awaitable[tuple[SharedFile, ...]]] | None,
@@ -539,7 +533,6 @@ async def _render_stream_frame(
         shared = await files()
     lines = directives_for(
         frame,
-        streamed,
         collect,
         connect_message,
         shared,
@@ -548,12 +541,11 @@ async def _render_stream_frame(
         comments=comments,
         viewer_member_id=viewer_member_id,
     )
-    streamed = streamed or bool(lines and isinstance(frame, TextDelta))
     terminated = isinstance(frame, Terminal | Parked)
     prompting = isinstance(frame, Terminal) and not (
         exits and frame.frame.status == "cancelled" and bool(frame.frame.text)
     )
-    return _RenderedFrame(lines, streamed, terminated, prompting)
+    return _RenderedFrame(lines, terminated, prompting)
 
 
 async def _stream_end_directives(
@@ -647,7 +639,6 @@ async def stream_directives(
     resumption reaches the member on their next message."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + hold_seconds
-    streamed = False
     terminated = False
     prompting = False
     ran = False
@@ -691,7 +682,6 @@ async def stream_directives(
                 cursor, frame = item
                 rendered = await _render_stream_frame(
                     frame,
-                    streamed,
                     pending,
                     connect,
                     files,
@@ -700,7 +690,6 @@ async def stream_directives(
                     comments,
                     viewer_member_id,
                 )
-                streamed = rendered.streamed
                 for line in rendered.lines:
                     yield line
                 rendered_cursor = cursor

@@ -11,6 +11,7 @@ frames, `mid_turn_reply` rows, `writeback` rows, and the surface's own calls.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -343,27 +344,13 @@ class WorkingThenClosingSpanModel:
         yield Usage(input_tokens=1, output_tokens=1)
 
 
-def _terminal_lines(frames: list[object]) -> list[list[str]]:
-    """What the ufo terminal prints for a turn's frames, keeping the `streamed` bookkeeping
-    `stream_directives` keeps: once a delta has been rendered the terminal frame's answer is taken
-    to have reached the transcript already, so it is not said a second time."""
-    printed: list[list[str]] = []
-    streamed = False
-    for frame in frames:
-        lines = directives_for(frame, streamed)
-        if lines and isinstance(frame, TextDelta):
-            streamed = True
-        printed.extend(line.decode().rstrip("\n").split("\t") for line in lines)
-    return printed
-
-
 async def test_the_closing_span_reaches_the_ufo_terminal_exactly_once(
     db: None, tmp_path: Path
 ) -> None:
-    """The ufo terminal prints the delta stream and caps the turn on the terminal frame, saying that
-    frame's text only when no delta preceded it. A closing round's span is delivered by the answer
+    """The ufo terminal prints the delta stream as it runs and, on the terminal frame, draws that
+    frame's text in the closing passage's place. A closing round's span is delivered by the answer
     and by no Reply frame, so the words the redaction withheld have to ride the delta stream: the
-    member reads the answer once, on the surface the whole session is printed on."""
+    member reads the answer once while it runs, on the surface the whole session is printed on."""
     turn = await _seed_turn("queued", None)
     with ws(turn.workspace_id):
         hub = RecordingHub()
@@ -374,13 +361,14 @@ async def test_the_closing_span_reaches_the_ufo_terminal_exactly_once(
     assert frame is not None
     assert (frame.status, frame.text.strip()) == ("done", CLOSING_TEXT)
     assert rows == []
-    printed = _terminal_lines(hub.frames)
-    said = [
-        json.loads(line[2])["text"] if line[0] == "frame" else line[1]
-        for line in printed
-        if line[:2] == ["frame", "message"] or line[0] == "say"
+    printed = [
+        line.decode().rstrip("\n").split("\t")
+        for frame in hub.frames
+        for line in directives_for(frame)
     ]
-    assert [words for words in said if CLOSING_TEXT in words] == [CLOSING_TEXT]
+    streamed = [json.loads(line[2])["text"] for line in printed if line[:2] == ["frame", "message"]]
+    assert [words for words in streamed if CLOSING_TEXT in words] == [CLOSING_TEXT]
+    assert [line[0] for line in printed if line[0] == "say"] == []
     assert printed[-1][0] == "ask"
 
 
@@ -551,6 +539,53 @@ async def test_an_artifact_the_closing_answer_carries_lands_as_a_details_file_be
     assert any(f"[{REPORT_LINK_TEXT}](/workspace/{REPORT_NAME})" in text for text in said)
 
 
+async def test_a_carried_file_the_turn_already_shared_lands_no_second_row(
+    db: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A link to a file `share_file` already handed the member in this turn carries nothing more:
+    the bytes are the same, so the row that shares them is the one that stands, and every surface
+    lists the file once. The skip is logged by path and digest; the label still replaces the link
+    in the delivered answer."""
+    turn = await _seed_turn("queued", None)
+    digest = f"sha256:{hashlib.sha256((REPORT_BODY + chr(10)).encode()).hexdigest()}"
+    now = datetime.now(UTC)
+    with ws(turn.workspace_id):
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.insert(tables.shared_artifact).values(
+                    turn_id=turn.id,
+                    blob_key=f"{ARTIFACT_KEY_PREFIX}{uuid4()}/{REPORT_NAME}",
+                    id=uuid4(),
+                    workspace_id=turn.workspace_id,
+                    filename=REPORT_NAME,
+                    media_type="text/markdown",
+                    size_bytes=len(REPORT_BODY) + 1,
+                    digest=digest,
+                    role="file",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        engine = await _carrying_engine(turn, CarryingModel(), tmp_path)
+        with caplog.at_level(logging.INFO, logger="ufo"):
+            frame = await engine.run()
+        rows = await _shared(turn.id)
+        keys = sorted(entry.key for entry in await engine.blob.list(ARTIFACT_KEY_PREFIX))
+
+    assert frame is not None
+    assert (frame.status, frame.text) == ("done", f"{CARRYING_ANSWER}\n\n{REPORT_LINK_TEXT}\n")
+    assert [(row.filename, row.role, row.digest) for row in rows] == [(REPORT_NAME, "file", digest)]
+    assert keys == []
+    skipped = [
+        record.ufo
+        for record in caplog.records
+        if record.getMessage() == "turn.carried_file_already_shared"
+    ]
+    assert [(entry["path"], entry["digest"]) for entry in skipped] == [
+        (f"/workspace/{REPORT_NAME}", digest)
+    ]
+
+
 async def test_a_refused_commit_lands_no_carried_file_and_the_closing_one_lands_once(
     db: None, tmp_path: Path
 ) -> None:
@@ -592,8 +627,9 @@ async def test_a_replayed_terminal_keeps_the_bytes_its_landed_rows_point_at(
     db: None, tmp_path: Path
 ) -> None:
     """The same attempt reaching the terminal write twice — a lost acknowledgement, a recovery that
-    adopted it — stages the same keys and finds the turn already terminal; the bytes the first
-    write's rows point at stay, because a row is what keeps them."""
+    adopted it — stages nothing new, since the rows it already landed share the very bytes, and
+    finds the turn already terminal; the bytes the first write's rows point at stay, because a row
+    is what keeps them."""
     turn = await _seed_turn("queued", None)
     with ws(turn.workspace_id):
         engine = await _carrying_engine(turn, CarryingModel(), tmp_path)
@@ -608,7 +644,7 @@ async def test_a_replayed_terminal_keeps_the_bytes_its_landed_rows_point_at(
         after = await _shared(turn.id)
 
     assert frame is not None and replayed is not None and committed is False
-    assert [file.key for file in staged] == [rows[0].blob_key]
+    assert staged == ()
     assert kept == (REPORT_BODY + "\n").encode()
     assert [row.blob_key for row in after] == [rows[0].blob_key]
 

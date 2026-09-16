@@ -92,13 +92,16 @@ record and draws nothing of it. Withholding is the surface's, never the server's
 ### Rows derived from the record
 
 The transcript holds one `Segment` entry per stretch of a turn — `steps[from..to)` of its record and
-the ops that started among them — and draws it from the record on every change. A turn is one segment
-until it drains a member's message; the message then stands between what came before and what
-followed, as RFC 0055 lays the portal out. A rolled segment reads `Completed N steps ▸` over its
-answer; the answer is the trailing text of the segment, drawn committed-blocks-first with the open
-tail live. `N` counts labelled tool steps, the words that preceded one, unbound drawn ops, and runs
-that stated a step. Runs draw under the last segment as `label · latest ▸` rows that open by click.
-Rolling a turn up closes its words, so a turn ended by a detach or a stop keeps them.
+the ops that started among them — and draws it from the record on every change. A turn is one
+segment until it drains a member's message; the message then stands between what came before and
+what followed, as RFC 0055 lays the portal out. A rolled segment reads `Completed N steps ▸` over
+its answer. While the turn runs the answer is the trailing text of the segment, drawn
+committed-blocks-first with the open tail live; once the done frame lands its text is the answer and
+stands in that passage's place, as RFC 0055's `answerOf` has it — so the surface never says a done
+frame's text, and an answer whose stream an op or a resume cut before the frame reads once. `N`
+counts labelled tool steps, the words that preceded one, unbound drawn ops, and runs that stated a
+step. Runs draw under the last segment as `label · latest ▸` rows that open by click. Rolling a turn
+up closes its words, so a turn ended by a detach or a stop keeps them.
 
 ### The row
 

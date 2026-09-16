@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::fold::Frame;
+use crate::fold::{self, Frame, DONE};
+use crate::record::TurnRecord;
 use crate::ui::toolrender::OpView;
 use crate::ui::{meter_line, RESUMED_NOTE};
 use crate::wire::{
@@ -147,20 +148,33 @@ struct PendingAuthorization {
     options: Vec<AuthorizationOption>,
 }
 
-#[derive(Default)]
 pub struct Driver {
     next_id: u64,
     asks: HashSet<u64>,
     authorizations: HashMap<u64, PendingAuthorization>,
     secrets: HashMap<u64, PendingSecret>,
+    record: TurnRecord,
 }
 
-/// The events a live frame publishes. A frame that ends the turn publishes nothing of its own: the
-/// cap directives that follow it do.
-fn frame_events(event: &str, data: &str) -> Vec<Event> {
+impl Default for Driver {
+    fn default() -> Driver {
+        Driver {
+            next_id: 0,
+            asks: HashSet::new(),
+            authorizations: HashMap::new(),
+            secrets: HashMap::new(),
+            record: fold::empty(None),
+        }
+    }
+}
+
+/// The events a live frame publishes, folded into the turn's record on the way. A done frame's
+/// text is the `message` only when nothing of the closing passage streamed as deltas.
+fn frame_events(record: &mut TurnRecord, event: &str, data: &str) -> Vec<Event> {
     let Some(frame) = Frame::decode(event, data) else {
         return Vec::new();
     };
+    fold::fold_next(record, &frame, &fold::utc_now_rfc3339());
     match frame {
         Frame::Message { text } => vec![Event::TextDelta { text }],
         Frame::Activity { text, .. } => vec![Event::Status { text }],
@@ -181,6 +195,11 @@ fn frame_events(event: &str, data: &str) -> Vec<Event> {
         Frame::Resumed { .. } => vec![Event::Note {
             text: RESUMED_NOTE.to_string(),
         }],
+        Frame::Terminal(frame) if frame.status == DONE && !fold::closing_streamed(record) => frame
+            .text
+            .filter(|text| !text.is_empty())
+            .map(|text| vec![Event::Message { text }])
+            .unwrap_or_default(),
         Frame::Sources { .. } | Frame::Terminal(_) | Frame::Parked { .. } => Vec::new(),
     }
 }
@@ -205,7 +224,7 @@ impl Driver {
 
     pub fn on_directive(&mut self, directive: &Directive) -> Vec<Event> {
         match directive {
-            Directive::Frame { event, data } => frame_events(event, data),
+            Directive::Frame { event, data } => frame_events(&mut self.record, event, data),
             Directive::Say(text) => vec![Event::Message { text: text.clone() }],
             Directive::You(text) => vec![Event::MemberMessage { text: text.clone() }],
             Directive::Fired(text) => vec![Event::FiredMessage { text: text.clone() }],
@@ -437,6 +456,31 @@ mod tests {
             params: "{\"argv\":[\"ls\"]}".into(),
             call_id: String::new(),
         }
+    }
+
+    #[test]
+    fn a_done_frames_text_is_the_message_when_nothing_of_it_streamed() {
+        let mut driver = Driver::new();
+        let done = Directive::Frame {
+            event: "terminal".into(),
+            data: "{\"status\":\"done\",\"text\":\"Here it is.\"}".into(),
+        };
+        assert_eq!(
+            driver.on_directive(&done),
+            vec![Event::Message {
+                text: "Here it is.".into()
+            }]
+        );
+        assert_eq!(
+            driver.on_directive(&Directive::Frame {
+                event: "message".into(),
+                data: "{\"text\":\"Here it is.\"}".into(),
+            }),
+            vec![Event::TextDelta {
+                text: "Here it is.".into()
+            }]
+        );
+        assert_eq!(driver.on_directive(&done), Vec::<Event>::new());
     }
 
     #[test]
