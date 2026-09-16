@@ -438,7 +438,7 @@ def test_credential_list_reports_set_and_unset_without_values(cli_home: CliRunne
         line.split()[0]: line.split()[-1] for line in listed.output.splitlines() if line.strip()
     }
     assert statuses["perplexity_api_key"] == "set"
-    assert statuses["mcp_servers"] == "unset"
+    assert statuses["datadog_api_key"] == "unset"
 
 
 def test_bundle_writes_a_runnable_artifact(cli_home: CliRunner) -> None:

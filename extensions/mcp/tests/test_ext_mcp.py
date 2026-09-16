@@ -6,15 +6,16 @@ FastMCP server — a spec-compliant MCP server reached over the real Streamable-
 not speak), carried by an in-process ASGI client so there is no network or port. The `mcp_client`
 seam is overridden to point at that server, mirroring how the connectors pack stubs its `Client`.
 The tools run the way core does (a real `ToolContext` whose `ext` comes from the loader's
-`turn_tools`, reading the server URL and Bearer token back out of the stored `mcp_servers`
-credential). A tool raising surfaces as an is_error result; the 1 MiB request/response bounds
-raise."""
+`turn_tools`, reading the server URL out of the extension's own store and the Bearer token out of
+the slot that server's connection declares). A tool raising surfaces as an is_error result; the
+1 MiB request/response bounds raise."""
 
 import contextlib
 import json
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -32,12 +33,14 @@ from mcp.types import Tool as McpTool
 from ufo.db import current_workspace, workspace_tx
 from ufo.host.ext.loader import turn_tools
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.access.grants import GrantStore
 from ufo.runtime.engine import MAX_TOOL_RESULT_CHARS
 from ufo.runtime.tools.context import ToolContext
 from ufo.runtime.workspace import init_workspace_credentials
 from ufo.schema import tables
 from ufo.schema.records import Agent, Turn
 from ufo.sdk.audience import conversation_audience
+from ufo.sdk.grants import ConnectionSummary
 
 pytestmark = [
     pytest.mark.usefixtures("database_url"),
@@ -149,7 +152,7 @@ async def _serving(
         yield client_for
 
 
-def test_manifest_declares_the_two_dynamic_tools_and_the_server_slot() -> None:
+def test_manifest_declares_the_two_dynamic_tools_and_the_server_kind() -> None:
     manifest = mcp.manifest()
     assert manifest.name == "mcp"
     by_name = {tool.name: tool for tool in manifest.tools}
@@ -158,140 +161,70 @@ def test_manifest_declares_the_two_dynamic_tools_and_the_server_slot() -> None:
     assert by_name["call_mcp_tool"].description == CALL_MCP_TOOL_DESCRIPTION
     assert by_name["list_mcp_tools"].untrusted is True
     assert by_name["call_mcp_tool"].untrusted is True
-    assert set(mcp.ListMcpToolsInput.model_fields) == {
-        "server",
-        "tool_names",
-    }
-    assert set(mcp.CallMcpToolInput.model_fields) == {
-        "server",
-        "tool_name",
-        "arguments",
-    }
-    (slot,) = mcp.manifest().credentials
-    assert slot.name == "mcp_servers"
-    assert slot.injection is None
-    assert slot.merge is mcp.merge_mcp_server
-    assert slot.entries is mcp.mcp_server_names
+    assert set(mcp.ListMcpToolsInput.model_fields) == {"server", "tool_names"}
+    assert set(mcp.CallMcpToolInput.model_fields) == {"server", "tool_name", "arguments"}
+    (kind,) = manifest.objects
+    assert kind.name == "mcp_server"
+    assert kind.spec_model is mcp.McpServerSpec
+    assert manifest.credentials == ()
+    assert manifest.workspace_credentials is not None
 
 
-def test_configured_server_names_are_sorted_and_carry_no_url_or_token() -> None:
-    stored = json.dumps(
-        {
-            "servers": {
-                "supabase": {"url": "https://mcp.supabase.com/mcp", "auth": "sbp-token"},
-                "neon": {"url": "https://mcp.neon.tech/mcp", "auth": "neon-token"},
-            }
-        }
-    )
-
-    named = mcp.mcp_server_names(stored)
-
-    assert named == ("neon", "supabase")
-    assert "sbp-token" not in str(named)
-    assert "mcp.supabase.com" not in str(named)
-
-
-def test_no_server_is_configured_reads_as_no_names() -> None:
-    assert mcp.mcp_server_names(json.dumps({"servers": {}})) == ()
-
-
-def test_one_mcp_server_update_preserves_other_servers_and_saved_auth() -> None:
-    current = json.dumps(
-        {
-            "servers": {
-                "railway": {"url": "https://mcp.railway.com/mcp", "auth": "railway-token"},
-                "vercel": {"url": "https://mcp.vercel.com", "auth": "old-vercel-token"},
-            }
-        }
-    )
-
-    added = mcp.McpServersConfig.model_validate_json(
-        mcp.merge_mcp_server(
-            current,
-            json.dumps(
-                {
-                    "name": "github",
-                    "url": "https://api.githubcopilot.com/mcp/",
-                    "auth": "github-token",
-                }
-            ),
-        )
-    )
-    updated = mcp.McpServersConfig.model_validate_json(
-        mcp.merge_mcp_server(
-            added.model_dump_json(),
-            json.dumps({"name": "vercel", "url": "https://mcp.vercel.com/mcp"}),
-        )
-    )
-
-    assert set(updated.servers) == {"railway", "vercel", "github"}
-    assert updated.servers["railway"].auth == "railway-token"
-    assert updated.servers["vercel"] == mcp.McpServer(
-        url="https://mcp.vercel.com/mcp", auth="old-vercel-token"
-    )
-    assert updated.servers["github"].auth == "github-token"
-
-
-def test_whole_mcp_server_config_replaces_saved_servers() -> None:
-    replaced = mcp.McpServersConfig.model_validate_json(
-        mcp.merge_mcp_server(
-            json.dumps(
-                {
-                    "servers": {
-                        "railway": {
-                            "url": "https://mcp.railway.com/mcp",
-                            "auth": "railway-token",
-                        }
-                    }
-                }
-            ),
-            json.dumps({}),
-        )
-    )
-
-    assert replaced.servers == {}
-
-
-def test_whole_mcp_server_config_repairs_invalid_saved_value() -> None:
-    repaired = mcp.McpServersConfig.model_validate_json(
-        mcp.merge_mcp_server(
-            "not json",
-            json.dumps({"servers": {"vercel": {"url": "https://mcp.vercel.com"}}}),
-        )
-    )
-
-    assert repaired.servers == {"vercel": mcp.McpServer(url="https://mcp.vercel.com")}
-
-
-def test_one_mcp_server_can_be_removed_without_reentering_the_others() -> None:
-    updated = mcp.McpServersConfig.model_validate_json(
-        mcp.merge_mcp_server(
-            json.dumps(
-                {
-                    "servers": {
-                        "railway": {"url": "https://mcp.railway.com/mcp"},
-                        "vercel": {"url": "https://mcp.vercel.com"},
-                    }
-                }
-            ),
-            json.dumps({"name": "vercel", "remove": True}),
-        )
-    )
-
-    assert updated.servers == {"railway": mcp.McpServer(url="https://mcp.railway.com/mcp")}
-
-
-def test_removing_an_unknown_mcp_server_fails() -> None:
-    with pytest.raises(mcp.CredentialValueInvalid, match=r"missing.*not configured"):
-        mcp.merge_mcp_server(
-            json.dumps({"servers": {"railway": {"url": "https://mcp.railway.com/mcp"}}}),
-            json.dumps({"name": "missing", "remove": True}),
-        )
-
-
-def test_server_config_rejects_a_non_http_url() -> None:
+def test_server_spec_rejects_a_non_http_url() -> None:
     with pytest.raises(ValueError, match="http or https"):
-        mcp.McpServer(url="ftp://mcp.example.test")
+        mcp.McpServerSpec(url="ftp://mcp.example.test")
+
+
+def _shared_row(connection_id: UUID) -> ConnectionSummary:
+    moment = datetime(2026, 9, 15, tzinfo=UTC)
+    return ConnectionSummary(
+        id=connection_id,
+        provider=mcp.MCP_PROVIDER_PREFIX + SERVER_NAME,
+        account_id="",
+        host="",
+        base_url=None,
+        backfill_days=None,
+        owner_member_id=None,
+        owner_email=None,
+        shared=True,
+        connected_at=moment,
+        updated_at=moment,
+        agents=(),
+    )
+
+
+def test_a_token_slot_is_derived_from_the_name_a_member_typed() -> None:
+    """A panel must know where a token goes before the row exists, so the slot follows the name
+    rather than the row's id."""
+    slot = mcp.token_slot(_shared_row(uuid4()))
+
+    assert slot == "mcp_server_" + SERVER_NAME
+
+
+def test_the_mcp_namespace_cannot_collide_with_a_brokered_provider() -> None:
+    assert mcp.MCP_PROVIDER_PREFIX + "vercel" != "vercel"
+    assert mcp.server_name(mcp.MCP_PROVIDER_PREFIX + "vercel") == "vercel"
+
+
+async def test_a_server_is_a_connection_row_carrying_its_endpoint(db: None) -> None:
+    """The row is the whole record of who holds a server, so the connectors shelf lists it and the
+    disconnect every account already has removes it."""
+    context = await _tool_context()
+
+    (row,) = await mcp.mcp_connections()
+
+    assert row.provider == mcp.MCP_PROVIDER_PREFIX + SERVER_NAME
+    assert await mcp.server_url(context.ext, row.id) == ENDPOINT
+
+
+async def test_one_token_slot_is_declared_for_each_server(db: None) -> None:
+    context = await _tool_context()
+
+    declared = await mcp.declared_credentials(context.ext, context.turn.workspace_id)
+
+    assert [slot.name for slot in declared] == ["mcp_server_" + SERVER_NAME]
+    assert declared[0].injection is None
+    assert AUTH_TOKEN not in declared[0].description
 
 
 async def test_list_mcp_tools_browses_the_catalog_without_schemas(
@@ -488,8 +421,9 @@ def _credentials() -> CredentialStore:
 
 
 async def _tool_context() -> ToolContext:
-    """A workspace with the `mcp_servers` credential filled, plus a ToolContext whose `ext` is the
-    loader-built context the two tools receive — the exact wiring `turn_tools` hands the engine."""
+    """A workspace holding one MCP server as a connection row — its endpoint in the extension's own
+    store, its token in the slot that row declares — plus a ToolContext whose `ext` is the
+    loader-built context the two tools receive, the exact wiring `turn_tools` hands the engine."""
     store = _credentials()
     workspace_id = uuid4()
     async with workspace_tx() as connection:
@@ -498,13 +432,14 @@ async def _tool_context() -> ToolContext:
                 id=workspace_id, created_at=sa.func.now(), updated_at=sa.func.now()
             )
         )
-    config = mcp.McpServersConfig(
-        servers={SERVER_NAME: mcp.McpServer(url=ENDPOINT, auth=AUTH_TOKEN)}
-    )
-    await store.put(workspace_id, mcp.MCP_SERVERS_SLOT, config.model_dump_json())
     init_workspace_credentials(store)
     current_workspace.set(workspace_id)
     _, ext_by_tool, _ = turn_tools((mcp.manifest(),), store, audience=conversation_audience(None))
+    ext = ext_by_tool["call_mcp_tool"]
+    connection_id = await ext.register_connection(mcp.MCP_PROVIDER_PREFIX + SERVER_NAME)
+    await ext.store.put(mcp.endpoint_key(connection_id), {mcp.SERVER_URL_KEY: ENDPOINT})
+    await ext.store.put(mcp.minted_key(SERVER_NAME), {})
+    await store.put(workspace_id, mcp.token_slot_for(SERVER_NAME), AUTH_TOKEN)
     return ToolContext(
         sandbox=None,
         blob=None,
@@ -523,5 +458,136 @@ async def _tool_context() -> ToolContext:
         speaker_member_id=None,
         audience=conversation_audience(None),
         artifact_token_secret="",
-        ext=ext_by_tool["call_mcp_tool"],
+        ext=ext,
+        grants=GrantStore(),
     )
+
+
+async def test_two_members_cannot_hold_two_servers_of_one_name(db: None) -> None:
+    """The name is what a tool call addresses, so a second row under it would make the call
+    ambiguous and declare the same token slot twice, which the workspace slot resolver refuses."""
+    context = await _tool_context()
+    second = await context.ext.register_connection(
+        mcp.MCP_PROVIDER_PREFIX + SERVER_NAME, owner_member_id=uuid4()
+    )
+
+    held = await mcp.mcp_connections()
+
+    assert [row.id for row in held] == [second]
+    assert len({mcp.token_slot(row) for row in held}) == 1
+
+
+async def _member(workspace_id: UUID, *, admin: bool) -> UUID:
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email=f"{member_id.hex[:8]}@x.test",
+                is_admin=admin,
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    return member_id
+
+
+async def _own(context: ToolContext, row_id: UUID, member_id: UUID) -> None:
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.connection)
+            .values(owner_member_id=member_id, shared=False)
+            .where(tables.connection.c.id == row_id)
+        )
+
+
+async def test_a_name_readded_after_its_row_went_carries_no_earlier_token(db: None) -> None:
+    """The disconnect every account has knows nothing of this extension, so a name re-added after it
+    would otherwise dial its new endpoint with the token the old server left behind."""
+    context = await _tool_context()
+    (row,) = await mcp.mcp_connections()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.connection).where(tables.connection.c.id == row.id)
+        )
+    admin_id = await _member(context.turn.workspace_id, admin=True)
+    admin = replace(context, speaker_member_id=admin_id, audience=conversation_audience(admin_id))
+
+    await mcp.McpServerObjects().apply(
+        admin,
+        SERVER_NAME,
+        mcp.McpServerSpec(url="http://fresh.test/mcp"),
+        None,
+        expected_generation=None,
+    )
+
+    server = await mcp._server(admin, SERVER_NAME)
+    assert server.url == "http://fresh.test/mcp"
+    assert server.auth is None
+
+
+async def test_a_server_belongs_to_the_workspace_and_the_tools_reach_it(db: None) -> None:
+    """Both tools bind no member authority, so a row private to whoever added it would be
+    unreachable to the very turn that added it."""
+    context = await _tool_context()
+    (row,) = await mcp.mcp_connections()
+
+    assert row.shared is True
+    assert row.owner_member_id is None
+    assert context.speaker_member_id is None
+    assert (await mcp._server(context, SERVER_NAME)).url == ENDPOINT
+
+
+async def test_a_token_left_by_a_removal_elsewhere_stays_nameable(db: None) -> None:
+    """The disconnect every account has takes the row and knows nothing of this extension, so the
+    token would otherwise be held under a declaration that died with the row — unreadable,
+    unclearable, and still a secret the workspace holds. The mint marker keeps it named, so the
+    credential kind lists it and an admin can drop it."""
+    context = await _tool_context()
+    (row,) = await mcp.mcp_connections()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.connection).where(tables.connection.c.id == row.id)
+        )
+
+    declared = await mcp.declared_credentials(context.ext, context.turn.workspace_id)
+
+    assert [slot.name for slot in declared] == [mcp.token_slot_for(SERVER_NAME)]
+    assert await context.ext.credentials.stored(mcp.token_slot_for(SERVER_NAME))
+
+
+async def test_adding_a_name_again_drops_only_that_name_s_stale_token(db: None) -> None:
+    """`apply` writes its row, its endpoint and its marker in three transactions, so a sweep of the
+    whole workspace would delete an endpoint another `apply` had written since. Cleanup keeps to the
+    one name being written."""
+    context = await _tool_context()
+    (row,) = await mcp.mcp_connections()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.connection).where(tables.connection.c.id == row.id)
+        )
+    admin_id = await _member(context.turn.workspace_id, admin=True)
+    admin = replace(context, speaker_member_id=admin_id, audience=conversation_audience(admin_id))
+    await mcp.McpServerObjects().apply(
+        admin,
+        "other",
+        mcp.McpServerSpec(url="http://other.test/mcp"),
+        None,
+        expected_generation=None,
+    )
+
+    assert await context.ext.credentials.stored(mcp.token_slot_for(SERVER_NAME))
+
+    await mcp.McpServerObjects().apply(
+        admin,
+        SERVER_NAME,
+        mcp.McpServerSpec(url="http://fresh.test/mcp"),
+        None,
+        expected_generation=None,
+    )
+
+    server = await mcp._server(admin, SERVER_NAME)
+    assert server.url == "http://fresh.test/mcp"
+    assert server.auth is None
+    assert (await mcp._server(admin, "other")).url == "http://other.test/mcp"

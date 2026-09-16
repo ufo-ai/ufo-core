@@ -508,7 +508,6 @@ async def test_an_admin_declares_a_slot_and_the_credential_kind_lists_it(db: Non
             "header": "X-Acme-Key",
             "host_slot": "",
             "host_options": [],
-            "entries": [],
         }
         assert fetched["status"]["filled"] is False
 

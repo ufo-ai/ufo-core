@@ -6,7 +6,6 @@ proven by the sample-extension conformance probe and the Slack extension's own t
 
 import asyncio
 import hashlib
-import json
 import logging
 import time
 from dataclasses import dataclass, field, replace
@@ -974,61 +973,6 @@ async def test_credential_slots_report_fill_state_and_no_value(db: None, tmp_pat
         ("beta_token", False),
     ]
     assert all("sealed" not in view.model_dump_json() for view in listed)
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_structured_slot_lists_the_names_it_holds_and_not_the_value(
-    db: None, tmp_path
-) -> None:
-    workspace_id, _, _ = await _seed()
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-    assert context._credentials is not None
-    await context._credentials.put(
-        workspace_id, "mcp_servers", '{"servers":{"supabase":{"auth":"sbp-secret"}}}'
-    )
-    context = replace(
-        context,
-        _declared_slots=(
-            DeclaredSlot(
-                name="mcp_servers",
-                description="MCP servers",
-                extension="mcp",
-                entries=lambda value: tuple(sorted(json.loads(value)["servers"])),
-            ),
-        ),
-    )
-
-    (view,) = await context.list_credential_slots()
-
-    assert view.entries == ("supabase",)
-    assert "sbp-secret" not in view.model_dump_json()
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_a_slot_declaring_no_reader_is_never_decrypted(db: None, tmp_path) -> None:
-    """The fill-state read must not touch the ciphertext of a slot that projects no names — this
-    row is unopenable, so a projection that decrypted every slot would raise here."""
-    workspace_id, _, _ = await _seed()
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.insert(tables.credential).values(
-                workspace_id=workspace_id,
-                slot="acme_api_key",
-                ciphertext=b"not-fernet-ciphertext",
-                created_at=sa.func.now(),
-                updated_at=sa.func.now(),
-            )
-        )
-    context = replace(
-        _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path)),
-        _declared_slots=(
-            DeclaredSlot(name="acme_api_key", description="ACME key", extension="acme"),
-        ),
-    )
-
-    (view,) = await context.list_credential_slots()
-
-    assert (view.filled, view.entries) == (True, ())
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
@@ -2796,70 +2740,6 @@ async def test_credential_prompts_gate_per_slot_on_seal_workspace_and_marker(
             await context.fulfill_credential_request(sealed, "a", "hijack", uuid4())
         with pytest.raises(CredentialRequestInvalid, match="slot"):
             await context.fulfill_credential_request(sealed, "c", "off-seal", member_id)
-
-
-@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
-async def test_credential_fulfillment_uses_the_declared_merge(db: None, tmp_path) -> None:
-    workspace_id, _, member_id = await _seed(member_email="owner@example.com")
-    assert member_id is not None
-    async with workspace_tx() as connection:
-        await connection.execute(
-            sa.update(tables.member).values(is_admin=True).where(tables.member.c.id == member_id)
-        )
-    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
-
-    def merge(current: str | None, submitted: str) -> str:
-        return submitted if current is None else f"{current},{submitted}"
-
-    context = replace(
-        context,
-        _declared_slots=(
-            DeclaredSlot(name="structured", description="", extension="sample", merge=merge),
-        ),
-    )
-    first = seal_credential_request(
-        context._credentials.fernet,
-        CredentialRequestState(
-            workspace_id=workspace_id, member_id=member_id, slots=("structured",)
-        ),
-    )
-    second = seal_credential_request(
-        context._credentials.fernet,
-        CredentialRequestState(
-            workspace_id=workspace_id, member_id=member_id, slots=("structured",)
-        ),
-    )
-
-    with ws(workspace_id):
-        await context.fulfill_credential_request(first, "structured", "one", member_id)
-        with pytest.raises(CredentialRequestInvalid, match="already fulfilled"):
-            await context.fulfill_credential_request(first, "structured", "reused", member_id)
-        await context.fulfill_credential_request(second, "structured", "two", member_id)
-        assert await context._credentials.get(workspace_id, "structured") == "one,two"
-        undeclared = seal_credential_request(
-            context._credentials.fernet,
-            CredentialRequestState(
-                workspace_id=workspace_id, member_id=member_id, slots=("removed",)
-            ),
-        )
-        with pytest.raises(CredentialRequestInvalid, match="not declared"):
-            await context.fulfill_credential_request(undeclared, "removed", "value", member_id)
-        context = replace(
-            context,
-            _declared_slots=(DeclaredSlot(name="provider", description="", extension="sample"),),
-        )
-        authorization = seal_credential_request(
-            context._credentials.fernet,
-            CredentialRequestState(
-                workspace_id=workspace_id,
-                member_id=member_id,
-                slots=("provider",),
-                payload="provider-state",
-            ),
-        )
-        await context.fulfill_credential_request(authorization, "provider", "one", member_id)
-        await context.fulfill_credential_request(authorization, "provider", "two", member_id)
-        assert await context._credentials.get(workspace_id, "provider") == "two"
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

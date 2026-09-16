@@ -567,21 +567,24 @@ async def test_credential_access_reads_declared_and_rejects_undeclared(db: None)
 async def test_credential_access_gates_a_slot_the_extension_resolves_per_workspace(
     db: None,
 ) -> None:
-    """`clear` reaches a slot the extension resolves for this workspace, so dropping a declaration
-    drops its secret; a slot neither declared nor resolved is still refused, and reading the secret
-    stays with the manifest's own declarations."""
+    """An extension reaches a slot it resolves for this workspace exactly as it reaches its own
+    manifest's: it authored that declaration, and a value only the proxy and the sandbox can read is
+    unreachable to the handler that needs it in-process. A slot neither declared nor resolved is
+    refused by every verb."""
     workspace_id = await _workspace()
     store = _store()
     await store.put(workspace_id, "acme_api_key", "sk-workspace")
     init_workspace_credentials(store)
     access = CredentialAccess(declared=frozenset(), resolved=_resolves(frozenset({"acme_api_key"})))
     with ws(workspace_id):
+        assert await access.get("acme_api_key") == "sk-workspace"
+        assert await access.stored("acme_api_key")
+        assert await access.stored_slots() == frozenset({"acme_api_key"})
+        for verb in (access.get, access.stored, access.clear):
+            with pytest.raises(UndeclaredCredentialSlot, match="undeclared_slot"):
+                await verb("undeclared_slot")
         await access.clear("acme_api_key")
         assert await store.stored_slots(workspace_id) == frozenset()
-        with pytest.raises(UndeclaredCredentialSlot, match="undeclared_slot"):
-            await access.clear("undeclared_slot")
-        with pytest.raises(UndeclaredCredentialSlot, match="acme_api_key"):
-            await access.get("acme_api_key")
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)

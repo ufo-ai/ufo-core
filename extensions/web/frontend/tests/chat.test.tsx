@@ -2774,15 +2774,15 @@ test("a credential handoff stores a value and drops the prompt it answered", asy
   expect(screen.queryByPlaceholderText("notion_token")).toBeNull();
 });
 
-test("an MCP credential handoff saves one server update from named fields", async () => {
+test("a credential handoff stores one server token against its own slot", async () => {
   const submitted: { current: URLSearchParams | null } = { current: null };
   wire({
     ...transcript({
       messages: [{ role: "assistant", text: "configure it" }],
       credentials: {
         sealed: "sealed-token",
-        reason: "Paste the whole JSON value.",
-        prompts: [{ slot: "mcp_servers", prompt: "MCP server JSON" }],
+        reason: "Paste the token for the vercel MCP server.",
+        prompts: [{ slot: "mcp_server_vercel", prompt: "Access token" }],
       },
     }),
     "/credentials": (_url, init) => {
@@ -2793,51 +2793,15 @@ test("an MCP credential handoff saves one server update from named fields", asyn
   open();
 
   expect(
-    await screen.findByText("Add or update one MCP server. Saved servers stay in place."),
+    await screen.findByText("Paste the token for the vercel MCP server."),
   ).toBeTruthy();
-  expect(screen.queryByText("Paste the whole JSON value.")).toBeNull();
-  await userEvent.type(screen.getByLabelText("Server name"), "vercel");
-  await userEvent.type(screen.getByLabelText("Server URL"), "https://mcp.vercel.com");
-  await userEvent.type(screen.getByLabelText("Access token"), "vercel-token");
-  await userEvent.click(screen.getByRole("button", { name: "Save server" }));
+  await userEvent.type(screen.getByPlaceholderText("mcp_server_vercel"), "vercel-token");
+  await userEvent.click(screen.getByRole("button", { name: "Store" }));
 
-  expect(await screen.findByText("MCP server saved.")).toBeTruthy();
+  expect(await screen.findByText("Stored mcp_server_vercel.")).toBeTruthy();
   expect(submitted.current?.get("sealed")).toBe("sealed-token");
-  expect(submitted.current?.get("slot")).toBe("mcp_servers");
-  expect(JSON.parse(submitted.current?.get("value") ?? "")).toEqual({
-    name: "vercel",
-    url: "https://mcp.vercel.com",
-    auth: "vercel-token",
-  });
-});
-
-test("an MCP credential handoff removes one named server", async () => {
-  const submitted: { current: URLSearchParams | null } = { current: null };
-  wire({
-    ...transcript({
-      messages: [{ role: "assistant", text: "remove it" }],
-      credentials: {
-        sealed: "sealed-token",
-        reason: "Update the MCP servers.",
-        prompts: [{ slot: "mcp_servers", prompt: "MCP server JSON" }],
-      },
-    }),
-    "/credentials": (_url, init) => {
-      submitted.current = init?.body as URLSearchParams;
-      return new Response("stored");
-    },
-  });
-  open();
-
-  await userEvent.type(await screen.findByLabelText("Server name"), "vercel");
-  await userEvent.click(screen.getByRole("button", { name: "Remove server" }));
-  await userEvent.click(screen.getByRole("button", { name: "Confirm remove server" }));
-
-  expect(await screen.findByText("MCP server removed.")).toBeTruthy();
-  expect(JSON.parse(submitted.current?.get("value") ?? "")).toEqual({
-    name: "vercel",
-    remove: true,
-  });
+  expect(submitted.current?.get("slot")).toBe("mcp_server_vercel");
+  expect(submitted.current?.get("value")).toBe("vercel-token");
 });
 
 test("a streamed chunk never steals focus from where the member put it", async () => {

@@ -4,28 +4,31 @@ and storefront over one Streamable-HTTP MCP endpoint the `mcp` extension reaches
 Upstream's file tools stay off (`UpstreamPin.service_tool_sets`) — the agent's file surface is ufo's
 sandbox, and the conversation's workspace directory is copied into the container at grading time so
 upstream's own verifier scores exactly the bytes the turn left on disk. Each case runs its own
-container on a Docker-assigned port and writes that endpoint into its own workspace's `mcp_servers`
-slot, so eval lanes run concurrently without ever touching each other's services."""
+container on a Docker-assigned port and lands that endpoint as its own workspace's MCP server row,
+so eval lanes run concurrently without ever touching each other's services."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from httpx import AsyncClient, HTTPError
 from pydantic import BaseModel, ConfigDict, Field
+from ufo_ext_mcp import MCP_PROVIDER_PREFIX, SERVER_KIND, SERVER_URL_KEY
 
 from evals.handbook.corpus import HandbookTask, UpstreamPin
+from ufo.db import workspace_tx
 from ufo.runtime.access.credentials import CredentialStore
+from ufo.runtime.workspace import ws
+from ufo.schema import tables
 
 BASE_IMAGE = "handbook_base"
 CONTAINER_PREFIX = "ufo-handbook-"
 CONTAINER_PORT = 8000
 LOOPBACK = "127.0.0.1"
-MCP_SERVERS_SLOT = "mcp_servers"
 SERVER_NAME = "workplace"
 PROXY_COMMAND = ("bash", "/app/scripts/start.sh", "--method", "http", "--port", str(CONTAINER_PORT))
 WORKDIR = "/workdir"
@@ -254,11 +257,55 @@ class TaskEnvironment:
         return state.strip() == "true"
 
     async def _point_workspace_at_services(self, workspace_id: UUID, endpoint: str) -> None:
-        """Write the `mcp_servers` slot the `mcp` extension reads, naming this case's own
-        container. The slot is workspace-scoped and each concurrent lane owns its own workspace, so
-        a lane never points the agent at another lane's services."""
-        servers = {"servers": {SERVER_NAME: {"url": f"http://{endpoint}/mcp"}}}
-        await self.credentials.put(workspace_id, MCP_SERVERS_SLOT, json.dumps(servers))
+        """Land the connection row and endpoint the `mcp` extension reads, naming this case's own
+        container. The row is workspace-scoped and each concurrent lane owns its own workspace, so a
+        lane never points the agent at another lane's services. The row is shared and unowned: the
+        eval speaks as no member, and an unowned connection is the workspace's own. It settles on
+        the row a prior case left, because the name is the workspace's and one row answers to it.
+
+        Written as rows rather than through the object verb because the rig stands the workspace up
+        before any turn runs, and that verb is a speaking admin's."""
+        with ws(workspace_id):
+            async with workspace_tx() as connection:
+                held = (
+                    await connection.execute(
+                        sa.select(tables.connection.c.id).where(
+                            tables.connection.c.workspace_id == workspace_id,
+                            tables.connection.c.provider == MCP_PROVIDER_PREFIX + SERVER_NAME,
+                        )
+                    )
+                ).scalar_one_or_none()
+                connection_id = held or uuid4()
+                if held is None:
+                    await connection.execute(
+                        sa.insert(tables.connection).values(
+                            id=connection_id,
+                            workspace_id=workspace_id,
+                            provider=MCP_PROVIDER_PREFIX + SERVER_NAME,
+                            account_id="",
+                            host="",
+                            shared=True,
+                            created_at=sa.func.now(),
+                            updated_at=sa.func.now(),
+                        )
+                    )
+                await connection.execute(
+                    sa.delete(tables.ext_store).where(
+                        tables.ext_store.c.workspace_id == workspace_id,
+                        tables.ext_store.c.extension == "mcp",
+                        tables.ext_store.c.key == f"{SERVER_KIND}/{connection_id.hex}",
+                    )
+                )
+                await connection.execute(
+                    sa.insert(tables.ext_store).values(
+                        workspace_id=workspace_id,
+                        extension="mcp",
+                        key=f"{SERVER_KIND}/{connection_id.hex}",
+                        value={SERVER_URL_KEY: f"http://{endpoint}/mcp"},
+                        created_at=sa.func.now(),
+                        updated_at=sa.func.now(),
+                    )
+                )
 
     async def _copy_in(self, container: str, workspace_dir: Path) -> None:
         """Replace the container's workspace with the conversation's, and stage the task's tests.

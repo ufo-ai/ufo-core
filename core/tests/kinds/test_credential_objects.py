@@ -168,7 +168,6 @@ async def test_declared_slot_lists_reads_and_clears_without_the_value(db: None) 
             "header": "authorization",
             "host_slot": "",
             "host_options": [],
-            "entries": [],
         }
         assert fetched["status"]["filled"] is True
         assert fetched["status"]["host"] == sample.INJECTION_HOST

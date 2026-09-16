@@ -1411,7 +1411,7 @@ def _handbook_ingest(config: Config, staging_root: Path | None) -> IngestDeps | 
 
 def _credential_store(config: Config) -> CredentialStore:
     """The store a suite writes BYOK slots through — the handbook environment points the workspace's
-    `mcp_servers` slot at its own services. Fails loud when the deploy has no credential key: a
+    MCP server row at its own services. Fails loud when the deploy has no credential key: a
     silently unwritten slot would leave the agent with no way to reach the environment."""
     key = os.environ.get(config.credentials.key_env)
     if not key:

@@ -43,7 +43,6 @@ import { PROVIDER_GLYPHS } from "@/lib/providerGlyph";
 import type { ActionView, CredentialPrompt } from "@/lib/types";
 import {
   CredentialValueFields,
-  MCP_SERVERS_SLOT,
 } from "@/views/CredentialPrompt";
 
 type Slot = {
@@ -55,7 +54,6 @@ type Slot = {
   host: string;
   env: string;
   header: string;
-  entries: string[];
 };
 
 const WORKSPACE_EXTENSION = "workspace_credentials";
@@ -86,14 +84,13 @@ const MODEL_PROVIDER_SLOTS = [
   "openrouter_api_key",
 ] as const;
 
-const SECTION_ORDER = ["Model provider", "Service key", "Workspace key", "MCP"];
+const SECTION_ORDER = ["Model provider", "Service key", "Workspace key"];
 
 /* A closed set of four. A section per extension gave Slack a heading and one row under it, and
    every extension that declares a key would earn one the same way. */
 function credentialSection(row: Slot) {
   if (row.extension === WORKSPACE_EXTENSION) return "Workspace key";
   const slot = row.slot.toLowerCase();
-  if (slot === MCP_SERVERS_SLOT) return "MCP";
   if (MODEL_PROVIDER_SLOTS.includes(slot as (typeof MODEL_PROVIDER_SLOTS)[number]))
     return "Model provider";
   return "Service key";
@@ -147,7 +144,7 @@ function CredentialActs({ row, context }: { row: Slot; context: RowContext }) {
       <DropdownMenuContent align="end" className="w-(--container-menu)">
         {workspaceKey && ask ? (
           <DropdownMenuItem onSelect={ask}>
-            {row.slot === MCP_SERVERS_SLOT ? "Update" : row.filled ? "Replace" : "Set"}
+            {row.filled ? "Replace" : "Set"}
           </DropdownMenuItem>
         ) : null}
         <DropdownMenuItem onSelect={() => setDropping(true)}>
@@ -211,7 +208,7 @@ const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
       }),
   rowKey: (row) => row.name,
   search: (row) =>
-    [row.slot, row.description, row.extension, row.host, row.env, ...row.entries].join(" "),
+    [row.slot, row.description, row.extension, row.host, row.env].join(" "),
   list: {
     mark: (row) => (
       <MarkTile>
@@ -237,7 +234,6 @@ const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
     meta: [
       { field: "description", render: (description) => codeSpans(description) },
       { field: "host", render: (host) => codeSpans(host) },
-      { field: "entries", render: (entries) => (entries.length ? entries.join(", ") : null) },
     ],
   },
 
@@ -285,16 +281,10 @@ const CREDENTIALS: ListingSpec<CredentialsPayload, Slot> = {
       <DialogContent>
         <PromptHeader provider={askedProvider(request.prompts)}>
           <DialogTitle>
-            {request.prompts.length === 1 && request.prompts[0].slot === MCP_SERVERS_SLOT
-              ? "Save MCP server"
-              : request.prompts.length === 1
-                ? "Credential value"
-                : "Credential values"}
+            {request.prompts.length === 1 ? "Credential value" : "Credential values"}
           </DialogTitle>
           <DialogDescription>
-            {request.prompts.length === 1 && request.prompts[0].slot === MCP_SERVERS_SLOT
-              ? "Add or update one server. Saved servers stay in place."
-              : request.reason}
+            {request.reason}
           </DialogDescription>
         </PromptHeader>
         <CredentialPromptDialogForm
@@ -438,7 +428,6 @@ function DeclareForm({
       host: hostOf(host),
       env: env.trim(),
       header: header.trim() || DEFAULT_HEADER,
-      entries: [],
     };
     setSaving(true);
     const outcome = await context.act({
@@ -688,20 +677,6 @@ function CredentialPromptDialogForm({
     }
   }
 
-  async function remove(prompt: CredentialPrompt, name: string) {
-    if (busy) return;
-    setBusy(true);
-    const failure = await store(prompt, JSON.stringify({ name, remove: true }));
-    setBusy(false);
-    if (failure !== null) {
-      setNotice({ text: failure, refused: true });
-      return;
-    }
-    held.current.push(prompt.slot);
-    report();
-    onComplete();
-  }
-
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (busy || !ready) return;
@@ -735,32 +710,17 @@ function CredentialPromptDialogForm({
         onSubmit={submit}
         className="flex flex-col gap-2xl"
       >
-        {pending.map((prompt) =>
-          prompt.slot === MCP_SERVERS_SLOT ? (
+        {pending.map((prompt) => (
+          <Field key={prompt.slot} label={prompt.prompt} htmlFor={prompt.slot}>
             <CredentialValueFields
-              key={prompt.slot}
               idPrefix={prompt.slot}
               prompt={prompt}
               onChange={(value) =>
                 setValues((current) => ({ ...current, [prompt.slot]: value }))
               }
-              onRemove={
-                pending.length === 1 ? (name) => void remove(prompt, name) : undefined
-              }
-              busy={busy}
             />
-          ) : (
-            <Field key={prompt.slot} label={prompt.prompt} htmlFor={prompt.slot}>
-              <CredentialValueFields
-                idPrefix={prompt.slot}
-                prompt={prompt}
-                onChange={(value) =>
-                  setValues((current) => ({ ...current, [prompt.slot]: value }))
-                }
-              />
-            </Field>
-          ),
-        )}
+          </Field>
+        ))}
       </form>
       <DialogFooter>
         <Button
@@ -770,11 +730,7 @@ function CredentialPromptDialogForm({
           busy={busy}
           disabled={!ready}
         >
-          {pending.length === 1 && pending[0].slot === MCP_SERVERS_SLOT
-            ? "Save server"
-            : pending.length === 1
-              ? "Set credential"
-              : "Set credentials"}
+          {pending.length === 1 ? "Set credential" : "Set credentials"}
         </Button>
       </DialogFooter>
     </>

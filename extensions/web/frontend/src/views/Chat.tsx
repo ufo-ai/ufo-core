@@ -10,7 +10,7 @@ import {
 
 import logo from "@/assets/ufo-logo.svg";
 
-import { CredentialPromptForm, MCP_SERVERS_SLOT } from "@/views/CredentialPrompt";
+import { CredentialPromptForm } from "@/views/CredentialPrompt";
 import {
   Questionnaire,
   QuestionnaireActions,
@@ -271,12 +271,7 @@ export function Chat({
           >
             {credentials && !readOnly ? (
               <Handoff>
-                <div>
-                  {credentials.prompts.length === 1 &&
-                  credentials.prompts[0].slot === MCP_SERVERS_SLOT
-                    ? "Add or update one MCP server. Saved servers stay in place."
-                    : credentials.reason}
-                </div>
+                <div>{credentials.reason}</div>
                 {credentials.prompts.map((prompt) => (
                   <CredentialPromptForm
                     key={prompt.slot}

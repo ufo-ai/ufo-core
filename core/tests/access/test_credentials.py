@@ -1281,16 +1281,3 @@ async def test_a_rejection_the_rebuild_cannot_fix_is_raised_after_one_retry(
             [event async for event in client.complete(object())]
 
     assert attempts == ["rejected", "rejected"]
-
-
-async def test_update_merges_with_the_value_under_the_workspace_lock(db: None) -> None:
-    workspace_id = await _workspace()
-    store = _store()
-
-    def append(current: str | None, submitted: str) -> str:
-        return (current or "") + submitted
-
-    await store.update(workspace_id, "structured", "one", append)
-    await store.update(workspace_id, "structured", "-two", append)
-
-    assert await store.get(workspace_id, "structured") == "one-two"

@@ -332,10 +332,12 @@ class CredentialAccess:
     `ws_current().credential`. Workspace and secret both come from the scope the turn or job
     bound, so a handler can read neither an undeclared slot nor a workspace it did not name.
 
-    `resolved` names the slots the extension resolves per workspace, which no manifest carries. It
-    widens `clear` alone, read live under the bound workspace: an extension holding a workspace's
-    own declarations must drop the stored value with the declaration, and reading the secret stays
-    with what the manifest declares."""
+    `resolved` names the slots the extension resolves per workspace, which no manifest carries.
+    Read live under the bound workspace, it widens every verb here: an extension that resolves a
+    slot authored that declaration itself, so gating its own row behind a manifest name it cannot
+    write would leave the value reachable by the proxy and the sandbox and by nothing in-process.
+    That gap is what forces one fixed slot to hold a map of many secrets, and a map cannot carry a
+    row's owner."""
 
     declared: frozenset[str]
     resolved: Callable[[], Awaitable[frozenset[str]]] | None = None
@@ -344,29 +346,36 @@ class CredentialAccess:
     def workspace_id(self) -> UUID:
         return ws_current().workspace_id
 
+    async def _gated(self) -> frozenset[str]:
+        if self.resolved is None:
+            return self.declared
+        return self.declared | await self.resolved()
+
     async def get(self, slot: str) -> str:
-        """Resolve a declared slot to the bound workspace's live value — its stored BYOK secret if
-        set, else the platform default from env. An undeclared slot never reaches a secret; a slot
-        set in neither place fails loud."""
-        if slot not in self.declared:
+        """Resolve a slot this extension declares or resolves to the bound workspace's live value —
+        its stored BYOK secret if set, else the platform default from env. A slot the extension
+        neither declares nor resolves never reaches a secret; a slot set in neither place fails
+        loud."""
+        if slot not in await self._gated():
             raise UndeclaredCredentialSlot(slot)
         return await ws_current().credential(slot)
 
     async def stored(self, slot: str) -> bool:
-        """Whether the bound workspace holds its own secret for a declared slot rather than running
-        on the platform default. A handler that spends money on a provider key asks this to know
-        whose money it spent: the ledger meters what the platform is owed, and a call made on the
-        workspace's own key is billed to it by that provider directly."""
-        if slot not in self.declared:
+        """Whether the bound workspace holds its own secret for a slot this extension declares or
+        resolves, rather than running on the platform default. A handler that spends money on a
+        provider key asks this to know whose money it spent: the ledger meters what the platform is
+        owed, and a call made on the workspace's own key is billed to it by that provider
+        directly."""
+        if slot not in await self._gated():
             raise UndeclaredCredentialSlot(slot)
         return await ws_current().credential_is_stored(slot)
 
     async def stored_slots(self) -> frozenset[str]:
-        """Which of this handler's declared slots the bound workspace holds its own secret for, in
-        one read. `stored` asked of every declared slot at once, for a handler that walks a
-        catalogue each tick rather than asking about one slot it already has in hand. Undeclared
-        slots never appear, so this discloses no more than `stored` would."""
-        return await ws_current().stored_credential_slots() & self.declared
+        """Which of this handler's slots the bound workspace holds its own secret for, in one read.
+        `stored` asked of every slot at once, for a handler that walks a catalogue each tick rather
+        than asking about one slot it already has in hand. Slots this extension neither declares nor
+        resolves never appear, so this discloses no more than `stored` would."""
+        return await ws_current().stored_credential_slots() & await self._gated()
 
     async def rotate(self, slot: str, expected: str, plaintext: str) -> bool:
         """Compare-and-swap an existing declared slot after an external provider rotates it. This
@@ -379,8 +388,7 @@ class CredentialAccess:
         """Drop the bound workspace's stored value for a slot this extension declares or resolves.
         The verb an extension that resolves slots per workspace needs: dropping the declaration
         leaves a value nothing declares, unreachable and still a secret the workspace holds."""
-        gated = self.declared if self.resolved is None else self.declared | await self.resolved()
-        if slot not in gated:
+        if slot not in await self._gated():
             raise UndeclaredCredentialSlot(slot)
         await ws_current().clear_credential(slot)
 

@@ -38,7 +38,7 @@ The agent sees two generic MCP tools rather than upstream's 82 named ones. That 
 shape — the same funnel Composio rides — and it is strictly harder than the published harness, so a
 score here is not directly comparable to the upstream leaderboard.
 
-Cases are exclusive: the workspace's `mcp_servers` slot points at exactly one task's services at a
+Cases are exclusive: the workspace's MCP server row points at exactly one task's services at a
 time. Each case raises its own container, named for its task and workspace on a port Docker assigns,
 and writes that slot itself; nothing has to be configured by hand.
 
@@ -76,7 +76,7 @@ uv run python -m evals \
 ```
 
 Omit `--handbook-task` to run all 65. Cases run one at a time regardless of `--concurrency` — each
-holds the whole workspace's `mcp_servers` slot — and each turn is allowed up to an hour, matching
+holds the whole workspace's MCP server row — and each turn is allowed up to an hour, matching
 upstream's own budget. `--handbook-ingest STAGING` indexes each task's policy documents as a synced
 source before its turn and withholds them from the workspace, which is the deployment a company
 running ufo would have; it covers the tasks whose rubrics do not assert on a document filename and
@@ -90,7 +90,7 @@ carries upstream's full scorecard, so the viewer shows which rubrics failed and 
 One case is one container, one conversation, and roughly 2–10M tokens; the corpus is ~18 hours and
 several hundred dollars serially. Two things matter at that scale.
 
-**Parallelise across stacks, not within one.** Each case points its workspace's `mcp_servers` slot at
+**Parallelise across stacks, not within one.** Each case points its workspace's MCP server row at
 its own container, so concurrency needs one workspace per lane — that is what `python -m evals.stack`
 provisions. A container is named for its task and its workspace and publishes a port Docker assigns,
 so lanes never touch each other's services, and a lane reclaims its own containers on the next

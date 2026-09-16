@@ -73,7 +73,6 @@ const SLOT = {
   extension: "models",
   description: "the key",
   filled: true,
-  entries: [],
 };
 
 const HOST_SLOT = {
@@ -82,18 +81,16 @@ const HOST_SLOT = {
   extension: "coding",
   description: "paste the key from `api.datadoghq.com`",
   filled: true,
-  entries: [],
 };
 
 const EMPTY_SLOT = { ...HOST_SLOT, name: "apollo", slot: "APOLLO_API_KEY", filled: false };
 
 const MCP_SLOT = {
-  name: "mcp-servers",
-  slot: "mcp_servers",
+  name: "mcp-server-neon",
+  slot: "mcp_server_neon",
   extension: "mcp",
-  description: "BYOK MCP servers.",
+  description: "Bearer token for the 'neon' MCP server.",
   filled: true,
-  entries: ["neon", "supabase"],
 };
 
 const WORKSPACE_SLOT = {
@@ -105,7 +102,6 @@ const WORKSPACE_SLOT = {
   host: "api.acme.com",
   env: "ACME_API_KEY",
   header: "Authorization",
-  entries: [],
 };
 
 const CREDENTIAL_ACTIONS = [
@@ -131,7 +127,6 @@ const BEDROCK_SLOT = {
   extension: "models",
   description: "the key",
   filled: true,
-  entries: [],
 };
 
 const SLACK_TOKEN = {
@@ -140,7 +135,6 @@ const SLACK_TOKEN = {
   extension: "slack",
   description: "the bot user OAuth token",
   filled: true,
-  entries: [],
 };
 const SLACK_SECRET = {
   ...SLACK_TOKEN,
@@ -263,7 +257,7 @@ test("credentials group and sort the filled slots, and render their literals", a
   expect(credentialNames()).toEqual(["OPENAI_API_KEY", "DATADOG_API_KEY"]);
 });
 
-test("the MCP slot names the servers it holds, and a search for one finds that row", async () => {
+test("each MCP server stands as its own slot, and a search for it finds that row", async () => {
   location.hash = "#/workspace/credentials";
   wire({
     "/workspace/credentials": () =>
@@ -272,12 +266,11 @@ test("the MCP slot names the servers it holds, and a search for one finds that r
   });
   render(<App agents={[AGENT]} member={ADMIN} onAgents={() => {}} />);
 
-  await screen.findByText("mcp_servers");
-  expect(screen.getByText(/neon, supabase/)).toBeTruthy();
+  await screen.findByText("mcp_server_neon");
 
-  await userEvent.type(screen.getByLabelText("Search credentials"), "supabase{Enter}");
+  await userEvent.type(screen.getByLabelText("Search credentials"), "neon{Enter}");
 
-  expect(credentialNames()).toEqual(["mcp_servers"]);
+  expect(credentialNames()).toEqual(["mcp_server_neon"]);
 });
 
 test("a workspace key is declared and filled by one save, and edited by one intent", async () => {

@@ -70,7 +70,7 @@ def load_handbook(
     ingest: IngestDeps | None = None,
 ) -> tuple[EvalTask, ...]:
     """Verify the checkout against the pin and build one exclusive task per case. Cases are
-    exclusive because the workspace's `mcp_servers` slot points at exactly one task's services at a
+    exclusive because the workspace's MCP server row points at exactly one task's services at a
     time."""
     pin = load_pin()
     tasks = load_corpus(checkout, task_ids)

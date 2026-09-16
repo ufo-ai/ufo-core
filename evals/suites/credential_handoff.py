@@ -39,7 +39,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from ufo_ext_eval_env.manifest import EMAIL_PROVIDER
 from ufo_ext_keyed_connectors import HOST_SLOT_SUFFIX
-from ufo_ext_mcp import MCP_SERVERS_SLOT
+from ufo_ext_mcp import TOKEN_SLOT_PREFIX
 
 from evals.harness.capability import (
     CapabilityCase,
@@ -95,10 +95,14 @@ def _evidence(output: CapabilityOutput) -> JsonObject:
     }
 
 
-def private_prompt_scorer(slots: tuple[str, ...]) -> Grader:
+def private_prompt_scorer(slots: tuple[str, ...], prefixes: tuple[str, ...] = ()) -> Grader:
     """`request_credentials` completed and its prompts name every slot the case needs. Requiring
     completion catches an invented slot for free: an undeclared one is refused, so a call naming a
-    host the workspace has no home for cannot be read as a private handoff that happened."""
+    host the workspace has no home for cannot be read as a private handoff that happened.
+
+    `prefixes` names a slot whose exact spelling the case cannot know, because the workspace mints
+    it: an MCP server's token slot is keyed by the connection the agent has just created, so the
+    case asks for the family and the row the agent made supplies the rest."""
 
     async def grade(output: CapabilityOutput) -> CapabilityVerdict:
         evidence = _evidence(output)
@@ -117,17 +121,21 @@ def private_prompt_scorer(slots: tuple[str, ...]) -> Grader:
             for prompt in group
             if isinstance(prompt, dict) and "slot" in prompt
         }
-        missing = tuple(slot for slot in slots if slot not in requested)
+        missing = tuple(slot for slot in slots if slot not in requested) + tuple(
+            prefix for prefix in prefixes if not any(slot.startswith(prefix) for slot in requested)
+        )
         if missing:
             return CapabilityVerdict(
                 False,
                 f"prompted for {sorted(requested) or '(no slot)'}, missing {', '.join(missing)}",
                 evidence,
             )
-        return CapabilityVerdict(True, f"prompted privately for {', '.join(slots)}", evidence)
+        return CapabilityVerdict(
+            True, f"prompted privately for {', '.join(slots + prefixes)}", evidence
+        )
 
     return DescribedGrader(
-        f"{REQUEST_CREDENTIALS} completes and prompts for {', '.join(slots)}", grade
+        f"{REQUEST_CREDENTIALS} completes and prompts for {', '.join(slots + prefixes)}", grade
     )
 
 
@@ -217,10 +225,9 @@ CASES = (
         "byok-server-token",
         "Add our internal MCP server at https://mcp.evalco.test/sse. It takes a bearer token "
         "I hold.",
-        private_prompt_scorer((MCP_SERVERS_SLOT,)),
+        private_prompt_scorer((), (TOKEN_SLOT_PREFIX,)),
         rubric=(NO_CHAT_DISCLOSURE, NO_INVENTED_DESTINATION),
         digest_tag="credential-handoff:byok-server-token:action",
-        seed=_unfilled((MCP_SERVERS_SLOT,)),
     ),
     CapabilityCase(
         "oauth-brokered-provider",

@@ -1582,9 +1582,14 @@ const CREDENTIAL_ACTIONS = [
 
 test("a named MCP server is connected by its token alone, and the url is the deploy's", async () => {
   const posted: string[] = [];
+  const intents: unknown[] = [];
   location.hash = sectionHash("connectors", { chip: "available" });
   library({
     "/workspace/credentials$": () => json({ actions: CREDENTIAL_ACTIONS, slots: [] }),
+    "/intents": (_url, init) => {
+      intents.push(JSON.parse(String(init?.body)));
+      return json({ applied: true, message: "", turn_id: TURN_ID });
+    },
     "/actions/credential/request_credentials": () =>
       json({
         applied: true,
@@ -1610,21 +1615,17 @@ test("a named MCP server is connected by its token alone, and the url is the dep
   await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Connect" }));
 
   await waitFor(() => expect(posted).toHaveLength(1));
+  expect(intents).toEqual([
+    { verb: "apply", kind: "mcp_server", name: "neon", spec: { url: "https://mcp.neon.tech/mcp" } },
+  ]);
   const sent = new URLSearchParams(posted[0]);
-  expect(sent.get("slot")).toBe("mcp_servers");
-  expect(JSON.parse(String(sent.get("value")))).toEqual({
-    name: "neon",
-    url: "https://mcp.neon.tech/mcp",
-    auth: "neon-live",
-  });
+  expect(sent.get("slot")).toBe("mcp_server_neon");
+  expect(sent.get("value")).toBe("neon-live");
 });
 
 test("a configured MCP server stands on the workspace shelf rather than offering itself", async () => {
   location.hash = sectionHash("connectors", { chip: "workspace" });
-  library({
-    "/workspace/credentials$": () =>
-      json({ actions: [], slots: [{ slot: "mcp_servers", entries: ["neon"] }] }),
-  });
+  library({ "/connections": () => json({ connections: [grant("mcp:neon", true, "gm")] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   expect(await connected("Neon")).toBeTruthy();
@@ -1636,10 +1637,7 @@ test("a configured MCP server stands on the workspace shelf rather than offering
 
 test("the All chip counts the shelf it narrows, not every shelf at once", async () => {
   location.hash = sectionHash("connectors", { chip: "available" });
-  library({
-    "/workspace/credentials$": () =>
-      json({ actions: [], slots: [{ slot: "mcp_servers", entries: ["neon"] }] }),
-  });
+  library({ "/connections": () => json({ connections: [grant("mcp:neon", true, "gm")] }) });
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
   await offered();
 

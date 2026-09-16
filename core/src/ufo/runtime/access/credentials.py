@@ -13,7 +13,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
@@ -229,7 +229,6 @@ class CredentialStore:
         submitted: str,
         request_id: UUID | None,
         member_id: UUID,
-        merge: Callable[[str | None, str], str] | None,
     ) -> None:
         """Write while the sealed member is a seated admin, claiming a member prompt once."""
         if not submitted:
@@ -285,11 +284,7 @@ class CredentialStore:
                     )
                 )
             ).one_or_none()
-            current = None if row is None else self.fernet.decrypt(row.ciphertext).decode()
-            plaintext = submitted if merge is None else merge(current, submitted)
-            if not plaintext:
-                raise ValueError("credential value is empty")
-            ciphertext = self.fernet.encrypt(plaintext.encode())
+            ciphertext = self.fernet.encrypt(submitted.encode())
             if row is None:
                 await connection.execute(
                     sa.insert(tables.credential).values(
@@ -320,55 +315,6 @@ class CredentialStore:
                     tables.credential.c.slot == slot,
                 )
             )
-
-    async def update(
-        self,
-        workspace_id: UUID,
-        slot: str,
-        submitted: str,
-        merge: Callable[[str | None, str], str],
-    ) -> None:
-        """Merge one private submission into a slot while holding the workspace write lock."""
-        if not submitted:
-            raise ValueError("credential value is empty")
-        async with workspace_tx() as connection:
-            await connection.execute(
-                sa.select(tables.workspace.c.id)
-                .where(tables.workspace.c.id == workspace_id)
-                .with_for_update()
-            )
-            row = (
-                await connection.execute(
-                    sa.select(tables.credential.c.ciphertext).where(
-                        tables.credential.c.workspace_id == workspace_id,
-                        tables.credential.c.slot == slot,
-                    )
-                )
-            ).one_or_none()
-            current = None if row is None else self.fernet.decrypt(row.ciphertext).decode()
-            plaintext = merge(current, submitted)
-            if not plaintext:
-                raise ValueError("credential value is empty")
-            ciphertext = self.fernet.encrypt(plaintext.encode())
-            if row is None:
-                await connection.execute(
-                    sa.insert(tables.credential).values(
-                        workspace_id=workspace_id,
-                        slot=slot,
-                        ciphertext=ciphertext,
-                        created_at=sa.func.now(),
-                        updated_at=sa.func.now(),
-                    )
-                )
-            else:
-                await connection.execute(
-                    sa.update(tables.credential)
-                    .values(ciphertext=ciphertext, updated_at=sa.func.now())
-                    .where(
-                        tables.credential.c.workspace_id == workspace_id,
-                        tables.credential.c.slot == slot,
-                    )
-                )
 
     async def stored_slots(self, workspace_id: UUID) -> frozenset[str]:
         """Every slot this workspace holds its own secret for, in one read. A caller asking the
@@ -492,9 +438,7 @@ class DeclaredSlot:
     that declares it, `host` — the wire target when the slot carries one, either a fixed hostname
     or the `HostChoice` a member selects within — `env`, the sandbox variable the slot's
     sentinel is exported as, empty for a slot the sandbox never sees, and `header`, the header the
-    secret rides in on the wire. `merge` updates a structured
-    secret from one private submission at the encrypted store boundary, and `entries` reads that
-    same value back as the non-secret names it holds."""
+    secret rides in on the wire."""
 
     name: str
     description: str
@@ -502,23 +446,6 @@ class DeclaredSlot:
     host: str | HostChoice | None = None
     env: str = ""
     header: str = ""
-    merge: Callable[[str | None, str], str] | None = None
-    entries: Callable[[str], tuple[str, ...]] | None = None
-
-
-async def slot_entries(
-    store: "CredentialStore | None", workspace_id: UUID, slot: DeclaredSlot
-) -> tuple[str, ...]:
-    """The non-secret names one structured slot's stored value holds, read for the projections that
-    carry them. The value is decrypted, named and dropped inside this call, so a caller holding the
-    result holds no secret. A slot that declares no reader, a process that holds no store, and an
-    empty slot all read as no entries."""
-    if slot.entries is None or store is None:
-        return ()
-    try:
-        return slot.entries(await store.get(workspace_id, slot.name))
-    except CredentialSlotUnset:
-        return ()
 
 
 def declared_slot_fingerprint(slot: DeclaredSlot) -> str:

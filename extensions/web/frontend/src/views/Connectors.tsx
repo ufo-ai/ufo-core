@@ -78,7 +78,6 @@ import {
   type FirstRunPayload,
   type McpServerTile,
 } from "@/lib/firstRun";
-import { MCP_SERVERS_SLOT } from "@/views/CredentialPrompt";
 import { ConnectAccount } from "@/views/ConnectAccount";
 import { CONNECT_INSTALLS, WorkspaceChannels } from "@/views/Surfaces";
 
@@ -235,15 +234,21 @@ type ConnectionRow = {
   mcp: McpServerTile | null;
 };
 
-type CredentialSlotView = { slot: string; entries: string[] };
+const MCP_SERVER_KIND = "mcp_server";
+const MCP_TOKEN_SLOT_PREFIX = "mcp_server_";
+const MCP_PROVIDER_PREFIX = "mcp:";
+
+type CredentialSlotView = { slot: string };
 type CredentialsPayload = { slots: CredentialSlotView[]; actions: ActionView[] };
 
-/** The MCP servers this workspace has configured, by name — the same names `connectionRows` files
- *  a connected server's row under. */
-function mcpHeld(state: PanelState<CredentialsPayload>): Set<string> {
-  if (state.phase !== "ready") return new Set();
-  const slot = state.payload.slots.find((row) => row.slot === MCP_SERVERS_SLOT);
-  return new Set(slot?.entries ?? []);
+/** Read off the rows, never the token slots: a slot outlives the server it belonged to until the
+ *  value is cleared, so a removed server would keep reading as held. */
+function mcpHeld(connections: PoolConnection[]): Set<string> {
+  return new Set(
+    connections
+      .filter((entry) => entry.provider.startsWith(MCP_PROVIDER_PREFIX))
+      .map((entry) => entry.provider.slice(MCP_PROVIDER_PREFIX.length)),
+  );
 }
 
 
@@ -409,8 +414,8 @@ function McpOffer() {
   );
 }
 
-/** The endpoint is the row's, so only the token is asked for; the value written is the same
- *  `{name, url, auth}` the slot's merge takes from the credentials screen's own form. */
+/** Two steps, because a token is never an object's field: the intent lands the server, then the
+ *  sealed handoff fills the slot its name derives. */
 function ConnectMcpServer({
   tile,
   agentId,
@@ -433,9 +438,21 @@ function ConnectMcpServer({
     event.preventDefault();
     if (busy || !token.trim() || !request) return;
     setBusy(true);
+    const landed = await postIntent(agentId, {
+      verb: "apply",
+      kind: MCP_SERVER_KIND,
+      name: tile.name,
+      spec: { url: tile.url },
+    });
+    if (!landed.applied) {
+      setBusy(false);
+      setNotice(outcomeNotice(landed));
+      return;
+    }
+    const slot = MCP_TOKEN_SLOT_PREFIX + tile.name;
     const outcome = await postAction(agentId, request.call, {
       reason: "Sent to " + tile.url + " and nowhere else. Stored encrypted and never shown again.",
-      prompts: [{ slot: MCP_SERVERS_SLOT, prompt: tile.token }],
+      prompts: [{ slot, prompt: tile.token }],
     });
     const sealed = outcome.credentials?.sealed;
     if (!sealed) {
@@ -447,11 +464,7 @@ function ConnectMcpServer({
     try {
       res = await fetch(BASE + "/credentials", {
         method: "POST",
-        body: new URLSearchParams({
-          sealed,
-          slot: MCP_SERVERS_SLOT,
-          value: JSON.stringify({ name: tile.name, url: tile.url, auth: token.trim() }),
-        }),
+        body: new URLSearchParams({ sealed, slot, value: token.trim() }),
         credentials: "same-origin",
       });
     } catch {
@@ -870,7 +883,7 @@ export function Connectors({
       <OutcomeNotice state={expanded.error} />
       <Panel state={state}>
         {(reads) => {
-          const rows = connectionRows(reads.catalog, reads.pool, viewer, mcpHeld(credentials));
+          const rows = connectionRows(reads.catalog, reads.pool, viewer, mcpHeld(reads.pool.connections));
           const found = rows.filter((row) => rowMatches(row, query, searched));
           const shelves: Record<Shelf, ConnectionRow[]> = {
             available: found.filter((row) => !row.entry && !row.installed),

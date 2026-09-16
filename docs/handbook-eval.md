@@ -67,7 +67,7 @@ dependencies are needed.
 date — is preserved verbatim ahead of the envelope.
 
 **Wiring.** The agent reaches the container through the existing `mcp` extension: point the
-workspace's `mcp_servers` credential slot at `http://localhost:<port>/mcp`. No new extension, no
+workspace's MCP server row at `http://localhost:<port>/mcp`. No new extension, no
 new connector provider, no `eval_env` work.
 
 ### Suite layout, as built
@@ -77,7 +77,7 @@ new connector provider, no `eval_env` work.
 | `evals/handbook/data/upstream.json` | Pinned revision, uniform tool sets, verifier digest, per-task rubric count + tree digest |
 | `evals/handbook/build.py` | Write the pin from a checkout (run once, commit the result) |
 | `evals/handbook/corpus.py` | Verify a checkout against the pin; fail loud on any drift |
-| `evals/handbook/environment.py` | Build the task image, start the proxy, write the `mcp_servers` slot, copy the finished workspace in, run the verifier, tear down |
+| `evals/handbook/environment.py` | Build the task image, start the proxy, land the MCP server row, copy the finished workspace in, run the verifier, tear down |
 | `evals/handbook/ingest.py` | Index a task's policy documents as a synced source before its turn |
 | `evals/handbook/runner.py` | Task → `CapabilityCase` (staged workspace, envelope) + the rubric-scoring grader |
 
@@ -94,7 +94,7 @@ harder — the model pays a discovery round and must fetch schemas before callin
 not directly comparable to the published leaderboard. We run our real shape and treat the gap as a
 finding, since it is the same funnel Composio rides in production.
 
-**Concurrency.** `mcp_servers` is workspace-scoped, so cases cannot share a workspace
+**Concurrency.** An MCP server row is workspace-scoped, so cases cannot share a workspace
 concurrently. Cases are `exclusive=True` (the `scenario_task` precedent) and run one at a time
 regardless of `--concurrency`; a sweep parallelises across stacks instead, one workspace per lane,
 which `python -m evals.stack` provisions.

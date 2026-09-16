@@ -86,7 +86,9 @@ class ApplyIntent(BaseModel):
     declaration itself. The `source_trigger` kind pairs a third way: a trigger IS
     the conversation it wakes, and the lane runs on the member's intent conversation, so the portal
     never creates one — its `apply` carries `paused`, the one field a standing trigger changes, and
-    its `delete` ends it. A delete names its object and carries no spec."""
+    its `delete` ends it. The `mcp_server` kind takes `apply` — the endpoint alone, its token being
+    a secret its own private prompt collects — and `delete`, which takes the server's endpoint and
+    token with the row. A delete names its object and carries no spec."""
 
     verb: Literal["apply", "delete", "connect", "attach", "detach"]
     kind: Literal[
@@ -101,6 +103,7 @@ class ApplyIntent(BaseModel):
         "source_trigger",
         "credential",
         "credential_slot",
+        "mcp_server",
     ]
     name: str
     spec: dict[str, JsonValue] | None = None

@@ -86,7 +86,6 @@ from ufo.runtime.access.credentials import (
     named_slots,
     open_credential_request,
     seal_credential_request,
-    slot_entries,
 )
 from ufo.runtime.access.grants import (
     ConnectHandoff,
@@ -1238,8 +1237,7 @@ class CredentialSlotView(BaseModel):
     `name` is the `credential` object kind's name for the slot — the address a prepared intent
     mutates. `host`, `env` and `header` are the wire the slot's value rides, carried so the panel
     can render and re-submit a slot declared for this workspace alone; a slot that reaches no wire
-    carries none of them. `entries` names what a structured value holds — the servers under an MCP
-    slot, say — so the panel draws one row per entry instead of one opaque row per slot."""
+    carries none of them."""
 
     slot: str
     name: str
@@ -1249,7 +1247,6 @@ class CredentialSlotView(BaseModel):
     host: str = ""
     env: str = ""
     header: str = ""
-    entries: tuple[str, ...] = ()
 
 
 def _stream_name(config: dict[str, JsonValue]) -> str | None:
@@ -2593,7 +2590,6 @@ class SurfaceContext:
             value,
             _credential_request_id(state, sealed) if private_prompt else None,
             member_id,
-            declared.merge,
         )
         if marker is not None:
             try:
@@ -4674,7 +4670,6 @@ class SurfaceContext:
                     host=slot.host if isinstance(slot.host, str) else "",
                     env=slot.env,
                     header=slot.header,
-                    entries=await slot_entries(self._credentials, self.workspace_id, slot),
                 )
                 for slot in sorted(declared, key=lambda slot: (slot.extension, slot.name))
             ]
