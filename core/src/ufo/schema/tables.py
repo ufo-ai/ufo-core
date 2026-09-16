@@ -61,6 +61,11 @@ member = sa.Table(
 )
 
 sa.Index("member_email", member.c.email)
+sa.Index(
+    "member_invited_at",
+    member.c.invited_at,
+    postgresql_where=member.c.invited_at.is_not(None),
+)
 
 surface_identity = sa.Table(
     "surface_identity",

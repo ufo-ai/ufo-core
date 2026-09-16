@@ -89,7 +89,7 @@ Three tables in the extension's own migration chain, following `app_notification
 
 | Table | Holds |
 |---|---|
-| `lifecycle_event` | `(workspace_id, member_id, name, occurred_at, payload)` — the instant a delay is measured from |
+| `lifecycle_event` | `(workspace_id, member_id, name, occurred_at)` — the instant a delay is measured from, and nothing else; a trigger that carries data brings the column for it |
 | `lifecycle_enrollment` | one member in one sequence: `step`, `next_due_at`, `claimed_by`, `claim_expires_at`, `state` |
 | `lifecycle_send` | one attempt: `(workspace_id, member_id, kind, occasion)`, `state`, `ses_message_id`, `delivery`, `last_error` |
 
@@ -99,13 +99,28 @@ granted, so a top-up that is spent again is a new occasion and the same admin is
 unique key over it is the claim: the row is inserted before control is called, and a second pass
 inserts nothing and sends nothing.
 
+The event row and the enrollments measured from it are one transaction. The event is the whole
+idempotency key — a second pass reads it and writes nothing — so a pass that committed the event
+and then stopped would leave a member logged, never enrolled, and beyond repair.
+
 The runner is the `scheduled_tasks` shape: a per-minute job whose candidates are the workspaces with
 a due enrollment, a lease claim on the row, and the attempt marked in the same statement that claims
 it. A result nothing can decide fails rather than repeating — a duplicate lifecycle email is worse
 than a missing one, exactly as for a campaign.
 
 An enrollment ends when the sequence ends, when an exit condition matches, or when the member
-suppresses the topic. A member is in a sequence once: re-entry needs the enrollment to have ended.
+suppresses the topic. A member is in a sequence once: re-entry needs the enrollment to have ended,
+which a unique index over the live rows is what says.
+
+An exit condition is not a second kind of declaration. A step composes its message from the member
+as they are now, and answers nothing where the reason for the message is gone — a teammate who has
+since shown up, a seat that was removed — so the enrollment ends having sent nothing and the
+condition lives beside the words it governs.
+
+A sequence measured from an instant is only offered to members who reached it recently: the sweep
+that enrolls looks back a bounded window, which keeps a per-minute job off the whole fleet and
+states the product rule at the same time — a sequence measured from an invitation has nothing to
+say about one from last quarter.
 
 ## Who writes the words
 

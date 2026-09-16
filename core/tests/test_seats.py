@@ -25,8 +25,12 @@ from ufo.runtime.seats import (
     Seats,
     UnknownMember,
     create_member,
+    has_spoken,
+    invited_member,
+    invited_members,
     member_by_email,
     member_is_admin,
+    recently_invited_workspaces,
     signup_workspace_id,
     workspace_by_domain,
     workspace_domain,
@@ -498,3 +502,84 @@ async def test_a_malformed_domain_matches_nothing(db: None) -> None:
     async with owner_tx() as connection:
         for typed in ("%", "%.com", "acme_com", "owner@acme.com", " ", ""):
             assert await workspace_by_domain(connection, typed) is None
+
+
+async def _invite(workspace_id: UUID, email: str, by: UUID, *, ago: timedelta) -> UUID:
+    member_id = await _member(workspace_id, email)
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.member)
+            .where(tables.member.c.id == member_id)
+            .values(invited_at=datetime.now(UTC) - ago, invited_by=by)
+        )
+    return member_id
+
+
+async def test_an_invitation_reads_back_with_who_sent_it_and_what_became_of_it(
+    db: None,
+) -> None:
+    """What a lifecycle sequence measured from an invitation needs: the address, the instant, and
+    the admin who sent it. A founder is not an invitation — nobody added them — so they are
+    absent."""
+    workspace_id = await _workspace()
+    admin = await _member(workspace_id, ADMIN_EMAIL)
+    invited = await _invite(workspace_id, TEAMMATE_EMAIL, admin, ago=timedelta(hours=1))
+
+    async with workspace_tx() as connection:
+        (row,) = await invited_members(connection, workspace_id, timedelta(days=7))
+        assert (row.member_id, row.email, row.inviter) == (invited, TEAMMATE_EMAIL, ADMIN_EMAIL)
+        assert row.seated is True
+        assert await invited_member(connection, workspace_id, invited) == row
+        assert await invited_member(connection, workspace_id, admin) is None, (
+            "a founder is not invited"
+        )
+
+
+async def test_the_window_bounds_the_members_read_and_one_member_reads_at_any_age(
+    db: None,
+) -> None:
+    """The sweep reads a workspace because one invitation is recent. Without the same bound on the
+    rows it would hand back the whole backlog, and a sequence measuring a delay from each would
+    fire all of them at once. The step measured from an invitation reads its own member later,
+    after that window has closed, so the single read carries no bound."""
+    workspace_id = await _workspace()
+    admin = await _member(workspace_id, ADMIN_EMAIL)
+    fresh = await _invite(workspace_id, TEAMMATE_EMAIL, admin, ago=timedelta(days=1))
+    stale = await _invite(workspace_id, "stale@acme.com", admin, ago=timedelta(days=30))
+
+    async with workspace_tx() as connection:
+        read = await invited_members(connection, workspace_id, timedelta(days=7))
+        assert [row.member_id for row in read] == [fresh]
+        assert await invited_member(connection, workspace_id, stale) is not None
+
+
+async def test_a_member_has_spoken_once_a_turn_carries_them(db: None) -> None:
+    """The exit condition of the reminder an added teammate reads. It is asked of one member rather
+    than carried on every invitation, because answering it walks the workspace's turns."""
+    workspace_id = await _workspace()
+    admin = await _member(workspace_id, ADMIN_EMAIL)
+    invited = await _invite(workspace_id, TEAMMATE_EMAIL, admin, ago=timedelta(hours=1))
+
+    async with workspace_tx() as connection:
+        assert await has_spoken(connection, workspace_id, invited) is False
+
+    await _parked_turn(workspace_id, invited)
+    async with workspace_tx() as connection:
+        assert await has_spoken(connection, workspace_id, invited) is True
+        assert await has_spoken(connection, workspace_id, admin) is False
+
+
+async def test_the_invitation_window_bounds_the_candidate_set(db: None) -> None:
+    """The window keeps a per-minute sweep off the whole fleet, and it is the product rule too: an
+    invitation older than it enrols nobody, so a job that fell behind by longer has missed those
+    members rather than owing them a late message."""
+    recent, stale, uninvited = await _workspace(), await _workspace(), await _workspace()
+    for workspace_id, ago in ((recent, timedelta(days=1)), (stale, timedelta(days=30))):
+        admin = await _member(workspace_id, ADMIN_EMAIL)
+        await _invite(workspace_id, TEAMMATE_EMAIL, admin, ago=ago)
+    await _member(uninvited, ADMIN_EMAIL)
+
+    named = await recently_invited_workspaces(timedelta(days=7))()
+    assert recent in named
+    assert stale not in named
+    assert uninvited not in named, "a workspace nobody was added to is no candidate"

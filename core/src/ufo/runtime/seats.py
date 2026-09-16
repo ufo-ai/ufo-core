@@ -9,7 +9,7 @@ speak."""
 
 from collections.abc import Collection
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5
 
 import sqlalchemy as sa
@@ -233,6 +233,145 @@ async def workspace_domain(connection: AsyncConnection, workspace_id: UUID) -> s
     if not domain or signup_workspace_id(email) == workspace_id:
         return None
     return domain
+
+
+@dataclass(frozen=True, slots=True)
+class InvitedMember:
+    """One member an admin added, and what has become of them. `spoken` is stamped off the turn a
+    member addressed the agent with, whatever surface carried it — unlike the writeback registry,
+    which a live surface's members never enter — so a member who has not spoken has not shown up:
+    they were added, the invitation reached them, and nothing came of it. `inviter` is None where
+    the admin who added them has since been removed."""
+
+    member_id: UUID
+    email: str
+    invited_at: datetime
+    inviter: str | None
+    seated: bool
+
+
+async def invited_members(
+    connection: AsyncConnection, workspace_id: UUID, within: timedelta
+) -> tuple[InvitedMember, ...]:
+    """Every member of this workspace an admin added inside `within`, oldest invitation first.
+
+    A founder is absent: `invited_at` is stamped only where `invited_by` is, so the workspace's own
+    first member — who invited nobody and was invited by nobody — is not an invitation.
+
+    The window bounds the rows, not only the workspaces a sweep runs in. Without it a workspace
+    that holds one recent invitation hands back every invitation it ever made, and a job measuring
+    a delay from each of them fires the whole backlog at once.
+
+    The bound is a statement predicate rather than a filter on the answer, and it is the same
+    expression `recently_invited_workspaces` names its candidates by."""
+    inviter = tables.member.alias("inviter")
+    rows = (
+        await connection.execute(
+            sa.select(
+                tables.member.c.id,
+                tables.member.c.email,
+                tables.member.c.invited_at,
+                tables.member.c.seated_at,
+                inviter.c.email.label("inviter_email"),
+            )
+            .select_from(
+                tables.member.outerjoin(inviter, inviter.c.id == tables.member.c.invited_by)
+            )
+            .where(
+                tables.member.c.workspace_id == workspace_id,
+                tables.member.c.invited_at.is_not(None),
+                tables.member.c.invited_at > datetime.now(UTC) - within,
+            )
+            .order_by(tables.member.c.invited_at.asc(), tables.member.c.id.asc())
+        )
+    ).all()
+    return tuple(
+        InvitedMember(
+            member_id=row.id,
+            email=row.email,
+            invited_at=row.invited_at,
+            inviter=row.inviter_email,
+            seated=row.seated_at is not None,
+        )
+        for row in rows
+    )
+
+
+async def invited_member(
+    connection: AsyncConnection, workspace_id: UUID, member_id: UUID
+) -> InvitedMember | None:
+    """One invitation, of any age. A step measured from an invitation reads the member it is about
+    when it comes due, which is after the window that found them has closed."""
+    inviter = tables.member.alias("inviter")
+    row = (
+        await connection.execute(
+            sa.select(
+                tables.member.c.id,
+                tables.member.c.email,
+                tables.member.c.invited_at,
+                tables.member.c.seated_at,
+                inviter.c.email.label("inviter_email"),
+            )
+            .select_from(
+                tables.member.outerjoin(inviter, inviter.c.id == tables.member.c.invited_by)
+            )
+            .where(
+                tables.member.c.workspace_id == workspace_id,
+                tables.member.c.id == member_id,
+                tables.member.c.invited_at.is_not(None),
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    return InvitedMember(
+        member_id=row.id,
+        email=row.email,
+        invited_at=row.invited_at,
+        inviter=row.inviter_email,
+        seated=row.seated_at is not None,
+    )
+
+
+async def has_spoken(connection: AsyncConnection, workspace_id: UUID, member_id: UUID) -> bool:
+    """Whether this member has ever taken a turn.
+
+    Asked of one member rather than carried on every invitation: `turn_spoken` leads with the
+    conversation, so the speaker is an in-index filter and a member who never spoke is answered by
+    walking the workspace's turns. On an invitation row that cost is paid per member per pass by a
+    per-minute sweep that discards the answer."""
+    return bool(
+        (
+            await connection.execute(
+                sa.select(sa.literal(1))
+                .where(
+                    tables.turn.c.workspace_id == workspace_id,
+                    tables.turn.c.speaker_member_id == member_id,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    )
+
+
+def recently_invited_workspaces(within: timedelta) -> WorkspaceCandidates:
+    """Candidates for a job that reacts to an invitation: the workspaces where an admin added
+    someone inside `within`.
+
+    The window is what keeps this off the whole fleet — an invitation is rare and a workspace
+    leaves the set once its newest one ages out — and it is also the product rule. A sequence
+    measured from an invitation has nothing to say about one from last quarter, so a job that fell
+    behind by longer than its window has missed those members rather than owing them a late
+    message, and the window is chosen to state that."""
+
+    def invited() -> sa.Select[tuple[UUID]]:
+        return (
+            sa.select(tables.member.c.workspace_id)
+            .where(tables.member.c.invited_at > datetime.now(UTC) - within)
+            .distinct()
+        )
+
+    return owner_candidates(invited)
 
 
 async def workspace_by_domain(connection: AsyncConnection, domain: str) -> UUID | None:

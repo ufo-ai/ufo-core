@@ -6,27 +6,23 @@ The gateway stands in as an httpx transport — the route it serves is proved by
 `servers/control/tests/email_send_it.rs` and the body by the contract both ends read. What is
 asserted here is the extension's own rows and the messages it composes."""
 
-import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-import httpx
 import pytest
 import sqlalchemy as sa
+from conftest import BASE_URL, HOME_SURFACE, Gateway, context
 from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from ufo_ext_flags_open import build
 from ufo_ext_lifecycle_email.balance_notice import (
     ACTION_LABEL,
     BALANCE_EXHAUSTED,
-    FAILED,
-    FEEDBACK_WINDOW,
-    SENT,
     SUBJECT,
     BalanceNotice,
-    lifecycle_send,
     notice_workspaces,
 )
-from ufo_ext_lifecycle_email.manifest import NAME, SENDING_FLAG, _notice
+from ufo_ext_lifecycle_email.manifest import SENDING_FLAG, _notice
+from ufo_ext_lifecycle_email.sends import FAILED, FEEDBACK_WINDOW, SENT, lifecycle_send
 
 from ufo.db import workspace_tx
 from ufo.flags import SERVED_FALSE, init_flags
@@ -35,55 +31,13 @@ from ufo.runtime.billing.balance import (
     EXHAUSTION_WINDOW,
     credit,
 )
-from ufo.runtime.email import EmailSends
-from ufo.runtime.ext.context import ExtensionContext, context_for
 from ufo.runtime.workspace import ws
 from ufo.schema import tables
 
 pytestmark = pytest.mark.usefixtures("db")
 
-BASE_URL = "https://app.ufo.ai"
-HOME_SURFACE = "web"
-MESSAGE_ID = "0100019a-message"
 RESERVE = 5_000_000
 OWN_KEY_SLOT = "anthropic_api_key"
-
-
-class Gateway:
-    """The send seam's other end, recording what it was asked to send and answering as control
-    does. `reported` is what SES has said about each message so far."""
-
-    def __init__(self) -> None:
-        self.sent: list[dict] = []
-        self.reported: dict[str, str | None] = {}
-        self.refuse: int | None = None
-        self.next_id = 0
-
-    def transport(self) -> httpx.MockTransport:
-        return httpx.MockTransport(self._answer)
-
-    def _answer(self, request: httpx.Request) -> httpx.Response:
-        if request.method == "GET":
-            message_id = request.url.path.rsplit("/", 1)[-1]
-            return httpx.Response(200, json={"delivery": self.reported.get(message_id)})
-        if self.refuse is not None:
-            return httpx.Response(self.refuse, json={"detail": "member@acme.com has bounced"})
-        self.next_id += 1
-        message_id = f"{MESSAGE_ID}-{self.next_id}"
-        self.sent.append({**json.loads(request.content), "message_id": message_id})
-        self.reported.setdefault(message_id, None)
-        return httpx.Response(200, json={"message_id": message_id})
-
-
-def _context(gateway: Gateway, own_key_slots: tuple[str, ...] = ()) -> ExtensionContext:
-    return context_for(
-        NAME,
-        frozenset(),
-        email=EmailSends(base_url="http://ufo-gateway", token="t", transport=gateway.transport()),
-        public_base_url=BASE_URL,
-        home_surface=HOME_SURFACE,
-        own_key_slots=own_key_slots,
-    )
 
 
 async def _seed(*, admins: int = 1, members: int = 0) -> tuple[UUID, list[UUID]]:
@@ -147,7 +101,7 @@ async def test_each_admin_is_told_once_and_told_again_only_after_a_top_up() -> N
     await _fund(workspace_id, 10_000_000, "first")
     await _spend(workspace_id)
     gateway = Gateway()
-    ctx = _context(gateway)
+    ctx = context(gateway)
 
     with ws(workspace_id):
         await BalanceNotice(ctx=ctx).run()
@@ -187,7 +141,7 @@ async def test_the_delivery_ses_reports_lands_on_the_row() -> None:
     await _fund(workspace_id, 10_000_000, "first")
     await _spend(workspace_id)
     gateway = Gateway()
-    ctx = _context(gateway)
+    ctx = context(gateway)
 
     with ws(workspace_id):
         await BalanceNotice(ctx=ctx).run()
@@ -209,7 +163,7 @@ async def test_a_refusal_fails_the_row_and_is_never_retried() -> None:
     await _spend(workspace_id)
     gateway = Gateway()
     gateway.refuse = 409
-    ctx = _context(gateway)
+    ctx = context(gateway)
 
     with ws(workspace_id):
         await BalanceNotice(ctx=ctx).run()
@@ -230,11 +184,7 @@ async def test_a_deploy_with_no_billing_screen_sends_nothing() -> None:
     await _fund(workspace_id, 10_000_000, "first")
     await _spend(workspace_id)
     gateway = Gateway()
-    ctx = context_for(
-        NAME,
-        frozenset(),
-        email=EmailSends(base_url="http://ufo-gateway", token="t", transport=gateway.transport()),
-    )
+    ctx = context(gateway, portal=False)
 
     with ws(workspace_id):
         await BalanceNotice(ctx=ctx).run()
@@ -305,12 +255,12 @@ async def test_a_workspace_on_its_own_key_is_told_nothing() -> None:
     gateway = Gateway()
 
     with ws(workspace_id):
-        await BalanceNotice(ctx=_context(gateway, (OWN_KEY_SLOT,))).run()
+        await BalanceNotice(ctx=context(gateway, own_key_slots=(OWN_KEY_SLOT,))).run()
     assert gateway.sent == [], "the gate admits this workspace, so nothing has stopped"
     assert await _rows(workspace_id) == []
 
     with ws(workspace_id):
-        await BalanceNotice(ctx=_context(gateway)).run()
+        await BalanceNotice(ctx=context(gateway)).run()
     assert len(gateway.sent) == 1, "a deploy keying every model itself tells the same workspace"
 
 
@@ -322,7 +272,7 @@ async def test_a_told_workspace_leaves_the_candidate_set() -> None:
     await _fund(workspace_id, 10_000_000, "first")
     await _spend(workspace_id)
     gateway = Gateway()
-    ctx = _context(gateway)
+    ctx = context(gateway)
     candidates = notice_workspaces()
 
     assert workspace_id in await candidates()
@@ -347,18 +297,10 @@ async def test_a_pass_that_cannot_decide_leaves_the_row_attempted() -> None:
     await _fund(workspace_id, 10_000_000, "first")
     await _spend(workspace_id)
 
-    def unreachable(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("no route", request=request)
+    gateway = Gateway()
+    gateway.unreachable = True
+    ctx = context(gateway)
 
-    ctx = context_for(
-        NAME,
-        frozenset(),
-        email=EmailSends(
-            base_url="http://ufo-gateway", token="t", transport=httpx.MockTransport(unreachable)
-        ),
-        public_base_url=BASE_URL,
-        home_surface=HOME_SURFACE,
-    )
     with ws(workspace_id):
         await BalanceNotice(ctx=ctx).run()
     (row,) = await _rows(workspace_id)
@@ -372,7 +314,7 @@ async def test_the_flag_decides_whether_this_deploy_sends_at_all() -> None:
     await _fund(workspace_id, 10_000_000, "first")
     await _spend(workspace_id)
     gateway = Gateway()
-    ctx = _context(gateway)
+    ctx = context(gateway)
 
     init_flags(
         InMemoryProvider(
