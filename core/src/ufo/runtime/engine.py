@@ -3709,7 +3709,9 @@ class TurnEngine:
         """Bind the member this call acts for. A `requested_by` ref names one of the turn's active
         messages and binds its author. Without the ref, exactly one active authenticated member
         binds automatically on a tool that declares member authority; with several, omission means
-        conversation-common work. A tool that does not declare member authority never binds one.
+        conversation-common work — the model names a member's newest message to spend their private
+        accounts, one member per call, resolved live at every call so nothing is snapshotted. A
+        tool that does not declare member authority never binds one.
         Both routes read the same active messages, so a message a hook denied — absorbed without
         ever entering them — withholds its author as a requester whichever route the model takes.
 

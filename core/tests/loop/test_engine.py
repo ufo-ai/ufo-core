@@ -2678,6 +2678,84 @@ async def test_one_active_speaker_bypasses_member_authorization(db: None, tmp_pa
     assert gate.requests == []
 
 
+async def test_multi_speaker_calls_resolve_connections_per_call_without_a_scope(
+    db: None, tmp_path: Path
+) -> None:
+    """Each call in a multi-speaker turn spends exactly the named member's private accounts beside
+    the shared ones, chosen per call and read live — no turn-wide connection scope exists to
+    snapshot, cap, or go stale, and an unattributed call still binds nobody."""
+
+    class Input(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+    turn = await _seed_turn("queued", None, admission_source=MEMBER_ADMISSION)
+    first = await _seat_member(turn.workspace_id, "first@example.com")
+    second = await _seat_member(turn.workspace_id, "second@example.com")
+    first_ref, second_ref = uuid4(), uuid4()
+    seen: list[UUID | None] = []
+    usable: list[set[UUID]] = []
+    grants = GrantStore()
+    with ws(turn.workspace_id), agent(turn.agent_id):
+        first_connection = await grants.record(
+            provider="hub",
+            account_id="first-account",
+            host="api.hub.test",
+            grantor_member_id=first,
+            shared=False,
+        )
+        second_connection = await grants.record(
+            provider="hub",
+            account_id="second-account",
+            host="api.hub.test",
+            grantor_member_id=second,
+            shared=False,
+        )
+
+    async def capture(ctx: ToolContext, args: Input) -> ToolResult:
+        seen.append(ctx.speaker_member_id)
+        usable.append({account.connection_id for account in await ctx.usable_connector_accounts()})
+        return ToolResult(content=(TextContent(text="ok"),))
+
+    engine = replace(
+        _engine(turn, EchoModel(), tmp_path),
+        grants=grants,
+        tools=ToolRegistry(
+            (ToolDef(name="member_probe", description="d", input_model=Input, handler=capture),)
+        ),
+    )
+    requesters = {
+        first_ref: ActiveMessage(member_id=first, rendered="First"),
+        second_ref: ActiveMessage(member_id=second, rendered="Second"),
+    }
+    with ws(turn.workspace_id), agent(turn.agent_id):
+        first_call = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(id="first", name="member_probe", input={"requested_by": str(first_ref)}),
+            requesters,
+        )
+        second_call = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(id="second", name="member_probe", input={"requested_by": str(second_ref)}),
+            requesters,
+        )
+        common = await _dispatch(
+            engine,
+            _dispatch_context(engine),
+            ToolUseBlock(id="common", name="member_probe", input={}),
+            requesters,
+        )
+
+    assert not any(r.is_error for r in (first_call, second_call, common))
+    assert seen == [first, second, None]
+    assert usable == [
+        {first_connection},
+        {second_connection},
+        set(),
+    ]
+
+
 async def test_an_unattributed_speaker_blocks_automatic_member_authority(
     db: None, tmp_path: Path
 ) -> None:
