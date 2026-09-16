@@ -20,7 +20,7 @@ export function HoverCardContent({ className, side = "right", sideOffset = 8, ..
         side={side}
         sideOffset={sideOffset}
         className={cn(
-          "z-50 flex w-(--container-connect) flex-col gap-2xs rounded-menu border border-edge bg-popover p-sm px-(--spacing-md) text-ui text-popover-foreground [box-shadow:var(--shadow-raised)] animate-raise",
+          "z-50 flex w-(--container-connect) flex-col gap-2xs rounded-menu border border-edge bg-popover p-sm px-(--spacing-lg) text-ui text-popover-foreground [box-shadow:var(--shadow-raised)] animate-raise",
           className,
         )}
         {...props}
