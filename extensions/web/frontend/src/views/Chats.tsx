@@ -95,16 +95,19 @@ function archivedRead(query: string): string {
   return "/objects/conversation?" + params.toString();
 }
 
-type Scope = "all" | "mine" | "workspace";
+type Scope = "all" | "mine" | "workspace" | "archived";
+
+const ARCHIVED_SCOPE: Scope = "archived";
 
 const SCOPE_SEGMENTS: { label: string; value: Scope }[] = [
   { label: "All", value: "all" },
   { label: "Mine", value: "mine" },
   { label: "Workspace", value: "workspace" },
+  { label: ARCHIVED, value: ARCHIVED_SCOPE },
 ];
 
 function asScope(value: string | undefined): Scope {
-  return value === "mine" || value === "workspace" ? value : "all";
+  return value === "mine" || value === "workspace" || value === ARCHIVED_SCOPE ? value : "all";
 }
 
 function scoped(row: Conversation, scope: Scope): boolean {
@@ -203,17 +206,21 @@ export function Chats({
     readRail();
     setFilings((held) => held + 1);
   }, []);
+  const filing = scope === ARCHIVED_SCOPE;
   const said = usePanelRead<ConversationsPayload>(
-    query ? conversationsRead(query, after) : null,
+    query && !filing ? conversationsRead(query, after) : null,
     filings,
   );
-  const away = usePanelRead<ConversationsPayload>(archivedRead(query), filings);
-  const archived = away.phase === "ready" ? chatRows(away.payload) : [];
-  /** The archived walk holds no step of its own, so a page that stops short — cut, or holding a
-   *  cursor nothing reads — says so instead of truncating. */
-  const awayCut =
-    away.phase === "ready" && (away.payload.cut === true || Boolean(away.payload.next_cursor));
-  const read: Read = query
+  const away = usePanelRead<ConversationsPayload>(filing ? archivedRead(query) : null, filings);
+  const archived: Read = {
+    phase: away.phase,
+    rows: away.phase === "ready" ? chatRows(away.payload) : [],
+    /** The archived walk holds no step of its own, so a page that stops short — cut, or holding a
+     *  cursor nothing reads — says so instead of truncating. */
+    cut: away.phase === "ready" && (away.payload.cut === true || Boolean(away.payload.next_cursor)),
+    older: null,
+  };
+  const listed: Read = query
     ? {
         phase: said.phase,
         rows: said.phase === "ready" ? chatRows(said.payload) : [],
@@ -222,6 +229,7 @@ export function Chats({
         older: said.phase === "ready" ? said.payload.next_cursor : null,
       }
     : { phase: rail.phase, rows: rail.rows, cut: rail.cut, older: null };
+  const read: Read = filing ? archived : listed;
   const shown = read.rows.filter((row) => scoped(row, scope));
   const narrowed = query !== "" || scope !== "all" || picked !== "";
   return (
@@ -269,22 +277,6 @@ export function Chats({
                 onFiled={filed}
               />
             </Section>
-            {archived.length ? (
-              <Section title={ARCHIVED}>
-                <DataTable
-                  columns={COLUMNS}
-                  rows={archived.filter((row) => scoped(row, scope) && faceted(row, picked))}
-                  rowKey={(row) => row.conversation_id}
-                  lede
-                  empty={NO_CHATS}
-                  note={NO_MATCHES}
-                  open={(row) => () => onOpen(row)}
-                >
-                  {(row) => <ChatCells row={row} onFiled={filed} />}
-                </DataTable>
-                {awayCut ? <Notice>{CUT}</Notice> : null}
-              </Section>
-            ) : null}
           </div>
         </Page>
       </section>

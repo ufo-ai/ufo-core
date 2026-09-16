@@ -860,25 +860,32 @@ test("a chat row files its conversation away, holds it above the list, or delete
   expect(posted).toEqual([THIRD_ID + "/delete_conversation"]);
 });
 
-test("the archived conversations stand in their own section, and unarchive from it", async () => {
+test("Archived is the category to the right of Workspace, and unarchives from its table", async () => {
   const posted: string[] = [];
   wire(filingWire([CHAT_ROW, FILED], posted));
   location.hash = "#/chats";
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
-  const archived = await within(home).findByRole("heading", { name: "Archived" });
-  const section = archived.closest("section")!;
-  expect(within(section).getByRole("row", { name: /Old runbook/ })).toBeTruthy();
-  expect(titles(home)).toContain("Pick one thread");
+  expect(
+    within(home)
+      .getAllByRole("tab")
+      .map((one) => one.textContent),
+  ).toEqual(["All", "Mine", "Workspace", "Archived"]);
+  expect(titles(home)).toEqual(["Pick one thread"]);
 
-  await userEvent.click(within(section).getByRole("button", { name: "Actions for Old runbook" }));
+  await userEvent.click(within(home).getByRole("tab", { name: "Archived" }));
+
+  expect(location.hash).toBe("#/chats?scope=archived");
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Old runbook"]));
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Old runbook" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: "Unarchive" }));
 
   await vi.waitFor(() => expect(posted).toEqual([ALERT_ID + "/unarchive_conversation"]));
 });
 
-test("a filed row leaves the main table, and an archived one stands once, under Archived", async () => {
+test("a filed row leaves the main table, and stands under the Archived category", async () => {
   const posted: string[] = [];
   const rows = [CHAT_ROW, PINNED];
   wire(filingWire(rows, posted));
@@ -891,15 +898,15 @@ test("a filed row leaves the main table, and an archived one stands once, under 
   await userEvent.click(within(home).getByRole("button", { name: "Actions for Ship the plan" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
 
-  const archived = await within(home).findByRole("heading", { name: "Archived" });
   await vi.waitFor(() =>
     expect(within(mainTable(home)).queryByRole("row", { name: /Ship the plan/ })).toBeNull(),
   );
-  expect(screen.getAllByRole("row", { name: /Ship the plan/ })).toHaveLength(1);
-  expect(
-    within(archived.closest("section")!).getByRole("row", { name: /Ship the plan/ }),
-  ).toBeTruthy();
 
+  await userEvent.click(within(home).getByRole("tab", { name: "Archived" }));
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan"]));
+  expect(screen.getAllByRole("row", { name: /Ship the plan/ })).toHaveLength(1);
+
+  await userEvent.click(within(home).getByRole("tab", { name: "All" }));
   await userEvent.click(within(home).getByRole("button", { name: "Actions for Pick one thread" }));
   await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
   await userEvent.click(
@@ -924,11 +931,12 @@ test("an archived listing the workspace holds more than says so rather than trun
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
 
   const home = await screen.findByRole("region", { name: "Home" });
-  const archived = await within(home).findByRole("heading", { name: "Archived" });
-  expect(
-    within(archived.closest("section")!).getByText("Search to reach older chats."),
-  ).toBeTruthy();
-  expect(within(mainTable(home)).queryByText("Search to reach older chats.")).toBeNull();
+  expect(within(home).queryByText("Search to reach older chats.")).toBeNull();
+
+  await userEvent.click(within(home).getByRole("tab", { name: "Archived" }));
+
+  expect(await within(home).findByRole("row", { name: /Old runbook/ })).toBeTruthy();
+  expect(within(home).getByText("Search to reach older chats.")).toBeTruthy();
 });
 
 test("Delete is offered on a conversation this member owns and on no other", async () => {
