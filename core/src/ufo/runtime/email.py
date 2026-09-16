@@ -6,6 +6,10 @@ turns SES feedback into a delivery state live in `servers/control`; a second sen
 would duplicate all four. So this posts the words of one message to control's
 `/internal/email/send` and reads its delivery back from the row that consumer writes.
 
+The drip copy an operator edits is there for a different reason: a sequence is one set of words for
+the whole fleet, and every table this process can reach is scoped to one workspace by row security.
+So the approved set is read over the same channel.
+
 Composed once at the boot that wires the jobs role and threaded down as an `ExtensionContext`
 field, so an extension holds the capability and never the deploy's control address or token. A
 deploy that names no control service wires none, and `ctx.email` is then None — the capability is
@@ -22,6 +26,7 @@ CONTROL_EMAIL_URL_ENV = "UFO_CONTROL_EMAIL_URL"
 CONTROL_EMAIL_TOKEN_ENV = "UFO_ONBOARD_CONTROL_TOKEN"
 
 SEND_PATH = "/internal/email/send"
+SEQUENCES_PATH = "/internal/lifecycle/sequences"
 SEND_TIMEOUT_SECONDS = 20.0
 
 REFUSAL_MAX_CHARS = 500
@@ -81,6 +86,20 @@ class EmailSends:
         message_id: str = answered["message_id"]
         log("email.sent", kind=kind, message_id=message_id)
         return message_id
+
+    async def sequences(self) -> tuple[dict, ...]:
+        """The drip sequences an operator has approved, as control holds them: the row's id, a
+        name, the event each measures from, and its steps. Only an approved revision is here —
+        editing one drops its approval, so words nobody signed off never reach a member.
+
+        The id is what an enrollment keys on, because a name can be freed by a rename and taken by
+        a second sequence that would then answer for the first one's members.
+
+        The copy lives there rather than here because a sequence is one set of words for the whole
+        fleet, and every table this process can reach is scoped to one workspace."""
+        answered = await self._ask("GET", SEQUENCES_PATH)
+        listed: list[dict] = answered["sequences"]
+        return tuple(listed)
 
     async def delivery(self, message_id: str) -> str | None:
         """What SES last reported for this send — `delivered`, `bounced`, `complained`, `delayed`,

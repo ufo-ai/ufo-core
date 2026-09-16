@@ -54,6 +54,7 @@ BODY = (
 )
 ACTION_LABEL = "Sign in"
 UNNAMED_WORKSPACE = "a ufo workspace"
+URL_PLACEHOLDER = "{url}"
 
 CONNECT_SUBJECT = "Connect an account to {workspace}"
 CONNECT_BODY = (
@@ -98,6 +99,15 @@ class Sequence:
     name: str
     event: str
     steps: tuple[Step, ...]
+    row_id: str | None = None
+
+    @property
+    def identity(self) -> str:
+        """What an enrollment holds, and what the runner resolves it back through. A sequence in
+        the tree is its name: a diff reviews a rename. A row is its id, because an operator renaming
+        a row frees its name for a second sequence, and a member half-way through the first would
+        then be sent the second one's words at the first one's step."""
+        return self.row_id or self.name
 
 
 async def invited_teammate(ctx: ExtensionContext, member_id: UUID) -> Composed | None:
@@ -153,20 +163,13 @@ async def connect_something(ctx: ExtensionContext, member_id: UUID) -> Composed 
     url = ctx.home_url()
     if url is None:
         return None
-    async with ctx.transaction() as connection:
-        seated = next(
-            (
-                entry
-                for entry in (await Seats(ctx.workspace_id).snapshot(connection)).members
-                if entry.id == member_id and entry.seated
-            ),
-            None,
-        )
-        workspace = await workspace_domain(connection, ctx.workspace_id)
-    if seated is None or member_id in await who_has_connected((member_id,)):
+    address = await seated_address(ctx, member_id)
+    if address is None or member_id in await who_has_connected((member_id,)):
         return None
+    async with ctx.transaction() as connection:
+        workspace = await workspace_domain(connection, ctx.workspace_id)
     return Composed(
-        address=seated.email,
+        address=address,
         kind=CONNECT_SOMETHING_KIND,
         subject=CONNECT_SUBJECT.format(workspace=workspace or UNNAMED_WORKSPACE),
         body=CONNECT_BODY,
@@ -187,3 +190,43 @@ SEQUENCES: tuple[Sequence, ...] = (
         steps=(Step(after=timedelta(0), compose=connect_something),),
     ),
 )
+
+
+async def seated_address(ctx: ExtensionContext, member_id: UUID) -> str | None:
+    """The member's address while they still hold a seat, and None once they do not — the exit
+    every sequence shares, because a message to someone an admin removed is a message nobody
+    asked for."""
+    async with ctx.transaction() as connection:
+        return next(
+            (
+                entry.email
+                for entry in (await Seats(ctx.workspace_id).snapshot(connection)).members
+                if entry.id == member_id and entry.seated
+            ),
+            None,
+        )
+
+
+def row_step(step: dict) -> Step:
+    """One step of a drip sequence an operator approved, read as a step in the tree is.
+
+    A row's words are literal but for `{url}`, which becomes this deploy's portal. One placeholder
+    and no expression language: an operator writes copy, and copy that could fail to render is a
+    message a member never gets and nobody is told about."""
+
+    async def compose(ctx: ExtensionContext, member_id: UUID) -> Composed | None:
+        address = await seated_address(ctx, member_id)
+        if address is None:
+            return None
+        url = ctx.home_url() or ""
+        link = (step["action_url"] or "").replace(URL_PLACEHOLDER, url) or None
+        return Composed(
+            address=address,
+            kind=step["kind"],
+            subject=step["subject"],
+            body=step["body"].replace(URL_PLACEHOLDER, url),
+            action_label=step["action_label"] if link else None,
+            action_url=link,
+        )
+
+    return Step(after=timedelta(seconds=step["after_seconds"]), compose=compose)

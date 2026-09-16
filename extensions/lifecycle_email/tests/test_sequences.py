@@ -21,7 +21,11 @@ from ufo_ext_lifecycle_email.enrollments import (
     lifecycle_event,
 )
 from ufo_ext_lifecycle_email.events import WriteEvents
-from ufo_ext_lifecycle_email.runner import UNKNOWN_SEQUENCE_GRACE, SequenceRunner
+from ufo_ext_lifecycle_email.runner import (
+    UNKNOWN_SEQUENCE_GRACE,
+    Reconciling,
+    SequenceRunner,
+)
 from ufo_ext_lifecycle_email.sends import SENT, lifecycle_send
 from ufo_ext_lifecycle_email.sequences import (
     INVITED_TEAMMATE,
@@ -155,7 +159,9 @@ async def test_an_invitation_logs_its_instant_and_enrolls_the_member_once() -> N
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
 
     async with workspace_tx() as connection:
         events = list(
@@ -186,6 +192,7 @@ async def test_nothing_fires_before_the_delay_is_up() -> None:
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
         await SequenceRunner(ctx=ctx).run()
 
     assert gateway.sent == []
@@ -201,6 +208,7 @@ async def test_the_due_step_fires_once_and_ends_the_enrollment() -> None:
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
     await _due_now(workspace_id)
     assert workspace_id in await due_enrollment_workspaces()()
 
@@ -236,6 +244,7 @@ async def test_a_member_who_showed_up_ends_the_enrollment_unsent() -> None:
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
     await _due_now(workspace_id)
     await _spoke(workspace_id, invited_id)
 
@@ -257,6 +266,7 @@ async def test_a_lapsed_lease_re_fires_the_enrollment_and_sends_nothing_twice() 
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
     await _due_now(workspace_id)
 
     with ws(workspace_id):
@@ -292,32 +302,35 @@ async def test_a_lapsed_lease_re_fires_the_enrollment_and_sends_nothing_twice() 
     assert enrollment.state == ENDED
 
 
-async def test_a_pass_that_stops_between_the_two_writes_enrolls_on_the_next_pass(
+async def test_a_reconcile_that_stops_mid_event_offers_it_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The event row is the whole idempotency key, so a committed event with no enrollment is a
-    member nothing can ever enroll. Both writes are one transaction: the interrupted pass commits
-    neither."""
+    """One event is one transaction. Its enrollments and the mark that says it was read commit
+    together, so a pass that stops between them leaves the event unread rather than read with
+    nothing measured from it."""
     workspace_id, _, invited_id = await _seed()
-    gateway = Gateway()
-    ctx = context(gateway)
+    ctx = context(Gateway())
 
     async def refuse(*args: object, **kwargs: object) -> None:
         raise RuntimeError("the pass stopped")
 
-    monkeypatch.setattr(Enrollments, "_enroll", refuse)
-    with ws(workspace_id), pytest.raises(RuntimeError):
+    with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+    monkeypatch.setattr(Enrollments, "_mark_read", refuse)
+    with ws(workspace_id), pytest.raises(RuntimeError):
+        await Reconciling(ctx=ctx).run()
 
-    assert await _events(workspace_id) == [], "the event is not committed without its enrollment"
+    (event,) = await _events(workspace_id)
+    assert event.matched_at is None, "an event whose enrollments did not commit stays unread"
     assert await _enrollments(workspace_id) == []
 
     monkeypatch.undo()
     with ws(workspace_id):
-        await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
 
     (event,) = await _events(workspace_id)
     (enrollment,) = await _enrollments(workspace_id)
+    assert event.matched_at is not None
     assert enrollment.event_id == event.id
     assert enrollment.member_id == invited_id
 
@@ -352,6 +365,7 @@ async def test_an_image_that_does_not_hold_the_sequence_leaves_the_enrollment_fo
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
     await _due_now(workspace_id)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -389,6 +403,7 @@ async def test_an_enrollment_past_the_grace_ends_when_no_sequence_claims_it() ->
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
     stale = datetime.now(UTC) - UNKNOWN_SEQUENCE_GRACE - timedelta(minutes=1)
     async with workspace_tx() as connection:
         await connection.execute(

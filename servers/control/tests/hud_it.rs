@@ -13,6 +13,7 @@ use ufo_control::email_send::EmailSends;
 use ufo_control::gateway::{router, stamped_script, GatewayState, Onboarding, OPERATOR_COOKIE};
 use ufo_control::hud::{csrf_token, CSRF_HEADER, EMAIL_SURFACE_PATH, OPERATOR_LOGIN_PATH};
 use ufo_control::invite::InviteCodes;
+use ufo_control::lifecycle::{Sequences, APPROVED_PATH, SURFACE_PATH as SEQUENCE_SURFACE_PATH};
 use ufo_control::shared::SharedWorkspaces;
 use ufo_control::store::OnboardStore;
 use ufo_control::token::mint_token;
@@ -75,10 +76,11 @@ async fn rig(sends: bool) -> (String, String) {
             apex_host: "ufo.ai".to_string(),
         }),
         email_sends: EmailSends {
-            pool: sends_pool,
+            pool: sends_pool.clone(),
             sender: EmailSender::Console,
             apex_host: "ufo.ai".to_string(),
         },
+        sequences: Sequences { pool: sends_pool },
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
@@ -247,4 +249,151 @@ async fn a_mutation_needs_the_session_its_origin_and_its_own_token() {
     assert_eq!(payload["created_by"], OPERATOR);
     assert_eq!(payload["state"], "draft");
     assert!(payload["id"].as_str().unwrap().parse::<Uuid>().is_ok());
+}
+
+#[tokio::test]
+async fn the_sequence_editor_is_the_operators_and_the_approved_set_is_the_runners() {
+    let (base, address) = rig(true).await;
+    let (token, headers) = session(OPERATOR);
+    let bound = csrf_token(SECRET, &token);
+    let sequence = serde_json::json!({
+        "name": "welcome_drip",
+        "event": "member_invited",
+        "steps": [{
+            "after_seconds": 86_400,
+            "kind": "welcome_day_one",
+            "subject": "Getting started",
+            "body": "Ask it to connect an account.",
+            "action_label": "Open the workspace",
+            "action_url": "https://app.ufo.ai",
+        }],
+    });
+
+    let anonymous = client()
+        .get(format!("{base}{SEQUENCE_SURFACE_PATH}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::SEE_OTHER);
+
+    let page = client()
+        .get(format!("{base}{SEQUENCE_SURFACE_PATH}"))
+        .headers(headers.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(page.text().await.unwrap().contains("Lifecycle Sequences"));
+
+    let (_member_token, member_headers) = session(MEMBER);
+    let refused = client()
+        .get(format!("{base}{SEQUENCE_SURFACE_PATH}/list"))
+        .headers(member_headers)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.status(),
+        StatusCode::UNAUTHORIZED,
+        "a verified member is not an operator"
+    );
+
+    let created = client()
+        .post(format!("{base}{SEQUENCE_SURFACE_PATH}/list"))
+        .headers(headers.clone())
+        .header(ORIGIN, format!("http://{address}"))
+        .header(CSRF_HEADER, &bound)
+        .json(&sequence)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::OK);
+    let held: serde_json::Value = created.json().await.unwrap();
+
+    let unauthorized = client()
+        .get(format!("{base}{APPROVED_PATH}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let before: serde_json::Value = client()
+        .get(format!("{base}{APPROVED_PATH}"))
+        .bearer_auth("onboard-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(before["sequences"].as_array().unwrap().len(), 0);
+
+    let approved = client()
+        .post(format!(
+            "{base}{SEQUENCE_SURFACE_PATH}/{}/approve",
+            held["id"].as_str().unwrap()
+        ))
+        .headers(headers.clone())
+        .header(ORIGIN, format!("http://{address}"))
+        .header(CSRF_HEADER, &bound)
+        .json(&serde_json::json!({"revision": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), StatusCode::OK);
+
+    let after: serde_json::Value = client()
+        .get(format!("{base}{APPROVED_PATH}"))
+        .bearer_auth("onboard-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after["sequences"][0]["name"], "welcome_drip");
+    assert_eq!(after["sequences"][0]["steps"][0]["after_seconds"], 86_400);
+
+    let reworded = client()
+        .post(format!(
+            "{base}{SEQUENCE_SURFACE_PATH}/{}/content",
+            held["id"].as_str().unwrap()
+        ))
+        .headers(headers.clone())
+        .header(ORIGIN, format!("http://{address}"))
+        .header(CSRF_HEADER, &bound)
+        .json(&serde_json::json!({"revision": 1, "name": "welcome_drip",
+                                  "event": "member_invited",
+                                  "steps": [{"after_seconds": 172_800,
+                                             "kind": "welcome_day_two",
+                                             "subject": "Two days in",
+                                             "body": "Give it a repository to read.",
+                                             "action_label": null,
+                                             "action_url": null}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        reworded.status(),
+        StatusCode::OK,
+        "the editor saves an edit"
+    );
+    let edited: serde_json::Value = reworded.json().await.unwrap();
+    assert_eq!(edited["revision"], 2);
+    assert!(edited["approved_revision"].is_null());
+    assert_eq!(edited["steps"][0]["kind"], "welcome_day_two");
+
+    let held: serde_json::Value = client()
+        .get(format!("{base}{APPROVED_PATH}"))
+        .bearer_auth("onboard-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        held["sequences"][0]["steps"][0]["kind"], "welcome_day_one",
+        "the runner keeps the approved copy while an edit waits for its approval"
+    );
 }

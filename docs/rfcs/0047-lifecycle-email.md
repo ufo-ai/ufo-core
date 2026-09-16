@@ -89,7 +89,7 @@ Three tables in the extension's own migration chain, following `app_notification
 
 | Table | Holds |
 |---|---|
-| `lifecycle_event` | `(workspace_id, member_id, name, occurred_at)` — the instant a delay is measured from, and nothing else; a trigger that carries data brings the column for it |
+| `lifecycle_event` | `(workspace_id, member_id, name, occurred_at, reconciled_at)` — the instant a delay is measured from, and whether a pass has offered it to the sequences yet |
 | `lifecycle_enrollment` | one member in one sequence: `step`, `next_due_at`, `claimed_by`, `claim_expires_at`, `state` |
 | `lifecycle_send` | one attempt: `(workspace_id, member_id, kind, occasion)`, `state`, `ses_message_id`, `delivery`, `last_error` |
 
@@ -117,6 +117,11 @@ as they are now, and answers nothing where the reason for the message is gone �
 since shown up, a seat that was removed — so the enrollment ends having sent nothing and the
 condition lives beside the words it governs.
 
+A producer only logs an instant; one job decides what measures from it, and marks the event read
+whether or not anything did. That is what lets a sequence approved this morning reach the events
+logged since the last pass without reaching a year of them, and what keeps a hook from knowing
+whether a sequence lives in the tree or in a row.
+
 A sequence measured from an instant is only offered to members who reached it recently: the sweep
 that enrolls looks back a bounded window, which keeps a per-minute job off the whole fleet and
 states the product rule at the same time — a sequence measured from an invitation has nothing to
@@ -126,13 +131,27 @@ say about one from last quarter.
 
 | Kind | Home | Changing it |
 |---|---|---|
-| Transactional, event-triggered | a template module in the extension | a diff and a deploy |
-| Drip sequence copy and timing | rows the operator edits | an edit, then an approval, then live |
+| Transactional, event-triggered | a module in the extension | a diff and a deploy |
+| Drip sequence copy and timing | rows in `ufo_control` the operator edits | an edit, then an approval, then live |
 
-The operator editor is a `RouteSpec` under `/ext/lifecycle_email/`, gated on the operator email
-domain the way `extensions/debugger` and `extensions/memory` already gate their pages. A sequence
-carries a revision; editing bumps it and drops the approval, and the runner only sends an approved
-revision — the campaign ledger's rule, applied to a sequence.
+The editor is served by `servers/control`, beside the campaign HUD and behind the same operator
+cookie and CSRF proof, and the rows live in `ufo_control`. Not a `RouteSpec` under
+`/ext/lifecycle_email/`: a sequence is one set of words for the whole fleet, and every table an
+extension can reach is scoped to one workspace by row security — a fleet-wide row there is
+invisible to the role the extension reads with. The control schema is outside that fence, which is
+the same reason the campaign ledger is there. The runner reads the approved set through one more
+bearer-gated internal route on the channel the send seam already opened.
+
+A sequence carries a revision; editing bumps it and drops the approval. Approving stores that
+revision's own words, and the runner is handed those — not the row, which is what the operator is
+editing. So an edit in progress changes nothing a member is part-way through, and retiring is the
+one act that stops a sequence: a sequence the runner cannot resolve has no step left, so a live
+enrollment ends rather than waiting on words that are not coming.
+
+A row holds what a module holds: a subject, a body, and at most one act — a button's label and its
+link. Its words are literal but for `{url}`, which becomes this deploy's portal. One placeholder and
+no expression language: copy that could fail to render is a message a member never gets and nobody
+is told about.
 
 ## Units
 

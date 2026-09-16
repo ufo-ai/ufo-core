@@ -10,6 +10,7 @@ pub mod gateway;
 pub mod hud;
 pub mod invite;
 pub mod invite_delivery;
+pub mod lifecycle;
 pub mod message;
 pub mod rls;
 pub mod schema;

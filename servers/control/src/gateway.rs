@@ -14,6 +14,7 @@ use crate::directives::{client_install, directive, render, PROMPT};
 use crate::email_send::{self, EmailSends};
 use crate::hud;
 use crate::invite::{InviteCodes, InviteError, Redemption, SignupProfile};
+use crate::lifecycle::{self, Sequences};
 use crate::shared::{EnsuredWorkspace, SeatError, SharedWorkspaces, WorkspaceChoice};
 use crate::store::{OnboardClaim, OnboardStore};
 use crate::token;
@@ -460,6 +461,8 @@ pub struct GatewayState {
     pub campaigns: Option<Campaigns>,
     /// The one-message seam core calls.
     pub email_sends: EmailSends,
+    /// The drip copy an operator edits, and the approved set the runner reads.
+    pub sequences: Sequences,
 }
 
 pub fn router(state: GatewayState) -> Router {
@@ -481,7 +484,8 @@ pub fn router(state: GatewayState) -> Router {
         .route(AUTH_CALLBACK_PATH, get(auth_callback))
         .route("/v1/onboard/web", post(onboard_web))
         .route("/v1/onboard/{channel}", post(onboard))
-        .merge(email_send::routes());
+        .merge(email_send::routes())
+        .merge(lifecycle::routes());
     if state.console_mode {
         router = router.route(AUTH_CONSOLE_PATH, get(auth_console));
     }

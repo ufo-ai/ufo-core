@@ -216,6 +216,18 @@ fn write_guard<'a>(
     state: &'a GatewayState,
     headers: &HeaderMap,
 ) -> Result<(&'a Campaigns, String), Box<Response>> {
+    let operator = operator_write(state, headers)?;
+    let Some(campaigns) = state.campaigns.as_ref() else {
+        return Err(Box::new(unavailable()));
+    };
+    Ok((campaigns, operator))
+}
+
+/// The same four proofs, for an operator surface with no campaign ledger behind it.
+pub(crate) fn operator_write(
+    state: &GatewayState,
+    headers: &HeaderMap,
+) -> Result<String, Box<Response>> {
     let Some(operator) = operator(state, headers) else {
         return Err(Box::new(unauthorized()));
     };
@@ -247,20 +259,17 @@ fn write_guard<'a>(
                 .into_response(),
         ));
     }
-    let Some(campaigns) = state.campaigns.as_ref() else {
-        return Err(Box::new(unavailable()));
-    };
-    Ok((campaigns, operator))
+    Ok(operator)
 }
 
-fn operator(state: &GatewayState, headers: &HeaderMap) -> Option<String> {
+pub(crate) fn operator(state: &GatewayState, headers: &HeaderMap) -> Option<String> {
     let session = session(headers)?;
     let email = token::verified_email(&state.onboarding.token_secret, &session, Utc::now())?;
     let domain = email.rsplit_once('@').map(|(_, domain)| domain)?;
     (domain == OPERATOR_EMAIL_DOMAIN).then_some(email)
 }
 
-fn session(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn session(headers: &HeaderMap) -> Option<String> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     cookies.split(';').find_map(|part| {
         let (name, value) = part.trim().split_once('=')?;
@@ -316,7 +325,7 @@ fn refused(error: CampaignError) -> Response {
         .into_response()
 }
 
-fn unauthorized() -> Response {
+pub(crate) fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(serde_json::json!({"detail": "an operator session is required"})),

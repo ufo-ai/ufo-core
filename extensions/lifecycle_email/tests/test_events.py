@@ -16,7 +16,7 @@ from ufo_ext_lifecycle_email.enrollments import (
     lifecycle_event,
 )
 from ufo_ext_lifecycle_email.events import WriteEvents, event_workspaces
-from ufo_ext_lifecycle_email.runner import SequenceRunner
+from ufo_ext_lifecycle_email.runner import Reconciling, SequenceRunner
 from ufo_ext_lifecycle_email.sequences import (
     CONNECT_NUDGE_AFTER,
     CONNECT_NUDGE_UNTIL,
@@ -155,6 +155,7 @@ async def test_an_invitation_is_logged_once_at_the_instant_it_happened() -> None
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
 
     async with workspace_tx() as connection:
         rows = (
@@ -182,6 +183,7 @@ async def test_a_member_who_connected_nothing_is_logged_once_the_deadline_passes
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
 
     assert await _names(workspace_id) == {MEMBER_INVITED, NOTHING_CONNECTED}
     assert CONNECT_SOMETHING in await _sequences(workspace_id)
@@ -198,6 +200,7 @@ async def test_an_invitation_inside_the_deadline_is_not_an_absence() -> None:
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
 
     assert await _names(workspace_id) == {MEMBER_INVITED}, (
         "a member who has not got there yet is not a member who did not get there"
@@ -211,6 +214,7 @@ async def test_a_connection_the_member_owns_stops_the_absence() -> None:
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
 
     assert await _names(workspace_id) == {MEMBER_INVITED}
     assert CONNECT_SOMETHING not in await _sequences(workspace_id)
@@ -225,6 +229,7 @@ async def test_a_shared_connection_stops_it_for_everyone() -> None:
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
 
     assert await _names(workspace_id) == {MEMBER_INVITED}
 
@@ -258,11 +263,13 @@ async def test_a_stale_invitation_leaves_the_candidate_set() -> None:
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
     assert await _names(workspace_id) == {MEMBER_INVITED}
 
     await _aged(workspace_id, CONNECT_NUDGE_UNTIL + timedelta(days=1))
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
 
     assert await _names(workspace_id) == {MEMBER_INVITED}
     assert workspace_id not in await event_workspaces()()
@@ -292,6 +299,7 @@ async def test_a_member_who_connects_between_the_event_and_the_send_is_not_told_
 
     with ws(workspace_id):
         await WriteEvents(ctx=ctx).run()
+        await Reconciling(ctx=ctx).run()
     assert NOTHING_CONNECTED in await _names(workspace_id)
 
     await _connect(workspace_id, member_id, shared=False)

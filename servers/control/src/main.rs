@@ -17,6 +17,7 @@ use ufo_control::gateway::{
 };
 use ufo_control::invite::{InviteCodes, SignupProfile};
 use ufo_control::invite_delivery::{self, InviteDeliveries, POLL_INTERVAL_SECONDS};
+use ufo_control::lifecycle::Sequences;
 use ufo_control::rls::{
     bootstrap_policies, ensure_control_role, ensure_serve_role, owner_dsn, serve_dsn,
     PG_ROLE_SEED_ENV,
@@ -185,6 +186,7 @@ async fn gateway() -> Result<(), String> {
     let pool_for_sends = pool.clone();
     let pool_for_feedback = pool.clone();
     let pool_for_sends_route = pool.clone();
+    let pool_for_sequences = pool.clone();
     let apex_for_slack = apex.clone();
     let apex_for_invites = apex.clone();
     let apex_for_campaigns = apex.clone();
@@ -229,6 +231,9 @@ async fn gateway() -> Result<(), String> {
             pool: pool_for_sends_route,
             sender: sender.clone(),
             apex_host: apex_for_send_route,
+        },
+        sequences: Sequences {
+            pool: pool_for_sequences,
         },
     };
 

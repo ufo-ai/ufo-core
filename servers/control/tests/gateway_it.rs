@@ -14,6 +14,7 @@ use ufo_control::gateway::{
     SIGNUP_MARK_TTL_MINUTES, WORKSPACE_PROMPT,
 };
 use ufo_control::invite::InviteCodes;
+use ufo_control::lifecycle::Sequences;
 use ufo_control::shared::SharedWorkspaces;
 use ufo_control::store::OnboardStore;
 use ufo_control::token::{mint_token, sign, SESSION_COOKIE};
@@ -83,6 +84,7 @@ async fn rig_with(
             sender: EmailSender::Console,
             apex_host: "ufo.ai".to_string(),
         },
+        sequences: Sequences { pool: pool.clone() },
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tokio_postgres::Client;
 
 use crate::store::SCHEMA;
-use crate::{campaign, email_send, invite, invite_delivery, slack_connect, store};
+use crate::{campaign, email_send, invite, invite_delivery, lifecycle, slack_connect, store};
 
 pub const LEDGERS: &[&str] = &[
     store::TABLE,
@@ -14,6 +14,7 @@ pub const LEDGERS: &[&str] = &[
     campaign::RECIPIENT_TABLE,
     campaign::EVENT_TABLE,
     email_send::TABLE,
+    lifecycle::TABLE,
 ];
 
 pub const SHAPE_LOCK: &str = "select pg_advisory_xact_lock(hashtext('ufo_control schema'))";
@@ -40,6 +41,7 @@ pub fn ddl() -> Vec<String> {
         invite_delivery::DDL,
         campaign::DDL,
         email_send::DDL,
+        lifecycle::DDL,
     ] {
         statements.extend(group.iter().map(|statement| statement.to_string()));
     }
@@ -259,7 +261,7 @@ mod tests {
     #[test]
     fn the_head_shape_reads_every_declared_column() {
         let shape = head_shape();
-        assert_eq!(shape.len(), 8, "one entry per ledger");
+        assert_eq!(shape.len(), 9, "one entry per ledger");
         let claim = &shape[store::TABLE];
         assert!(claim.contains("created_workspace"), "{claim:?}");
         assert!(claim.contains("invite_id"), "{claim:?}");

@@ -90,9 +90,9 @@ class WriteEvents:
         async with self.ctx.transaction() as connection:
             invited = await invited_members(connection, self.ctx.workspace_id, INVITATION_WINDOW)
         for member in invited:
-            await events.reached(MEMBER_INVITED, member.member_id, member.invited_at)
+            await events.record(MEMBER_INVITED, member.member_id, member.invited_at)
         for member_id in await self._connected_nothing():
-            await events.reached(NOTHING_CONNECTED, member_id, datetime.now(UTC))
+            await events.record(NOTHING_CONNECTED, member_id, datetime.now(UTC))
 
     async def _connected_nothing(self) -> tuple[UUID, ...]:
         """The instant is now rather than the deadline they crossed: a sequence measures from the

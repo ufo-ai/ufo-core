@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lifecycle Sequences</title>
+<style>
+:root {
+  --ink: #191A1A; --paper: #FAF9F7; --line: #EBEAE9; --muted: #919090; --bad: #A4342A;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink);
+       font: 14px/1.5 system-ui, sans-serif; }
+header { display: flex; align-items: baseline; gap: 12px; padding: 16px 24px;
+         border-bottom: 1px solid var(--line); }
+header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+header a, header span { color: var(--muted); font-size: 13px; }
+main { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 57px); }
+aside { border-right: 1px solid var(--line); padding: 16px; }
+section { padding: 16px 24px; min-width: 0; }
+button { font: inherit; padding: 6px 12px; border: 1px solid var(--ink); border-radius: 4px;
+         background: var(--ink); color: var(--paper); cursor: pointer; }
+button.plain { background: transparent; color: var(--ink); border-color: var(--line); }
+ul { list-style: none; margin: 12px 0 0; padding: 0; }
+li { padding: 8px; border: 1px solid var(--line); border-radius: 4px; margin-bottom: 6px;
+     cursor: pointer; background: transparent; }
+li[aria-current="true"] { border-color: var(--ink); }
+li b { display: block; font-weight: 500; }
+li em { font-style: normal; color: var(--muted); font-size: 12px; }
+label { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--muted); }
+input, textarea { width: 100%; font: inherit; padding: 6px 8px; border-radius: 4px;
+                  border: 1px solid var(--line); background: #FFF; color: var(--ink); }
+textarea { min-height: 120px; resize: vertical; }
+fieldset { border: 1px solid var(--line); border-radius: 4px; margin: 12px 0 0; padding: 0 12px 12px; }
+legend { color: var(--muted); font-size: 13px; padding: 0 4px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+            padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: 140px 1fr; gap: 12px; }
+#alert { color: var(--bad); min-height: 20px; margin-bottom: 12px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 16px; }
+dt { color: var(--muted); }
+dd { margin: 0; }
+@media (max-width: 720px) { main { grid-template-columns: 1fr; }
+                            aside { border-right: 0; border-bottom: 1px solid var(--line); }
+                            .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lifecycle Sequences</h1>
+  <a href="/surface/email">Campaigns</a>
+  <span id="operator"></span>
+</header>
+<main>
+  <aside>
+    <button id="new" class="plain">New Sequence</button>
+    <ul id="sequences"></ul>
+  </aside>
+  <section>
+    <div id="alert" role="alert"></div>
+    <dl>
+      <dt>Revision</dt><dd id="d-revision">—</dd>
+      <dt>Approved</dt><dd id="d-approved">—</dd>
+    </dl>
+    <div class="row">
+      <div>
+        <label for="name">Name</label>
+        <input id="name" placeholder="welcome_drip">
+      </div>
+      <div>
+        <label for="event">Measured from</label>
+        <input id="event" placeholder="member_invited">
+      </div>
+    </div>
+    <div id="steps"></div>
+    <div class="controls">
+      <button id="add" class="plain">Add a Step</button>
+      <button id="save">Save</button>
+      <button id="approve" class="plain">Approve</button>
+      <button id="retire" class="plain">Retire</button>
+    </div>
+  </section>
+</main>
+<script>
+const ROOT = '/surface/email/sequences';
+const el = (id) => document.getElementById(id);
+const state = { csrf: '', sequences: [], selected: null, steps: [] };
+
+function say(message) { el('alert').textContent = message; }
+
+async function call(path, method, body) {
+  const headers = { 'x-ufo-csrf': state.csrf };
+  if (body) headers['content-type'] = 'application/json';
+  const response = await fetch(ROOT + path, {
+    method, headers, credentials: 'same-origin',
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.detail || ('The request failed with ' + response.status));
+  return payload;
+}
+
+function held() {
+  return state.sequences.find((row) => row.id === state.selected) || null;
+}
+
+function drawList() {
+  const list = el('sequences');
+  list.replaceChildren();
+  for (const row of state.sequences) {
+    const item = document.createElement('li');
+    item.setAttribute('aria-current', String(row.id === state.selected));
+    const name = document.createElement('b');
+    name.textContent = row.name;
+    const note = document.createElement('em');
+    note.textContent = row.retired_at
+      ? 'retired'
+      : (row.approved_revision === row.revision ? 'live at r' + row.revision : 'draft r' + row.revision);
+    item.append(name, note);
+    item.onclick = () => { select(row.id); };
+    list.append(item);
+  }
+}
+
+function stepFields(step, index) {
+  const box = document.createElement('fieldset');
+  const legend = document.createElement('legend');
+  legend.textContent = 'Step ' + (index + 1);
+  box.append(legend);
+  for (const [key, label, placeholder, area] of [
+    ['after_seconds', 'Seconds after the event', '86400', false],
+    ['kind', 'Kind', 'welcome_day_one', false],
+    ['subject', 'Subject', 'Getting started', false],
+    ['body', 'Body', 'Plain text. A blank line starts a paragraph.', true],
+    ['action_label', 'Button label', 'Sign in', false],
+    ['action_url', 'Button link', 'https://app.ufo.ai, or {url} for the portal', false],
+  ]) {
+    const tag = document.createElement('label');
+    tag.textContent = label;
+    const field = document.createElement(area ? 'textarea' : 'input');
+    field.value = step[key] ?? '';
+    field.placeholder = placeholder;
+    field.oninput = () => {
+      if (key === 'after_seconds') { step[key] = Number(field.value); return; }
+      step[key] = field.value || (key.startsWith('action_') ? null : '');
+    };
+    box.append(tag, field);
+  }
+  const drop = document.createElement('button');
+  drop.className = 'plain';
+  drop.textContent = 'Remove';
+  drop.style.marginTop = '12px';
+  drop.onclick = () => { state.steps.splice(index, 1); drawSteps(); };
+  box.append(drop);
+  return box;
+}
+
+function drawSteps() {
+  const box = el('steps');
+  box.replaceChildren();
+  state.steps.forEach((step, index) => box.append(stepFields(step, index)));
+}
+
+function select(id) {
+  state.selected = id;
+  const row = held();
+  el('name').value = row ? row.name : '';
+  el('event').value = row ? row.event : '';
+  state.steps = row ? row.steps.map((step) => ({ ...step })) : [];
+  el('d-revision').textContent = row ? String(row.revision) : '—';
+  el('d-approved').textContent = row && row.approved_revision
+    ? 'r' + row.approved_revision + ' by ' + row.approved_by
+    : 'not approved';
+  drawList();
+  drawSteps();
+}
+
+function draft() {
+  return { name: el('name').value.trim(), event: el('event').value.trim(), steps: state.steps };
+}
+
+async function load(selectId) {
+  const payload = await call('/list', 'GET');
+  state.csrf = payload.csrf;
+  state.sequences = payload.sequences;
+  el('operator').textContent = payload.operator;
+  select(selectId ?? state.selected);
+}
+
+async function guarded(work) {
+  say('');
+  try { await work(); } catch (error) { say(error.message); }
+}
+
+el('new').onclick = () => { select(null); };
+el('add').onclick = () => {
+  state.steps.push({ after_seconds: 0, kind: '', subject: '', body: '', action_label: null, action_url: null });
+  drawSteps();
+};
+el('save').onclick = () => guarded(async () => {
+  const row = held();
+  const saved = row
+    ? await call('/' + row.id + '/content', 'POST', { revision: row.revision, ...draft() })
+    : await call('/list', 'POST', draft());
+  await load(saved.id);
+});
+el('approve').onclick = () => guarded(async () => {
+  const row = held();
+  if (!row) return;
+  await call('/' + row.id + '/approve', 'POST', { revision: row.revision });
+  await load(row.id);
+});
+el('retire').onclick = () => guarded(async () => {
+  const row = held();
+  if (!row) return;
+  await call('/' + row.id + '/retire', 'POST');
+  await load(row.id);
+});
+
+guarded(() => load(null));
+</script>
+</body>
+</html>
