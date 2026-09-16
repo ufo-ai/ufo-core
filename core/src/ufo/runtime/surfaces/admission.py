@@ -84,6 +84,7 @@ from ufo.schema.records import (
     MEMBER_ADMISSION,
     NON_TERMINAL_STATUSES,
     PARKED,
+    REPLY_REACHES_NOBODY,
     SCHEDULED_ADMISSION,
     SUBAGENT_SURFACE,
     SURFACE_COMMENT_ROUND_INDEX,
@@ -1389,9 +1390,6 @@ class Admission:
                 turn_id=str(turn_id),
                 error_class=type(error).__name__,
             )
-
-
-REPLY_REACHES_NOBODY = "nobody"
 
 
 def _reply_context(inbound: _Inbound, surface: str, durable: frozenset[str]) -> dict[str, object]:

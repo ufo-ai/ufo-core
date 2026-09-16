@@ -23,12 +23,12 @@ from ufo.runtime.seats import SEAT_REFUSAL_MESSAGE, UNRESOLVED_SPEAKER_MESSAGE
 from ufo.runtime.surfaces.admission import (
     ADMITTED_TURN_METRIC,
     ARCHIVED_REFUSAL_MESSAGE,
-    REPLY_REACHES_NOBODY,
     Admission,
 )
 from ufo.runtime.turns.audience import conversation_audience
 from ufo.schema import tables
 from ufo.schema.records import (
+    REPLY_REACHES_NOBODY,
     SURFACE_COMMENT_ROUND_INDEX,
     ModelAccountCapability,
     TerminalFrame,

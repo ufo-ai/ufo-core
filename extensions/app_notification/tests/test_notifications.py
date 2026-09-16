@@ -18,6 +18,7 @@ from ufo_ext_app_notification.notify_tool import (
     NOTIFY_FOLDED,
     NOTIFY_NEEDS_A_MEMBER,
     NOTIFY_QUEUED,
+    NOTIFY_REPLY_REACHES,
     NOTIFY_SELF,
     NOTIFY_TOOL,
     NOTIFY_TOOL_NAME,
@@ -50,8 +51,10 @@ from ufo.schema.records import (
     Agent,
     ModelAccountCapability,
     Turn,
+    TurnContext,
     TurnRuntimeConfig,
 )
+from ufo.sdk.surfaces import REPLY_REACHES_NOBODY
 
 pytestmark = pytest.mark.usefixtures("database_url")
 
@@ -495,6 +498,41 @@ async def test_speakerless_turn_and_the_inbox_agent_itself_are_refused(db: None)
     assert refused_self.is_error is True
     assert refused_self.content[0].text == NOTIFY_SELF
     assert rows == []
+
+
+def _reaching(ctx: ToolContext, reply_reaches: str) -> ToolContext:
+    return replace(
+        ctx, turn=ctx.turn.model_copy(update={"context": TurnContext(reply_reaches=reply_reaches)})
+    )
+
+
+async def test_a_turn_whose_reply_reaches_the_member_says_it_there(db: None) -> None:
+    workspace_id, member_id, agent_id, _, conversation_id = await _seed()
+    spoken = _tool_ctx(workspace_id, conversation_id, agent_id, speaker_member_id=member_id)
+    on_slack = _reaching(spoken, "slack")
+    with ws(workspace_id), agent(agent_id):
+        refused = await notify(
+            on_slack, NotifyInput(subject="github/3733", body="rebased clean, checks green")
+        )
+        rows = await NotificationStore(on_slack.ext).rows()
+
+    assert refused.is_error is True
+    assert refused.content[0].text == NOTIFY_REPLY_REACHES.format(surface="slack")
+    assert rows == ()
+
+
+async def test_a_turn_nobody_reads_notifies(db: None) -> None:
+    workspace_id, member_id, agent_id, _, conversation_id = await _seed()
+    spoken = _tool_ctx(workspace_id, conversation_id, agent_id, speaker_member_id=member_id)
+    unread = _reaching(spoken, REPLY_REACHES_NOBODY)
+    with ws(workspace_id), agent(agent_id):
+        queued = await notify(
+            unread, NotifyInput(subject="github/3733", body="checks failed on main")
+        )
+        rows = await NotificationStore(unread.ext).rows()
+
+    assert queued.is_error is False
+    assert len(rows) == 1
 
 
 async def test_the_kind_reads_the_members_own_rows_and_dismisses_them(db: None) -> None:

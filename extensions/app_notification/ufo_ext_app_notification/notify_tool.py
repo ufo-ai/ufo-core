@@ -7,7 +7,7 @@ spoken: a tool call never enters a delivered reply, so no redaction stands betwe
 member. What the model sees back is one line, plus the reason when a fence refuses, which is what
 makes the fences steerable rather than silent.
 
-Five refusals are structural. A turn with no speaker names no member, and a notification nobody is
+Six refusals are structural. A turn with no speaker names no member, and a notification nobody is
 the recipient of is not one. The Notification agent's own turns cannot
 post: an inbox that mails itself is the loop this whole design must be unable to enter. A spawned
 turn cannot post: it was started by another turn to do that turn's work, so what it finds belongs to
@@ -18,7 +18,12 @@ member's own conversation — cannot post either, so a delivery can never raise 
 itself; that turn is not spawned but admitted into a conversation the member already reads, so the
 fence there is the exact turn id the delivery recorded.
 
-The fifth is the subject itself: one carrying an identifier minted per event is refused. The
+A turn whose reply reaches anyone cannot post either. The member it acts for is among the readers —
+they spoke there, or set the watch there — so the reply is the telling, and a notification of the
+same fact would come back to their own chat as a second copy. Admission stamps `reply_reaches` with
+the surface that posts the reply, or `nobody`, so the fence reads neither the body nor the audience.
+
+The sixth is the subject itself: one carrying an identifier minted per event is refused. The
 subject is the fold key and a uuid is unique by construction, so such a subject can never fold and
 every repeat opens a row of its own. Saying so in the field's description was not enough — a turn
 reading pages reached for the page id it had in hand — and the fold is what stands between a member
@@ -33,6 +38,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field
 
 from ufo.sdk.context import ExtensionContext, TurnRuntimeConfig
+from ufo.sdk.surfaces import REPLY_REACHES_NOBODY
 from ufo.sdk.tools import TextContent, ToolContext, ToolDef, ToolResult
 from ufo_ext_app_notification.store import (
     BODY_MAX,
@@ -78,6 +84,7 @@ NOTIFY_UNSTABLE_SUBJECT = (
 NOTIFY_INSIDE_A_DELIVERY = (
     "this turn is delivering a notification; it does not raise one about that"
 )
+NOTIFY_REPLY_REACHES = "this turn's reply reaches the member on {surface}; say it there"
 NOTIFY_QUEUED = "Queued. Nothing answers back on this conversation."
 NOTIFY_FOLDED = (
     "Folded into the notification on this subject, now raised {n} times. Nothing answers "
@@ -136,6 +143,9 @@ async def notify(ctx: ToolContext, args: NotifyInput) -> ToolResult:
         return _refusal(NOTIFY_NO_INBOX)
     if inbox == ctx.turn.agent_id:
         return _refusal(NOTIFY_SELF)
+    reaches = None if ctx.turn.context is None else ctx.turn.context.reply_reaches
+    if reaches is not None and reaches != REPLY_REACHES_NOBODY:
+        return _refusal(NOTIFY_REPLY_REACHES.format(surface=reaches))
     runtime_config = (ctx.turn.runtime_config or TurnRuntimeConfig()).model_copy(
         update={"connections": await ctx.connector_connection_ids()}
     )

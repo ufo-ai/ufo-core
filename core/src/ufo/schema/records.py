@@ -595,6 +595,10 @@ class Agent(BaseModel):
     no row backs the record, which matches no targeting, so a targeted skill never loads there."""
 
 
+REPLY_REACHES_NOBODY = "nobody"
+"""The `reply_reaches` a turn carries when no surface posts its reply and no member is reading."""
+
+
 class TurnContext(BaseModel):
     """Ambient facts the admitting surface knows about an inbound — who spoke, their IANA timezone,
     the question their message answers when the surface knew one, and where they said it. An
