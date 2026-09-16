@@ -90,12 +90,18 @@ from evals.suites import (
     writing_subagent,
 )
 from evals.suites.asd_writing import asd_writing_task
+from evals.suites.follow_ups import follow_ups_task
 from evals.suites.skill_gtm import CASES as SKILL_GTM_CASES
 from evals.suites.slack_silence import CASES as SLACK_SILENCE_CASES
 from evals.suites.slack_silence import slack_silence_task
 from evals.suites.wiki_generation import wiki_generation_task
 
 SEMANTIC_JUDGE_MODEL = "gpt-5.4-mini"
+"""The follow-up rows are graded on a stronger judge than the semantic suites: the questions there
+are whether a sentence has a section and states a fact, and the questions here are whether a row is
+grounded in a thread and whether pressing it starts work or a conversation — distinctions a lighter
+judge scores by keyword rather than by reading."""
+FOLLOW_UPS_JUDGE_MODEL = "gpt-5.6-terra"
 SCENARIO_SIMULATOR_MODEL = "claude-haiku-4-5"
 VISUAL_JUDGE_MODEL = "claude-sonnet-5"
 
@@ -240,6 +246,7 @@ TASKS: tuple[EvalTask, ...] = (
     capability_task("connector_connections", connector_connections.CASES, serial=True),
     capability_task("report_digest", report_digest.CASES, judge_model=SEMANTIC_JUDGE_MODEL),
     asd_writing_task(SEMANTIC_JUDGE_MODEL),
+    follow_ups_task(FOLLOW_UPS_JUDGE_MODEL),
     wiki_generation_task(SEMANTIC_JUDGE_MODEL),
     skill_loading_task(SKILL_LOADING_CASES, packs=SKILL_LOADING_PACKS),
     skill_loading_task(SKILL_MEMBER_CASES, name="skill_loading_member"),

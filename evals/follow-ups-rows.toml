@@ -1,0 +1,77 @@
+name = "follow-ups-rows"
+base = "HEAD"
+suites = ["follow_ups"]
+repeats = 2
+concurrency = 1
+max_stacks = 1
+budget_usd = 4.0
+# Measured over 122 ranking and 55 judge calls: $0.00023 a ranking on luna and $0.0066 a judge call
+# on terra, which is where all but a twentieth of the spend goes. One judge call answers all six of
+# a slate's criteria, so a run costs $0.085 whether that is counted as 30 verdicts or 90.
+est_usd_per_case = 0.001
+
+[template]
+database = { url = "postgresql+asyncpg://ufo:ufo@127.0.0.1:5541/ufo" }
+blob = { backend = "filesystem", root = "./blobs" }
+browser = { cdp_provider = "browserbase" }
+connect = { public_base_url = "http://evals.invalid" }
+memory = { index_backend = "turbopuffer" }
+models = { auto_model = "z-ai/glm-5.3-flash" }
+pack = { name = "assistant_hosted" }
+research = { search_provider = "perplexity" }
+sandbox = { backend = "local" }
+flags = { backend = "open" }
+
+[[arm]]
+name = "no-actionable"
+
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/prompts/follow_ups.md"
+old = '''A row is work the assistant can start the moment it is pressed. Everything the work turns on is already in the thread or already in the workspace. Never write a row whose first act is to ask the member for a number, a date, a cadence, a source, or a choice — a member who has to answer a question before anything happens would have been quicker typing the request themselves. Where the work turns on something only the member holds, there is no row.
+
+'''
+new = ""
+
+[[arm]]
+name = "no-one-decision"
+
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/prompts/follow_ups.md"
+old = '''No two rows are the same decision. One act split across the accounts, formats, or destinations it could take is one row, not two.
+
+'''
+new = ""
+
+[[arm]]
+name = "no-silence"
+
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/prompts/follow_ups.md"
+old = ''' Write none at all where the thread earns none: a closed question that got its answer leaves no work to offer, and a screen with no rows is the right answer there. Rows written to fill the screen cost the member their trust in the rows that would have been worth pressing.'''
+new = ""
+
+[[arm]]
+name = "no-invented-name"
+
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/prompts/follow_ups.md"
+old = ''' Name no recipient, file, schedule, or standing arrangement the thread did not carry: a share goes to Slack because this workspace takes shares, never to a team the thread never named.'''
+new = ""
+
+[[arm]]
+name = "no-question-exit"
+
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/prompts/follow_ups.md"
+old = ''' Write no rows where nothing can start until the member answers — which account, which of two paths — because that choice is theirs to make in their own words. An open invitation to change something later is not that, and neither is a number the reply says it still lacks: the work that does not wait on the answer still earns its rows.'''
+new = ""
+
+[[arm]]
+name = "no-already-did"
+
+[[arm.replacements]]
+path = "extensions/web/ufo_ext_web/prompts/follow_ups.md"
+old = '''Never offer work the thread already did — the file it already wrote, the comparison it already made, the answer it already gave — and never offer what the assistant said in its last reply it was already doing.
+
+'''
+new = ""

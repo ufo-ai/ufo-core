@@ -21,7 +21,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
 
-from ufo.sdk.context import ScopedStore
+from ufo.sdk.context import JsonValue, ScopedStore
 from ufo.sdk.models import Message, ModelRequest, ToolSchema, ToolUseBlock
 from ufo.sdk.o11y import warn
 from ufo.sdk.surfaces import SurfaceModel
@@ -191,31 +191,42 @@ class FollowUpCache:
 
     async def _write(self, tail: tuple[tuple[str, str], ...]) -> Offers:
         assert self.model is not None
-        payload = {
-            "thread": [{"from": role, "said": said} for role, said in tail],
-            "kinds": sorted(self.kinds),
-        }
-        reply = await self.model.turn(
-            ModelRequest(
-                model=self.model.model,
-                system=FOLLOW_UPS,
-                messages=(
-                    Message(role="user", content=json.dumps(payload, separators=(",", ":"))),
-                ),
-                max_tokens=OFFERS_MAX_TOKENS,
-                conversation_cache_ttl="5m",
-                tools=(
-                    ToolSchema(
-                        name=OFFERS_TOOL,
-                        description=OFFERS_TOOL_DESCRIPTION,
-                        input_schema=_OffersCall.model_json_schema(),
-                    ),
-                ),
-                tool_choice=OFFERS_TOOL,
-                reasoning="off",
-            )
-        )
+        reply = await self.model.turn(ranking_request(self.model.model, tail, self.kinds))
         return settle_offers(reply, self.turn_id)
+
+
+def _reachable_schema(kinds: frozenset[str]) -> dict[str, JsonValue]:
+    """The call's schema with the kind enum cut to what this workspace can take. Told in prose which
+    kinds are reachable, the ranking spends rows on the ones that are not — every slate of one
+    measured thread carried a `share` into a workspace without Slack — and the screen then drops
+    them, so the member reads a shorter slate for no reason. The contract refuses instead."""
+    schema = _OffersCall.model_json_schema()
+    schema["$defs"]["Offer"]["properties"]["kind"]["enum"] = sorted(kinds)
+    return schema
+
+
+def ranking_request(
+    model: str, tail: tuple[tuple[str, str], ...], kinds: frozenset[str]
+) -> ModelRequest:
+    """The one shape of the ranking call. A screen's read and a suite grading that read make the
+    same call through here, so what an eval measures is the slate a member would have been drawn."""
+    payload = {"thread": [{"from": role, "said": said} for role, said in tail]}
+    return ModelRequest(
+        model=model,
+        system=FOLLOW_UPS,
+        messages=(Message(role="user", content=json.dumps(payload, separators=(",", ":"))),),
+        max_tokens=OFFERS_MAX_TOKENS,
+        conversation_cache_ttl="5m",
+        tools=(
+            ToolSchema(
+                name=OFFERS_TOOL,
+                description=OFFERS_TOOL_DESCRIPTION,
+                input_schema=_reachable_schema(kinds),
+            ),
+        ),
+        tool_choice=OFFERS_TOOL,
+        reasoning="off",
+    )
 
 
 def settle_offers(reply: Message, turn_id: UUID) -> Offers:

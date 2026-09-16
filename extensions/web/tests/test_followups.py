@@ -359,9 +359,10 @@ async def test_a_deploy_with_no_model_answers_without_one(db: None) -> None:
         assert (await _cache(uuid4(), uuid4(), None).read()).offers == ()
 
 
-async def test_the_thread_and_the_kinds_it_can_take_are_what_the_ranking_reads(db: None) -> None:
-    """The payload is the tail and the reach, and nothing else — a ranking that read a member's
-    memory here would offer work this thread never mentioned."""
+async def test_the_thread_is_the_payload_and_the_reach_is_the_contract(db: None) -> None:
+    """The payload is the tail and nothing else — a ranking that read a member's memory here would
+    offer work this thread never mentioned. The reach rides the tool schema rather than the words:
+    told in prose which kinds it could take, the ranking spent rows on the ones it could not."""
     workspace_id = await _seed_workspace()
     client = _OffersClient(_written("Draft the Acme reply"))
     seen: list[ModelRequest] = []
@@ -381,9 +382,10 @@ async def test_the_thread_and_the_kinds_it_can_take_are_what_the_ranking_reads(d
         "thread": [
             {"from": "user", "said": "What did Acme say?"},
             {"from": "assistant", "said": "They asked for the revised terms."},
-        ],
-        "kinds": ["ask", "keep", "share", "watch"],
+        ]
     }
+    offered = seen[0].tools[0].input_schema["$defs"]["Offer"]["properties"]["kind"]["enum"]
+    assert offered == sorted(EVERY_KIND)
 
 
 async def test_rows_are_kept_under_the_conversation_they_answer(db: None) -> None:
