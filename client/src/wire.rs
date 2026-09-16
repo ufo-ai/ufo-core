@@ -124,6 +124,10 @@ pub enum Directive {
     },
     Poll(f64),
     Listen(f64),
+    Working {
+        status: String,
+        since: f64,
+    },
     Since(String),
     Run(OpRequest),
     Token(String),
@@ -194,6 +198,10 @@ pub fn parse_line(line: &str) -> Directive {
         },
         "poll" => Directive::Poll(field(&fields, 0).parse().unwrap_or(1.0)),
         "listen" => Directive::Listen(field(&fields, 0).parse().unwrap_or(2.0)),
+        "working" if fields.len() >= 2 => Directive::Working {
+            status: fields[0].clone(),
+            since: fields[1].parse().unwrap_or(0.0),
+        },
         "since" if fields.len() >= 2 => Directive::Since(format!("{}:{}", fields[0], fields[1])),
         "run" => Directive::Run(OpRequest {
             op_id: field(&fields, 0),
@@ -1330,6 +1338,9 @@ mod tests {
             } => Some(("secret", vec![sealed.clone(), slot.clone(), prompt.clone()])),
             Directive::Poll(seconds) => Some(("poll", vec![format!("{seconds}")])),
             Directive::Listen(seconds) => Some(("listen", vec![format!("{seconds}")])),
+            Directive::Working { status, since } => {
+                Some(("working", vec![status.clone(), format!("{since}")]))
+            }
             Directive::Since(cursor) => {
                 Some(("since", cursor.splitn(2, ':').map(str::to_string).collect()))
             }

@@ -82,6 +82,7 @@ from ufo.runtime.ext.surface import (
     WRITEBACK_DELIVERED,
     WRITEBACK_FAILED,
     WRITEBACK_MAX_AGE_SECONDS,
+    BackgroundWork,
     MemberSaid,
     MidTurnReply,
     NothingDelivered,
@@ -3250,6 +3251,100 @@ async def _seed_agent_row(workspace_id: UUID, name: str) -> UUID:
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_conversation_awaiting_work_its_turn_left_lists_as_running(
+    db: None, tmp_path
+) -> None:
+    """A turn that ran a command in the background or spawned a subagent into it ends, and the
+    conversation still awaits the result: its row reads `running` until the task is no longer
+    followed and the child has ended, and `background_work` names what it awaits."""
+    workspace_id, agent_id, member_id = await _seed(member_email="m@example.com")
+    assert member_id is not None
+    context = _context(workspace_id, StubDbos(), FilesystemBlobStore(root=tmp_path))
+    conversation = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="waiting",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+    )
+    turn = await _seed_conversation_turn(workspace_id, conversation, agent_id, seq=1, inbound="go")
+    child_conversation = await _seed_conversation(
+        workspace_id,
+        agent_id,
+        queue_key="child",
+        audience=str(conversation_audience(member_id)),
+        member_id=member_id,
+        surface=SUBAGENT_SURFACE,
+    )
+    launched = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+    spawned = datetime(2026, 9, 16, 12, 5, tzinfo=UTC)
+
+    async def listed() -> str:
+        rows = await context.list_agent_conversations(agent_id, member_id, admin=False, limit=50)
+        return next(entry.turn for entry in rows if entry.summary.id == conversation)
+
+    async def followed_until(moment: datetime) -> None:
+        async with workspace_tx() as connection:
+            await connection.execute(
+                sa.update(tables.detached_task)
+                .where(tables.detached_task.c.turn_id == turn)
+                .values(follow_until=moment)
+            )
+            await connection.execute(
+                sa.update(tables.turn).where(tables.turn.c.id == turn).values(detached_until=moment)
+            )
+
+    assert await listed() == "idle"
+    assert await context.background_work(conversation) is None
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.detached_task).values(
+                workspace_id=workspace_id,
+                turn_id=turn,
+                conversation_id=conversation,
+                sandbox_conversation_id=conversation,
+                task="t1",
+                runtime_base="/runs/x/tasks/t1",
+                follow_until=launched,
+                created_at=launched,
+            )
+        )
+    await followed_until(datetime.now(UTC) + timedelta(hours=1))
+    assert await listed() == "running"
+    assert await context.background_work(conversation) == BackgroundWork(
+        subagents=(), tasks=1, since=launched
+    )
+
+    await followed_until(datetime.now(UTC) - timedelta(hours=1))
+    assert await listed() == "idle", "a task no longer followed is not awaited"
+    assert await context.background_work(conversation) is None
+
+    child = await _turn_row(
+        workspace_id, child_conversation, agent_id, 1, status="running", parent_turn_id=turn
+    )
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == child).values(created_at=spawned)
+        )
+    assert await listed() == "running"
+    assert await context.background_work(conversation) == BackgroundWork(
+        subagents=("research",), tasks=0, since=spawned
+    )
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == child)
+            .values(
+                status="done",
+                terminal=TerminalFrame(status="done", text="ok").model_dump(mode="json"),
+            )
+        )
+    assert await listed() == "idle"
+    assert await context.background_work(conversation) is None
+
+
 async def test_agent_conversations_list_by_audience_and_wall(db: None, tmp_path) -> None:
     """The list a member reads: their own conversations and the workspace-shared ones, never
     another member's private one, a room's, or an externally-shared channel's. An admin lists every

@@ -19,7 +19,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -638,6 +638,30 @@ impl<W: Write> App<W> {
 
     pub fn is_working(&self) -> bool {
         self.working
+    }
+
+    /// The bottom line at the prompt: the work the conversation awaits, clocked from when it
+    /// began, or nothing. A turn in flight keeps its own line.
+    pub fn background(&mut self, work: Option<(String, f64)>) {
+        if self.working {
+            return;
+        }
+        match work {
+            Some((status, began)) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0.0, |since| since.as_secs_f64());
+                let since = Instant::now()
+                    .checked_sub(Duration::from_secs_f64((now - began).max(0.0)))
+                    .unwrap_or_else(Instant::now);
+                self.status.activity = Activity::Working { since, status };
+            }
+            None => {
+                if let Activity::Working { .. } = self.status.activity {
+                    self.status.activity = Activity::WaitingInput;
+                }
+            }
+        }
     }
 
     pub fn tick(&mut self) {
@@ -2387,6 +2411,42 @@ mod tests {
             "the running op's row lives in the transcript: {line}"
         );
         assert!(transcript(&mut app).contains("⏺ Running the tests"));
+    }
+
+    #[test]
+    fn the_prompt_keeps_a_spinner_for_the_work_the_turn_left_running() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        app.end_turn(true);
+        assert_eq!(app.activity_line(80).to_string(), "");
+        let began = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock")
+            .as_secs_f64()
+            - 90.0;
+        app.background(Some(("Awaiting a background task".to_string(), began)));
+        let line = app.activity_line(80).to_string();
+        assert!(
+            line.contains(SPINNER_FRAMES[0])
+                && line.contains("Awaiting a background task")
+                && line.contains("1m30s"),
+            "the wait reads as work, clocked from when it began: {line}"
+        );
+        app.background(None);
+        assert_eq!(
+            app.activity_line(80).to_string(),
+            "",
+            "a reconnect that finds the work gone clears the line"
+        );
+        app.begin_turn();
+        app.status_text("Reading the notes");
+        app.background(Some(("Awaiting a background task".to_string(), began)));
+        assert!(
+            app.activity_line(80)
+                .to_string()
+                .contains("Reading the notes"),
+            "a turn in flight keeps its own line"
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator, Iterator
 from contextlib import aclosing
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -2317,6 +2317,68 @@ async def test_a_fresh_resume_replays_history_and_a_poll_does_not(
     assert bounced == [["since", str(turn_id), ""], ["listen", "2"]], (
         f"a marked idle listen answers its cursor and the interval alone: {bounced}"
     )
+
+
+async def test_a_prompted_stream_says_the_work_the_turn_left_running(
+    ufo: tuple[AsyncClient, UUID],
+) -> None:
+    """A turn that backgrounded a command ends at the prompt with the conversation still awaiting
+    the result: every stream end and every idle bounce carries a `working` line naming the wait
+    and when it began, so the client keeps a spinner, until a bounce finds the work gone."""
+    client, workspace_id = ufo
+    await _seed_member(workspace_id, "owner@example.com")
+    token = _mint(SECRET, workspace_id, "owner@example.com", _future())
+    await _post(client, "main", token, b"hello")
+    turn_id, status = await _sole_turn(workspace_id)
+    assert status == "done"
+    launched = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+    async with workspace_tx() as connection:
+        conversation_id = (
+            await connection.execute(
+                sa.select(tables.turn.c.conversation_id).where(tables.turn.c.id == turn_id)
+            )
+        ).scalar_one()
+        await connection.execute(
+            sa.insert(tables.detached_task).values(
+                workspace_id=workspace_id,
+                turn_id=turn_id,
+                conversation_id=conversation_id,
+                sandbox_conversation_id=conversation_id,
+                task="t1",
+                runtime_base="/runs/x/tasks/t1",
+                follow_until=datetime.now(UTC) + timedelta(hours=1),
+                created_at=launched,
+            )
+        )
+        await connection.execute(
+            sa.update(tables.turn)
+            .where(tables.turn.c.id == turn_id)
+            .values(detached_until=datetime.now(UTC) + timedelta(hours=1))
+        )
+    working = ["working", "Awaiting a background task", f"{launched.timestamp():.0f}"]
+
+    polled = await _post(client, "main", token, b"")
+    assert polled[-2:] == [working, ["listen", "2"]], polled
+
+    headers = {
+        "authorization": f"Bearer {token}",
+        "x-ufo-since": f"{turn_id}:",
+        "x-ufo-listen": "1",
+    }
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        bounced = await client.post("/surface/ufo/main", content=b"", headers=headers)
+    assert _lines(bounced.content) == [["since", str(turn_id), ""], working, ["listen", "2"]]
+
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.delete(tables.detached_task).where(tables.detached_task.c.turn_id == turn_id)
+        )
+        await connection.execute(
+            sa.update(tables.turn).where(tables.turn.c.id == turn_id).values(detached_until=None)
+        )
+    async with asyncio.timeout(STREAM_TIMEOUT_SECONDS):
+        cleared = await client.post("/surface/ufo/main", content=b"", headers=headers)
+    assert _lines(cleared.content) == [["since", str(turn_id), ""], ["listen", "2"]]
 
 
 async def test_a_marked_bounce_renders_a_refused_wakeup_without_exiting(

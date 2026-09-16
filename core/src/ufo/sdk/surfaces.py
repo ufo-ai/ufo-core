@@ -73,6 +73,9 @@ from ufo.runtime.ext.surface import (
     AgentTurnStatus as AgentTurnStatus,
 )
 from ufo.runtime.ext.surface import (
+    BackgroundWork as BackgroundWork,
+)
+from ufo.runtime.ext.surface import (
     ConnectionView as ConnectionView,
 )
 from ufo.runtime.ext.surface import (

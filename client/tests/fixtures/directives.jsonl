@@ -16,6 +16,7 @@
 {"wire": "workspace", "verb": "secret", "fields": ["sealed-blob", "perplexity_api_key", "Paste your Perplexity key"], "line": "secret\tsealed-blob\tperplexity_api_key\tPaste your Perplexity key"}
 {"wire": "workspace", "verb": "sent", "fields": ["turn-1", "1", "arr-1"], "line": "sent\tturn-1\t1\tarr-1"}
 {"wire": "workspace", "verb": "since", "fields": ["turn-1", "cursor-9"], "line": "since\tturn-1\tcursor-9"}
+{"wire": "workspace", "verb": "working", "fields": ["Awaiting reviewer and a background task", "1789000000"], "line": "working\tAwaiting reviewer and a background task\t1789000000"}
 {"wire": "workspace", "verb": "you", "fields": ["what I said"], "line": "you\twhat I said"}
 {"wire": "onboard", "verb": "ask", "fields": ["Enter your work email:"], "line": "ask\tEnter your work email:"}
 {"wire": "onboard", "verb": "choose", "fields": ["Which workspace?", "acme", "beta LLC"], "line": "choose\tWhich workspace?\tacme\tbeta LLC"}

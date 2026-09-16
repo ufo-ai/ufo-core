@@ -923,6 +923,7 @@ struct Gate {
     questions: VecDeque<GateQuestion>,
     answers: Vec<String>,
     many: bool,
+    working: Option<(String, f64)>,
     secrets: VecDeque<(String, String, String)>,
     asked: bool,
     exit: Option<i32>,
@@ -1526,6 +1527,7 @@ fn run_tty(
                     } else if !settle(&mut app, &mut live.gate) {
                         break 0;
                     }
+                    app.background(live.gate.working.take());
                     app.paint();
                 }
                 WireEvent::Fatal(message) => {
@@ -1618,6 +1620,7 @@ fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
             gate.asked = true;
             gate.prompt = prompt;
         }
+        Directive::Working { status, since } => gate.working = Some((status, since)),
         Directive::Choose {
             prompt,
             options,
@@ -1711,7 +1714,7 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                 Directive::Say(text) => out.say(&text),
                 Directive::You(text) => out.member(&text),
                 Directive::Fired(text) => out.fired(&text),
-                Directive::Sent { .. } => {}
+                Directive::Sent { .. } | Directive::Working { .. } => {}
                 Directive::Frame { event, data } => out.frame(&event, &data),
                 Directive::Note(text) => out.note(&text),
                 Directive::File { name, size, url } => out.file(&name, &size, &url),

@@ -271,6 +271,7 @@ impl Driver {
             }],
             Directive::Poll(_)
             | Directive::Listen(_)
+            | Directive::Working { .. }
             | Directive::Since(_)
             | Directive::Run(_)
             | Directive::Token(_)

@@ -37,6 +37,7 @@ WORKSPACE_WIRE = frozenset(
         "since",
         "poll",
         "listen",
+        "working",
         "run",
         "install",
     }
@@ -93,6 +94,7 @@ WORKSPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "since": ("turn-1", "cursor-9"),
     "poll": ("1",),
     "listen": ("2",),
+    "working": ("Awaiting reviewer and a background task", "1789000000"),
     "run": ("op-1", "exec", "exec", "120", "", '{"argv":["ls"]}', "c1"),
     "install": (),
 }

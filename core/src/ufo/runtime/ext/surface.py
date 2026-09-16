@@ -641,8 +641,20 @@ LIVE_TURN_PRIORITY: tuple[Literal["running", "queued", "parked"], ...] = (
 )
 
 IDLE_TURN = "idle"
+RUNNING_TURN = "running"
 
 ListedTurn = Literal["running", "queued", "parked", "idle"]
+
+
+@dataclass(frozen=True)
+class BackgroundWork:
+    """What a conversation awaits with no turn in flight: the subagents its turns spawned into the
+    background, by name or profile, the detached tasks still followed, and when the earliest of
+    them began."""
+
+    subagents: tuple[str, ...]
+    tasks: int
+    since: datetime
 
 
 def _liveness() -> sa.Case[int]:
@@ -1411,10 +1423,11 @@ class ListedConversation(BaseModel):
     `audience` and `surface_label` travel as the conversation row stores them — the portal maps
     them to member words.
 
-    `turn` is the liveest non-terminal turn the conversation holds (`LIVE_TURN_PRIORITY` order),
-    `IDLE_TURN` where it holds none — what a listing row draws its status indicator from. It is
-    the shape of the conversation's work rather than a word of its content, so an unreadable row
-    states it like `turn_count`.
+    `turn` is the liveest non-terminal turn the conversation holds (`LIVE_TURN_PRIORITY` order);
+    `running` where it holds none but still awaits work a turn left behind — a detached task
+    followed past now, a subagent spawned into the background — and `IDLE_TURN` otherwise: what a
+    listing row draws its status indicator from. It is the shape of the conversation's work rather
+    than a word of its content, so an unreadable row states it like `turn_count`.
 
     `title` is what the conversation is called: the member's own opening words as the turn that
     opened it stored them — the ambient digest a channel surface renders around them is not what
@@ -1732,8 +1745,44 @@ class ConversationDirectory:
             .limit(1)
             .correlate(tables.conversation)
             .scalar_subquery(),
+            self._awaiting(),
             IDLE_TURN,
         )
+
+    def _awaiting(self) -> sa.ColumnElement[str | None]:
+        """`running` while a turn of the conversation, itself ended, left work the conversation
+        still awaits — a detached task followed past now, or a subagent spawned into the background
+        whose turn has not ended — and null otherwise. Both sets are read once per listing, never
+        once per row, off the partial indexes that hold only the turns in flight: `turn_detached`
+        for the tasks, and `turn_agent_live` for the children, reached through the workspace's
+        agents because a child spawned onto another agent carries that agent's id. The rows then
+        test membership against a set the size of the work in flight, not of the history."""
+        parent = tables.turn.alias("parent")
+        agents = sa.select(tables.agent.c.id).where(
+            tables.agent.c.workspace_id == self.workspace_id
+        )
+        detached = (
+            sa.select(tables.turn.c.conversation_id)
+            .where(
+                tables.turn.c.workspace_id == self.workspace_id,
+                tables.turn.c.detached_until > datetime.now(UTC),
+            )
+            .correlate(None)
+        )
+        spawned = (
+            sa.select(parent.c.conversation_id)
+            .select_from(tables.turn.join(parent, tables.turn.c.parent_turn_id == parent.c.id))
+            .where(
+                tables.turn.c.agent_id.in_(agents),
+                tables.turn.c.terminal.is_(None),
+                tables.turn.c.parent_turn_id.is_not(None),
+            )
+            .correlate(None)
+        )
+        awaited = sa.or_(
+            tables.conversation.c.id.in_(detached), tables.conversation.c.id.in_(spawned)
+        )
+        return sa.case((awaited, RUNNING_TURN))
 
     def _read_at(self, member_id: UUID) -> sa.ColumnElement[datetime | None]:
         return (
@@ -3496,6 +3545,59 @@ class SurfaceContext:
                 )
             ).one_or_none()
         return None if row is None else row.id
+
+    async def background_work(self, conversation_id: UUID) -> BackgroundWork | None:
+        """The work a conversation awaits with no turn in flight — what its listing row draws
+        `running` from — or None when it awaits nothing. A surface says it while the member stands
+        at the prompt, so the wait reads as work rather than silence."""
+        now = datetime.now(UTC)
+        parent = tables.turn.alias("parent")
+        async with workspace_tx() as connection:
+            spawned = (
+                await connection.execute(
+                    sa.select(
+                        sa.func.coalesce(
+                            sa.func.nullif(tables.turn.c.subagent_name, ""),
+                            tables.turn.c.subagent_profile,
+                            tables.agent.c.name,
+                        ),
+                        tables.turn.c.created_at,
+                    )
+                    .select_from(
+                        tables.turn.join(parent, tables.turn.c.parent_turn_id == parent.c.id).join(
+                            tables.agent, tables.turn.c.agent_id == tables.agent.c.id
+                        )
+                    )
+                    .where(
+                        parent.c.workspace_id == self.workspace_id,
+                        parent.c.conversation_id == conversation_id,
+                        tables.turn.c.terminal.is_(None),
+                    )
+                    .order_by(tables.turn.c.created_at)
+                )
+            ).all()
+            tasks = (
+                await connection.execute(
+                    sa.select(
+                        sa.func.count(), sa.func.min(tables.detached_task.c.created_at)
+                    ).where(
+                        tables.detached_task.c.workspace_id == self.workspace_id,
+                        tables.detached_task.c.conversation_id == conversation_id,
+                        tables.detached_task.c.follow_until > now,
+                    )
+                )
+            ).one()
+        count, first_task = tasks
+        if not spawned and not count:
+            return None
+        starts = [row[1] for row in spawned]
+        if first_task is not None:
+            starts.append(first_task)
+        return BackgroundWork(
+            subagents=tuple(row[0] for row in spawned),
+            tasks=count,
+            since=min(_as_utc(start) for start in starts),
+        )
 
     async def absorbing_turn(self, conversation_id: UUID) -> UUID | None:
         """The turn a message admitted to this conversation now would fold into, or None when it

@@ -22,7 +22,10 @@ every `LISTEN_SECONDS` while it idles, marking each reconnect with `x-ufo-listen
 reconnect whose `since` names the conversation's latest turn — already terminal, already
 rendered — answers `since` and `listen` alone, so idling costs one line; one that finds a newer
 turn falls into the resume tail and prints it as it runs. An unmarked empty reconnect is a `poll`
-or severed-stream resume whose cursor may stand mid-turn, so it always drains the tail.
+or severed-stream resume whose cursor may stand mid-turn, so it always drains the tail. Where the
+turn left work the conversation still awaits — a command run in the background, a subagent spawned
+into it — a `working` line stands before each `listen`, naming the wait and when it began, so the
+prompted client keeps a spinner until a reconnect finds the work gone.
 
 A send (`x-ufo-send`) is the one POST that holds nothing: it admits its body, answers with the
 `sent` ack, and returns. It is the request a member's second message rides while their first turn
@@ -76,6 +79,7 @@ from ufo.sdk.surfaces import (
     PORTAL_SURFACE,
     AgentSummary,
     AskUserInput,
+    BackgroundWork,
     ConnectRequestInvalid,
     Conversation,
     CredentialPrompt,
@@ -555,6 +559,7 @@ async def _stream_end_directives(
     ran: bool,
     prompting: bool,
     moved_on: Callable[[], Awaitable[bool]] | None,
+    awaiting: Callable[[], Awaitable[BackgroundWork | None]] | None,
 ) -> tuple[bytes, ...]:
     if not terminated and not ran:
         return (
@@ -567,11 +572,28 @@ async def _stream_end_directives(
             directive("poll", "0"),
         )
     if prompting:
+        work = None if awaiting is None else await awaiting()
         return (
             directive("since", str(turn_id), rendered_cursor),
+            *_working(work),
             directive("listen", str(LISTEN_SECONDS)),
         )
     return ()
+
+
+def _working(work: BackgroundWork | None) -> tuple[bytes, ...]:
+    """The bottom line a prompted client keeps while the conversation awaits work its last turn
+    left running, with when that work began: nothing when it awaits nothing."""
+    if work is None:
+        return ()
+    awaited = list(work.subagents)
+    if work.tasks == 1:
+        awaited.append("a background task")
+    elif work.tasks > 1:
+        awaited.append(f"{work.tasks} background tasks")
+    *head, last = awaited
+    said = last if not head else f"{', '.join(head)} and {last}"
+    return (directive("working", f"Awaiting {said}", f"{work.since.timestamp():.0f}"),)
 
 
 async def _cancel_stream_tasks(*tasks: asyncio.Task[Any] | None) -> None:
@@ -595,6 +617,7 @@ async def stream_directives(
     turn_id: UUID,
     since: str = "",
     moved_on: Callable[[], Awaitable[bool]] | None = None,
+    awaiting: Callable[[], Awaitable[BackgroundWork | None]] | None = None,
     exits: bool = True,
     runtime: RuntimeIdentity | None = None,
     comments: bool = True,
@@ -700,7 +723,7 @@ async def stream_directives(
         finally:
             await _cancel_stream_tasks(frame_task, op_task)
     for line in await _stream_end_directives(
-        turn_id, rendered_cursor, terminated, ran, prompting, moved_on
+        turn_id, rendered_cursor, terminated, ran, prompting, moved_on, awaiting
     ):
         yield line
 
@@ -915,7 +938,9 @@ async def _channel_message(
             return PlainTextResponse(directive("ask", PROMPT))
         if marked and named == str(turn_id) and await ctx.turn_is_terminal(turn_id):
             return PlainTextResponse(
-                directive("since", named, held) + directive("listen", str(LISTEN_SECONDS))
+                directive("since", named, held)
+                + b"".join(_working(await ctx.background_work(conversation_id)))
+                + directive("listen", str(LISTEN_SECONDS))
             )
         return _ChannelTurn(turn_id, resumed=True)
     if stale:
@@ -1013,6 +1038,7 @@ class _ChannelStream:
             turn_id=self.turn.id,
             since=since,
             moved_on=self._moved_on,
+            awaiting=partial(self.ctx.background_work, self.conversation_id),
             exits=not self.marked,
             runtime=self.ctx.runtime,
             comments=not self.turn.commented,

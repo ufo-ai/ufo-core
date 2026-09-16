@@ -3171,6 +3171,71 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
 
 #[cfg(unix)]
 #[test]
+fn the_prompt_shows_the_work_a_turn_left_running_until_a_listen_finds_it_gone() {
+    let began = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock")
+        .as_secs()
+        - 90;
+    let working: &'static str =
+        Box::leak(format!("working\tAwaiting a background task\t{began}").into_boxed_str());
+    let first: &'static [&'static str] = Box::leak(
+        vec![
+            "frame\tmessage\t{\"text\": \"Started the build in the background.\"}",
+            "ask\t>",
+            "since\tturn-1\t",
+            working,
+            "listen\t2",
+        ]
+        .into_boxed_slice(),
+    );
+    let served = serve(vec![
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: first,
+        },
+        Exchange {
+            delay_ms: 0,
+            status: 200,
+            reply_lines: &["since\tturn-1\t", "listen\t2"],
+        },
+    ]);
+    let home = scratch_home("tty-background-work");
+    let mut session = run_client_on_pty(&served.url, &["go"], &home, Some(&served.url), SCREEN);
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the turn's own post reaches the gateway");
+    thread::sleep(Duration::from_millis(800));
+
+    let prompted = session.screen();
+    assert!(
+        prompted.contains("Awaiting a background task") && prompted.contains("1m3"),
+        "the prompt keeps a spinner for the work the turn left running: {prompted}"
+    );
+
+    served
+        .arrived
+        .recv_timeout(ARRIVAL_WAIT)
+        .expect("the idle listen reconnects");
+    thread::sleep(Duration::from_millis(800));
+
+    let cleared = session.screen();
+    assert!(
+        !cleared.contains("Awaiting"),
+        "a listen that finds the work gone clears the line: {cleared}"
+    );
+
+    session.press(b"\x03");
+    assert!(session.ended(), "Ctrl+C ends the session");
+    served.gateway.done();
+    session.reaped();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[cfg(unix)]
+#[test]
 fn generated_activity_accumulates_live_and_rolls_up() {
     let served = serve(vec![
         Exchange {
