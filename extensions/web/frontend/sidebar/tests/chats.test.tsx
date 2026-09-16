@@ -4,7 +4,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 import type { Conversation } from "@/lib/types";
-import { railActivity } from "@/lib/railStore";
+import { freshenRail, railActivity } from "@/lib/railStore";
 
 import {
   AGENT,
@@ -20,6 +20,7 @@ import {
   json,
   useStreamFake,
   wire,
+  type Route,
 } from "../../tests/harness";
 
 const COLLEAGUE_ID = "66666666-6666-4666-8666-666666666666";
@@ -959,6 +960,252 @@ test("an archived listing the workspace holds more than says so rather than trun
 
   expect(await within(home).findByRole("row", { name: /Old runbook/ })).toBeTruthy();
   expect(within(home).getByText("Search to reach older chats.")).toBeTruthy();
+});
+
+/** The conversation listings the page read: the rail's page and the archived walk share this one
+ *  path, so the count is what an act costs the member in reads. */
+function listings(calls: string[]): number {
+  return calls.filter((url) => url.includes("/objects/conversation?")).length;
+}
+
+/** Holds every listing read open from the moment the returned act is called, which is what a
+ *  filing must draw through. */
+function heldListings(routes: Record<string, Route>): () => void {
+  const listing = routes["/objects/conversation$"];
+  let held = false;
+  routes["/objects/conversation$"] = (url, init) =>
+    held ? new Promise<Response>(() => {}) : listing(url, init);
+  return () => {
+    held = true;
+  };
+}
+
+test("a filing act draws before a listing answers, and re-reads one page, not every listing", async () => {
+  const posted: string[] = [];
+  const routes = filingWire([CHAT_ROW, PINNED], posted);
+  const hold = heldListings(routes);
+  const { calls } = wire(routes);
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan", "Pick one thread"]));
+  hold();
+  const read = listings(calls);
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Ship the plan" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+
+  await vi.waitFor(() =>
+    expect(within(mainTable(home)).queryByRole("row", { name: /Ship the plan/ })).toBeNull(),
+  );
+  expect(listings(calls) - read).toBe(1);
+
+  await userEvent.click(within(home).getByRole("tab", { name: "Archived" }));
+
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan"]));
+});
+
+/** Page one answers with the first row and page two with what it left, landing only on `land`: the
+ *  rail's own walk, in flight when the member files, answering after the act with rows from before it. */
+function pagedListing(routes: Record<string, Route>): () => void {
+  const listing = routes["/objects/conversation$"];
+  let waiting: (() => void) | null = null;
+  routes["/objects/conversation$"] = async (url, init) => {
+    const params = new URLSearchParams(url.split("?")[1] ?? "");
+    if (params.get("archived") === "true") return listing(url, init);
+    const { objects } = (await (await listing(url, init)).json()) as { objects: unknown[] };
+    if (!params.get("cursor")) {
+      return json({ objects: objects.slice(0, 1), next_cursor: "page-two" });
+    }
+    const rest = json({ objects: objects.slice(1) });
+    await new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    return rest;
+  };
+  return () => waiting?.();
+}
+
+/** Lets every promise the held read stands behind settle, which a microtask flush alone does not. */
+async function settled(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+test("a listing read issued before a filing act never puts the filed row back", async () => {
+  const posted: string[] = [];
+  const routes = filingWire([PINNED, CHAT_ROW], posted);
+  const land = pagedListing(routes);
+  wire(routes);
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  const sidebar = screen.getByRole("navigation", { name: "Workspace" });
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan"]));
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Ship the plan" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+
+  await vi.waitFor(() => expect(posted).toEqual([THIRD_ID + "/archive_conversation"]));
+  await vi.waitFor(() =>
+    expect(within(sidebar).queryByRole("button", { name: /Ship the plan/ })).toBeNull(),
+  );
+
+  land();
+  await settled();
+
+  expect(within(sidebar).queryByRole("button", { name: /Ship the plan/ })).toBeNull();
+  expect(within(mainTable(home)).queryByRole("row", { name: /Ship the plan/ })).toBeNull();
+  expect(within(sidebar).getByRole("button", { name: /Pick one thread/ })).toBeTruthy();
+});
+
+test("a pin holds its row above the rest at once, with no listing answering for it", async () => {
+  const posted: string[] = [];
+  const routes = filingWire(
+    [CHAT_ROW, { ...PINNED, pinned: false, last_at: "2026-07-10T08:00:00.000Z" }],
+    posted,
+  );
+  const hold = heldListings(routes);
+  wire(routes);
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Pick one thread", "Ship the plan"]));
+  hold();
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Ship the plan" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Pin" }));
+
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan", "Pick one thread"]));
+  expect(posted).toEqual([THIRD_ID + "/pin_conversation"]);
+});
+
+test("an unarchived row leaves the archived listing before a read states it", async () => {
+  const posted: string[] = [];
+  const routes = filingWire([CHAT_ROW, FILED], posted);
+  const hold = heldListings(routes);
+  wire(routes);
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await userEvent.click(within(home).getByRole("tab", { name: "Archived" }));
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Old runbook"]));
+  hold();
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Old runbook" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Unarchive" }));
+
+  await vi.waitFor(() => expect(screen.queryByRole("row", { name: /Old runbook/ })).toBeNull());
+
+  await userEvent.click(within(home).getByRole("tab", { name: "All" }));
+
+  await vi.waitFor(() =>
+    expect(within(mainTable(home)).getByRole("row", { name: /Old runbook/ })).toBeTruthy(),
+  );
+  expect(screen.getAllByRole("row", { name: /Old runbook/ })).toHaveLength(1);
+  expect(posted).toEqual([ALERT_ID + "/unarchive_conversation"]);
+});
+
+/** The listing on screen reads again when the tab is looked at, and the rail's own poll reads its
+ *  page. */
+async function readAgain(): Promise<void> {
+  await act(async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    await freshenRail();
+  });
+}
+
+test("a read answering with the row unarchived puts it back in the table", async () => {
+  const posted: string[] = [];
+  const rows = [CHAT_ROW, PINNED];
+  wire(filingWire(rows, posted));
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan", "Pick one thread"]));
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Ship the plan" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Pick one thread"]));
+
+  await readAgain();
+  rows[1] = { ...rows[1], archived: false };
+  await readAgain();
+
+  await vi.waitFor(() =>
+    expect(within(mainTable(home)).getByRole("row", { name: /Ship the plan/ })).toBeTruthy(),
+  );
+  expect(screen.getAllByRole("row", { name: /Ship the plan/ })).toHaveLength(1);
+  expect(posted).toEqual([THIRD_ID + "/archive_conversation"]);
+});
+
+test("a filing retires once the archived listing's read answers for its row", async () => {
+  const posted: string[] = [];
+  const rows = [CHAT_ROW, PINNED];
+  wire(filingWire(rows, posted));
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan", "Pick one thread"]));
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Ship the plan" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+  await userEvent.click(within(home).getByRole("tab", { name: "Archived" }));
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan"]));
+
+  rows[1] = { ...rows[1], archived: false };
+  await readAgain();
+
+  await vi.waitFor(() => expect(screen.queryByRole("row", { name: /Ship the plan/ })).toBeNull());
+  expect(posted).toEqual([THIRD_ID + "/archive_conversation"]);
+});
+
+test("a pinned row stands in no listing whose read did not answer for it", async () => {
+  const posted: string[] = [];
+  wire(filingWire([CHAT_ROW, PINNED], posted));
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan", "Pick one thread"]));
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Pick one thread" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Pin" }));
+  await vi.waitFor(() => expect(titles(home)[0]).toBe("Pick one thread"));
+
+  await userEvent.type(within(home).getByRole("searchbox", { name: "Search chats" }), "ship{enter}");
+
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan"]));
+  expect(screen.queryByRole("row", { name: /Pick one thread/ })).toBeNull();
+  expect(posted).toEqual([CONVO_ID + "/pin_conversation"]);
+});
+
+test("an archived row stands in no later search, which says it matches nothing", async () => {
+  const posted: string[] = [];
+  wire(filingWire([CHAT_ROW, PINNED], posted));
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Ship the plan", "Pick one thread"]));
+
+  await userEvent.click(within(home).getByRole("button", { name: "Actions for Ship the plan" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+  await vi.waitFor(() => expect(titles(home)).toEqual(["Pick one thread"]));
+
+  await userEvent.type(within(home).getByRole("searchbox", { name: "Search chats" }), "zebra{enter}");
+
+  await vi.waitFor(() =>
+    expect(within(mainTable(home)).getByText("No conversations match.")).toBeTruthy(),
+  );
+  expect(screen.queryByRole("row", { name: /Ship the plan/ })).toBeNull();
 });
 
 test("Delete is offered on a conversation this member owns and on no other", async () => {

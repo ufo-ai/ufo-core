@@ -318,6 +318,24 @@ export function readChat(rows: Conversation[], conversationId: string): Conversa
   );
 }
 
+export const CONVERSATION_KIND = "conversation";
+export const ARCHIVE_ACTION = "archive_conversation";
+export const UNARCHIVE_ACTION = "unarchive_conversation";
+export const PIN_ACTION = "pin_conversation";
+export const UNPIN_ACTION = "unpin_conversation";
+export const DELETE_ACTION = "delete_conversation";
+
+/** What each filing act leaves on the row it acted on. A screen draws the act from this table
+ *  rather than from a read of the workspace: the verb is one round trip and every listing behind a
+ *  chat screen is another, so a filing that waited for them took seconds to appear. */
+export const FILING_MARKS: Record<string, Partial<Conversation>> = {
+  [ARCHIVE_ACTION]: { archived: true },
+  [UNARCHIVE_ACTION]: { archived: false },
+  [PIN_ACTION]: { pinned: true },
+  [UNPIN_ACTION]: { pinned: false },
+  [DELETE_ACTION]: { deleted: true },
+};
+
 /** A chat filed out of the listing — archived or deleted: its row leaves, because the listing read
  *  behind the rail answers without it and `mergeChats` holds every row a read does not name. */
 export function filedChat(rows: Conversation[], conversationId: string): Conversation[] {

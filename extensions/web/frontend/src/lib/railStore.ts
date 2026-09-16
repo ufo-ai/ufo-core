@@ -51,6 +51,9 @@ export type RailState = {
   /** Every conversation this tab holds a record of, by id: the listed rows, the ones a permalink
    *  resolved past the listing's bound, and the one a send just founded. */
   known: Readonly<Record<string, Conversation>>;
+  /** What the reads behind the rail have answered, counted, so a screen laying its member's own
+   *  act over these rows knows a read has answered since the act. */
+  answers: number;
   fault: ToastState | null;
   cut: boolean;
   shown: RailShown;
@@ -67,6 +70,7 @@ function fresh(): RailState {
     rows: [],
     sought: {},
     known: {},
+    answers: 0,
     fault: null,
     cut: false,
     shown: heldRailShown(),
@@ -123,7 +127,8 @@ export function useRail(): RailState {
   }, railState);
 }
 
-/** A retry answering after the read it replaced would otherwise put the older rows back. */
+/** A retry answering after the read it replaced would otherwise put the older rows back, and so
+ *  would a read issued before a filing act: both are voided by raising this generation. */
 let reads = 0;
 
 /** Comfortably past what the sidebar can usefully show, stated so a workspace with thousands of
@@ -163,7 +168,7 @@ async function walkRail(read: number): Promise<void> {
     );
     update((held) =>
       withRows(
-        { ...held, phase: "ready" as const, cut: result.payload.cut === true },
+        { ...held, phase: "ready" as const, cut: result.payload.cut === true, answers: held.answers + 1 },
         mergeChats(gathered, held.rows),
       ),
     );
@@ -173,14 +178,18 @@ async function walkRail(read: number): Promise<void> {
 }
 
 /** One page answers the whole rail's dots: a running turn's own updates put its conversation at
- *  the head of the `last_at` order. */
-async function refreshRail(): Promise<void> {
+ *  the head of the `last_at` order. It is also the one read a member's own act runs behind its
+ *  optimistic write, rather than the whole `walkRail` continuation, and a filing voids the walk the
+ *  rail may be waiting on, so this answer is what ends that wait. */
+export async function freshenRail(): Promise<void> {
   const read = reads;
   const params = new URLSearchParams({ order_by: "last_at", order: "desc" });
   const result = await getJson<ConversationsPayload>("/objects/conversation?" + params.toString());
   if (read !== reads || !result.ok) return;
   const fetched = chatRows(result.payload).map((row) => applyVisibility(row.conversation_id, row));
-  update((held) => withRows(held, mergeChats(fetched, held.rows)));
+  update((held) =>
+    withRows({ ...held, phase: "ready" as const, answers: held.answers + 1 }, mergeChats(fetched, held.rows)),
+  );
 }
 
 let ticking: number | null = null;
@@ -194,7 +203,7 @@ function poll(): void {
   ticking = window.setTimeout(
     () => {
       ticking = null;
-      void refreshRail().then(poll);
+      void freshenRail().then(poll);
     },
     live ? WORKING_STATUS_MS : RESTING_STATUS_MS,
   );
@@ -293,6 +302,9 @@ export function changeRailVisibility(
   return true;
 }
 
+/** The change stands or is put back, and the read behind it answers for the conversation. No read
+ *  issued before this one answers for the audience after it — the change is laid over what lands
+ *  only while it is held here — so raising the read generation voids them. */
 export function settleRailVisibility(conversationId: string, outcome: IntentOutcome): void {
   const change = visibilityChanges.get(conversationId);
   if (!change) return;
@@ -308,13 +320,26 @@ export function settleRailVisibility(conversationId: string, outcome: IntentOutc
           },
         }),
   }));
-  readRail();
+  reads += 1;
+  void freshenRail();
 }
 
-/** A conversation this member just filed out of the listing: its row leaves as the act lands. The
- *  reads behind the rail stop naming it, and a merge holds every row a read does not name. */
-export function railFiled(conversationId: string): void {
-  update((held) => ({ ...held, rows: filedChat(held.rows, conversationId) }));
+/** A conversation this member just filed: the act stands in the rail ahead of the read that will
+ *  state it. A row the act took off the listing leaves — the reads behind the rail stop naming it,
+ *  and a merge holds every row a read does not name — and any other filing leaves the row under the
+ *  marks the act set, listed again where the act brought it back.
+ *
+ *  No read issued before the act answers for the state after it: a merge holds every row a read
+ *  does not name, so a listing read in flight — the walk behind the first draw, the status poll
+ *  behind a running turn — would put the filed row back. Raising the read generation voids them,
+ *  and the act's own `freshenRail` behind this call is the first read that stands. */
+export function railFiled(row: Conversation): void {
+  update((held) =>
+    row.archived || row.deleted
+      ? { ...held, rows: filedChat(held.rows, row.conversation_id) }
+      : withRows(held, mergeChats([row], held.rows)),
+  );
+  reads += 1;
 }
 
 export function railRead(conversationId: string): void {

@@ -33,6 +33,7 @@ from openfeature import api
 from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from PIL import Image
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncEngine
 from ufo_ext_app_chat.manifest import manifest as app_chat_manifest
 from ufo_ext_app_code.manifest import manifest as app_code_manifest
 from ufo_ext_connectors.manifest import manifest as connectors_manifest
@@ -11695,6 +11696,85 @@ async def test_a_portal_chat_is_private_until_its_member_shares_it(
     assert narrowed.json()["applied"] is True
     assert narrowed.json()["message"].startswith("Only you read this conversation from now on.")
     assert await _audience_columns(conversation_id) == (f"member:{member_id}", member_id)
+
+
+async def _seed_filing_rows(
+    workspace_id: UUID, agent_id: UUID, member_id: UUID, *, start: int, count: int
+) -> list[UUID]:
+    seeded = []
+    for index in range(start, start + count):
+        conversation_id = await _seed_agent_conversation(
+            workspace_id,
+            agent_id,
+            queue_key=f"filing:{index}",
+            audience=f"member:{member_id}",
+            member_id=member_id,
+        )
+        await _seed_listed_turn(
+            workspace_id,
+            conversation_id,
+            agent_id,
+            seq=1,
+            inbound=f"filing {index}",
+            speaker_member_id=member_id,
+        )
+        seeded.append(conversation_id)
+    return seeded
+
+
+@contextmanager
+def _counted_statements(engine: AsyncEngine) -> Iterator[list[str]]:
+    run: list[str] = []
+
+    def record(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        run.append(statement)
+
+    sa.event.listen(engine.sync_engine, "before_cursor_execute", record)
+    try:
+        yield run
+    finally:
+        sa.event.remove(engine.sync_engine, "before_cursor_execute", record)
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_filing_act_costs_the_same_however_many_conversations_the_workspace_holds(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """Archive, pin and share each answer off the row the route named, so a filing runs the same
+    statements on a workspace holding ten conversations as on one holding a hundred and ten. The
+    act never walks the listing, which is what would put a member's wait on the workspace's size."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "m@example.com")
+    small = await _seed_filing_rows(workspace_id, agent_id, member_id, start=0, count=10)
+    async with workspace_tx() as connection:
+        engine = connection.engine
+
+    warmed = await _conversation_action(client, agent_id, small[0], token, "pin_conversation")
+    assert warmed.json()["applied"] is True
+
+    counted: dict[str, list[int]] = {}
+    for action in ("archive_conversation", "pin_conversation", "share_conversation"):
+        counted[action] = []
+    for round_index, row in enumerate((small[1], small[2])):
+        if round_index:
+            await _seed_filing_rows(workspace_id, agent_id, member_id, start=10, count=100)
+        for action in counted:
+            with _counted_statements(engine) as run:
+                acted = await _conversation_action(client, agent_id, row, token, action)
+            assert acted.json()["applied"] is True, acted.json()
+            counted[action].append(len(run))
+
+    assert {action: counts[0] for action, counts in counted.items()} == {
+        action: counts[1] for action, counts in counted.items()
+    }, counted
 
 
 @pytest.mark.usefixtures("database_url")

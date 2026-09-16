@@ -53,7 +53,16 @@ import {
   chatShown,
 } from "@/lib/chatRuns";
 import { postObjectAction, type IntentOutcome } from "@/lib/api";
-import { seekChat, useRail, readRail } from "@/lib/railStore";
+import {
+  ARCHIVE_ACTION,
+  CONVERSATION_KIND,
+  DELETE_ACTION,
+  FILING_MARKS,
+  PIN_ACTION,
+  UNARCHIVE_ACTION,
+  UNPIN_ACTION,
+} from "@/lib/rail";
+import { freshenRail, railFiled, seekChat, useRail } from "@/lib/railStore";
 import { heldRoute, placeHome } from "@/lib/router";
 import {
   HOME_CONNECTORS_LANE,
@@ -89,13 +98,6 @@ const SORT_BY = "Sort by";
 const SHOW = "Show";
 
 const CONNECTORS_SECTION = "connectors" as const;
-
-const CONVERSATION_KIND = "conversation";
-const ARCHIVE_ACTION = "archive_conversation";
-const UNARCHIVE_ACTION = "unarchive_conversation";
-const PIN_ACTION = "pin_conversation";
-const UNPIN_ACTION = "unpin_conversation";
-const DELETE_ACTION = "delete_conversation";
 
 const CONNECTORS_PURPOSE = "Connect the accounts your apps work in.";
 
@@ -465,10 +467,14 @@ function HistoryRow({
         { kind: CONVERSATION_KIND, name: row.conversation_id, action },
         {},
       );
-      if (!outcome.applied) setFault(outcome.message);
-      else readRail();
+      if (!outcome.applied) {
+        setFault(outcome.message);
+        return;
+      }
+      railFiled({ ...row, ...FILING_MARKS[action] });
+      void freshenRail();
     },
-    [row.agent_id, row.conversation_id],
+    [row],
   );
   const own =
     acting !== null &&

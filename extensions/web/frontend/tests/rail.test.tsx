@@ -9,7 +9,7 @@ import { App } from "@/App";
 import { NARROW } from "@/lib/narrow";
 import { agentName } from "@/lib/agentName";
 import { RESTING_STATUS_MS, WORKING_STATUS_MS } from "@/lib/appStatusStore";
-import { ADMIN_DISCLOSURE } from "@/lib/audience";
+import { ADMIN_DISCLOSURE, SHARED_SUBJECT } from "@/lib/audience";
 import {
   appOrder,
   appRun,
@@ -23,7 +23,17 @@ import {
   type RailSort,
   stampIso,
 } from "@/lib/rail";
-import { pickAppsExpanded, pickRailShown, railState, resetRailStore } from "@/lib/railStore";
+import {
+  changeRailVisibility,
+  freshenRail,
+  pickAppsExpanded,
+  pickRailShown,
+  railFiled,
+  railState,
+  readRail,
+  resetRailStore,
+  settleRailVisibility,
+} from "@/lib/railStore";
 import { newChatHash } from "@/lib/route";
 import type { Agent, Conversation } from "@/lib/types";
 
@@ -161,6 +171,89 @@ test("the rail walks the listing to its far page", async () => {
   );
   expect(railState().phase).toBe("ready");
   expect(calls).toBe(2);
+});
+
+test("a filing voids the read in flight, and its own read answers for the rail", async () => {
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  wire({
+    "/objects/conversation$": async () => {
+      calls += 1;
+      if (calls === 1) return json({ objects: [conversationObject(CHAT_ROW)], next_cursor: null });
+      if (calls === 2) {
+        const before = json({ objects: [conversationObject(CHAT_ROW)], next_cursor: null });
+        await held;
+        return before;
+      }
+      return json({ objects: [], next_cursor: null });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await waitFor(() => expect(railState().rows.map((row) => row.title)).toEqual([CHAT_ROW.title]));
+  act(() => readRail());
+  expect(railState().phase).toBe("loading");
+
+  await act(async () => {
+    railFiled({ ...CHAT_ROW, archived: true });
+    await freshenRail();
+  });
+
+  expect(railState().rows).toEqual([]);
+  expect(railState().phase).toBe("ready");
+
+  await act(async () => {
+    release();
+    await held;
+  });
+
+  expect(railState().rows).toEqual([]);
+  expect(calls).toBe(3);
+});
+
+test("a listing read issued before a visibility change never puts the old audience back", async () => {
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const shared = { ...CHAT_ROW, audience: SHARED_SUBJECT, member_email: null };
+  let calls = 0;
+  wire({
+    "/objects/conversation$": async () => {
+      calls += 1;
+      if (calls === 1) return json({ objects: [conversationObject(CHAT_ROW)], next_cursor: null });
+      if (calls === 2) {
+        const before = json({ objects: [conversationObject(CHAT_ROW)], next_cursor: null });
+        await held;
+        return before;
+      }
+      return json({ objects: [conversationObject(shared)], next_cursor: null });
+    },
+  });
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await waitFor(() => expect(railState().rows[0]?.audience).toBe(CHAT_ROW.audience));
+  act(() => readRail());
+
+  await act(async () => {
+    changeRailVisibility(CONVO_ID, SHARED_SUBJECT, null);
+    settleRailVisibility(CONVO_ID, { applied: true, message: "" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(railState().rows[0].audience).toBe(SHARED_SUBJECT);
+
+  await act(async () => {
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(railState().rows[0].audience).toBe(SHARED_SUBJECT);
+  expect(railState().rows[0].member_email).toBeNull();
+  expect(calls).toBe(3);
 });
 
 test("the rail's first page stands while the walk is still reading", async () => {

@@ -37,12 +37,20 @@ import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
 import { OwnerMark } from "@/lib/ownerMark";
 import {
+  ARCHIVE_ACTION,
   CHAT_STATE_RANK,
+  CONVERSATION_KIND,
+  DELETE_ACTION,
+  FILING_MARKS,
+  PIN_ACTION,
+  UNARCHIVE_ACTION,
+  UNPIN_ACTION,
   chatRows,
   chatState,
+  mergeChats,
   type ConversationsPayload,
 } from "@/lib/rail";
-import { railFiled, readRail, useRail } from "@/lib/railStore";
+import { freshenRail, railFiled, useRail } from "@/lib/railStore";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
 import type { Conversation } from "@/lib/types";
 import { HOME_TITLE } from "@/lib/title";
@@ -61,15 +69,40 @@ const SEARCH = "Search chats";
 const CUT = "Search to reach older chats.";
 const ARCHIVED = "Archived";
 
-const CONVERSATION_KIND = "conversation";
-const ARCHIVE_ACTION = "archive_conversation";
-const UNARCHIVE_ACTION = "unarchive_conversation";
-const PIN_ACTION = "pin_conversation";
-const UNPIN_ACTION = "unpin_conversation";
-const DELETE_ACTION = "delete_conversation";
+/** The rows this member's own acts have filed, by conversation, as each act left them. */
+type Filings = Readonly<Record<string, Conversation>>;
 
-/** The acts that take a conversation out of the listing the main table draws. */
-const AWAY_ACTIONS = [ARCHIVE_ACTION, DELETE_ACTION];
+const NO_FILINGS: Filings = {};
+
+/** One listing's rows with the filings laid over the read behind it, so a row an act moved is
+ *  drawn where the act put it while the read behind the listing catches up. */
+function filedRows(rows: Conversation[], filings: Filings, archived: boolean): Conversation[] {
+  const laid = rows.map((row) => {
+    const filed = filings[row.conversation_id];
+    return filed === undefined
+      ? row
+      : { ...row, archived: filed.archived, pinned: filed.pinned, deleted: filed.deleted };
+  });
+  return mergeChats(laid, Object.values(filings)).filter(
+    (row) => !row.deleted && row.archived === archived,
+  );
+}
+
+/** The filings this listing's read has caught up with: a row it names as the act left it, and a row
+ *  the act moved off this listing that it no longer names. Every later read answers for them. */
+function caught(rows: Conversation[], filings: Filings, archived: boolean): string[] {
+  const named = new Map(rows.map((row) => [row.conversation_id, row]));
+  return Object.keys(filings).filter((id) => {
+    const read = named.get(id);
+    const filed = filings[id];
+    if (read === undefined) return filed.deleted || filed.archived !== archived;
+    return (
+      read.archived === filed.archived &&
+      read.pinned === filed.pinned &&
+      read.deleted === filed.deleted
+    );
+  });
+}
 
 /** Every cell but the time states a fact the member came to read, so the table is drawn in the
  *  page's own ink and the stamp alone recedes. */
@@ -172,7 +205,7 @@ function ordered(rows: Conversation[]): Conversation[] {
 }
 
 /** What a row's act filed, so the listing answers for the conversation before the reads do. */
-type Filed = (conversationId: string, action: string) => void;
+type Filed = (row: Conversation, action: string) => void;
 
 /** The rows behind the table, from whichever source answered for them. */
 type Read = {
@@ -200,21 +233,52 @@ export function Chats({
   const picked = place.chip ?? "";
   const after = place.after ?? "";
   const rail = useRail();
-  const [filings, setFilings] = useState(0);
-  const filed = useCallback((conversationId: string, action: string) => {
-    if (AWAY_ACTIONS.includes(action)) railFiled(conversationId);
-    readRail();
-    setFilings((held) => held + 1);
-  }, []);
   const filing = scope === ARCHIVED_SCOPE;
   const said = usePanelRead<ConversationsPayload>(
     query && !filing ? conversationsRead(query, after) : null,
-    filings,
   );
-  const away = usePanelRead<ConversationsPayload>(filing ? archivedRead(query) : null, filings);
+  const away = usePanelRead<ConversationsPayload>(filing ? archivedRead(query) : null);
+  /** What the read behind the listing has answered, counted: a filing retires on a read that
+   *  answered after the act, and the rail counts the reads of its own listing. */
+  const answering = filing ? away : said;
+  const [panelAnswers, setAnswers] = useState(0);
+  useEffect(() => {
+    if (answering.phase === "ready") setAnswers((count) => count + 1);
+  }, [answering]);
+  const answers = panelAnswers + rail.answers;
+  /** The reads a filing may be laid over: a listing answers for one query and one page, so a
+   *  filing held past a change to either would patch a listing whose read never covered its row. */
+  const context = query + "\n" + after;
+  const [held, setHeld] = useState<{ context: string; laid: number; filings: Filings }>({
+    context,
+    laid: answers,
+    filings: NO_FILINGS,
+  });
+  const filings = held.context === context ? held.filings : NO_FILINGS;
+  /** The act posts its verb, the marks it set are drawn at once, and one bounded page confirms
+   *  them; every listing this screen reads carries the marks meanwhile. */
+  const filed = useCallback(
+    (row: Conversation, action: string) => {
+      const marked = { ...row, ...FILING_MARKS[action] };
+      setHeld((was) => ({
+        context,
+        laid: answers,
+        filings: {
+          ...(was.context === context ? was.filings : NO_FILINGS),
+          [marked.conversation_id]: marked,
+        },
+      }));
+      railFiled(marked);
+      void freshenRail();
+    },
+    [context, answers],
+  );
+  const awayRows = away.phase === "ready" ? chatRows(away.payload) : [];
+  const saidRows = said.phase === "ready" ? chatRows(said.payload) : [];
+  const listedRows = query ? saidRows : rail.rows;
   const archived: Read = {
     phase: away.phase,
-    rows: away.phase === "ready" ? chatRows(away.payload) : [],
+    rows: filedRows(awayRows, filings, true),
     /** The archived walk holds no step of its own, so a page that stops short — cut, or holding a
      *  cursor nothing reads — says so instead of truncating. */
     cut: away.phase === "ready" && (away.payload.cut === true || Boolean(away.payload.next_cursor)),
@@ -223,14 +287,33 @@ export function Chats({
   const listed: Read = query
     ? {
         phase: said.phase,
-        rows: said.phase === "ready" ? chatRows(said.payload) : [],
+        rows: filedRows(saidRows, filings, false),
         /** A listing holding a step to the rest is not cut: the step is the way to them. */
         cut: said.phase === "ready" && said.payload.cut === true && !said.payload.next_cursor,
         older: said.phase === "ready" ? said.payload.next_cursor : null,
       }
-    : { phase: rail.phase, rows: rail.rows, cut: rail.cut, older: null };
+    : {
+        phase: rail.phase,
+        rows: filedRows(rail.rows, filings, false),
+        cut: rail.cut,
+        older: null,
+      };
   const read: Read = filing ? archived : listed;
   const shown = read.rows.filter((row) => scoped(row, scope));
+  const answered =
+    answers > held.laid
+      ? caught(filing ? awayRows : listedRows, filings, filing).join("\n")
+      : "";
+  useEffect(() => {
+    if (!answered) return;
+    const retired = new Set(answered.split("\n"));
+    setHeld((was) => {
+      const kept = Object.entries(was.filings).filter(([id]) => !retired.has(id));
+      return kept.length === Object.keys(was.filings).length
+        ? was
+        : { ...was, filings: Object.fromEntries(kept) };
+    });
+  }, [answered]);
   const narrowed = query !== "" || scope !== "all" || picked !== "";
   return (
     <Pane>
@@ -398,7 +481,7 @@ function RowActs({ row, onFiled }: { row: Conversation; onFiled: Filed }) {
       return;
     }
     setAsking(false);
-    onFiled(row.conversation_id, action);
+    onFiled(row, action);
   };
   return (
     <>
