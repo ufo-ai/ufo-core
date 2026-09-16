@@ -18,7 +18,8 @@ EXTENSION = "lifecycle_email"
 
 class Gateway:
     """What control was asked to send, what SES has said about each message so far, the drip
-    sequences an operator has approved, and what a member asked to stop hearing."""
+    sequences an operator has approved, what a member asked to stop hearing, and the catalogue the
+    fleet holds."""
 
     def __init__(self) -> None:
         self.sent: list[dict] = []

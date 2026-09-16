@@ -7,6 +7,7 @@ use reqwest::header::{HeaderMap, HeaderValue, COOKIE, ORIGIN};
 use reqwest::redirect::Policy;
 use reqwest::StatusCode;
 use ufo_control::campaign::Campaigns;
+use ufo_control::catalogue::{Messages, SURFACE_PATH as CATALOGUE_SURFACE_PATH};
 use ufo_control::claim::ClaimWorkflow;
 use ufo_control::email::{parse_senders, AwsEndpoints, EmailSender, FounderSender};
 use ufo_control::email_send::EmailSends;
@@ -59,7 +60,7 @@ async fn rig(sends: bool) -> (String, String) {
         console_mode: false,
         campaigns: sends.then(|| Campaigns {
             pool,
-            core: workspaces,
+            core: workspaces.clone(),
             sender: FounderSender {
                 senders: parse_senders(SENDERS).unwrap(),
                 configuration_set: "ufo-testing-founder-email".to_string(),
@@ -81,7 +82,13 @@ async fn rig(sends: bool) -> (String, String) {
             apex_host: "ufo.ai".to_string(),
             product_topic: None,
         },
-        sequences: Sequences { pool: sends_pool },
+        sequences: Sequences {
+            pool: sends_pool.clone(),
+        },
+        messages: Messages {
+            pool: sends_pool,
+            core: workspaces,
+        },
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
@@ -396,5 +403,66 @@ async fn the_sequence_editor_is_the_operators_and_the_approved_set_is_the_runner
     assert_eq!(
         held["sequences"][0]["steps"][0]["kind"], "welcome_day_one",
         "the runner keeps the approved copy while an edit waits for its approval"
+    );
+}
+
+#[tokio::test]
+async fn the_catalogue_is_the_operators_and_the_declaration_is_the_fleets() {
+    let (base, _address) = rig(true).await;
+    let (_token, headers) = session(OPERATOR);
+
+    let anonymous = client()
+        .get(format!("{base}{CATALOGUE_SURFACE_PATH}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::SEE_OTHER);
+
+    let page = client()
+        .get(format!("{base}{CATALOGUE_SURFACE_PATH}"))
+        .headers(headers.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let drawn = page.text().await.unwrap();
+    assert!(drawn.contains("Lifecycle Messages"));
+
+    let (_member_token, member_headers) = session(MEMBER);
+    let refused = client()
+        .get(format!("{base}{CATALOGUE_SURFACE_PATH}/list"))
+        .headers(member_headers)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.status(),
+        StatusCode::UNAUTHORIZED,
+        "a verified member is not an operator"
+    );
+
+    let unreachable = client()
+        .get(format!("{base}{CATALOGUE_SURFACE_PATH}/list"))
+        .headers(headers)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        unreachable.status(),
+        StatusCode::BAD_GATEWAY,
+        "the words are the fleet's, so a fleet this plane cannot reach is said rather than drawn \
+         as a deploy that sends nothing"
+    );
+    let said: serde_json::Value = unreachable.json().await.unwrap();
+    assert!(
+        said["detail"]
+            .as_str()
+            .is_some_and(|cause| !cause.is_empty()),
+        "the cause is the operator's to read"
+    );
+    assert!(
+        drawn.contains("payload.detail"),
+        "and the page says it: a fleet this plane cannot reach is not a session the operator has \
+         to open again"
     );
 }

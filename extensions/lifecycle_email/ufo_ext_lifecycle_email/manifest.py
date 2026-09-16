@@ -8,7 +8,7 @@ be caught as it happens.
 Five jobs because they are five failure domains, and each names the workspaces it has work in:
 
   lifecycle_events     writes events — a member was invited, a member has connected nothing
-  lifecycle_reconcile  reads events nothing has looked at yet, and starts the sequences that match
+  lifecycle_reconcile  declares what this deploy sends, reads unread events, starts their sequences
   lifecycle_runner     sends the steps that are due
   balance_notice       reads the balance row and sends; no events, no sequences
   reconnect_notice     reads the parked streams and sends; no events, no sequences
@@ -31,6 +31,7 @@ from ufo.sdk.flags import flag_enabled
 from ufo.sdk.jobs import JobSpec
 from ufo.sdk.manifest import FlagSpec, Manifest
 from ufo_ext_lifecycle_email.balance_notice import BalanceNotice, notice_workspaces
+from ufo_ext_lifecycle_email.catalogue import MESSAGES
 from ufo_ext_lifecycle_email.enrollments import (
     due_enrollment_workspaces,
     unread_event_workspaces,
@@ -92,6 +93,7 @@ def manifest() -> Manifest:
             ),
         ),
         tools=(PRODUCT_EMAIL_TOOL,),
+        messages=MESSAGES,
         jobs=(
             JobSpec(
                 name=NOTICE_JOB,

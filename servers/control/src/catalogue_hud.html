@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lifecycle Messages</title>
+<style>
+:root {
+  --ink: #191A1A; --paper: #FAF9F7; --line: #EBEAE9; --muted: #919090; --bad: #A4342A;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink);
+       font: 14px/1.5 system-ui, sans-serif; }
+header { display: flex; align-items: baseline; gap: 12px; padding: 16px 24px;
+         border-bottom: 1px solid var(--line); }
+header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+header a, header span { color: var(--muted); font-size: 13px; }
+main { padding: 16px 24px; }
+#alert { color: var(--bad); min-height: 20px; margin-bottom: 12px; }
+p.note { color: var(--muted); margin: 0 0 16px; max-width: 60ch; }
+article { border: 1px solid var(--line); border-radius: 4px; padding: 12px 16px;
+          margin-bottom: 12px; max-width: 80ch; }
+article h2 { margin: 0; font-size: 14px; font-weight: 500; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0 0; }
+dt { color: var(--muted); }
+dd { margin: 0; }
+dd.body { white-space: pre-wrap; }
+@media (max-width: 720px) { dl { grid-template-columns: 1fr; }
+                            dt { margin-top: 8px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lifecycle Messages</h1>
+  <a href="/surface/email">Campaigns</a>
+  <a id="sequences" href="/surface/email/sequences">Sequences</a>
+  <span id="operator"></span>
+</header>
+<main>
+  <div id="alert" role="alert"></div>
+  <p class="note">Every message this deploy can send to a member, and what causes each one. Words
+  in the tree change with a deploy; a drip step changes on the sequences screen.</p>
+  <div id="messages"></div>
+</main>
+<script>
+function el(id) { return document.getElementById(id); }
+function say(message) { el('alert').textContent = message; }
+
+function draw(payload) {
+  el('operator').textContent = payload.operator;
+  el('sequences').href = payload.sequences_path;
+  const box = el('messages');
+  box.replaceChildren();
+  if (!payload.messages.length) {
+    const empty = document.createElement('p');
+    empty.className = 'note';
+    empty.textContent = 'Nothing has been declared yet. The fleet declares what it sends on its '
+      + 'next pass.';
+    box.append(empty);
+    return;
+  }
+  for (const message of payload.messages) {
+    const card = document.createElement('article');
+    const name = document.createElement('h2');
+    name.textContent = message.kind;
+    const facts = document.createElement('dl');
+    for (const [label, value, klass] of [
+      ['Fires', message.fires, ''],
+      ['Topic', message.topic, ''],
+      ['Changed by', message.edited, ''],
+      ['Subject', message.subject, ''],
+      ['Body', message.body, 'body'],
+    ]) {
+      const term = document.createElement('dt');
+      term.textContent = label;
+      const said = document.createElement('dd');
+      said.textContent = value;
+      if (klass) said.className = klass;
+      facts.append(term, said);
+    }
+    card.append(name, facts);
+    box.append(card);
+  }
+}
+
+async function load() {
+  const answered = await fetch('/surface/email/catalogue/list', { credentials: 'same-origin' });
+  if (answered.status === 401) { say('This page is the operators’. Sign in again.'); return; }
+  const payload = await answered.json().catch(() => ({}));
+  if (!answered.ok) { say(payload.detail || ('The request failed with ' + answered.status)); return; }
+  draw(payload);
+}
+
+load();
+</script>
+</body>
+</html>

@@ -469,7 +469,7 @@ async fn delivered(
     answered(state.email_sends.delivery(&message_id).await)
 }
 
-fn admitted(state: &GatewayState, headers: &HeaderMap) -> bool {
+pub(crate) fn admitted(state: &GatewayState, headers: &HeaderMap) -> bool {
     let presented = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -478,7 +478,7 @@ fn admitted(state: &GatewayState, headers: &HeaderMap) -> bool {
     constant_time_eq(presented, &state.onboarding.workspaces.control_token)
 }
 
-fn unauthorized() -> Response {
+pub(crate) fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(serde_json::json!({"detail": "the control token is required"})),

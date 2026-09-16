@@ -209,6 +209,23 @@ editing. So an edit in progress changes nothing a member is part-way through, an
 one act that stops a sequence: a sequence the runner cannot resolve has no step left, so a live
 enrollment ends rather than waiting on words that are not coming.
 
+## Reading the whole of it
+
+One page lists every message this deploy can send, with the sentence that says what fires each —
+the one thing no template shows.
+
+Half of them are words in the tree, and control runs no Python. They reach the page as a Manifest
+point: an extension declares the messages it can send the way it already declares its jobs, flags
+and tools, and control asks core for the running image's own declaration when an operator opens the
+page. It is a Manifest point for the reason the sequence editor is not a `RouteSpec` — an extension
+cannot publish anything fleet-wide of its own, because every table it can reach is scoped to one
+workspace and every job it can declare names the workspaces it has work in. Nothing is stored, so
+nothing falls out of step with a deploy, and a fleet this plane cannot reach is said rather than
+drawn as a deploy that sends nothing.
+
+The other half are the approved steps control already holds. The page draws both and says which is
+which: one changes with a deploy, the other with an edit.
+
 A row holds what a module holds: a subject, a body, and at most one act — a button's label and its
 link. Its words are literal but for `{url}`, which becomes this deploy's portal. One placeholder and
 no expression language: copy that could fail to render is a message a member never gets and nobody
@@ -229,6 +246,7 @@ Each lands with both ends and its own proof.
 | 7 | Product news on its own contact-list topic | a product message carries `List-Unsubscribe` and the footer SES fills, and a transactional one carries neither |
 | 8 | The reconnect notice | an account the provider stopped answering reaches the member who can grant it again, once per break |
 | 9 | The Email screen | a member reads what they receive and turns product email off from the portal, through the tool chat already calls |
+| 10 | The catalogue | an operator reads every message this deploy can send, and what fires it, on one page |
 
 ## Non-goals
 

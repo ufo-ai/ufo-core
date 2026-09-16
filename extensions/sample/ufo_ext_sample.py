@@ -81,6 +81,7 @@ from ufo.sdk.manifest import (
     InjectionTarget,
     Manifest,
     MemorySearchProviderSpec,
+    MessageSpec,
     ModifyInput,
     ModifyOutput,
     OnboardingStep,
@@ -176,6 +177,12 @@ TOOL_NAME = "sample_echo"
 NOTE_TOOL_NAME = "sample_note"
 JOB_NAME = "sample_tick"
 ROUTE_PATH = "hook"
+MESSAGE_KIND = "sample_notice"
+MESSAGE_TOPIC = "transactional"
+MESSAGE_FIRES = "The sample extension declares one message, so the seam has a consumer."
+MESSAGE_SUBJECT = "A sample notice"
+MESSAGE_BODY = "Nothing sends this. It is here so the catalogue has something to read."
+
 ONBOARDING_NAME = "sample_setup"
 SUBAGENT_NAME = "sample_probe"
 PROVISIONED_AGENT_NAME = "sample-probe-agent"
@@ -1665,6 +1672,15 @@ def manifest() -> Manifest:
         ),
         routes=(
             RouteSpec(method="POST", path=ROUTE_PATH, handler=_hook, identify=resolve_workspace),
+        ),
+        messages=(
+            MessageSpec(
+                kind=MESSAGE_KIND,
+                topic=MESSAGE_TOPIC,
+                fires=MESSAGE_FIRES,
+                subject=MESSAGE_SUBJECT,
+                body=MESSAGE_BODY,
+            ),
         ),
         onboarding_steps=(OnboardingStep(name=ONBOARDING_NAME, handler=_setup),),
         prompt_sections=(PromptSection(name=SECTION_NAME, body=SECTION_BODY),),

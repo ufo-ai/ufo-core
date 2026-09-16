@@ -112,6 +112,22 @@ pub struct SharedWorkspaces {
     pub control_token: String,
 }
 
+/// One message an extension declares it can send. `fires` is what causes it — the one thing no
+/// template shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclaredMessage {
+    pub kind: String,
+    pub topic: String,
+    pub fires: String,
+    pub subject: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeclaredMessages {
+    pub messages: Vec<DeclaredMessage>,
+}
+
 impl SharedWorkspaces {
     pub async fn choices(
         &self,
@@ -155,6 +171,14 @@ impl SharedWorkspaces {
             None => self.get("invitations", &[]).await?,
         };
         Ok(listed.invitations)
+    }
+
+    /// What this deploy can send a member, as the running fleet declares it. The words live in the
+    /// extensions that hold them and this plane runs no Python, so it asks rather than keeps a
+    /// copy: there is nothing to fall out of step with a deploy.
+    pub async fn messages(&self) -> Result<Vec<DeclaredMessage>, SeatError> {
+        let declared: DeclaredMessages = self.get("messages", &[]).await?;
+        Ok(declared.messages)
     }
 
     pub async fn recipients(

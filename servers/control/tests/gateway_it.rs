@@ -4,6 +4,7 @@ use chrono::{Duration, Utc};
 use harness::{ledger_pool, spawn_http};
 use reqwest::redirect::Policy;
 use reqwest::StatusCode;
+use ufo_control::catalogue::Messages;
 use ufo_control::claim::ClaimWorkflow;
 use ufo_control::email::EmailSender;
 use ufo_control::email_send::{EmailSends, PREFERENCE_PATH, SEND_PATH};
@@ -50,6 +51,11 @@ async fn rig_with(
     let (workos_base, _) = spawn_http(workos).await;
     let (serve_base, _) = spawn_http(serve).await;
     let store = OnboardStore::new(pool.clone());
+    let workspaces = SharedWorkspaces {
+        workspace_url: "https://app.flyingobject.ai".to_string(),
+        serve_internal_url: serve_base,
+        control_token: "onboard-token".to_string(),
+    };
     let state = GatewayState {
         onboarding: Onboarding {
             claims: ClaimWorkflow::new(
@@ -62,11 +68,7 @@ async fn rig_with(
                 }),
             ),
             store,
-            workspaces: SharedWorkspaces {
-                workspace_url: "https://app.flyingobject.ai".to_string(),
-                serve_internal_url: serve_base,
-                control_token: "onboard-token".to_string(),
-            },
+            workspaces: workspaces.clone(),
             invites: InviteCodes::new(pool.clone()),
             verifier: Verifier::Console,
             token_secret: SECRET.to_string(),
@@ -86,6 +88,10 @@ async fn rig_with(
             product_topic: None,
         },
         sequences: Sequences { pool: pool.clone() },
+        messages: Messages {
+            pool: pool.clone(),
+            core: workspaces.clone(),
+        },
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

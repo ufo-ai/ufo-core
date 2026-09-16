@@ -42,6 +42,7 @@ from ufo.onboard.onboarding import (
 )
 from ufo.runtime.access.credentials import member_slot
 from ufo.runtime.billing.balance import credit, set_reserve
+from ufo.runtime.ext.manifest import MessageSpec
 from ufo.runtime.seats import create_member, email_domain, signup_workspace_id, workspace_subject
 from ufo.runtime.workspace import MEMBER_ROUTED_SLOTS, ws, ws_current
 from ufo.schema import tables
@@ -144,6 +145,20 @@ class EnsuredWorkspace(BaseModel):
     workspace_id: str
     admin: bool
     founding: bool
+
+
+class DeclaredMessage(BaseModel):
+    """One message this deploy can send, as its extension declares it."""
+
+    kind: str
+    topic: str
+    fires: str
+    subject: str
+    body: str
+
+
+class DeclaredMessages(BaseModel):
+    messages: list[DeclaredMessage]
 
 
 class WorkspaceChoice(BaseModel):
@@ -298,10 +313,13 @@ def _verified_signup(
 
 @dataclass(frozen=True)
 class OnboardControl:
-    """The six routes, and the workflows they run. `control_token` gates every one of them; a
+    """The seven routes, and the workflows they run. `control_token` gates every one of them; a
     request without it is refused before any read."""
 
     control_token: str
+    messages: tuple[MessageSpec, ...] = ()
+    """Every message the installed extensions declare they can send, for the operator catalogue.
+    The control plane runs no Python and cannot read the words, so it asks for them here."""
 
     def router(self) -> APIRouter:
         router = APIRouter(prefix="/internal/onboard", dependencies=[Depends(self._guard)])
@@ -311,11 +329,29 @@ class OnboardControl:
         router.add_api_route("/fleet", self._fleet, methods=["GET"])
         router.add_api_route("/invitations", self._invitations, methods=["GET"])
         router.add_api_route("/recipients", self._recipients, methods=["GET"])
+        router.add_api_route("/messages", self._messages, methods=["GET"])
         return router
 
     async def _guard(self, authorization: Annotated[str, Header()] = "") -> None:
         if authorization != f"Bearer {self.control_token}":
             raise HTTPException(status_code=401, detail="onboard control token required")
+
+    async def _messages(self) -> DeclaredMessages:
+        """What this deploy can send a member, as its extensions declare it. No workspace and no
+        read of any tenant row — the answer is the running image's own declaration, so it is
+        current by construction and cannot go stale."""
+        return DeclaredMessages(
+            messages=[
+                DeclaredMessage(
+                    kind=message.kind,
+                    topic=message.topic,
+                    fires=message.fires,
+                    subject=message.subject,
+                    body=message.body,
+                )
+                for message in self.messages
+            ]
+        )
 
     async def _seat(self, request: SeatRequest) -> EnsuredWorkspace:
         """Create the workspace this verified signup subject names, or join one already there, and

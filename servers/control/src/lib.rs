@@ -1,6 +1,7 @@
 pub mod campaign;
 pub mod campaign_feedback;
 pub mod campaign_send;
+pub mod catalogue;
 pub mod claim;
 pub mod db;
 pub mod directives;

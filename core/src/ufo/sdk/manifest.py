@@ -157,6 +157,9 @@ from ufo.runtime.ext.manifest import (
     MemorySearchProviderSpec as MemorySearchProviderSpec,
 )
 from ufo.runtime.ext.manifest import (
+    MessageSpec as MessageSpec,
+)
+from ufo.runtime.ext.manifest import (
     ModifyInput as ModifyInput,
 )
 from ufo.runtime.ext.manifest import (

@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use ufo_control::campaign::Campaigns;
 use ufo_control::campaign_feedback::{self, CampaignFeedback, FeedbackQueue};
 use ufo_control::campaign_send::{self, CampaignSends};
+use ufo_control::catalogue::Messages;
 use ufo_control::db;
 use ufo_control::email::{
     apex_host, email_sender_from_env, founder_sender_from_env, invite_email,
@@ -187,6 +188,7 @@ async fn gateway() -> Result<(), String> {
     let pool_for_feedback = pool.clone();
     let pool_for_sends_route = pool.clone();
     let pool_for_sequences = pool.clone();
+    let pool_for_messages = pool.clone();
     let apex_for_slack = apex.clone();
     let apex_for_invites = apex.clone();
     let apex_for_campaigns = apex.clone();
@@ -198,6 +200,7 @@ async fn gateway() -> Result<(), String> {
         control_token: control_token.clone(),
     };
     let core_for_campaigns = core_for_invites.clone();
+    let core_for_messages = core_for_invites.clone();
     let sender = email_sender_from_env().map_err(|error| error.to_string())?;
     let founder = founder_sender_from_env().map_err(|error| error.to_string())?;
     let product_topic = std::env::var(SES_PRODUCT_TOPIC_ENV)
@@ -247,6 +250,10 @@ async fn gateway() -> Result<(), String> {
         },
         sequences: Sequences {
             pool: pool_for_sequences,
+        },
+        messages: Messages {
+            pool: pool_for_messages,
+            core: core_for_messages,
         },
     };
 

@@ -538,7 +538,12 @@ def run(fleet: Fleet) -> None:
     app.include_router(artifacts_router)
     onboard_token = os.environ.get(ONBOARD_CONTROL_TOKEN_ENV, "")
     if onboard_token:
-        app.include_router(OnboardControl(control_token=onboard_token).router())
+        app.include_router(
+            OnboardControl(
+                control_token=onboard_token,
+                messages=tuple(message for manifest in manifests for message in manifest.messages),
+            ).router()
+        )
     app.include_router(SiteReports(invoker_for=invoker_for).router())
     sync_driver = SyncDriver(
         backends=_source_backends(manifests),

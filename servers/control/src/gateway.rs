@@ -9,6 +9,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 
 use crate::campaign::Campaigns;
+use crate::catalogue::{self, Messages};
 use crate::claim::ClaimWorkflow;
 use crate::directives::{client_install, directive, render, PROMPT};
 use crate::email_send::{self, EmailSends};
@@ -463,6 +464,8 @@ pub struct GatewayState {
     pub email_sends: EmailSends,
     /// The drip copy an operator edits, and the approved set the runner reads.
     pub sequences: Sequences,
+    /// Every message this deploy can send, as the tree declares it and the rows hold it.
+    pub messages: Messages,
 }
 
 pub fn router(state: GatewayState) -> Router {
@@ -485,7 +488,8 @@ pub fn router(state: GatewayState) -> Router {
         .route("/v1/onboard/web", post(onboard_web))
         .route("/v1/onboard/{channel}", post(onboard))
         .merge(email_send::routes())
-        .merge(lifecycle::routes());
+        .merge(lifecycle::routes())
+        .merge(catalogue::routes());
     if state.console_mode {
         router = router.route(AUTH_CONSOLE_PATH, get(auth_console));
     }

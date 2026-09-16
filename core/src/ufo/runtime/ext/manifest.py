@@ -167,6 +167,26 @@ class JobSpec:
 
 
 @dataclass(frozen=True)
+class MessageSpec:
+    """One message an extension can send a member, declared so an operator can read the catalogue.
+
+    An extension holds the words; a deploy ships them, and nothing outside this process can read
+    them — the control plane that draws the catalogue runs no Python. A declaration is how they
+    reach it, and it is a Manifest point for the reason every other one is: an extension cannot
+    publish anything fleet-wide of its own, because every table it can reach is scoped to one
+    workspace and every job it can declare names the workspaces it has work in.
+
+    `fires` is the sentence an operator reads to know what causes this message — the one thing no
+    template shows, written beside the copy it explains so the two cannot drift."""
+
+    kind: str
+    topic: str
+    fires: str
+    subject: str
+    body: str
+
+
+@dataclass(frozen=True)
 class RouteSpec:
     """An HTTP endpoint an extension serves. The app mounts `handler` for `method` at
     `/ext/<name>/<path>`; each request is handed the extension's scoped ExtensionContext and the
@@ -899,6 +919,7 @@ class Manifest:
     objects: tuple[ObjectKind, ...] = ()
     jobs: tuple[JobSpec, ...] = ()
     routes: tuple[RouteSpec, ...] = ()
+    messages: tuple[MessageSpec, ...] = ()
     credentials: tuple[CredentialSlot, ...] = ()
     connectors: tuple[ConnectorProvider, ...] = ()
     connector_resolver: OpenConnectorNamespace | None = None
