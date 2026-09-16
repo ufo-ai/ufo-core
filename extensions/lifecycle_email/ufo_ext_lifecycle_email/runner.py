@@ -1,9 +1,8 @@
-"""The two halves of the sequence engine, each its own job because each is its own failure domain:
-a sweep that cannot read the rows it enrolls from must not hold back a message already due.
+"""The job that sends the steps that are due.
 
-Neither fires on what it wrote. The sweep logs an instant and puts a member in a sequence whose
-first step is days out; the runner fires what is due. Both tick on the clock, which is the standing
-rule that batch-at-interval is the default."""
+It is its own job because it is its own failure domain: a sweep that cannot read the rows it writes
+events from must not hold back a message already due. It fires on the clock, never on what it
+wrote — the enrollments it reads were created by another job, from events written by a third."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -11,15 +10,9 @@ from datetime import UTC, datetime, timedelta
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.email import EmailRefused, EmailSends, EmailUnanswered
 from ufo.sdk.o11y import log
-from ufo.sdk.seats import invited_members
 from ufo_ext_lifecycle_email.enrollments import Enrollment, Enrollments
 from ufo_ext_lifecycle_email.sends import Sends
-from ufo_ext_lifecycle_email.sequences import (
-    INVITATION_WINDOW,
-    MEMBER_INVITED,
-    SEQUENCES,
-    Composed,
-)
+from ufo_ext_lifecycle_email.sequences import SEQUENCES, Composed
 
 UNKNOWN_SEQUENCE_GRACE = timedelta(hours=1)
 """How long a step stays due, with no image able to resolve its sequence, before the enrollment is
@@ -32,25 +25,6 @@ been able to send it.
 A roll is bounded — the migrate Job runs to completion, the outgoing pods serve until the new ones
 are ready, and `graceful_shutdown_seconds` caps the drain at ten minutes. An hour is well past that,
 so a skewed pass defers and a sequence genuinely torn out stops holding its enrollments live."""
-
-
-@dataclass(frozen=True)
-class Enrolling:
-    """Read the rows core already holds, log the instants a sequence measures from, and put each
-    member in the sequence that measures from it. Both writes are idempotent on their own keys, so
-    a pass that repeats reads the same rows and writes nothing twice."""
-
-    ctx: ExtensionContext
-
-    async def run(self) -> None:
-        enrollments = Enrollments(ctx=self.ctx)
-        measured = tuple(sequence for sequence in SEQUENCES if sequence.event == MEMBER_INVITED)
-        async with self.ctx.transaction() as connection:
-            invited = await invited_members(connection, self.ctx.workspace_id, INVITATION_WINDOW)
-        for member in invited:
-            await enrollments.enroll_on(
-                MEMBER_INVITED, member.member_id, member.invited_at, measured
-            )
 
 
 @dataclass(frozen=True)

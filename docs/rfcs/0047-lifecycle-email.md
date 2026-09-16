@@ -76,7 +76,7 @@ still told their balance ran out. That half arrives with the preferences in unit
 | Kind | Fire point | Exists today |
 |---|---|---|
 | Product — feature use | `HookSpec(event="post_tool_use", tools=(...))` writes an event row | yes, unchanged |
-| Product — absence of use | per-minute job over the extension's own event rows | yes, unchanged |
+| Product — absence of use | per-minute job over the extension's own event rows, anti-joined against the feature event | yes, unchanged |
 | Lifecycle — seated, invited, connected | per-minute sweep of `member`, `object_change` | yes, unchanged |
 | Transactional — balance, limits | per-minute sweep of `workspace_balance` headroom and `spend_cap` | yes, unchanged |
 
@@ -142,7 +142,7 @@ Each lands with both ends and its own proof.
 |---|---|---|
 | 1 | The send seam, plus the balance-exhausted notice | an extension sends one message and reads its delivery back |
 | 2 | Event log, enrollment, the per-minute runner, one repo-defined sequence | a delay measured from an instant fires on time, once |
-| 3 | `post_tool_use` product triggers and an absence-of-use sequence | a feature event enrolls, and a non-event does too |
+| 3 | `post_tool_use` product triggers and an absence-of-use sequence | a feature event is logged where the member uses the feature, an absence is logged where the deadline passes without it, and both enroll |
 | 4 | The operator editor, revisions and approval | drip copy changes without a deploy and cannot go out unapproved |
 | 5 | Member topic preferences | a member silences marketing and still receives transactional |
 

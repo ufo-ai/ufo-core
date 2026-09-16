@@ -553,7 +553,7 @@ def test_extension_migration_forms_one_head_per_owner(database_url: str) -> None
         "enrichment_0002",
         "notification_0008",
         "workspace_credential_slot_0001",
-        "lifecycle_email_0002",
+        "lifecycle_email_0003",
     } <= set(heads)
     assert len(heads) == 19
 

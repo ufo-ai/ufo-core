@@ -7,7 +7,6 @@ assert what the extension composed and what its own rows then say."""
 import json
 
 import httpx
-import pytest
 
 from ufo.runtime.email import EmailSends
 from ufo.runtime.ext.context import ExtensionContext, context_for
@@ -59,8 +58,3 @@ def context(
         home_surface=HOME_SURFACE if portal else None,
         own_key_slots=own_key_slots,
     )
-
-
-@pytest.fixture
-def gateway() -> Gateway:
-    return Gateway()

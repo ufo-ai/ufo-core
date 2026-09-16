@@ -11,7 +11,6 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from conftest import BASE_URL, HOME_SURFACE, Gateway, context
 from openfeature.provider.in_memory_provider import InMemoryFlag, InMemoryProvider
 from ufo_ext_flags_open import build
 from ufo_ext_lifecycle_email.balance_notice import (
@@ -23,6 +22,7 @@ from ufo_ext_lifecycle_email.balance_notice import (
 )
 from ufo_ext_lifecycle_email.manifest import SENDING_FLAG, _notice
 from ufo_ext_lifecycle_email.sends import FAILED, FEEDBACK_WINDOW, SENT, lifecycle_send
+from ufo_testsupport.lifecycle_email import BASE_URL, HOME_SURFACE, Gateway, context
 
 from ufo.db import workspace_tx
 from ufo.flags import SERVED_FALSE, init_flags

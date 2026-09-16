@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.jobs import WorkspaceCandidates, owner_candidates
-from ufo_ext_lifecycle_email.sequences import Sequence
+from ufo_ext_lifecycle_email.sequences import SEQUENCES
 
 LIVE = "live"
 ENDED = "ended"
@@ -107,25 +107,25 @@ class Enrollments:
 
     ctx: ExtensionContext
 
-    async def enroll_on(
-        self,
-        name: str,
-        member_id: UUID,
-        occurred_at: datetime,
-        sequences: tuple[Sequence, ...],
-    ) -> None:
-        """Log the instant this member reached this state, and put them in the sequences measured
-        from it.
+    async def reached(self, name: str, member_id: UUID, occurred_at: datetime) -> bool:
+        """Log the instant, and put the member in every sequence that measures from it. Answers
+        whether this call was the one that logged it, so a caller that sweeps the same rows every
+        minute can tell the first pass from the rest.
 
-        One transaction, because the event is the idempotency key: the second pass sees the event
-        row and writes nothing, so a pass that committed the event and then stopped would leave a
-        member logged and never enrolled, with nothing able to repair it. Committing neither leaves
-        the next pass reading the member as it found them."""
+        Enrolling here rather than at each producer is what keeps a sequence's trigger in one
+        place: a sequence names the event it measures from, and every producer of that event
+        enrolls it without knowing the sequence exists.
+
+        One transaction, because the event is the whole idempotency key: a second pass reads the
+        event row and writes nothing, so a pass that committed the event and then stopped would
+        leave a member logged, never enrolled, and beyond repair."""
         async with self.ctx.transaction() as connection:
             event_id = await self._record(connection, name, member_id, occurred_at)
             if event_id is None:
-                return
-            for sequence in sequences:
+                return False
+            for sequence in SEQUENCES:
+                if sequence.event != name:
+                    continue
                 await self._enroll(
                     connection,
                     sequence.name,
@@ -134,6 +134,7 @@ class Enrollments:
                     occurred_at,
                     sequence.steps[0].after,
                 )
+            return True
 
     async def _record(
         self, connection: AsyncConnection, name: str, member_id: UUID, occurred_at: datetime

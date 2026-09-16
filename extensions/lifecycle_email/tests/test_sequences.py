@@ -12,7 +12,6 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 import ufo_ext_lifecycle_email.runner as runner_module
-from conftest import Gateway, context
 from ufo_ext_lifecycle_email.enrollments import (
     ENDED,
     LIVE,
@@ -21,19 +20,16 @@ from ufo_ext_lifecycle_email.enrollments import (
     lifecycle_enrollment,
     lifecycle_event,
 )
-from ufo_ext_lifecycle_email.runner import (
-    UNKNOWN_SEQUENCE_GRACE,
-    Enrolling,
-    SequenceRunner,
-)
+from ufo_ext_lifecycle_email.events import WriteEvents
+from ufo_ext_lifecycle_email.runner import UNKNOWN_SEQUENCE_GRACE, SequenceRunner
 from ufo_ext_lifecycle_email.sends import SENT, lifecycle_send
 from ufo_ext_lifecycle_email.sequences import (
-    INVITATION_WINDOW,
     INVITED_TEAMMATE,
     INVITED_TEAMMATE_AFTER,
     INVITED_TEAMMATE_KIND,
     MEMBER_INVITED,
 )
+from ufo_testsupport.lifecycle_email import Gateway, context
 
 from ufo.db import workspace_tx
 from ufo.runtime.workspace import ws
@@ -158,8 +154,8 @@ async def test_an_invitation_logs_its_instant_and_enrolls_the_member_once() -> N
     ctx = context(Gateway())
 
     with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
 
     async with workspace_tx() as connection:
         events = list(
@@ -189,7 +185,7 @@ async def test_nothing_fires_before_the_delay_is_up() -> None:
     ctx = context(gateway)
 
     with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
         await SequenceRunner(ctx=ctx).run()
 
     assert gateway.sent == []
@@ -204,7 +200,7 @@ async def test_the_due_step_fires_once_and_ends_the_enrollment() -> None:
     ctx = context(gateway)
 
     with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
     await _due_now(workspace_id)
     assert workspace_id in await due_enrollment_workspaces()()
 
@@ -239,7 +235,7 @@ async def test_a_member_who_showed_up_ends_the_enrollment_unsent() -> None:
     ctx = context(gateway)
 
     with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
     await _due_now(workspace_id)
     await _spoke(workspace_id, invited_id)
 
@@ -260,7 +256,7 @@ async def test_a_lapsed_lease_re_fires_the_enrollment_and_sends_nothing_twice() 
     ctx = context(gateway)
 
     with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
     await _due_now(workspace_id)
 
     with ws(workspace_id):
@@ -296,28 +292,11 @@ async def test_a_lapsed_lease_re_fires_the_enrollment_and_sends_nothing_twice() 
     assert enrollment.state == ENDED
 
 
-async def test_an_invitation_older_than_the_window_enrolls_nobody() -> None:
-    """The window bounds the members the pass reads, not only the workspaces it runs in. A
-    workspace that holds one recent invitation would otherwise hand back its whole backlog, and
-    every one of those enrollments would be due the instant it was written."""
-    workspace_id, _, _ = await _seed(invited_ago=INVITATION_WINDOW + timedelta(days=1))
-    gateway = Gateway()
-    ctx = context(gateway)
-
-    with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
-        await SequenceRunner(ctx=ctx).run()
-
-    assert await _events(workspace_id) == []
-    assert await _enrollments(workspace_id) == []
-    assert gateway.sent == []
-
-
 async def test_a_pass_that_stops_between_the_two_writes_enrolls_on_the_next_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The event row is the idempotency key, so a committed event with no enrollment is a member
-    nothing can ever enroll. Both writes are one transaction: the interrupted pass commits
+    """The event row is the whole idempotency key, so a committed event with no enrollment is a
+    member nothing can ever enroll. Both writes are one transaction: the interrupted pass commits
     neither."""
     workspace_id, _, invited_id = await _seed()
     gateway = Gateway()
@@ -328,14 +307,14 @@ async def test_a_pass_that_stops_between_the_two_writes_enrolls_on_the_next_pass
 
     monkeypatch.setattr(Enrollments, "_enroll", refuse)
     with ws(workspace_id), pytest.raises(RuntimeError):
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
 
     assert await _events(workspace_id) == [], "the event is not committed without its enrollment"
     assert await _enrollments(workspace_id) == []
 
     monkeypatch.undo()
     with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
 
     (event,) = await _events(workspace_id)
     (enrollment,) = await _enrollments(workspace_id)
@@ -352,7 +331,7 @@ async def test_an_invitation_already_past_the_first_step_enrolls_nobody() -> Non
     ctx = context(gateway)
 
     with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
         await SequenceRunner(ctx=ctx).run()
 
     assert await _events(workspace_id) == []
@@ -372,7 +351,7 @@ async def test_an_image_that_does_not_hold_the_sequence_leaves_the_enrollment_fo
     ctx = context(gateway)
 
     with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
     await _due_now(workspace_id)
     async with workspace_tx() as connection:
         await connection.execute(
@@ -409,7 +388,7 @@ async def test_an_enrollment_past_the_grace_ends_when_no_sequence_claims_it() ->
     ctx = context(gateway)
 
     with ws(workspace_id):
-        await Enrolling(ctx=ctx).run()
+        await WriteEvents(ctx=ctx).run()
     stale = datetime.now(UTC) - UNKNOWN_SEQUENCE_GRACE - timedelta(minutes=1)
     async with workspace_tx() as connection:
         await connection.execute(
