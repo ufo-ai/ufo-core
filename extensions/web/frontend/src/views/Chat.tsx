@@ -3,11 +3,8 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 import {
   IconCheck,
   IconChevronRight,
-  IconClock,
   IconCornerDownRight,
   IconCreditCardOff,
-  IconFileText,
-  IconMessage,
   IconPlug,
 } from "@tabler/icons-react";
 
@@ -61,7 +58,6 @@ import { AgentIcon } from "@/lib/agentIcon";
 import { agentName } from "@/lib/agentName";
 import { useAppStatus } from "@/lib/appStatusStore";
 import { useMe } from "@/lib/audience";
-import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import {
   attachedTurn,
@@ -946,11 +942,10 @@ const FOLLOW_UPS_EVERY_MS = 600_000;
 /* Except while another read is writing this turn's rows, which is over in a second or two. */
 const FOLLOW_UPS_RANKING_MS = 2_000;
 
-function OfferMark({ kind }: { kind: OfferKind }) {
-  if (kind === "share")
-    return <BrandMark provider="slack" className="size-(--size-glyph) shrink-0" />;
-  const Glyph = kind === "keep" ? IconFileText : kind === "watch" ? IconClock : IconCornerDownRight;
-  return <Glyph className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />;
+/* Every row that sends a sentence draws the same arrow: the mark says the press sends the words,
+   which is the one thing these rows have to say before they are read. */
+function AskMark() {
+  return <IconCornerDownRight className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />;
 }
 
 /* A row reads as the few words of its hook and sends the prompt behind it, which states the work in
@@ -979,7 +974,7 @@ function FollowUps({
       {offers.map((offer) => (
         <PressRow
           key={offer.hook}
-          glyph={<OfferMark kind={offer.kind} />}
+          glyph={<AskMark />}
           line={offer.hook}
           onPress={() => onPress(offer.prompt)}
         />
@@ -1001,7 +996,6 @@ function Wordmark() {
 
 type StarterRow = {
   kind: "app" | "check_in" | "unlock";
-  mark: string | null;
   line: string;
   ask: string;
   agent_id?: string | null;
@@ -1020,19 +1014,16 @@ const STARTERS_READ = "/workspace/starters";
 const STARTERS_EVERY_MS = 300_000;
 const STARTER_PLACES = ["w-4/5", "w-3/5", "w-2/3"];
 
-const STARTERS: { mark: string; line: string; ask: string }[] = [
+const STARTERS: { line: string; ask: string }[] = [
   {
-    mark: "wedjat",
     line: "Track the competitors you name, with a source for every claim.",
     ask: "I want an application that tracks the competitors I name and writes up what changed, with a source for each claim.",
   },
   {
-    mark: "nephele",
     line: "Research a market, company, or person on request.",
     ask: "I want an application that researches a market, company, or person on request and cites every claim.",
   },
   {
-    mark: "kalyx",
     line: "Draft recurring updates, announcements, and posts.",
     ask: "I want an application that drafts our recurring updates, announcements, and posts.",
   },
@@ -1047,18 +1038,6 @@ function namedTiles(providers: MissingTile[]): string {
     : labels.slice(0, -1).join(", ") + " and " + labels.at(-1);
 }
 
-function StarterMark({ row }: { row: StarterRow }) {
-  if (row.kind === "unlock" && row.providers?.length) {
-    return (
-      <BrandMark provider={row.providers[0].name} className="size-(--size-glyph) shrink-0" />
-    );
-  }
-  if (row.kind === "check_in" || !row.mark) {
-    return <IconMessage className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />;
-  }
-  return <AgentIcon name={row.mark} className="size-(--size-glyph) shrink-0" />;
-}
-
 function StarterWaiting({ width }: { width: string }) {
   return (
     <div
@@ -1066,7 +1045,7 @@ function StarterWaiting({ width }: { width: string }) {
       className={cn(PRESS_ROW, "pointer-events-none hover:bg-transparent")}
       aria-hidden
     >
-      <Skeleton className="size-(--size-glyph) shrink-0 rounded-full" />
+      <Skeleton className="size-(--size-glyph) shrink-0" />
       <span className="relative min-w-0 flex-1">
         {"\u00a0"}
         <Skeleton className={cn("absolute inset-y-0 left-0", width)} />
@@ -1094,7 +1073,7 @@ function Starters({ agentId }: { agentId: string }) {
         rows.map((row) => (
           <PressRow
             key={row.agent_id ?? `${row.kind}:${row.ask}`}
-            glyph={<StarterMark row={row} />}
+            glyph={<AskMark />}
             line={row.line}
             onPress={() => start(row.agent_id, row.ask, row.kind)}
           />
@@ -1104,12 +1083,7 @@ function Starters({ agentId }: { agentId: string }) {
         <ConnectWaiting />
       ) : unlock ? (
         <PressRow
-          glyph={
-            <BrandMark
-              provider={unlock.providers[0].name}
-              className="size-(--size-glyph) shrink-0"
-            />
-          }
+          glyph={<AskMark />}
           line={unlock.line}
           note={"Connect " + namedTiles(unlock.providers) + "."}
           onPress={() => start(unlock.agent_id, unlock.ask, "unlock")}

@@ -4071,7 +4071,7 @@ test("a ranked slate replaces every row the screen ships with", async () => {
   expect(screen.queryByRole("button", { name: /competitors you name/ })).toBeNull();
 });
 
-test("a spare unlock stands in an app's slot and wears the brand of what it needs", async () => {
+test("a spare unlock stands in an app's slot and draws the arrow every row draws", async () => {
   wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
   location.hash = newChatHash(AGENT_ID);
   render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
@@ -4080,10 +4080,40 @@ test("a spare unlock stands in an app's slot and wears the brand of what it need
   expect(row.textContent).not.toContain("Connect");
 
   const glyph = row.firstElementChild!;
-  expect(glyph.getAttribute("style")).toContain("--brand-salesforce");
-  const mark = glyph.getAttribute("class") ?? "";
-  expect(mark).toContain("size-(--size-glyph)");
-  expect(mark).not.toContain("--size-brand-mark");
+  expect(glyph.getAttribute("style")).toBeNull();
+  expect(glyph.classList.contains("tabler-icon-corner-down-right")).toBe(true);
+  expect(glyph.getAttribute("class")).toContain("size-(--size-glyph)");
+});
+
+test("every starter says the press sends its sentence, with the one arrow and no logo", async () => {
+  wire({ ...transcript(), "/workspace/starters": () => json(SLATE) });
+  location.hash = newChatHash(AGENT_ID);
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await screen.findByRole("button", { name: /months of runway left/ });
+  const rows = [...document.querySelectorAll("button")].filter((row) =>
+    /runway left|invoice past its terms|deal is still waiting on|waiting on legal/.test(
+      row.textContent ?? "",
+    ),
+  );
+  expect(rows).toHaveLength(4);
+  for (const row of rows) {
+    expect(row.firstElementChild!.classList.contains("tabler-icon-corner-down-right")).toBe(true);
+    expect(row.querySelector("[style*='--brand-']")).toBeNull();
+  }
+});
+
+test("a follow-up row draws the arrow whatever kind of work it offers", async () => {
+  wire({ ...transcript({ messages: SPOKEN }), ...OFFERED });
+  open();
+
+  const rows = await screen.findByTestId("follow-ups");
+  const marks = [...rows.querySelectorAll("button")].map((row) => row.firstElementChild!);
+  expect(marks).toHaveLength(2);
+  for (const mark of marks) {
+    expect(mark.classList.contains("tabler-icon-corner-down-right")).toBe(true);
+  }
+  expect(rows.querySelector("[style*='--brand-']")).toBeNull();
 });
 
 test("a ranked starter says its own sentence, and a check-in asks after work", async () => {
@@ -4179,9 +4209,8 @@ test("an unlock is an ask, not a departure: it names its accounts and says the b
     screen.queryByRole("link", { name: /Connect more accounts/ }),
   ).toBeNull();
 
-  const mark = row.firstElementChild!.getAttribute("class") ?? "";
-  expect(mark).toContain("size-(--size-glyph)");
-  expect(mark).not.toContain("--size-brand-mark");
+  expect(row.firstElementChild!.classList.contains("tabler-icon-corner-down-right")).toBe(true);
+  expect(row.querySelector("[style*='--brand-']")).toBeNull();
 
   await userEvent.click(row);
   await waitFor(() => expect(StreamFake.opened.length).toBe(1));
