@@ -5,6 +5,7 @@ import {
   IconHistoryToggle,
   IconLoader,
   IconMessageCircle,
+  IconPinFilled,
   IconTerminal2,
   IconUsersGroup,
 } from "@tabler/icons-react";
@@ -28,6 +29,8 @@ import { automationsHash } from "@/lib/route";
 export const AUTOMATION = "Automation";
 
 export const SHARED = "Shared with Workspace";
+
+export const PINNED = "Pinned";
 
 const GLYPH = "size-(--size-glyph) shrink-0";
 
@@ -63,19 +66,23 @@ const STATE_INK: Record<Exclude<ChatState, "working">, string> = {
 /** The one mark a conversation leads with, on the table and down the rail alike: the state alone
  *  and never the surface, which has a column of its own on one and the row's end on the other. It
  *  states the engine's turn beside the state it read off it, because a turn that lands is what a
- *  stream watches while the state is what the ink draws. */
+ *  stream watches while the state is what the ink draws. A pinned row draws that state as a pin in
+ *  the dot's place and the dot's ink, so the row that stands above the list says so. */
 export function ChatStatus({ row, className }: { row: Conversation; className?: string }) {
   const state = chatState(row);
   return (
     <span
       role="img"
-      aria-label={STATE_WORDS[state]}
+      aria-label={row.pinned ? PINNED + ", " + STATE_WORDS[state] : STATE_WORDS[state]}
       data-state={state}
+      data-pinned={row.pinned}
       data-turn={row.turn}
       className={cn("flex items-center justify-center", GLYPH, className)}
     >
       {state === "working" ? (
         <Spinner glyph={IconLoader} ink="text-ink-soft" />
+      ) : row.pinned ? (
+        <IconPinFilled aria-hidden className={cn(MARK, STATE_INK[state])} />
       ) : (
         <span aria-hidden className={cn(DOT, STATE_INK[state])} />
       )}

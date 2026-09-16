@@ -840,6 +840,28 @@ function mainTable(home: HTMLElement): HTMLElement {
   return home.querySelectorAll("table")[0] as HTMLElement;
 }
 
+function mark(name: RegExp): HTMLElement {
+  return within(row(name)).getAllByRole("cell")[0].querySelector("[data-state]") as HTMLElement;
+}
+
+test("a pinned row leads with a pin where the dot stands, and an unpinned row keeps the dot", async () => {
+  wire({ ...chatsOnWire([CHAT_ROW, PINNED]), "/transcript": () => json({ messages: [] }) });
+  location.hash = "#/chats";
+  render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  const home = await screen.findByRole("region", { name: "Home" });
+  await within(home).findByRole("row", { name: /Ship the plan/ });
+
+  const pinned = mark(/Ship the plan/);
+  expect(pinned.getAttribute("aria-label")).toBe("Pinned, Idle");
+  expect(pinned.querySelector("svg.tabler-icon-pin-filled")).toBeTruthy();
+
+  const plain = mark(/Pick one thread/);
+  expect(plain.getAttribute("aria-label")).toBe("Idle");
+  expect(plain.querySelector("svg")).toBeNull();
+  expect(plain.querySelector("span.rounded-full")).toBeTruthy();
+});
+
 test("a chat row files its conversation away, holds it above the list, or deletes it", async () => {
   const posted: string[] = [];
   wire(filingWire([CHAT_ROW, PINNED, FILED, COLLEAGUE], posted));
