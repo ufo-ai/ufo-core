@@ -70,6 +70,7 @@ from ufo.runtime.hub import (
     ArtifactsChanged,
     CostTick,
     InProcessHub,
+    LiveFrame,
     Parked,
     Reply,
     Resumed,
@@ -93,6 +94,7 @@ from ufo.schema.records import (
 )
 from ufo.sdk.audience import conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
+from ufo.sdk.record import frame_event, frame_payload
 from ufo.sdk.surfaces import ConnectRequest, SurfaceAuth, with_agent_detail
 from ufo.serve import _mount_shared_surfaces
 
@@ -127,23 +129,41 @@ def _lines(body: bytes) -> list[list[str]]:
     return [line.split("\t") for line in body.decode().splitlines()]
 
 
+def _answer(lines: list[list[str]]) -> str:
+    """The words a member read: streamed message frames and the unstreamed `say` lines."""
+    return "".join(
+        json.loads(line[2])["text"] if line[0] == "frame" else line[1]
+        for line in lines
+        if line[:2] == ["frame", "message"] or line[0] == "say"
+    )
+
+
 def test_directive_escapes_tabs_newlines_and_backslashes() -> None:
     assert directive("say", "hello") == b"say\thello\n"
-    assert directive("txt", "a\tb\nc\\d\r") == b"txt\ta\\tb\\nc\\\\d\n"
+    assert directive("say", "a\tb\nc\\d\r") == b"say\ta\\tb\\nc\\\\d\n"
     assert directive("ask", PROMPT) == b"ask\t>\n"
     assert directive("poll", "1") == b"poll\t1\n"
 
 
+def _frame(frame: LiveFrame) -> bytes:
+    event = frame_event(frame)
+    assert event is not None
+    return directive("frame", event, frame_payload(frame))
+
+
 def test_frame_map_covers_every_live_frame() -> None:
-    assert directives_for(TextDelta(text="hi"), streamed=False) == (b"txt\thi\n",)
+    """Every frame the record folds crosses as itself, named and shaped as the web stream and the
+    conformance fixture carry it; a frame with nothing in it crosses as nothing, and a sources
+    frame never crosses, since the terminal draws no sources."""
+    assert directives_for(TextDelta(text="hi"), streamed=False) == (
+        b'frame\tmessage\t{"text":"hi"}\n',
+    )
     assert directives_for(TextDelta(text=""), streamed=False) == ()
-    assert directives_for(Activity(text="Listing the workspace."), False) == (
-        b"note\tListing the workspace.\tactivity\n",
-    )
+    listing = Activity(text="Listing the workspace.")
+    assert directives_for(listing, False) == (_frame(listing),)
     assert directives_for(ArtifactsChanged(), False) == ()
-    assert directives_for(Resumed(attempt="attempt-one"), False) == (
-        b"note\tthe service restarted; this turn resumed\n",
-    )
+    resumed = Resumed(attempt="attempt-one")
+    assert directives_for(resumed, False) == (_frame(resumed),)
     consulted = Sources(
         items=(
             SourceRef(kind="web", title="Pricing", url="https://northwind.example/pricing"),
@@ -160,34 +180,30 @@ def test_frame_map_covers_every_live_frame() -> None:
         profile="general_purpose",
         name="UK sports news",
     )
-    assert directives_for(run, False) == ()
-    assert directives_for(run.model_copy(update={"activity": "Listing the workspace."}), False) == (
-        b"note\tUK sports news: Listing the workspace.\tactivity\tUK sports news\n",
+    assert directives_for(run, False) == (_frame(run),)
+    working = run.model_copy(update={"activity": "Listing the workspace."})
+    assert directives_for(working, False) == (_frame(working),)
+    assert directives_for(run.model_copy(update={"status": "done"}), False) == (
+        _frame(run.model_copy(update={"status": "done"})),
     )
-    assert directives_for(
-        run.model_copy(update={"name": "", "activity": "Loading demo guidance."}), False
-    ) == (b"note\tgeneral_purpose: Loading demo guidance.\tactivity\tgeneral_purpose\n",)
-    assert directives_for(run.model_copy(update={"status": "done"}), False) == ()
-    assert directives_for(CostTick(cost_micro_usd=55_000, tokens=3000), False) == (
-        b"status\t3000 tok - $0.055000\n",
-    )
+    priced = CostTick(cost_micro_usd=55_000, tokens=3000)
+    assert directives_for(priced, False) == (_frame(priced),)
     comment = Reply(
         id=UUID(int=4),
         text="You [commented](https://ufo.test/surface/web#/c/thread): follow up",
         is_comment=True,
     )
-    assert directives_for(comment, False) == (
-        b"say\tYou [commented](https://ufo.test/surface/web#/c/thread): follow up\n",
-    )
+    assert directives_for(comment, False) == (_frame(comment),)
+    assert directives_for(comment, False, comments=False) == ()
+    assert directives_for(Reply(id=UUID(int=5), text=""), False) == ()
 
 
 def test_a_drain_names_the_member_arrivals_it_folded() -> None:
     """The turn has taken up what the member sent into it, so the client settles the rows it is
     holding. A drain that folded nothing of the member's says nothing."""
     first, second = uuid4(), uuid4()
-    assert directives_for(Absorbed(arrivals=(first, second)), streamed=True) == (
-        f"absorbed\t{first}\t{second}\n".encode(),
-    )
+    drained = Absorbed(arrivals=(first, second))
+    assert directives_for(drained, streamed=True) == (_frame(drained),)
     assert directives_for(Absorbed(arrivals=()), streamed=True) == ()
 
 
@@ -196,10 +212,19 @@ def test_a_cancel_divides_on_whether_it_carries_words() -> None:
     is the member's, and they stopped a turn rather than left. An admission refusal cancels with its
     reason, which the member reads before the client exits."""
     stopped = Terminal(frame=TerminalFrame(status="cancelled"))
-    assert directives_for(stopped, streamed=True) == (b"say\tcancelled\n", b"ask\t>\n")
+    assert directives_for(stopped, streamed=True) == (
+        _frame(stopped),
+        b"say\tcancelled\n",
+        b"ask\t>\n",
+    )
     refused = Terminal(frame=TerminalFrame(status="cancelled", text="Over the daily cap."))
-    assert directives_for(refused, streamed=True) == (b"say\tOver the daily cap.\n", b"exit\t0\n")
+    assert directives_for(refused, streamed=True) == (
+        _frame(refused),
+        b"say\tOver the daily cap.\n",
+        b"exit\t0\n",
+    )
     assert directives_for(refused, streamed=True, exits=False) == (
+        _frame(refused),
         b"say\tOver the daily cap.\n",
         b"ask\t>\n",
     ), "a stream that did not admit the refused turn keeps the session"
@@ -221,16 +246,19 @@ def test_pending_credential_prompts_render_individually() -> None:
     sibling never re-prompts while a missing one keeps asking."""
     request = _request()
     done = Terminal(frame=TerminalFrame(status="done", text="t", credential_request=request))
+    crossed = Terminal(frame=TerminalFrame(status="done", text="t"))
     assert directives_for(done, streamed=True, collect=request.prompts) == (
+        _frame(crossed),
         b"secret\tsealed-opaque\tslack_bot_token\tBot User OAuth Token\n",
         b"secret\tsealed-opaque\tslack_signing_secret\tSigning Secret\n",
         b"ask\t>\n",
     )
     assert directives_for(done, streamed=True, collect=request.prompts[1:]) == (
+        _frame(crossed),
         b"secret\tsealed-opaque\tslack_signing_secret\tSigning Secret\n",
         b"ask\t>\n",
     )
-    assert directives_for(done, streamed=True) == (b"ask\t>\n",)
+    assert directives_for(done, streamed=True) == (_frame(crossed), b"ask\t>\n")
 
 
 def test_a_terminal_renders_a_structured_permission_question_for_its_target() -> None:
@@ -255,6 +283,7 @@ def test_a_terminal_renders_a_structured_permission_question_for_its_target() ->
         streamed=True,
         viewer_member_id=target_member_id,
     ) == (
+        _frame(Terminal(frame=TerminalFrame(status="done"))),
         b"say\tPermission required\n",
         b"choose\tAllow this request?\tAllow\tDeny\tAlways Allow\n",
         b"ask\t>\n",
@@ -292,6 +321,7 @@ def test_a_terminal_renders_one_time_authorization_choices() -> None:
         streamed=True,
         viewer_member_id=target_member_id,
     ) == (
+        _frame(Terminal(frame=TerminalFrame(status="done"))),
         b"say\tPermission required\n",
         (
             f"authorize\t{authorization_id}\tAllow this request?"
@@ -338,6 +368,7 @@ def test_a_terminal_transports_the_scoped_always_authorization_choice() -> None:
         streamed=True,
         viewer_member_id=target_member_id,
     ) == (
+        _frame(Terminal(frame=TerminalFrame(status="done"))),
         b"say\tGitHub approval\n",
         (
             f"authorize\t{authorization_id}\tRead issues from the selected GitHub account?"
@@ -361,7 +392,32 @@ def test_a_terminal_hides_a_structured_permission_question_from_another_member()
         Terminal(frame=TerminalFrame(status="done", question=question)),
         streamed=True,
         viewer_member_id=uuid4(),
-    ) == (b"ask\t>\n",)
+    ) == (
+        _frame(Terminal(frame=TerminalFrame(status="done"))),
+        b"ask\t>\n",
+    )
+
+
+def test_the_terminal_frame_crosses_without_its_question_and_credential_request() -> None:
+    """Both ride their own directives, gated to the member they name, so the frame a second member
+    tails carries neither the targeted prompt nor the seal."""
+    question = AskUserInput(
+        title="Permission required",
+        questions=(AskQuestion(question="Allow this request?"),),
+        target_member_id=uuid4(),
+    )
+    done = Terminal(
+        frame=TerminalFrame(
+            status="done", text="t", question=question, credential_request=_request()
+        )
+    )
+    lines = _lines(b"".join(directives_for(done, streamed=True, viewer_member_id=uuid4())))
+    assert [line[:2] for line in lines] == [["frame", "terminal"], ["ask", ">"]]
+    crossed = json.loads(lines[0][2])
+    assert (crossed["status"], crossed["text"]) == ("done", "t")
+    assert (crossed["question"], crossed["credential_request"]) == (None, None)
+    assert "sealed-opaque" not in lines[0][2]
+    assert "Allow this request?" not in lines[0][2]
 
 
 def test_a_terminal_preserves_structured_question_answer_modes() -> None:
@@ -388,6 +444,7 @@ def test_a_terminal_preserves_structured_question_answer_modes() -> None:
     assert directives_for(
         Terminal(frame=TerminalFrame(status="done", question=question)), streamed=True
     ) == (
+        _frame(Terminal(frame=TerminalFrame(status="done"))),
         b"say\tAccess details\n",
         b"choose\tExplain access\n",
         b"choose_many\tSelect services\tMail\tCalendar\n",
@@ -433,7 +490,13 @@ def test_a_shared_file_precedes_the_secret_and_connect_lines() -> None:
         connect_message="[Complete the connection](https://oauth.test/a)",
         files=(SharedFile(filename="k.csv", size_bytes=4, url="https://ufo.test/artifacts/k"),),
     )
-    assert [line.split(b"\t")[0] for line in lines] == [b"file", b"secret", b"say", b"ask"]
+    assert [line.split(b"\t")[0] for line in lines] == [
+        b"frame",
+        b"file",
+        b"secret",
+        b"say",
+        b"ask",
+    ]
 
 
 async def test_only_a_terminal_frame_reads_what_the_turn_shared() -> None:
@@ -455,7 +518,8 @@ async def test_only_a_terminal_frame_reads_what_the_turn_shared() -> None:
     ]
     assert reads == 1
     assert lines == [
-        b"txt\tpartial\n",
+        _frame(TextDelta(text="partial")),
+        _frame(Terminal(frame=TerminalFrame(status="done", text="partial"))),
         b"file\tone.txt\t3\thttps://ufo.test/artifacts/1\n",
         b"ask\t>\n",
         b"since\t77777777-7777-4777-8777-777777777777\tc2\n",
@@ -479,7 +543,8 @@ async def test_an_unstreamed_reply_is_said_whole() -> None:
     lines = [
         line async for line in stream_directives(aclosing(frames()), 5.0, files=files, turn_id=TURN)
     ]
-    assert lines[0] == b"say\tHere it is:\\n\\nOne.\\n\\nTwo.\n"
+    assert lines[0].startswith(b"frame\tterminal\t")
+    assert lines[1] == b"say\tHere it is:\\n\\nOne.\\n\\nTwo.\n"
 
 
 async def test_stream_privately_renders_a_connect_handoff() -> None:
@@ -502,7 +567,8 @@ async def test_stream_privately_renders_a_connect_handoff() -> None:
         line
         async for line in stream_directives(aclosing(frames()), 5.0, connect=connect, turn_id=TURN)
     ]
-    assert lines == [
+    assert lines[0].startswith(b"frame\tterminal\t")
+    assert lines[1:] == [
         b"say\tUse the connection control.\n",
         b"say\t[Complete the connection](https://oauth.example.test/authorize)\n",
         b"ask\t>\n",
@@ -636,7 +702,7 @@ async def test_a_stream_that_will_be_resumed_names_where_it_got_to() -> None:
     )
     lines = _lines(out)
     assert lines == [
-        ["note", "Listing the folder.", "activity"],
+        *_lines(_frame(Activity(text="Listing the folder."))),
         ["since", str(TURN), "7"],
         ["poll", "1"],
     ]
@@ -667,7 +733,7 @@ async def test_a_cancel_that_carries_words_exits_without_a_listen() -> None:
             )
         ]
     )
-    assert _lines(out) == [["say", "Over the daily cap."], ["exit", "0"]]
+    assert _lines(out) == [*_lines(_frame(refused)), ["say", "Over the daily cap."], ["exit", "0"]]
 
 
 async def test_a_worded_cancel_on_a_listen_stream_prompts_and_keeps_listening() -> None:
@@ -686,6 +752,7 @@ async def test_a_worded_cancel_on_a_listen_stream_prompts_and_keeps_listening() 
         ]
     )
     assert _lines(out) == [
+        *_lines(_frame(refused)),
         ["say", "Over the daily cap."],
         ["ask", ">"],
         ["since", str(TURN), "1"],
@@ -696,17 +763,16 @@ async def test_a_worded_cancel_on_a_listen_stream_prompts_and_keeps_listening() 
 async def test_a_park_ends_without_a_listen() -> None:
     """A parked turn resumes under its own id, so a listen bounce would re-render its notice on
     every reconnect; the park keeps the parked shape and the member's next message resumes."""
+    parked = Parked(message="over cap")
     out = b"".join(
         [
             chunk
             async for chunk in stream_directives(
-                aclosing(_feed([("1", Parked(message="over cap"))])),
-                hold_seconds=HOLD_SECONDS,
-                turn_id=TURN,
+                aclosing(_feed([("1", parked)])), hold_seconds=HOLD_SECONDS, turn_id=TURN
             )
         ]
     )
-    assert _lines(out) == [["say", "over cap"], ["ask", ">"]]
+    assert _lines(out) == [*_lines(_frame(parked)), ["say", "over cap"], ["ask", ">"]]
 
 
 @dataclass(frozen=True)
@@ -943,8 +1009,7 @@ async def test_shared_fleet_scopes_each_turn_to_its_token_workspace(
     lines_a = await _post(shared_ufo, "main", token_a, b"hi a")
     lines_b = await _post(shared_ufo, "main", token_b, b"hi b")
     for lines in (lines_a, lines_b):
-        answer = "".join(f for verb, *rest in lines if verb in ("txt", "say") for f in rest)
-        assert "echo:1" in answer
+        assert "echo:1" in _answer(lines)
         assert ["ask", ">"] in lines
         assert lines[-1] == ["listen", "2"]
     turn_a, status_a = await _sole_turn(ws_a)
@@ -1091,9 +1156,9 @@ async def test_a_resumed_stream_does_not_reprint_what_the_terminal_already_showe
     resumed = await _resume(turn_id)
     stale = await _resume(uuid4())
 
-    assert [line[0] for line in resumed] == ["say", "ask", "since", "listen"]
-    assert resumed[0] == ["say", "Listed."]
-    assert ["note", "Listing the folder.", "activity"] in stale
+    assert [line[0] for line in resumed] == ["frame", "say", "ask", "since", "listen"]
+    assert resumed[1] == ["say", "Listed."]
+    assert _lines(_frame(Activity(text="Listing the folder.")))[0] in stale
 
 
 async def _post_unsend(
@@ -1272,8 +1337,7 @@ async def test_message_admits_a_turn_streams_it_and_links_the_member(
     member_id = await _seed_member(workspace_id, "owner@example.com")
     token = _mint(SECRET, workspace_id, "owner@example.com", _future())
     lines = await _post(client, "main", token, b"hello")
-    answer = "".join(field for verb, *rest in lines if verb in ("txt", "say") for field in rest)
-    assert "echo:1" in answer
+    assert "echo:1" in _answer(lines)
     assert lines[-1][0] in ("ask", "exit", "listen")
     async with workspace_tx() as connection:
         turn_id = (
@@ -1623,8 +1687,7 @@ async def test_empty_body_polls_without_admitting_a_turn(ufo: tuple[AsyncClient,
     assert await _turn_count(workspace_id) == 1
     polled = await _post(client, "main", token, b"")
     assert await _turn_count(workspace_id) == 1
-    answer = "".join(field for verb, *rest in polled if verb in ("txt", "say") for field in rest)
-    assert "echo:1" in answer
+    assert "echo:1" in _answer(polled)
     assert ["ask", ">"] in polled
     assert polled[-1] == ["listen", "2"]
 
@@ -1684,10 +1747,11 @@ async def test_empty_body_privately_opens_the_latest_connect_handoff(
         lines = await _post(client, "main", token, b"")
     finally:
         install_connect_flow(None)
-    assert lines[0] == ["say", "Use the connection control."]
-    assert lines[1][0] == "say"
-    assert lines[1][1].startswith("[Complete the connection](https://oauth.example.test/authorize")
-    assert lines[2] == ["ask", ">"]
+    assert lines[0][:2] == ["frame", "terminal"]
+    assert lines[1] == ["say", "Use the connection control."]
+    assert lines[2][0] == "say"
+    assert lines[2][1].startswith("[Complete the connection](https://oauth.example.test/authorize")
+    assert lines[3] == ["ask", ">"]
     async with workspace_tx() as connection:
         memoized_url = (
             await connection.execute(
@@ -1696,7 +1760,7 @@ async def test_empty_body_privately_opens_the_latest_connect_handoff(
                 )
             )
         ).scalar_one()
-    assert memoized_url in lines[1][1]
+    assert memoized_url in lines[2][1]
 
 
 async def test_unknown_bearer_is_rejected(ufo: tuple[AsyncClient, UUID]) -> None:
@@ -1831,7 +1895,8 @@ def test_a_terminal_refusal_reaches_the_member_in_its_own_words() -> None:
         )
     )
     lines = _lines(b"".join(directives_for(gone, streamed=False)))
-    assert lines[0][0] == "say" and "/Users/m/proj" in lines[0][1]
+    assert lines[0][:2] == ["frame", "terminal"]
+    assert lines[1][0] == "say" and "/Users/m/proj" in lines[1][1]
 
 
 async def _post_terminal(
@@ -2486,6 +2551,7 @@ async def test_a_joined_terminal_routes_a_targeted_question_to_its_member(
     assert ["say", "Permission required"] not in peer_lines
     assert not any(line[0] in {"choose", "choose_many"} for line in peer_lines)
     assert ["say", "Waiting for a decision."] in peer_lines
+    assert not any("Allow this request?" in field for line in peer_lines for field in line)
 
 
 async def test_terminal_authorization_carries_identity_and_choices_only_to_target(
@@ -2827,8 +2893,7 @@ async def test_a_conversation_opened_by_id_replays_then_admits_a_comment(
     assert posted.status_code == 200
     lines = _lines(posted.content)
     assert lines[0][0] == "sent"
-    answer = "".join(f for verb, *rest in lines if verb in {"txt", "say"} for f in rest)
-    assert "echo:" in answer
+    assert "echo:" in _answer(lines)
     assert not any("commented" in field for line in lines for field in line), lines
     async with workspace_tx() as connection:
         turn = (

@@ -455,10 +455,13 @@ def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:
             assert named[kind] in event
     assert b"event: comment\n" in _sse("8", Reply(id=uuid4(), text="commented", is_comment=True))
 
+    with pytest.raises(ValueError, match="unmapped live frame ArtifactsChanged"):
+        _sse("", ArtifactsChanged())
+
     class Unmapped(BaseModel):
         pass
 
-    with pytest.raises(ValueError, match="unmapped live frame Unmapped"):
+    with pytest.raises(TypeError, match="unnamed live frame Unmapped"):
         _sse("", cast(LiveFrame, Unmapped()))
 
 

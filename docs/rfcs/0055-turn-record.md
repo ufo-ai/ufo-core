@@ -78,12 +78,24 @@ still going, then the last labelled step). Slack's own `TurnActivity` bookkeepin
 every frame kind now holds the reference `fold` to them, since a surface that folds handles a new
 kind the day core does.
 
-### The terminal, next
+### The terminal on the record
 
-The terminal's wire carries no frame kinds for a resume, a sources step, or a run's start and end,
-so its client cannot fold a faithful record from today's directives. Its port is a frame-carrying
-directive, Rust types rendered from the same schema, a Rust fold replaying `fold.json`, and the
-client's retained model derived from the record — a change of its own size, taken separately.
+The directive wire carries every frame as itself: `frame\t<event>\t<json>`, the event name and
+payload the web stream's SSE rows carry, both read off `frame_event` and `frame_payload` in
+`ufo.runtime.turns.record`, so the two wires cannot name a kind apart. The `txt`, `status` and
+`absorbed` verbs leave, and with them the English the client parsed out of a note to tell a run's
+label from its step; `note` stays for what is not a frame — the history rollup and the workspace
+note. A sources frame does not cross: the terminal draws no sources, and the Rust fold keeps the
+kind for the fixture it replays. The terminal frame crosses without its question and credential
+request: each rides its own directive (`say` and `choose`, `authorize`, `secret`), gated to the
+member it names, so a second member tailing the turn reads neither the prompt nor the seal. `ufo_testsupport.contract` renders the record's schema as `client/src/record.rs` (serde,
+tagged enums, ids and instants as strings) beside `contract.ts`, held fresh by the same test, and
+`client/src/fold.rs` folds a decoded frame into that record with the reference's faults, replaying
+`fold.json` and round-tripping `record.json` under `cargo test`. The client folds every frame it
+reads beside the rows it retains; the plain-mode rollup counts the record's steps, and the JSON
+mode maps the decoded frame onto its own events. `gates.py` holds the wire's verb table equal
+across the fixture, the surface's literals, and the Rust parser's arms. The debugger's `_sse`
+names its events itself — a debug rendering of stored frames, held to the same names by the gate.
 
 ### The transitions
 
@@ -128,9 +140,8 @@ the one listener set and pins `SILENCE_SENTINEL` across the two languages.
 Nothing crosses the wire unchecked: the boundary decodes every SSE payload, where today every
 handler casts `JSON.parse` output. One shape: a turn's words are text steps, in one list, and the
 answer is a rule over them rather than a fourth field. Both ends: `hidden` is produced by
-`_member_bubble` and consumed by the bubble's attribute and the record type. The terminal client
-keeps its own step model and is untouched; the server projection is untouched, since the client's
-settled form is held equal to it rather than replacing it.
+`_member_bubble` and consumed by the bubble's attribute and the record type. The server projection
+is untouched, since the client's settled form is held equal to it rather than replacing it.
 
 Two visible changes. Passages a turn streams between tool steps join with a blank line instead of
 running together. A silent turn draws nothing: no bubble and no meta line.

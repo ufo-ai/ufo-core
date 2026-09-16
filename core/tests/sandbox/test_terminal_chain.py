@@ -143,8 +143,10 @@ class _WireClient:
             for raw in lines:
                 verb, *fields = (_unescape(part) for part in raw.split("\t"))
                 match verb:
-                    case "say" | "note" | "txt":
+                    case "say" | "note":
                         transcript.append(fields[0] if fields else "")
+                    case "frame" if fields[:1] == ["message"]:
+                        transcript.append(json.loads(fields[1])["text"])
                     case "since" if len(fields) >= 2:
                         since = f"{fields[0]}:{fields[1]}"
                     case "run":

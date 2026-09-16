@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::fold::Frame;
 use crate::ui::toolrender::OpView;
+use crate::ui::{meter_line, RESUMED_NOTE};
 use crate::wire::{
     AuthorizationAnswer, AuthorizationChoice, AuthorizationOption, Directive, OpRequest,
     RuntimeAttestation,
@@ -153,6 +155,36 @@ pub struct Driver {
     secrets: HashMap<u64, PendingSecret>,
 }
 
+/// The events a live frame publishes. A frame that ends the turn publishes nothing of its own: the
+/// cap directives that follow it do.
+fn frame_events(event: &str, data: &str) -> Vec<Event> {
+    let Some(frame) = Frame::decode(event, data) else {
+        return Vec::new();
+    };
+    match frame {
+        Frame::Message { text } => vec![Event::TextDelta { text }],
+        Frame::Activity { text } => vec![Event::Status { text }],
+        Frame::SubagentActivity(run) if !run.activity.is_empty() => vec![Event::Status {
+            text: format!("{}: {}", run.label(), run.activity),
+        }],
+        Frame::SubagentActivity(_) => Vec::new(),
+        Frame::Cost {
+            tokens,
+            cost_micro_usd,
+        } => vec![Event::Status {
+            text: meter_line(tokens, cost_micro_usd),
+        }],
+        Frame::Absorbed { arrivals } => vec![Event::MessageAbsorbed {
+            arrival_ids: arrivals,
+        }],
+        Frame::Reply { text, .. } | Frame::Comment { text, .. } => vec![Event::Message { text }],
+        Frame::Resumed { .. } => vec![Event::Note {
+            text: RESUMED_NOTE.to_string(),
+        }],
+        Frame::Sources { .. } | Frame::Terminal(_) | Frame::Parked { .. } => Vec::new(),
+    }
+}
+
 impl Driver {
     pub fn new() -> Driver {
         Driver::default()
@@ -173,13 +205,11 @@ impl Driver {
 
     pub fn on_directive(&mut self, directive: &Directive) -> Vec<Event> {
         match directive {
-            Directive::Txt(text) => vec![Event::TextDelta { text: text.clone() }],
+            Directive::Frame { event, data } => frame_events(event, data),
             Directive::Say(text) => vec![Event::Message { text: text.clone() }],
             Directive::You(text) => vec![Event::MemberMessage { text: text.clone() }],
             Directive::Fired(text) => vec![Event::FiredMessage { text: text.clone() }],
             Directive::Note(text) => vec![Event::Note { text: text.clone() }],
-            Directive::Activity { text, .. } => vec![Event::Status { text: text.clone() }],
-            Directive::Status(text) => vec![Event::Status { text: text.clone() }],
             Directive::File { name, size, url } => vec![Event::FileShared {
                 name: name.clone(),
                 size: size.clone(),
@@ -219,9 +249,6 @@ impl Driver {
                 turn_id: turn_id.clone(),
                 opened_run: *opened,
                 arrival_id: arrival_id.clone(),
-            }],
-            Directive::Absorbed(arrival_ids) => vec![Event::MessageAbsorbed {
-                arrival_ids: arrival_ids.clone(),
             }],
             Directive::Poll(_)
             | Directive::Listen(_)
@@ -415,7 +442,10 @@ mod tests {
     fn content_directives_map_to_events() {
         let mut driver = Driver::new();
         assert_eq!(
-            driver.on_directive(&Directive::Txt("chunk".into())),
+            driver.on_directive(&Directive::Frame {
+                event: "message".into(),
+                data: "{\"text\":\"chunk\"}".into(),
+            }),
             vec![Event::TextDelta {
                 text: "chunk".into()
             }]
@@ -431,19 +461,38 @@ mod tests {
             vec![Event::Note { text: "dim".into() }]
         );
         assert_eq!(
-            driver.on_directive(&Directive::Activity {
-                text: "Listing files.".into(),
-                run: None,
+            driver.on_directive(&Directive::Frame {
+                event: "activity".into(),
+                data: "{\"text\":\"Listing files.\"}".into(),
             }),
             vec![Event::Status {
                 text: "Listing files.".into()
             }]
         );
         assert_eq!(
-            driver.on_directive(&Directive::Status("12 tok".into())),
+            driver.on_directive(&Directive::Frame {
+                event: "cost".into(),
+                data: "{\"cost_micro_usd\":110,\"tokens\":12}".into(),
+            }),
             vec![Event::Status {
-                text: "12 tok".into()
+                text: "12 tok - $0.000110".into()
             }]
+        );
+        assert_eq!(
+            driver.on_directive(&Directive::Frame {
+                event: "absorbed".into(),
+                data: "{\"arrivals\":[\"arr-1\"]}".into(),
+            }),
+            vec![Event::MessageAbsorbed {
+                arrival_ids: vec!["arr-1".into()]
+            }]
+        );
+        assert_eq!(
+            driver.on_directive(&Directive::Frame {
+                event: "terminal".into(),
+                data: "{\"status\":\"done\"}".into(),
+            }),
+            Vec::<Event>::new()
         );
         assert_eq!(
             driver.on_directive(&Directive::File {

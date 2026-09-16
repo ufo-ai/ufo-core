@@ -11,6 +11,7 @@ frames, `mid_turn_reply` rows, `writeback` rows, and the surface's own calls.
 """
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
@@ -374,7 +375,12 @@ async def test_the_closing_span_reaches_the_ufo_terminal_exactly_once(
     assert (frame.status, frame.text.strip()) == ("done", CLOSING_TEXT)
     assert rows == []
     printed = _terminal_lines(hub.frames)
-    assert [line for line in printed if CLOSING_TEXT in line[-1]] == [["txt", CLOSING_TEXT]]
+    said = [
+        json.loads(line[2])["text"] if line[0] == "frame" else line[1]
+        for line in printed
+        if line[:2] == ["frame", "message"] or line[0] == "say"
+    ]
+    assert [words for words in said if CLOSING_TEXT in words] == [CLOSING_TEXT]
     assert printed[-1][0] == "ask"
 
 

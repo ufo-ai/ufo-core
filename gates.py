@@ -146,9 +146,7 @@ CONSENT_MODULES = (Path("extensions/web/frontend/src/lib/consent.tsx"),)
 CONSENT_MARK_NAME = "CONSENT_WINDOW_MARK"
 DEBUGGER_TAIL_MODULE = Path("extensions/debugger/frontend/src/Tail.tsx")
 RECORD_MODULE = Path("core/src/ufo/runtime/turns/record.py")
-FRAME_EXEMPTIONS: dict[str, frozenset[str]] = {
-    "web _sse": frozenset({"ArtifactsChanged"}),
-}
+FRAME_EXEMPTIONS: dict[str, frozenset[str]] = {}
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
 CORE_SRC_ROOT = "core/src"
@@ -794,7 +792,7 @@ def _live_frame_consumer_failures(trees: dict[Path, ast.Module]) -> list[str]:
     redis = trees.get(REDIS_HUB_MODULE)
     record = trees.get(RECORD_MODULE)
     consumers: list[tuple[str, ast.AST | None]] = [
-        ("web _sse", _function_scope(web, "_sse") if web else None),
+        ("record frame_event", _function_scope(record, "frame_event") if record else None),
         ("debugger _sse", _function_scope(debugger, "_sse") if debugger else None),
         (
             "ufo directives_for",
@@ -835,8 +833,8 @@ def _live_frame_consumer_failures(trees: dict[Path, ast.Module]) -> list[str]:
             for kind in sorted(kinds - codec)
         )
 
-    if web is not None and debugger is not None:
-        failures.extend(_sse_listener_failures(web, debugger))
+    if web is not None and debugger is not None and record is not None:
+        failures.extend(_sse_listener_failures(web, debugger, record))
     return failures
 
 
@@ -850,10 +848,22 @@ def _bytes_event_names(scope: ast.AST) -> set[str]:
     return names
 
 
-def _sse_listener_failures(web: ast.Module, debugger: ast.Module) -> list[str]:
+def _returned_strings(scope: ast.AST) -> set[str]:
+    return {
+        node.value.value
+        for node in ast.walk(scope)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
+
+
+def _sse_listener_failures(web: ast.Module, debugger: ast.Module, record: ast.Module) -> list[str]:
+    """The web stream's event names are the frame names `frame_event` answers plus the events the
+    surface synthesizes itself, and the portal's `EVENT_KINDS` must spell exactly that set."""
     failures: list[str] = []
-    web_sse = _function_scope(web, "_sse")
-    web_events = _bytes_event_names(web_sse) if web_sse else set()
+    naming = _function_scope(record, "frame_event")
+    web_events = _returned_strings(naming) if naming else set()
     web_events |= {
         node.args[0].value
         for node in ast.walk(web)

@@ -100,14 +100,11 @@ pub enum Directive {
         opened: bool,
         arrival_id: String,
     },
-    Absorbed(Vec<String>),
-    Note(String),
-    Activity {
-        text: String,
-        run: Option<String>,
+    Frame {
+        event: String,
+        data: String,
     },
-    Txt(String),
-    Status(String),
+    Note(String),
     Ask(String),
     Choose {
         prompt: String,
@@ -180,14 +177,11 @@ pub fn parse_line(line: &str) -> Directive {
             opened: fields[1] == "1",
             arrival_id: field(&fields, 2),
         },
-        "absorbed" => Directive::Absorbed(fields.into_iter().filter(|id| !id.is_empty()).collect()),
-        "note" if fields.get(1).is_some_and(|kind| kind == "activity") => Directive::Activity {
-            text: field(&fields, 0),
-            run: fields.get(2).filter(|label| !label.is_empty()).cloned(),
+        "frame" if fields.len() >= 2 => Directive::Frame {
+            event: fields[0].clone(),
+            data: fields[1].clone(),
         },
         "note" => Directive::Note(field(&fields, 0)),
-        "txt" => Directive::Txt(field(&fields, 0)),
-        "status" => Directive::Status(field(&fields, 0)),
         "ask" => Directive::Ask(field(&fields, 0)),
         "choose" if !fields.is_empty() => question(&fields, false),
         "choose_many" if !fields.is_empty() => question(&fields, true),
@@ -1058,19 +1052,13 @@ mod tests {
         );
         assert_eq!(parse_line("note\tdim"), Directive::Note("dim".into()));
         assert_eq!(
-            parse_line("note\tListing files.\tactivity"),
-            Directive::Activity {
-                text: "Listing files.".into(),
-                run: None,
+            parse_line("frame\tactivity\t{\"text\":\"Listing files.\"}"),
+            Directive::Frame {
+                event: "activity".into(),
+                data: "{\"text\":\"Listing files.\"}".into(),
             }
         );
-        assert_eq!(
-            parse_line("note\treviewer: Reading the diff.\tactivity\treviewer"),
-            Directive::Activity {
-                text: "reviewer: Reading the diff.".into(),
-                run: Some("reviewer".into()),
-            }
-        );
+        assert_eq!(parse_line("frame\tactivity"), Directive::Unknown);
         assert_eq!(
             parse_line("you\tmy words"),
             Directive::You("my words".into())
@@ -1086,15 +1074,6 @@ mod tests {
                 opened: false,
                 arrival_id: "arr-3".into(),
             }
-        );
-        assert_eq!(
-            parse_line("absorbed\tarr-3\tarr-4"),
-            Directive::Absorbed(vec!["arr-3".into(), "arr-4".into()])
-        );
-        assert_eq!(parse_line("txt\tchunk"), Directive::Txt("chunk".into()));
-        assert_eq!(
-            parse_line("status\t12 tok"),
-            Directive::Status("12 tok".into())
         );
         assert_eq!(parse_line("say"), Directive::Say(String::new()));
     }
@@ -1315,13 +1294,7 @@ mod tests {
             Directive::You(text) => Some(("you", vec![text.clone()])),
             Directive::Fired(text) => Some(("fired", vec![text.clone()])),
             Directive::Note(text) => Some(("note", vec![text.clone()])),
-            Directive::Activity { text, run } => {
-                let mut fields = vec![text.clone(), "activity".to_string()];
-                fields.extend(run.iter().cloned());
-                Some(("note", fields))
-            }
-            Directive::Txt(text) => Some(("txt", vec![text.clone()])),
-            Directive::Status(text) => Some(("status", vec![text.clone()])),
+            Directive::Frame { event, data } => Some(("frame", vec![event.clone(), data.clone()])),
             Directive::Ask(prompt) => Some(("ask", vec![prompt.clone()])),
             Directive::Choose {
                 prompt,
@@ -1387,7 +1360,6 @@ mod tests {
                     arrival_id.clone(),
                 ],
             )),
-            Directive::Absorbed(arrival_ids) => Some(("absorbed", arrival_ids.clone())),
             Directive::Runtime(attestation) => Some((
                 "runtime",
                 vec![serde_json::to_string(attestation).expect("runtime attestation serializes")],

@@ -78,16 +78,9 @@ from ufo.sdk.http import (
     set_session_cookie,
 )
 from ufo.sdk.hub import (
-    Absorbed,
-    Activity,
     ArtifactsChanged,
-    CostTick,
     LiveFrame,
     Parked,
-    Reply,
-    Resumed,
-    Sources,
-    SubagentActivity,
     Terminal,
     TextDelta,
 )
@@ -136,7 +129,7 @@ from ufo.sdk.objects import (
     ObjectRef,
     ObjectRow,
 )
-from ufo.sdk.record import ActivityEvent, SubagentRun
+from ufo.sdk.record import ActivityEvent, SubagentRun, frame_event, frame_payload
 from ufo.sdk.sandbox import shipped_app_slug
 from ufo.sdk.surfaces import (
     AGENT_DETAIL_ELEMENT,
@@ -5261,40 +5254,18 @@ async def object_detail(ctx: SurfaceContext, request: Request) -> Response:
 
 
 def _sse(cursor: str, frame: LiveFrame) -> bytes:
-    """One SSE event. A non-empty cursor is emitted as the event `id:`, which the browser echoes as
-    `Last-Event-ID` on reconnect, so a dropped stream resumes from the last frame it rendered."""
+    """One SSE event, named by `frame_event`. A non-empty cursor is emitted as the event `id:`,
+    which the browser echoes as `Last-Event-ID` on reconnect, so a dropped stream resumes from the
+    last frame it rendered. A text delta rides the unnamed `message` event, and a terminal frame
+    crosses unwrapped."""
     head = f"id: {cursor}\n".encode() if cursor else b""
-    match frame:
-        case Terminal():
-            payload = frame.frame.model_dump_json().encode()
-            return head + b"event: terminal\ndata: " + payload + b"\n\n"
-        case Parked():
-            return head + b"event: parked\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case CostTick():
-            return head + b"event: cost\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case Activity():
-            return head + b"event: activity\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case SubagentActivity():
-            return (
-                head
-                + b"event: subagent_activity\ndata: "
-                + frame.model_dump_json().encode()
-                + b"\n\n"
-            )
-        case Absorbed():
-            return head + b"event: absorbed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case Resumed():
-            return head + b"event: resumed\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case Reply(is_comment=True):
-            return head + b"event: comment\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case Reply():
-            return head + b"event: reply\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case Sources():
-            return head + b"event: sources\ndata: " + frame.model_dump_json().encode() + b"\n\n"
-        case TextDelta():
-            return head + b"data: " + frame.model_dump_json().encode() + b"\n\n"
-        case _:
-            raise ValueError(f"unmapped live frame {type(frame).__name__}")
+    event = frame_event(frame)
+    if event is None:
+        raise ValueError(f"unmapped live frame {type(frame).__name__}")
+    payload = frame_payload(frame).encode()
+    if isinstance(frame, TextDelta):
+        return head + b"data: " + payload + b"\n\n"
+    return head + b"event: " + event.encode() + b"\ndata: " + payload + b"\n\n"
 
 
 async def intents(ctx: SurfaceContext, request: Request) -> Response:

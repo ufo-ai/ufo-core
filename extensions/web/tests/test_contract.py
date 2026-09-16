@@ -5,9 +5,11 @@ from ufo_testsupport.contract import (
     CONTRACT_PATH,
     FOLD_FIXTURE_PATH,
     RECORD_FIXTURE_PATH,
+    RUST_CONTRACT_PATH,
     rendered_contract,
     rendered_fold,
     rendered_record,
+    rendered_rust,
 )
 
 
@@ -26,4 +28,10 @@ def test_record_fixture_is_fresh() -> None:
 def test_fold_fixture_is_fresh() -> None:
     assert FOLD_FIXTURE_PATH.read_text() == rendered_fold(), (
         "stale fold fixture; regenerate: uv run python -m ufo_testsupport.contract"
+    )
+
+
+def test_rust_contract_is_fresh() -> None:
+    assert RUST_CONTRACT_PATH.read_text() == rendered_rust(), (
+        "stale rust contract; regenerate: uv run python -m ufo_testsupport.contract"
     )

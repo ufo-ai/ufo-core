@@ -1,4 +1,3 @@
-{"wire": "workspace", "verb": "absorbed", "fields": ["arr-1", "arr-2"], "line": "absorbed\tarr-1\tarr-2"}
 {"wire": "workspace", "verb": "ask", "fields": [">"], "line": "ask\t>"}
 {"wire": "workspace", "verb": "authorize", "fields": ["92fc2a7b-d3fe-4fb7-8096-e78f658dbda6", "Allow this request?", "allow", "Allow once", "This action only.", "deny", "Deny", "Do not allow this action.", "always", "Always allow for GitHub", "Future repository reads from this account."], "line": "authorize\t92fc2a7b-d3fe-4fb7-8096-e78f658dbda6\tAllow this request?\tallow\tAllow once\tThis action only.\tdeny\tDeny\tDo not allow this action.\talways\tAlways allow for GitHub\tFuture repository reads from this account."}
 {"wire": "workspace", "verb": "choose", "fields": ["Allow this request?", "Allow", "Deny", "Always Allow"], "line": "choose\tAllow this request?\tAllow\tDeny\tAlways Allow"}
@@ -6,9 +5,10 @@
 {"wire": "workspace", "verb": "exit", "fields": ["0"], "line": "exit\t0"}
 {"wire": "workspace", "verb": "file", "fields": ["quarterly report.pdf", "2048", "https://ws.example/artifacts/a?exp=1&sig=2"], "line": "file\tquarterly report.pdf\t2048\thttps://ws.example/artifacts/a?exp=1&sig=2"}
 {"wire": "workspace", "verb": "fired", "fields": ["github: Fix the build updated"], "line": "fired\tgithub: Fix the build updated"}
+{"wire": "workspace", "verb": "frame", "fields": ["message", "{\"text\": \"tab\\there \\\\ back\\\\slash and\\nnewline — ufo\"}"], "line": "frame\tmessage\t{\"text\": \"tab\\\\there \\\\\\\\ back\\\\\\\\slash and\\\\nnewline — ufo\"}"}
 {"wire": "workspace", "verb": "install", "fields": [], "line": "install"}
 {"wire": "workspace", "verb": "listen", "fields": ["2"], "line": "listen\t2"}
-{"wire": "workspace", "verb": "note", "fields": ["Listing files.", "activity"], "line": "note\tListing files.\tactivity"}
+{"wire": "workspace", "verb": "note", "fields": ["Completed 3 steps"], "line": "note\tCompleted 3 steps"}
 {"wire": "workspace", "verb": "poll", "fields": ["1"], "line": "poll\t1"}
 {"wire": "workspace", "verb": "run", "fields": ["op-1", "exec", "exec", "120", "", "{\"argv\":[\"ls\"]}"], "line": "run\top-1\texec\texec\t120\t\t{\"argv\":[\"ls\"]}"}
 {"wire": "workspace", "verb": "runtime", "fields": ["{\"runtime\":{\"revision\":\"abc12345\",\"image_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"config_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"sandbox_backend\":\"e2b\",\"sandbox_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"model\":\"glm-5.3-flash\",\"reasoning\":\"high\",\"environment\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}"], "line": "runtime\t{\"runtime\":{\"revision\":\"abc12345\",\"image_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"config_digest\":\"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"sandbox_backend\":\"e2b\",\"sandbox_digest\":\"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"},\"model\":\"glm-5.3-flash\",\"reasoning\":\"high\",\"environment\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}"}
@@ -16,8 +16,6 @@
 {"wire": "workspace", "verb": "secret", "fields": ["sealed-blob", "perplexity_api_key", "Paste your Perplexity key"], "line": "secret\tsealed-blob\tperplexity_api_key\tPaste your Perplexity key"}
 {"wire": "workspace", "verb": "sent", "fields": ["turn-1", "1", "arr-1"], "line": "sent\tturn-1\t1\tarr-1"}
 {"wire": "workspace", "verb": "since", "fields": ["turn-1", "cursor-9"], "line": "since\tturn-1\tcursor-9"}
-{"wire": "workspace", "verb": "status", "fields": ["12 tok - $0.000110"], "line": "status\t12 tok - $0.000110"}
-{"wire": "workspace", "verb": "txt", "fields": ["tab\there \\ back\\slash and\nnewline — ufo"], "line": "txt\ttab\\there \\\\ back\\\\slash and\\nnewline — ufo"}
 {"wire": "workspace", "verb": "you", "fields": ["what I said"], "line": "you\twhat I said"}
 {"wire": "onboard", "verb": "ask", "fields": ["Enter your work email:"], "line": "ask\tEnter your work email:"}
 {"wire": "onboard", "verb": "choose", "fields": ["Which workspace?", "acme", "beta LLC"], "line": "choose\tWhich workspace?\tacme\tbeta LLC"}

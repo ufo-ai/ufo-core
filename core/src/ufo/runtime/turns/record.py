@@ -252,6 +252,46 @@ def find_run(runs: tuple[SubagentRun, ...], turn_id: UUID) -> SubagentRun | None
     return None
 
 
+def frame_event(frame: LiveFrame) -> str | None:
+    """The event a frame crosses a wire under — the web's SSE event and the terminal's `frame`
+    directive alike, the names the conformance fixture's rows carry — or None for a frame no wire
+    carries as itself."""
+    match frame:
+        case TextDelta():
+            return "message"
+        case Activity():
+            return "activity"
+        case Sources():
+            return "sources"
+        case SubagentActivity():
+            return "subagent_activity"
+        case Reply(is_comment=True):
+            return "comment"
+        case Reply():
+            return "reply"
+        case Absorbed():
+            return "absorbed"
+        case Resumed():
+            return "resumed"
+        case CostTick():
+            return "cost"
+        case Terminal():
+            return "terminal"
+        case Parked():
+            return "parked"
+        case ArtifactsChanged():
+            return None
+    raise TypeError(f"unnamed live frame {type(frame).__name__}")
+
+
+def frame_payload(frame: LiveFrame) -> str:
+    """The JSON a frame crosses a wire as: a terminal frame unwrapped to the `TerminalFrame` the
+    record's end holds, every other frame as itself."""
+    if isinstance(frame, Terminal):
+        return frame.frame.model_dump_json()
+    return frame.model_dump_json()
+
+
 def fold(record: TurnRecord, frame: LiveFrame, at: datetime) -> TurnRecord:
     """The record after one live frame — the reference every surface's fold answers to, replayed
     against the portal's by the conformance fixture `ufo_testsupport.contract` renders. `at` is the

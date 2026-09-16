@@ -20,14 +20,12 @@ from ufo_ext_ufo.surface import directive as surface_directive
 
 WORKSPACE_WIRE = frozenset(
     {
-        "txt",
+        "frame",
         "note",
-        "status",
         "say",
         "you",
         "fired",
         "sent",
-        "absorbed",
         "ask",
         "choose",
         "choose_many",
@@ -50,14 +48,12 @@ FIXTURE_PATH = Path(__file__).parents[2] / "client" / "tests" / "fixtures" / "di
 CODEC_TORTURE = "tab\there \\ back\\slash and\nnewline — ufo"
 
 WORKSPACE_FIELDS: dict[str, tuple[str, ...]] = {
-    "txt": (CODEC_TORTURE,),
-    "note": ("Listing files.", "activity"),
-    "status": ("12 tok - $0.000110",),
+    "frame": ("message", json.dumps({"text": CODEC_TORTURE}, ensure_ascii=False)),
+    "note": ("Completed 3 steps",),
     "say": (CODEC_TORTURE,),
     "you": ("what I said",),
     "fired": ("github: Fix the build updated",),
     "sent": ("turn-1", "1", "arr-1"),
-    "absorbed": ("arr-1", "arr-2"),
     "ask": (">",),
     "choose": ("Allow this request?", "Allow", "Deny", "Always Allow"),
     "choose_many": ("Select services", "Mail", "Calendar"),

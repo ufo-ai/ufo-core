@@ -867,7 +867,7 @@ fn plain_session_round_trips_ask_and_exit() {
         Exchange {
             delay_ms: 0,
             status: 200,
-            reply_lines: &["txt\tThe answer.", "exit\t0"],
+            reply_lines: &["frame\tmessage\t{\"text\": \"The answer.\"}", "exit\t0"],
         },
     ]);
     let home = scratch_home("plain");
@@ -1037,8 +1037,8 @@ fn json_mode_speaks_the_event_protocol() {
         reply_lines: &[
             "token\ttok-1",
             "workspace\thttp://workspace.example",
-            "txt\tpartial ",
-            "txt\treply",
+            "frame\tmessage\t{\"text\": \"partial \"}",
+            "frame\tmessage\t{\"text\": \"reply\"}",
             "say\twhole",
             "exit\t0",
         ],
@@ -1207,7 +1207,7 @@ fn resume_replays_history_before_the_tail() {
         reply_lines: &[
             "you\tearlier question",
             "say\tearlier answer",
-            "txt\tthe latest reply",
+            "frame\tmessage\t{\"text\": \"the latest reply\"}",
             "exit\t0",
         ],
     }]);
@@ -1370,7 +1370,11 @@ fn a_mid_turn_send_posts_instantly_and_settles_on_absorption() {
         Exchange {
             delay_ms: 0,
             status: 200,
-            reply_lines: &["absorbed\tarr-9", "say\tsecond", "exit\t0"],
+            reply_lines: &[
+                "frame\tabsorbed\t{\"arrivals\": [\"arr-9\"]}",
+                "say\tsecond",
+                "exit\t0",
+            ],
         },
     ]);
     let home = scratch_home("instant-send");
@@ -1626,7 +1630,7 @@ fn esc_on_a_running_turn_posts_the_stop() {
         Exchange {
             delay_ms: 2000,
             status: 200,
-            reply_lines: &["txt\tthinking", "ask\t>"],
+            reply_lines: &["frame\tmessage\t{\"text\": \"thinking\"}", "ask\t>"],
         },
         Exchange {
             delay_ms: 0,
@@ -1665,7 +1669,7 @@ fn a_second_esc_in_one_turn_leaves_the_next_turn_running() {
         Exchange {
             delay_ms: 3000,
             status: 200,
-            reply_lines: &["txt\tthinking", "ask\t>"],
+            reply_lines: &["frame\tmessage\t{\"text\": \"thinking\"}", "ask\t>"],
         },
         Exchange {
             delay_ms: 0,
@@ -1742,7 +1746,7 @@ fn an_ack_naming_no_arrival_settles_the_row_at_once() {
         Exchange {
             delay_ms: 2500,
             status: 200,
-            reply_lines: &["txt\tworking", "poll\t1"],
+            reply_lines: &["frame\tmessage\t{\"text\": \"working\"}", "poll\t1"],
         },
         Exchange {
             delay_ms: 0,
@@ -2320,7 +2324,7 @@ fn up_recalls_the_queued_send_and_enter_sends_it_again() {
         Exchange {
             delay_ms: 4000,
             status: 200,
-            reply_lines: &["txt\tworking", "poll\t1"],
+            reply_lines: &["frame\tmessage\t{\"text\": \"working\"}", "poll\t1"],
         },
         Exchange {
             delay_ms: 0,
@@ -2340,7 +2344,11 @@ fn up_recalls_the_queued_send_and_enter_sends_it_again() {
         Exchange {
             delay_ms: 0,
             status: 200,
-            reply_lines: &["absorbed\tarr-2", "say\tdone", "exit\t0"],
+            reply_lines: &[
+                "frame\tabsorbed\t{\"arrivals\": [\"arr-2\"]}",
+                "say\tdone",
+                "exit\t0",
+            ],
         },
     ]);
     let home = scratch_home("tty-recall");
@@ -2422,7 +2430,7 @@ fn a_tty_send_settles_into_the_transcript_when_the_turn_absorbs_it() {
         Exchange {
             delay_ms: 2500,
             status: 200,
-            reply_lines: &["txt\tworking", "poll\t1"],
+            reply_lines: &["frame\tmessage\t{\"text\": \"working\"}", "poll\t1"],
         },
         Exchange {
             delay_ms: 0,
@@ -2432,7 +2440,11 @@ fn a_tty_send_settles_into_the_transcript_when_the_turn_absorbs_it() {
         Exchange {
             delay_ms: 0,
             status: 200,
-            reply_lines: &["absorbed\tarr-1", "say\tdone", "exit\t0"],
+            reply_lines: &[
+                "frame\tabsorbed\t{\"arrivals\": [\"arr-1\"]}",
+                "say\tdone",
+                "exit\t0",
+            ],
         },
     ]);
     let home = scratch_home("tty-send");
@@ -2481,7 +2493,7 @@ fn an_idle_tty_listens_and_prints_the_turn_that_wakes_the_conversation() {
             delay_ms: 0,
             status: 200,
             reply_lines: &[
-                "txt\tanswer one",
+                "frame\tmessage\t{\"text\": \"answer one\"}",
                 "ask\t>",
                 "since\tturn-1\t5",
                 "listen\t0.05",
@@ -2553,7 +2565,7 @@ fn a_detach_holds_while_the_listen_armed_turn_keeps_streaming() {
         Exchange {
             delay_ms: 3000,
             status: 200,
-            reply_lines: &["txt\tpartial", "poll\t9"],
+            reply_lines: &["frame\tmessage\t{\"text\": \"partial\"}", "poll\t9"],
         },
         Exchange {
             delay_ms: 0,
@@ -2617,7 +2629,7 @@ fn a_severed_bounce_runs_the_reconnect_ladder_to_its_end() {
         Exchange {
             delay_ms: 0,
             status: 599,
-            reply_lines: &["txt\twoken"],
+            reply_lines: &["frame\tmessage\t{\"text\": \"woken\"}"],
         },
         Exchange {
             delay_ms: 0,
@@ -2911,17 +2923,20 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
             delay_ms: 0,
             status: 200,
             reply_lines: &[
-                "txt\tReading the notes first.",
-                "note\trunning read: the notes",
-                "txt\tNow the calendar.",
-                "note\trunning read: the calendar",
+                "frame\tmessage\t{\"text\": \"Reading the notes first.\"}",
+                "frame\tactivity\t{\"text\": \"running read: the notes\"}",
+                "frame\tmessage\t{\"text\": \"Now the calendar.\"}",
+                "frame\tactivity\t{\"text\": \"running read: the calendar\"}",
                 "poll\t1",
             ],
         },
         Exchange {
             delay_ms: 0,
             status: 200,
-            reply_lines: &["txt\tThe meeting is at four.", "ask\t>"],
+            reply_lines: &[
+                "frame\tmessage\t{\"text\": \"The meeting is at four.\"}",
+                "ask\t>",
+            ],
         },
     ]);
     let home = scratch_home("tty-rollup");
@@ -2997,15 +3012,18 @@ fn generated_activity_accumulates_live_and_rolls_up() {
             delay_ms: 0,
             status: 200,
             reply_lines: &[
-                "note\tReading the notes.\tactivity",
-                "note\tChecking the calendar.\tactivity",
+                "frame\tactivity\t{\"text\": \"Reading the notes.\"}",
+                "frame\tactivity\t{\"text\": \"Checking the calendar.\"}",
                 "poll\t1",
             ],
         },
         Exchange {
             delay_ms: 0,
             status: 200,
-            reply_lines: &["txt\tThe meeting is at four.", "ask\t>"],
+            reply_lines: &[
+                "frame\tmessage\t{\"text\": \"The meeting is at four.\"}",
+                "ask\t>",
+            ],
         },
     ]);
     let home = scratch_home("tty-generated-activity");
@@ -3057,10 +3075,10 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         delay_ms: 0,
         status: 200,
         reply_lines: &[
-            "note\trunning spawn: reviewer",
-            "txt\tThe reviewer is on it.",
-            "note\treviewer: Reading the diff.\tactivity\treviewer",
-            "note\treviewer: Running focused tests.\tactivity\treviewer",
+            "frame\tactivity\t{\"text\": \"running spawn: reviewer\"}",
+            "frame\tmessage\t{\"text\": \"The reviewer is on it.\"}",
+            "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"Reading the diff.\", \"status\": \"\"}",
+            "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"Running focused tests.\", \"status\": \"\"}",
             "ask\t>",
         ],
     }]);
@@ -3190,10 +3208,10 @@ fn a_piped_session_logs_every_step_and_counts_them() {
         delay_ms: 0,
         status: 200,
         reply_lines: &[
-            "txt\tReading the notes first.\n",
-            "note\trunning read: the notes",
-            "note\tloading skill: office/pptx",
-            "txt\tThe meeting is at four.\n",
+            "frame\tmessage\t{\"text\": \"Reading the notes first.\"}\n",
+            "frame\tactivity\t{\"text\": \"running read: the notes\"}",
+            "frame\tactivity\t{\"text\": \"loading skill: office/pptx\"}",
+            "frame\tmessage\t{\"text\": \"The meeting is at four.\"}\n",
             "exit\t0",
         ],
     }]);
@@ -3225,9 +3243,9 @@ fn a_piped_session_logs_and_counts_generated_activity() {
         delay_ms: 0,
         status: 200,
         reply_lines: &[
-            "note\tReading the notes.\tactivity",
-            "note\tChecking the calendar.\tactivity",
-            "txt\tThe meeting is at four.\n",
+            "frame\tactivity\t{\"text\": \"Reading the notes.\"}",
+            "frame\tactivity\t{\"text\": \"Checking the calendar.\"}",
+            "frame\tmessage\t{\"text\": \"The meeting is at four.\"}\n",
             "exit\t0",
         ],
     }]);
@@ -3254,9 +3272,9 @@ fn a_piped_session_counts_no_step_for_an_answer_a_run_narrated_over() {
         delay_ms: 0,
         status: 200,
         reply_lines: &[
-            "note\trunning spawn: reviewer",
-            "txt\tThe reviewer is on it.\n",
-            "note\treviewer: running read: the diff",
+            "frame\tactivity\t{\"text\": \"running spawn: reviewer\"}",
+            "frame\tmessage\t{\"text\": \"The reviewer is on it.\"}\n",
+            "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"running read: the diff\", \"status\": \"\"}",
             "exit\t0",
         ],
     }]);
@@ -3277,10 +3295,10 @@ fn a_piped_session_counts_a_run_once_however_much_it_did() {
         delay_ms: 0,
         status: 200,
         reply_lines: &[
-            "note\trunning spawn: reviewer",
-            "note\treviewer: running read: the diff",
-            "note\treviewer: running bash: cargo test",
-            "txt\tThe reviewer found nothing.\n",
+            "frame\tactivity\t{\"text\": \"running spawn: reviewer\"}",
+            "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"running read: the diff\", \"status\": \"\"}",
+            "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"running bash: cargo test\", \"status\": \"\"}",
+            "frame\tmessage\t{\"text\": \"The reviewer found nothing.\"}\n",
             "exit\t0",
         ],
     }]);
@@ -3537,7 +3555,11 @@ fn the_conversation_page_joins_a_thread_by_id_and_posts_into_it() {
             Exchange {
                 delay_ms: 0,
                 status: 200,
-                reply_lines: &["sent\tturn-2\t1\t", "txt\tI do.", "exit\t0"],
+                reply_lines: &[
+                    "sent\tturn-2\t1\t",
+                    "frame\tmessage\t{\"text\": \"I do.\"}",
+                    "exit\t0",
+                ],
             },
         ],
         LISTING,

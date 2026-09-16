@@ -1564,13 +1564,8 @@ fn settle(app: &mut App, gate: &mut Gate) -> bool {
 fn wakes_display(directive: &Directive) -> bool {
     matches!(
         directive,
-        Directive::Say(_)
-            | Directive::Txt(_)
-            | Directive::Note(_)
-            | Directive::Activity { .. }
-            | Directive::Status(_)
-            | Directive::File { .. }
-    )
+        Directive::Say(_) | Directive::Note(_) | Directive::File { .. }
+    ) || matches!(directive, Directive::Frame { event, .. } if event != "absorbed")
 }
 
 fn collect_answer<W: std::io::Write>(
@@ -1611,11 +1606,8 @@ fn apply_directive(app: &mut App, gate: &mut Gate, directive: Directive) {
         Directive::Say(text) => app.say(&text),
         Directive::You(text) => app.member_replay(&text),
         Directive::Fired(text) => app.fired_replay(&text),
-        Directive::Absorbed(arrival_ids) => app.absorbed(&arrival_ids),
+        Directive::Frame { event, data } => app.frame(&event, &data),
         Directive::Note(text) => app.note(&text),
-        Directive::Activity { text, run } => app.activity(&text, run.as_deref()),
-        Directive::Txt(chunk) => app.txt(&chunk),
-        Directive::Status(text) => app.status_text(&text),
         Directive::File { name, size, url } => app.file(&name, &size, &url),
         Directive::Ask(prompt) => {
             gate.asked = true;
@@ -1714,11 +1706,9 @@ fn run_plain(session: Session, runtime: OpRuntime, home: config::Home, first: St
                 Directive::Say(text) => out.say(&text),
                 Directive::You(text) => out.member(&text),
                 Directive::Fired(text) => out.fired(&text),
-                Directive::Absorbed(_) | Directive::Sent { .. } => {}
+                Directive::Sent { .. } => {}
+                Directive::Frame { event, data } => out.frame(&event, &data),
                 Directive::Note(text) => out.note(&text),
-                Directive::Activity { text, run } => out.activity(&text, run.as_deref()),
-                Directive::Txt(chunk) => out.txt(&chunk),
-                Directive::Status(text) => out.status(&text),
                 Directive::File { name, size, url } => out.file(&name, &size, &url),
                 Directive::Ask(prompt) => {
                     gate.asked = true;

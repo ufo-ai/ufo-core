@@ -11,6 +11,7 @@ session's DBOS worker, so its ledger read disposes that engine first and lets th
 its own — the same lifecycle boundary the real process has between `serve` and a one-shot verb."""
 
 import asyncio
+import json
 import os
 import shutil
 import socket
@@ -788,7 +789,11 @@ def test_the_wire_streams_the_answer_then_spend_reports_the_burn(
             body = ""
         else:
             pytest.fail(f"stream never capped: {lines}")
-    answer = "".join(line.split("\t", 1)[1] for line in lines if line.startswith("txt\t"))
+    answer = "".join(
+        json.loads(line.split("\t", 2)[2])["text"]
+        for line in lines
+        if line.startswith("frame\tmessage\t")
+    )
     assert "echo:1" in answer
 
     asyncio.run(dispose_db())

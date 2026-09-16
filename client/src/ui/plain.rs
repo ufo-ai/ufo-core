@@ -1,23 +1,21 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 
+use crate::fold::{self, Frame};
+use crate::record::TurnRecord;
 use crate::ui::retained::rollup_line;
-use crate::ui::{narrates_activity, run_label, SENT_BY_UFO};
+use crate::ui::{meter_line, RESUMED_NOTE, SENT_BY_UFO};
 
 pub struct Plain {
     open: bool,
-    steps: usize,
-    runs_counted: HashSet<String>,
-    thinking: bool,
+    record: TurnRecord,
 }
 
 impl Plain {
     pub fn new() -> Plain {
         Plain {
             open: false,
-            steps: 0,
-            runs_counted: HashSet::new(),
-            thinking: false,
+            record: fold::empty(None),
         }
     }
 
@@ -27,31 +25,33 @@ impl Plain {
     }
 
     pub fn note(&mut self, text: &str) {
-        if narrates_activity(text) {
-            match run_label(text) {
-                None => {
-                    self.steps += usize::from(self.thinking) + 1;
-                    self.thinking = false;
-                }
-                Some(label) => {
-                    self.steps += usize::from(self.runs_counted.insert(label.to_string()));
-                }
-            }
-        }
         self.say(text);
     }
 
-    pub fn activity(&mut self, text: &str, run: Option<&str>) {
-        match run {
-            None => {
-                self.steps += 1;
-                self.thinking = false;
+    /// One live frame off the wire, folded into the turn record and printed as the line it is: a
+    /// step's label, a run's step under its name, the meter, a resume, the places a step read, or
+    /// a delivered reply. A drain prints nothing, and a frame that will not decode prints nothing.
+    pub fn frame(&mut self, event: &str, data: &str) {
+        let Some(frame) = Frame::decode(event, data) else {
+            return;
+        };
+        fold::fold(&mut self.record, &frame, &fold::utc_now_rfc3339());
+        match frame {
+            Frame::Message { text } => self.txt(&text),
+            Frame::Activity { text } if !text.is_empty() => self.say(&text),
+            Frame::Activity { .. } | Frame::Absorbed { .. } => {}
+            Frame::SubagentActivity(run) if !run.activity.is_empty() => {
+                self.say(&format!("{}: {}", run.label(), run.activity));
             }
-            Some(label) => {
-                self.steps += usize::from(self.runs_counted.insert(label.to_string()));
-            }
+            Frame::SubagentActivity(_) => {}
+            Frame::Cost {
+                tokens,
+                cost_micro_usd,
+            } => self.status(&meter_line(tokens, cost_micro_usd)),
+            Frame::Resumed { .. } => self.say(RESUMED_NOTE),
+            Frame::Reply { text, .. } | Frame::Comment { text, .. } => self.say(&text),
+            Frame::Sources { .. } | Frame::Terminal(_) | Frame::Parked { .. } => {}
         }
-        self.say(text);
     }
 
     pub fn member(&mut self, text: &str) {
@@ -78,7 +78,6 @@ impl Plain {
         let _ = io::stdout().flush();
         if !chunk.is_empty() {
             self.open = !chunk.ends_with('\n');
-            self.thinking |= !chunk.trim().is_empty();
         }
     }
 
@@ -97,9 +96,8 @@ impl Plain {
 
     pub fn end_stream(&mut self) {
         self.line_break();
-        let steps = std::mem::take(&mut self.steps);
-        self.runs_counted.clear();
-        self.thinking = false;
+        let steps = fold::step_count(&self.record);
+        self.record = fold::empty(None);
         if steps > 0 {
             println!("{}", rollup_line(steps));
         }

@@ -15,7 +15,7 @@ pub mod theme;
 pub mod toolrender;
 mod wrap;
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -32,7 +32,9 @@ use crossterm::tty::IsTty as _;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::fold::{self, Frame};
 use crate::pr::Pr;
+use crate::record::TurnRecord;
 use crate::ui::conversations::{labeled, Cache, Conversations, Fetch, Pick, Slot, NEW_CHAT_LABEL};
 use crate::ui::editor::{AskState, Key, Outcome};
 use crate::ui::history::History;
@@ -64,16 +66,10 @@ const KEY_COL: usize = 26;
 const FLASH_SECONDS: u64 = 2;
 const EARLY_ABSORBED_MAX: usize = 64;
 
-pub fn narrates_activity(text: &str) -> bool {
-    let under_a_label = text.split_once(": ").map_or(text, |(_, rest)| rest);
-    [text, under_a_label]
-        .iter()
-        .any(|said| said.starts_with("running ") || said.starts_with("loading skill"))
-}
+pub const RESUMED_NOTE: &str = "the service restarted; this turn resumed";
 
-pub fn run_label(text: &str) -> Option<&str> {
-    let (label, made) = text.split_once(": ")?;
-    narrates_activity(made).then_some(label)
+pub fn meter_line(tokens: i64, cost_micro_usd: i64) -> String {
+    format!("{tokens} tok - ${:.6}", cost_micro_usd as f64 / 1_000_000.0)
 }
 
 pub fn wants_fx() -> bool {
@@ -225,7 +221,8 @@ pub struct App<W: Write = io::Stdout> {
     running_op: Option<OpView>,
     running_desc: Option<String>,
     narration: Option<(String, String)>,
-    runs_counted: HashSet<String>,
+    record: TurnRecord,
+    faults: usize,
     last_reply: String,
     host: String,
     channel: String,
@@ -291,7 +288,8 @@ impl<W: Write> App<W> {
             running_op: None,
             running_desc: None,
             narration: None,
-            runs_counted: HashSet::new(),
+            record: fold::empty(None),
+            faults: 0,
             last_reply: String::new(),
             host,
             channel,
@@ -337,7 +335,8 @@ impl<W: Write> App<W> {
         self.running_op = None;
         self.running_desc = None;
         self.narration = None;
-        self.runs_counted.clear();
+        self.record = fold::empty(None);
+        self.faults = 0;
         self.last_reply.clear();
         self.channel = channel;
         self.working = false;
@@ -508,37 +507,51 @@ impl<W: Write> App<W> {
     }
 
     pub fn note(&mut self, text: &str) {
-        if text.starts_with("running ") {
-            self.narrate(text);
-        } else if text.starts_with("loading skill") {
-            self.status_text(text);
-        }
-        if narrates_activity(text) {
-            let Some(label) = run_label(text) else {
-                self.step(Step::Note(text.to_string()), true);
-                return;
-            };
-            let row = text[label.len() + ": ".len()..].to_string();
-            match self.runs_counted.insert(label.to_string()) {
-                true => self.step(
-                    Step::Run {
-                        label: label.to_string(),
-                        rows: vec![row],
-                        opened: false,
-                    },
-                    false,
-                ),
-                false => {
-                    self.flush_stream();
-                    self.retained.push_under(label, row);
-                }
-            }
-            return;
-        }
         self.flush_stream();
         self.retained.push(Entry::Note(text.to_string()));
     }
 
+    /// One live frame off the wire: folded into the turn record first, then drawn. A frame that
+    /// will not decode, or that the record refuses, is counted and draws nothing.
+    pub fn frame(&mut self, event: &str, data: &str) {
+        let Some(frame) = Frame::decode(event, data) else {
+            self.faults += 1;
+            return;
+        };
+        if !fold::fold(&mut self.record, &frame, &fold::utc_now_rfc3339()) {
+            self.faults += 1;
+        }
+        match frame {
+            Frame::Message { text } => self.txt(&text),
+            Frame::Activity { text } if !text.is_empty() => self.activity(&text, None),
+            Frame::Activity { .. } => {}
+            Frame::SubagentActivity(run) if !run.activity.is_empty() => {
+                let label = run.label().to_string();
+                self.activity(&format!("{label}: {}", run.activity), Some(&label));
+            }
+            Frame::SubagentActivity(_) => {}
+            Frame::Absorbed { arrivals } => self.absorbed(&arrivals),
+            Frame::Resumed { .. } => self.note(RESUMED_NOTE),
+            Frame::Cost {
+                tokens,
+                cost_micro_usd,
+            } => self.status_text(&meter_line(tokens, cost_micro_usd)),
+            Frame::Reply { text, .. } | Frame::Comment { text, .. } => self.say(&text),
+            Frame::Sources { .. } | Frame::Terminal(_) | Frame::Parked { .. } => {}
+        }
+    }
+
+    pub fn record(&self) -> &TurnRecord {
+        &self.record
+    }
+
+    pub fn faults(&self) -> usize {
+        self.faults
+    }
+
+    /// A run's row rides under the run's own name: its first row opens the run, every later one
+    /// joins it. The parent's open answer is left alone either way, since a background run says
+    /// nothing about where the parent's words end.
     pub fn activity(&mut self, text: &str, run: Option<&str>) {
         let Some(label) = run else {
             self.narrate(text);
@@ -548,20 +561,8 @@ impl<W: Write> App<W> {
         self.status_text(text);
         let prefix = format!("{label}: ");
         let row = text.strip_prefix(&prefix).unwrap_or(text).to_string();
-        match self.runs_counted.insert(label.to_string()) {
-            true => self.step(
-                Step::Run {
-                    label: label.to_string(),
-                    rows: vec![row],
-                    opened: false,
-                },
-                false,
-            ),
-            false => {
-                self.flush_stream();
-                self.retained.push_under(label, row);
-            }
-        }
+        self.flush_stream();
+        self.retained.push_under(label, row);
     }
 
     fn narrate(&mut self, text: &str) {
@@ -666,6 +667,8 @@ impl<W: Write> App<W> {
 
     pub fn begin_turn(&mut self) {
         self.working = true;
+        self.record = fold::empty(None);
+        self.faults = 0;
         self.retained.begin_turn();
         self.prompt = PROMPT_IDLE.to_string();
         self.last_reply.clear();
@@ -682,7 +685,6 @@ impl<W: Write> App<W> {
         self.flush_stream();
         self.reply_open = false;
         self.retained.roll_up_steps();
-        self.runs_counted.clear();
         self.status.activity = if waiting {
             Activity::WaitingInput
         } else {
@@ -2276,7 +2278,7 @@ mod tests {
     fn a_narrated_call_states_its_result_under_the_row_it_narrated() {
         let mut app = app_on_memory();
         app.begin_turn();
-        app.note("running exec: counting the rows");
+        app.activity("running exec: counting the rows", None);
         let op = asked("exec", "exec", r#"{"argv":["wc","-l"]}"#);
         app.op_started(&op);
         app.op_finished(&op, &Ok(exec_reply(0, "42\n").into_bytes()));
@@ -2560,35 +2562,6 @@ mod tests {
             painted.contains("\x1b[?1049h"),
             "the screen entered the alternate buffer of the sink it was handed: {painted:?}"
         );
-    }
-
-    #[test]
-    fn only_the_agents_own_work_narrates_a_step() {
-        assert!(narrates_activity("running bash: ls"));
-        assert!(narrates_activity("loading skill: office/pptx"));
-        assert!(narrates_activity("reviewer: running read: the diff"));
-        assert!(narrates_activity("reviewer: loading skill: coding"));
-        assert!(!narrates_activity("Completed 3 steps"));
-        assert!(!narrates_activity("Copied the last reply."));
-        assert!(!narrates_activity("Not stopped: the turn had ended"));
-        assert!(!narrates_activity(
-            "Detached; the turn continues, and a new message rejoins it."
-        ));
-    }
-
-    #[test]
-    fn a_run_names_itself_before_the_call_it_made() {
-        assert_eq!(
-            run_label("reviewer: running read: the diff"),
-            Some("reviewer")
-        );
-        assert_eq!(
-            run_label("reviewer: loading skill: coding"),
-            Some("reviewer")
-        );
-        assert_eq!(run_label("running read: the diff"), None);
-        assert_eq!(run_label("loading skill: office/pptx"), None);
-        assert_eq!(run_label("Copied the last reply."), None);
     }
 
     #[test]

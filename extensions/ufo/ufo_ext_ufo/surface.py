@@ -50,7 +50,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ValidationError
 
-from ufo.sdk.accounting import MICRO_USD_PER_USD
 from ufo.sdk.audience import SHARED_AUDIENCE, conversation_audience
 from ufo.sdk.bearer import verify_token, workspace_claim
 from ufo.sdk.credentials import CredentialValueInvalid
@@ -71,6 +70,7 @@ from ufo.sdk.hub import (
 )
 from ufo.sdk.models import Message, ToolResultBlock, ToolUseBlock
 from ufo.sdk.o11y import log
+from ufo.sdk.record import frame_event, frame_payload
 from ufo.sdk.surfaces import (
     EXTENSION_SURFACE_PREFIX,
     PORTAL_SURFACE,
@@ -98,7 +98,6 @@ from ufo.sdk.surfaces import (
 SURFACE_UFO = "ufo"
 SOURCE = "ufo cli"
 PROMPT = ">"
-RESUMED_NOTE = "the service restarted; this turn resumed"
 POLL_SECONDS = 1
 LISTEN_SECONDS = 2
 MAX_MESSAGE_BYTES = 40_000
@@ -308,35 +307,31 @@ def directives_for(
     *,
     viewer_member_id: UUID | None = None,
 ) -> tuple[bytes, ...]:
-    """The directive lines one live frame renders to. Token deltas stream as `txt`; tool-run
-    activity is a retained `note` carrying its activity kind, while the running cost meter is a
-    transient `status` line; the terminal frame
-    caps the turn (`streamed` says the answer already reached the transcript as `txt`, `collect`
-    names the credential prompts still awaiting values, `files` the ones it shared). A drain names
-    the member arrivals it folded (`absorbed`), which is how a client holding a message it sent
-    mid-turn learns the agent has taken that message up. A reply the turn delivered mid-flight says
-    itself (`say`): the member has been sent those words, and they never rode the token stream. The
-    same frame carries a linked notice when a member comments from the portal — said unless
-    `comments` is off, which is how the stream that admitted a comment keeps from reading the
-    member their own words back. A targeted question renders only for `viewer_member_id`. A turn
-    the fleet
-    resumed after the process running it died narrates that as a `note`, on the frame — a client's
-    notes already carry every other thing the turn is doing, so this one needs no grace to keep it
-    clear of the answer."""
+    """The directive lines one live frame renders to. Every frame the turn record folds crosses as
+    itself — `frame`, the event it is named by and its JSON, the same rows the web stream and the
+    conformance fixture carry — so the client folds the one record every surface holds. The
+    terminal frame crosses first, without its question and credential request — each rides its own
+    directive below, gated to the member it names, so a second member tailing the turn reads
+    neither the prompt nor the seal — and then caps the turn (`streamed` says the answer already
+    reached the transcript as a text frame, `collect` names the credential prompts still awaiting
+    values, `files` the ones it shared); a park crosses and then says why. A wordless text frame,
+    an empty drain and an empty sources step cross as nothing. A reply the turn delivered
+    mid-flight crosses unless `comments` is off and it is the linked notice of a member's own
+    portal comment — the stream that admitted the comment keeps from reading the member their own
+    words back. A targeted question renders only for `viewer_member_id`."""
     match frame:
         case TextDelta():
-            return (directive("txt", frame.text),) if frame.text else ()
+            return _frame(frame) if frame.text else ()
         case Activity():
-            return (directive("note", frame.text, "activity"),)
+            return _frame(frame)
         case ArtifactsChanged():
             return ()
         case SubagentActivity():
-            return _subagent_note(frame)
+            return _frame(frame)
         case CostTick():
-            cost = frame.cost_micro_usd / MICRO_USD_PER_USD
-            return (directive("status", f"{frame.tokens} tok - ${cost:.6f}"),)
+            return _frame(frame)
         case Terminal():
-            return _answer(
+            capped = _answer(
                 frame,
                 streamed,
                 collect,
@@ -346,6 +341,8 @@ def directives_for(
                 runtime,
                 viewer_member_id,
             )
+            bare = frame.frame.model_copy(update={"question": None, "credential_request": None})
+            return (*_frame(Terminal(frame=bare)), *capped)
         case Parked():
             attestation = (
                 ()
@@ -357,27 +354,27 @@ def directives_for(
                     ),
                 )
             )
-            return (*attestation, directive("say", frame.message), directive("ask", PROMPT))
+            return (
+                *_frame(frame),
+                *attestation,
+                directive("say", frame.message),
+                directive("ask", PROMPT),
+            )
         case Absorbed():
-            arrivals = tuple(str(arrival) for arrival in frame.arrivals)
-            return (directive("absorbed", *arrivals),) if arrivals else ()
+            return _frame(frame) if frame.arrivals else ()
         case Resumed():
-            return (directive("note", RESUMED_NOTE),)
+            return _frame(frame)
         case Reply():
-            said = frame.text and (comments or not frame.is_comment)
-            return (directive("say", frame.text),) if said else ()
+            crosses = frame.text and (comments or not frame.is_comment)
+            return _frame(frame) if crosses else ()
         case Sources():
             return ()
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
 
 
-def _subagent_note(frame: SubagentActivity) -> tuple[bytes, ...]:
-    """A run's dispatches narrate as notes under the run's name; its start and terminal are the
-    parent's spawn narration and result, so they add no line."""
-    label = frame.name or frame.profile
-    if frame.activity:
-        return (directive("note", f"{label}: {frame.activity}", "activity", label),)
-    return ()
+def _frame(frame: LiveFrame) -> tuple[bytes, ...]:
+    event = frame_event(frame)
+    return () if event is None else (directive("frame", event, frame_payload(frame)),)
 
 
 def _answer(
