@@ -9,7 +9,7 @@ import {
   IconPlus,
   IconRadar,
   IconSearch,
-  IconUsers,
+  IconUsersGroup,
   type TablerIcon,
 } from "@tabler/icons-react";
 
@@ -82,7 +82,7 @@ function places(
       if (section === "radar" && !surfaces.radar) return [];
       return [{ label: view.label, hash: sectionHash(section), icon }];
     }),
-    { label: "Workspace", hash: workspaceHash(landing), icon: IconUsers },
+    { label: "Workspace", hash: workspaceHash(landing), icon: IconUsersGroup },
   ].filter((row, at, rows) => rows.findIndex((other) => other.hash === row.hash) === at);
 }
 

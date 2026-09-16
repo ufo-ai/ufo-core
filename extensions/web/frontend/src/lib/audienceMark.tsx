@@ -1,4 +1,4 @@
-import { IconLock, IconUsers } from "@tabler/icons-react";
+import { IconLock, IconUsersGroup } from "@tabler/icons-react";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -39,7 +39,7 @@ export function AudienceMark({ entry }: { entry: AudienceEntry }) {
           {own ? (
             <IconLock className={AUDIENCE_GLYPH} aria-hidden />
           ) : (
-            <IconUsers className={AUDIENCE_GLYPH} aria-hidden />
+            <IconUsersGroup className={AUDIENCE_GLYPH} aria-hidden />
           )}
           <span className="sr-only">{detail}</span>
         </span>

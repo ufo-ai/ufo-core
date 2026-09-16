@@ -5,7 +5,7 @@ import {
   IconLogout,
   IconPlug,
   IconPlus,
-  IconUsers,
+  IconUsersGroup,
 } from "@tabler/icons-react";
 
 import { MemberAvatar, faceName } from "@/lib/memberFace";
@@ -225,7 +225,7 @@ function defaultPins(agents: Agent[]): string[] {
 
 const AskGlyph = () => <IconPlus className={GLYPH} aria-hidden />;
 const CreateAppGlyph = () => <IconCirclePlus className={GLYPH} aria-hidden />;
-const WorkspaceGlyph = () => <IconUsers className={GLYPH} aria-hidden />;
+const WorkspaceGlyph = () => <IconUsersGroup className={GLYPH} aria-hidden />;
 
 const SECTION_GLYPHS: Partial<Record<Section, React.ReactNode>> = {
   connectors: <IconPlug className={GLYPH} aria-hidden />,

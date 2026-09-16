@@ -1,4 +1,4 @@
-import { IconLock, IconTerminal2, IconUsers } from "@tabler/icons-react";
+import { IconLock, IconTerminal2, IconUsersGroup } from "@tabler/icons-react";
 import { Suspense, lazy, useCallback, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -133,7 +133,7 @@ function VisibilityControl({
               aria-label={VISIBILITY_LABEL + current}
               title={audienceDetail(conversation, viewer)}
             >
-              {current === PRIVATE ? <IconLock aria-hidden /> : <IconUsers aria-hidden />}
+              {current === PRIVATE ? <IconLock aria-hidden /> : <IconUsersGroup aria-hidden />}
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
