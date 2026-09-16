@@ -1,19 +1,10 @@
-import { IconDots } from "@tabler/icons-react";
+import { IconDotsVertical } from "@tabler/icons-react";
 import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Search } from "@/components/ui/field";
@@ -24,7 +15,6 @@ import type { FacetGroup } from "@/kernel/pane";
 import { Notice, PanelEmpty, PanelSkeleton, Section, usePanelRead } from "@/kernel/panel";
 import type { PanelState } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
-import { postObjectAction } from "@/lib/api";
 import { SHARED_SUBJECT, ownerLabel, useViewer } from "@/lib/audience";
 import {
   AutomationMark,
@@ -37,20 +27,20 @@ import { cn } from "@/lib/cn";
 import { Moment } from "@/lib/moments";
 import { OwnerMark } from "@/lib/ownerMark";
 import {
-  ARCHIVE_ACTION,
+  ChatFilingDialog,
+  ChatFilingItems,
+  useChatFiling,
+  type Filed,
+} from "@/lib/chatFiling";
+import {
   CHAT_STATE_RANK,
-  CONVERSATION_KIND,
-  DELETE_ACTION,
   FILING_MARKS,
-  PIN_ACTION,
-  UNARCHIVE_ACTION,
-  UNPIN_ACTION,
   chatRows,
   chatState,
   mergeChats,
   type ConversationsPayload,
 } from "@/lib/rail";
-import { freshenRail, railFiled, useRail } from "@/lib/railStore";
+import { useRail } from "@/lib/railStore";
 import type { PlaceStep, WorkspacePlace } from "@/lib/route";
 import type { Conversation } from "@/lib/types";
 import { HOME_TITLE } from "@/lib/title";
@@ -204,9 +194,6 @@ function ordered(rows: Conversation[]): Conversation[] {
   );
 }
 
-/** What a row's act filed, so the listing answers for the conversation before the reads do. */
-type Filed = (row: Conversation, action: string) => void;
-
 /** The rows behind the table, from whichever source answered for them. */
 type Read = {
   phase: PanelState<unknown>["phase"];
@@ -268,8 +255,6 @@ export function Chats({
           [marked.conversation_id]: marked,
         },
       }));
-      railFiled(marked);
-      void freshenRail();
     },
     [context, answers],
   );
@@ -458,78 +443,26 @@ function ChatCells({ row, onFiled }: { row: Conversation; onFiled: Filed }) {
   );
 }
 
-/** Delete is offered on a conversation this member owns and on no other, because the verb refuses
- *  anybody else; a control that refuses on press is a control that should not have been drawn. */
 function RowActs({ row, onFiled }: { row: Conversation; onFiled: Filed }) {
-  const acting = useViewer();
-  const [busy, setBusy] = useState(false);
-  const [asking, setAsking] = useState(false);
-  const [refused, setRefused] = useState("");
-  const owned =
-    acting !== null && (row.owner_email === acting || (row.mine && row.owner_email === null));
-  const file = async (action: string) => {
-    setBusy(true);
-    setRefused("");
-    const outcome = await postObjectAction(
-      row.agent_id,
-      { kind: CONVERSATION_KIND, name: row.conversation_id, action },
-      {},
-    );
-    setBusy(false);
-    if (!outcome.applied) {
-      setRefused(outcome.message);
-      return;
-    }
-    setAsking(false);
-    onFiled(row, action);
-  };
+  const filing = useChatFiling(row, onFiled);
   return (
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="quiet" size="icon" busy={busy} aria-label={"Actions for " + row.title}>
-            <IconDots aria-hidden />
+          <Button
+            variant="quiet"
+            size="icon"
+            busy={filing.busy}
+            aria-label={"Actions for " + row.title}
+          >
+            <IconDotsVertical aria-hidden />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem
-            onSelect={() => void file(row.archived ? UNARCHIVE_ACTION : ARCHIVE_ACTION)}
-          >
-            {row.archived ? "Unarchive" : "Archive"}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void file(row.pinned ? UNPIN_ACTION : PIN_ACTION)}>
-            {row.pinned ? "Unpin" : "Pin"}
-          </DropdownMenuItem>
-          {owned ? (
-            <DropdownMenuItem onSelect={() => setAsking(true)}>Delete</DropdownMenuItem>
-          ) : null}
+          <ChatFilingItems row={row} filing={filing} />
         </DropdownMenuContent>
       </DropdownMenu>
-      {refused && !asking ? (
-        <span role="status" className="text-label text-ink-soft">
-          {refused}
-        </span>
-      ) : null}
-      <Dialog open={asking} onOpenChange={setAsking}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete this conversation?</DialogTitle>
-            <DialogDescription>
-              {row.title} leaves every listing and only you, its owner, can restore it.
-            </DialogDescription>
-          </DialogHeader>
-          {refused ? (
-            <p role="status" className="m-0 text-small text-ink-soft">
-              {refused}
-            </p>
-          ) : null}
-          <DialogFooter>
-            <Button busy={busy} onClick={() => void file(DELETE_ACTION)}>
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ChatFilingDialog row={row} filing={filing} />
     </>
   );
 }

@@ -4,7 +4,16 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
 
-import { AGENT, CHAT_ROW, chatsOnWire, CONVO_ID, MEMBER, useStreamFake, wire } from "../../tests/harness";
+import {
+  AGENT,
+  CHAT_ROW,
+  chatsOnWire,
+  CONVO_ID,
+  json,
+  MEMBER,
+  useStreamFake,
+  wire,
+} from "../../tests/harness";
 
 beforeEach(() => {
   useStreamFake();
@@ -43,6 +52,39 @@ async function acts(title: string): Promise<HTMLElement> {
   const row = press.closest("li");
   if (!row) throw new Error(title + " stands in no row");
   return within(row).getByRole("button", { name: "Thread options" });
+}
+
+const FILING_ACTIONS = [
+  "pin_conversation",
+  "unpin_conversation",
+  "archive_conversation",
+  "unarchive_conversation",
+  "delete_conversation",
+];
+
+/** The acts the conversation kind answers for, and what each one filed, the way the Home table's
+ *  own wire reports them. */
+function filingWire(posted: string[]) {
+  return {
+    ...chatsOnWire([CHAT_ROW]),
+    "/actions/conversation/": (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        posted.push(url.split("/actions/conversation/")[1]);
+        return json({ applied: true, message: "Saved." });
+      }
+      const conversationId = url.split("/actions/conversation/")[1].split("?")[0];
+      return json({
+        actions: FILING_ACTIONS.map((name) => ({
+          name,
+          description: "",
+          input_schema: { properties: {} },
+          call: { kind: "conversation", name: conversationId, action: name },
+          label: name,
+        })),
+      });
+    },
+    "/transcript": () => json({ messages: [] }),
+  };
 }
 
 test("a thread row holds its acts behind a mark drawn under the pointer and on the row's focus", async () => {
@@ -91,6 +133,43 @@ test("copy link writes the thread's portal address", async () => {
   await userEvent.click(await screen.findByRole("menuitem", { name: "Copy link" }));
 
   expect(written).toHaveBeenCalledWith(location.origin + location.pathname + "#/c/" + CONVO_ID);
+  view.unmount();
+});
+
+test("the thread menu carries the Home table's filing acts beside the link acts", async () => {
+  const posted: string[] = [];
+  wire(filingWire(posted));
+  const view = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await acts("Pick one thread"));
+  const menu = await screen.findByRole("menu");
+  expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "Archive",
+    "Pin",
+    "Delete",
+    "Copy link",
+  ]);
+
+  await userEvent.click(within(menu).getByRole("menuitem", { name: "Pin" }));
+
+  await vi.waitFor(() => expect(posted).toEqual([CONVO_ID + "/pin_conversation"]));
+  view.unmount();
+});
+
+test("deleting a thread from the rail asks first and posts the verb the dialog answers", async () => {
+  const posted: string[] = [];
+  wire(filingWire(posted));
+  const view = render(<App agents={[AGENT]} member={MEMBER} onAgents={() => {}} />);
+
+  await userEvent.click(await acts("Pick one thread"));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+  expect(posted).toEqual([]);
+
+  await userEvent.click(
+    within(await screen.findByRole("dialog")).getByRole("button", { name: "Delete" }),
+  );
+
+  await vi.waitFor(() => expect(posted).toEqual([CONVO_ID + "/delete_conversation"]));
   view.unmount();
 });
 

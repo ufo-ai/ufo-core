@@ -92,6 +92,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ChatFilingDialog, ChatFilingItems, useChatFiling } from "@/lib/chatFiling";
 import {
   RAIL_SHOWN_OPTIONS,
   RAIL_SORT_OPTIONS,
@@ -765,34 +766,40 @@ function RailRowActs({
   onOpenChange: (open: boolean) => void;
 }) {
   const host = useDrawerHost();
+  const filing = useChatFiling(row);
   const away = slackLink(row.surface, row.source);
   return (
-    <DropdownMenu open={open} onOpenChange={onOpenChange}>
-      <DropdownMenuTrigger asChild>
-        <button type="button" aria-label={THREAD_ACTS} className={RAIL_ROW_GLYPH}>
-          <IconDotsVertical className="size-icon" aria-hidden />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent side="bottom" align="end" container={host}>
-        <DropdownMenuItem
-          onSelect={() => void navigator.clipboard.writeText(threadLink(row.conversation_id))}
-        >
-          Copy link
-        </DropdownMenuItem>
-        {away === null ? null : (
-          <DropdownMenuItem asChild>
-            <a
-              href={away}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-inherit no-underline"
-            >
-              Open in {row.surface_label ?? surfaceWord(row.surface)}
-            </a>
+    <>
+      <DropdownMenu open={open} onOpenChange={onOpenChange}>
+        <DropdownMenuTrigger asChild>
+          <button type="button" aria-label={THREAD_ACTS} className={RAIL_ROW_GLYPH}>
+            <IconDotsVertical className="size-icon" aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="bottom" align="end" container={host}>
+          <ChatFilingItems row={row} filing={filing} />
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onSelect={() => void navigator.clipboard.writeText(threadLink(row.conversation_id))}
+          >
+            Copy link
           </DropdownMenuItem>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+          {away === null ? null : (
+            <DropdownMenuItem asChild>
+              <a
+                href={away}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-inherit no-underline"
+              >
+                Open in {row.surface_label ?? surfaceWord(row.surface)}
+              </a>
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <ChatFilingDialog row={row} filing={filing} />
+    </>
   );
 }
 
