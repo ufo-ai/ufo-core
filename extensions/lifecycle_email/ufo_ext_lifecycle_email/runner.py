@@ -136,6 +136,7 @@ class SequenceRunner:
             message_id = await email.send(
                 address=composed.address,
                 kind=composed.kind,
+                topic=composed.topic,
                 subject=composed.subject,
                 body=composed.body,
                 action_label=composed.action_label,

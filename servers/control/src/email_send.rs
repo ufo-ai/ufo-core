@@ -4,6 +4,12 @@
 //!
 //! The route is bearer-gated by the same token core's `/internal/onboard/*` routes require: one
 //! shared secret for the one channel between the two services.
+//!
+//! Two suppressions, and they are not the same rule. A hard one — bounced, complained,
+//! unsubscribed — bars every message this deploy sends, because reaching that address again costs
+//! the sending domain its standing. A topic preference bars product news alone: a member who asked
+//! to hear nothing more about the product is still told their balance ran out, because that is
+//! what their workspace is doing with their money.
 
 use std::sync::LazyLock;
 
@@ -25,8 +31,20 @@ use crate::message::{render, Words};
 use crate::workos::constant_time_eq;
 
 pub const TABLE: &str = "ufo_control.email_send";
+pub const PREFERENCE_TABLE: &str = "ufo_control.email_preference";
 pub const SEND_PATH: &str = "/internal/email/send";
 pub const DELIVERY_PATH: &str = "/internal/email/send/{message_id}";
+pub const PREFERENCE_PATH: &str = "/internal/email/preference";
+
+/// Everything a workspace is doing with a member's money or access. Never silenced.
+pub const TRANSACTIONAL: &str = "transactional";
+/// Everything else. A member silences it and keeps the rest.
+pub const PRODUCT_NEWS: &str = "product_news";
+pub const TOPICS: &[&str] = &[TRANSACTIONAL, PRODUCT_NEWS];
+
+fn transactional() -> String {
+    TRANSACTIONAL.to_string()
+}
 
 pub const MAX_KIND_CHARS: usize = 64;
 pub const MAX_SUBJECT_CHARS: usize = 200;
@@ -51,6 +69,11 @@ pub const DDL: &[&str] = &[
        sent_at timestamptz not null default now(),\
        updated_at timestamptz not null default now())",
     "create index if not exists email_send_address on ufo_control.email_send (email)",
+    "create table if not exists ufo_control.email_preference (\
+       email text not null,\
+       topic text not null,\
+       silenced_at timestamptz not null default now(),\
+       primary key (email, topic))",
 ];
 
 /// What core posts: words, never markup. The frame is this deploy's, so an extension cannot ship a
@@ -63,11 +86,32 @@ pub const DDL: &[&str] = &[
 pub struct Asked {
     pub email: String,
     pub kind: String,
+    /// A caller that names no topic is one from the image this gateway is replacing: the two roll
+    /// as separate Deployments, so an old serve pod posts here for about a minute. It reads as
+    /// transactional, which loses no notice — where refusing it would fail the attempt row for
+    /// good, and a workspace that ran out of credit in that minute would never be told.
+    #[serde(default = "transactional")]
+    pub topic: String,
     pub subject: String,
     /// Paragraphs, separated by a blank line.
     pub body: String,
     pub action_label: Option<String>,
     pub action_url: Option<String>,
+}
+
+/// What a member asked for, carried here rather than kept by the extension that heard it, so the
+/// one place that applies suppression applies this too.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Preference {
+    pub email: String,
+    pub topic: String,
+    pub silenced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Silenced {
+    pub topic: String,
+    pub silenced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -88,6 +132,8 @@ pub enum SendError {
     Refused(String),
     #[error("{0} has bounced, complained, or unsubscribed")]
     Suppressed(String),
+    #[error("{address} asked to hear nothing more about {topic}")]
+    Silenced { address: String, topic: String },
     #[error("there is no send {0}")]
     Absent(String),
     #[error(transparent)]
@@ -113,6 +159,12 @@ impl EmailSends {
         let address = self.checked(&asked)?;
         if self.suppressed(&address).await? {
             return Err(SendError::Suppressed(address));
+        }
+        if asked.topic != TRANSACTIONAL && self.silenced(&address, &asked.topic).await? {
+            return Err(SendError::Silenced {
+                address,
+                topic: asked.topic.clone(),
+            });
         }
         let message = render(
             &Words {
@@ -155,6 +207,45 @@ impl EmailSends {
         })
     }
 
+    /// Record, or lift, what a member asked for. Idempotent both ways: a member who says it twice
+    /// says it once.
+    pub async fn prefer(&self, asked: Preference) -> Result<Silenced, SendError> {
+        let (address, _) =
+            normalize_email(&asked.email).map_err(|error| SendError::Refused(error.to_string()))?;
+        if asked.topic == TRANSACTIONAL || !TOPICS.contains(&asked.topic.as_str()) {
+            return Err(SendError::Refused(format!(
+                "{:?} is not a topic a member can silence",
+                asked.topic
+            )));
+        }
+        let connection = self.pool.get().await?;
+        let statement = match asked.silenced {
+            true => format!(
+                "insert into {PREFERENCE_TABLE} (email, topic) values ($1, $2) \
+                 on conflict (email, topic) do nothing"
+            ),
+            false => format!("delete from {PREFERENCE_TABLE} where email = $1 and topic = $2"),
+        };
+        connection
+            .execute(&statement, &[&address, &asked.topic])
+            .await?;
+        Ok(Silenced {
+            topic: asked.topic,
+            silenced: asked.silenced,
+        })
+    }
+
+    async fn silenced(&self, address: &str, topic: &str) -> Result<bool, SendError> {
+        let connection = self.pool.get().await?;
+        let held = connection
+            .query_opt(
+                &format!("select 1 from {PREFERENCE_TABLE} where email = $1 and topic = $2"),
+                &[&address, &topic],
+            )
+            .await?;
+        Ok(held.is_some())
+    }
+
     fn checked(&self, asked: &Asked) -> Result<String, SendError> {
         let (address, domain) =
             normalize_email(&asked.email).map_err(|error| SendError::Refused(error.to_string()))?;
@@ -164,6 +255,12 @@ impl EmailSends {
                     "{address} is under the reserved top-level domain {tld:?}, which accepts no mail"
                 )));
             }
+        }
+        if !TOPICS.contains(&asked.topic.as_str()) {
+            return Err(SendError::Refused(format!(
+                "{:?} is not a topic (expected one of {TOPICS:?})",
+                asked.topic
+            )));
         }
         if asked.kind.chars().count() > MAX_KIND_CHARS || !KIND_PATTERN.is_match(&asked.kind) {
             return Err(SendError::Refused(format!(
@@ -236,6 +333,22 @@ pub fn routes() -> Router<GatewayState> {
     Router::new()
         .route(SEND_PATH, post(sent))
         .route(DELIVERY_PATH, get(delivered))
+        .route(PREFERENCE_PATH, post(preferred))
+}
+
+async fn preferred(State(state): State<GatewayState>, headers: HeaderMap, body: Bytes) -> Response {
+    if !admitted(&state, &headers) {
+        return unauthorized();
+    }
+    let asked: Preference = match serde_json::from_slice(&body) {
+        Ok(asked) => asked,
+        Err(error) => {
+            return answered::<Silenced>(Err(SendError::Refused(format!(
+                "the preference is unreadable: {error}"
+            ))))
+        }
+    };
+    answered(state.email_sends.prefer(asked).await)
 }
 
 /// A `Json<Asked>` argument would be rejected by axum before the handler runs, answering an
@@ -290,7 +403,7 @@ fn answered<T: Serialize>(result: Result<T, SendError>) -> Response {
     };
     let status = match &error {
         SendError::Refused(_) => StatusCode::BAD_REQUEST,
-        SendError::Suppressed(_) => StatusCode::CONFLICT,
+        SendError::Suppressed(_) | SendError::Silenced { .. } => StatusCode::CONFLICT,
         SendError::Absent(_) => StatusCode::NOT_FOUND,
         SendError::Aws(_) => StatusCode::BAD_GATEWAY,
         SendError::Pool(_) | SendError::Query(_) => StatusCode::INTERNAL_SERVER_ERROR,

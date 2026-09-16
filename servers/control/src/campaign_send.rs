@@ -3,11 +3,13 @@ use uuid::Uuid;
 
 use crate::campaign::{
     campaign_message, read_campaign, Campaign, CampaignError, RECIPIENT_TABLE, SEND_ATTEMPTED,
-    SEND_FAILED, SEND_PENDING, SEND_SENT, STATE_APPROVED, STATE_COMPLETED, STATE_SENDING, TABLE,
+    SEND_CANCELLED, SEND_FAILED, SEND_PENDING, SEND_SENT, STATE_APPROVED, STATE_COMPLETED,
+    STATE_SENDING, TABLE,
 };
 use crate::email::{
     verdict, AwsError, FounderSender, SendVerdict, Sender, MAX_RETRY_AFTER_SECONDS,
 };
+use crate::email_send::{PREFERENCE_TABLE, PRODUCT_NEWS};
 
 pub const POLL_INTERVAL_SECONDS: u64 = 5;
 pub const LEASE_SECONDS: i64 = 120;
@@ -91,6 +93,25 @@ impl CampaignSends {
             );
             return Ok(None);
         };
+        match self.silenced(&claimed.email).await {
+            Ok(true) => {
+                self.write(
+                    &claimed,
+                    &format!(
+                        "state = '{SEND_CANCELLED}', worker_id = null, claim_expires_at = null, \
+                         last_error = null"
+                    ),
+                    &[],
+                )
+                .await?;
+                return Ok(None);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.rearm(&claimed).await?;
+                return Err(error);
+            }
+        }
         match self.deliver(&claimed, &held, from).await {
             Ok(()) => Ok(None),
             Err(Carried::Ledger(error)) => Err(error),
@@ -163,6 +184,19 @@ impl CampaignSends {
             campaign_id: row.get("campaign_id"),
             email: row.get("email"),
         }))
+    }
+
+    /// The audience froze at prepare and the send runs long after, so a preference recorded in
+    /// between bars the message only if the row is read again here.
+    async fn silenced(&self, email: &str) -> Result<bool, CampaignError> {
+        let connection = self.pool.get().await?;
+        let held = connection
+            .query_opt(
+                &format!("select 1 from {PREFERENCE_TABLE} where email = $1 and topic = $2"),
+                &[&email, &PRODUCT_NEWS],
+            )
+            .await?;
+        Ok(held.is_some())
     }
 
     async fn deliver(

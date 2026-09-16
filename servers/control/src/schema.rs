@@ -14,6 +14,7 @@ pub const LEDGERS: &[&str] = &[
     campaign::RECIPIENT_TABLE,
     campaign::EVENT_TABLE,
     email_send::TABLE,
+    email_send::PREFERENCE_TABLE,
     lifecycle::TABLE,
 ];
 
@@ -261,7 +262,7 @@ mod tests {
     #[test]
     fn the_head_shape_reads_every_declared_column() {
         let shape = head_shape();
-        assert_eq!(shape.len(), 9, "one entry per ledger");
+        assert_eq!(shape.len(), 10, "one entry per ledger");
         let claim = &shape[store::TABLE];
         assert!(claim.contains("created_workspace"), "{claim:?}");
         assert!(claim.contains("invite_id"), "{claim:?}");

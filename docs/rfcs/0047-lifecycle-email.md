@@ -67,9 +67,15 @@ without one the seam could send and never report; the set is separate because th
 `ses:FromAddress` condition differ from a campaign's, and the consumer does not.
 
 Suppression stays where it already is, and control applies it centrally. A hard suppression —
-bounced, complained, unsubscribed — bars every kind, and unit 1 lands it. A topic opt-out bars
-marketing and drip, and never bars transactional: a member who unsubscribed from product news is
-still told their balance ran out. That half arrives with the preferences in unit 5.
+bounced, complained, unsubscribed — bars every message this deploy sends, because reaching that
+address again costs the sending domain its standing. A topic preference bars product news alone: a
+member who asked to hear nothing more about the product is still told their balance ran out,
+because that is what their workspace is doing with their money. Every send therefore names a
+topic, and `transactional` is the one a member cannot silence.
+
+The preference is a row in `ufo_control` beside the suppression it joins, and a member expresses
+it the way a member expresses everything — in chat. There is no unsubscribe endpoint of our own:
+the agent holds a tool, calls it for the speaker's own address, and control records it.
 
 ## What fires a sequence
 
@@ -163,7 +169,7 @@ Each lands with both ends and its own proof.
 | 2 | Event log, enrollment, the per-minute runner, one repo-defined sequence | a delay measured from an instant fires on time, once |
 | 3 | `post_tool_use` product triggers and an absence-of-use sequence | a feature event is logged where the member uses the feature, an absence is logged where the deadline passes without it, and both enroll |
 | 4 | The operator editor, revisions and approval | drip copy changes without a deploy and cannot go out unapproved |
-| 5 | Member topic preferences | a member silences marketing and still receives transactional |
+| 5 | Member topic preferences | a member silences product news in chat and still receives transactional |
 
 ## Non-goals
 

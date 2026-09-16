@@ -7,6 +7,7 @@ use tokio_postgres::Row;
 use uuid::Uuid;
 
 use crate::email::{normalize_email, FounderSender, Sender};
+use crate::email_send::{PREFERENCE_TABLE, PRODUCT_NEWS};
 use crate::gateway::OPERATOR_EMAIL_DOMAIN;
 use crate::message::{render, Message, Words};
 use crate::shared::{SeatError, SeatedMember, SharedWorkspaces};
@@ -732,15 +733,18 @@ impl Campaigns {
         }
     }
 
-    /// Ours and SES's, unioned. SES is the gate that actually refuses the send, so its answer is
-    /// read even where no event of ours recorded the opt-out.
+    /// Ours and SES's, unioned: SES is the gate that actually refuses the send, and a preference a
+    /// member set in chat never reaches SES at all.
     async fn suppressed(&self) -> Result<HashSet<String>, CampaignError> {
         let connection = self.pool.get().await?;
         let states: Vec<String> = SUPPRESSED.iter().map(|state| state.to_string()).collect();
         let rows = connection
             .query(
-                &format!("select distinct email from {RECIPIENT_TABLE} where delivery = any($1)"),
-                &[&states],
+                &format!(
+                    "select distinct email from {RECIPIENT_TABLE} where delivery = any($1) \
+                     union select email from {PREFERENCE_TABLE} where topic = $2"
+                ),
+                &[&states, &PRODUCT_NEWS],
             )
             .await?;
         let mut suppressed: HashSet<String> = rows

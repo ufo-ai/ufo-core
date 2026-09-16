@@ -1,7 +1,10 @@
 use chrono::{TimeZone, Utc};
 use serde::Deserialize;
 use ufo_control::directives::directive;
-use ufo_control::email_send::{Asked, Delivered, Sent, SEND_PATH};
+use ufo_control::email_send::{
+    Asked, Delivered, Preference, Sent, Silenced, PREFERENCE_PATH, PRODUCT_NEWS, SEND_PATH,
+    TRANSACTIONAL,
+};
 use ufo_control::token::{sign, verified_email};
 
 #[derive(Deserialize)]
@@ -85,10 +88,13 @@ fn every_onboard_fixture_line_is_this_encoder() {
 struct EmailSendContract {
     send_path: String,
     delivery_path: String,
+    preference_path: String,
     send_request: serde_json::Value,
     send_response: serde_json::Value,
     reported_response: serde_json::Value,
     unreported_response: serde_json::Value,
+    preference_request: serde_json::Value,
+    preference_response: serde_json::Value,
 }
 
 #[test]
@@ -106,6 +112,7 @@ fn the_send_seam_reads_and_answers_exactly_what_core_writes() {
         serde_json::from_value(contract.send_request.clone()).expect("core's body deserializes");
     assert_eq!(asked.email, "member@acme.com");
     assert_eq!(asked.kind, "balance_exhausted");
+    assert_eq!(asked.topic, TRANSACTIONAL);
     assert_eq!(asked.subject, "acme.com is out of credit");
     assert!(asked.body.contains("no credit left"));
     assert_eq!(asked.action_label.as_deref(), Some("Add credit"));
@@ -134,5 +141,32 @@ fn the_send_seam_reads_and_answers_exactly_what_core_writes() {
         serde_json::to_value(Delivered { delivery: None }).unwrap(),
         contract.unreported_response,
         "a send SES has not reported on answers with a null, never an absent field"
+    );
+
+    let mut older = contract.send_request.clone();
+    older
+        .as_object_mut()
+        .expect("the body is an object")
+        .remove("topic");
+    let from_the_previous_image: Asked =
+        serde_json::from_value(older).expect("a body with no topic still deserializes");
+    assert_eq!(
+        from_the_previous_image.topic, TRANSACTIONAL,
+        "the gateway and the fleet roll separately, so a post from the image being replaced is \
+         read rather than refused"
+    );
+
+    assert_eq!(PREFERENCE_PATH, contract.preference_path);
+    let preference: Preference =
+        serde_json::from_value(contract.preference_request).expect("the preference deserializes");
+    assert_eq!(preference.topic, PRODUCT_NEWS);
+    assert!(preference.silenced);
+    assert_eq!(
+        serde_json::to_value(Silenced {
+            topic: PRODUCT_NEWS.to_string(),
+            silenced: true,
+        })
+        .unwrap(),
+        contract.preference_response
     );
 }

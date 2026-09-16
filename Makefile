@@ -164,7 +164,7 @@ test-one: reinstall ## Run one file or node id serially (FILE=path) — xdist on
 control-pg: ## Start the control suite's Postgres on :5549
 	docker rm -f ufo-control-rust-pg >/dev/null 2>&1 || true
 	docker run -d --rm --name ufo-control-rust-pg -e POSTGRES_USER=ufo -e POSTGRES_PASSWORD=ufo \
-		-e POSTGRES_DB=ufo -p 127.0.0.1:5549:5432 pgvector/pgvector:pg17
+		-e POSTGRES_DB=ufo -p 127.0.0.1:5549:5432 --shm-size=1g pgvector/pgvector:pg17
 	until docker exec ufo-control-rust-pg pg_isready -U ufo >/dev/null 2>&1; do sleep 1; done
 
 test-control: ## Run the control (gateway) suite — needs `make control-pg`

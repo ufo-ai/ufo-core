@@ -18,7 +18,12 @@ keeps a producer from knowing whether a sequence lives in the tree or in a row.
 
 One flag decides whether this deploy sends at all. Every job reads it and does nothing while it is
 off — no rows are written, so turning it on starts from the fleet as it stands rather than sending
-a backlog of what was missed."""
+a backlog of what was missed. The tool is not flagged with it: a member may say "stop emailing me"
+whenever they like, and the preference is recorded and honoured once sending is on.
+
+The one tool is how a member stops hearing from us. There is no unsubscribe endpoint of our own:
+a member says it to the agent, and the preference is recorded where suppression is already
+applied."""
 
 from ufo.sdk.context import ExtensionContext
 from ufo.sdk.flags import flag_enabled
@@ -30,10 +35,11 @@ from ufo_ext_lifecycle_email.enrollments import (
     unread_event_workspaces,
 )
 from ufo_ext_lifecycle_email.events import WriteEvents, event_workspaces
+from ufo_ext_lifecycle_email.preference import PRODUCT_EMAIL_TOOL
 from ufo_ext_lifecycle_email.runner import Reconciling, SequenceRunner
 
 NAME = "lifecycle_email"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 NOTICE_JOB = "balance_notice"
 EVENTS_JOB = "lifecycle_events"
 RECONCILE_JOB = "lifecycle_reconcile"
@@ -76,6 +82,7 @@ def manifest() -> Manifest:
                 what="ufo sends lifecycle email — balance notices and sequences.",
             ),
         ),
+        tools=(PRODUCT_EMAIL_TOOL,),
         jobs=(
             JobSpec(
                 name=NOTICE_JOB,

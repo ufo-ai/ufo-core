@@ -14,6 +14,7 @@ use ufo_control::campaign::{
 use ufo_control::campaign_feedback::{CampaignFeedback, FeedbackQueue};
 use ufo_control::campaign_send::CampaignSends;
 use ufo_control::email::{parse_senders, AwsEndpoints, FounderSender};
+use ufo_control::email_send::{PREFERENCE_TABLE, PRODUCT_NEWS};
 use ufo_control::hud::csrf_token;
 use ufo_control::message::UNSUBSCRIBE_PLACEHOLDER;
 use ufo_control::shared::SharedWorkspaces;
@@ -254,6 +255,46 @@ async fn preparing_freezes_the_audience_and_excludes_who_it_must_not_reach() {
 }
 
 #[tokio::test]
+async fn a_member_who_silenced_product_email_in_chat_is_out_of_the_audience() {
+    let pool = ledger_pool().await;
+    let (_directory, token) = token_file();
+    let (aws, _aws_log) = spawn_http(vec![
+        (200, STS_RESPONSE.to_string()),
+        (200, NO_CONTACTS.to_string()),
+    ])
+    .await;
+    let (core, _core_log) = spawn_http(vec![
+        (
+            200,
+            seated(&[
+                ("silenced@acme.com", Uuid::new_v4()),
+                ("listening@acme.com", Uuid::new_v4()),
+            ]),
+        ),
+        (200, NO_SEATS.to_string()),
+    ])
+    .await;
+    let connection = pool.get().await.unwrap();
+    connection
+        .execute(
+            &format!("insert into {PREFERENCE_TABLE} (email, topic) values ($1, $2)"),
+            &[&"silenced@acme.com", &PRODUCT_NEWS],
+        )
+        .await
+        .unwrap();
+    let ledger = campaigns(pool.clone(), &aws, core, token);
+
+    let created = ledger.create(OPERATOR, draft("Update")).await.unwrap();
+    let prepared = ledger.prepare(created.id, created.revision).await.unwrap();
+
+    assert_eq!(prepared.sample, vec!["listening@acme.com".to_string()]);
+    assert_eq!(
+        prepared.counts.audience, 1,
+        "a preference set in chat never reaches SES, so the audience has to read it here"
+    );
+}
+
+#[tokio::test]
 async fn an_approval_names_the_revision_and_the_count_it_was_granted_over() {
     let pool = ledger_pool().await;
     let (_directory, token) = token_file();
@@ -340,6 +381,96 @@ async fn editing_approved_content_drops_the_approval_and_the_frozen_list() {
     assert_eq!(
         frozen, 0,
         "the list belonged to the words that were replaced"
+    );
+}
+
+#[tokio::test]
+async fn a_member_who_silences_our_news_after_the_audience_froze_is_not_sent_to() {
+    let pool = ledger_pool().await;
+    let (_directory, token) = token_file();
+    let (aws, aws_log) = spawn_http(vec![
+        (200, STS_RESPONSE.to_string()),
+        (200, NO_CONTACTS.to_string()),
+        (200, STS_RESPONSE.to_string()),
+        (200, sent("message-one")),
+    ])
+    .await;
+    let (core, _core_log) = spawn_http(vec![
+        (
+            200,
+            seated(&[
+                ("stays@acme.com", Uuid::new_v4()),
+                ("leaves@acme.com", Uuid::new_v4()),
+            ]),
+        ),
+        (200, NO_SEATS.to_string()),
+    ])
+    .await;
+    let ledger = campaigns(pool.clone(), &aws, core, token.clone());
+
+    let created = ledger.create(OPERATOR, draft("Update")).await.unwrap();
+    ledger.prepare(created.id, created.revision).await.unwrap();
+    ledger
+        .approve(created.id, created.revision, 2, OPERATOR)
+        .await
+        .unwrap();
+
+    // Between the freeze and the send, which is the whole of the window this covers.
+    pool.get()
+        .await
+        .unwrap()
+        .execute(
+            &format!("insert into {PREFERENCE_TABLE} (email, topic) values ($1, $2)"),
+            &[&"leaves@acme.com", &PRODUCT_NEWS],
+        )
+        .await
+        .unwrap();
+
+    ledger
+        .schedule(created.id, created.revision, Utc::now())
+        .await
+        .unwrap();
+    let sends = CampaignSends {
+        pool: pool.clone(),
+        sender: sender(&aws, token),
+        apex_host: APEX.to_string(),
+        worker_id: "test.1".to_string(),
+        poll_interval: std::time::Duration::from_millis(1),
+    };
+    for _ in 0..4 {
+        sends.poll().await.unwrap();
+    }
+
+    let posted = aws_log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|exchange| exchange.path == "/v2/email/outbound-emails")
+        .count();
+    assert_eq!(
+        posted, 1,
+        "the address that left after the freeze is not sent to"
+    );
+
+    let states: Vec<(String, String)> = pool
+        .get()
+        .await
+        .unwrap()
+        .query(
+            &format!("select email, state from {RECIPIENT_TABLE} order by email"),
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get("email"), row.get("state")))
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            ("leaves@acme.com".to_string(), "cancelled".to_string()),
+            ("stays@acme.com".to_string(), "sent".to_string()),
+        ]
     );
 }
 

@@ -14,6 +14,7 @@ from datetime import timedelta
 from uuid import UUID
 
 from ufo.sdk.context import ExtensionContext
+from ufo.sdk.email import PRODUCT_NEWS
 from ufo.sdk.grants import connection_summaries
 from ufo.sdk.seats import Seats, has_spoken, invited_member, workspace_domain
 
@@ -71,7 +72,11 @@ class Composed:
     the attempt row is keyed by, so an operator reading either ledger can tell one step of one
     sequence from another.
 
-    Words, never markup: control draws every message this deploy sends in the one frame."""
+    Words, never markup: control draws every message this deploy sends in the one frame.
+
+    Every sequence is product news. What a sequence has to say is about the product, and a member
+    who asked to hear nothing more about it has asked about exactly this — where a notice about
+    their workspace's money is not theirs to silence, and carries the transactional topic."""
 
     address: str
     kind: str
@@ -79,6 +84,7 @@ class Composed:
     body: str
     action_label: str | None = None
     action_url: str | None = None
+    topic: str = PRODUCT_NEWS
 
 
 @dataclass(frozen=True)

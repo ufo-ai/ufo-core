@@ -480,6 +480,7 @@ def run(fleet: Fleet) -> None:
             public_base_url=config.connect.public_base_url,
             home_surface=browser_home,
             artifact_token_secret=artifact_secret,
+            email=email_sends_from_env(),
             invoker_for=invoker_for,
             probes=probes,
         ),

@@ -1,9 +1,11 @@
 {
   "send_path": "/internal/email/send",
   "delivery_path": "/internal/email/send/0100019a1b2c3d4e-5f6a7b8c-9d0e-1f2a-3b4c-5d6e7f8a9b0c-000000",
+  "preference_path": "/internal/email/preference",
   "send_request": {
     "email": "member@acme.com",
     "kind": "balance_exhausted",
+    "topic": "transactional",
     "subject": "acme.com is out of credit",
     "body": "acme.com has no credit left, so the agent has stopped answering. It starts again as soon as credit is added.",
     "action_label": "Add credit",
@@ -17,5 +19,14 @@
   },
   "unreported_response": {
     "delivery": null
+  },
+  "preference_request": {
+    "email": "member@acme.com",
+    "topic": "product_news",
+    "silenced": true
+  },
+  "preference_response": {
+    "topic": "product_news",
+    "silenced": true
   }
 }

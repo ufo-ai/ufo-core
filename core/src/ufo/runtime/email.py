@@ -27,6 +27,12 @@ CONTROL_EMAIL_TOKEN_ENV = "UFO_ONBOARD_CONTROL_TOKEN"
 
 SEND_PATH = "/internal/email/send"
 SEQUENCES_PATH = "/internal/lifecycle/sequences"
+PREFERENCE_PATH = "/internal/email/preference"
+
+TRANSACTIONAL = "transactional"
+"""Everything a workspace is doing with a member's money or access. Never silenced."""
+PRODUCT_NEWS = "product_news"
+"""Everything else. A member silences it and keeps the rest."""
 SEND_TIMEOUT_SECONDS = 20.0
 
 REFUSAL_MAX_CHARS = 500
@@ -66,6 +72,7 @@ class EmailSends:
         *,
         address: str,
         kind: str,
+        topic: str,
         subject: str,
         body: str,
         action_label: str | None = None,
@@ -77,6 +84,7 @@ class EmailSends:
             json={
                 "email": address,
                 "kind": kind,
+                "topic": topic,
                 "subject": subject,
                 "body": body,
                 "action_label": action_label,
@@ -86,6 +94,17 @@ class EmailSends:
         message_id: str = answered["message_id"]
         log("email.sent", kind=kind, message_id=message_id)
         return message_id
+
+    async def silence(self, address: str, topic: str, *, silenced: bool) -> None:
+        """Record, or lift, what a member asked for. It is kept where suppression is applied
+        rather than beside the extension that heard it, so one place decides what goes out.
+
+        `transactional` is refused: a member cannot silence what their workspace is doing with
+        their money, and an extension that tries is told so rather than quietly doing nothing."""
+        await self._ask(
+            "POST", PREFERENCE_PATH, json={"email": address, "topic": topic, "silenced": silenced}
+        )
+        log("email.preference", topic=topic, silenced=str(silenced))
 
     async def sequences(self) -> tuple[dict, ...]:
         """The drip sequences an operator has approved, as control holds them: the row's id, a

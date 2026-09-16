@@ -6,7 +6,9 @@ use deadpool_postgres::Pool;
 use harness::{ledger_pool, spawn_http, Exchange};
 use ufo_control::campaign_feedback::{CampaignFeedback, FeedbackQueue};
 use ufo_control::email::{AwsEndpoints, EmailSender, SesEmailSender};
-use ufo_control::email_send::{Asked, EmailSends, SendError, TABLE};
+use ufo_control::email_send::{
+    Asked, EmailSends, Preference, SendError, PRODUCT_NEWS, TABLE, TRANSACTIONAL,
+};
 
 const STS_RESPONSE: &str = r#"<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
   <AssumeRoleWithWebIdentityResult>
@@ -26,6 +28,7 @@ fn asked(email: &str) -> Asked {
     Asked {
         email: email.to_string(),
         kind: "balance_exhausted".to_string(),
+        topic: TRANSACTIONAL.to_string(),
         subject: "acme.com is out of credit".to_string(),
         body: "acme.com has no credit left, so the agent has stopped answering.".to_string(),
         action_label: Some("Add credit".to_string()),
@@ -277,6 +280,94 @@ async fn a_malformed_ask_is_refused_with_the_reason() {
         log.lock().unwrap().is_empty(),
         "nothing malformed reaches SES"
     );
+}
+
+#[tokio::test]
+async fn a_silenced_topic_bars_product_news_and_never_the_transactional() {
+    let pool = ledger_pool().await;
+    let (_directory, token_file) = projected_token();
+    let (aws, log) = spawn_http(vec![
+        (200, STS_RESPONSE.to_string()),
+        (200, r#"{"MessageId": "message-one"}"#.to_string()),
+        (200, STS_RESPONSE.to_string()),
+        (200, r#"{"MessageId": "message-two"}"#.to_string()),
+    ])
+    .await;
+    let sends = EmailSends {
+        pool,
+        sender: ses(&aws, token_file),
+        apex_host: APEX.to_string(),
+    };
+
+    sends
+        .prefer(Preference {
+            email: "Member@Acme.com".to_string(),
+            topic: PRODUCT_NEWS.to_string(),
+            silenced: true,
+        })
+        .await
+        .unwrap();
+
+    let news = Asked {
+        kind: "connect_something_reminder".to_string(),
+        topic: PRODUCT_NEWS.to_string(),
+        ..asked("member@acme.com")
+    };
+    let refusal = sends.send(news.clone()).await.unwrap_err();
+    assert!(
+        matches!(refusal, SendError::Silenced { ref topic, .. } if topic == PRODUCT_NEWS),
+        "a member who asked to hear nothing more about the product hears nothing more"
+    );
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "the refusal lands before SES"
+    );
+
+    sends.send(asked("member@acme.com")).await.unwrap();
+    assert!(
+        !log.lock().unwrap().is_empty(),
+        "what the workspace is doing with their money is still theirs to read"
+    );
+
+    sends
+        .prefer(Preference {
+            email: "member@acme.com".to_string(),
+            topic: PRODUCT_NEWS.to_string(),
+            silenced: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        sends.send(news).await.is_ok(),
+        "a member can ask for it back"
+    );
+}
+
+#[tokio::test]
+async fn the_transactional_topic_cannot_be_silenced() {
+    let pool = ledger_pool().await;
+    let (_directory, token_file) = projected_token();
+    let (aws, _log) = spawn_http(Vec::new()).await;
+    let sends = EmailSends {
+        pool,
+        sender: ses(&aws, token_file),
+        apex_host: APEX.to_string(),
+    };
+
+    for topic in [TRANSACTIONAL, "invented"] {
+        let refusal = sends
+            .prefer(Preference {
+                email: "member@acme.com".to_string(),
+                topic: topic.to_string(),
+                silenced: true,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refusal, SendError::Refused(stated) if stated.contains("topic a member can")),
+            "{topic} is not a member's to silence"
+        );
+    }
 }
 
 #[tokio::test]

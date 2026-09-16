@@ -15,7 +15,10 @@ import pytest
 from ufo.runtime.email import (
     CONTROL_EMAIL_TOKEN_ENV,
     CONTROL_EMAIL_URL_ENV,
+    PREFERENCE_PATH,
+    PRODUCT_NEWS,
     SEND_PATH,
+    TRANSACTIONAL,
     EmailRefused,
     EmailSends,
     EmailUnanswered,
@@ -42,6 +45,7 @@ async def send_the_contract(sends: EmailSends) -> str:
     return await sends.send(
         address=asked["email"],
         kind=asked["kind"],
+        topic=asked["topic"],
         subject=asked["subject"],
         body=asked["body"],
         action_label=asked["action_label"],
@@ -119,3 +123,23 @@ def test_a_deploy_with_no_control_service_wires_no_seam(monkeypatch: pytest.Monk
     monkeypatch.delenv(CONTROL_EMAIL_TOKEN_ENV, raising=False)
     with pytest.raises(RuntimeError, match=CONTROL_EMAIL_TOKEN_ENV):
         email_sends_from_env()
+
+
+async def test_a_preference_posts_the_contract_body_under_its_own_path() -> None:
+    """A member's own address and the one topic they may silence, carried to the place suppression
+    is applied rather than kept beside the extension that heard it."""
+    seen: list[httpx.Request] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=CONTRACT["preference_response"])
+
+    asked = CONTRACT["preference_request"]
+    await seam(gateway).silence(asked["email"], asked["topic"], silenced=asked["silenced"])
+
+    (request,) = seen
+    assert request.method == "POST"
+    assert request.url.path == CONTRACT["preference_path"] == PREFERENCE_PATH
+    assert json.loads(request.content) == asked
+    assert asked["topic"] == PRODUCT_NEWS
+    assert asked["topic"] != TRANSACTIONAL, "the one topic a member cannot silence"

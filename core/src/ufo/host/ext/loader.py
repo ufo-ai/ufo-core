@@ -67,6 +67,7 @@ from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore, HostChoice
 from ufo.runtime.access.grants import ConnectionRecorded
 from ufo.runtime.access.workspace_slots import SlotProvider, WorkspaceSlots
+from ufo.runtime.email import EmailSends
 from ufo.runtime.ext.context import (
     ConversationProbes,
     DeployCredentials,
@@ -502,6 +503,7 @@ def turn_tools(
     artifact_token_secret: str = "",
     member_context_member_id: UUID | None = None,
     member_context_blob: WorkspaceBlobStore | None = None,
+    email: EmailSends | None = None,
     invoker: TurnInvoker | None = None,
     probes: ConversationProbes | None = None,
 ) -> tuple[tuple[ToolDef, ...], dict[str, ExtensionContext], ObjectVerbs]:
@@ -558,6 +560,7 @@ def turn_tools(
             member_context_read=manifest.member_context_read,
             member_context_member_id=member_context_member_id,
             member_context_blob=member_context_blob,
+            email=email,
             invoker=invoker,
             probes=probes,
             deploy_credentials=deploy_credentials,

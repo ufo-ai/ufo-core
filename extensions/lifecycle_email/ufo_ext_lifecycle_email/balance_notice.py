@@ -30,7 +30,7 @@ from ufo.sdk.balance import (
     unfunded_balances,
 )
 from ufo.sdk.context import ExtensionContext
-from ufo.sdk.email import EmailRefused, EmailSends, EmailUnanswered
+from ufo.sdk.email import TRANSACTIONAL, EmailRefused, EmailSends, EmailUnanswered
 from ufo.sdk.jobs import WorkspaceCandidates, owner_candidates
 from ufo.sdk.seats import Seats, workspace_domain
 from ufo_ext_lifecycle_email.sends import Sends, lifecycle_send, unreported_workspaces
@@ -118,6 +118,7 @@ class BalanceNotice:
                 message_id = await email.send(
                     address=member.email,
                     kind=BALANCE_EXHAUSTED,
+                    topic=TRANSACTIONAL,
                     subject=SUBJECT.format(workspace=named),
                     body=BODY.format(workspace=named),
                     action_label=ACTION_LABEL,

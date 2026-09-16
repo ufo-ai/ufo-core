@@ -6,7 +6,7 @@ use reqwest::redirect::Policy;
 use reqwest::StatusCode;
 use ufo_control::claim::ClaimWorkflow;
 use ufo_control::email::EmailSender;
-use ufo_control::email_send::{EmailSends, SEND_PATH};
+use ufo_control::email_send::{EmailSends, PREFERENCE_PATH, SEND_PATH};
 use ufo_control::gateway::{
     keyed_mark, parse_invite_required, router, stamped_script, GatewayState, Onboarding,
     BILLING_CHOICE, FIRST_MOVE_PROMPT, INVITATION_LOGIN_PATH, JOIN_LOGIN_PATH, LOGIN_PATH,
@@ -1652,6 +1652,7 @@ async fn the_send_seam_answers_only_the_control_token() {
     let asked = serde_json::json!({
         "email": "member@acme.com",
         "kind": "balance_exhausted",
+        "topic": "transactional",
         "subject": "acme.com is out of credit",
         "body": "acme.com has no credit left, so the agent has stopped answering.",
     });
@@ -1674,6 +1675,18 @@ async fn the_send_seam_answers_only_the_control_token() {
         unreadable.status(),
         StatusCode::UNAUTHORIZED,
         "the token is answered before the body is read, so nothing is told the shape"
+    );
+
+    let preference = client()
+        .post(format!("{}{PREFERENCE_PATH}", rig.base))
+        .body("{")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        preference.status(),
+        StatusCode::UNAUTHORIZED,
+        "every bearer-gated route with a body reads the token first, not this one alone"
     );
 
     let admitted = client()

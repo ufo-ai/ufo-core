@@ -8,7 +8,7 @@ import json
 
 import httpx
 
-from ufo.runtime.email import SEQUENCES_PATH, EmailSends
+from ufo.runtime.email import PREFERENCE_PATH, SEQUENCES_PATH, EmailSends
 from ufo.runtime.ext.context import ExtensionContext, context_for
 
 BASE_URL = "https://app.ufo.ai"
@@ -17,13 +17,14 @@ EXTENSION = "lifecycle_email"
 
 
 class Gateway:
-    """What control was asked to send, what SES has said about each message so far, and the drip
-    sequences an operator has approved."""
+    """What control was asked to send, what SES has said about each message so far, the drip
+    sequences an operator has approved, and what a member asked to stop hearing."""
 
     def __init__(self) -> None:
         self.sent: list[dict] = []
         self.reported: dict[str, str | None] = {}
         self.approved: list[dict] = []
+        self.preferences: list[dict] = []
         self.refuse: int | None = None
         self.unreachable = False
         self.next_id = 0
@@ -36,6 +37,12 @@ class Gateway:
             raise httpx.ConnectError("no route", request=request)
         if request.url.path == SEQUENCES_PATH:
             return httpx.Response(200, json={"sequences": self.approved})
+        if request.url.path == PREFERENCE_PATH:
+            asked = json.loads(request.content)
+            self.preferences.append(asked)
+            return httpx.Response(
+                200, json={"topic": asked["topic"], "silenced": asked["silenced"]}
+            )
         if request.method == "GET":
             message_id = request.url.path.rsplit("/", 1)[-1]
             return httpx.Response(200, json={"delivery": self.reported.get(message_id)})

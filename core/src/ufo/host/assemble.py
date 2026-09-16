@@ -52,6 +52,7 @@ from ufo.host.tools.builtins import SPAWN_TOOL
 from ufo.runtime.access.connectors import CliCredential
 from ufo.runtime.access.credentials import CredentialStore
 from ufo.runtime.access.workspace_slots import WorkspaceSlots
+from ufo.runtime.email import EmailSends
 from ufo.runtime.ext.context import ConversationProbes, ExtensionContext, TurnInvoker
 from ufo.runtime.ext.hooks import HookChain
 from ufo.runtime.ext.manifest import Manifest
@@ -122,6 +123,10 @@ class HostEnvironment:
     public_base_url: str | None = None
     home_surface: str | None = None
     artifact_token_secret: str = ""
+    email: EmailSends | None = None
+    """The deploy's one-message send seam, which a tool recording what a member asked to stop
+    hearing reaches through its context. None where no control service is configured, and such a
+    tool then fails loud rather than telling a member their preference was kept."""
     invoker_for: Callable[[UUID], TurnInvoker] | None = None
     """The internal turn seam an extension tool reaches through its context — the same factory the
     jobs role and the delivery sweep hold, bound to the turn's workspace at assembly. A tool that
@@ -254,6 +259,7 @@ class HostEnvironment:
             home_surface=self.home_surface,
             artifact_token_secret=self.artifact_token_secret,
             member_context_blob=self.blob,
+            email=self.email,
             invoker=(
                 None if self.invoker_for is None else self.invoker_for(ws_current().workspace_id)
             ),

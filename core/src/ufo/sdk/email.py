@@ -6,6 +6,12 @@ stay in `servers/control`; this is the seam to them.
 surface lives in named modules like this one."""
 
 from ufo.runtime.email import (
+    PRODUCT_NEWS as PRODUCT_NEWS,
+)
+from ufo.runtime.email import (
+    TRANSACTIONAL as TRANSACTIONAL,
+)
+from ufo.runtime.email import (
     EmailRefused as EmailRefused,
 )
 from ufo.runtime.email import (
