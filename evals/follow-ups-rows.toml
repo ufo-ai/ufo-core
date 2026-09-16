@@ -33,16 +33,6 @@ old = '''A row is work the assistant can start the moment it is pressed. Everyth
 new = ""
 
 [[arm]]
-name = "no-one-decision"
-
-[[arm.replacements]]
-path = "extensions/web/ufo_ext_web/prompts/follow_ups.md"
-old = '''No two rows are the same decision. One act split across the accounts, formats, or destinations it could take is one row, not two.
-
-'''
-new = ""
-
-[[arm]]
 name = "no-silence"
 
 [[arm.replacements]]

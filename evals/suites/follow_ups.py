@@ -84,11 +84,6 @@ GRADING = (
         "is a form, not an offer.",
     ),
     (
-        "distinct",
-        "No two rows are the same decision in different words, including one act split across the "
-        "accounts or formats it could use.",
-    ),
-    (
         "complete",
         "Where the reply proposed work, or named a gap the assistant itself could close, a row "
         "offers it rather than only offering to summarise, compare, or file what was already said.",
@@ -98,19 +93,20 @@ GRADING = (
         "No row offers work this thread already did, or what the reply said it was about to do "
         "next.",
     ),
-    (
-        "voice",
-        "Each hook is the short form of its own prompt and addressed the same way. A hook that "
-        'speaks to the member about their own things — "your mailbox", "your contract '
-        'value" — over a prompt the member speaks to the assistant — "my mailbox" — is two '
-        "voices for one act, and the member reads one and sends the other.",
-    ),
 )
-"""Six criteria, each its own verdict rather than one folded out of all six. A judge that flips on
-one slate in six turns an all-or-nothing fold into a coin — six individually stable criteria fold to
-`0.95 ** 6` — and the run-to-run spread that produced reads as the ranking moving when it is the
-instrument. Scored apart, a flaky criterion costs its own verdict and nothing else, and the same
-judge call answers six verdicts instead of one: the cheapest resolution this suite can buy."""
+"""Each criterion is its own verdict rather than one folded out of all of them. A judge that flips
+on one slate in six turns an all-or-nothing fold into a coin — criteria that are individually stable
+fold to `0.95 ** n` — and the spread that produced reads as the ranking moving when it is the
+instrument. Scored apart, a flaky criterion costs its own verdict alone, and one judge call answers
+them all: the cheapest resolution this suite can buy.
+
+Two were dropped after the first ablation, where they passed 1,260 verdicts out of 1,260 across
+every arm — including the arms deleting the clauses they were written to guard. A criterion that
+cannot fail costs rubric tokens and judge attention and separates nothing. `distinct` went because
+the ranking never split one decision across two rows whether told to or not, and the clause telling
+it not to went with it; `voice` went because it never caught the register mismatch between a hook
+and its prompt, even rewritten to name that defect outright — twice unable to fail is evidence about
+the criterion, not about the ranking."""
 
 
 @dataclass(frozen=True)

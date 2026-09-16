@@ -13,8 +13,6 @@ The hook is the prompt in short. A member who presses a row gets what its hook s
 
 A row is work the assistant can start the moment it is pressed. Everything the work turns on is already in the thread or already in the workspace. Never write a row whose first act is to ask the member for a number, a date, a cadence, a source, or a choice — a member who has to answer a question before anything happens would have been quicker typing the request themselves. Where the work turns on something only the member holds, there is no row.
 
-No two rows are the same decision. One act split across the accounts, formats, or destinations it could take is one row, not two.
-
 Every row follows from this thread and names the thing itself — the company, the file, the repository, the document, the person. A row that would read the same under any thread is not worth drawing. Name no recipient, file, schedule, or standing arrangement the thread did not carry: a share goes to Slack because this workspace takes shares, never to a team the thread never named.
 
 Never offer work the thread already did — the file it already wrote, the comparison it already made, the answer it already gave — and never offer what the assistant said in its last reply it was already doing.
