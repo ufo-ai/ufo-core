@@ -525,7 +525,7 @@ test("a colleague's words stand left on the neutral fill, the viewer's own right
 
   const own = screen.getByText("thanks").closest("[data-role=me]")!;
   expect(own.getAttribute("data-align")).toBe("end");
-  expect(own.getAttribute("data-variant")).toBe("default");
+  expect(own.getAttribute("data-variant")).toBe("said");
   expect(own.className).toContain("*:data-[slot=bubble-content]:bg-said");
   expect(own.closest("[data-slot=message]")!.getAttribute("data-align")).toBe("end");
 
@@ -3729,10 +3729,10 @@ test("agent markdown renders as elements while the member's text stays literal",
   });
 
   expect((await screen.findByText("bold")).tagName).toBe("STRONG");
-  const agentSide = screen.getByText("bold").closest("[data-slot=bubble-content]")!;
-  expect(agentSide.className).not.toContain("whitespace-pre-wrap");
-  const mineSide = screen.getByText("**hi**").closest("[data-slot=bubble-content]")!;
-  expect(mineSide.className).toContain("whitespace-pre-wrap");
+  const bubbleOf = (text: string) =>
+    screen.getByText(text).closest("[data-slot=bubble]")!.getAttribute("data-variant");
+  expect(bubbleOf("bold")).toBe("ghost");
+  expect(bubbleOf("**hi**")).toBe("said");
   const link = await screen.findByRole("link", { name: "docs" });
   expect(link.getAttribute("href")).toBe("https://example.com/d");
   expect(screen.getByText("**hi**").textContent).toBe("**hi**");

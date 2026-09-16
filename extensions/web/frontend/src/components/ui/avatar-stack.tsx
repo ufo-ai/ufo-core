@@ -1,6 +1,5 @@
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { BRAND_MARKS, BrandMark } from "@/lib/brandMark";
-import { cn } from "@/lib/cn";
 import { FaceCircle } from "@/lib/memberFace";
 
 export type AvatarStackPerson = {
@@ -9,7 +8,6 @@ export type AvatarStackPerson = {
 };
 
 const SHOWN = 3;
-const CIRCLE = "border border-card";
 const OVERLAP = "-ml-2xs";
 const LEADING_WWW = /^www\./;
 
@@ -42,7 +40,7 @@ export function AvatarStack({ people }: { people: readonly AvatarStackPerson[] }
         <Face key={`${index}:${person.name}`} person={person} overlapped={index > 0} />
       ))}
       {rest ? (
-        <Avatar className={cn(CIRCLE, OVERLAP)}>
+        <Avatar stacked className={OVERLAP}>
           <AvatarFallback aria-hidden>+{rest}</AvatarFallback>
         </Avatar>
       ) : null}
@@ -52,10 +50,10 @@ export function AvatarStack({ people }: { people: readonly AvatarStackPerson[] }
 
 function Face({ person, overlapped }: { person: AvatarStackPerson; overlapped: boolean }) {
   const mark = person.company ? vendoredMark(person.company) : null;
-  const circle = cn(CIRCLE, overlapped && OVERLAP);
+  const overlap = overlapped ? OVERLAP : undefined;
   if (mark) {
     return (
-      <Avatar title={person.name} className={circle}>
+      <Avatar stacked title={person.name} className={overlap}>
         <AvatarFallback aria-hidden>
           <BrandMark provider={mark} className="size-full rounded-full" />
         </AvatarFallback>
@@ -68,7 +66,8 @@ function Face({ person, overlapped }: { person: AvatarStackPerson; overlapped: b
       photo={null}
       tint={person.name}
       title={person.name}
-      className={circle}
+      stacked
+      className={overlap}
     />
   );
 }

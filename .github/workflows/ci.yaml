@@ -202,6 +202,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: extensions/web/frontend/pnpm-lock.yaml
       - run: pnpm -C extensions/web/frontend install --frozen-lockfile
+      - run: pnpm -C extensions/web/frontend run lint
       - run: pnpm -C extensions/web/frontend run build
       - uses: actions/upload-artifact@v4
         with:

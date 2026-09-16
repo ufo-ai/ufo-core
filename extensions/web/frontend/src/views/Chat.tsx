@@ -1,36 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
-import {
-  IconCheck,
-  IconChevronRight,
-  IconCornerDownRight,
-  IconCreditCardOff,
-  IconPlug,
-} from "@tabler/icons-react";
-
-import logo from "@/assets/ufo-logo.svg";
+import { IconCreditCardOff } from "@tabler/icons-react";
 
 import { CredentialPromptForm } from "@/views/CredentialPrompt";
-import {
-  Questionnaire,
-  QuestionnaireActions,
-  QuestionnaireChoice,
-  QuestionnaireChoiceDescription,
-  QuestionnaireChoices,
-  QuestionnaireError,
-  QuestionnaireInput,
-  QuestionnaireItem,
-  QuestionnaireOnward,
-  QuestionnaireSkip,
-  QuestionnaireStepper,
-  QuestionnaireSubmit,
-  QuestionnaireTitle,
-  KEY,
-  ROW,
-  type QuestionnaireItemDefinition,
-} from "@/components/ui/questionnaire";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Asked, choosable, openEntries } from "@/components/ui/asked";
+import { buttonVariants } from "@/components/ui/button";
+import { Handoff } from "@/components/ui/handoff";
+import { OfferRows } from "@/components/ui/offers";
 import {
   PromptInput,
   PromptInputAttach,
@@ -41,16 +17,21 @@ import {
   PromptInputTextarea,
   PromptInputToolbar,
 } from "@/components/ui/prompt-input";
-import { Skeleton } from "@/components/ui/skeleton";
+import {
+  FALLBACK_ROWS,
+  Starters,
+  Wordmark,
+  type StarterRow,
+  type UnlockRow,
+} from "@/components/ui/starters";
 import { SILENT, Toast } from "@/components/ui/toast";
+import { Watching } from "@/components/ui/watching";
 import {
   MessageLog,
-  Meta,
   TranscriptPane,
   TranscriptScroll,
   useTakeMeToTheFoot,
 } from "@/kernel/messages";
-import { PressRow, PRESS_ROW, PRESS_ROW_CHEVRON } from "@/components/ui/pressrow";
 import { takeFocus } from "@/kernel/focus";
 import { COLUMN } from "@/kernel/pane";
 import { Empty, usePanelRead } from "@/kernel/panel";
@@ -79,7 +60,7 @@ import { useEarlierMessages } from "@/lib/earlier";
 import { CHAT_SURFACE } from "@/lib/mainAgent";
 import { AUTO_MODEL } from "@/lib/models";
 import { setPendingAsk, takePendingAsk, watchPendingAsk } from "@/lib/pendingAsk";
-import { newChatHash, sectionHash, workspaceHash } from "@/lib/route";
+import { newChatHash, workspaceHash } from "@/lib/route";
 import { navigate, useRoute } from "@/lib/router";
 import { uploadAttachment, type UploadRef } from "@/lib/api";
 import {
@@ -90,7 +71,7 @@ import {
   stopTurn,
   type ChatTarget,
 } from "@/lib/turnStream";
-import type { ChatQuestion, Member, QuestionEntry, QuestionOption } from "@/lib/types";
+import type { ChatQuestion, Member, QuestionEntry } from "@/lib/types";
 
 export type ChatAgent = {
   id: string;
@@ -260,7 +241,7 @@ export function Chat({
               readOnly
                 ? undefined
                 : (question) => (
-                    <Question
+                    <Answering
                       target={target}
                       question={question}
                       held={held}
@@ -319,7 +300,7 @@ export function Chat({
       )}
       {readOnly ? (
         watched !== null && watched === stops ? (
-          <Watching target={target} turnId={watched} />
+          <Watching onStop={() => stopTurn(target, watched)} />
         ) : null
       ) : (
         <Composer
@@ -343,29 +324,6 @@ export function Chat({
         onDone={() => updateChat(chatKey, (current) => ({ ...current, fault: null }))}
       />
     </TranscriptScroll>
-  );
-}
-
-const STOP = "Stop";
-
-/** The one act a watched conversation offers while its turn runs: the stop the composer would
- *  carry, standing where the composer would. The surface decides who may press it. */
-function Watching({ target, turnId }: { target: ChatTarget; turnId: string }) {
-  const [stopping, setStopping] = useState(false);
-  return (
-    <div className={cn(COLUMN, "flex shrink-0 justify-end px-2xl py-lg")}>
-      <Button
-        variant="row"
-        busy={stopping}
-        onClick={async () => {
-          setStopping(true);
-          await stopTurn(target, turnId);
-          setStopping(false);
-        }}
-      >
-        {STOP}
-      </Button>
-    </div>
   );
 }
 
@@ -438,106 +396,7 @@ export function FoundingChat({
   );
 }
 
-function Handoff({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex max-w-bubble flex-col gap-sm self-start rounded-bubble border border-edge px-lg py-md">
-      {children}
-    </div>
-  );
-}
-
-
-const MAX_ANSWER_OPTIONS = 10;
-
-const MIN_ANSWER_OPTIONS = 2;
-
-function choosable(entry: QuestionEntry): boolean {
-  return Boolean(
-    entry.options &&
-      entry.options.length >= MIN_ANSWER_OPTIONS &&
-      entry.options.length <= MAX_ANSWER_OPTIONS &&
-      !entry.free_text_only &&
-      !entry.allow_attachments,
-  );
-}
-
-function typed(entry: QuestionEntry): boolean {
-  return (
-    !entry.allow_attachments &&
-    (Boolean(entry.free_text_only) || (entry.options ?? []).length < MIN_ANSWER_OPTIONS)
-  );
-}
-
-const KEYS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
-type SettledRow = { entry: QuestionEntry; answer: string };
-
-function answerKey(entry: QuestionEntry, words: string): string {
-  const options = choosable(entry) ? (entry.options ?? []) : [];
-  const at = options.findIndex((option) => option.label === words);
-  return KEYS[at === -1 ? options.length : at];
-}
-
-const ANSWERED_MS = 320;
-
-function opened(entry: QuestionEntry): string | undefined {
-  const options = entry.options ?? [];
-  if (entry.chosen) return entry.chosen;
-  const lone = options.length === 1 && !entry.free_text_only && !entry.allow_attachments;
-  return lone ? options[0].label : undefined;
-}
-
-function already(entry: QuestionEntry): boolean {
-  return !entry.multi_select && opened(entry) !== undefined;
-}
-
-function written(entry: QuestionEntry): string | undefined {
-  const answer = opened(entry);
-  if (choosable(entry) && (entry.options ?? []).some((option) => option.label === answer)) {
-    return undefined;
-  }
-  return answer;
-}
-
-function suggested(entry: QuestionEntry): QuestionOption[] {
-  const options = entry.options ?? [];
-  return options.filter((option) => option.label !== written(entry));
-}
-
-function Settled({ rows, restated }: { rows: SettledRow[]; restated: boolean }) {
-  return (
-    <div className="flex flex-col gap-md rounded-panel bg-fill p-lg">
-      {rows.map(({ entry, answer }, index) => {
-        const words = restated ? answer.slice(0, -(entry.question.length + 3)) : answer;
-        return (
-          <div key={index} className="flex flex-col gap-sm">
-            <div className="text-ui leading-chrome font-medium text-pretty">{entry.question}</div>
-            <div className={cn(ROW, "bg-surface text-ink-soft")}>
-              <span aria-hidden className={KEY}>
-                {answerKey(entry, words)}
-              </span>
-              <span className="min-w-0 flex-1 truncate">{words}</span>
-              <IconCheck aria-hidden className="size-icon shrink-0" />
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/* The card draws these and the thread's foot withholds its rows while any stand. Only the
-   transcript read writes `closed`, so a foot reading it alone stayed shut for the session. */
-function openEntries(question: ChatQuestion): { entry: QuestionEntry; index: number }[] {
-  const landed = question.answered ?? {};
-  return question.closed
-    ? []
-    : (question.questions ?? [])
-        .map((entry, index) => ({ entry, index }))
-        .filter(({ index }) => landed[index] === undefined);
-}
-
-function Question({
+function Answering({
   target,
   question,
   held,
@@ -548,133 +407,17 @@ function Question({
   held: boolean;
   onAct: () => void;
 }) {
-  const asked: QuestionEntry[] = question.questions ?? [];
   const toTheFoot = useTakeMeToTheFoot();
-  const landed = question.answered ?? {};
-  const open = openEntries(question);
-  const settled = asked
-    .map((entry, index) => ({ entry, answer: landed[index] }))
-    .filter((row): row is SettledRow => row.answer !== undefined);
-  const steppable = open.filter(({ entry }) => choosable(entry) || typed(entry));
-  const prose = open.filter(({ entry }) => !choosable(entry) && !typed(entry));
-  // Declared choices and drawn choices are one list: an entry naming options the form does not render
-  // leaves the primitive holding a choice with nowhere to be, which it says on the console.
-  const items: QuestionnaireItemDefinition[] = steppable.map(({ entry, index }) => ({
-    name: String(index),
-    ...(choosable(entry)
-      ? { choices: (entry.options ?? []).map((option) => ({ value: option.label })) }
-      : {}),
-  }));
-  const names = items.map((item) => item.name);
-  const onward = (from: number): string | undefined => {
-    const next = steppable.findIndex(({ entry }, index) => index > from && !already(entry));
-    return next === -1 ? undefined : names[next];
-  };
-  const [at, setAt] = useState(onward(-1) ?? names[0]);
-  const moving = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => clearTimeout(moving.current ?? undefined), []);
   return (
-    <div className="mt-lg flex max-w-bubble flex-col gap-lg rounded-panel border border-edge p-xl">
-      {question.title || question.icon ? (
-        <div className="flex items-center gap-lg">
-          <div className="min-w-0 flex-1 text-label font-medium text-ink-soft">{question.title}</div>
-          {question.icon ? (
-            <Avatar>
-              <AvatarFallback>
-                <AgentIcon name={question.icon} />
-              </AvatarFallback>
-            </Avatar>
-          ) : null}
-        </div>
-      ) : null}
-      {settled.length ? <Settled rows={settled} restated={asked.length !== 1} /> : null}
-      {prose.map(({ entry, index }) => (
-        <div key={index} className="flex flex-col gap-xs">
-          <div>{entry.header ? entry.header + " — " + entry.question : entry.question}</div>
-          {(entry.options ?? []).map((option) => (
-            <Meta key={option.label}>
-              {option.description ? option.label + " — " + option.description : option.label}
-            </Meta>
-          ))}
-          <Meta>
-            {entry.multi_select
-              ? "Select all that apply — answer in the message box below."
-              : "Answer in the message box below."}
-          </Meta>
-        </div>
-      ))}
-      {steppable.length ? (
-        <Questionnaire
-          items={items}
-          item={at}
-          onItemChange={(name) => {
-            clearTimeout(moving.current ?? undefined);
-            setAt(name);
-          }}
-          onSubmit={(event) => {
-            event.preventDefault();
-            const answers = new FormData(event.currentTarget);
-            onAct();
-            toTheFoot();
-            void deliver(target, question, asked, steppable, answers);
-          }}
-        >
-          {steppable.map(({ entry, index }) => (
-            <QuestionnaireItem key={index} name={String(index)} multiple={entry.multi_select ?? undefined}>
-              <QuestionnaireTitle>{entry.question}</QuestionnaireTitle>
-              <QuestionnaireChoices>
-                {choosable(entry)
-                  ? (entry.options ?? []).map((option) => (
-                      <QuestionnaireChoice
-                        key={option.label}
-                        value={option.label}
-                        defaultChecked={option.label === entry.chosen}
-                        // Arrowing through a radio group fires a click on every option the arrows pass — detail 0, no pointer
-                        // under it — so a run that moved on those would carry a keyboard member off the question mid-read.
-                        onClick={(event) => {
-                          if (entry.multi_select || event.detail === 0) return;
-                          const next = onward(names.indexOf(String(index)));
-                          if (next === undefined) return;
-                          clearTimeout(moving.current ?? undefined);
-                          moving.current = setTimeout(() => setAt(next), ANSWERED_MS);
-                        }}
-                      >
-                        <span>{option.label}</span>
-                        {option.description ? (
-                          <QuestionnaireChoiceDescription>
-                            {option.description}
-                          </QuestionnaireChoiceDescription>
-                        ) : null}
-                      </QuestionnaireChoice>
-                    ))
-                  : suggested(entry).map((option) => (
-                      <Meta key={option.label}>
-                        {option.description
-                          ? option.label + " — " + option.description
-                          : option.label}
-                      </Meta>
-                    ))}
-                {entry.multi_select && choosable(entry) ? null : (
-                  <QuestionnaireInput
-                    aria-label={entry.question}
-                    placeholder="Your answer"
-                    shortcut={KEYS[choosable(entry) ? (entry.options ?? []).length : 0]}
-                    defaultValue={written(entry)}
-                  />
-                )}
-              </QuestionnaireChoices>
-              <QuestionnaireError />
-            </QuestionnaireItem>
-          ))}
-          <QuestionnaireActions>
-            {steppable.length > 1 ? <QuestionnaireStepper /> : null}
-            <QuestionnaireSkip />
-            <QuestionnaireOnward />
-            <QuestionnaireSubmit disabled={held} />
-          </QuestionnaireActions>
-        </Questionnaire>
-      ) : null}
-    </div>
+    <Asked
+      question={question}
+      held={held}
+      onAnswer={(answers, open) => {
+        onAct();
+        toTheFoot();
+        void deliver(target, question, question.questions ?? [], open, answers);
+      }}
+    />
   );
 }
 
@@ -921,7 +664,7 @@ function Composer({
       >
         {starting ? <Wordmark /> : null}
         {box}
-        {starting ? <Starters agentId={target.agentId} /> : null}
+        {starting ? <RankedStarters agentId={target.agentId} /> : null}
       </div>
     </div>
   );
@@ -937,14 +680,6 @@ const FOLLOW_UPS_EVERY_MS = 600_000;
 /* Except while another read is writing this turn's rows, which is over in a second or two. */
 const FOLLOW_UPS_RANKING_MS = 2_000;
 
-/* Every row that sends a sentence draws the same arrow: the mark says the press sends the words,
-   which is the one thing these rows have to say before they are read. */
-function AskMark() {
-  return <IconCornerDownRight className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />;
-}
-
-/* A row reads as the few words of its hook and sends the prompt behind it, which states the work in
-   full; the rule says the words under it are the member's rather than the agent's. */
 function FollowUps({
   agentId,
   conversationId,
@@ -962,147 +697,29 @@ function FollowUps({
   );
   const read = answered.phase === "ready" ? answered.payload : null;
   useEffect(() => setRanking(read?.ranking ?? false), [read]);
-  const offers = read?.offers ?? [];
-  if (!offers.length) return null;
-  return (
-    <div data-testid="follow-ups" className="mt-2xl flex flex-col border-t border-edge pt-lg">
-      {offers.map((offer) => (
-        <PressRow
-          key={offer.hook}
-          glyph={<AskMark />}
-          line={offer.hook}
-          onPress={() => onPress(offer.prompt)}
-        />
-      ))}
-    </div>
-  );
+  return <OfferRows offers={read?.offers ?? []} onPress={onPress} />;
 }
 
-function Wordmark() {
-  return (
-    <span
-      role="img"
-      aria-label="ufo"
-      className="mx-auto mb-8xl block h-(--size-wordmark-hero) w-(--size-logo-hero) bg-current max-narrow:hidden"
-      style={{ mask: `url(${logo}) center / contain no-repeat` }}
-    />
-  );
-}
-
-type StarterRow = {
-  kind: "app" | "check_in" | "unlock";
-  line: string;
-  ask: string;
-  agent_id?: string | null;
-  providers?: MissingTile[];
-};
-type MissingTile = { name: string; label: string };
-type UnlockRow = {
-  line: string;
-  ask: string;
-  agent_id?: string | null;
-  providers: MissingTile[];
-};
 type StartersPayload = { starters: StarterRow[]; unlock: UnlockRow | null };
 
 const STARTERS_READ = "/workspace/starters";
 const STARTERS_EVERY_MS = 300_000;
-const STARTER_PLACES = ["w-4/5", "w-3/5", "w-2/3"];
 
-const STARTERS: { line: string; ask: string }[] = [
-  {
-    line: "Track the competitors you name, with a source for every claim.",
-    ask: "I want an application that tracks the competitors I name and writes up what changed, with a source for each claim.",
-  },
-  {
-    line: "Research a market, company, or person on request.",
-    ask: "I want an application that researches a market, company, or person on request and cites every claim.",
-  },
-  {
-    line: "Draft recurring updates, announcements, and posts.",
-    ask: "I want an application that drafts our recurring updates, announcements, and posts.",
-  },
-];
-
-const FALLBACK_ROWS: StarterRow[] = STARTERS.map((starter) => ({ kind: "app", ...starter }));
-
-function namedTiles(providers: MissingTile[]): string {
-  const labels = providers.map((tile) => tile.label);
-  return labels.length < 2
-    ? labels.join("")
-    : labels.slice(0, -1).join(", ") + " and " + labels.at(-1);
-}
-
-function StarterWaiting({ width }: { width: string }) {
-  return (
-    <div
-      data-part="starter-waiting"
-      className={cn(PRESS_ROW, "pointer-events-none hover:bg-transparent")}
-      aria-hidden
-    >
-      <Skeleton className="size-(--size-glyph) shrink-0" />
-      <span className="relative min-w-0 flex-1">
-        {"\u00a0"}
-        <Skeleton className={cn("absolute inset-y-0 left-0", width)} />
-      </span>
-      <span className="size-(--size-glyph) shrink-0" />
-    </div>
-  );
-}
-
-function Starters({ agentId }: { agentId: string }) {
+function RankedStarters({ agentId }: { agentId: string }) {
   const read = usePanelRead<StartersPayload>(STARTERS_READ, 0, STARTERS_EVERY_MS);
   const answered = read.phase === "ready" ? read.payload : null;
   const rows = answered?.starters?.length ? answered.starters : FALLBACK_ROWS;
   const unlock = answered?.unlock?.providers?.length ? answered.unlock : null;
-  const start = (target: string | null | undefined, ask: string, kind: string) => {
-    const next = target ?? agentId;
-    setPendingAsk(next, ask, true, null, kind);
-    if (next !== agentId) navigate(newChatHash(next));
-  };
   return (
-    <div className="mt-2xl flex flex-col">
-      {read.phase === "loading" ? (
-        STARTER_PLACES.map((width) => <StarterWaiting key={width} width={width} />)
-      ) : (
-        rows.map((row) => (
-          <PressRow
-            key={row.agent_id ?? `${row.kind}:${row.ask}`}
-            glyph={<AskMark />}
-            line={row.line}
-            onPress={() => start(row.agent_id, row.ask, row.kind)}
-          />
-        ))
-      )}
-      {read.phase === "loading" ? (
-        <ConnectWaiting />
-      ) : unlock ? (
-        <PressRow
-          glyph={<AskMark />}
-          line={unlock.line}
-          note={"Connect " + namedTiles(unlock.providers) + "."}
-          onPress={() => start(unlock.agent_id, unlock.ask, "unlock")}
-        />
-      ) : (
-        <a href={sectionHash("connectors")} className={PRESS_ROW}>
-          <IconPlug className="size-(--size-glyph) shrink-0 text-ink-soft" aria-hidden />
-          <span className="min-w-0 flex-1 truncate text-ink-soft">
-            Connect more accounts for better suggestions.
-          </span>
-          <IconChevronRight className={PRESS_ROW_CHEVRON} aria-hidden />
-        </a>
-      )}
-    </div>
-  );
-}
-
-/** The connector row's place while the ranking is read: the ranking says whether this row names one
- *  app's accounts or the connectors screen, so a connect act drawn before it lands is taken away. */
-function ConnectWaiting() {
-  return (
-    <div className={cn(PRESS_ROW, "hover:bg-transparent")} aria-hidden>
-      <Skeleton className="size-(--size-glyph) shrink-0" />
-      <Skeleton className="h-(--size-glyph) w-3/5" />
-    </div>
+    <Starters
+      rows={rows}
+      unlock={unlock}
+      waiting={read.phase === "loading"}
+      onStart={(target, ask, kind) => {
+        const next = target ?? agentId;
+        setPendingAsk(next, ask, true, null, kind);
+        if (next !== agentId) navigate(newChatHash(next));
+      }}
+    />
   );
 }

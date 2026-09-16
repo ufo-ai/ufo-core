@@ -1,0 +1,177 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "jsPlugins": [
+    "@shadcn/lint"
+  ],
+  "ignorePatterns": [
+    "dist",
+    "node_modules",
+    "src/apps",
+    "src/blocks"
+  ],
+  "settings": {
+    "shadcn": {
+      "componentImports": [
+        "^@/kernel(/|$)"
+      ],
+      "ignoreImports": [
+        "^@shadcn/react(/|$)",
+        "^@radix-ui/",
+        "^react-resizable-panels$"
+      ]
+    }
+  },
+  "categories": {
+    "correctness": "off"
+  },
+  "rules": {
+    "shadcn/no-raw-colors": [
+      "error",
+      {
+        "allow": [
+          "text-mono",
+          "text-fine",
+          "text-small",
+          "text-label",
+          "text-ui",
+          "text-body",
+          "text-subtitle",
+          "text-title",
+          "text-figure",
+          "shadow-rule",
+          "fill-none"
+        ],
+        "message": "\"{{className}}\" is not a colour the theme declares. Use one of: {{tokens}}, or declare --color-<name> in {{file}}."
+      }
+    ],
+    "shadcn/no-unknown-classes": [
+      "error",
+      {
+        "allow": [
+          "brand-mark",
+          "element-icon",
+          "tabler-icon"
+        ],
+        "message": "\"{{className}}\" generates no CSS. Fix the spelling, or declare it with @utility in {{file}}."
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "src/components/ui/asked.tsx",
+        "src/components/ui/attachment.tsx",
+        "src/components/ui/avatar.tsx",
+        "src/components/ui/bubble-header.tsx",
+        "src/components/ui/bubble.tsx",
+        "src/components/ui/button.tsx",
+        "src/components/ui/connect-link.tsx",
+        "src/components/ui/copy-act.tsx",
+        "src/components/ui/decode.tsx",
+        "src/components/ui/earlier-row.tsx",
+        "src/components/ui/empty.tsx",
+        "src/components/ui/handoff.tsx",
+        "src/components/ui/marker.tsx",
+        "src/components/ui/message-scroller.tsx",
+        "src/components/ui/message.tsx",
+        "src/components/ui/offers.tsx",
+        "src/components/ui/pressrow.tsx",
+        "src/components/ui/prompt-input.tsx",
+        "src/components/ui/questionnaire.tsx",
+        "src/components/ui/skeleton.tsx",
+        "src/components/ui/sources.tsx",
+        "src/components/ui/starters.tsx",
+        "src/components/ui/ticker.tsx",
+        "src/components/ui/toast.tsx",
+        "src/components/ui/turn-activity.tsx",
+        "src/components/ui/turn-apps.tsx",
+        "src/components/ui/turn-files.tsx",
+        "src/components/ui/watching.tsx",
+        "src/kernel/messages.tsx",
+        "src/kernel/panel.tsx",
+        "src/lib/memberFace.tsx",
+        "src/playground/**",
+        "src/views/Chat.tsx",
+        "src/views/ChatPane.tsx"
+      ],
+      "rules": {
+        "shadcn/no-restyle": [
+          "error",
+          {
+            "allow": [
+              "layout",
+              "m-*",
+              "mx-*",
+              "my-*",
+              "mt-*",
+              "mb-*",
+              "ml-*",
+              "mr-*",
+              "ms-*",
+              "me-*",
+              "-m-*",
+              "-mx-*",
+              "-my-*",
+              "-mt-*",
+              "-mb-*",
+              "-ml-*",
+              "-mr-*",
+              "-ms-*",
+              "-me-*",
+              "gap-*",
+              "gap-x-*",
+              "gap-y-*",
+              "top-*",
+              "right-*",
+              "bottom-*",
+              "left-*",
+              "inset-*",
+              "inset-x-*",
+              "inset-y-*",
+              "w-*",
+              "min-w-*",
+              "max-w-*",
+              "scroll-fade-*",
+              "line-fade-*",
+              "scrollbar-*",
+              "lane-share"
+            ],
+            "contracts": [
+              {
+                "pattern": "^(MessageLog|TranscriptPane|Pane)$",
+                "allow": [
+                  "layout",
+                  "spacing",
+                  "p-*",
+                  "px-*",
+                  "py-*",
+                  "pt-*",
+                  "pb-*",
+                  "ps-*",
+                  "pe-*"
+                ],
+                "message": {
+                  "spacing": "A transcript container takes its inset from the page it stands on.",
+                  "default": "\"{{className}}\" is not allowed on <{{component}}>: <{{component}}> owns how it draws itself. Use a variant ({{variants|none declared}}), or add one in {{file}} if the design calls for it."
+                }
+              },
+              {
+                "pattern": "^(Bubble|BubbleContent)$",
+                "deny": [
+                  "w-*",
+                  "max-w-*",
+                  "min-w-*"
+                ],
+                "message": {
+                  "layout": "A message is read at --container-said. Set its measure with a Bubble variant ({{variants|none declared}}), never with a width here.",
+                  "default": "\"{{className}}\" is not allowed on <{{component}}>: <{{component}}> owns how it draws itself. Use a variant ({{variants|none declared}}), or add one in {{file}} if the design calls for it."
+                }
+              }
+            ],
+            "message": "\"{{className}}\" is not allowed on <{{component}}>: <{{component}}> owns how it draws itself. Use a variant ({{variants|none declared}}), or add one in {{file}} if the design calls for it."
+          }
+        ]
+      }
+    }
+  ]
+}

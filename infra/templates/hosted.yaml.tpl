@@ -759,6 +759,9 @@ spec:
             # The terminal client version this deploy serves — the ufo surface tells a stale
             # x-ufo-script to install.
             - {name: UFO_CLIENT_VERSION, value: "${client_version}"}
+            # The design system's own pages: the blocks reference and the chat playground. A
+            # deploy that does not ask for them serves the 404 the route has always given.
+            - {name: UFO_WEB_DESIGN_SURFACES, value: "${design_surfaces}"}
 %{ if rum_recording }
             # The portal's session recording (Datadog RUM). A recording is made in the member's
             # browser, so the page has to name the application it records into — and one image

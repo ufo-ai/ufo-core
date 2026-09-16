@@ -52,6 +52,19 @@ test("a size and a colour spelled text-* both survive", () => {
   }
 });
 
+/** The type scale spells a size `text-…`, which is also how a colour is spelled, so the design
+ *  system linter reads every unlisted step as an undeclared theme colour and refuses the file. */
+test("every type step is a size the design system linter knows", () => {
+  const allowed = new Set(
+    (
+      JSON.parse(readFileSync(join(import.meta.dirname, "../.oxlintrc.json"), "utf8")) as {
+        rules: { "shadcn/no-raw-colors": [string, { allow: string[] }] };
+      }
+    ).rules["shadcn/no-raw-colors"][1].allow,
+  );
+  expect([...listed("TEXT")].filter((step) => !allowed.has(`text-${step}`))).toEqual([]);
+});
+
 test("two sizes still conflict, and the last one wins", () => {
   expect(cn("text-label", "text-title")).toBe("text-title");
   expect(cn("gap-2xl", "gap-8xl")).toBe("gap-8xl");

@@ -109,8 +109,16 @@ COMPOSITION_GAP = re.compile(r"(?<![\w-])gap-(?:x-|y-)?(\[[^\]]*\]|[\w.]+)")
 FRAMED_STAT = re.compile(r"<Stat[\s>][^>]*?(?<![\w-])(border)(?![\w-])", re.S)
 APP_REBUILD_LINE = "takes the platform kit as it stands today"
 APPS_LIST = re.compile(r"const APPS = \[(?P<apps>[^\]]*)\]")
-PORTAL_ENTRIES = frozenset({PORTAL_SOURCE / "main.tsx", PORTAL_SOURCE / "apps" / "kit.ts"})
+PORTAL_ENTRIES = frozenset(
+    {
+        PORTAL_SOURCE / "main.tsx",
+        PORTAL_SOURCE / "apps" / "kit.ts",
+        PORTAL_SOURCE / "playground" / "main.tsx",
+    }
+)
 BLOCKS_SOURCE = PORTAL_SOURCE / "blocks"
+COMPONENT_SOURCE = PORTAL_SOURCE / "components" / "ui"
+KERNEL_IMPORT = re.compile(r"""(?:from|import)\s*\(?\s*["']((?:@/kernel|@/views)/[^"']*)["']""")
 PORTAL_THEME = PORTAL_SOURCE / "theme.css"
 PORTAL_MODULE_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"})
 STYLESHEET_IMPORT = re.compile(r"""["'][^"']*\.css["']""")
@@ -2219,6 +2227,30 @@ def _blocks_boundary_failures() -> list[str]:
     return failures
 
 
+def _component_layer_failures() -> list[str]:
+    """`components/ui` holds the design system's primitives and `kernel` composes them into the
+    screens a member reads. An import the other way inverts that: a primitive drags the kernel's
+    modules in behind it wherever it is reached for, and the two layers answer to each other rather
+    than one to the next, so the direction a reader leans on to place a module no longer holds. The
+    wall is one-way — the kernel names a primitive freely, a primitive names no kernel module. A
+    directory holding no component fails here too, or the gate passes on an empty read."""
+    source = ROOT / COMPONENT_SOURCE
+    if not source.is_dir():
+        return [f"{COMPONENT_SOURCE}: the component source is missing"]
+    failures: list[str] = []
+    for path in sorted(source.rglob("*")):
+        if path.suffix not in PORTAL_MODULE_SUFFIXES:
+            continue
+        rel = path.relative_to(ROOT)
+        failures.extend(
+            f"{rel}: {found.group(1)} — a primitive may not import the kernel that composes it"
+            for found in KERNEL_IMPORT.finditer(path.read_text())
+        )
+    if not any(source.glob("*.tsx")):
+        failures.append(f"{COMPONENT_SOURCE}: no component found — the gate lost its subjects")
+    return failures
+
+
 def _prompt_home_failures() -> list[str]:
     """Every prompt lives in a directory named `prompts/`. One glob over the repo — `*/prompts/*.md`
     — is then the whole set, so an agent looking for the text a model reads finds it without knowing
@@ -2423,6 +2455,7 @@ def main() -> int:
     failures.extend(_registered_naming_failures())
     failures.extend(_portal_style_failures())
     failures.extend(_blocks_boundary_failures())
+    failures.extend(_component_layer_failures())
     failures.extend(_composition_rhythm_failures())
     failures.extend(_kit_catalogue_failures())
     failures.extend(_comment_length_failures())

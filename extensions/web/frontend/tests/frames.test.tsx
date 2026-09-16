@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
 import { App } from "@/App";
-import { faviconUrl } from "@/kernel/messages";
+import { faviconUrl } from "@/components/ui/sources";
 import { tokens } from "@/lib/turnMeta";
 
 import { AGENT, ARRIVAL_ID, CHAT_ROW, chatsOnWire, CONVO_ID, json, MEMBER, saying, SECOND_ID, StreamFake, TURN_ID, useStreamFake, wire } from "./harness";
@@ -687,16 +687,15 @@ test("the slot strip is one quiet act per slot, the open one drawn as held", asy
   expect(changes.className).toContain("border-transparent");
   expect(changes.className).toContain("bg-transparent");
   expect(changes.className).toContain("hover:bg-fill");
+  expect(changes.className).toContain("aria-pressed:bg-fill");
   expect(changes.className).toContain("size-(--size-control)");
   expect(changes.textContent).toBe("");
   expect(changes.getAttribute("aria-pressed")).toBe("false");
 
   await userEvent.click(changes);
   expect(changes.getAttribute("aria-pressed")).toBe("true");
-  expect(changes.className.split(" ")).toContain("bg-fill");
   const sources = screen.getByRole("button", { name: "Sources 1" });
   expect(sources.getAttribute("aria-pressed")).toBe("false");
-  expect(sources.className.split(" ")).not.toContain("bg-fill");
 });
 
 test("a send whose answer is not json ends the wait instead of disabling the composer", async () => {

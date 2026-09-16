@@ -212,6 +212,51 @@ reader who cannot see the colour. A graphic with more than one colour carries a 
 What reads it: the six-step and four-division rules are `gates.py`'s (a composition gap outside the
 six, or a `border` on a `Stat`, is a text-level failure); the grid and the mark rules are a reviewer's.
 
+## The component owns its appearance
+
+A component's colour, shape, typography, motion and inset are its own; a page decides only where it
+sits. `pnpm -C extensions/web/frontend run lint` reads that off the tree, and the `web-build` job
+runs it — `make check` does not, because it holds no node. It runs the three `@shadcn/lint` rules
+nothing else here expresses:
+
+| Rule | Refuses | Over |
+|---|---|---|
+| `no-restyle` | a `className` that restyles a component instead of naming a variant | the chat surface and the page that documents it |
+| `no-raw-colors` | a `text-`/`bg-`/`border-` naming a colour the theme never declared | the portal source |
+| `no-unknown-classes` | a class Tailwind generates no CSS for | the portal source |
+
+`gates.py` already refuses a bracket value naming a raw measurement or colour, a `<style>` tag and a
+template literal in `className`, so `no-arbitrary-values`, `no-inline-styles` and
+`require-static-classes` stay off — a second reader of one rule is a second answer to it.
+
+A clean run proves nothing about a rule: a contract whose pattern is misspelled, or a scope naming a
+file that moved, is silent rather than wrong. `tests/lint.test.ts` reads `.oxlintrc.json` and fails
+when a contract spells a component the design system does not export, or the scope names a path it
+cannot reach. Make a new rule fire on purpose before trusting it — the message it prints is the
+whole point of it.
+
+Space around a component is the page's: a margin, a gap, an inset offset, a width. Everything else
+answers with a variant, and a variant the component does not have is one to add to the component,
+never a class at the call site. `no-restyle` covers `src/kernel/messages.tsx`, `src/views/Chat.tsx`,
+`src/views/ChatPane.tsx` and `src/playground/`, so the page that states the contract answers to it;
+a surface joins them when its components carry the variants its pages ask for.
+
+`playground.html` draws every state the chat components own, one case per variant.
+`tests/playground.test.tsx` holds it from both ends: it walks the imports of `Chat.tsx`,
+`ChatPane.tsx` and `messages.tsx` and fails when a component they reach has neither a page entry nor
+a line in the test's `CHROME` list, and it reads each `cva` axis off the component and fails when a
+variant it declares has no case drawn. A variant nobody has drawn is one nobody has seen, so it
+ships with the state that shows it or it does not ship; a `CHROME` line for a component the surface
+no longer draws fails too, so the list cannot rot. Serve the page from any dev server on this tree
+at `/surface/web/static/playground.html`.
+
+The linter's class grammar knows Tailwind's numeric scales, not the roles this theme names: it reads
+`text-label` as a colour it cannot find and `p-2xl` as a class it cannot classify. So
+`.oxlintrc.json` lists the type steps as sizes and leaves the inset and radius steps refused on a
+component, which is the rule anyway. `tests/cn.test.ts` holds that list against `src/lib/cn.ts`,
+which `theme.css` holds in turn — a step added to the sheet and to neither list is reported as an
+undeclared colour on every line that uses it.
+
 ## Rules the surface holds to
 
 Ten rules, each closing a class of defect rather than an instance. The first five are the ones a

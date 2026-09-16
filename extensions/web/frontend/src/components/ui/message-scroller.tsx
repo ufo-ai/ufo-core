@@ -1,3 +1,4 @@
+import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentProps } from "react";
 import {
   MessageScroller as MessageScrollerPrimitive,
@@ -70,16 +71,39 @@ export function MessageScrollerContent({
   );
 }
 
+const itemVariants = cva("min-w-0 shrink-0", {
+  variants: {
+    mark: {
+      held: cn(
+        "rounded-panel bg-attention outline-2 outline-attention-ink",
+        "transition-[background-color,outline-color] duration-500",
+      ),
+      "letting-go": cn(
+        "rounded-panel bg-transparent outline-2 outline-transparent",
+        "transition-[background-color,outline-color] duration-500",
+      ),
+    },
+    throb: { true: "animate-marked", false: "" },
+  },
+  defaultVariants: { throb: false },
+});
+
+/** `mark` draws the row a jump landed on in the second accent, because the first is the fill a
+ *  member's own words carry: a mark in that fill reads as a message the member sent. `throb` is the
+ *  caller's rather than a `motion-reduce:` rule, because the member's preference decides whether the
+ *  row pulses at all rather than how it pulses. */
 export function MessageScrollerItem({
   className,
+  mark,
+  throb,
   scrollAnchor = false,
   ...props
-}: ComponentProps<typeof MessageScrollerPrimitive.Item>) {
+}: ComponentProps<typeof MessageScrollerPrimitive.Item> & VariantProps<typeof itemVariants>) {
   return (
     <MessageScrollerPrimitive.Item
       data-slot="message-scroller-item"
       scrollAnchor={scrollAnchor}
-      className={cn("min-w-0 shrink-0", className)}
+      className={cn(itemVariants({ mark, throb }), className)}
       {...props}
     />
   );

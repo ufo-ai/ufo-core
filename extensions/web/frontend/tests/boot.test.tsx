@@ -48,7 +48,9 @@ test("the built page names a hashed module and stylesheet under this surface", (
     expect(ref[1].startsWith("/surface/web/")).toBe(true);
   }
   expect(/assets\/index-[A-Za-z0-9_-]+\.js/.test(page)).toBe(true);
-  expect(/assets\/index-[A-Za-z0-9_-]+\.css/.test(page)).toBe(true);
+  const sheet = /href="\/surface\/web\/static\/(assets\/index-[A-Za-z0-9_-]+\.css)"/.exec(page);
+  expect(sheet).not.toBeNull();
+  expect(readFileSync(join(STATIC, sheet![1]), "utf8").length).toBeGreaterThan(0);
   expect(page).toContain("<!doctype html>");
 });
 

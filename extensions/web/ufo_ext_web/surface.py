@@ -426,10 +426,71 @@ def portal_shell(html: str, config: Mapping[str, str] | None) -> str:
     return shell
 
 
+def asset_etags(table: Mapping[str, tuple[bytes, str]]) -> dict[str, str]:
+    """The validator each entry of a served table answers with: its content hash, so bytes that
+    changed transfer and bytes that did not answer 304. Every table a request can be served from
+    derives its validators here, because a table and its validators built apart is a name served
+    under another's hash — held for a year, and wrong for a year."""
+    return {name: f'"{sha256(body).hexdigest()[:32]}"' for name, (body, _) in table.items()}
+
+
 STATIC_ASSETS = load_assets(STATIC_DIR / "assets")
-STATIC_ETAGS = {
-    name: f'"{sha256(body).hexdigest()[:32]}"' for name, (body, _) in STATIC_ASSETS.items()
-}
+STATIC_ETAGS = asset_etags(STATIC_ASSETS)
+
+DESIGN_SURFACE_ENV = "UFO_WEB_DESIGN_SURFACES"
+DESIGN_SURFACE_SERVED = "true"
+DESIGN_SURFACE_NAMES = ("blocks.html", "playground.html")
+DESIGN_SURFACE_MEDIA_TYPE = "text/html; charset=utf-8"
+DESIGN_DIR = STATIC_DIR / "design"
+
+
+def design_surfaces_published(environ: Mapping[str, str]) -> bool:
+    """Whether this deploy publishes the design surfaces.
+
+    One image is promoted from testing into production, so which deploys carry these pages is the
+    deploy's variable rather than the build's output: production sets nothing and goes on answering
+    what it always answered. Only the exact affirmative opens them — unset, empty, and every other
+    spelling withhold them — so a variable set wrong reads as a deploy that never asked rather than
+    as one publishing its own documentation."""
+    return environ.get(DESIGN_SURFACE_ENV, "").strip() == DESIGN_SURFACE_SERVED
+
+
+def load_design_surfaces(directory: Path) -> dict[str, tuple[bytes, str]]:
+    """The documentation pages for the component fork and the chat design system, by request name.
+
+    Read once at import beside the built assets, because the tree is startup's to read and a page
+    request runs on the loop. The set of names is closed and spelled out: these entries sit at the
+    root of the build tree, where the portal shells sit too, so a suffix or a prefix rule over that
+    directory would hand out `index.html` — the shell, addressed around its own handler. A deploy
+    that skipped the frontend build holds neither page and serves the 404 it always did."""
+    pages = {name: directory / name for name in DESIGN_SURFACE_NAMES}
+    return {
+        name: (path.read_bytes(), DESIGN_SURFACE_MEDIA_TYPE)
+        for name, path in pages.items()
+        if path.is_file()
+    }
+
+
+def load_design_assets(environ: Mapping[str, str]) -> dict[str, tuple[bytes, str]]:
+    """The chunks the design pages name, by request name — nothing where the deploy withholds the
+    pages.
+
+    The gate is on the read, not only on the request, because this is 5.7 MB the portal never names
+    and a pod that read it would hold it for the life of the process. The frontend builds it under
+    `static/design/assets` rather than beside the portal's own chunks, so `STATIC_ASSETS` cannot see
+    it and `publish_assets` cannot write it to the fleet store — that store answers for `assets/*`
+    alone, and a design page is served from its own deploy's build or not at all. The keys keep the
+    directory, so nothing under it can answer for a portal asset."""
+    if not design_surfaces_published(environ):
+        return {}
+    return {
+        f"{DESIGN_DIR.name}/{name}": asset
+        for name, asset in load_assets(DESIGN_DIR / "assets").items()
+    }
+
+
+DESIGN_SURFACES = {**load_design_surfaces(STATIC_DIR), **load_design_assets(os.environ)}
+DESIGN_SURFACE_ETAGS = asset_etags(DESIGN_SURFACES)
 CONTEXT_TAG = re.compile(r"\A\s*<context>.*?</context>\s*", re.S)
 INJECTED_CONTEXT = re.compile(r"\s*<injected_context>.*?</injected_context>\s*\Z", re.S)
 MESSAGE_REF = re.compile(r"\A\s*<context>\s*message_ref:\s*(?P<ref>[^\n]+)", re.S)
@@ -501,6 +562,27 @@ def _static_response(request: Request) -> Response | None:
     return _asset_response(request, name, body, media_type, STATIC_ETAGS[name])
 
 
+def _design_surface_response(request: Request, environ: Mapping[str, str]) -> Response | None:
+    """The design surface a portal path names where this deploy publishes them, or None — which
+    leaves the path the 404 it answers everywhere else.
+
+    The table is the two pages and, under `design/assets/`, the chunks they name. A deploy that
+    asked for nothing never read the chunks at all; the variable is read here as well because the
+    pages are a kilobyte each and are read whatever it says, so this is what withholds them. The
+    name then indexes that table, so a traversal
+    sequence and a near miss alike resolve to no entry rather than to a file. A page carries no
+    content hash and revalidates on every load — its name is fixed and its bytes change with the
+    build behind it — while a chunk's hashed name is held for a year, as the portal's own is."""
+    if not design_surfaces_published(environ):
+        return None
+    name = request.url.path.removeprefix(STATIC_PREFIX)
+    surface = DESIGN_SURFACES.get(name)
+    if surface is None:
+        return None
+    body, media_type = surface
+    return _asset_response(request, name, body, media_type, DESIGN_SURFACE_ETAGS[name])
+
+
 def _asset_response(
     request: Request, name: str, body: bytes, media_type: str, etag: str
 ) -> Response:
@@ -514,7 +596,7 @@ def _asset_response(
     return Response(body, media_type=media_type, headers=headers)
 
 
-HASHED_ASSET_NAME = re.compile(r"assets/.+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+")
+HASHED_ASSET_NAME = re.compile(r"(?:design/)?assets/.+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+")
 ASSET_IMMUTABLE = "public, max-age=31536000, immutable"
 ASSET_REVALIDATE = "no-cache"
 STATIC_STORE_PREFIX = "static/web/"
@@ -885,8 +967,16 @@ async def static_asset(ctx: SurfaceContext, request: Request) -> Response:
     names these, and the shell serves to a session, so an unresolved request is a 401 rather than
     a transfer. The assets carry no workspace data. A name this build does not hold is answered
     from the shared store, where every pod published its own build before serving pages — so a
-    page from one build resolves on a pod running another."""
-    return _static_response(request) or await _stored_asset(ctx.fleet_blob, request)
+    page from one build resolves on a pod running another.
+
+    The two design surfaces answer here as well, on the deploys that opt into them: they and the
+    chunks under `design/assets/` are read by the team through the same session, and the shared
+    store publishes only `assets/*`, so a deploy serves them from its own build or not at all."""
+    return (
+        _static_response(request)
+        or _design_surface_response(request, os.environ)
+        or await _stored_asset(ctx.fleet_blob, request)
+    )
 
 
 async def open_session(ctx: SurfaceContext, request: Request) -> Response:

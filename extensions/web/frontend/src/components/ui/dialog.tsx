@@ -89,7 +89,7 @@ export function DialogFooter({
     >
       {lead ? <div className="mr-auto">{lead}</div> : null}
       <DialogPrimitive.Close asChild>
-        <Button className="px-3xl py-md">{leave}</Button>
+        <Button size="commit">{leave}</Button>
       </DialogPrimitive.Close>
       {children}
     </div>

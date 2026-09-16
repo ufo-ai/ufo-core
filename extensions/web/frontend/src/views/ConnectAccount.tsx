@@ -144,13 +144,13 @@ function Chatgpt({ onConnected }: { onConnected: () => void }) {
           <p className="m-0">Enter this code when ChatGPT asks for it.</p>
           {busy ? <p className="m-0 text-ink-soft">Asking ChatGPT…</p> : null}
           {code ? (
-            <code className="rounded-input bg-raised px-2xl py-sm font-mono text-title tracking-code">
+            <code className="rounded-panel bg-raised px-2xl py-sm font-mono text-title tracking-code">
               {code.user_code}
             </code>
           ) : null}
         </Step>
       </ol>
-      {refusal ? <p className="m-0 text-label text-danger">{refusal}</p> : null}
+      {refusal ? <p className="m-0 text-label text-attention-ink">{refusal}</p> : null}
     </div>
   );
 }
@@ -208,7 +208,7 @@ function Claude({ onConnected }: { onConnected: () => void }) {
           </form>
         </Step>
       </ol>
-      {refusal ? <p className="m-0 text-label text-danger">{refusal}</p> : null}
+      {refusal ? <p className="m-0 text-label text-attention-ink">{refusal}</p> : null}
     </div>
   );
 }
@@ -330,7 +330,7 @@ export function ConnectAccount({
       }
     >
       {rows}
-      {refusal ? <p className="m-0 text-label text-danger">{refusal}</p> : null}
+      {refusal ? <p className="m-0 text-label text-attention-ink">{refusal}</p> : null}
       {asking ? (
         <Sheet
           open

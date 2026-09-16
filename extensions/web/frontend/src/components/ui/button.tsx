@@ -21,7 +21,10 @@ export const buttonVariants = cva(
         send: "bg-ink text-surface font-medium px-3xl py-md border border-transparent hover:opacity-(--opacity-muted-soft)",
         outline: "border border-edge bg-transparent text-ink px-lg py-xs hover:bg-fill",
         row: "border border-transparent bg-transparent text-inherit rounded-control px-md py-2xs hover:bg-fill",
-        quiet: "border border-transparent bg-transparent text-inherit px-lg py-xs hover:bg-fill",
+        quiet: cn(
+          "border border-transparent bg-transparent text-inherit px-lg py-xs",
+          "hover:bg-fill aria-pressed:bg-fill",
+        ),
         mark: "border-0 bg-transparent p-0 text-ink-soft hover:text-ink",
         option: cn(
           "border border-transparent bg-transparent text-inherit px-lg py-xs",
@@ -29,10 +32,20 @@ export const buttonVariants = cva(
           "aria-pressed:bg-ink aria-pressed:text-surface aria-pressed:border-ink",
           "aria-pressed:hover:bg-ink aria-pressed:hover:opacity-(--opacity-muted-soft)",
         ),
+        corner: cn(
+          "border border-edge bg-card text-ink-soft rounded-control p-2xs",
+          "hover:bg-fill hover:text-ink",
+        ),
+      },
+      tone: {
+        soft: "text-ink-soft",
+        attention: "text-attention-ink",
       },
       size: {
         default: "",
+        commit: "px-3xl py-md",
         bar: "h-(--size-control) whitespace-nowrap rounded-full px-2xl py-0 text-label",
+        chip: "gap-sm rounded-full px-md text-label",
         icon: "size-(--size-control) rounded-full p-0 [&_svg]:size-(--size-glyph)",
         glyph: "size-(--size-glyph) rounded-control p-0 [&_svg]:size-(--size-glyph)",
       },
@@ -42,7 +55,7 @@ export const buttonVariants = cva(
 );
 
 export type ButtonProps = ComponentProps<"button"> &
-  VariantProps<typeof buttonVariants> & { busy?: boolean };
+  VariantProps<typeof buttonVariants> & { busy?: boolean; strong?: boolean };
 
 /** A button lays its content out as a centred row, so a glyph sits in the middle of the box rather
  *  than on the text baseline at its left edge, and `size="icon"` is the box a glyph alone is drawn
@@ -50,6 +63,14 @@ export type ButtonProps = ComponentProps<"button"> &
  *  `size="bar"` is the same height drawn as a pill: the acts standing in a page's header or a
  *  section's bar are the height and the shape of the search and the filter beside them, so a band
  *  of controls reads as one row rather than as a tall act with chrome tucked under it.
+ *  `size="commit"` is the box the act at the foot of a dialog takes — the inset `variant="send"`
+ *  bakes, so the way out stands the same size as the act it answers — and `size="chip"` is the
+ *  pill an act inside the composer takes: a bar's corner at a narrower inset, so the model the
+ *  chat runs on sits in the card rather than reading as a control of the page.
+ *
+ *  `variant="corner"` is the act that stands on the thing it acts on: the card ground, the edge and
+ *  the corner the thumbnail's own badge takes, so dropping a picked file reads above the picture
+ *  under it rather than dissolving into it.
  *
  *  `variant="mark"` with `size="glyph"` is the act drawn as the mark alone: no box, no ground, the
  *  tone of the marks around it, and the ink of the surface under the pointer. A band whose acts are
@@ -58,13 +79,18 @@ export type ButtonProps = ComponentProps<"button"> &
  *
  *  `busy` marks an act already in flight. The button keeps its place in the accessibility tree —
  *  `disabled` would drop the focused element out of it mid-submit — and swallows the activation
- *  instead, so a second click cannot commit the act twice or submit the form it sits in. */
+ *  instead, so a second click cannot commit the act twice or submit the form it sits in.
+ *
+ *  `strong` weights the label: `ConfirmButton` carries it while armed, so the press that commits
+ *  does not read as the press that armed it. */
 export function Button({
   className,
   variant,
+  tone,
   size,
   type = "button",
   busy,
+  strong,
   onClick,
   ...props
 }: ButtonProps) {
@@ -81,8 +107,9 @@ export function Button({
         onClick?.(event);
       }}
       className={cn(
-        buttonVariants({ variant, size }),
+        buttonVariants({ variant, tone, size }),
         busy && "opacity-(--opacity-muted) animate-working motion-reduce:animate-none",
+        strong && "font-strong",
         className,
       )}
       {...props}
@@ -90,12 +117,12 @@ export function Button({
   );
 }
 
-export function ConfirmButton({ verb, onClick, className, ...props }: ButtonProps & { verb: string }) {
+export function ConfirmButton({ verb, onClick, ...props }: ButtonProps & { verb: string }) {
   const [armed, setArmed] = useState(false);
   return (
     <Button
       {...props}
-      className={cn(armed && "font-strong", className)}
+      strong={armed}
       onBlur={() => setArmed(false)}
       onClick={(event) => {
         if (!armed) {

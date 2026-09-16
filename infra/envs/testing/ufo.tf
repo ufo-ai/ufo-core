@@ -276,6 +276,8 @@ data "kubectl_file_documents" "hosted" {
     rum_recording = true
     rum_site      = local.datadog_site
     rum_env       = local.datadog_env
+
+    design_surfaces = "true"
   })
 }
 

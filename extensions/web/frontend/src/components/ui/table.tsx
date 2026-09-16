@@ -182,9 +182,7 @@ export function Lede({
 export function TableNote({ span, children }: { span: number; children: ReactNode }) {
   return (
     <tr>
-      <Td colSpan={span} className="text-ink-soft">
-        {children}
-      </Td>
+      <Td colSpan={span}>{children}</Td>
     </tr>
   );
 }

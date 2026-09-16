@@ -7,12 +7,14 @@
   "scripts": {
     "dev": "vite",
     "dev:history": "vite --config vite.history.config.ts",
-    "build": "tsc -b && tsc -p tsconfig.apps.json && tsc -p sidebar && vite build && vite build --config sidebar/vite.config.ts && vite build --config vite.apps.config.ts && vite build --config vite.sdk.config.ts && node kit-catalogue.mjs",
+    "build": "tsc -b && tsc -p tsconfig.apps.json && tsc -p sidebar && vite build && vite build --config sidebar/vite.config.ts && vite build --config vite.playground.config.ts && vite build --config vite.apps.config.ts && vite build --config vite.sdk.config.ts && node kit-catalogue.mjs",
     "check": "tsc -b && tsc -p tsconfig.apps.json && tsc -p sidebar",
+    "lint": "oxlint src sidebar/src",
     "test": "vitest run"
   },
   "devDependencies": {
     "@datadog/datadog-ci": "^5.23.0",
+    "@shadcn/lint": "^0.1.0",
     "@tabler/icons": "^3.46.0",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/dom": "^10.4.1",
@@ -25,6 +27,7 @@
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^4.7.0",
     "jsdom": "^26.0.0",
+    "oxlint": "^1.83.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
     "vite": "^7.0.0",

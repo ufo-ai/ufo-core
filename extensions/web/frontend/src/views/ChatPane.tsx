@@ -232,7 +232,6 @@ function useThreadActs({
                 size="icon"
                 aria-label={entry.count ? entry.label + " " + entry.count : entry.label}
                 aria-pressed={slot === entry.id}
-                className={cn(slot === entry.id && "bg-fill")}
                 onClick={() => onSelectSlot?.(slot === entry.id ? null : entry.id)}
               >
                 <SlotIcon icon={entry.icon} />
@@ -245,7 +244,7 @@ function useThreadActs({
             size="icon"
             aria-label={terminal.active ? "Shell, sandbox running" : "Shell"}
             aria-pressed={shellOpen}
-            className={cn(shellOpen && "bg-fill", !terminal.active && "text-ink-soft")}
+            tone={terminal.active ? undefined : "soft"}
             onClick={() => setShellOpen((raised) => !raised)}
           >
             <IconTerminal2 aria-hidden />

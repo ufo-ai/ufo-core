@@ -35,12 +35,19 @@ export function MessageContent({ className, ...props }: ComponentProps<"div">) {
   );
 }
 
-export function MessageHeader({ className, ...props }: ComponentProps<"div">) {
+/** The small soft line over a turn. `bubble` insets it by a bubble's own padding, so a name in it
+ *  starts on the same vertical as the words beneath it. */
+export function MessageHeader({
+  className,
+  bubble,
+  ...props
+}: ComponentProps<"div"> & { bubble?: boolean }) {
   return (
     <div
       data-slot="message-header"
       className={cn(
-        "flex max-w-full min-w-0 items-center px-lg text-small font-medium text-ink-soft",
+        "flex max-w-full min-w-0 items-center text-small font-medium text-ink-soft",
+        bubble ? "px-2xl" : "px-lg",
         "group-has-data-[variant=ghost]/message:px-0",
         className,
       )}

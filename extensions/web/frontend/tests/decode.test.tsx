@@ -1,7 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 
-import { DecodeLine, decodeFrame, settle, type SettledCell } from "@/kernel/messages";
+import { DecodeLine, decodeFrame, settle, type SettledCell } from "@/components/ui/decode";
 import { brailleOf, readBraille } from "@/lib/braille";
 
 const TEXT = "reading the calendar";

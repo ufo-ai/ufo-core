@@ -216,10 +216,10 @@ export function PromptInputAttachments() {
           <li key={id} className="flex">
             <PickedThumbnail file={file}>
               <Button
-                variant="row"
+                variant="corner"
                 aria-label={"Remove " + file.name}
                 onClick={() => drop(id)}
-                className="absolute top-0 right-0 m-xs border-edge bg-card p-2xs text-ink-soft hover:text-ink"
+                className="absolute top-0 right-0 m-xs"
               >
                 <svg viewBox="0 0 16 16" aria-hidden className={GLYPH}>
                   <path
@@ -312,11 +312,7 @@ export function PromptInputModel({
   return (
     <DropdownMenu dir="rtl" open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <Button
-          variant="quiet"
-          aria-label={"Model: " + modelLabel(model)}
-          className="gap-sm rounded-full px-md text-label"
-        >
+        <Button variant="quiet" size="chip" aria-label={"Model: " + modelLabel(model)}>
           {model === AUTO_MODEL ? (
             <IconSparkles aria-hidden className={MODEL_MARK} stroke={1.5} />
           ) : mark ? (

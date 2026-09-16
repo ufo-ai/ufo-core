@@ -59,6 +59,7 @@ export function FaceCircle({
   photo,
   tint,
   title,
+  stacked,
   className,
   style,
 }: {
@@ -66,13 +67,14 @@ export function FaceCircle({
   photo: string | null;
   tint: string;
   title?: string;
+  stacked?: boolean;
   className?: string;
   style?: CSSProperties;
 }) {
   return (
-    <Avatar title={title} className={className} style={style}>
+    <Avatar title={title} stacked={stacked} className={className} style={style}>
       {photo ? <AvatarImage src={photo} alt="" /> : null}
-      <AvatarFallback aria-hidden className={cn("font-medium", memberTint(tint))}>
+      <AvatarFallback aria-hidden person className={memberTint(tint)}>
         {initialsOf(name)}
       </AvatarFallback>
     </Avatar>

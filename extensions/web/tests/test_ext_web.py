@@ -5170,6 +5170,177 @@ async def test_a_hashed_asset_is_held_and_an_unhashed_one_revalidates(
     assert unhashed.headers["cache-control"] == "no-cache"
 
 
+DESIGN_SURFACE_PATHS = (
+    "/surface/web/static/blocks.html",
+    "/surface/web/static/playground.html",
+)
+DESIGN_CHUNK_PREFIX = "design/assets/playground-"
+DESIGN_PAGE_REF = re.compile(r'(?:src|href)="/surface/web/static/([^"]+)"')
+
+
+def design_assets() -> dict[str, tuple[bytes, str]]:
+    return web_surface.load_design_assets(
+        {web_surface.DESIGN_SURFACE_ENV: web_surface.DESIGN_SURFACE_SERVED}
+    )
+
+
+def opted_in_design_surfaces(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[bytes, str]]:
+    surfaces = {**web_surface.DESIGN_SURFACES, **design_assets()}
+    monkeypatch.setattr(web_surface, "DESIGN_SURFACES", surfaces)
+    monkeypatch.setattr(web_surface, "DESIGN_SURFACE_ETAGS", web_surface.asset_etags(surfaces))
+    return surfaces
+
+
+def design_chunk() -> str:
+    name = next(
+        (
+            held
+            for held in design_assets()
+            if held.startswith(DESIGN_CHUNK_PREFIX) and held.endswith(".js")
+        ),
+        None,
+    )
+    if name is None:
+        raise RuntimeError(f"the design surfaces are not built — run `{web_surface.PORTAL_BUILD}`")
+    return name
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_design_surfaces_are_served_only_where_the_deploy_asks_for_them(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One image is promoted into production, so the design surfaces are a deploy's variable rather
+    than a build's output: a deploy that sets nothing serves the 404 it always did, and every
+    spelling short of the affirmative is that same silence — a variable set wrong publishes
+    nothing.
+
+    The chunks behind the pages answer to the same variable twice over: a deploy that asked for
+    nothing never reads them, and a pod that did read them still refuses the request. Withholding
+    the page alone would leave the megabytes behind it fetchable by any session."""
+    client, workspace_id, _agent_id = web
+    token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    chunk = design_chunk()
+    chunk_path = f"/surface/web/static/{chunk}"
+    body, media_type = opted_in_design_surfaces(monkeypatch)[chunk]
+    etag = web_surface.DESIGN_SURFACE_ETAGS[chunk]
+    monkeypatch.delenv(web_surface.DESIGN_SURFACE_ENV, raising=False)
+
+    assert web_surface.load_design_assets({}) == {}
+    assert f"assets/{chunk.rsplit('/', 1)[1]}" not in web_surface.STATIC_ASSETS
+
+    for path in DESIGN_SURFACE_PATHS:
+        unset = await client.get(path, headers=headers)
+        assert unset.status_code == 404
+
+    withheld = await client.get(chunk_path, headers=headers)
+    assert withheld.status_code == 404
+
+    for spelling in ("", "   ", "1", "yes", "false", "True"):
+        monkeypatch.setenv(web_surface.DESIGN_SURFACE_ENV, spelling)
+        assert web_surface.load_design_assets({web_surface.DESIGN_SURFACE_ENV: spelling}) == {}
+        refused = await client.get(DESIGN_SURFACE_PATHS[1], headers=headers)
+        assert refused.status_code == 404
+        refused_chunk = await client.get(chunk_path, headers=headers)
+        assert refused_chunk.status_code == 404
+
+    monkeypatch.setenv(web_surface.DESIGN_SURFACE_ENV, web_surface.DESIGN_SURFACE_SERVED)
+    for path in DESIGN_SURFACE_PATHS:
+        served = await client.get(path, headers=headers)
+        assert served.status_code == 200
+        assert served.headers["content-type"] == "text/html; charset=utf-8"
+        assert served.headers["cache-control"] == "no-cache"
+        assert served.text == (web_surface.STATIC_DIR / path.rsplit("/", 1)[1]).read_text()
+
+    opened = await client.get(chunk_path, headers=headers)
+    assert opened.status_code == 200
+    assert opened.content == body
+    assert opened.headers["content-type"] == media_type
+    assert opened.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert opened.headers["etag"] == etag
+
+    again = await client.get(chunk_path, headers={**headers, "if-none-match": etag})
+    assert again.status_code == 304
+
+    for path in DESIGN_SURFACE_PATHS:
+        page = (web_surface.STATIC_DIR / path.rsplit("/", 1)[1]).read_text()
+        named = DESIGN_PAGE_REF.findall(page)
+        assert named
+        for ref in named:
+            reached = await client.get(f"/surface/web/static/{ref}", headers=headers)
+            assert reached.status_code == 200, ref
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_design_surface_is_refused_to_a_request_carrying_no_session(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The variable says which deploys hold the pages, never who may read them: a design surface is
+    the team's, so the session gate the rest of this route answers to stands in front of it and an
+    unresolved request is a 401 rather than a transfer. Its chunks sit behind that same gate, so a
+    page no one can open is not a bundle anyone can read."""
+    client, _workspace_id, _agent_id = web
+    chunk = design_chunk()
+    body, _media_type = opted_in_design_surfaces(monkeypatch)[chunk]
+    monkeypatch.setenv(web_surface.DESIGN_SURFACE_ENV, web_surface.DESIGN_SURFACE_SERVED)
+
+    for path in DESIGN_SURFACE_PATHS:
+        anonymous = await client.get(path)
+        assert anonymous.status_code == 401
+        assert "<!doctype html>" not in anonymous.text.lower()
+
+    tokenless = await client.get(f"/surface/web/static/{chunk}")
+    assert tokenless.status_code == 401
+    assert tokenless.content != body
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_an_opted_in_deploy_serves_the_two_named_design_surfaces_and_nothing_beside_them(
+    web: tuple[AsyncClient, UUID, UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The variable opens two names and the chunks under `design/assets/`, not the directories they
+    sit in. The portal shells sit beside the pages in the same tree, so a suffix or prefix rule
+    would hand out `index.html` — the shell, addressed around its own handler — and a traversal
+    sequence would reach the tree above it. A chunk keeps its directory in the name it answers to,
+    so the same bytes addressed as a portal asset are refused: that path is the one production
+    serves."""
+    client, workspace_id, _agent_id = web
+    token = mint_token(TOKEN_SECRET, str(workspace_id), "owner@example.com", timedelta(hours=1))
+    headers = {"cookie": f"{SESSION_COOKIE}={token}"}
+    chunk = design_chunk()
+    opted_in_design_surfaces(monkeypatch)
+    monkeypatch.setenv(web_surface.DESIGN_SURFACE_ENV, web_surface.DESIGN_SURFACE_SERVED)
+
+    for name in (
+        "index.html",
+        "sidebar.html",
+        "playgroundxhtml",
+        "playground.html.map",
+        "%2e%2e/index.html",
+        "assets/%2e%2e/playground.html",
+        "%2e%2e/%2e%2e/pyproject.toml",
+    ):
+        stray = await client.get(f"/surface/web/static/{name}", headers=headers)
+        assert stray.status_code == 404, name
+
+    leaf = chunk.rsplit("/", 1)[1]
+    for name in (
+        f"assets/{leaf}",
+        f"design/{leaf}",
+        f"design/assets/%2e%2e/%2e%2e/{leaf}",
+        "design/playground.html",
+        "design/assets/playground-00000000.js",
+    ):
+        outside = await client.get(f"/surface/web/static/{name}", headers=headers)
+        assert outside.status_code == 404, name
+
+
 class _PublishStore:
     """A store that records how the publish reached it: each prefix it listed, each key it wrote,
     and how many writes were in flight at once."""
