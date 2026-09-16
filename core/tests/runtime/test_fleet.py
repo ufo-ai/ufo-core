@@ -8,10 +8,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from dbos._dbos import _get_or_create_dbos_registry
+from dbos import DBOS
 from dbos._utils import INTERNAL_QUEUE_NAME
 from sqlalchemy.engine import make_url
 
+from ufo.config import Config
 from ufo.runtime.jobs import JOB_QUEUE_NAME
 from ufo.schema.records import (
     EXPRESS_QUEUE_NAME,
@@ -29,16 +30,15 @@ ENQUEUED = "ENQUEUED"
 SUCCESS = "SUCCESS"
 
 
-def test_the_fleets_partition_every_queue_the_deploy_registers() -> None:
-    """Importing `ufo.serve` is what a serve process does, and it registers every queue the deploy
-    runs. A queue no fleet names is one no pod would ever dequeue — work enqueued onto it would sit
-    forever — and a fleet naming a queue nothing registers listens to silence, which looks exactly
-    like a healthy pod running nothing. Both are invisible at runtime, so the partition is asserted
-    here instead."""
-    registered = set(_get_or_create_dbos_registry().queue_info_map) - {INTERNAL_QUEUE_NAME}
+def test_the_fleets_partition_every_queue_the_deploy_registers(dbos_launched: Config) -> None:
+    """A serve boot declares its queues in the system database after launch, which the session's
+    launch does too, so the rows are read back here. A queue no fleet names is one no pod would
+    ever dequeue — work enqueued onto it would sit forever — and a fleet naming a queue nothing
+    registers listens to silence, which looks exactly like a healthy pod running nothing. Both are
+    invisible at runtime, so the partition is asserted here instead."""
+    registered = {queue.name for queue in DBOS.list_queues()} - {INTERNAL_QUEUE_NAME}
     claimed = [queue for fleet in (TURNS_FLEET, JOBS_FLEET) for queue in fleet.queues]
 
-    assert registered
     assert registered == {
         TURN_QUEUE_NAME,
         EXPRESS_QUEUE_NAME,

@@ -275,11 +275,11 @@ def _launch_dbos(env: _Env) -> None:
             "application_version": DBOS_APP_VERSION,
             "system_database_url": env.system_url,
             "executor_id": str(instance_id),
-            "run_admin_server": False,
             "serializer": ReplaySafeSerializer(),
         }
     )
     DBOS.launch()
+    loop_queue.register_turn_queues()
     _in_daemon_thread(ExecutorRecovery().run)
 
 

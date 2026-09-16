@@ -13,11 +13,11 @@ terminal — a workspace still running its previous execution absorbs the tick a
 never stalling its neighbors, and twin replica boots start a one-shot once — and each
 `job_workflow` records exactly one workspace's handler as a DBOS step through the extension's
 scoped ExtensionContext, so recovery replays a completed handler instead of running it again and a
-core job and an extension job ride the identical path. `JOB_QUEUE` runs at
+core job and an extension job ride the identical path. The jobs queue runs at
 most `JOB_WORKER_CONCURRENCY` `job_workflow` executions per process, bounded backpressure in
 Postgres, never a thread bloom; a recurring tick rides DBOS's internal queue — one candidate read
 and one durable insert per candidate workspace, milliseconds — so it never waits behind a slow job
-for a slot. A one-shot tick rides `JOB_QUEUE`, as does the execution it fans out. The expensive
+for a slot. A one-shot tick rides the jobs queue, as does the execution it fans out. The expensive
 handler work is therefore confined to `ufo.serve.JOBS_FLEET`, while every image can drain every
 application queue across a rollout or rollback."""
 
@@ -28,7 +28,7 @@ from typing import Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from dbos import DBOS, DBOSClient, EnqueueOptions, Queue, ScheduleInput, SetEnqueueOptions
+from dbos import DBOS, DBOSClient, EnqueueOptions, ScheduleInput, SetEnqueueOptions
 from dbos import error as dbos_error
 from pydantic import BaseModel
 
@@ -165,8 +165,14 @@ PAGE_CHANGE_NARROWED_METRIC = "page_change_narrowed_total"
 PAGE_CHANGE_PARKED_METRIC = "page_change_parked_total"
 PAGE_CHANGE_STALLED_METRIC = "page_change_stalled_total"
 JOB_WORKER_CONCURRENCY = 8
-JOB_QUEUE = Queue(JOB_QUEUE_NAME, worker_concurrency=JOB_WORKER_CONCURRENCY)
 QUEUED: TurnStatus = "queued"
+
+
+def register_job_queue() -> None:
+    """Declare the jobs queue in the system database, after `DBOS.launch` and off the event loop.
+    Queue settings live in that table, and a tick enqueued on a name no process has declared stays
+    ENQUEUED."""
+    DBOS.register_queue(JOB_QUEUE_NAME, worker_concurrency=JOB_WORKER_CONCURRENCY)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1114,7 +1120,9 @@ class JobRunner:
             if binding.spec.schedule is None:
                 with SetEnqueueOptions(deduplication_id=binding.key):
                     try:
-                        JOB_QUEUE.enqueue(job_tick, datetime.now(UTC), binding.key)
+                        DBOS.enqueue_workflow(
+                            JOB_QUEUE_NAME, job_tick, datetime.now(UTC), binding.key
+                        )
                     except dbos_error.DBOSQueueDeduplicatedError:
                         warn("jobs.enqueue_skipped", key=binding.key)
                         continue
@@ -1150,8 +1158,8 @@ class JobRunner:
         for workspace_id in await self.candidates(key):
             with SetEnqueueOptions(deduplication_id=f"{key}:{workspace_id}"):
                 try:
-                    await JOB_QUEUE.enqueue_async(
-                        job_workflow, scheduled_time, key, str(workspace_id)
+                    await DBOS.enqueue_workflow_async(
+                        JOB_QUEUE_NAME, job_workflow, scheduled_time, key, str(workspace_id)
                     )
                 except dbos_error.DBOSQueueDeduplicatedError:
                     warn("jobs.tick_skipped", key=key, workspace_id=str(workspace_id))

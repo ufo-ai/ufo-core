@@ -172,6 +172,7 @@ from ufo.runtime.jobs import (
     bindings_from,
     core_jobs,
     model_key_slots,
+    register_job_queue,
 )
 from ufo.runtime.media.preview_renderer import (
     PREVIEW_SERVICE_URL_ENV,
@@ -181,7 +182,7 @@ from ufo.runtime.media.preview_renderer import (
 from ufo.runtime.media.site_previewer import SitePreviewer
 from ufo.runtime.memory import DEFAULT_MEMORY_SEARCH_PROVIDER, MemorySearch
 from ufo.runtime.profiles import CORE_SUBAGENT_PROFILES
-from ufo.runtime.queue import Runtime, init_runtime
+from ufo.runtime.queue import Runtime, init_runtime, register_turn_queues
 from ufo.runtime.runtime_instance import (
     CancelReconciler,
     ExecutorRecovery,
@@ -515,7 +516,6 @@ def run(fleet: Fleet) -> None:
             "application_version": DBOS_APP_VERSION,
             "system_database_url": config.database.system_url,
             "executor_id": str(instance_id),
-            "run_admin_server": False,
             "max_executor_threads": DBOS_MAX_EXECUTOR_THREADS,
             "sys_db_pool_size": DBOS_SYSTEM_DATABASE_POOL_SIZE,
             "serializer": ReplaySafeSerializer(),
@@ -523,6 +523,8 @@ def run(fleet: Fleet) -> None:
     )
     DBOS.listen_queues(fleet.queues)
     DBOS.launch()
+    register_turn_queues()
+    register_job_queue()
     app.state.fleet = fleet
     app.state.hub = hub
     app.state.dbos = dbos_client

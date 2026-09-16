@@ -48,6 +48,8 @@ from sandbox.build_template import (
 from ufo.config import BlobConfig, Config, ContextConfig, DatabaseConfig
 from ufo.db import apply_migrations, dispose_db, init_db, workspace_tx
 from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
+from ufo.runtime.jobs import register_job_queue
+from ufo.runtime.queue import register_turn_queues
 from ufo.runtime.workspace import init_workspace_credentials
 from ufo.schema.records import DBOS_APP_NAME, DBOS_APP_VERSION
 from ufo_testsupport.migrations import apply_cached_migrations
@@ -377,12 +379,13 @@ def dbos_launched(database_url: str, tmp_path_factory: pytest.TempPathFactory) -
             "name": DBOS_APP_NAME,
             "application_version": DBOS_APP_VERSION,
             "system_database_url": system_url,
-            "run_admin_server": False,
             "scheduler_polling_interval_sec": 1.0,
             "serializer": ReplaySafeSerializer(),
         }
     )
     DBOS.launch()
+    register_turn_queues()
+    register_job_queue()
     yield config
     DBOS.destroy()
 

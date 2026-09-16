@@ -12,7 +12,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 import sqlalchemy as sa
-from dbos import DBOS, DBOSClient, Queue
+from dbos import DBOS, DBOSClient
 from pydantic import BaseModel
 
 from ufo.blob import WorkspaceBlobStore
@@ -654,24 +654,22 @@ async def _apply_provisions(runtime: "Runtime", workspace_id: UUID) -> None:
     _provisioned_workspaces.add(workspace_id)
 
 
-TURN_QUEUE = Queue(
-    TURN_QUEUE_NAME,
-    worker_concurrency=TURN_WORKER_CONCURRENCY,
-    polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
-)
-EXPRESS_QUEUE = Queue(
-    EXPRESS_QUEUE_NAME,
-    polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
-)
-UNSCOPED_TURN_QUEUE = Queue(
-    UNSCOPED_TURN_QUEUE_NAME,
-    worker_concurrency=TURN_WORKER_CONCURRENCY,
-    polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
-)
-UNSCOPED_EXPRESS_QUEUE = Queue(
-    UNSCOPED_EXPRESS_QUEUE_NAME,
-    polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
-)
+def register_turn_queues() -> None:
+    """Declare the four turn queues in the system database, after `DBOS.launch`. Queue settings
+    live in that table, and a turn enqueued on a name no process has declared stays ENQUEUED, so
+    every process declares all four whatever fleet it dequeues from."""
+    DBOS.register_queue(
+        TURN_QUEUE_NAME,
+        worker_concurrency=TURN_WORKER_CONCURRENCY,
+        polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
+    )
+    DBOS.register_queue(EXPRESS_QUEUE_NAME, polling_interval_sec=TURN_QUEUE_POLL_SECONDS)
+    DBOS.register_queue(
+        UNSCOPED_TURN_QUEUE_NAME,
+        worker_concurrency=TURN_WORKER_CONCURRENCY,
+        polling_interval_sec=TURN_QUEUE_POLL_SECONDS,
+    )
+    DBOS.register_queue(UNSCOPED_EXPRESS_QUEUE_NAME, polling_interval_sec=TURN_QUEUE_POLL_SECONDS)
 
 
 @dataclass(frozen=True)

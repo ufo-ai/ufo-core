@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -16,6 +17,7 @@ from uuid import UUID, uuid4
 import pytest
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from dbos import DBOS
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
@@ -3259,37 +3261,57 @@ def test_an_exhausted_account_names_the_limit_rather_than_a_missing_connection()
         assert f"https://ufo.example{SPAWN_CONNECT_PATH}" in str(fault)
 
 
-async def test_spawned_children_run_outside_the_turns_queue_claim(
-    surface: Turns, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@asynccontextmanager
+async def _turn_worker_bound(bound: int) -> AsyncIterator[None]:
+    """Hold the turns queue's per-worker claim at `bound` for the body. The bound lives in the
+    queues table and the queue's worker thread rereads it once per poll, so the body waits a poll
+    before it counts on the new value. The setter runs on this test's own thread rather than
+    through the `_async` variants, which repoint the loop's default executor at DBOS's shared
+    pool."""
+
+    def bind(value: int) -> None:
+        DBOS.retrieve_queue(loop_queue.TURN_QUEUE_NAME).set_worker_concurrency(value)
+
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        await loop.run_in_executor(pool, bind, bound)
+        await asyncio.sleep(loop_queue.TURN_QUEUE_POLL_SECONDS * 2)
+        try:
+            yield
+        finally:
+            await loop.run_in_executor(pool, bind, loop_queue.TURN_WORKER_CONCURRENCY)
+
+
+async def test_spawned_children_run_outside_the_turns_queue_claim(surface: Turns) -> None:
     """With the turns queue's worker bound at one, the parent holds the process's only claim on
     it for its whole run — the spawn completes only because children ride the express queue."""
-    monkeypatch.setattr(loop_queue.TURN_QUEUE, "_worker_concurrency", 1)
-    seed = await _bootstrap()
-    parent = await surface.admit(seed, "spawn-subagent")
-    _, terminal = await surface.consume(seed, parent)
+    async with _turn_worker_bound(1):
+        seed = await _bootstrap()
+        parent = await surface.admit(seed, "spawn-subagent")
+        _, terminal = await surface.consume(seed, parent)
     assert terminal["status"] == "done"
 
 
-async def test_member_turns_hold_to_the_worker_claim_bound(
-    surface: Turns, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(loop_queue.TURN_QUEUE, "_worker_concurrency", 2)
+async def test_member_turns_hold_to_the_worker_claim_bound(surface: Turns) -> None:
     HOLD_STARTED.clear()
     HOLD_RELEASE.clear()
     HOLD_TWO_STARTED.clear()
     try:
-        seeds = [await _bootstrap() for _ in range(3)]
-        turn_ids = [
-            await surface.admit(seed, f"hold-slot {index}") for index, seed in enumerate(seeds)
-        ]
-        assert await asyncio.to_thread(HOLD_TWO_STARTED.wait, STREAM_TIMEOUT_SECONDS)
-        await asyncio.sleep(0.5)
-        assert len(HOLD_STARTED) == 2
-        HOLD_RELEASE.set()
-        results = await asyncio.gather(
-            *(surface.consume(seed, turn_id) for seed, turn_id in zip(seeds, turn_ids, strict=True))
-        )
+        async with _turn_worker_bound(2):
+            seeds = [await _bootstrap() for _ in range(3)]
+            turn_ids = [
+                await surface.admit(seed, f"hold-slot {index}") for index, seed in enumerate(seeds)
+            ]
+            assert await asyncio.to_thread(HOLD_TWO_STARTED.wait, STREAM_TIMEOUT_SECONDS)
+            await asyncio.sleep(0.5)
+            assert len(HOLD_STARTED) == 2
+            HOLD_RELEASE.set()
+            results = await asyncio.gather(
+                *(
+                    surface.consume(seed, turn_id)
+                    for seed, turn_id in zip(seeds, turn_ids, strict=True)
+                )
+            )
         assert len(HOLD_STARTED) == 3
         assert all(terminal["status"] == "done" for _, terminal in results)
     finally:

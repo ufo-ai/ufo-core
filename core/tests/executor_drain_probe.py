@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from dbos import DBOS, Queue
+from dbos import DBOS
 
 WORKFLOW_SECONDS = 3600.0
 DRAIN_SECONDS = 2
@@ -24,11 +24,10 @@ dbos = DBOS(
     config={
         "name": "draincheck",
         "system_database_url": f"sqlite:///{Path(sys.argv[1])}",
-        "run_admin_server": False,
         "executor_id": "probe-executor",
     }
 )
-queue = Queue("probe-q")
+PROBE_QUEUE = "probe-q"
 parked_started = threading.Event()
 stubborn_started = threading.Event()
 evidence: dict[str, object] = {}
@@ -54,8 +53,9 @@ async def stubborn(seconds: float) -> str:
 
 
 DBOS.launch()
-queue.enqueue(parked, WORKFLOW_SECONDS)
-stubborn_handle = queue.enqueue(stubborn, WORKFLOW_SECONDS)
+DBOS.register_queue(PROBE_QUEUE)
+DBOS.enqueue_workflow(PROBE_QUEUE, parked, WORKFLOW_SECONDS)
+stubborn_handle = DBOS.enqueue_workflow(PROBE_QUEUE, stubborn, WORKFLOW_SECONDS)
 if not (
     parked_started.wait(timeout=START_TIMEOUT_SECONDS)
     and stubborn_started.wait(timeout=START_TIMEOUT_SECONDS)

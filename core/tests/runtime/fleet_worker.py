@@ -17,7 +17,8 @@ from uuid import uuid4
 from dbos import DBOS, DBOSClient, EnqueueOptions
 
 from ufo.harness.durability import ReplaySafeSerializer, replay_safe_client
-from ufo.runtime.jobs import JOB_QUEUE_NAME
+from ufo.runtime.jobs import JOB_QUEUE_NAME, register_job_queue
+from ufo.runtime.queue import register_turn_queues
 from ufo.schema.records import (
     DBOS_APP_NAME,
     DBOS_APP_VERSION,
@@ -47,12 +48,13 @@ def _launch(fleet: str, system_url: str) -> str:
             "application_version": DBOS_APP_VERSION,
             "system_database_url": system_url,
             "executor_id": str(instance_id),
-            "run_admin_server": False,
             "serializer": ReplaySafeSerializer(),
         }
     )
     DBOS.listen_queues(FLEETS[fleet].queues)
     DBOS.launch()
+    register_turn_queues()
+    register_job_queue()
     return str(instance_id)
 
 
