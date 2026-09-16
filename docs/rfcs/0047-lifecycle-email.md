@@ -66,28 +66,36 @@ already publishes to. A configuration set is what makes SES publish a delivery e
 without one the seam could send and never report; the set is separate because the identity and the
 `ses:FromAddress` condition differ from a campaign's, and the consumer does not.
 
-Suppression stays where it already is, and control applies it centrally. A hard suppression —
-bounced, complained, unsubscribed — bars every message this deploy sends, because reaching that
-address again costs the sending domain its standing. A topic preference bars product news alone: a
-member who asked to hear nothing more about the product is still told their balance ran out,
-because that is what their workspace is doing with their money. Every send therefore names a
-topic, and `transactional` is the one a member cannot silence.
+Suppression stays where it already is, and control applies it centrally. A hard suppression — a
+bounce or a complaint — bars every message this deploy sends, because reaching that address again
+costs the sending domain its standing. An unsubscribe is not one of those. It says which mail the
+member does not want; it does not say the address is bad. So an unsubscribe is a topic preference,
+and a preference bars its own topic and nothing else: a member who leaves the founder list is still
+told their balance ran out, because that is what their workspace is doing with their money. Every
+send names a topic. `transactional` is the one a member cannot silence; `product_news` and
+`founder_updates` are the two they can — but only `product_news` is ours to set. SES holds the
+founder list's opt-out on its own contact and applies it to the send, so lifting our row alone
+would report a resume that never happens; the hosted page is what lifts it.
 
-The preference is a row in `ufo_control` beside the suppression it joins, and a member expresses
-it the way a member expresses everything — in chat. There is no unsubscribe endpoint of our own:
-the agent holds a tool, calls it for the speaker's own address, and control records it.
+The preference is a row in `ufo_control` beside the suppression it joins, and two paths write it.
+In chat, the agent holds a tool and calls it for the speaker's own address. In the mail, SES's
+hosted unsubscribe page records the opt-out and publishes a `Subscription` event; the feedback
+consumer maps the contact-list topic it names to ours and writes the row — and lifts it again on
+the opt-in the same page publishes, which for the founder topic is the only surface that can. There is no unsubscribe
+endpoint of our own.
 
 ## What fires a sequence
 
 | Kind | Fire point | Exists today |
 |---|---|---|
-| Product — feature use | `HookSpec(event="post_tool_use", tools=(...))` writes an event row | yes, unchanged |
-| Product — absence of use | per-minute job over the extension's own event rows, anti-joined against the feature event | yes, unchanged |
-| Lifecycle — seated, invited, connected | per-minute sweep of `member`, `object_change` | yes, unchanged |
+| Lifecycle — invited | per-minute sweep of core's members | yes, unchanged |
+| Lifecycle — absence of use | per-minute sweep of the extension's own event rows, banded by age, against a live read of core's connections | yes, unchanged |
 | Transactional — balance, limits | per-minute sweep of `workspace_balance` headroom and `spend_cap` | yes, unchanged |
 
-Nothing in that table asks core for a new hook. The product events the SDK already fires cover
-feature use, and everything else is a state a sweep can read.
+Nothing in that table asks core for a new hook, and nothing is caught as it happens. Every state
+is already a row, so a job on a clock reads it — the standing rule that batch-at-interval is the
+default. A hook that fired on the act would say less: a member who asks to connect an account has
+not connected one, and the row is what knows whether they did.
 
 ## The state a sequence holds
 
@@ -167,9 +175,10 @@ Each lands with both ends and its own proof.
 |---|---|---|
 | 1 | The send seam, plus the balance-exhausted notice | an extension sends one message and reads its delivery back |
 | 2 | Event log, enrollment, the per-minute runner, one repo-defined sequence | a delay measured from an instant fires on time, once |
-| 3 | `post_tool_use` product triggers and an absence-of-use sequence | a feature event is logged where the member uses the feature, an absence is logged where the deadline passes without it, and both enroll |
+| 3 | The sweep that writes events, and an absence-of-use sequence | an invitation is logged where the member is invited, an absence is logged where the deadline passes without a connection, and both enroll |
 | 4 | The operator editor, revisions and approval | drip copy changes without a deploy and cannot go out unapproved |
 | 5 | Member topic preferences | a member silences product news in chat and still receives transactional |
+| 6 | An unsubscribe becomes a topic preference | a member who leaves the founder list is barred from the next campaign and still gets their balance notice |
 
 ## Non-goals
 

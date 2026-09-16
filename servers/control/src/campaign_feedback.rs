@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -12,7 +13,7 @@ use crate::campaign::{
 use crate::email::{
     assume_role, signed_post, AwsCall, AwsError, SesCredentials, AWS_TIMEOUT_SECONDS, SQS_SERVICE,
 };
-use crate::email_send::TABLE as SEND_TABLE;
+use crate::email_send::{PREFERENCE_TABLE, SILENCEABLE, TABLE as SEND_TABLE};
 
 pub const POLL_INTERVAL_SECONDS: u64 = 20;
 pub const WAIT_TIME_SECONDS: u32 = 20;
@@ -25,6 +26,7 @@ const DELETE_TARGET: &str = "AmazonSQS.DeleteMessageBatch";
 
 const PERMANENT_BOUNCE: &str = "Permanent";
 const OPT_OUT: &str = "OPT_OUT";
+const OPT_IN: &str = "OPT_IN";
 
 /// The SES `eventType` values this deploy publishes. `Rendering Failure` carries a space, which is
 /// why the mapping matches on the wire string rather than on a name of ours.
@@ -194,6 +196,8 @@ struct TopicPreferences {
 
 #[derive(Deserialize)]
 struct TopicStatus {
+    #[serde(rename = "topicName")]
+    topic_name: String,
     #[serde(rename = "subscriptionStatus")]
     subscription_status: String,
 }
@@ -248,6 +252,38 @@ impl SesEvent {
                 .iter()
                 .any(|topic| topic.subscription_status == OPT_OUT)
     }
+
+    /// `unsubscribeAll` reads our whole silenceable list, not the map: the map holds only what this
+    /// deploy sends under, and the member asked for no mail.
+    fn topic_preferences(&self, every: &BTreeMap<String, String>) -> BTreeMap<String, bool> {
+        let Some(preferences) = self
+            .subscription
+            .as_ref()
+            .and_then(|part| part.new_topic_preferences.as_ref())
+        else {
+            return BTreeMap::new();
+        };
+        if preferences.unsubscribe_all.unwrap_or(false) {
+            return SILENCEABLE
+                .iter()
+                .map(|topic| (topic.to_string(), true))
+                .collect();
+        }
+        preferences
+            .topic_subscription_status
+            .iter()
+            .filter_map(|topic| {
+                let silenced = match topic.subscription_status.as_str() {
+                    OPT_OUT => true,
+                    OPT_IN => false,
+                    _ => return None,
+                };
+                every
+                    .get(&topic.topic_name)
+                    .map(|ours| (ours.clone(), silenced))
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -255,6 +291,10 @@ pub struct CampaignFeedback {
     pub pool: Pool,
     pub queue: FeedbackQueue,
     pub poll_interval: std::time::Duration,
+    /// Each SES contact-list topic this deploy sends under, against the name our own preference
+    /// table holds. An unsubscribe arrives naming SES's spelling; what it bars is decided by ours,
+    /// so the two are mapped here rather than guessed at either end.
+    pub topics: BTreeMap<String, String>,
 }
 
 impl CampaignFeedback {
@@ -331,6 +371,20 @@ impl CampaignFeedback {
                 ],
             )
             .await?;
+        for (topic, silenced) in event.topic_preferences(&self.topics) {
+            let statement = match silenced {
+                true => format!(
+                    "insert into {PREFERENCE_TABLE} (email, topic) values ($1, $2) \
+                     on conflict (email, topic) do nothing"
+                ),
+                false => format!("delete from {PREFERENCE_TABLE} where email = $1 and topic = $2"),
+            };
+            connection.execute(&statement, &[&email, &topic]).await?;
+            tracing::info!(
+                target: "ufo_control::campaign_feedback",
+                "campaign_feedback.preference topic={topic} silenced={silenced}"
+            );
+        }
         let Some(delivery) = event.delivery_state() else {
             return Ok(());
         };

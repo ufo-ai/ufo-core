@@ -7,7 +7,8 @@ use harness::{ledger_pool, spawn_http, Exchange};
 use ufo_control::campaign_feedback::{CampaignFeedback, FeedbackQueue};
 use ufo_control::email::{AwsEndpoints, EmailSender, SesEmailSender};
 use ufo_control::email_send::{
-    Asked, EmailSends, Preference, SendError, PRODUCT_NEWS, TABLE, TRANSACTIONAL,
+    Asked, EmailSends, Preference, SendError, FOUNDER_UPDATES, PREFERENCE_TABLE, PRODUCT_NEWS,
+    SILENCEABLE, TABLE, TRANSACTIONAL,
 };
 
 const STS_RESPONSE: &str = r#"<AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -23,6 +24,7 @@ const STS_RESPONSE: &str = r#"<AssumeRoleWithWebIdentityResponse xmlns="https://
 
 const CONFIGURATION_SET: &str = "ufo-testing-transactional";
 const APEX: &str = "ufo.ai";
+const SES_FOUNDER_TOPIC: &str = "ufo-testing-founder-updates";
 
 fn asked(email: &str) -> Asked {
     Asked {
@@ -69,6 +71,22 @@ async fn recorded(pool: &Pool, message_id: &str) -> Option<(String, String, Opti
         .map(|row| (row.get("kind"), row.get("email"), row.get("delivery")))
 }
 
+async fn silenced_topics(pool: &Pool, email: &str) -> Vec<String> {
+    let connection = pool.get().await.unwrap();
+    let mut topics: Vec<String> = connection
+        .query(
+            &format!("select topic from {PREFERENCE_TABLE} where email = $1"),
+            &[&email],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<_, String>("topic"))
+        .collect();
+    topics.sort();
+    topics
+}
+
 async fn drain_feedback(pool: &Pool, token_file: PathBuf, event: &str) {
     let (queue, _log) = spawn_http(vec![
         (200, STS_RESPONSE.to_string()),
@@ -90,6 +108,10 @@ async fn drain_feedback(pool: &Pool, token_file: PathBuf, event: &str) {
             sts: format!("{queue}/"),
         },
         poll_interval: std::time::Duration::from_millis(1),
+        topics: std::collections::BTreeMap::from([(
+            SES_FOUNDER_TOPIC.to_string(),
+            FOUNDER_UPDATES.to_string(),
+        )]),
     }
     .poll()
     .await
@@ -206,6 +228,34 @@ async fn an_address_that_left_a_campaign_still_hears_about_its_own_workspace() {
     assert!(
         !log.lock().unwrap().is_empty(),
         "the message reaches SES rather than being barred"
+    );
+}
+
+#[tokio::test]
+async fn a_member_cannot_lift_the_founder_opt_out_from_chat() {
+    let pool = ledger_pool().await;
+    let (_directory, token_file) = projected_token();
+    let (aws, _log) = spawn_http(Vec::new()).await;
+    let sends = EmailSends {
+        pool,
+        sender: ses(&aws, token_file),
+        apex_host: APEX.to_string(),
+    };
+
+    let refusal = sends
+        .prefer(Preference {
+            email: "member@acme.com".to_string(),
+            topic: FOUNDER_UPDATES.to_string(),
+            silenced: false,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        refusal
+            .to_string()
+            .contains("is not a topic a member can set"),
+        "SES holds that opt-out on its contact list, so lifting our row alone would report a \
+         resume that never happens: {refusal}"
     );
 }
 
@@ -409,5 +459,133 @@ async fn the_message_reaches_ses_drawn_in_the_deploy_frame_and_carries_no_unsubs
     assert!(
         !text.contains("amazonSESUnsubscribeUrl") && !html.contains("amazonSESUnsubscribeUrl"),
         "a transactional message carries no unsubscribe: SES would leave the braces in it"
+    );
+}
+
+#[tokio::test]
+async fn an_unsubscribe_from_the_founder_topic_bars_that_topic_alone() {
+    let pool = ledger_pool().await;
+    let (_directory, token_file) = projected_token();
+    let (aws, _log) = spawn_http(vec![
+        (200, STS_RESPONSE.to_string()),
+        (200, r#"{"MessageId": "message-one"}"#.to_string()),
+        (200, STS_RESPONSE.to_string()),
+        (200, r#"{"MessageId": "message-two"}"#.to_string()),
+    ])
+    .await;
+    let sends = EmailSends {
+        pool: pool.clone(),
+        sender: ses(&aws, token_file.clone()),
+        apex_host: APEX.to_string(),
+    };
+    sends.send(asked("member@acme.com")).await.unwrap();
+
+    let unsubscribed = format!(
+        r#"{{"eventType": "Subscription", "mail": {{"timestamp": "2026-07-10T12:00:00.000Z", "messageId": "message-one", "destination": ["member@acme.com"]}}, "subscription": {{"timestamp": "2026-07-10T12:00:05.000Z", "newTopicPreferences": {{"unsubscribeAll": false, "topicSubscriptionStatus": [{{"topicName": "{SES_FOUNDER_TOPIC}", "subscriptionStatus": "OPT_OUT"}}]}}}}}}"#
+    );
+    drain_feedback(&pool, token_file, &unsubscribed).await;
+
+    let connection = pool.get().await.unwrap();
+    let silenced: Vec<String> = connection
+        .query(
+            &format!("select topic from {PREFERENCE_TABLE} where email = $1"),
+            &[&"member@acme.com"],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<_, String>("topic"))
+        .collect();
+    assert_eq!(
+        silenced,
+        vec![FOUNDER_UPDATES.to_string()],
+        "the unsubscribe SES reports is held against the topic it names"
+    );
+
+    assert!(
+        sends.send(asked("member@acme.com")).await.is_ok(),
+        "leaving the founder list does not stop the notice that the workspace is out of credit"
+    );
+}
+
+#[tokio::test]
+async fn an_opt_in_on_the_hosted_page_lifts_what_the_opt_out_wrote() {
+    let pool = ledger_pool().await;
+    let (_directory, token_file) = projected_token();
+
+    let left = format!(
+        r#"{{"eventType": "Subscription", "mail": {{"timestamp": "2026-07-10T12:00:00.000Z", "messageId": "message-one", "destination": ["member@acme.com"]}}, "subscription": {{"timestamp": "2026-07-10T12:00:05.000Z", "newTopicPreferences": {{"unsubscribeAll": false, "topicSubscriptionStatus": [{{"topicName": "{SES_FOUNDER_TOPIC}", "subscriptionStatus": "OPT_OUT"}}]}}}}}}"#
+    );
+    drain_feedback(&pool, token_file.clone(), &left).await;
+    assert_eq!(
+        silenced_topics(&pool, "member@acme.com").await,
+        vec![FOUNDER_UPDATES.to_string()]
+    );
+
+    let returned = format!(
+        r#"{{"eventType": "Subscription", "mail": {{"timestamp": "2026-07-10T13:00:00.000Z", "messageId": "message-two", "destination": ["member@acme.com"]}}, "subscription": {{"timestamp": "2026-07-10T13:00:05.000Z", "newTopicPreferences": {{"unsubscribeAll": false, "topicSubscriptionStatus": [{{"topicName": "{SES_FOUNDER_TOPIC}", "subscriptionStatus": "OPT_IN"}}]}}}}}}"#
+    );
+    drain_feedback(&pool, token_file, &returned).await;
+
+    assert!(
+        silenced_topics(&pool, "member@acme.com").await.is_empty(),
+        "the hosted page is the only surface that lifts this topic, so an opt-in it publishes has \
+         to reach the row the opt-out wrote"
+    );
+}
+
+#[tokio::test]
+async fn unsubscribe_from_everything_silences_every_topic_a_member_may_silence() {
+    let pool = ledger_pool().await;
+    let (_directory, token_file) = projected_token();
+    let (aws, _log) = spawn_http(vec![
+        (200, STS_RESPONSE.to_string()),
+        (200, r#"{"MessageId": "message-one"}"#.to_string()),
+        (200, STS_RESPONSE.to_string()),
+        (200, r#"{"MessageId": "message-two"}"#.to_string()),
+    ])
+    .await;
+    let sends = EmailSends {
+        pool: pool.clone(),
+        sender: ses(&aws, token_file.clone()),
+        apex_host: APEX.to_string(),
+    };
+    sends.send(asked("member@acme.com")).await.unwrap();
+
+    let everything = r#"{"eventType": "Subscription", "mail": {"timestamp": "2026-07-10T12:00:00.000Z", "messageId": "message-one", "destination": ["member@acme.com"]}, "subscription": {"timestamp": "2026-07-10T12:00:05.000Z", "newTopicPreferences": {"unsubscribeAll": true, "topicSubscriptionStatus": []}}}"#;
+    drain_feedback(&pool, token_file, everything).await;
+
+    let connection = pool.get().await.unwrap();
+    let mut silenced: Vec<String> = connection
+        .query(
+            &format!("select topic from {PREFERENCE_TABLE} where email = $1"),
+            &[&"member@acme.com"],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<_, String>("topic"))
+        .collect();
+    silenced.sort();
+    let mut expected: Vec<String> = SILENCEABLE.iter().map(|topic| topic.to_string()).collect();
+    expected.sort();
+    assert_eq!(
+        silenced, expected,
+        "a member who asked for no mail at all asked about every topic they may silence, not \
+         only the ones this deploy happens to send"
+    );
+
+    let refusal = sends
+        .send(Asked {
+            kind: "connect_something_reminder".to_string(),
+            topic: PRODUCT_NEWS.to_string(),
+            ..asked("member@acme.com")
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(refusal, SendError::Silenced { .. }));
+    assert!(
+        sends.send(asked("member@acme.com")).await.is_ok(),
+        "the notice that the workspace is out of credit is still not theirs to silence"
     );
 }

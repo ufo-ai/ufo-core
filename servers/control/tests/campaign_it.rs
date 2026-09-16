@@ -14,7 +14,7 @@ use ufo_control::campaign::{
 use ufo_control::campaign_feedback::{CampaignFeedback, FeedbackQueue};
 use ufo_control::campaign_send::CampaignSends;
 use ufo_control::email::{parse_senders, AwsEndpoints, FounderSender};
-use ufo_control::email_send::{PREFERENCE_TABLE, PRODUCT_NEWS};
+use ufo_control::email_send::{FOUNDER_UPDATES, PREFERENCE_TABLE, PRODUCT_NEWS};
 use ufo_control::hud::csrf_token;
 use ufo_control::message::UNSUBSCRIBE_PLACEHOLDER;
 use ufo_control::shared::SharedWorkspaces;
@@ -255,7 +255,7 @@ async fn preparing_freezes_the_audience_and_excludes_who_it_must_not_reach() {
 }
 
 #[tokio::test]
-async fn a_member_who_silenced_product_email_in_chat_is_out_of_the_audience() {
+async fn a_preference_bars_its_own_topic_and_the_audience_reads_the_one_it_sends_under() {
     let pool = ledger_pool().await;
     let (_directory, token) = token_file();
     let (aws, _aws_log) = spawn_http(vec![
@@ -267,6 +267,7 @@ async fn a_member_who_silenced_product_email_in_chat_is_out_of_the_audience() {
         (
             200,
             seated(&[
+                ("left@acme.com", Uuid::new_v4()),
                 ("silenced@acme.com", Uuid::new_v4()),
                 ("listening@acme.com", Uuid::new_v4()),
             ]),
@@ -275,23 +276,33 @@ async fn a_member_who_silenced_product_email_in_chat_is_out_of_the_audience() {
     ])
     .await;
     let connection = pool.get().await.unwrap();
-    connection
-        .execute(
-            &format!("insert into {PREFERENCE_TABLE} (email, topic) values ($1, $2)"),
-            &[&"silenced@acme.com", &PRODUCT_NEWS],
-        )
-        .await
-        .unwrap();
+    for (email, topic) in [
+        ("left@acme.com", FOUNDER_UPDATES),
+        ("silenced@acme.com", PRODUCT_NEWS),
+    ] {
+        connection
+            .execute(
+                &format!("insert into {PREFERENCE_TABLE} (email, topic) values ($1, $2)"),
+                &[&email, &topic],
+            )
+            .await
+            .unwrap();
+    }
     let ledger = campaigns(pool.clone(), &aws, core, token);
 
     let created = ledger.create(OPERATOR, draft("Update")).await.unwrap();
     let prepared = ledger.prepare(created.id, created.revision).await.unwrap();
 
-    assert_eq!(prepared.sample, vec!["listening@acme.com".to_string()]);
-    assert_eq!(
-        prepared.counts.audience, 1,
-        "a preference set in chat never reaches SES, so the audience has to read it here"
+    assert!(
+        !prepared.sample.contains(&"left@acme.com".to_string()),
+        "the hosted page records the founder opt-out here before SES's own list is paged again"
     );
+    assert!(
+        prepared.sample.contains(&"silenced@acme.com".to_string()),
+        "and a member who asked to hear nothing more about the product still hears from the \
+         founders: a preference bars its own topic and nothing else"
+    );
+    assert_eq!(prepared.counts.audience, 2);
 }
 
 #[tokio::test]
@@ -385,7 +396,7 @@ async fn editing_approved_content_drops_the_approval_and_the_frozen_list() {
 }
 
 #[tokio::test]
-async fn a_member_who_silences_our_news_after_the_audience_froze_is_not_sent_to() {
+async fn a_member_who_leaves_the_founder_topic_after_the_audience_froze_is_not_sent_to() {
     let pool = ledger_pool().await;
     let (_directory, token) = token_file();
     let (aws, aws_log) = spawn_http(vec![
@@ -421,7 +432,7 @@ async fn a_member_who_silences_our_news_after_the_audience_froze_is_not_sent_to(
         .unwrap()
         .execute(
             &format!("insert into {PREFERENCE_TABLE} (email, topic) values ($1, $2)"),
-            &[&"leaves@acme.com", &PRODUCT_NEWS],
+            &[&"leaves@acme.com", &FOUNDER_UPDATES],
         )
         .await
         .unwrap();
@@ -713,6 +724,7 @@ async fn a_hard_bounce_lands_on_its_recipient_and_bars_the_address_from_the_next
             sts: format!("{queue}/"),
         },
         poll_interval: std::time::Duration::from_millis(1),
+        topics: std::collections::BTreeMap::new(),
     }
     .poll()
     .await
@@ -1108,4 +1120,45 @@ async fn a_test_sent_before_the_prepare_does_not_take_an_audience_member_out_of_
         .unwrap()
         .get(0);
     assert_eq!(rows, 1, "one row carries one address");
+}
+
+#[tokio::test]
+async fn a_member_who_left_the_founder_list_is_barred_from_the_next_campaign() {
+    let pool = ledger_pool().await;
+    let (_directory, token) = token_file();
+    let (aws, _aws_log) = spawn_http(vec![
+        (200, STS_RESPONSE.to_string()),
+        (200, NO_CONTACTS.to_string()),
+    ])
+    .await;
+    let (core, _core_log) = spawn_http(vec![
+        (
+            200,
+            seated(&[
+                ("gone@acme.com", Uuid::new_v4()),
+                ("here@acme.com", Uuid::new_v4()),
+            ]),
+        ),
+        (200, NO_SEATS.to_string()),
+    ])
+    .await;
+    let connection = pool.get().await.unwrap();
+    connection
+        .execute(
+            &format!("insert into {PREFERENCE_TABLE} (email, topic) values ($1, $2)"),
+            &[&"gone@acme.com", &FOUNDER_UPDATES],
+        )
+        .await
+        .unwrap();
+    let ledger = campaigns(pool.clone(), &aws, core, token);
+
+    let created = ledger.create(OPERATOR, draft("Update")).await.unwrap();
+    let prepared = ledger.prepare(created.id, created.revision).await.unwrap();
+
+    assert_eq!(prepared.counts.audience, 1);
+    assert_eq!(
+        prepared.sample,
+        vec!["here@acme.com".to_string()],
+        "the address that left the founder list is the one held back"
+    );
 }

@@ -38,9 +38,21 @@ pub const PREFERENCE_PATH: &str = "/internal/email/preference";
 
 /// Everything a workspace is doing with a member's money or access. Never silenced.
 pub const TRANSACTIONAL: &str = "transactional";
-/// Everything else. A member silences it and keeps the rest.
+/// Everything else this seam sends. A member silences it and keeps the rest.
 pub const PRODUCT_NEWS: &str = "product_news";
+/// What a founder campaign sends under. Nothing posts it here — a campaign has its own sender —
+/// but a member silences it the same way, and one table holds both answers.
+pub const FOUNDER_UPDATES: &str = "founder_updates";
+
+/// What a send may name.
 pub const TOPICS: &[&str] = &[TRANSACTIONAL, PRODUCT_NEWS];
+/// What a member may silence. Transactional is absent and always will be: a workspace running out
+/// of credit is not news, it is what is happening to their money.
+pub const SILENCEABLE: &[&str] = &[PRODUCT_NEWS, FOUNDER_UPDATES];
+
+/// What a member may set from chat. The founder list's opt-out is SES's, held on its contact list
+/// and applied to the send, so lifting our row alone would report a resume that never happens.
+pub const SETTABLE: &[&str] = &[PRODUCT_NEWS];
 
 fn transactional() -> String {
     TRANSACTIONAL.to_string()
@@ -212,9 +224,9 @@ impl EmailSends {
     pub async fn prefer(&self, asked: Preference) -> Result<Silenced, SendError> {
         let (address, _) =
             normalize_email(&asked.email).map_err(|error| SendError::Refused(error.to_string()))?;
-        if asked.topic == TRANSACTIONAL || !TOPICS.contains(&asked.topic.as_str()) {
+        if !SETTABLE.contains(&asked.topic.as_str()) {
             return Err(SendError::Refused(format!(
-                "{:?} is not a topic a member can silence",
+                "{:?} is not a topic a member can set (expected one of {SETTABLE:?})",
                 asked.topic
             )));
         }

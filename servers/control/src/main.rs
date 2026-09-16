@@ -10,7 +10,7 @@ use ufo_control::email::{
     apex_host, email_sender_from_env, founder_sender_from_env, invite_email,
     public_apex_host_from_env, DEFAULT_PUBLIC_BASE_URL, PUBLIC_BASE_URL_ENV,
 };
-use ufo_control::email_send::EmailSends;
+use ufo_control::email_send::{EmailSends, FOUNDER_UPDATES};
 use ufo_control::gateway::{
     parse_invite_required, router, stamped_script, GatewayState, Onboarding, CLIENT_BIN_DIR_ENV,
     GATEWAY_PORT_ENV, INVITE_REQUIRED_ENV, SIGNUP_KEY_ENV,
@@ -255,6 +255,10 @@ async fn gateway() -> Result<(), String> {
 
     match founder {
         Some((sender, queue_url)) => {
+            let topics = std::collections::BTreeMap::from([(
+                sender.topic.clone(),
+                FOUNDER_UPDATES.to_string(),
+            )]);
             let queue = FeedbackQueue {
                 url: queue_url,
                 region: sender.region.clone(),
@@ -278,6 +282,7 @@ async fn gateway() -> Result<(), String> {
                 CampaignFeedback {
                     pool: pool_for_feedback,
                     queue,
+                    topics,
                     poll_interval: std::time::Duration::from_secs(
                         campaign_feedback::POLL_INTERVAL_SECONDS,
                     ),

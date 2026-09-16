@@ -16,6 +16,7 @@ pub const LEDGERS: &[&str] = &[
     email_send::TABLE,
     email_send::PREFERENCE_TABLE,
     lifecycle::TABLE,
+    BACKFILL_TABLE,
 ];
 
 pub const SHAPE_LOCK: &str = "select pg_advisory_xact_lock(hashtext('ufo_control schema'))";
@@ -33,8 +34,21 @@ const TABLE_CONSTRAINTS: &[&str] = &[
 const LIVE_COLUMNS: &str = "select table_name, column_name from information_schema.columns \
                             where table_schema = $1 and table_name = any($2::text[])";
 
+/// What a one-time fill in `reshape` records so it never runs twice. `reshape` replays on every
+/// migrate, so a fill that writes member state has to name itself here or it undoes their later
+/// acts on the next deploy.
+pub const BACKFILL_TABLE: &str = "ufo_control.schema_backfill";
+pub const UNSUBSCRIBED_TOPICS_FILL: &str = "unsubscribed_topics";
+
 pub fn ddl() -> Vec<String> {
-    let mut statements = vec![format!("create schema if not exists {SCHEMA}")];
+    let mut statements = vec![
+        format!("create schema if not exists {SCHEMA}"),
+        format!(
+            "create table if not exists {BACKFILL_TABLE} (\
+               name text primary key,\
+               filled_at timestamptz not null default now())"
+        ),
+    ];
     for group in [
         store::DDL,
         invite::DDL,
@@ -123,6 +137,35 @@ pub fn reshape() -> Vec<String> {
              (signup_subject) where consumed_at is null",
             invite::LIVE_SUBJECT_INDEX,
             invite::TABLE
+        ),
+        // Consent recorded before a topic existed to record it against: which topic the
+        // unsubscribe meant was never kept, so the safe read is every topic a member can silence.
+        format!(
+            "insert into {} (email, topic) \
+             select distinct r.email, t.topic from {} r cross join unnest($TOPICS$) as t(topic) \
+             where r.delivery = '{}' and not exists \
+               (select 1 from {} where name = '{}') \
+             on conflict do nothing",
+            email_send::PREFERENCE_TABLE,
+            campaign::RECIPIENT_TABLE,
+            campaign::UNSUBSCRIBED,
+            BACKFILL_TABLE,
+            UNSUBSCRIBED_TOPICS_FILL
+        )
+        .replace(
+            "$TOPICS$",
+            &format!(
+                "array[{}]",
+                email_send::SILENCEABLE
+                    .iter()
+                    .map(|topic| format!("'{topic}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        format!(
+            "insert into {} (name) values ('{}') on conflict do nothing",
+            BACKFILL_TABLE, UNSUBSCRIBED_TOPICS_FILL
         ),
     ]
 }
@@ -262,7 +305,7 @@ mod tests {
     #[test]
     fn the_head_shape_reads_every_declared_column() {
         let shape = head_shape();
-        assert_eq!(shape.len(), 10, "one entry per ledger");
+        assert_eq!(shape.len(), 11, "one entry per ledger");
         let claim = &shape[store::TABLE];
         assert!(claim.contains("created_workspace"), "{claim:?}");
         assert!(claim.contains("invite_id"), "{claim:?}");

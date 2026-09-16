@@ -42,6 +42,116 @@ async fn shaping_twice_is_a_no_op_and_leaves_the_schema_required() {
 }
 
 #[tokio::test]
+async fn reshape_carries_a_recorded_unsubscribe_into_the_topic_preferences() {
+    let pool = ledger_pool().await;
+    let client = pool.get().await.unwrap();
+    let campaign_id = Uuid::new_v4();
+    client
+        .execute(
+            "insert into ufo_control.email_campaign \
+             (id, subject, body, created_by, sender, audience, state) \
+             values ($1, 'Update', 'Words.', 'operator@metalcraft.ai', 'founder@ufo.ai', \
+             'members', 'completed')",
+            &[&campaign_id],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "insert into ufo_control.email_recipient \
+             (campaign_id, email, member_id, delivery, state) \
+             values ($1, 'left@acme.com', $2, 'unsubscribed', 'sent')",
+            &[&campaign_id, &Uuid::new_v4()],
+        )
+        .await
+        .unwrap();
+    client
+        .execute("delete from ufo_control.email_preference", &[])
+        .await
+        .unwrap();
+    // The ledger pool is shared, so the fill may already be recorded from an earlier shaping.
+    client
+        .execute("delete from ufo_control.schema_backfill", &[])
+        .await
+        .unwrap();
+
+    drop(client);
+    let mut owned = pool.get().await.unwrap();
+    shape_control_schema(&mut owned).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    let topics: Vec<String> = client
+        .query(
+            "select topic from ufo_control.email_preference where email = $1 order by topic",
+            &[&"left@acme.com"],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<_, String>("topic"))
+        .collect();
+    assert_eq!(
+        topics,
+        vec!["founder_updates".to_string(), "product_news".to_string()],
+        "which topic the unsubscribe meant was never kept, so the safe read is all of them"
+    );
+
+    client
+        .execute(
+            "delete from ufo_control.email_preference where email = $1 and topic = $2",
+            &[&"left@acme.com", &"product_news"],
+        )
+        .await
+        .unwrap();
+    drop(client);
+    let mut again = pool.get().await.unwrap();
+    shape_control_schema(&mut again).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    let after: Vec<String> = client
+        .query(
+            "select topic from ufo_control.email_preference where email = $1 order by topic",
+            &[&"left@acme.com"],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<_, String>("topic"))
+        .collect();
+    assert_eq!(
+        after,
+        vec!["founder_updates".to_string()],
+        "a member who asked for product email again is not silenced by the next migrate"
+    );
+
+    // And once they resume the last topic they hold, leaving no preference row at all.
+    client
+        .execute(
+            "delete from ufo_control.email_preference where email = $1",
+            &[&"left@acme.com"],
+        )
+        .await
+        .unwrap();
+    drop(client);
+    let mut third = pool.get().await.unwrap();
+    shape_control_schema(&mut third).await.unwrap();
+    let client = pool.get().await.unwrap();
+
+    let held: i64 = client
+        .query_one(
+            "select count(*) from ufo_control.email_preference where email = $1",
+            &[&"left@acme.com"],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        held, 0,
+        "the fill is recorded as done, so an address holding nothing is not silenced again"
+    );
+}
+
+#[tokio::test]
 async fn reshape_fills_a_subject_omitted_by_either_ledger_writer() {
     let pool = ledger_pool().await;
     let client = pool.get().await.unwrap();

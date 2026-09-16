@@ -9,7 +9,7 @@ use crate::campaign::{
 use crate::email::{
     verdict, AwsError, FounderSender, SendVerdict, Sender, MAX_RETRY_AFTER_SECONDS,
 };
-use crate::email_send::{PREFERENCE_TABLE, PRODUCT_NEWS};
+use crate::email_send::{FOUNDER_UPDATES, PREFERENCE_TABLE};
 
 pub const POLL_INTERVAL_SECONDS: u64 = 5;
 pub const LEASE_SECONDS: i64 = 120;
@@ -193,7 +193,7 @@ impl CampaignSends {
         let held = connection
             .query_opt(
                 &format!("select 1 from {PREFERENCE_TABLE} where email = $1 and topic = $2"),
-                &[&email, &PRODUCT_NEWS],
+                &[&email, &FOUNDER_UPDATES],
             )
             .await?;
         Ok(held.is_some())

@@ -7,7 +7,7 @@ use tokio_postgres::Row;
 use uuid::Uuid;
 
 use crate::email::{normalize_email, FounderSender, Sender};
-use crate::email_send::{PREFERENCE_TABLE, PRODUCT_NEWS};
+use crate::email_send::{FOUNDER_UPDATES, PREFERENCE_TABLE};
 use crate::gateway::OPERATOR_EMAIL_DOMAIN;
 use crate::message::{render, Message, Words};
 use crate::shared::{SeatError, SeatedMember, SharedWorkspaces};
@@ -40,9 +40,15 @@ pub const UNSUBSCRIBED: &str = "unsubscribed";
 pub const REJECTED: &str = "rejected";
 pub const RENDERING_FAILED: &str = "rendering_failed";
 
-/// An address in any of these has told us, or told SES, that this mail is unwanted. It is excluded
-/// from every later campaign, whichever campaign recorded it.
-pub const SUPPRESSED: &[&str] = &[BOUNCED, COMPLAINED, UNSUBSCRIBED];
+/// An address in either of these cannot receive mail at all: it bounced, or someone called it
+/// spam. Reaching it again costs the sending domain its standing, so it is barred from every
+/// message this deploy sends, of every topic, transactional included.
+///
+/// `UNSUBSCRIBED` is deliberately absent. An unsubscribe is a member saying they want no more of
+/// one *topic*, not that the address is unreachable — so it is recorded as a topic preference and
+/// bars that topic alone. A member who wants no more product news is still told their workspace ran
+/// out of credit.
+pub const SUPPRESSED: &[&str] = &[BOUNCED, COMPLAINED];
 
 /// What bars a message a workspace sends about a member's own money or access. Only the states
 /// that say the address itself does not work: leaving a campaign is a preference about marketing,
@@ -733,8 +739,8 @@ impl Campaigns {
         }
     }
 
-    /// Ours and SES's, unioned: SES is the gate that actually refuses the send, and a preference a
-    /// member set in chat never reaches SES at all.
+    /// Ours and SES's, unioned: SES is the gate that refuses the send, and the feedback consumer
+    /// records the hosted page's opt-out before SES's own list is paged again.
     async fn suppressed(&self) -> Result<HashSet<String>, CampaignError> {
         let connection = self.pool.get().await?;
         let states: Vec<String> = SUPPRESSED.iter().map(|state| state.to_string()).collect();
@@ -744,7 +750,7 @@ impl Campaigns {
                     "select distinct email from {RECIPIENT_TABLE} where delivery = any($1) \
                      union select email from {PREFERENCE_TABLE} where topic = $2"
                 ),
-                &[&states, &PRODUCT_NEWS],
+                &[&states, &FOUNDER_UPDATES],
             )
             .await?;
         let mut suppressed: HashSet<String> = rows
