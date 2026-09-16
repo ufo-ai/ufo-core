@@ -9,6 +9,7 @@
     {
       "kind": "tool",
       "label": "Reading the changelog.",
+      "call_id": "c1",
       "sources": [
         {
           "kind": "web",
@@ -43,6 +44,7 @@
     {
       "kind": "tool",
       "label": null,
+      "call_id": "",
       "sources": [
         {
           "kind": "web",

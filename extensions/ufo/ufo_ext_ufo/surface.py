@@ -368,13 +368,21 @@ def directives_for(
             crosses = frame.text and (comments or not frame.is_comment)
             return _frame(frame) if crosses else ()
         case Sources():
-            return ()
+            return _frame(frame) if frame.items else ()
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
 
 
 def _frame(frame: LiveFrame) -> tuple[bytes, ...]:
     event = frame_event(frame)
     return () if event is None else (directive("frame", event, frame_payload(frame)),)
+
+
+def _run(op: TerminalOp) -> bytes:
+    """The op as the client runs it, and the tool call it serves — what the client binds the
+    call's label to."""
+    return directive(
+        "run", op.op_id, op.kind, op.name, str(op.timeout_s), op.arg, op.params, op.call_id
+    )
 
 
 def _answer(
@@ -673,15 +681,7 @@ async def stream_directives(
                         continue
                     op_task = None
                     yield directive("since", str(turn_id), rendered_cursor)
-                    yield directive(
-                        "run",
-                        op.op_id,
-                        op.kind,
-                        op.name,
-                        str(op.timeout_s),
-                        op.arg,
-                        op.params,
-                    )
+                    yield _run(op)
                     ran = True
                     break
                 item = frame_task.result()

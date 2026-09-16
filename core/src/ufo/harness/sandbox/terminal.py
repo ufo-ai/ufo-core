@@ -39,6 +39,7 @@ from ufo.harness.sandbox.session import (
     NO_PROXY_HOSTS,
     PROXY_PASSWORD,
     RUNTIME_DIRNAME,
+    TOOL_CALL_ID,
     UFO_HOME_ENV,
     WORKSPACE_DIR,
     DialTarget,
@@ -180,8 +181,9 @@ class TerminalOpFailed(RuntimeError):
 class TerminalOp:
     """One request to a connected terminal. `kind` picks the client's primitive arm; `name` picks
     the file op within it, which the client implements natively; `params` is that op's JSON; `arg`
-    is a copy primitive's target path. The server names work and carries values — never code. The
-    id is what the answer comes back under."""
+    is a copy primitive's target path; `call_id` is the tool call the op serves, empty for work the
+    runtime issues for itself. The server names work and carries values — never code. The id is
+    what the answer comes back under."""
 
     op_id: str
     kind: str
@@ -189,6 +191,7 @@ class TerminalOp:
     name: str = ""
     arg: str = ""
     params: str = ""
+    call_id: str = ""
 
 
 _Waiter = tuple["asyncio.Future[object]", asyncio.AbstractEventLoop]
@@ -270,6 +273,7 @@ class TerminalTransport(Protocol):
         arg: str = "",
         params: str = "",
         body: bytes | None = None,
+        call_id: str = "",
     ) -> bytes: ...
 
     async def next_op(
@@ -401,10 +405,13 @@ class Terminals:
         arg: str = "",
         params: str = "",
         body: bytes | None = None,
+        call_id: str = "",
     ) -> bytes:
         """Ask the conversation's terminal to run one op and answer its reply, raising
-        `TerminalGone` when none is bound or the bound one stops answering. The deadline is the op's
-        own timeout plus slack — the margin covers the wire, never the op. Every exit path clears
+        `TerminalGone` when none is bound or the bound one stops answering. `call_id` names the tool
+        call the op serves, which the client binds the call's label to; the caller states it, since
+        a transport is a pipe and knows no dispatch. The deadline is the op's own timeout plus slack
+        — the margin covers the wire, never the op. Every exit path clears
         the slot's op, so a timed-out write does not hold a file copy for the life of the session,
         and clears an idle slot whose last connection already left.
 
@@ -427,6 +434,7 @@ class Terminals:
             name=name,
             arg=arg,
             params=params,
+            call_id=call_id,
         )
         try:
             with self._lock:
@@ -697,6 +705,7 @@ class TerminalCarrier:
                 OP_SKILLS,
                 DEFAULT_EXEC_TIMEOUT_SECONDS,
                 params=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                call_id=TOOL_CALL_ID.get(),
             )
         except TerminalOpFailed as error:
             raise RuntimeError(str(error)) from error
@@ -731,6 +740,7 @@ class TerminalCarrier:
                 timeout_s,
                 name=OP_EXEC,
                 params=json.dumps(params, separators=(",", ":")),
+                call_id=TOOL_CALL_ID.get(),
             )
         except TerminalOpFailed as error:
             raise RuntimeError(str(error)) from error
@@ -755,6 +765,7 @@ class TerminalCarrier:
                 DEFAULT_EXEC_TIMEOUT_SECONDS,
                 arg=_client_path(handle, path),
                 body=content,
+                call_id=TOOL_CALL_ID.get(),
             )
         except TerminalOpFailed as error:
             raise OSError(str(error)) from error
@@ -769,6 +780,7 @@ class TerminalCarrier:
                 OP_READ,
                 DEFAULT_EXEC_TIMEOUT_SECONDS,
                 arg=_client_path(handle, path),
+                call_id=TOOL_CALL_ID.get(),
             )
         except TerminalOpFailed as error:
             if str(error).startswith(OP_NOT_FOUND_PREFIX):
@@ -829,6 +841,7 @@ class TerminalCarrier:
                         },
                         separators=(",", ":"),
                     ),
+                    call_id=TOOL_CALL_ID.get(),
                 )
             except TerminalOpFailed as error:
                 raise ValueError(str(error)) from error
@@ -858,6 +871,7 @@ class TerminalCarrier:
                 DEFAULT_EXEC_TIMEOUT_SECONDS,
                 name=op,
                 params=json.dumps(rewritten, separators=(",", ":")),
+                call_id=TOOL_CALL_ID.get(),
             )
         except TerminalOpFailed as error:
             raise RuntimeError(str(error)) from error

@@ -65,11 +65,13 @@ class TextStep(BaseModel):
 
 
 class ToolStep(BaseModel):
-    """One tool call, as its member-facing label and the places it read. A step whose label never
-    landed carries None."""
+    """One tool call, as its member-facing label, the call it labels, and the places it read. A
+    step whose label never landed carries None; one that sources opened before any label names no
+    call."""
 
     kind: Literal["tool"] = "tool"
     label: str | None
+    call_id: str
     sources: tuple[SourceRef, ...]
     open: bool
 
@@ -310,8 +312,8 @@ def fold(record: TurnRecord, frame: LiveFrame, at: datetime) -> TurnRecord:
             return _words(record, text)
         case Activity(text=""):
             return record
-        case Activity(text=label):
-            return _opening(record, ToolStep(label=label, sources=(), open=True))
+        case Activity(text=label, call_id=call_id):
+            return _opening(record, ToolStep(label=label, call_id=call_id, sources=(), open=True))
         case Sources(items=items):
             return _sources(record, items)
         case SubagentActivity():
@@ -354,7 +356,9 @@ def _sources(record: TurnRecord, items: tuple[SourceRef, ...]) -> TurnRecord:
         return _with_step(
             record, len(record.steps) - 1, last.model_copy(update={"sources": sources})
         )
-    return _opening(record, ToolStep(label=None, sources=consulted((), items), open=True))
+    return _opening(
+        record, ToolStep(label=None, call_id="", sources=consulted((), items), open=True)
+    )
 
 
 def _run(record: TurnRecord, frame: SubagentActivity) -> TurnRecord:

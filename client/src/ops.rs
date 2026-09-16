@@ -229,6 +229,7 @@ mod tests {
             timeout_s: 30,
             arg: arg.into(),
             params: params.into(),
+            call_id: String::new(),
         }
     }
 

@@ -93,7 +93,7 @@ WORKSPACE_FIELDS: dict[str, tuple[str, ...]] = {
     "since": ("turn-1", "cursor-9"),
     "poll": ("1",),
     "listen": ("2",),
-    "run": ("op-1", "exec", "exec", "120", "", '{"argv":["ls"]}'),
+    "run": ("op-1", "exec", "exec", "120", "", '{"argv":["ls"]}', "c1"),
     "install": (),
 }
 ONBOARD_FIELDS: dict[str, tuple[str, ...]] = {

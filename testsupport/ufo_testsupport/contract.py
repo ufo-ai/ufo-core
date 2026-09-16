@@ -270,12 +270,12 @@ def record_fixture() -> TurnRecord:
         id=TURN_ID,
         steps=(
             TextStep(text="Reading the changelog first.", open=False),
-            ToolStep(label="Reading the changelog.", sources=(page,), open=False),
+            ToolStep(label="Reading the changelog.", call_id="c1", sources=(page,), open=False),
             ReplyStep(id=REPLY_ID, text="Filed the launch issue as metalcraftai/ufo#1801."),
             CommentStep(id=ARRIVAL_ID, text="A comment landed on Slack."),
             DrainStep(arrivals=(ARRIVAL_ID,)),
             ResumedStep(attempt="44444444444444444444444444444444"),
-            ToolStep(label=None, sources=(page,), open=False),
+            ToolStep(label=None, call_id="", sources=(page,), open=False),
             TextStep(text="It shipped Tuesday.", open=False),
         ),
         runs=(
@@ -361,9 +361,9 @@ def conformance_cases() -> list[tuple[str, tuple[LiveFrame, ...]]]:
             "words between two tool steps, then the answer",
             (
                 TextDelta(text="Reading the changelog first."),
-                Activity(text="Reading the changelog."),
+                Activity(text="Reading the changelog.", call_id="c1"),
                 TextDelta(text="Checking the tags now."),
-                Activity(text="Checking the release tags."),
+                Activity(text="Checking the release tags.", call_id="c2"),
                 TextDelta(text="It shipped "),
                 TextDelta(text="Tuesday."),
                 done,

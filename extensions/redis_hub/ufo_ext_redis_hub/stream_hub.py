@@ -52,6 +52,7 @@ class _ToolActivityWire(BaseModel):
     tool: str
     preview: str
     description: str = ""
+    call_id: str = ""
 
 
 class _SkillActivityWire(BaseModel):
@@ -81,7 +82,9 @@ def frame_payload(frame: HubFrame) -> dict[str, object]:
     """The wire form of one frame: its kind tag and its model fields, so a tail reconstructs the
     exact LiveFrame variant it was published as."""
     if isinstance(frame, Activity):
-        data = _ToolActivityWire(tool="activity", preview="", description=frame.text)
+        data = _ToolActivityWire(
+            tool="activity", preview="", description=frame.text, call_id=frame.call_id
+        )
         return {"kind": TOOL_ACTIVITY_KIND, "data": data.model_dump(mode="json")}
     return {"kind": _KIND_BY_TYPE[type(frame)], "data": frame.model_dump(mode="json")}
 
@@ -90,7 +93,7 @@ def frame_from_payload(payload: dict[str, object]) -> HubFrame:
     kind = payload["kind"]
     if kind == TOOL_ACTIVITY_KIND:
         tool_wire = _ToolActivityWire.model_validate(payload["data"])
-        return Activity(text=tool_wire.description or tool_wire.tool)
+        return Activity(text=tool_wire.description or tool_wire.tool, call_id=tool_wire.call_id)
     if kind == SKILL_ACTIVITY_KIND:
         skill_wire = _SkillActivityWire.model_validate(payload["data"])
         return Activity(text=f"Loading {skill_wire.skill}.")

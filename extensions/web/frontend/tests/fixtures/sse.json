@@ -5,7 +5,7 @@
   },
   {
     "event": "activity",
-    "data": "{\"text\":\"Listing the workspace.\"}"
+    "data": "{\"text\":\"Listing the workspace.\",\"call_id\":\"\"}"
   },
   {
     "event": "subagent_activity",

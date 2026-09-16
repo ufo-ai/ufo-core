@@ -28,6 +28,7 @@ pub struct OpRequest {
     pub timeout_s: u64,
     pub arg: String,
     pub params: String,
+    pub call_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -203,6 +204,7 @@ pub fn parse_line(line: &str) -> Directive {
                 .unwrap_or(FALLBACK_TIMEOUT_SECONDS),
             arg: field(&fields, 4),
             params: field(&fields, 5),
+            call_id: field(&fields, 6),
         }),
         "token" => Directive::Token(field(&fields, 0)),
         "workspace" => Directive::Workspace(field(&fields, 0)),
@@ -1090,6 +1092,7 @@ mod tests {
                 timeout_s: 120,
                 arg: String::new(),
                 params: "{\"argv\":[\"ls\"]}".into(),
+                call_id: String::new(),
             })
         );
     }
@@ -1339,6 +1342,7 @@ mod tests {
                     op.timeout_s.to_string(),
                     op.arg.clone(),
                     op.params.clone(),
+                    op.call_id.clone(),
                 ],
             )),
             Directive::Token(token) => Some(("token", vec![token.clone()])),

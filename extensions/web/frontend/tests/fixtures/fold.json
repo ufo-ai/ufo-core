@@ -8,7 +8,7 @@
       },
       {
         "event": "activity",
-        "data": "{\"text\":\"Reading the changelog.\"}"
+        "data": "{\"text\":\"Reading the changelog.\",\"call_id\":\"c1\"}"
       },
       {
         "event": "message",
@@ -16,7 +16,7 @@
       },
       {
         "event": "activity",
-        "data": "{\"text\":\"Checking the release tags.\"}"
+        "data": "{\"text\":\"Checking the release tags.\",\"call_id\":\"c2\"}"
       },
       {
         "event": "message",
@@ -42,6 +42,7 @@
         {
           "kind": "tool",
           "label": "Reading the changelog.",
+          "call_id": "c1",
           "sources": [],
           "open": false
         },
@@ -53,6 +54,7 @@
         {
           "kind": "tool",
           "label": "Checking the release tags.",
+          "call_id": "c2",
           "sources": [],
           "open": false
         },
@@ -95,7 +97,7 @@
       },
       {
         "event": "activity",
-        "data": "{\"text\":\"Listing.\"}"
+        "data": "{\"text\":\"Listing.\",\"call_id\":\"\"}"
       },
       {
         "event": "sources",
@@ -111,6 +113,7 @@
       "steps": [
         {
           "kind": "tool",
+          "call_id": "",
           "sources": [
             {
               "kind": "web",
@@ -137,6 +140,7 @@
         {
           "kind": "tool",
           "label": "Listing.",
+          "call_id": "",
           "sources": [
             {
               "kind": "workspace",

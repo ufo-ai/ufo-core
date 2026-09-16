@@ -136,9 +136,10 @@ async def test_an_op_from_the_turn_pod_reaches_the_connection_pod_and_a_reply_re
     conversation_id, member = uuid4(), uuid4()
     conn.connect(conversation_id, "/Users/member/proj", member)
 
-    sending = asyncio.ensure_future(turn.send(conversation_id, "exec", 5))
+    sending = asyncio.ensure_future(turn.send(conversation_id, "exec", 5, call_id="c1"))
     op = await conn.next_op(conversation_id)
     assert op.kind == "exec" and op.timeout_s == 5
+    assert op.call_id == "c1", "the call the op serves crosses the pods with it"
     assert turn.resolve(conversation_id, op.op_id, b'{"exit_code":0}', member_id=member)
     assert await sending == b'{"exit_code":0}'
 

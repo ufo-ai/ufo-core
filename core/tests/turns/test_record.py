@@ -51,19 +51,20 @@ def done(text: str) -> Terminal:
 def test_the_fold_keeps_words_and_steps_in_the_order_the_stream_told_them() -> None:
     record = replay(
         TextDelta(text="Reading the changelog first."),
-        Activity(text="Reading the changelog."),
+        Activity(text="Reading the changelog.", call_id="c1"),
         TextDelta(text="Checking "),
         TextDelta(text="the tags now."),
-        Activity(text="Checking the release tags."),
+        Activity(text="Checking the release tags.", call_id="c2"),
         TextDelta(text="It shipped Tuesday."),
     )
     assert record.steps == (
         TextStep(text="Reading the changelog first.", open=False),
-        ToolStep(label="Reading the changelog.", sources=(), open=False),
+        ToolStep(label="Reading the changelog.", call_id="c1", sources=(), open=False),
         TextStep(text="Checking the tags now.", open=False),
-        ToolStep(label="Checking the release tags.", sources=(), open=False),
+        ToolStep(label="Checking the release tags.", call_id="c2", sources=(), open=False),
         TextStep(text="It shipped Tuesday.", open=True),
     )
+    assert [step.call_id for step in record.steps if isinstance(step, ToolStep)] == ["c1", "c2"]
     assert record.end is None
 
 
@@ -78,7 +79,7 @@ def test_a_terminal_closes_every_step_and_ends_the_record() -> None:
 def test_sources_with_no_step_open_an_unlabelled_one_and_words_close_it() -> None:
     record = replay(Sources(items=(PAGE,)), Sources(items=(PAGE,)), TextDelta(text="Here."))
     assert record.steps == (
-        ToolStep(label=None, sources=(PAGE,), open=False),
+        ToolStep(label=None, call_id="", sources=(PAGE,), open=False),
         TextStep(text="Here.", open=True),
     )
 

@@ -166,6 +166,7 @@ pub enum Step {
     Tool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        call_id: String,
         sources: Vec<SourceRef>,
         open: bool,
     },

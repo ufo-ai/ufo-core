@@ -38,7 +38,7 @@ impl Plain {
         fold::fold(&mut self.record, &frame, &fold::utc_now_rfc3339());
         match frame {
             Frame::Message { text } => self.txt(&text),
-            Frame::Activity { text } if !text.is_empty() => self.say(&text),
+            Frame::Activity { text, .. } if !text.is_empty() => self.say(&text),
             Frame::Activity { .. } | Frame::Absorbed { .. } => {}
             Frame::SubagentActivity(run) if !run.activity.is_empty() => {
                 self.say(&format!("{}: {}", run.label(), run.activity));

@@ -26,7 +26,7 @@ const RUN_ID = "99999999-9999-4999-8999-999999999999";
 const RUN_CONVERSATION = "77777777-7777-4777-8777-777777777777";
 
 const say = (text: string): TurnFrame => ({ kind: "message", text });
-const step = (text: string): TurnFrame => ({ kind: "activity", text });
+const step = (text: string, call_id = ""): TurnFrame => ({ kind: "activity", text, call_id });
 const drain = (...arrivals: string[]): TurnFrame => ({ kind: "absorbed", arrivals });
 const reply = (text: string, id = REPLY_ID): TurnFrame => ({ kind: "reply", id, text });
 const done = (text: string, question: Record<string, unknown> | null = null): TurnFrame => ({
@@ -78,9 +78,9 @@ const ROUNDS = [
 test("the fold keeps a turn's words and steps in the order the stream told them", () => {
   expect(replay(ROUNDS).steps).toEqual([
     { kind: "text", text: "Reading the changelog first.", open: false },
-    { kind: "tool", label: "Reading the changelog.", sources: [], open: false },
+    { kind: "tool", label: "Reading the changelog.", call_id: "", sources: [], open: false },
     { kind: "text", text: "Checking the tags now.", open: false },
-    { kind: "tool", label: "Checking the release tags.", sources: [], open: false },
+    { kind: "tool", label: "Checking the release tags.", call_id: "", sources: [], open: false },
     { kind: "text", text: "It shipped Tuesday.", open: true },
   ]);
 });
@@ -187,6 +187,7 @@ test("the live row draws the segment's last step over its words, and names what 
     {
       kind: "tool",
       label: "Reading.",
+      call_id: "",
       sources: [{ kind: "web", title: "Docs", url: "https://x/y", ref: "", provider: "" }],
       open: false,
     },
@@ -196,7 +197,7 @@ test("the live row draws the segment's last step over its words, and names what 
 test("sources with no step of their own open an unlabelled step whose tiles stand until words arrive", () => {
   const page = { kind: "web" as const, title: "Docs", url: "https://x/y", ref: "", provider: "" };
   const opened = replay([{ kind: "sources", items: [page, page] }]);
-  expect(opened.steps).toEqual([{ kind: "tool", label: null, sources: [page], open: true }]);
+  expect(opened.steps).toEqual([{ kind: "tool", label: null, call_id: "", sources: [page], open: true }]);
   const [row] = layout([], opened);
   if (row.kind !== "live") throw new Error("no live row");
   expect(row.working).toBe(RESEARCHING);
@@ -272,7 +273,16 @@ test("the boundary refuses an event the stream does not declare and a payload wi
   expect(decodeFrame("nonsense", "{}")).toBeNull();
   expect(decodeFrame("activity", "not json")).toBeNull();
   expect(decodeFrame("activity", "{}")).toBeNull();
-  expect(decodeFrame("activity", '{"text":"Reading."}')).toEqual({ kind: "activity", text: "Reading." });
+  expect(decodeFrame("activity", '{"text":"Reading."}')).toEqual({
+    kind: "activity",
+    text: "Reading.",
+    call_id: "",
+  });
+  expect(decodeFrame("activity", '{"text":"Reading.","call_id":"c1"}')).toEqual({
+    kind: "activity",
+    text: "Reading.",
+    call_id: "c1",
+  });
   expect(decodeFrame("terminal", '{"status":"cancelled"}', AT)).toEqual({
     kind: "terminal",
     at: AT,
@@ -355,4 +365,9 @@ test("a done turn on the auto model names no model, and its question rides its r
     title: "One",
     questions: [{ question: "Which?" }],
   });
+});
+
+test("a labelled step names the call its label is for, so a surface can bind the label to the call's row", () => {
+  const bound = replay([step("Reading the changelog.", "c1"), step("Listing.")]);
+  expect(bound.steps.map((held) => (held.kind === "tool" ? held.call_id : null))).toEqual(["c1", ""]);
 });

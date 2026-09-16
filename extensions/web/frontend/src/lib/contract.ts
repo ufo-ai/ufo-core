@@ -140,6 +140,7 @@ export type TextStep = {
 export type ToolStep = {
   kind: "tool";
   label: string | null;
+  call_id: string;
   sources: SourceRef[];
   open: boolean;
 };

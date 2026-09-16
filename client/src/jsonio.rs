@@ -163,7 +163,7 @@ fn frame_events(event: &str, data: &str) -> Vec<Event> {
     };
     match frame {
         Frame::Message { text } => vec![Event::TextDelta { text }],
-        Frame::Activity { text } => vec![Event::Status { text }],
+        Frame::Activity { text, .. } => vec![Event::Status { text }],
         Frame::SubagentActivity(run) if !run.activity.is_empty() => vec![Event::Status {
             text: format!("{}: {}", run.label(), run.activity),
         }],
@@ -320,7 +320,7 @@ impl Driver {
             kind: op.kind.clone(),
             name: op.name.clone(),
             arg: op.arg.clone(),
-            command: OpView::from_request(op).title(None),
+            command: OpView::from_request(op).title(std::path::Path::new("")),
         }
     }
 
@@ -435,6 +435,7 @@ mod tests {
             timeout_s: 120,
             arg: "notes.md".into(),
             params: "{\"argv\":[\"ls\"]}".into(),
+            call_id: String::new(),
         }
     }
 
@@ -1070,10 +1071,14 @@ mod signin_tests {
             arg: String::new(),
             params: r#"{"argv":["sh","-c","UFO_WALK_ROOT=/w export UFO_WALK_ROOT ..."],"env":{}}"#
                 .into(),
+            call_id: String::new(),
         };
         let Event::OpStart { command, .. } = driver.on_op_started(&op) else {
             panic!("op_start expected");
         };
-        assert_eq!(command, "list files");
+        assert_eq!(
+            command,
+            "exec sh -c UFO_WALK_ROOT=/w export UFO_WALK_ROOT ..."
+        );
     }
 }

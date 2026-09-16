@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Literal, Protocol, runtime_checkable
@@ -29,6 +30,9 @@ from ufo.harness.sandbox.protocol import SandboxCommands, SandboxFileOperations
 from ufo.schema.records import CONNECTION_SCOPE_MAX
 
 WORKSPACE_DIR = "/workspace"
+TOOL_CALL_ID: ContextVar[str] = ContextVar("tool_call_id", default="")
+"""The tool call whose dispatch is issuing sandbox work, set by the engine around each dispatch and
+read where an op leaves for a connected terminal; work the runtime issues for itself names none."""
 WORKSPACE_SCOPE_HINT = (
     f": a file tool reaches {WORKSPACE_DIR} and nothing above it, so name a path under "
     f"{WORKSPACE_DIR}."

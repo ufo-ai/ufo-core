@@ -38,7 +38,7 @@ impl RunFrame {
 #[allow(clippy::large_enum_variant)]
 pub enum Frame {
     Message { text: String },
-    Activity { text: String },
+    Activity { text: String, call_id: String },
     Sources { items: Vec<SourceRef> },
     SubagentActivity(RunFrame),
     Reply { id: String, text: String },
@@ -53,6 +53,13 @@ pub enum Frame {
 #[derive(Deserialize)]
 struct Text {
     text: String,
+}
+
+#[derive(Deserialize)]
+struct Labelled {
+    text: String,
+    #[serde(default)]
+    call_id: String,
 }
 
 #[derive(Deserialize)]
@@ -97,9 +104,12 @@ impl Frame {
             "message" => serde_json::from_str::<Text>(data)
                 .ok()
                 .map(|held| Frame::Message { text: held.text }),
-            "activity" => serde_json::from_str::<Text>(data)
+            "activity" => serde_json::from_str::<Labelled>(data)
                 .ok()
-                .map(|held| Frame::Activity { text: held.text }),
+                .map(|held| Frame::Activity {
+                    text: held.text,
+                    call_id: held.call_id,
+                }),
             "sources" => serde_json::from_str::<Items>(data)
                 .ok()
                 .map(|held| Frame::Sources { items: held.items }),
@@ -172,7 +182,7 @@ fn consulted(held: &mut Vec<SourceRef>, items: &[SourceRef]) {
     }
 }
 
-fn close_open(steps: &mut [Step]) {
+pub fn close_open(steps: &mut [Step]) {
     for step in steps {
         match step {
             Step::Text { open, .. } | Step::Tool { open, .. } => *open = false,
@@ -293,7 +303,7 @@ pub fn fold(record: &mut TurnRecord, frame: &Frame, at: &str) -> bool {
             }
             true
         }
-        Frame::Activity { text } => {
+        Frame::Activity { text, call_id } => {
             if text.is_empty() {
                 return true;
             }
@@ -301,6 +311,7 @@ pub fn fold(record: &mut TurnRecord, frame: &Frame, at: &str) -> bool {
                 record,
                 Step::Tool {
                     label: Some(text.clone()),
+                    call_id: call_id.clone(),
                     sources: Vec::new(),
                     open: true,
                 },
@@ -323,6 +334,7 @@ pub fn fold(record: &mut TurnRecord, frame: &Frame, at: &str) -> bool {
                 record,
                 Step::Tool {
                     label: None,
+                    call_id: String::new(),
                     sources,
                     open: true,
                 },
@@ -422,7 +434,7 @@ pub fn current_step(record: &TurnRecord) -> Option<&Step> {
         .find(|step| !matches!(step, Step::Reply { .. } | Step::Comment { .. }))
 }
 
-fn runs_that_worked(runs: &[SubagentRun]) -> usize {
+pub fn runs_that_worked(runs: &[SubagentRun]) -> usize {
     runs.iter()
         .map(|run| usize::from(!run.events.is_empty()) + runs_that_worked(&run.subagents))
         .sum()

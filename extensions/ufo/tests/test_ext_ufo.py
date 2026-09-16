@@ -27,6 +27,7 @@ from ufo_ext_ufo.surface import (
     HOLD_SECONDS,
     PROMPT,
     SharedFile,
+    _run,
     _utf8_header,
     directive,
     directives_for,
@@ -53,7 +54,7 @@ from ufo.harness.models.registry import ModelRegistry
 from ufo.harness.sandbox.conversation import SANDBOX_IMAGE_REF, ConversationSandbox
 from ufo.harness.sandbox.local import LocalCarrier
 from ufo.harness.sandbox.session import ProxyEndpoint, RunTokenCodec
-from ufo.harness.sandbox.terminal import TerminalOpFailed
+from ufo.harness.sandbox.terminal import TerminalOp, TerminalOpFailed
 from ufo.host.assemble import HostEnvironment
 from ufo.host.ext.loader import skill_registry
 from ufo.runtime import queue as loop_queue
@@ -153,8 +154,8 @@ def _frame(frame: LiveFrame) -> bytes:
 
 def test_frame_map_covers_every_live_frame() -> None:
     """Every frame the record folds crosses as itself, named and shaped as the web stream and the
-    conformance fixture carry it; a frame with nothing in it crosses as nothing, and a sources
-    frame never crosses, since the terminal draws no sources."""
+    conformance fixture carry it, the sources frame with them — a surface that draws no sources
+    leaves them undrawn itself; a frame with nothing in it crosses as nothing."""
     assert directives_for(TextDelta(text="hi"), streamed=False) == (
         b'frame\tmessage\t{"text":"hi"}\n',
     )
@@ -171,7 +172,7 @@ def test_frame_map_covers_every_live_frame() -> None:
             SourceRef(kind="workspace", title="Order form", ref="page/2f1c", provider="notion"),
         )
     )
-    assert directives_for(consulted, False) == ()
+    assert directives_for(consulted, False) == (_frame(consulted),)
     assert directives_for(Sources(items=()), False) == ()
     run = SubagentActivity(
         turn_id=UUID(int=1),
@@ -3086,3 +3087,19 @@ async def test_a_conversation_opened_by_id_refuses_what_the_wall_and_the_surface
     stranger = _mint(SECRET, workspace_id, "stranger@example.com", _future())
     assert (await post(str(texts), b"", authorization=f"Bearer {stranger}")).status_code == 403
     assert await _turn_count(workspace_id) == 3
+
+
+def test_a_run_directive_names_the_call_its_op_serves() -> None:
+    """The op rides down with the tool call it serves, so the client binds the call's label to the
+    row that ran it; an op the runtime issued for itself names no call."""
+    op = TerminalOp(
+        op_id="op-1",
+        kind="exec",
+        timeout_s=120,
+        name="exec",
+        params='{"argv":["ls"]}',
+        call_id="c1",
+    )
+    assert _run(op) == b'run\top-1\texec\texec\t120\t\t{"argv":["ls"]}\tc1\n'
+    runtime = TerminalOp(op_id="op-2", kind="write", timeout_s=30, arg="/p/a")
+    assert _run(runtime) == b"run\top-2\twrite\t\t30\t/p/a\t\t\n"

@@ -2257,6 +2257,7 @@ mod tests {
             timeout_s: 30,
             arg: String::new(),
             params: r#"{"system":{},"user":{}}"#.into(),
+            call_id: String::new(),
         }));
 
         assert!(ended);

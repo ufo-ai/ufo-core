@@ -41,7 +41,7 @@ use crate::ui::history::History;
 use crate::ui::osc::{Caps, ImageProtocol};
 use crate::ui::picker::{PickKey, PickOutcome, Picker};
 use crate::ui::probe::Probe;
-use crate::ui::retained::{Entry, Retained, Step};
+use crate::ui::retained::{Entry, Retained};
 use crate::ui::select::{ClickTracker, Grain, Selection};
 use crate::ui::status::{Activity, Progress, Signals, StatusRow};
 use crate::ui::term::AltScreen;
@@ -191,7 +191,6 @@ pub struct App<W: Write = io::Stdout> {
     progress: Progress,
     screen: AltScreen<W>,
     status: StatusRow,
-    stream: markdown::StreamRenderer,
     ask: AskState,
     prompt: String,
     history: History,
@@ -209,7 +208,6 @@ pub struct App<W: Write = io::Stdout> {
     page_hit: Option<(u16, Range<u16>)>,
     read_only: Option<String>,
     retained: Retained,
-    reply_open: bool,
     view_rows: usize,
     window_start: usize,
     hover: Option<(u16, u16)>,
@@ -218,10 +216,6 @@ pub struct App<W: Write = io::Stdout> {
     clicks: ClickTracker,
     focused: bool,
     flash: Option<(String, Instant)>,
-    running_op: Option<OpView>,
-    running_desc: Option<String>,
-    narration: Option<(String, String)>,
-    record: TurnRecord,
     faults: usize,
     last_reply: String,
     host: String,
@@ -251,6 +245,8 @@ impl<W: Write> App<W> {
         let _ = screen.enter();
         let cache = Cache::at(home_root, session_id);
         let cached = cache.load();
+        let mut retained = Retained::new(cols);
+        retained.set_cwd(cwd.clone());
         App {
             signals: Signals {
                 enabled: theme.mode != ColorMode::Plain,
@@ -258,7 +254,6 @@ impl<W: Write> App<W> {
             progress: Progress::new(),
             screen,
             status: StatusRow::new(),
-            stream: markdown::StreamRenderer::default(),
             ask: AskState::default(),
             prompt: PROMPT_IDLE.to_string(),
             history: History::load(home_root),
@@ -275,8 +270,7 @@ impl<W: Write> App<W> {
             page_draft: AskState::default(),
             page_hit: None,
             read_only: None,
-            retained: Retained::new(cols),
-            reply_open: false,
+            retained,
             view_rows: 1,
             window_start: 0,
             hover: None,
@@ -285,10 +279,6 @@ impl<W: Write> App<W> {
             clicks: ClickTracker::new(),
             focused: true,
             flash: None,
-            running_op: None,
-            running_desc: None,
-            narration: None,
-            record: fold::empty(None),
             faults: 0,
             last_reply: String::new(),
             host,
@@ -311,7 +301,6 @@ impl<W: Write> App<W> {
     }
 
     pub fn reset_conversation(&mut self, channel: String, read_only: Option<String>) {
-        self.stream = markdown::StreamRenderer::default();
         self.ask = AskState::default();
         self.prompt = PROMPT_IDLE.to_string();
         self.queued.clear();
@@ -326,16 +315,12 @@ impl<W: Write> App<W> {
         self.page_hit = None;
         self.read_only = read_only;
         self.retained = Retained::new(self.cols);
-        self.reply_open = false;
+        self.retained.set_cwd(self.cwd.clone());
         self.window_start = 0;
         self.hover = None;
         self.exit_images.clear();
         self.selection = None;
         self.flash = None;
-        self.running_op = None;
-        self.running_desc = None;
-        self.narration = None;
-        self.record = fold::empty(None);
         self.faults = 0;
         self.last_reply.clear();
         self.channel = channel;
@@ -482,111 +467,57 @@ impl<W: Write> App<W> {
     }
 
     pub fn say(&mut self, text: &str) {
-        self.flush_stream();
         self.last_reply = text.to_string();
         self.retained.push(Entry::Markdown(text.to_string()));
-        self.reply_open = false;
-    }
-
-    pub fn txt(&mut self, chunk: &str) {
-        self.last_reply.push_str(chunk);
-        let source = self.stream.push(chunk);
-        self.commit_reply(source);
-    }
-
-    fn commit_reply(&mut self, source: String) {
-        if source.is_empty() {
-            return;
-        }
-        if self.reply_open {
-            self.retained.extend_markdown(&source);
-        } else if !source.trim().is_empty() {
-            self.retained.push(Entry::Markdown(source));
-            self.reply_open = true;
-        }
     }
 
     pub fn note(&mut self, text: &str) {
-        self.flush_stream();
         self.retained.push(Entry::Note(text.to_string()));
     }
 
-    /// One live frame off the wire: folded into the turn record first, then drawn. A frame that
-    /// will not decode, or that the record refuses, is counted and draws nothing.
+    /// One live frame off the wire, folded into the live turn's record, which the transcript
+    /// draws its rows from. What is left here is what the record does not carry: the bottom line's
+    /// words, the words a copy takes, and the member rows a drain settles. A frame that will not
+    /// decode, or that the record refuses, is counted.
     pub fn frame(&mut self, event: &str, data: &str) {
         let Some(frame) = Frame::decode(event, data) else {
             self.faults += 1;
             return;
         };
-        if !fold::fold(&mut self.record, &frame, &fold::utc_now_rfc3339()) {
+        if !self.retained.fold(&frame, &fold::utc_now_rfc3339()) {
             self.faults += 1;
         }
         match frame {
-            Frame::Message { text } => self.txt(&text),
-            Frame::Activity { text } if !text.is_empty() => self.activity(&text, None),
-            Frame::Activity { .. } => {}
-            Frame::SubagentActivity(run) if !run.activity.is_empty() => {
-                let label = run.label().to_string();
-                self.activity(&format!("{label}: {}", run.activity), Some(&label));
+            Frame::Message { text } => self.last_reply.push_str(&text),
+            Frame::Activity { text, .. } if !text.is_empty() => {
+                self.last_reply.clear();
+                self.status_text(&text);
             }
-            Frame::SubagentActivity(_) => {}
+            Frame::SubagentActivity(run) if !run.activity.is_empty() => {
+                let said = format!("{}: {}", run.label(), run.activity);
+                self.status_text(&said);
+            }
             Frame::Absorbed { arrivals } => self.absorbed(&arrivals),
-            Frame::Resumed { .. } => self.note(RESUMED_NOTE),
             Frame::Cost {
                 tokens,
                 cost_micro_usd,
             } => self.status_text(&meter_line(tokens, cost_micro_usd)),
-            Frame::Reply { text, .. } | Frame::Comment { text, .. } => self.say(&text),
-            Frame::Sources { .. } | Frame::Terminal(_) | Frame::Parked { .. } => {}
+            Frame::Reply { text, .. } | Frame::Comment { text, .. } => self.last_reply = text,
+            Frame::Activity { .. }
+            | Frame::SubagentActivity(_)
+            | Frame::Resumed { .. }
+            | Frame::Sources { .. }
+            | Frame::Terminal(_)
+            | Frame::Parked { .. } => {}
         }
     }
 
-    pub fn record(&self) -> &TurnRecord {
-        &self.record
+    pub fn record(&self) -> Option<&TurnRecord> {
+        self.retained.record()
     }
 
     pub fn faults(&self) -> usize {
         self.faults
-    }
-
-    /// A run's row rides under the run's own name: its first row opens the run, every later one
-    /// joins it. The parent's open answer is left alone either way, since a background run says
-    /// nothing about where the parent's words end.
-    pub fn activity(&mut self, text: &str, run: Option<&str>) {
-        let Some(label) = run else {
-            self.narrate(text);
-            self.step(Step::Note(text.to_string()), true);
-            return;
-        };
-        self.status_text(text);
-        let prefix = format!("{label}: ");
-        let row = text.strip_prefix(&prefix).unwrap_or(text).to_string();
-        self.flush_stream();
-        self.retained.push_under(label, row);
-    }
-
-    fn narrate(&mut self, text: &str) {
-        if let Some((tool, detail)) = text
-            .strip_prefix("running ")
-            .and_then(|rest| rest.split_once(": "))
-        {
-            self.narration = Some((tool.to_string(), detail.to_string()));
-        }
-        self.status_text(text);
-    }
-
-    /// A run narrates at its own pace: a background run states its calls while the parent writes that
-    /// closing answer, so a row of the run says nothing about where the parent's words end.
-    fn step(&mut self, step: Step, own: bool) {
-        self.flush_stream();
-        if own && self.reply_open {
-            if let Some(thought) = self.retained.take_reply() {
-                self.retained.push_step(Step::Thought(thought));
-                self.last_reply.clear();
-            }
-            self.reply_open = false;
-        }
-        self.retained.push_step(step);
     }
 
     pub fn status_text(&mut self, text: &str) {
@@ -599,7 +530,6 @@ impl<W: Write> App<W> {
     }
 
     pub fn file(&mut self, name: &str, size: &str, url: &str) {
-        self.flush_stream();
         let said = match url.is_empty() {
             true => name.to_string(),
             false => format!("{}{name}{}", osc::link_open(url), osc::LINK_CLOSE),
@@ -609,32 +539,16 @@ impl<W: Write> App<W> {
             .push(Entry::Raw(vec![Line::styled(line, self.theme.muted)]));
     }
 
+    /// A step the member reads takes a row; an op the runtime issued for itself draws nothing.
     pub fn op_started(&mut self, op: &OpRequest) {
-        self.running_desc = match self.narration.take() {
-            Some((tool, detail)) if tool == op.name || tool == op.kind => Some(detail),
-            _ => None,
-        };
-        self.running_op = Some(OpView::from_request(op));
+        if OpView::is_step(op) {
+            self.retained.op_started(op);
+        }
     }
 
     pub fn op_finished(&mut self, op: &OpRequest, result: &Result<Vec<u8>, String>) {
-        self.running_op = None;
-        let narrated = self.running_desc.take();
-        let view = OpView::from_request(op);
-        let reply = match result {
-            Ok(bytes) => Ok(bytes.as_slice()),
-            Err(failure) => Err(failure.as_str()),
-        };
-        let step = Step::Op {
-            header: view.header(narrated.as_deref(), &self.theme),
-            body: view.body(reply, &self.theme),
-        };
-        match narrated {
-            Some(said) => {
-                self.flush_stream();
-                self.retained.restate_step(&said, step);
-            }
-            None => self.step(step, true),
+        if OpView::is_step(op) {
+            self.retained.op_finished(op, result, &self.theme);
         }
         if let Ok(bytes) = result {
             self.inline_read_image(op, bytes);
@@ -667,7 +581,6 @@ impl<W: Write> App<W> {
 
     pub fn begin_turn(&mut self) {
         self.working = true;
-        self.record = fold::empty(None);
         self.faults = 0;
         self.retained.begin_turn();
         self.prompt = PROMPT_IDLE.to_string();
@@ -681,9 +594,6 @@ impl<W: Write> App<W> {
 
     pub fn end_turn(&mut self, waiting: bool) {
         self.working = false;
-        self.running_op = None;
-        self.flush_stream();
-        self.reply_open = false;
         self.retained.roll_up_steps();
         self.status.activity = if waiting {
             Activity::WaitingInput
@@ -734,6 +644,7 @@ impl<W: Write> App<W> {
             self.flash = None;
         }
         self.status.on_tick();
+        self.retained.tick(self.status.phase());
         if let Some(page) = self.conversations.as_mut() {
             page.on_tick();
         }
@@ -880,9 +791,7 @@ impl<W: Write> App<W> {
     }
 
     pub fn fired_replay(&mut self, text: &str) {
-        self.flush_stream();
         self.retained.push(Entry::Fired(text.to_string()));
-        self.reply_open = false;
     }
 
     pub fn member_echo(&mut self, text: &str) {
@@ -891,9 +800,10 @@ impl<W: Write> App<W> {
     }
 
     fn draw_member(&mut self, text: &str) {
-        self.flush_stream();
         self.retained.push(Entry::Member(text.to_string()));
-        self.reply_open = false;
+        if self.working {
+            self.retained.split_segment();
+        }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Reply {
@@ -1446,7 +1356,9 @@ impl<W: Write> App<W> {
     }
 
     fn live_tail(&self) -> Vec<Line<'static>> {
-        let tail = self.stream.open_tail();
+        let Some(tail) = self.retained.open_answer_tail() else {
+            return Vec::new();
+        };
         if tail.trim().is_empty() || self.retained.scrolled() > 0 {
             return Vec::new();
         }
@@ -1463,19 +1375,6 @@ impl<W: Write> App<W> {
                 let said = format!(" {said}");
                 return Line::styled(wrap::clip(&said, width).to_string(), self.theme.muted);
             }
-        }
-        if let Some(view) = self.running_op.as_ref() {
-            let dot = if self.status.phase().is_multiple_of(2) {
-                self.theme.accent
-            } else {
-                self.theme.muted
-            };
-            let said = view.title(self.running_desc.as_deref());
-            let title = wrap::clip(&said, width.saturating_sub(4)).to_string();
-            return Line::from(vec![
-                Span::styled("  ⏺ ".to_string(), dot),
-                Span::styled(title, self.theme.tool_title),
-            ]);
         }
         self.status.render(&self.theme, width as u16)
     }
@@ -1702,11 +1601,6 @@ impl<W: Write> App<W> {
         rows
     }
 
-    fn flush_stream(&mut self) {
-        let source = self.stream.finish();
-        self.commit_reply(source);
-    }
-
     fn splice_raw(&mut self, bytes: &str) {
         if bytes.is_empty() {
             return;
@@ -1715,7 +1609,6 @@ impl<W: Write> App<W> {
     }
 
     pub fn close(&mut self) {
-        self.flush_stream();
         self.retained.roll_up_steps();
         let document = self.retained.document(&self.theme);
         let _ = self.screen.leave();
@@ -1936,13 +1829,40 @@ mod tests {
     }
 
     fn asked(op: &str, kind: &str, params: &str) -> OpRequest {
+        let params = match (kind, serde_json::from_str::<serde_json::Value>(params)) {
+            ("exec", Ok(mut parsed)) if parsed.get("argv").is_some() => {
+                let command = parsed["argv"]
+                    .as_array()
+                    .expect("argv is a list")
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                parsed["safety_argv"] = serde_json::json!(["bash", "-lc", command]);
+                parsed.to_string()
+            }
+            _ => params.to_string(),
+        };
         OpRequest {
             op_id: "op1".to_string(),
             kind: kind.to_string(),
             name: op.to_string(),
             timeout_s: 30,
             arg: String::new(),
+            params,
+            call_id: String::new(),
+        }
+    }
+
+    fn plumbing(kind: &str, arg: &str, params: &str) -> OpRequest {
+        OpRequest {
+            op_id: format!("plumbing-{kind}-{arg}"),
+            kind: kind.to_string(),
+            name: if kind == "exec" { "exec" } else { "" }.to_string(),
+            timeout_s: 30,
+            arg: arg.to_string(),
             params: params.to_string(),
+            call_id: String::new(),
         }
     }
 
@@ -1964,6 +1884,17 @@ mod tests {
                 stdout.as_bytes()
             )
         )
+    }
+
+    fn message(app: &mut App<Vec<u8>>, text: &str) {
+        app.frame("message", &serde_json::json!({ "text": text }).to_string());
+    }
+
+    fn labelled(app: &mut App<Vec<u8>>, text: &str, call_id: &str) {
+        app.frame(
+            "activity",
+            &serde_json::json!({ "text": text, "call_id": call_id }).to_string(),
+        );
     }
 
     fn members(app: &mut App<Vec<u8>>) -> Vec<String> {
@@ -2202,6 +2133,7 @@ mod tests {
     #[test]
     fn a_streaming_reply_leaves_nothing_held_until_it_commits() {
         let mut app = app_on_memory();
+        app.begin_turn();
         let before = markdown::held_blocks();
         for delta in [
             "```rust\n",
@@ -2210,7 +2142,7 @@ mod tests {
             "    line.len()\n",
             "}\n",
         ] {
-            app.txt(delta);
+            message(&mut app, delta);
             app.paint();
         }
         assert_eq!(
@@ -2218,25 +2150,11 @@ mod tests {
             before,
             "the open tail is drawn, never held"
         );
-        app.txt("```\n\n");
+        message(&mut app, "```\n\n");
         app.paint();
         assert!(
             markdown::held_blocks() > before,
             "the block holds its colours once it settles into the transcript"
-        );
-    }
-
-    #[test]
-    fn a_narration_names_the_call_it_belongs_to() {
-        let mut app = app_on_memory();
-        app.narration = Some(("exec".to_string(), "counting the rows".to_string()));
-        app.op_started(&asked("exec", "exec", "{}"));
-        assert_eq!(app.running_desc.as_deref(), Some("counting the rows"));
-        app.narration = Some(("read".to_string(), "a different call".to_string()));
-        app.op_started(&asked("exec", "exec", "{}"));
-        assert!(
-            app.running_desc.is_none(),
-            "a narration for another tool is not adopted"
         );
     }
 
@@ -2247,15 +2165,17 @@ mod tests {
         for run in [
             "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
         ] {
+            let mut op = asked("exec", "exec", &format!(r#"{{"argv":["make","{run}"]}}"#));
+            op.op_id = format!("op-{run}");
             app.op_finished(
-                &asked("exec", "exec", &format!(r#"{{"argv":["make","{run}"]}}"#)),
+                &op,
                 &Ok(exec_reply(0, &format!("built {run}\n")).into_bytes()),
             );
         }
         let document = transcript(&mut app);
         for run in ["alpha", "theta"] {
             assert!(
-                document.contains(&format!("⏺ exec make {run}")),
+                document.contains(&format!("⏺ $ make {run}")),
                 "the call is a step of the turn: {document}"
             );
             assert!(
@@ -2263,10 +2183,6 @@ mod tests {
                 "and its output stands under it: {document}"
             );
         }
-        assert!(
-            app.running_op.is_none(),
-            "a finished op is no longer running"
-        );
         app.end_turn(false);
         assert!(
             transcript(&mut app).contains("Completed 8 steps"),
@@ -2275,38 +2191,57 @@ mod tests {
     }
 
     #[test]
-    fn a_narrated_call_states_its_result_under_the_row_it_narrated() {
+    fn a_label_heads_the_row_of_the_call_it_names() {
         let mut app = app_on_memory();
         app.begin_turn();
-        app.activity("running exec: counting the rows", None);
-        let op = asked("exec", "exec", r#"{"argv":["wc","-l"]}"#);
+        labelled(&mut app, "counting the rows", "c1");
+        let mut op = asked("exec", "exec", r#"{"argv":["wc","-l"]}"#);
+        op.call_id = "c1".to_string();
         app.op_started(&op);
         app.op_finished(&op, &Ok(exec_reply(0, "42\n").into_bytes()));
         let document = transcript(&mut app);
         assert!(
-            !document.contains("running exec: counting the rows"),
-            "the narration's row became the call's own: {document}"
+            document.contains("⏺ counting the rows") && document.contains("42"),
+            "the agent's words head the row and its result stands under them: {document}"
         );
         assert!(
-            document.contains("⏺ counting the rows") && document.contains("42"),
-            "which states the agent's words over the result: {document}"
+            document.contains("  $ wc -l"),
+            "the command stands under the words, since it ran on this machine: {document}"
         );
         app.end_turn(false);
         assert!(
             transcript(&mut app).contains("Completed 1 step"),
-            "one call is one step, whichever end of the wire stated it"
+            "the label and the call it names are one step, not two"
         );
+    }
+
+    #[test]
+    fn a_label_for_another_call_leaves_the_row_headed_by_its_command() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        labelled(&mut app, "a different call", "c9");
+        let mut op = asked("exec", "exec", r#"{"argv":["wc","-l"]}"#);
+        op.call_id = "c1".to_string();
+        app.op_started(&op);
+        app.op_finished(&op, &Ok(exec_reply(0, "42\n").into_bytes()));
+        let document = transcript(&mut app);
+        assert!(
+            document.contains("⏺ a different call") && document.contains("⏺ $ wc -l"),
+            "each stands on its own row: {document}"
+        );
+        app.end_turn(false);
+        assert!(transcript(&mut app).contains("Completed 2 steps"));
     }
 
     #[test]
     fn text_between_two_dispatches_is_the_thought_each_round_wrote() {
         let mut app = app_on_memory();
         app.begin_turn();
-        app.txt("Template is in place. Now writing the schema.\n");
-        app.activity("Build the content management system", None);
-        app.txt("Now the routes with auth:\n");
-        app.activity("Create the blog admin dashboard", None);
-        app.txt("Now the frontend pages.\n");
+        message(&mut app, "Template is in place. Now writing the schema.\n");
+        labelled(&mut app, "Build the content management system", "");
+        message(&mut app, "Now the routes with auth:\n");
+        labelled(&mut app, "Create the blog admin dashboard", "");
+        message(&mut app, "Now the frontend pages.\n");
         app.end_turn(false);
         let document = transcript(&mut app);
         assert!(
@@ -2324,31 +2259,6 @@ mod tests {
         assert!(
             thought < after,
             "each round's words stand above the call it made: {opened}"
-        );
-    }
-
-    #[test]
-    fn a_call_the_activity_directive_narrated_states_itself_once() {
-        let mut app = app_on_memory();
-        app.begin_turn();
-        app.activity("running exec: counting the rows", None);
-        let op = asked("exec", "exec", r#"{"argv":["wc","-l"]}"#);
-        app.op_started(&op);
-        app.op_finished(&op, &Ok(exec_reply(0, "42\n").into_bytes()));
-        app.end_turn(false);
-        assert!(
-            transcript(&mut app).contains("Completed 1 step"),
-            "the narration and the call it named are one step, not two"
-        );
-        app.retained.toggle_steps();
-        let opened = transcript(&mut app);
-        assert!(
-            opened.contains("⏺ counting the rows") && opened.contains("42"),
-            "stated under the agent's own words, over its result: {opened}"
-        );
-        assert!(
-            !opened.contains("exec wc -l"),
-            "the command is not restated beside the words: {opened}"
         );
     }
 
@@ -2372,9 +2282,80 @@ mod tests {
             &Ok(exec_reply(0, "").into_bytes()),
         );
         assert!(
-            transcript(&mut app).contains("⏺ exec make"),
-            "the header takes the room the transcript has"
+            transcript(&mut app).contains("⏺ $ make test…"),
+            "the header takes the room the transcript has and says it was cut"
         );
+    }
+
+    #[test]
+    fn what_the_runtime_runs_for_itself_draws_nothing() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        let probe = plumbing(
+            "exec",
+            "",
+            r#"{"argv":["sh","-c","pid=$(cat \"$1.pid\") || exit 1","sh","/t"],"env":{}}"#,
+        );
+        app.op_started(&probe);
+        app.op_finished(&probe, &Ok(exec_reply(0, "20213\n").into_bytes()));
+        let offload = plumbing("write", "/w/runs/x/tool-output/1", "");
+        app.op_started(&offload);
+        app.op_finished(&offload, &Ok(Vec::new()));
+        let read = plumbing("read", "/w/a.txt", "");
+        app.op_started(&read);
+        app.op_finished(&read, &Ok(b"bytes".to_vec()));
+        let scan = plumbing("fileop", "", r#"{"workspace":"/w"}"#);
+        app.op_started(&scan);
+        app.op_finished(&scan, &Ok(b"{}".to_vec()));
+        assert_eq!(
+            transcript(&mut app),
+            "",
+            "no probe, offload, read-back or change scan draws a row"
+        );
+        app.end_turn(false);
+        assert!(
+            !transcript(&mut app).contains("Completed"),
+            "and none of them counts as a step"
+        );
+    }
+
+    #[test]
+    fn the_bottom_line_keeps_the_turns_clock_while_an_op_runs() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        labelled(&mut app, "Running the tests", "c1");
+        let mut op = asked("exec", "exec", r#"{"argv":["make","test"]}"#);
+        op.call_id = "c1".to_string();
+        app.op_started(&op);
+        let line = app.activity_line(80).to_string();
+        assert!(
+            line.contains(SPINNER_FRAMES[0]) && line.contains("Running the tests"),
+            "the turn spinner and the latest label stay while the op runs: {line}"
+        );
+        assert!(
+            !line.contains("⏺"),
+            "the running op's row lives in the transcript: {line}"
+        );
+        assert!(transcript(&mut app).contains("⏺ Running the tests"));
+    }
+
+    #[test]
+    fn a_drained_message_stands_under_the_work_that_came_before_it() {
+        let mut app = app_on_memory();
+        app.begin_turn();
+        labelled(&mut app, "Reading the notes", "");
+        app.push_queued("while the turn ran");
+        app.sent_ack("while the turn ran", "arr-9");
+        app.frame("absorbed", r#"{"arrivals":["arr-9"]}"#);
+        labelled(&mut app, "Answering", "");
+        message(&mut app, "Here it is.");
+        let document = transcript(&mut app);
+        let before = document.find("Reading the notes").expect("the first step");
+        let echoed = document
+            .find("while the turn ran")
+            .expect("the echoed message");
+        let after = document.find("Answering").expect("the second step");
+        assert!(before < echoed && echoed < after, "{document}");
     }
 
     #[test]
@@ -2531,16 +2512,17 @@ mod tests {
     }
 
     #[test]
-    fn an_ended_turn_takes_its_running_call_with_it() {
+    fn an_ended_turn_keeps_the_row_of_a_call_still_running() {
         let mut app = app_on_memory();
         app.begin_turn();
         app.op_started(&asked("exec", "exec", r#"{"argv":["make"]}"#));
-        assert!(app.running_op.is_some());
+        assert!(transcript(&mut app).contains("⏺ $ make"));
         app.end_turn(false);
         assert!(!app.is_working());
+        app.retained.toggle_steps();
         assert!(
-            app.running_op.is_none(),
-            "a turn that ended is running nothing"
+            transcript(&mut app).contains("⏺ $ make · stopped"),
+            "a turn that ended stops what it was running"
         );
     }
 
@@ -2631,7 +2613,7 @@ mod tests {
         app.begin_turn();
         app.open_conversations(true);
         app.conversations_loaded(1, Ok(vec![listed("c1", "Who owns the pager", true)]));
-        app.txt("the reply");
+        message(&mut app, "the reply");
         app.end_turn(true);
         app.ask_prompt(">");
         assert_eq!(
@@ -2909,7 +2891,7 @@ mod tests {
     fn a_reset_starts_a_bare_transcript_and_a_read_only_one_takes_no_message() {
         let mut app = app_on_memory();
         app.begin_turn();
-        app.txt("an old reply");
+        message(&mut app, "an old reply");
         app.end_turn(false);
         typed(&mut app, "half a thought");
         app.reset_conversation("#eng".to_string(), Some("Slack".to_string()));

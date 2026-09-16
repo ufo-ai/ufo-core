@@ -2924,9 +2924,9 @@ fn a_turns_thoughts_stand_among_its_calls_and_roll_up_on_the_answer() {
             status: 200,
             reply_lines: &[
                 "frame\tmessage\t{\"text\": \"Reading the notes first.\"}",
-                "frame\tactivity\t{\"text\": \"running read: the notes\"}",
+                "frame\tactivity\t{\"text\": \"the notes\"}",
                 "frame\tmessage\t{\"text\": \"Now the calendar.\"}",
-                "frame\tactivity\t{\"text\": \"running read: the calendar\"}",
+                "frame\tactivity\t{\"text\": \"the calendar\"}",
                 "poll\t1",
             ],
         },
@@ -3075,7 +3075,7 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         delay_ms: 0,
         status: 200,
         reply_lines: &[
-            "frame\tactivity\t{\"text\": \"running spawn: reviewer\"}",
+            "frame\tactivity\t{\"text\": \"Handing off the review\"}",
             "frame\tmessage\t{\"text\": \"The reviewer is on it.\"}",
             "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"Reading the diff.\", \"status\": \"\"}",
             "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"Running focused tests.\", \"status\": \"\"}",
@@ -3126,7 +3126,9 @@ fn a_background_runs_call_leaves_the_answer_the_turn_already_wrote() {
         "a click opens the rollup: {opened}"
     );
     assert!(
-        opened.lines().any(|line| line.trim_end() == "  ⏺ reviewer")
+        opened
+            .lines()
+            .any(|line| line.trim_end() == "  ⏺ Handing off the review")
             && opened.contains("reviewer \u{25b8}"),
         "the run stands as one closed row among the steps: {opened}"
     );
@@ -3209,7 +3211,7 @@ fn a_piped_session_logs_every_step_and_counts_them() {
         status: 200,
         reply_lines: &[
             "frame\tmessage\t{\"text\": \"Reading the notes first.\"}\n",
-            "frame\tactivity\t{\"text\": \"running read: the notes\"}",
+            "frame\tactivity\t{\"text\": \"the notes\"}",
             "frame\tactivity\t{\"text\": \"loading skill: office/pptx\"}",
             "frame\tmessage\t{\"text\": \"The meeting is at four.\"}\n",
             "exit\t0",
@@ -3222,7 +3224,7 @@ fn a_piped_session_logs_every_step_and_counts_them() {
     let thought = stdout
         .find("Reading the notes first.")
         .expect("a piped session keeps the narration");
-    let call = stdout.find("running read: the notes").expect("the call");
+    let call = stdout.find("the notes").expect("the call");
     let skill = stdout
         .find("loading skill: office/pptx")
         .expect("the skill");
@@ -3272,7 +3274,7 @@ fn a_piped_session_counts_no_step_for_an_answer_a_run_narrated_over() {
         delay_ms: 0,
         status: 200,
         reply_lines: &[
-            "frame\tactivity\t{\"text\": \"running spawn: reviewer\"}",
+            "frame\tactivity\t{\"text\": \"Handing off the review\"}",
             "frame\tmessage\t{\"text\": \"The reviewer is on it.\"}\n",
             "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"running read: the diff\", \"status\": \"\"}",
             "exit\t0",
@@ -3295,7 +3297,7 @@ fn a_piped_session_counts_a_run_once_however_much_it_did() {
         delay_ms: 0,
         status: 200,
         reply_lines: &[
-            "frame\tactivity\t{\"text\": \"running spawn: reviewer\"}",
+            "frame\tactivity\t{\"text\": \"Handing off the review\"}",
             "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"running read: the diff\", \"status\": \"\"}",
             "frame\tsubagent_activity\t{\"turn_id\": \"run-reviewer\", \"parent_turn_id\": \"turn-1\", \"conversation_id\": \"conv-reviewer\", \"profile\": \"reviewer\", \"name\": \"reviewer\", \"activity\": \"running bash: cargo test\", \"status\": \"\"}",
             "frame\tmessage\t{\"text\": \"The reviewer found nothing.\"}\n",
@@ -3307,7 +3309,7 @@ fn a_piped_session_counts_a_run_once_however_much_it_did() {
     served.gateway.done();
     assert_eq!(code, 0, "stdout: {stdout}");
     for step in [
-        "running spawn: reviewer",
+        "Handing off the review",
         "reviewer: running read: the diff",
         "reviewer: running bash: cargo test",
     ] {

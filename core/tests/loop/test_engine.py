@@ -5589,9 +5589,10 @@ async def test_multi_tool_round_publishes_one_summary_per_tool(db: None, tmp_pat
     assert frame.status == "done"
     activity = [frame for frame in hub.frames if isinstance(frame, Activity)]
     assert activity == [
-        Activity(text="Preparing the load_skill step"),
-        Activity(text="Preparing the bash step"),
+        Activity(text="Preparing the load_skill step", call_id="s1"),
+        Activity(text="Preparing the bash step", call_id="c1"),
     ]
+    assert [frame.call_id for frame in activity] == ["s1", "c1"]
     assert activity_model.names == ["load_skill", "bash"]
     assert activity_model.goals == ["hi", "hi"]
 
@@ -5822,7 +5823,8 @@ async def test_tool_activity_frame_carries_the_generated_summary(db: None, tmp_p
     engine = replace(_engine(turn, NarratedToolModel(), tmp_path, carrier=carrier), hub=hub)
     await engine.run()
     tool_frames = [frame for frame in hub.frames if isinstance(frame, Activity)]
-    assert tool_frames == [Activity(text="Working on the request")]
+    assert tool_frames == [Activity(text="Working on the request", call_id="c1")]
+    assert [frame.call_id for frame in tool_frames] == ["c1"]
 
 
 async def test_tool_dispatch_does_not_wait_for_activity_generation(

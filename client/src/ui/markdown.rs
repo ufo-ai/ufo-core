@@ -43,25 +43,10 @@ enum Colours {
     Dropped,
 }
 
-#[derive(Default)]
-pub struct StreamRenderer {
-    pending: String,
-}
-
-impl StreamRenderer {
-    pub fn push(&mut self, chunk: &str) -> String {
-        self.pending.push_str(chunk);
-        let closed = closed_block_end(&self.pending);
-        self.pending.drain(..closed).collect()
-    }
-
-    pub fn open_tail(&self) -> &str {
-        &self.pending
-    }
-
-    pub fn finish(&mut self) -> String {
-        std::mem::take(&mut self.pending)
-    }
+/// The words split where their last closed block ends: the blocks a transcript already holds, and
+/// the open tail still being written that it draws live.
+pub fn committed_split(text: &str) -> (&str, &str) {
+    text.split_at(closed_block_end(text))
 }
 
 fn closed_block_end(text: &str) -> usize {
@@ -83,7 +68,13 @@ fn closed_block_end(text: &str) -> usize {
             }
             continue;
         }
-        if list && blank && !head.is_empty() && !is_item(head) && !line.starts_with([' ', '\t']) {
+        if list
+            && blank
+            && whole
+            && !head.is_empty()
+            && !is_item(head)
+            && !line.starts_with([' ', '\t'])
+        {
             list = false;
             closed = start;
         }
@@ -1014,65 +1005,78 @@ mod tests {
     }
 
     #[test]
-    fn stream_holds_an_open_fence_until_it_closes() {
-        let mut stream = StreamRenderer::default();
-        assert!(stream.push("```rust\n").is_empty());
-        assert!(stream.push("fn main() {}\n").is_empty());
-        assert_eq!(stream.open_tail(), "```rust\nfn main() {}\n");
-        assert_eq!(stream.push("```\n"), "```rust\nfn main() {}\n```\n");
-        assert_eq!(stream.open_tail(), "");
-    }
-
-    #[test]
-    fn stream_holds_a_table_until_a_blank_line_ends_it() {
-        let mut stream = StreamRenderer::default();
-        assert!(stream.push("| a | b |\n| - | - |\n").is_empty());
-        assert!(stream.push("| 1 | 2 |\n").is_empty());
+    fn an_open_fence_stays_in_the_tail_until_it_closes() {
         assert_eq!(
-            stream.push("\nafter"),
-            "| a | b |\n| - | - |\n| 1 | 2 |\n\n"
+            committed_split("```rust\nfn main() {}\n"),
+            ("", "```rust\nfn main() {}\n")
         );
-        assert_eq!(stream.open_tail(), "after");
+        assert_eq!(
+            committed_split("```rust\nfn main() {}\n```\n"),
+            ("```rust\nfn main() {}\n```\n", "")
+        );
     }
 
     #[test]
-    fn stream_commits_a_paragraph_on_its_blank_line() {
-        let mut stream = StreamRenderer::default();
-        assert!(stream.push("one two\nthree\n").is_empty());
-        assert_eq!(stream.push("\nnext"), "one two\nthree\n\n");
-        assert_eq!(stream.open_tail(), "next");
-        assert_eq!(stream.finish(), "next");
-        assert_eq!(stream.open_tail(), "");
+    fn a_table_stays_in_the_tail_until_a_blank_line_ends_it() {
+        let table = "| a | b |\n| - | - |\n| 1 | 2 |\n";
+        assert_eq!(committed_split(table), ("", table));
+        assert_eq!(
+            committed_split("| a | b |\n| - | - |\n| 1 | 2 |\n\nafter"),
+            ("| a | b |\n| - | - |\n| 1 | 2 |\n\n", "after")
+        );
     }
 
     #[test]
-    fn streamed_deltas_commit_the_source_losslessly() {
+    fn a_paragraph_commits_on_its_blank_line() {
+        assert_eq!(
+            committed_split("one two\nthree\n"),
+            ("", "one two\nthree\n")
+        );
+        assert_eq!(
+            committed_split("one two\nthree\n\nnext"),
+            ("one two\nthree\n\n", "next")
+        );
+    }
+
+    #[test]
+    fn the_split_is_lossless_and_only_grows_as_the_words_arrive() {
         let source = "# Title\n\nA paragraph long enough that it has to wrap somewhere.\n\n\
              - one\n- two\n  - nested\n\n1. first\n2. second\n\n\
              ```rust\nfn main() {}\n```\n\n\
              | a | b |\n| - | - |\n| 1 | 2 |\n\n> quoted\n\n---\n\nlast word\n";
-        let mut stream = StreamRenderer::default();
-        let mut committed = String::new();
-        let mut delta = String::new();
-        for ch in source.chars() {
-            delta.push(ch);
-            if delta.chars().count() == 5 {
-                committed.push_str(&stream.push(&delta));
-                delta.clear();
-            }
+        let mut held = 0;
+        for (end, _) in source
+            .char_indices()
+            .chain(std::iter::once((source.len(), ' ')))
+        {
+            let (committed, tail) = committed_split(&source[..end]);
+            assert_eq!(format!("{committed}{tail}"), &source[..end]);
+            assert!(committed.len() >= held, "a block once closed stays closed");
+            held = committed.len();
         }
-        committed.push_str(&stream.push(&delta));
-        committed.push_str(&stream.finish());
-        assert_eq!(committed, source);
+        let (committed, tail) = committed_split(source);
+        assert_eq!(
+            tail, "last word\n",
+            "a paragraph closes on the blank line after it"
+        );
+        assert_eq!(format!("{committed}{tail}"), source);
     }
 
     #[test]
-    fn stream_holds_a_list_until_a_block_follows_it() {
-        let mut stream = StreamRenderer::default();
-        assert!(stream.push("1. one\n").is_empty());
-        assert!(stream.push("2. two\n\n").is_empty());
-        assert_eq!(stream.push("after"), "1. one\n2. two\n\n");
-        assert_eq!(stream.open_tail(), "after");
+    fn a_list_stays_in_the_tail_until_a_whole_line_of_another_block_follows_it() {
+        assert_eq!(
+            committed_split("1. one\n2. two\n\n"),
+            ("", "1. one\n2. two\n\n")
+        );
+        assert_eq!(
+            committed_split("1. one\n2. two\n\nafter"),
+            ("", "1. one\n2. two\n\nafter"),
+            "a partial line may still become an item, as `1` becomes `1.`"
+        );
+        assert_eq!(
+            committed_split("1. one\n2. two\n\nafter\n"),
+            ("1. one\n2. two\n\n", "after\n")
+        );
     }
 }
 

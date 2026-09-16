@@ -127,6 +127,7 @@ from ufo.harness.replies import (
 )
 from ufo.harness.rounds import ModelRoundRunner, RoundEventTypes
 from ufo.harness.sandbox.session import (
+    TOOL_CALL_ID,
     TOOL_OUTPUT_DIRNAME,
     Sandbox,
     SandboxProviderUnavailable,
@@ -3988,7 +3989,7 @@ class TurnEngine:
                 self._activity.next_publish += 1
                 call_id, current_activity = current
                 if current_activity is not None:
-                    await self._publish(Activity(text=current_activity))
+                    await self._publish(Activity(text=current_activity, call_id=call_id))
                     await self._publish_run(activity=current_activity)
                 self._activity.labeled.add(call_id)
                 held = self._activity.sources.pop(call_id, None)
@@ -4075,6 +4076,7 @@ class TurnEngine:
         nothing."""
         call = bound.call
         self._live_dispatches.add(call.id)
+        issuing = TOOL_CALL_ID.set(call.id)
         find_usages: list[Usage] = []
         started = time.monotonic()
         outcome, error_class = "ok", None
@@ -4128,6 +4130,7 @@ class TurnEngine:
                 outcome, error_class = "step_failed", type(error).__name__
                 raise
             finally:
+                TOOL_CALL_ID.reset(issuing)
                 if sandbox_access is not None and sandbox_access.revoke is not None:
                     await sandbox_access.revoke()
                 _meter_dispatch(

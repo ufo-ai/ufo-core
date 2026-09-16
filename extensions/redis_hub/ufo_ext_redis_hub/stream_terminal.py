@@ -338,6 +338,7 @@ class RedisTerminals:
         arg: str = "",
         params: str = "",
         body: bytes | None = None,
+        call_id: str = "",
     ) -> bytes:
         """Ask the conversation's terminal to run one op and answer its reply, raising
         `TerminalGone` when none is bound or the bound one stops answering. Two waits, each with its
@@ -360,6 +361,7 @@ class RedisTerminals:
             name=name,
             arg=arg,
             params=params,
+            call_id=call_id,
         )
         deadline_s = timeout_s + OP_DEADLINE_SLACK_SECONDS
         lock = self._client().lock(
@@ -443,6 +445,7 @@ class RedisTerminals:
             "name": op.name,
             "arg": op.arg,
             "params": op.params,
+            "call_id": op.call_id,
         }
 
     def _decode_op(self, fields: _StreamFields) -> TerminalOp:
@@ -453,6 +456,7 @@ class RedisTerminals:
             name=_text(fields.get("name", "")),
             arg=_text(fields.get("arg", "")),
             params=_text(fields.get("params", "")),
+            call_id=_text(fields.get("call_id", "")),
         )
 
     async def _await_reply(self, op_id: str, deadline_s: float, timeout_s: int) -> bytes:

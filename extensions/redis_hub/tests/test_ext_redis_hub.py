@@ -24,6 +24,7 @@ from ufo_ext_redis_hub.stream_terminal import RedisTerminals
 
 from ufo.blob import FilesystemBlobStore
 from ufo.harness.models.interface import TextDelta
+from ufo.harness.sandbox.terminal import TerminalOp
 from ufo.runtime.hub import (
     Absorbed,
     Activity,
@@ -58,7 +59,7 @@ FRAMES: tuple[HubFrame, ...] = (
     Terminal(frame=TerminalFrame(status="done", text="answer", model="claude-opus-4-8")),
     Parked(message="over a spend cap"),
     CostTick(cost_micro_usd=110, tokens=10),
-    Activity(text="Listing the workspace."),
+    Activity(text="Listing the workspace.", call_id="c1"),
     ArtifactsChanged(),
     Absorbed(arrivals=(UUID(int=7), UUID(int=8))),
     ArrivalQueued(arrival_id=UUID(int=12)),
@@ -82,15 +83,18 @@ FRAMES: tuple[HubFrame, ...] = (
 def test_frame_wire_codec_round_trips_every_kind() -> None:
     for frame in FRAMES:
         assert frame_from_payload(frame_payload(frame)) == frame
+    labelled = frame_from_payload(frame_payload(Activity(text="Listing.", call_id="c1")))
+    assert isinstance(labelled, Activity) and labelled.call_id == "c1"
 
 
 def test_activity_keeps_the_shared_streams_tool_call_wire_shape() -> None:
-    assert frame_payload(Activity(text="Reading the changelog.")) == {
+    assert frame_payload(Activity(text="Reading the changelog.", call_id="c1")) == {
         "kind": "tool_call",
         "data": {
             "tool": "activity",
             "preview": "",
             "description": "Reading the changelog.",
+            "call_id": "c1",
         },
     }
 
@@ -124,6 +128,22 @@ async def test_terminal_binding_without_runtime_id_uses_the_conversation(
 
     assert binding is not None
     assert binding.runtime_id == conversation_id.hex
+
+
+def test_an_op_keeps_the_call_it_serves_across_the_op_stream(tmp_path: Path) -> None:
+    """The op stream is the second wire an op crosses; the call it serves must survive it, since
+    the client binds the call's label to the op by that id and draws a file op only when it names
+    one."""
+    terminals = RedisTerminals(
+        url="redis://localhost:6379/0", blob=FilesystemBlobStore(root=tmp_path)
+    )
+    served = TerminalOp(
+        op_id="op-1", kind="fileop", timeout_s=30, name="edit", params="{}", call_id="c1"
+    )
+    assert terminals._decode_op(terminals._op_fields(served)) == served
+    runtime = TerminalOp(op_id="op-2", kind="write", timeout_s=30, arg="/p/a")
+    assert terminals._decode_op(terminals._op_fields(runtime)) == runtime
+    assert terminals._decode_op(terminals._op_fields(runtime)).call_id == ""
 
 
 @needs_redis

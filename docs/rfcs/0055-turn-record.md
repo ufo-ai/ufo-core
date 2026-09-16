@@ -85,8 +85,8 @@ payload the web stream's SSE rows carry, both read off `frame_event` and `frame_
 `ufo.runtime.turns.record`, so the two wires cannot name a kind apart. The `txt`, `status` and
 `absorbed` verbs leave, and with them the English the client parsed out of a note to tell a run's
 label from its step; `note` stays for what is not a frame — the history rollup and the workspace
-note. A sources frame does not cross: the terminal draws no sources, and the Rust fold keeps the
-kind for the fixture it replays. The terminal frame crosses without its question and credential
+note. A sources frame crosses like every other; the terminal folds it and draws nothing of it
+(RFC 0056). The terminal frame crosses without its question and credential
 request: each rides its own directive (`say` and `choose`, `authorize`, `secret`), gated to the
 member it names, so a second member tailing the turn reads neither the prompt nor the seal. `ufo_testsupport.contract` renders the record's schema as `client/src/record.rs` (serde,
 tagged enums, ids and instants as strings) beside `contract.ts`, held fresh by the same test, and

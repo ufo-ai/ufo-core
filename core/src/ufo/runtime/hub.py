@@ -44,9 +44,11 @@ class CostTick(BaseModel):
 
 
 class Activity(BaseModel):
-    """The current one-line summary of a tool step."""
+    """The current one-line summary of a tool step. `call_id` names the tool call the label is
+    for, so a surface can bind it to the row that ran the call; empty where no call is known."""
 
     text: str
+    call_id: str = ""
 
 
 class SourceRef(BaseModel):

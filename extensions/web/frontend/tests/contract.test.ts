@@ -39,5 +39,5 @@ test("the portal lays the record out with its drained segment above the live row
   if (last.kind !== "live") throw new Error("no live row");
   expect(last.body).toBe("It shipped Tuesday.");
   expect(last.working).toBe(RESUMED_NOTE);
-  expect(last.folded).toEqual([{ kind: "tool", label: null, sources: held.steps[1].kind === "tool" ? held.steps[1].sources : [], open: false }]);
+  expect(last.folded).toEqual([{ kind: "tool", label: null, call_id: "", sources: held.steps[1].kind === "tool" ? held.steps[1].sources : [], open: false }]);
 });

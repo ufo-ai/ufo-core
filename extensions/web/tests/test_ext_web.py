@@ -409,9 +409,12 @@ CREDENTIAL_FERNET = Fernet(Fernet.generate_key())
 
 
 def test_sse_tags_activity_frames() -> None:
-    activity = _sse("7", Activity(text="Checking the workspace."))
+    activity = _sse("7", Activity(text="Checking the workspace.", call_id="c1"))
     assert activity.startswith(b"id: 7\nevent: activity\ndata: ")
-    assert json.loads(activity.split(b"data: ", 1)[1]) == {"text": "Checking the workspace."}
+    assert json.loads(activity.split(b"data: ", 1)[1]) == {
+        "text": "Checking the workspace.",
+        "call_id": "c1",
+    }
 
 
 def test_sse_names_every_live_frame_kind_and_refuses_an_unmapped_one() -> None:

@@ -22,6 +22,7 @@ import pytest
 from ufo.harness.document_renderer import DOCUMENT_INPUT_MAX_BYTES, DocumentRenderer
 from ufo.harness.sandbox import terminal
 from ufo.harness.sandbox.session import (
+    TOOL_CALL_ID,
     WORKSPACE_DIR,
     ProxyEndpoint,
     SandboxSession,
@@ -998,8 +999,46 @@ def test_a_sender_on_another_loop_is_woken_from_this_one() -> None:
     assert not thread.is_alive() and outcome == [b"cross-loop"]
 
 
+async def _check_an_op_carries_the_tool_call_it_is_issued_for() -> None:
+    """The carrier stamps every op with the call the engine is dispatching, read off the context the
+    engine sets around the dispatch, and the transport carries what it is given: the client binds
+    the call's label to the row that ran it. An op issued outside a dispatch names none."""
+    terminals = Terminals()
+    carrier = TerminalCarrier(terminals=terminals)
+    conversation_id = uuid4()
+    terminals.connect(conversation_id, "/Users/member/proj", uuid4())
+    handle = await carrier.create(_spec(conversation_id, "/Users/member/proj"))
+
+    issuing = TOOL_CALL_ID.set("c1")
+    try:
+        inside = asyncio.ensure_future(carrier.exec(handle, ("ls",), 5))
+    finally:
+        TOOL_CALL_ID.reset(issuing)
+    op = await _answer(
+        terminals,
+        conversation_id,
+        json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode(),
+    )
+    assert op.call_id == "c1"
+    assert (await inside).exit_code == 0
+
+    outside = asyncio.ensure_future(carrier.exec(handle, ("ls",), 5))
+    op = await _answer(
+        terminals,
+        conversation_id,
+        json.dumps({"exit_code": 0, "stdout_b64": "", "stderr_b64": ""}).encode(),
+    )
+    assert op.call_id == ""
+    assert (await outside).exit_code == 0
+
+    stated = asyncio.ensure_future(terminals.send(conversation_id, "exec", 5, call_id="c2"))
+    op = await _answer(terminals, conversation_id, b"ok")
+    assert op.call_id == "c2"
+    assert await stated == b"ok"
+
+
 async def test_terminal_in_memory_contract() -> None:
     checks = tuple(value for name, value in globals().items() if name.startswith("_check_"))
-    assert len(checks) == 31
+    assert len(checks) == 32
     for check in checks:
         await check()

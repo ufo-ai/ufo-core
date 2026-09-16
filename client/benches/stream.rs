@@ -1,4 +1,5 @@
-use ufo::ui::markdown::StreamRenderer;
+use ufo::fold::Frame;
+use ufo::ui::markdown::committed_split;
 use ufo::ui::retained::{Entry, Retained};
 use ufo::ui::theme::{ColorMode, Scheme, Theme};
 
@@ -27,7 +28,8 @@ The tail re-wraps whole, which is why the width is part of the measurement.
 ";
 
 const BLOCK: &str =
-    "One committed block of a streamed answer, wrapped whole into the transcript.\n";
+    "One committed block of a streamed answer, wrapped whole into the transcript.\n\n";
+const AT: &str = "2026-09-16T00:00:00Z";
 
 fn main() {
     divan::main();
@@ -49,16 +51,17 @@ fn deltas() -> Vec<&'static str> {
 }
 
 #[divan::bench]
-fn hold_back_a_streamed_reply(bencher: divan::Bencher) {
+fn split_a_streamed_reply_at_every_delta(bencher: divan::Bencher) {
     let deltas = deltas();
     bencher
         .counter(divan::counter::BytesCount::of_str(REPLY))
-        .with_inputs(StreamRenderer::default)
-        .bench_local_refs(|stream| {
+        .with_inputs(String::new)
+        .bench_local_refs(|held| {
             for delta in &deltas {
-                divan::black_box(stream.push(delta));
+                held.push_str(delta);
+                divan::black_box(committed_split(held));
             }
-            divan::black_box(stream.finish())
+            divan::black_box(committed_split(held).0.len())
         });
 }
 
@@ -71,11 +74,17 @@ fn commit_into_the_transcript(bencher: divan::Bencher, turns: usize) {
             for turn in 0..turns {
                 retained.push(Entry::Markdown(format!("Turn {turn} already committed.\n")));
             }
+            retained.begin_turn();
             retained.window(ROWS, &[], &theme);
             retained
         })
         .bench_local_refs(|retained| {
-            retained.extend_markdown(BLOCK);
+            retained.fold(
+                &Frame::Message {
+                    text: BLOCK.to_string(),
+                },
+                AT,
+            );
             divan::black_box(retained.window(ROWS, &[], &theme))
         });
 }

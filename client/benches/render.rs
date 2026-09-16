@@ -3,7 +3,7 @@ use base64::Engine;
 use ufo::ops::OP_FILE;
 use ufo::ui::markdown;
 use ufo::ui::theme::{ColorMode, Scheme, Theme};
-use ufo::ui::toolrender::OpView;
+use ufo::ui::toolrender::{OpState, OpView};
 use ufo::wire::OpRequest;
 
 const WIDTH: u16 = 100;
@@ -77,6 +77,7 @@ fn render_an_edits_diff(bencher: divan::Bencher) {
         timeout_s: 60,
         arg: String::new(),
         params: edit_params(&old, &new),
+        call_id: String::new(),
     });
-    bencher.bench(|| divan::black_box(view.body(Ok(b"{}"), &theme)));
+    bencher.bench(|| divan::black_box(view.body(Ok(b"{}"), OpState::Done, &theme)));
 }

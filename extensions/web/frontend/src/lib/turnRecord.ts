@@ -69,7 +69,7 @@ export type RunFrame = {
 
 export type Frame =
   | { kind: "message"; text: string }
-  | { kind: "activity"; text: string }
+  | { kind: "activity"; text: string; call_id: string }
   | { kind: "sources"; items: SourceRef[] }
   | { kind: "subagent_activity"; run: RunFrame }
   | { kind: "subagent"; run: SubagentRun }
@@ -124,8 +124,11 @@ export function decodeFrame(
 function shape(kind: EventKind, fields: Fields, at: string): Frame | null {
   switch (kind) {
     case "message":
-    case "activity":
       return str(fields.text) ? { kind, text: fields.text } : null;
+    case "activity":
+      return str(fields.text)
+        ? { kind, text: fields.text, call_id: str(fields.call_id) ? fields.call_id : "" }
+        : null;
     case "sources":
       return list(fields.items, isFields) ? { kind, items: fields.items as SourceRef[] } : null;
     case "subagent_activity":
@@ -321,7 +324,13 @@ export function fold(record: LiveTurn, frame: TurnFrame): LiveTurn {
     }
     case "activity":
       if (!frame.text) return record;
-      return opening(record, { kind: "tool", label: frame.text, sources: [], open: true });
+      return opening(record, {
+        kind: "tool",
+        label: frame.text,
+        call_id: frame.call_id,
+        sources: [],
+        open: true,
+      });
     case "sources": {
       const last = record.steps.at(-1);
       if (last?.kind === "tool" && last.open) {
@@ -333,6 +342,7 @@ export function fold(record: LiveTurn, frame: TurnFrame): LiveTurn {
       return opening(record, {
         kind: "tool",
         label: null,
+        call_id: "",
         sources: consulted([], frame.items),
         open: true,
       });
