@@ -49,3 +49,15 @@ from ufo.runtime.turns.record import (
 from ufo.runtime.turns.record import (
     TurnRecord as TurnRecord,
 )
+from ufo.runtime.turns.record import (
+    apply_run_frame as apply_run_frame,
+)
+from ufo.runtime.turns.record import (
+    current_step as current_step,
+)
+from ufo.runtime.turns.record import (
+    find_run as find_run,
+)
+from ufo.runtime.turns.record import (
+    fold as fold,
+)

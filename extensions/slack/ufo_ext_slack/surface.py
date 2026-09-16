@@ -131,18 +131,25 @@ from ufo.sdk.callback_page import PageLink, callback_page
 from ufo.sdk.context import CredentialAccess, ExtensionContext, JsonValue, ScopedStore
 from ufo.sdk.http import JSONResponse, Request, Response
 from ufo.sdk.hub import (
-    Absorbed,
-    Activity,
-    CostTick,
     LiveFrame,
     Parked,
-    Resumed,
     SubagentActivity,
     Terminal,
-    TextDelta,
 )
 from ufo.sdk.manifest import HookContext, HookOutcome
 from ufo.sdk.o11y import log, warn
+from ufo.sdk.record import (
+    DrainStep,
+    Meter,
+    ResumedStep,
+    SubagentRun,
+    TextStep,
+    ToolStep,
+    TurnRecord,
+    current_step,
+    find_run,
+    fold,
+)
 from ufo.sdk.surfaces import (
     AMBIENT_CONTEXT_ELEMENT,
     AMBIENT_HISTORY_MESSAGES,
@@ -3086,6 +3093,7 @@ class ThreadStatus:
 
     async def _follow(self, client: httpx.AsyncClient, bot_token: str, shown: str) -> None:
         sent_at = time.monotonic()
+        record = TurnRecord(id=self.turn_id, steps=(), runs=(), meter=None, end=None)
         async with self.ctx.tail(self.turn_id) as frames:
             upcoming = asyncio.ensure_future(anext(frames))
             waking = asyncio.ensure_future(self.blanked.wait())
@@ -3110,26 +3118,17 @@ class ThreadStatus:
                     except StopAsyncIteration:
                         return
                     upcoming = asyncio.ensure_future(anext(frames))
+                    record = fold(record, frame, datetime.now(UTC))
                     match frame:
                         case Terminal() | Parked():
                             return
-                        case Activity(text=activity) if activity:
-                            stated = activity.strip().rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
-                            text = STATUS_DESCRIBED_TEXT.format(description=stated)
-                        case SubagentActivity() if frame.activity:
-                            label = frame.name or frame.profile
-                            worked = frame.activity.strip()
-                            stated = f"{label}: {worked}".rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
-                            text = STATUS_DESCRIBED_TEXT.format(description=stated)
-                        case Absorbed():
-                            text = STATUS_PICKED_UP_TEXT
-                        case Resumed():
-                            text = STATUS_RESUMED_TEXT
-                        case TextDelta():
-                            text = STATUS_GENERATING_TEXT
+                        case SubagentActivity():
+                            stated = _run_line(record, frame.turn_id)
                         case _:
-                            continue
-                    text = text[:STATUS_TEXT_LIMIT]
+                            stated = _step_line(record)
+                    if stated is None:
+                        continue
+                    text = stated[:STATUS_TEXT_LIMIT]
                     if text == shown or time.monotonic() - sent_at < STATUS_UPDATE_MIN_SECONDS:
                         continue
                     if await self._set(client, bot_token, text):
@@ -3139,6 +3138,35 @@ class ThreadStatus:
                 upcoming.cancel()
                 waking.cancel()
                 await asyncio.gather(upcoming, waking, return_exceptions=True)
+
+
+def _described(words: str) -> str:
+    stated = words.strip().rstrip(".…")[:STATUS_DESCRIPTION_LIMIT]
+    return STATUS_DESCRIBED_TEXT.format(description=stated)
+
+
+def _step_line(record: TurnRecord) -> str | None:
+    """The line the record's newest step calls for, or None where it calls for none: a step whose
+    label never landed, and a reply delivered beside the work, leave the line standing."""
+    match current_step(record):
+        case TextStep():
+            return STATUS_GENERATING_TEXT
+        case ToolStep(label=str() as label) if label:
+            return _described(label)
+        case DrainStep():
+            return STATUS_PICKED_UP_TEXT
+        case ResumedStep():
+            return STATUS_RESUMED_TEXT
+    return None
+
+
+def _run_line(record: TurnRecord, turn_id: UUID) -> str | None:
+    """The line a run's frame calls for: the run's own name over the step it is on, or None
+    while it has stated no step, and once it has ended."""
+    run = find_run(record.runs, turn_id)
+    if run is None or not run.current:
+        return None
+    return _described(f"{run.name or run.profile}: {run.current.strip()}")
 
 
 _STATUS_TASKS: dict[UUID, asyncio.Task[None]] = {}
@@ -3253,40 +3281,51 @@ class ProgressCadence:
                 yield at
 
 
-@dataclass
-class TurnActivity:
-    """What a turn's tail has seen, reduced to its current member-facing activity. A tool step is
-    the generated summary of the tool run — what it is doing for the member, never the tool it
-    reached for. Text in flight is only identified as response preparation: its content may be
-    unfinished narration or the final answer this post must not preempt."""
+def _running(runs: tuple[SubagentRun, ...]) -> list[SubagentRun]:
+    held: list[SubagentRun] = []
+    for run in runs:
+        if run.running:
+            held.append(run)
+        held.extend(_running(run.subagents))
+    return held
 
-    activity: str = ""
-    streaming: list[str] = field(default_factory=list)
 
-    def update(self, summary: str) -> None:
-        self.streaming.clear()
-        self.activity = " ".join(summary.split())[:PROGRESS_ACTIVITY_LIMIT]
+def _bounded(words: str) -> str:
+    return " ".join(words.split())[:PROGRESS_ACTIVITY_LIMIT]
 
-    def stream(self, text: str) -> None:
-        self.streaming.append(text)
 
-    def current_step(self) -> str:
-        """The current step, with text in flight outranking the last completed tool call."""
-        if self.streaming:
-            return PROGRESS_PREPARING_RESPONSE
-        return self.activity
+def progress_step(record: TurnRecord) -> str:
+    """The step a progress post names, read off the turn record. Text in flight outranks every
+    call: its content may be unfinished narration or the answer this post must not preempt, so it
+    is named only as response preparation. A run still going with a step of its own comes next,
+    being what the turn is waiting on. A drain or a resume names no work, so the step before it
+    stands. Every line is the generated summary of the work — what it is doing for the member,
+    never the tool it reached for."""
+    if isinstance(current_step(record), TextStep):
+        return PROGRESS_PREPARING_RESPONSE
+    for run in reversed(_running(record.runs)):
+        if run.current:
+            return _bounded(f"{run.name or run.profile}: {run.current}")
+    for step in reversed(record.steps):
+        match step:
+            case TextStep():
+                return PROGRESS_PREPARING_RESPONSE
+            case ToolStep(label=str() as label) if label:
+                return _bounded(label)
+    return ""
 
-    def report(self, elapsed_seconds: float) -> str | None:
-        """This checkpoint's post, or None when the turn produced no signal at all — a checkpoint
-        with nothing but the clock behind it is skipped, never filled with a placeholder. One that
-        saw no *new* call still posts: naming the step the turn has sat in for the whole interval
-        answers "is it stalled?", the question that earns the post."""
-        step = self.current_step()
-        if not step:
-            return None
-        hours, minutes = divmod(int(elapsed_seconds // 60), 60)
-        elapsed = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
-        return PROGRESS_LINE.format(activity=step, elapsed=elapsed)
+
+def progress_report(record: TurnRecord, elapsed_seconds: float) -> str | None:
+    """This checkpoint's post, or None when the turn produced no signal at all — a checkpoint
+    with nothing but the clock behind it is skipped, never filled with a placeholder. One that
+    saw no *new* call still posts: naming the step the turn has sat in for the whole interval
+    answers "is it stalled?", the question that earns the post."""
+    step = progress_step(record)
+    if not step:
+        return None
+    hours, minutes = divmod(int(elapsed_seconds // 60), 60)
+    elapsed = f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+    return PROGRESS_LINE.format(activity=step, elapsed=elapsed)
 
 
 @dataclass(frozen=True)
@@ -3341,8 +3380,7 @@ class ThreadProgress:
         first = (self.armed_at - self.started_at).total_seconds() < self.cadence.base_seconds
         checkpoints = self.cadence.checkpoints_after(self._elapsed())
         deadline = next(checkpoints)
-        activity = TurnActivity()
-        spend: CostTick | None = None
+        record = TurnRecord(id=self.turn_id, steps=(), runs=(), meter=None, end=None)
         async with self.ctx.tail(self.turn_id) as frames:
             upcoming = asyncio.ensure_future(anext(frames))
             try:
@@ -3352,9 +3390,7 @@ class ThreadProgress:
                     if not done:
                         if await self.ctx.turn_is_terminal(self.turn_id):
                             return
-                        posted = await self._post(
-                            client, bot_token, activity, self._elapsed(), spend, first
-                        )
+                        posted = await self._post(client, bot_token, record, self._elapsed(), first)
                         first = first and not posted
                         deadline = next(checkpoints)
                         continue
@@ -3363,20 +3399,9 @@ class ThreadProgress:
                     except StopAsyncIteration:
                         return
                     upcoming = asyncio.ensure_future(anext(frames))
-                    match frame:
-                        case Terminal() | Parked():
-                            return
-                        case Activity(text=text) if text:
-                            activity.update(text)
-                        case SubagentActivity() if frame.activity:
-                            label = frame.name or frame.profile
-                            activity.update(f"{label}: {frame.activity}")
-                        case TextDelta(text=text):
-                            activity.stream(text)
-                        case CostTick():
-                            spend = frame
-                        case _:
-                            continue
+                    record = fold(record, frame, datetime.now(UTC))
+                    if isinstance(frame, Terminal | Parked):
+                        return
             finally:
                 upcoming.cancel()
                 await asyncio.gather(upcoming, return_exceptions=True)
@@ -3385,9 +3410,8 @@ class ThreadProgress:
         self,
         client: httpx.AsyncClient,
         bot_token: str,
-        activity: TurnActivity,
+        record: TurnRecord,
         elapsed_seconds: float,
-        spend: CostTick | None,
         first: bool,
     ) -> bool:
         """One checkpoint's post, contained: a rejection costs this update and returns, never the
@@ -3400,7 +3424,7 @@ class ThreadProgress:
 
         Answers whether the post landed, so the footer rides the turn's first delivered message: a
         skipped or rejected checkpoint leaves it for the next one to carry."""
-        text = activity.report(elapsed_seconds)
+        text = progress_report(record, elapsed_seconds)
         if text is None:
             log(
                 "slack.thread_progress.skipped",
@@ -3408,7 +3432,7 @@ class ThreadProgress:
                 elapsed_seconds=int(elapsed_seconds),
             )
             return False
-        return await self._say(client, bot_token, text, elapsed_seconds, spend, first)
+        return await self._say(client, bot_token, text, elapsed_seconds, record.meter, first)
 
     async def _say(
         self,
@@ -3416,7 +3440,7 @@ class ThreadProgress:
         bot_token: str,
         text: str,
         elapsed_seconds: float,
-        spend: CostTick | None,
+        spend: Meter | None,
         first: bool,
     ) -> bool:
         channel = self.thread.queue_key.partition(":")[0]
@@ -3452,11 +3476,11 @@ class ThreadProgress:
             _restamp_thread_status(self.ctx.workspace_id, channel, thread_ts)
         return True
 
-    async def _footer(self, bot_token: str, channel: str, spend: CostTick | None) -> str | None:
+    async def _footer(self, bot_token: str, channel: str, spend: Meter | None) -> str | None:
         """The standard footer under the same gating the reply's carries. A running turn has no
         terminal frame, so the cache share and the model it settled on do not exist yet and the
-        footer omits them; cost and tokens are the tail's own latest `CostTick`, absent until the
-        first model round prices one."""
+        footer omits them; cost and tokens are the record's meter, absent until the first model
+        round prices one."""
         accounting = (
             None
             if spend is None

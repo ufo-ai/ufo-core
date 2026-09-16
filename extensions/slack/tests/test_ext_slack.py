@@ -86,12 +86,16 @@ from ufo.runtime.ext.surface import (
     mint_marker,
 )
 from ufo.runtime.hub import (
+    Absorbed,
     Activity,
     CostTick,
     InProcessHub,
     LiveFrame,
     Parked,
     Resumed,
+    SourceRef,
+    Sources,
+    SubagentActivity,
     Terminal,
     TextDelta,
 )
@@ -99,6 +103,7 @@ from ufo.runtime.media.artifact_url import verify_artifact_url
 from ufo.runtime.queue import _load_turn
 from ufo.runtime.seats import UNRESOLVED_SPEAKER_MESSAGE
 from ufo.runtime.turns.ambient_reply import AmbientReplyClassifier
+from ufo.runtime.turns.record import TurnRecord, fold
 from ufo.runtime.workspace import init_workspace_credentials, ws
 from ufo.schema import tables
 from ufo.schema.records import (
@@ -5909,15 +5914,23 @@ def test_the_progress_cadence_grows_from_the_base_and_settles_at_the_cap() -> No
         slack.ProgressCadence(base_seconds=60.0, cap_seconds=30.0)
 
 
+def _folded(*frames: LiveFrame) -> TurnRecord:
+    record = TurnRecord(id=uuid4(), steps=(), runs=(), meter=None, end=None)
+    for frame in frames:
+        record = fold(record, frame, datetime.now(UTC))
+    return record
+
+
 def test_a_progress_post_keeps_only_the_latest_step() -> None:
     """Completed narration and prior steps do not accrete around the current work."""
-    activity = slack.TurnActivity()
-    activity.stream("Checking whether the migration already applied ")
-    activity.stream("before rerunning it.")
-    activity.update("inspecting the alembic version table")
-    activity.update("loading the `postgres/migrations` skill")
+    record = _folded(
+        TextDelta(text="Checking whether the migration already applied "),
+        TextDelta(text="before rerunning it."),
+        Activity(text="inspecting the alembic version table"),
+        Activity(text="loading the `postgres/migrations` skill"),
+    )
 
-    text = activity.report(725.0)
+    text = slack.progress_report(record, 725.0)
 
     assert text == "loading the `postgres/migrations` skill · 12m in"
     assert "inspecting the alembic version table" not in text
@@ -5926,8 +5939,9 @@ def test_a_progress_post_keeps_only_the_latest_step() -> None:
     assert "still working" not in text.lower()
 
     in_flight = "Now I will write the fix"
-    activity.stream(in_flight)
-    writing = activity.report(725.0)
+    writing = slack.progress_report(
+        fold(record, TextDelta(text=in_flight), datetime.now(UTC)), 725.0
+    )
 
     assert writing == "Preparing the response · 12m in"
     assert in_flight not in writing
@@ -5935,12 +5949,12 @@ def test_a_progress_post_keeps_only_the_latest_step() -> None:
 
 def test_a_progress_post_names_the_work_never_a_tool() -> None:
     """Nothing a member reads in a progress post is an internal identifier."""
-    activity = slack.TurnActivity()
-    activity.update("Reading the deploy log")
-    assert activity.current_step() == "Reading the deploy log"
-    activity.update("Restarting the worker")
+    record = _folded(Activity(text="Reading the deploy log"))
+    assert slack.progress_step(record) == "Reading the deploy log"
 
-    text = activity.report(200.0)
+    text = slack.progress_report(
+        fold(record, Activity(text="Restarting the worker"), datetime.now(UTC)), 200.0
+    )
 
     assert text == "Restarting the worker · 3m in"
     assert "bash" not in text
@@ -5950,42 +5964,102 @@ def test_a_progress_post_names_the_work_never_a_tool() -> None:
 
 def test_repeated_progress_posts_keep_only_the_latest_step() -> None:
     """A busy interval reads like Codex's work header, not a tool-call log."""
-    activity = slack.TurnActivity()
-    for description in (
-        "Reading the repo",
-        "Reading the repo",
-        "Checking the failing tests",
-        "Patching the fixture",
-        "Rerunning the failing test",
-        "Rerunning the failing test",
-        "Formatting the diff",
-        "Pushing the branch",
-    ):
-        activity.update(description)
+    record = _folded(
+        *(
+            Activity(text=description)
+            for description in (
+                "Reading the repo",
+                "Reading the repo",
+                "Checking the failing tests",
+                "Patching the fixture",
+                "Rerunning the failing test",
+                "Rerunning the failing test",
+                "Formatting the diff",
+                "Pushing the branch",
+            )
+        )
+    )
 
-    assert activity.report(1_200.0) == "Pushing the branch · 20m in"
-    assert activity.report(2_400.0) == "Pushing the branch · 40m in"
+    assert slack.progress_report(record, 1_200.0) == "Pushing the branch · 20m in"
+    assert slack.progress_report(record, 2_400.0) == "Pushing the branch · 40m in"
 
 
 def test_a_progress_post_bounds_the_model_supplied_text() -> None:
     """Only the latest step is bounded before it reaches Slack."""
-    activity = slack.TurnActivity()
-    activity.stream("a" * 5_000)
-    for index in range(6):
-        activity.update(f"{index}" * 5_000)
+    record = _folded(
+        TextDelta(text="a" * 5_000),
+        *(Activity(text=f"{index}" * 5_000) for index in range(6)),
+    )
 
-    text = activity.report(60.0)
+    text = slack.progress_report(record, 60.0)
 
     assert text is not None
     assert text == f"{'5' * slack.PROGRESS_ACTIVITY_LIMIT} · 1m in"
 
 
 def test_a_progress_step_is_one_bounded_line() -> None:
-    activity = slack.TurnActivity()
-    activity.update("Ran migrations\nwaited; for the lock")
-    activity.update("Checking the schema")
+    record = _folded(
+        Activity(text="Ran migrations\nwaited; for the lock"),
+        Activity(text="Checking the schema"),
+    )
 
-    assert activity.report(60.0) == "Checking the schema · 1m in"
+    assert slack.progress_report(record, 60.0) == "Checking the schema · 1m in"
+
+
+def test_a_progress_post_names_the_run_the_turn_waits_on_and_keeps_its_step_across_a_drain() -> (
+    None
+):
+    """A run still going is what the turn is doing; a drain names no work of its own."""
+    run = SubagentActivity(
+        turn_id=uuid4(),
+        parent_turn_id=uuid4(),
+        conversation_id=uuid4(),
+        profile="deep_research",
+        name="Calendar check",
+    )
+    record = _folded(Activity(text="Delegating the research"), run)
+    assert slack.progress_step(record) == "Delegating the research"
+
+    looking = fold(
+        record, run.model_copy(update={"activity": "Reading the calendar"}), datetime.now(UTC)
+    )
+    assert slack.progress_step(looking) == "Calendar check: Reading the calendar"
+
+    ended = fold(looking, run.model_copy(update={"status": "done"}), datetime.now(UTC))
+    assert slack.progress_step(ended) == "Delegating the research"
+
+    drained = fold(ended, Absorbed(arrivals=(uuid4(),)), datetime.now(UTC))
+    assert slack.progress_step(drained) == "Delegating the research"
+    assert slack.progress_step(_folded()) == ""
+
+
+def test_the_status_line_reads_the_record_and_leaves_a_labelless_step_standing() -> None:
+    """Every status line is a reading of the turn record's newest step, run frames aside."""
+    assert slack._step_line(_folded()) is None
+    assert slack._step_line(_folded(TextDelta(text="It "))) == slack.STATUS_GENERATING_TEXT
+    assert (
+        slack._step_line(_folded(Activity(text="Reading the deploy log.")))
+        == "Reading the deploy log…"
+    )
+    assert slack._step_line(_folded(Absorbed(arrivals=(uuid4(),)))) == slack.STATUS_PICKED_UP_TEXT
+    assert slack._step_line(_folded(Resumed(attempt="a"))) == slack.STATUS_RESUMED_TEXT
+    page = SourceRef(kind="web", title="Docs", url="https://docs.example/a")
+    assert slack._step_line(_folded(Sources(items=(page,)))) is None
+
+    run = SubagentActivity(
+        turn_id=uuid4(),
+        parent_turn_id=uuid4(),
+        conversation_id=uuid4(),
+        profile="deep_research",
+        name="Calendar check",
+    )
+    started = _folded(run)
+    assert slack._run_line(started, run.turn_id) is None
+    working = fold(
+        started, run.model_copy(update={"activity": " Reading the calendar. "}), datetime.now(UTC)
+    )
+    assert slack._run_line(working, run.turn_id) == "Calendar check: Reading the calendar…"
+    assert len(slack._run_line(working, run.turn_id) or "") <= slack.STATUS_TEXT_LIMIT
 
 
 ARMING_READ_BUDGET_SECONDS = 30.0

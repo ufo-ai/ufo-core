@@ -1,0 +1,379 @@
+[
+  {
+    "name": "words between two tool steps, then the answer",
+    "frames": [
+      {
+        "event": "message",
+        "data": "{\"text\":\"Reading the changelog first.\"}"
+      },
+      {
+        "event": "activity",
+        "data": "{\"text\":\"Reading the changelog.\"}"
+      },
+      {
+        "event": "message",
+        "data": "{\"text\":\"Checking the tags now.\"}"
+      },
+      {
+        "event": "activity",
+        "data": "{\"text\":\"Checking the release tags.\"}"
+      },
+      {
+        "event": "message",
+        "data": "{\"text\":\"It shipped \"}"
+      },
+      {
+        "event": "message",
+        "data": "{\"text\":\"Tuesday.\"}"
+      },
+      {
+        "event": "terminal",
+        "data": "{\"status\":\"done\",\"text\":\"It shipped Tuesday.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":0,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
+      }
+    ],
+    "record": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "steps": [
+        {
+          "kind": "text",
+          "text": "Reading the changelog first.",
+          "open": false
+        },
+        {
+          "kind": "tool",
+          "label": "Reading the changelog.",
+          "sources": [],
+          "open": false
+        },
+        {
+          "kind": "text",
+          "text": "Checking the tags now.",
+          "open": false
+        },
+        {
+          "kind": "tool",
+          "label": "Checking the release tags.",
+          "sources": [],
+          "open": false
+        },
+        {
+          "kind": "text",
+          "text": "It shipped Tuesday.",
+          "open": false
+        }
+      ],
+      "runs": [],
+      "end": {
+        "kind": "terminal",
+        "frame": {
+          "status": "done",
+          "text": "It shipped Tuesday.",
+          "tokens": 12,
+          "cost_micro_usd": 110,
+          "cache_percent": 0,
+          "model": "claude-opus-4-8",
+          "created": []
+        },
+        "at": "2026-09-15T12:00:00Z"
+      }
+    }
+  },
+  {
+    "name": "sources before any label open an unlabelled step, and words close it",
+    "frames": [
+      {
+        "event": "sources",
+        "data": "{\"items\":[{\"kind\":\"web\",\"title\":\"Docs\",\"url\":\"https://docs.example/a\",\"ref\":\"\",\"provider\":\"\"}]}"
+      },
+      {
+        "event": "sources",
+        "data": "{\"items\":[{\"kind\":\"web\",\"title\":\"Docs\",\"url\":\"https://docs.example/a\",\"ref\":\"\",\"provider\":\"\"},{\"kind\":\"workspace\",\"title\":\"Plan\",\"url\":\"\",\"ref\":\"page/1\",\"provider\":\"notion\"}]}"
+      },
+      {
+        "event": "message",
+        "data": "{\"text\":\"Here.\"}"
+      },
+      {
+        "event": "activity",
+        "data": "{\"text\":\"Listing.\"}"
+      },
+      {
+        "event": "sources",
+        "data": "{\"items\":[{\"kind\":\"workspace\",\"title\":\"Plan\",\"url\":\"\",\"ref\":\"page/1\",\"provider\":\"notion\"}]}"
+      },
+      {
+        "event": "terminal",
+        "data": "{\"status\":\"done\",\"text\":\"It shipped Tuesday.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":0,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
+      }
+    ],
+    "record": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "steps": [
+        {
+          "kind": "tool",
+          "sources": [
+            {
+              "kind": "web",
+              "title": "Docs",
+              "url": "https://docs.example/a",
+              "ref": "",
+              "provider": ""
+            },
+            {
+              "kind": "workspace",
+              "title": "Plan",
+              "url": "",
+              "ref": "page/1",
+              "provider": "notion"
+            }
+          ],
+          "open": false
+        },
+        {
+          "kind": "text",
+          "text": "Here.",
+          "open": false
+        },
+        {
+          "kind": "tool",
+          "label": "Listing.",
+          "sources": [
+            {
+              "kind": "workspace",
+              "title": "Plan",
+              "url": "",
+              "ref": "page/1",
+              "provider": "notion"
+            }
+          ],
+          "open": false
+        }
+      ],
+      "runs": [],
+      "end": {
+        "kind": "terminal",
+        "frame": {
+          "status": "done",
+          "text": "It shipped Tuesday.",
+          "tokens": 12,
+          "cost_micro_usd": 110,
+          "cache_percent": 0,
+          "model": "claude-opus-4-8",
+          "created": []
+        },
+        "at": "2026-09-15T12:00:00Z"
+      }
+    }
+  },
+  {
+    "name": "a drain cuts the round, a replayed reply states itself once, a comment is kept",
+    "frames": [
+      {
+        "event": "reply",
+        "data": "{\"id\":\"66666666-6666-4666-8666-666666666666\",\"message_ref\":\"88888888-8888-4888-8888-888888888888\",\"text\":\"Filed it.\",\"is_comment\":false}"
+      },
+      {
+        "event": "reply",
+        "data": "{\"id\":\"66666666-6666-4666-8666-666666666666\",\"message_ref\":\"88888888-8888-4888-8888-888888888888\",\"text\":\"Filed it.\",\"is_comment\":false}"
+      },
+      {
+        "event": "absorbed",
+        "data": "{\"arrivals\":[\"88888888-8888-4888-8888-888888888888\"]}"
+      },
+      {
+        "event": "absorbed",
+        "data": "{\"arrivals\":[\"88888888-8888-4888-8888-888888888888\"]}"
+      },
+      {
+        "event": "message",
+        "data": "{\"text\":\"2\"}"
+      },
+      {
+        "event": "cost",
+        "data": "{\"cost_micro_usd\":110,\"tokens\":12}"
+      },
+      {
+        "event": "comment",
+        "data": "{\"id\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"message_ref\":null,\"text\":\"A comment landed on Slack.\",\"is_comment\":true}"
+      },
+      {
+        "event": "terminal",
+        "data": "{\"status\":\"done\",\"text\":\"2\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":0,\"cost_micro_usd\":0,\"cache_percent\":0,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
+      }
+    ],
+    "record": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "steps": [
+        {
+          "kind": "reply",
+          "id": "66666666-6666-4666-8666-666666666666",
+          "text": "Filed it."
+        },
+        {
+          "kind": "drain",
+          "arrivals": [
+            "88888888-8888-4888-8888-888888888888"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": "2",
+          "open": false
+        },
+        {
+          "kind": "comment",
+          "id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+          "text": "A comment landed on Slack."
+        }
+      ],
+      "runs": [],
+      "meter": {
+        "tokens": 12,
+        "cost_micro_usd": 110
+      },
+      "end": {
+        "kind": "terminal",
+        "frame": {
+          "status": "done",
+          "text": "2",
+          "tokens": 0,
+          "cost_micro_usd": 0,
+          "cache_percent": 0,
+          "model": "claude-opus-4-8",
+          "created": []
+        },
+        "at": "2026-09-15T12:00:00Z"
+      }
+    }
+  },
+  {
+    "name": "a resume between words, then a park",
+    "frames": [
+      {
+        "event": "message",
+        "data": "{\"text\":\"Half\"}"
+      },
+      {
+        "event": "resumed",
+        "data": "{\"attempt\":\"44444444444444444444444444444444\"}"
+      },
+      {
+        "event": "message",
+        "data": "{\"text\":\"way\"}"
+      },
+      {
+        "event": "parked",
+        "data": "{\"message\":\"Spend cap reached; the turn resumes when the cap is raised.\"}"
+      }
+    ],
+    "record": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "steps": [
+        {
+          "kind": "text",
+          "text": "Half",
+          "open": false
+        },
+        {
+          "kind": "resumed",
+          "attempt": "44444444444444444444444444444444"
+        },
+        {
+          "kind": "text",
+          "text": "way",
+          "open": false
+        }
+      ],
+      "runs": [],
+      "end": {
+        "kind": "parked",
+        "message": "Spend cap reached; the turn resumes when the cap is raised."
+      }
+    }
+  },
+  {
+    "name": "a run nests its child under it and both end",
+    "frames": [
+      {
+        "event": "subagent_activity",
+        "data": "{\"turn_id\":\"99999999-9999-4999-8999-999999999999\",\"parent_turn_id\":\"33333333-3333-4333-8333-333333333333\",\"conversation_id\":\"77777777-7777-4777-8777-777777777777\",\"profile\":\"deep_research\",\"name\":\"Calendar check\",\"activity\":\"\",\"status\":\"\"}"
+      },
+      {
+        "event": "subagent_activity",
+        "data": "{\"turn_id\":\"99999999-9999-4999-8999-999999999999\",\"parent_turn_id\":\"33333333-3333-4333-8333-333333333333\",\"conversation_id\":\"77777777-7777-4777-8777-777777777777\",\"profile\":\"deep_research\",\"name\":\"Calendar check\",\"activity\":\"Reading the calendar.\",\"status\":\"\"}"
+      },
+      {
+        "event": "subagent_activity",
+        "data": "{\"turn_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"parent_turn_id\":\"99999999-9999-4999-8999-999999999999\",\"conversation_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"profile\":\"general_purpose\",\"name\":\"\",\"activity\":\"\",\"status\":\"\"}"
+      },
+      {
+        "event": "subagent_activity",
+        "data": "{\"turn_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"parent_turn_id\":\"99999999-9999-4999-8999-999999999999\",\"conversation_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"profile\":\"general_purpose\",\"name\":\"\",\"activity\":\"Looking up info\",\"status\":\"\"}"
+      },
+      {
+        "event": "subagent_activity",
+        "data": "{\"turn_id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"parent_turn_id\":\"99999999-9999-4999-8999-999999999999\",\"conversation_id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"profile\":\"general_purpose\",\"name\":\"\",\"activity\":\"\",\"status\":\"done\"}"
+      },
+      {
+        "event": "subagent_activity",
+        "data": "{\"turn_id\":\"99999999-9999-4999-8999-999999999999\",\"parent_turn_id\":\"33333333-3333-4333-8333-333333333333\",\"conversation_id\":\"77777777-7777-4777-8777-777777777777\",\"profile\":\"deep_research\",\"name\":\"Calendar check\",\"activity\":\"\",\"status\":\"done\"}"
+      },
+      {
+        "event": "terminal",
+        "data": "{\"status\":\"done\",\"text\":\"It shipped Tuesday.\",\"incomplete_reason\":null,\"error_class\":null,\"error_message\":null,\"tokens\":12,\"cost_micro_usd\":110,\"cache_percent\":0,\"model\":\"claude-opus-4-8\",\"reasoning\":null,\"environment\":null,\"question\":null,\"credential_request\":null,\"connect_request\":null,\"created\":[]}"
+      }
+    ],
+    "record": {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "steps": [],
+      "runs": [
+        {
+          "profile": "deep_research",
+          "name": "Calendar check",
+          "conversation_id": "77777777-7777-4777-8777-777777777777",
+          "events": [
+            {
+              "kind": "activity",
+              "text": "Reading the calendar."
+            }
+          ],
+          "output": "",
+          "subagents": [
+            {
+              "profile": "general_purpose",
+              "name": "",
+              "conversation_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+              "events": [
+                {
+                  "kind": "activity",
+                  "text": "Looking up info"
+                }
+              ],
+              "output": "",
+              "subagents": [],
+              "running": false,
+              "turn_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              "parent_turn_id": "99999999-9999-4999-8999-999999999999"
+            }
+          ],
+          "running": false,
+          "turn_id": "99999999-9999-4999-8999-999999999999",
+          "parent_turn_id": "33333333-3333-4333-8333-333333333333"
+        }
+      ],
+      "end": {
+        "kind": "terminal",
+        "frame": {
+          "status": "done",
+          "text": "It shipped Tuesday.",
+          "tokens": 12,
+          "cost_micro_usd": 110,
+          "cache_percent": 0,
+          "model": "claude-opus-4-8",
+          "created": []
+        },
+        "at": "2026-09-15T12:00:00Z"
+      }
+    }
+  }
+]

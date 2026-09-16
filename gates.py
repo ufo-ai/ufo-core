@@ -137,7 +137,6 @@ TERMINAL_DROPPED_VERBS = frozenset({"debugger", "first"})
 ONBOARD_WEB_DROPPED_VERBS = frozenset({"install"})
 WEB_SURFACE_MODULE = Path("extensions/web/ufo_ext_web/surface.py")
 DEBUGGER_SURFACE_MODULE = Path("extensions/debugger/ufo_ext_debugger/surface.py")
-SLACK_SURFACE_MODULE = Path("extensions/slack/ufo_ext_slack/surface.py")
 REDIS_HUB_MODULE = Path("extensions/redis_hub/ufo_ext_redis_hub/stream_hub.py")
 TURN_RECORD_MODULE = Path("extensions/web/frontend/src/lib/turnRecord.ts")
 CORE_SURFACE_MODULE = Path("core/src/ufo/runtime/ext/surface.py")
@@ -146,12 +145,9 @@ CALLBACK_PAGE_MODULE = Path("core/src/ufo/sdk/callback_page.py")
 CONSENT_MODULES = (Path("extensions/web/frontend/src/lib/consent.tsx"),)
 CONSENT_MARK_NAME = "CONSENT_WINDOW_MARK"
 DEBUGGER_TAIL_MODULE = Path("extensions/debugger/frontend/src/Tail.tsx")
+RECORD_MODULE = Path("core/src/ufo/runtime/turns/record.py")
 FRAME_EXEMPTIONS: dict[str, frozenset[str]] = {
     "web _sse": frozenset({"ArtifactsChanged"}),
-    "slack ThreadStatus._follow": frozenset({"ArtifactsChanged", "CostTick", "Reply", "Sources"}),
-    "slack ThreadProgress._follow": frozenset(
-        {"Absorbed", "ArtifactsChanged", "Reply", "Resumed", "Sources"}
-    ),
 }
 EXTENSIONS_ROOT = "extensions"
 PACKS_ROOT = "packs"
@@ -796,7 +792,7 @@ def _live_frame_consumer_failures(trees: dict[Path, ast.Module]) -> list[str]:
     debugger = trees.get(DEBUGGER_SURFACE_MODULE)
     ufo_surface = trees.get(UFO_SURFACE_MODULE)
     redis = trees.get(REDIS_HUB_MODULE)
-    slack = trees.get(SLACK_SURFACE_MODULE)
+    record = trees.get(RECORD_MODULE)
     consumers: list[tuple[str, ast.AST | None]] = [
         ("web _sse", _function_scope(web, "_sse") if web else None),
         ("debugger _sse", _function_scope(debugger, "_sse") if debugger else None),
@@ -804,14 +800,7 @@ def _live_frame_consumer_failures(trees: dict[Path, ast.Module]) -> list[str]:
             "ufo directives_for",
             _function_scope(ufo_surface, "directives_for") if ufo_surface else None,
         ),
-        (
-            "slack ThreadStatus._follow",
-            _function_scope(slack, "_follow", "ThreadStatus") if slack else None,
-        ),
-        (
-            "slack ThreadProgress._follow",
-            _function_scope(slack, "_follow", "ThreadProgress") if slack else None,
-        ),
+        ("record fold", _function_scope(record, "fold") if record else None),
     ]
     for label, scope in consumers:
         if scope is None:

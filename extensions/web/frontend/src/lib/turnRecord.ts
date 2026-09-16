@@ -320,6 +320,7 @@ export function fold(record: LiveTurn, frame: TurnFrame): LiveTurn {
       return opening(record, { kind: "text", text: frame.text, open: true });
     }
     case "activity":
+      if (!frame.text) return record;
       return opening(record, { kind: "tool", label: frame.text, sources: [], open: true });
     case "sources": {
       const last = record.steps.at(-1);

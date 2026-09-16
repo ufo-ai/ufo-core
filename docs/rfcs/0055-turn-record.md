@@ -56,8 +56,34 @@ discriminator always required, a defaulted field optional — and dumps one inst
 variant to `tests/fixtures/record.json`; `test_contract.py` fails when either file is stale, and
 the portal's `contract.test.ts` settles and lays that instance out. `turnRecord.ts` imports its
 types from the rendering and adds only what the page alone knows (`LiveTurn`). The web surface's
-run node is the same `SubagentRun`, dumped at the wire. A Slack or terminal fold adopts the
-contract by rendering the same schema into its language; the fixture is the conformance case.
+run node is the same `SubagentRun`, dumped at the wire.
+
+The fold itself is written once as the reference: `fold(record, frame, at)` in
+`ufo.runtime.turns.record`, over the hub's `LiveFrame` kinds, with the same faults logged through
+`log_error`. `conformance_cases()` in `ufo_testsupport.contract` runs frame sequences through it
+and writes `tests/fixtures/fold.json` — each case as the web surface's own SSE rows beside the
+record the reference reached, nulls dropped — and the portal's `conformance.test.ts` replays every
+case through `decodeFrame` and its own `fold` and compares. A surface in Python folds with the
+reference directly; the terminal's Rust client renders the same schema into its language and
+replays the same fixture.
+
+### Slack on the record
+
+Slack's two followers — the thread status line and the interim progress posts — each fold every
+frame they tail into a `TurnRecord` and read their line off it: the status line is a reading of
+`current_step` (words in flight, a labelled step, a drain, a resume) or of the run a frame named,
+and the progress step reads the same record with its own precedence (words in flight, then a run
+still going, then the last labelled step). Slack's own `TurnActivity` bookkeeping and its latest
+`CostTick` leave; the footer reads the record's meter. The gate that held every frame consumer to
+every frame kind now holds the reference `fold` to them, since a surface that folds handles a new
+kind the day core does.
+
+### The terminal, next
+
+The terminal's wire carries no frame kinds for a resume, a sources step, or a run's start and end,
+so its client cannot fold a faithful record from today's directives. Its port is a frame-carrying
+directive, Rust types rendered from the same schema, a Rust fold replaying `fold.json`, and the
+client's retained model derived from the record — a change of its own size, taken separately.
 
 ### The transitions
 
