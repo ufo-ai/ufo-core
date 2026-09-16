@@ -128,6 +128,13 @@ export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
       import("@/views/Billing").then((module) => ({ default: module.WorkspaceBilling })),
     ),
   },
+  email: {
+    label: "Email",
+    remountOnPlace: false,
+    render: placed(() =>
+      import("@/views/WorkspaceEmail").then((module) => ({ default: module.WorkspaceEmail })),
+    ),
+  },
 };
 
 export const SECTION_VIEWS: Partial<Record<Section, PaneView>> = {

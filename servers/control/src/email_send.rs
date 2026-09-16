@@ -35,6 +35,7 @@ pub const PREFERENCE_TABLE: &str = "ufo_control.email_preference";
 pub const SEND_PATH: &str = "/internal/email/send";
 pub const DELIVERY_PATH: &str = "/internal/email/send/{message_id}";
 pub const PREFERENCE_PATH: &str = "/internal/email/preference";
+pub const PREFERENCES_PATH: &str = "/internal/email/preference/{email}";
 
 /// Everything a workspace is doing with a member's money or access. Never silenced.
 pub const TRANSACTIONAL: &str = "transactional";
@@ -120,10 +121,17 @@ pub struct Preference {
     pub silenced: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Silenced {
     pub topic: String,
     pub silenced: bool,
+}
+
+/// Every topic a member may silence, against whether they have. The whole set rather than the rows
+/// held, so a settings screen draws what it can offer without knowing the list itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Preferences {
+    pub topics: Vec<Silenced>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -210,6 +218,34 @@ impl EmailSends {
             "email_send.sent kind={} message={message_id}", asked.kind
         );
         Ok(Sent { message_id })
+    }
+
+    /// What this address has silenced, as the whole silenceable set. An address nothing is held
+    /// for reads as silencing nothing, which is the truth: a preference is a row, and its absence
+    /// is the default.
+    pub async fn preferences(&self, email: &str) -> Result<Preferences, SendError> {
+        let (address, _) =
+            normalize_email(email).map_err(|error| SendError::Refused(error.to_string()))?;
+        let connection = self.pool.get().await?;
+        let rows = connection
+            .query(
+                &format!("select topic from {PREFERENCE_TABLE} where email = $1"),
+                &[&address],
+            )
+            .await?;
+        let held: std::collections::HashSet<String> = rows
+            .iter()
+            .map(|row| row.get::<_, String>("topic"))
+            .collect();
+        Ok(Preferences {
+            topics: SILENCEABLE
+                .iter()
+                .map(|topic| Silenced {
+                    topic: topic.to_string(),
+                    silenced: held.contains(*topic),
+                })
+                .collect(),
+        })
     }
 
     pub async fn delivery(&self, message_id: &str) -> Result<Delivered, SendError> {
@@ -376,6 +412,18 @@ pub fn routes() -> Router<GatewayState> {
         .route(SEND_PATH, post(sent))
         .route(DELIVERY_PATH, get(delivered))
         .route(PREFERENCE_PATH, post(preferred))
+        .route(PREFERENCES_PATH, get(preferences))
+}
+
+async fn preferences(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Path(email): Path<String>,
+) -> Response {
+    if !admitted(&state, &headers) {
+        return unauthorized();
+    }
+    answered(state.email_sends.preferences(&email).await)
 }
 
 async fn preferred(State(state): State<GatewayState>, headers: HeaderMap, body: Bytes) -> Response {

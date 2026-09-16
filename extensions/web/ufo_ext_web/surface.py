@@ -1460,6 +1460,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
             "surfaces": {
                 **{name: flags[key] for name, key in PORTAL_SURFACES.items()},
                 "team": audience.admin,
+                "email": ctx.sends_email,
             },
             "models": await offered_models(ctx.models),
             "archived": [
@@ -3996,6 +3997,33 @@ async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Respon
     )
 
 
+async def workspace_email(ctx: SurfaceContext, request: Request) -> Response:
+    """What this member may stop receiving, and whether they have.
+
+    A preference is keyed by the address and held for the whole fleet, so this reads the reader's
+    own and nobody else's — the same rule the tool behind the acts applies. A deploy with no send
+    seam answers no topics and no acts, because it sends nothing to silence.
+
+    Nothing here is workspace state, and the screen says so: what a workspace is doing with a
+    member's money or access is not theirs to silence, and that line is the page's, not a row's."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    _member_id, email, _audience = resolved
+    held = await ctx.email_preferences(email)
+    if held is None:
+        return JSONResponse({"address": email, "topics": [], "actions": []})
+    return JSONResponse(
+        {
+            "address": email,
+            "topics": [
+                {"topic": topic, "receiving": not silenced} for topic, silenced in held.items()
+            ],
+            "actions": _action_payloads(ctx.object_actions(MEMBER_KIND, "collection")),
+        }
+    )
+
+
 async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
     """The workspace roster: who the members are, what each is called, which of them administer the
     workspace, and whose access is live — the same rows the `member` kind lists to a member asking
@@ -5953,6 +5981,7 @@ ROUTES = (
         handler=conversation_slot,
     ),
     SurfaceRoute(method="GET", path="workspace/team", handler=workspace_team),
+    SurfaceRoute(method="GET", path="workspace/email", handler=workspace_email),
     SurfaceRoute(method="GET", path="workspace/profile", handler=workspace_profile),
     SurfaceRoute(method="GET", path="members/{member_id}/photo", handler=member_photo),
     SurfaceRoute(method="GET", path="workspace/sources", handler=workspace_sources),

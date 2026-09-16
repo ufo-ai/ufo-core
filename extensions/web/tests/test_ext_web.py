@@ -1850,7 +1850,7 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
             "photo_url": None,
         },
         "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True)
-        | {"app-store": False, "apps": False, "team": False},
+        | {"app-store": False, "apps": False, "team": False, "email": False},
         "models": ["auto", "claude-opus-4-8", "claude-sonnet-5"],
         "archived": [],
         "agents": [
@@ -2067,6 +2067,7 @@ async def test_a_flag_service_that_answers_nothing_leaves_a_member_what_they_had
         "app-store": False,
         "apps": False,
         "team": True,
+        "email": False,
     }
     assert visibility == {None: False, **dict.fromkeys(web_surface.APP_FLAGS, True)}
 
@@ -2567,6 +2568,27 @@ async def test_workspace_streams_take_the_visibility_of_the_connection_they_hang
     )
     assert [s["stream"] for s in admin_view.json()["sources"]] == ["messages"]
     assert (await client.get("/surface/web/workspace/sources")).status_code == 401
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_the_email_view_answers_nothing_on_a_deploy_that_sends_none(
+    web: tuple[AsyncClient, UUID, UUID],
+) -> None:
+    """The email view reads the member's own preferences through the deploy's send seam. A deploy
+    with no control service holds none, so the screen is offered no topics and no acts rather than
+    a toggle that cannot be honoured. An unauthenticated read is refused before any of it."""
+    client, workspace_id, _agent_id = web
+    _member, token = await _seed_member(workspace_id, "m@example.com")
+
+    assert (await client.get("/surface/web/workspace/email")).status_code == 401
+
+    read = await client.get(
+        "/surface/web/workspace/email",
+        headers={"cookie": f"{SESSION_COOKIE}={token}"},
+    )
+    assert read.status_code == 200
+    assert read.json() == {"address": "m@example.com", "topics": [], "actions": []}
 
 
 @pytest.mark.usefixtures("database_url")
@@ -14076,6 +14098,7 @@ async def test_a_flag_answered_false_is_the_one_thing_that_takes_a_screen_away(
         "app-store": True,
         "apps": True,
         "team": True,
+        "email": False,
     }
     assert [(agent["app"], agent["hidden"]) for agent in boot["agents"]] == [
         (None, False),

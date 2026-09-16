@@ -122,6 +122,7 @@ export type ArchivedApp = {
 export type Surfaces = {
   team: boolean;
   apps: boolean;
+  email: boolean;
   memory: boolean;
   radar: boolean;
   "community-skills": boolean;

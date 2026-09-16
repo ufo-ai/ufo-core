@@ -2,8 +2,8 @@ use chrono::{TimeZone, Utc};
 use serde::Deserialize;
 use ufo_control::directives::directive;
 use ufo_control::email_send::{
-    Asked, Delivered, Preference, Sent, Silenced, PREFERENCE_PATH, PRODUCT_NEWS, SEND_PATH,
-    TRANSACTIONAL,
+    Asked, Delivered, Preference, Preferences, Sent, Silenced, PREFERENCE_PATH, PRODUCT_NEWS,
+    SEND_PATH, SILENCEABLE, TRANSACTIONAL,
 };
 use ufo_control::token::{sign, verified_email};
 
@@ -89,12 +89,14 @@ struct EmailSendContract {
     send_path: String,
     delivery_path: String,
     preference_path: String,
+    preferences_path: String,
     send_request: serde_json::Value,
     send_response: serde_json::Value,
     reported_response: serde_json::Value,
     unreported_response: serde_json::Value,
     preference_request: serde_json::Value,
     preference_response: serde_json::Value,
+    preferences_response: serde_json::Value,
 }
 
 #[test]
@@ -168,5 +170,28 @@ fn the_send_seam_reads_and_answers_exactly_what_core_writes() {
         })
         .unwrap(),
         contract.preference_response
+    );
+
+    assert!(
+        contract
+            .preferences_path
+            .starts_with(&format!("{PREFERENCE_PATH}/")),
+        "a member's own preferences are read under the path that records one"
+    );
+    let preferences: Preferences =
+        serde_json::from_value(contract.preferences_response.clone()).expect("they deserialize");
+    assert_eq!(
+        preferences
+            .topics
+            .iter()
+            .map(|held| held.topic.as_str())
+            .collect::<Vec<_>>(),
+        SILENCEABLE,
+        "the answer is the whole silenceable set, so a screen draws what it can offer"
+    );
+    assert_eq!(
+        serde_json::to_value(preferences).unwrap(),
+        contract.preferences_response,
+        "core reads topic and silenced off this shape"
     );
 }

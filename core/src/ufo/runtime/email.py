@@ -17,6 +17,7 @@ absent rather than silently doing nothing."""
 
 import os
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
 
@@ -105,6 +106,13 @@ class EmailSends:
             "POST", PREFERENCE_PATH, json={"email": address, "topic": topic, "silenced": silenced}
         )
         log("email.preference", topic=topic, silenced=str(silenced))
+
+    async def preferences(self, address: str) -> dict[str, bool]:
+        """Every topic this address may silence, against whether they have. The whole set rather
+        than the rows held, so a screen draws what it can offer without holding the list itself."""
+        answered = await self._ask("GET", f"{PREFERENCE_PATH}/{quote(address, safe='')}")
+        held: list[dict] = answered["topics"]
+        return {str(topic["topic"]): bool(topic["silenced"]) for topic in held}
 
     async def sequences(self) -> tuple[dict, ...]:
         """The drip sequences an operator has approved, as control holds them: the row's id, a

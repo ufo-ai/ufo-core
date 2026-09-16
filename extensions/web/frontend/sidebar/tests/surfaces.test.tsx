@@ -47,6 +47,21 @@ test("the settings row opens the first workspace tab the member is drawn", async
   expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
 });
 
+test("the email tab is withheld where the deploy sends none", async () => {
+  location.hash = "#/workspace/apps";
+  render(
+    <App
+      agents={[AGENT]}
+      member={MEMBER}
+      surfaces={{ ...ALL_SURFACES, email: false }}
+      onAgents={() => {}}
+    />,
+  );
+
+  expect(await screen.findByRole("tab", { name: "Apps" })).toBeTruthy();
+  expect(screen.queryByRole("tab", { name: "Email" })).toBeNull();
+});
+
 test("the radar row and its palette place are withheld with the flag off", async () => {
   location.hash = "";
   wire({ "/transcript": () => json({ messages: [] }) });

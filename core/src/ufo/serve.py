@@ -127,7 +127,7 @@ from ufo.runtime.context_boundary import (
     select_flagged_context_boundary,
 )
 from ufo.runtime.delivery import DeliverySweep
-from ufo.runtime.email import email_sends_from_env
+from ufo.runtime.email import EmailSends, email_sends_from_env
 from ufo.runtime.ext.context import ConversationProbes, CredentialAccess, ModelAccess
 from ufo.runtime.ext.context import context_for as extension_context_for
 from ufo.runtime.ext.conversation_slots import BoundConversationSlot
@@ -603,6 +603,7 @@ def run(fleet: Fleet) -> None:
             public_base_url=config.connect.public_base_url,
             artifact_token_secret=artifact_secret,
         ),
+        email=email_sends_from_env(),
     )
     _assert_no_reserved_routes(app)
     log("serve.started", fleet=fleet.name, host=config.serve.host, port=config.serve.port)
@@ -1302,6 +1303,7 @@ def _mount_shared_surfaces(
     key_slot_for: Callable[[str], str | None] | None = None,
     own_key_slots: tuple[str, ...] = (),
     ambient_reply_for: "Callable[[str], AmbientReplyClassifier] | None" = None,
+    email: EmailSends | None = None,
 ) -> None:
     """Install the fleet-wide `WorkspaceScopeBoundary` and mount each shared-fleet-capable
     surface's routes, resolving the workspace per request instead of pinning one at boot:
@@ -1398,6 +1400,7 @@ def _mount_shared_surfaces(
             _preview_url=preview_service_url.rstrip("/") if preview_service_url else None,
             _preview_token=preview_token,
             _probes=probes,
+            _email=email,
         )
 
     for manifest in manifests:

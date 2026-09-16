@@ -28,5 +28,18 @@
   "preference_response": {
     "topic": "product_news",
     "silenced": true
+  },
+  "preferences_path": "/internal/email/preference/member%40acme.com",
+  "preferences_response": {
+    "topics": [
+      {
+        "topic": "product_news",
+        "silenced": true
+      },
+      {
+        "topic": "founder_updates",
+        "silenced": false
+      }
+    ]
   }
 }

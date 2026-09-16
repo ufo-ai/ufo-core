@@ -143,3 +143,20 @@ async def test_a_preference_posts_the_contract_body_under_its_own_path() -> None
     assert json.loads(request.content) == asked
     assert asked["topic"] == PRODUCT_NEWS
     assert asked["topic"] != TRANSACTIONAL, "the one topic a member cannot silence"
+
+
+async def test_preferences_read_the_whole_silenceable_set_under_the_address() -> None:
+    seen: list[httpx.Request] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=CONTRACT["preferences_response"])
+
+    held = await seam(gateway).preferences("member@acme.com")
+
+    assert held == {"product_news": True, "founder_updates": False}
+    (request,) = seen
+    assert request.method == "GET"
+    assert request.url.path == CONTRACT["preferences_path"].replace("%40", "@"), (
+        "httpx unquotes the path it dials; the contract holds the encoded form the route matches"
+    )

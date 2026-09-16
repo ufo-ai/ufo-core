@@ -10,6 +10,7 @@ export const WORKSPACE_TABS = [
   "credentials",
   "usage",
   "billing",
+  "email",
 ] as const;
 
 export const SECTIONS = ["wiki", "radar", "artifacts", "connectors"] as const;

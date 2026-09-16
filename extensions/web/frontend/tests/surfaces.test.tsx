@@ -29,6 +29,7 @@ const ADMIN = { ...MEMBER, admin: true };
 const WITHHELD: Surfaces = {
   team: false,
   apps: false,
+  email: false,
   memory: false,
   radar: false,
   "community-skills": false,
@@ -312,4 +313,26 @@ test("no app control is drawn while the flag withholds apps", async () => {
   expect(names).not.toContain("Create app");
   expect(names).not.toContain("Apps");
   expect(screen.queryByRole("button", { name: "New app" })).toBeNull();
+});
+
+test("a deploy with no send seam loses the email tab, and one that sends keeps it", async () => {
+  location.hash = "#/workspace/usage";
+  render(<App agents={[AGENT]} member={MEMBER} surfaces={WITHHELD} onAgents={() => {}} />);
+
+  await waitFor(() => expect(screen.queryByRole("tab", { name: "Usage" })).toBeTruthy());
+  expect(screen.queryByRole("tab", { name: "Email" })).toBeNull();
+});
+
+test("a deploy that sends offers the email tab", async () => {
+  location.hash = "#/workspace/usage";
+  render(
+    <App
+      agents={[AGENT]}
+      member={MEMBER}
+      surfaces={{ ...WITHHELD, email: true }}
+      onAgents={() => {}}
+    />,
+  );
+
+  await waitFor(() => expect(screen.queryByRole("tab", { name: "Email" })).toBeTruthy());
 });

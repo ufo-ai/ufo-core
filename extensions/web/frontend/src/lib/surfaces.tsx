@@ -8,6 +8,7 @@ const Offered = createContext<Surfaces | undefined>(undefined);
 export const ALL_SURFACES: Surfaces = {
   team: true,
   apps: true,
+  email: true,
   memory: true,
   radar: true,
   "community-skills": true,
@@ -27,7 +28,8 @@ export function SurfacesProvider({
 
 export function useSurfaces(): Surfaces {
   const surfaces = useContext(Offered);
-  if (surfaces === undefined) throw new Error("a view read the surfaces outside the provider");
+  if (surfaces === undefined)
+    throw new Error("a view read the surfaces outside the provider");
   return surfaces;
 }
 
@@ -36,12 +38,14 @@ export function useOfferedTabs(): readonly WorkspaceTab[] {
   return WORKSPACE_TABS.filter((tab) =>
     tab === "team"
       ? surfaces.team
-      : tab === "apps"
-        ? surfaces.apps
-        : tab === "memory"
-          ? surfaces.memory
-          : tab === "skills"
-            ? surfaces["community-skills"] || surfaces["installed-skills"]
-            : true,
+      : tab === "email"
+        ? surfaces.email
+        : tab === "apps"
+          ? surfaces.apps
+          : tab === "memory"
+            ? surfaces.memory
+            : tab === "skills"
+              ? surfaces["community-skills"] || surfaces["installed-skills"]
+              : true,
   );
 }

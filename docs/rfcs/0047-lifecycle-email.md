@@ -113,12 +113,22 @@ reads the contact first and writes its whole preference list back: `UpdateContac
 list it is given, and the hosted page's unsubscribe-from-all sets one flag over every topic, so
 clearing that flag for the named topic has to bar the rest by name.
 
-The preference is a row in `ufo_control` beside the suppression it joins, and two paths write it.
+The preference is a row in `ufo_control` beside the suppression it joins, and three paths write it.
 In chat, the agent holds a tool and calls it for the speaker's own address. In the mail, SES's
 hosted unsubscribe page records the opt-out and publishes a `Subscription` event; the feedback
 consumer maps the contact-list topic it names to ours and writes the row — and lifts it again on
-the opt-in the same page publishes, which for the founder topic is the only surface that can. There is no unsubscribe
-endpoint of our own.
+the opt-in the same page publishes, which for the founder topic is the only surface that can. In
+the portal, an Email screen reads the member's own preferences and submits the same tool as a
+prepared intent — the one mutation path a page has, so the turn is the transport and the audit
+record. There is no unsubscribe endpoint of our own, and the screen is not one: it reads a
+projection and admits a turn, like every other panel. It draws every topic the read answers with,
+and the one it cannot set draws its state beside the line that says where it is changed — a screen
+that dropped it would report a whole email setting while holding one back.
+
+That screen sits in the workspace tab strip and says what it is not. A preference is keyed by the
+address and held for the whole fleet, so it is the member's wherever they use ufo — and what a
+workspace is doing with their money or their access is not on it, because that is not theirs to
+silence.
 
 ## What fires a sequence
 
@@ -218,6 +228,7 @@ Each lands with both ends and its own proof.
 | 6 | An unsubscribe becomes a topic preference | a member who leaves the founder list is barred from the next campaign and still gets their balance notice |
 | 7 | Product news on its own contact-list topic | a product message carries `List-Unsubscribe` and the footer SES fills, and a transactional one carries neither |
 | 8 | The reconnect notice | an account the provider stopped answering reaches the member who can grant it again, once per break |
+| 9 | The Email screen | a member reads what they receive and turns product email off from the portal, through the tool chat already calls |
 
 ## Non-goals
 

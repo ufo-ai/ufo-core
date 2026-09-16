@@ -201,6 +201,7 @@ from ufo.sdk.http import cookie_secure
 
 if TYPE_CHECKING:
     from ufo.runtime.access.workspace_slots import WorkspaceSlots
+    from ufo.runtime.email import EmailSends
     from ufo.runtime.ext.context import ConversationProbes, SourceReader
     from ufo.runtime.ext.conversation_slots import (
         BoundConversationSlot,
@@ -2348,6 +2349,27 @@ class SurfaceContext:
     _preview_url: str | None = None
     _preview_token: str | None = None
     _probes: "ConversationProbes | None" = None
+    _email: "EmailSends | None" = None
+    """The deploy's send seam, or None where no control service is configured. A surface reads a
+    member's own email preferences through it; it sends nothing."""
+
+    @property
+    def sends_email(self) -> bool:
+        """Whether this deploy can send a member email at all. A surface asks before offering a
+        screen about it: a deploy with no send seam has no preference to hold, so the screen would
+        be a page that states its own absence."""
+        return self._email is not None
+
+    async def email_preferences(self, address: str) -> dict[str, bool] | None:
+        """Every topic this address may silence, against whether they have — or None on a deploy
+        with no send seam, which has no preferences to read and nothing to offer.
+
+        A preference is keyed by address and held for the whole fleet, so this is the one read on
+        this context that is not the workspace's. A surface asks it only of the member it has
+        already resolved as the reader."""
+        if self._email is None:
+            return None
+        return await self._email.preferences(address)
 
     @property
     def fleet_blob(self) -> FleetBlobStore:
