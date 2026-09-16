@@ -66,7 +66,12 @@ from ufo.harness.o11y import log
 from ufo.harness.sandbox.session import Sandbox, shell_path
 from ufo.runtime.access.connectors import ConnectorRegistry
 from ufo.runtime.access.credentials import CredentialRequests
-from ufo.runtime.access.grants import ConnectUnavailable, Grant, GrantStore
+from ufo.runtime.access.grants import (
+    CREDENTIALS_SCREEN_FRAGMENT,
+    ConnectUnavailable,
+    Grant,
+    GrantStore,
+)
 from ufo.runtime.access.member_authorization import AuthorizationBinding
 from ufo.runtime.billing.accounting import record_image_usage, record_video_usage
 from ufo.runtime.ext.context import ExtensionContext, SourceReader
@@ -225,7 +230,7 @@ class UnknownSpawnTarget(Exception):
         self.agents = agents
 
 
-SPAWN_CONNECT_PATH = "/surface/web#/workspace/credentials"
+SPAWN_CONNECT_PATH = f"/surface/web{CREDENTIALS_SCREEN_FRAGMENT}"
 
 
 class SpawnNeedsOwnModelKey(Exception):

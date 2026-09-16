@@ -1417,6 +1417,10 @@ class SyncDriver:
                     consecutive_empty=empty_runs,
                     synced_at=tables.source.c.synced_at if retry_at is not None else now,
                     parked_at=tables.source.c.parked_at if retry_at is not None else None,
+                    parked_since=(tables.source.c.parked_since if retry_at is not None else None),
+                    parked_awaits_grant=(
+                        tables.source.c.parked_awaits_grant if retry_at is not None else False
+                    ),
                     parked_reason=tables.source.c.parked_reason if retry_at is not None else None,
                     claimed_by=None,
                     claim_expires_at=None,
@@ -1634,6 +1638,16 @@ class SyncDriver:
         attention, on a reason naming a scope that was never missing — and would owe an alert, which
         a row that reads itself back every hour does not.
 
+        `parked_at` is the last refusal and moves at every re-park; `parked_since` is the first one
+        still standing and holds until a successful read clears it. Anything that must act once per
+        break keys on the second, because the first is a different instant every hour.
+        `parked_awaits_grant` carries what only the raiser knew: whether a member re-granting is
+        the one repair. Nothing else can tell that from a throttle, and the text of `parked_reason`
+        is not a signal to branch on. A stream already parked on a refusal that clears itself starts
+        `parked_since` again when the refusal becomes one only a grant repairs: the break a member
+        must act on began then, and dating it from the throttle would age it out of every window
+        before anyone was told.
+
         The count is read and the park decided inside the one statement, off the stored counter
         rather than the value this claim was taken on. An unpark lands while a claim is held — a
         reconnect of the account, a resync — and it writes that counter back to zero without
@@ -1661,6 +1675,23 @@ class SyncDriver:
                         consecutive_refusals=counted,
                         parked_at=sa.case((parks, now), else_=None),
                         parked_reason=sa.case((parks, reason), else_=None),
+                        parked_since=sa.case(
+                            (
+                                parks,
+                                sa.case(
+                                    (
+                                        sa.and_(
+                                            sa.literal(awaits_grant),
+                                            ~tables.source.c.parked_awaits_grant,
+                                        ),
+                                        now,
+                                    ),
+                                    else_=sa.func.coalesce(tables.source.c.parked_since, now),
+                                ),
+                            ),
+                            else_=None,
+                        ),
+                        parked_awaits_grant=sa.case((parks, awaits_grant), else_=False),
                         claimed_by=None,
                         claim_expires_at=None,
                         updated_at=sa.func.now(),

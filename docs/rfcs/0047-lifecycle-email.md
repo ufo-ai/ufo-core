@@ -73,6 +73,32 @@ already publishes to. A configuration set is what makes SES publish a delivery e
 without one the seam could send and never report; the set is separate because the identity and the
 `ses:FromAddress` condition differ from a campaign's, and the consumer does not.
 
+A parked stream is the sharpest of these. A stream parks when the provider refuses it, and the
+connection row is untouched, so the workspace reads as healthy while it syncs nothing. Nobody finds
+out until they ask the agent for something it can no longer reach. The notice goes to the member who
+owns the connection, because re-granting is theirs to do; a shared account nobody owns goes to the
+seated admins, who are the only people left who can.
+
+Two facts the row never recorded make that notice possible, and it carries both. A park held only
+the instant of its *last* refusal, which the driver rewrites every hour a stream stays refused —
+so `parked_since` is added beside it, written once and held until a successful read clears the
+park, and the notice keys on that. And a park said nothing about whether a member could repair it:
+a throttle, a rate-limited org and a plan gate all park and all clear themselves, and only the
+raiser knew the difference. `parked_awaits_grant` carries what it knew. Without the first the owner
+is mailed hourly; without the second they are told their access was withdrawn when it was not.
+
+The break is the connection's, not the stream's: its streams park on their own sync phases hours
+apart, so the break is dated by the oldest of them still parked, and the record of the message
+names the connection. A workspace holds several accounts and they break separately, so a notice
+sent for one is no answer for another. A stream already parked on a refusal that clears itself
+starts its break again when the refusal becomes one only a grant repairs — dating that break from
+the throttle would age it out of the window before anyone was told. A row parked before the
+revision runs is read for the same fact where the old shape already wrote it: a refusal that clears
+itself is held an hour and one that waits on a grant is held a year, and the gap between the two
+holds is the answer. Waking those rows instead would record nothing — the migrate job finishes
+before the fleet rolls, so the outgoing image serves the refusal and parks them again under a shape
+it does not know.
+
 Suppression stays where it already is, and control applies it centrally. A hard suppression — a
 bounce or a complaint — bars every message this deploy sends, because reaching that address again
 costs the sending domain its standing. An unsubscribe is not one of those. It says which mail the
@@ -101,6 +127,7 @@ endpoint of our own.
 | Lifecycle — invited | per-minute sweep of core's members | yes, unchanged |
 | Lifecycle — absence of use | per-minute sweep of the extension's own event rows, banded by age, against a live read of core's connections | yes, unchanged |
 | Transactional — balance, limits | per-minute sweep of `workspace_balance` headroom and `spend_cap` | yes, unchanged |
+| Transactional — an account the provider refuses | per-minute sweep of `source` for a parked stream | yes, unchanged |
 
 Nothing in that table asks core for a new hook, and nothing is caught as it happens. Every state
 is already a row, so a job on a clock reads it — the standing rule that batch-at-interval is the
@@ -190,6 +217,7 @@ Each lands with both ends and its own proof.
 | 5 | Member topic preferences | a member silences product news in chat and still receives transactional |
 | 6 | An unsubscribe becomes a topic preference | a member who leaves the founder list is barred from the next campaign and still gets their balance notice |
 | 7 | Product news on its own contact-list topic | a product message carries `List-Unsubscribe` and the footer SES fills, and a transactional one carries neither |
+| 8 | The reconnect notice | an account the provider stopped answering reaches the member who can grant it again, once per break |
 
 ## Non-goals
 

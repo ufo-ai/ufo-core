@@ -2924,6 +2924,8 @@ class ExtensionContext:
                     next_sync_at=datetime.now(UTC),
                     parked_at=None,
                     parked_reason=None,
+                    parked_since=None,
+                    parked_awaits_grant=False,
                     consecutive_refusals=0,
                     consecutive_empty=0,
                     updated_at=sa.func.now(),

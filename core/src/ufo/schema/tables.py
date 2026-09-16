@@ -1016,6 +1016,8 @@ source = sa.Table(
     sa.Column("consecutive_empty", sa.Integer, nullable=False, server_default="0"),
     sa.Column("parked_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("parked_reason", sa.Text, nullable=True),
+    sa.Column("parked_since", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("parked_awaits_grant", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("claimed_by", sa.Text, nullable=True),
     sa.Column("claim_expires_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),

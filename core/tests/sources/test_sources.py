@@ -2962,6 +2962,8 @@ async def _source_state(source_id: UUID) -> sa.RowMapping:
                         tables.source.c.consecutive_refusals,
                         tables.source.c.parked_at,
                         tables.source.c.parked_reason,
+                        tables.source.c.parked_since,
+                        tables.source.c.parked_awaits_grant,
                         tables.source.c.next_sync_at,
                         tables.source.c.claimed_by,
                     ).where(tables.source.c.uid == source_id)
@@ -5578,3 +5580,89 @@ async def test_a_quiet_stream_that_has_landed_a_page_keeps_the_interval(
             )
     due = _utc(state["next_sync_at"]) - datetime.now(UTC)
     assert due < timedelta(seconds=SOURCE_SYNC_INTERVAL_SECONDS * 5)
+
+
+async def test_a_re_park_holds_the_first_refusal_and_carries_what_only_the_raiser_knew(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+) -> None:
+    """`parked_at` is the last refusal and moves at every re-park, so nothing can act once per break
+    on it. `parked_since` is the first refusal still standing and holds until a successful read
+    clears the park. `parked_awaits_grant` carries the one thing only the raiser knew — whether a
+    member re-granting is the repair — because a throttle parks the same way and the reason text is
+    not a signal to branch on."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, "held-cursor")
+    driver, _ = _scripted_driver(
+        [StreamSkipped(PARK_REASON, awaits_grant=True)] * (SOURCE_REFUSAL_PARK_THRESHOLD + 2),
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    for _ in range(SOURCE_REFUSAL_PARK_THRESHOLD):
+        await _sync(driver)
+        await _make_due()
+    parked = await _source_state(source_id)
+    assert parked["parked_since"] == parked["parked_at"]
+    assert parked["parked_awaits_grant"] is True
+
+    await _sync(driver)
+    again = await _source_state(source_id)
+    assert again["parked_at"] > parked["parked_at"], "the hourly refusal re-parks"
+    assert again["parked_since"] == parked["parked_since"], (
+        "and the break it belongs to is the one that began"
+    )
+
+
+async def test_a_throttle_that_becomes_a_withdrawn_grant_dates_the_break_from_the_grant(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+) -> None:
+    """A stream parked on a refusal that clears itself carries `parked_since` from that first
+    throttle. When the provider later withdraws the account, the break a member must act on begins
+    then — dating it from the throttle would age it out of the notice's window before anyone was
+    told, and only a grant clears the row."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, "held-cursor")
+    throttles = [StreamSkipped(PARK_REASON)] * SOURCE_REFUSAL_PARK_THRESHOLD
+    withdrawn = [StreamSkipped(PARK_REASON, awaits_grant=True)] * 2
+    driver, _ = _scripted_driver(throttles + withdrawn, database_url, tmp_path / "blobs")
+
+    for _ in range(SOURCE_REFUSAL_PARK_THRESHOLD):
+        await _sync(driver)
+        await _make_due()
+    throttled = await _source_state(source_id)
+    assert throttled["parked_awaits_grant"] is False
+
+    await _sync(driver)
+    granted = await _source_state(source_id)
+    assert granted["parked_awaits_grant"] is True
+    assert granted["parked_since"] > throttled["parked_since"], (
+        "the break a member must repair began when the grant went, not when the throttle did"
+    )
+
+
+async def test_a_refusal_that_clears_itself_parks_without_asking_for_a_member(
+    db: None,
+    database_url: str,
+    tmp_path: Path,
+) -> None:
+    """A throttle, a rate-limited org and a plan gate park the row and lift on the next successful
+    read. Nothing should tell a member their access was withdrawn for one of those."""
+    workspace_id = await _workspace()
+    source_id = await _seed_scripted_source(workspace_id, "held-cursor")
+    driver, _ = _scripted_driver(
+        [StreamSkipped(PARK_REASON)] * SOURCE_REFUSAL_PARK_THRESHOLD,
+        database_url,
+        tmp_path / "blobs",
+    )
+
+    for _ in range(SOURCE_REFUSAL_PARK_THRESHOLD):
+        await _sync(driver)
+        await _make_due()
+
+    parked = await _source_state(source_id)
+    assert parked["parked_at"] is not None
+    assert parked["parked_awaits_grant"] is False

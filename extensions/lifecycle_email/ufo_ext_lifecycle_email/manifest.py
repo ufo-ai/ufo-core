@@ -1,16 +1,17 @@
-"""What the lifecycle-email extension declares: four per-minute jobs.
+"""What the lifecycle-email extension declares: five per-minute jobs.
 
 A lifecycle message is a reaction to a state, and every state it reacts to is already a row — core's
 members, core's connections, a workspace balance. So a job reads them on a clock, which is the
 standing rule that batch-at-interval is the default. No hook and no new event: nothing here has to
 be caught as it happens.
 
-Four jobs because they are four failure domains, and each names the workspaces it has work in:
+Five jobs because they are five failure domains, and each names the workspaces it has work in:
 
   lifecycle_events     writes events — a member was invited, a member has connected nothing
   lifecycle_reconcile  reads events nothing has looked at yet, and starts the sequences that match
   lifecycle_runner     sends the steps that are due
   balance_notice       reads the balance row and sends; no events, no sequences
+  reconnect_notice     reads the parked streams and sends; no events, no sequences
 
 A producer only writes an instant; one job decides what measures from it. That is what lets a
 sequence an operator approved this morning reach the events written since the last pass, and what
@@ -36,11 +37,13 @@ from ufo_ext_lifecycle_email.enrollments import (
 )
 from ufo_ext_lifecycle_email.events import WriteEvents, event_workspaces
 from ufo_ext_lifecycle_email.preference import PRODUCT_EMAIL_TOOL
+from ufo_ext_lifecycle_email.reconnect_notice import ReconnectNotice, reconnect_workspaces
 from ufo_ext_lifecycle_email.runner import Reconciling, SequenceRunner
 
 NAME = "lifecycle_email"
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 NOTICE_JOB = "balance_notice"
+RECONNECT_JOB = "reconnect_notice"
 EVENTS_JOB = "lifecycle_events"
 RECONCILE_JOB = "lifecycle_reconcile"
 RUNNER_JOB = "lifecycle_runner"
@@ -52,6 +55,12 @@ async def _notice(ctx: ExtensionContext) -> None:
     if not await flag_enabled(SENDING_FLAG, default=False):
         return
     await BalanceNotice(ctx=ctx).run()
+
+
+async def _reconnect(ctx: ExtensionContext) -> None:
+    if not await flag_enabled(SENDING_FLAG, default=False):
+        return
+    await ReconnectNotice(ctx=ctx).run()
 
 
 async def _events(ctx: ExtensionContext) -> None:
@@ -79,7 +88,7 @@ def manifest() -> Manifest:
         flags=(
             FlagSpec(
                 key=SENDING_FLAG,
-                what="ufo sends lifecycle email — balance notices and sequences.",
+                what="ufo sends lifecycle email — transactional notices and sequences.",
             ),
         ),
         tools=(PRODUCT_EMAIL_TOOL,),
@@ -89,6 +98,12 @@ def manifest() -> Manifest:
                 schedule=SCHEDULE,
                 handler=_notice,
                 candidates=notice_workspaces(),
+            ),
+            JobSpec(
+                name=RECONNECT_JOB,
+                schedule=SCHEDULE,
+                handler=_reconnect,
+                candidates=reconnect_workspaces(),
             ),
             JobSpec(
                 name=EVENTS_JOB,

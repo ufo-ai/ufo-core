@@ -537,6 +537,8 @@ class GrantStore:
                 .values(
                     parked_at=None,
                     parked_reason=None,
+                    parked_since=None,
+                    parked_awaits_grant=False,
                     consecutive_refusals=0,
                     consecutive_empty=0,
                     consecutive_errors=0,
@@ -1455,6 +1457,126 @@ async def _grant_summaries(scope: sa.ColumnElement[bool]) -> tuple[GrantSummary,
             shared=row.shared,
         )
         for row in rows
+    )
+
+
+CREDENTIALS_SCREEN_FRAGMENT = "#/workspace/credentials"
+"""The portal screen a member connects an account on, and reconnects one they lost."""
+
+
+@dataclass(frozen=True)
+class ParkedConnection:
+    """A connection whose access the provider has withdrawn: a stream of it parked for a refusal
+    only a member can repair, and `parked_since` the instant the first such refusal landed.
+
+    The connection row is untouched by a park, so nothing reading connections alone can tell an
+    account that syncs from one that silently stopped.
+
+    Only `parked_awaits_grant` rows count. A throttle, a rate-limited org and a plan gate all park
+    too, and all clear themselves on the next read — telling a member their access was withdrawn
+    would state a false cause and ask for an act that repairs nothing.
+
+    `parked_since` is the identity of the break, not a timestamp to show: it holds still while the
+    account stays broken and moves only when a new break begins. `parked_at` is the last refusal
+    and moves every hour, so anything told once per break keys on `parked_since` — but whether a
+    park stands at all is `parked_at`, the one column every image writes. An unpark from the image
+    this one replaces clears that and leaves the two beside it, and a member who has just
+    reconnected the account would otherwise be told it stopped answering."""
+
+    connection_id: UUID
+    provider: str
+    account_id: str
+    owner_member_id: UUID | None
+    parked_since: datetime
+
+
+async def parked_connections(
+    connection: AsyncConnection, workspace_id: UUID
+) -> tuple[ParkedConnection, ...]:
+    """Every connection of this workspace whose access a member must grant again, oldest break
+    first."""
+    rows = (
+        await connection.execute(
+            sa.select(
+                tables.connection.c.id,
+                tables.connection.c.provider,
+                tables.connection.c.account_id,
+                tables.connection.c.owner_member_id,
+                sa.func.min(tables.source.c.parked_since).label("parked_since"),
+            )
+            .select_from(
+                tables.connection.join(
+                    tables.source,
+                    sa.and_(
+                        tables.source.c.workspace_id == tables.connection.c.workspace_id,
+                        tables.source.c.connection_id == tables.connection.c.id,
+                    ),
+                )
+            )
+            .where(
+                tables.connection.c.workspace_id == workspace_id,
+                tables.source.c.parked_at.is_not(None),
+                tables.source.c.parked_since.is_not(None),
+                tables.source.c.parked_awaits_grant,
+            )
+            .group_by(
+                tables.connection.c.id,
+                tables.connection.c.provider,
+                tables.connection.c.account_id,
+                tables.connection.c.owner_member_id,
+            )
+            .order_by(sa.func.min(tables.source.c.parked_since).asc(), tables.connection.c.id.asc())
+        )
+    ).all()
+    return tuple(
+        ParkedConnection(
+            connection_id=row.id,
+            provider=row.provider,
+            account_id=row.account_id,
+            owner_member_id=row.owner_member_id,
+            parked_since=row.parked_since
+            if row.parked_since.tzinfo is not None
+            else row.parked_since.replace(tzinfo=UTC),
+        )
+        for row in rows
+    )
+
+
+PARK_WINDOW = timedelta(days=3)
+"""How long after a provider withdraws access the break is still work a job reacting to it has to
+do. Past this nobody is waiting on the message, and holding the workspace in a per-minute candidate
+set costs one execution a minute for as long as the account stays broken."""
+
+
+def parked_breaks() -> sa.Select[tuple[UUID, UUID, datetime]]:
+    """Every connection parked on a refusal only a member can repair, with the instant its break
+    began — what a job reacting to a withdrawn grant builds its candidate read from.
+
+    The connection is projected beside the workspace because a workspace holds more than one, and
+    they break separately: a caller that matched its record on the workspace alone would read the
+    message it sent for one account as proof that the other was told.
+
+    The break is the connection's, not the stream's, and it is dated by the oldest stream still
+    parked, exactly as `parked_connections` dates the one it reports. The streams of one connection
+    park on their own sync phases hours apart, so a read per stream would ask for a send against an
+    instant no message was ever keyed to, and the workspace would never leave the set.
+
+    That instant is projected because it names the break: a caller acting once per break joins its
+    own record against this column and drops the workspaces it has already told. Nothing else takes
+    one out — only a granted account clears the column, and an account nobody repairs never does.
+
+    `PARK_WINDOW` is the second bound, and it is the one that holds when nothing acts at all. A
+    caller's own record only drops a workspace once the caller has written a row, and a caller held
+    back by a flag writes none — so the break's own instant bounds the set instead."""
+    began = sa.func.min(tables.source.c.parked_since).label("parked_since")
+    return (
+        sa.select(tables.source.c.workspace_id, tables.source.c.connection_id, began)
+        .where(
+            tables.source.c.parked_at.is_not(None),
+            tables.source.c.parked_awaits_grant,
+            tables.source.c.parked_since > datetime.now(UTC) - PARK_WINDOW,
+        )
+        .group_by(tables.source.c.workspace_id, tables.source.c.connection_id)
     )
 
 
