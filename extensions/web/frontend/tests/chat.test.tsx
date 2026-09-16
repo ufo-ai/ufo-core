@@ -3143,6 +3143,69 @@ test("streaming keeps the log pinned at the bottom but never yanks a reader back
   await waitFor(() => expect(back.getAttribute("data-active")).toBe("false"));
 });
 
+const ROW = 100;
+/** `PREVIOUS_TURN_PEEK_PX`: the turn above the one just sent keeps peeking over the top. */
+const PEEK = 88;
+
+/** jsdom lays nothing out, so a row is stated as a hundred pixels at its place in the log. */
+function laidRows(log: HTMLElement): void {
+  Object.defineProperty(log, "clientHeight", { configurable: true, value: FOLD });
+  const box = (top: number, height: number) =>
+    ({ top, bottom: top + height, height, left: 0, right: 0, width: 0, x: 0, y: top }) as DOMRect;
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    if (this === log) return box(0, FOLD);
+    if ((this as HTMLElement).dataset.slot !== "message-scroller-item") return box(0, 0);
+    let above = 0;
+    for (let held = this.previousElementSibling; held; held = held.previousElementSibling) {
+      if ((held as HTMLElement).dataset.slot === "message-scroller-item") above += 1;
+    }
+    return box(above * ROW - log.scrollTop, ROW);
+  });
+}
+
+test("a send lifts the member's words to the top, under a thread standing on its rows", async () => {
+  wire({
+    ...transcript({ messages: SPOKEN }),
+    ...OFFERED,
+    "/chat": () => json({ turn_id: TURN_ID, conversation_id: CONVO_ID, title: "go" }),
+  });
+  open();
+  await screen.findByTestId("follow-ups");
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "and again");
+
+  const log = screen.getByTestId("log");
+  laidRows(log);
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  expect(await screen.findByText("and again")).toBeTruthy();
+  await waitFor(() => expect(log.scrollTop).toBe(2 * ROW - PEEK));
+});
+
+test("a row landing under a handoff leaves the half-typed secret where the member left it", async () => {
+  wire({
+    ...transcript({
+      messages: SPOKEN,
+      credentials: {
+        sealed: "sealed-token",
+        reason: "notion authenticates with this value.",
+        prompts: [{ slot: "notion_token", prompt: "Notion token" }],
+      },
+    }),
+    "/chat": () => json({ turn_id: REPLY_ID, conversation_id: CONVO_ID, title: "go" }),
+  });
+  open();
+
+  const field = await screen.findByPlaceholderText("notion_token");
+  await userEvent.type(field, "half-typed");
+
+  await userEvent.type(screen.getByLabelText("Ask UFO"), "and again");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(await screen.findByText("and again")).toBeTruthy();
+
+  expect(screen.getByPlaceholderText("notion_token")).toBe(field);
+  expect((field as HTMLInputElement).value).toBe("half-typed");
+});
+
 test("a dropped file is named on the composer, comes off it, and rides the message", async () => {
   const { handler } = wire({
     ...transcript(),
@@ -3556,7 +3619,7 @@ test("switching conversations remounts the log so scroll state never leaks acros
   const fresh = screen.getByTestId("log");
   expect(fresh).not.toBe(first);
 
-  laidLog(fresh);
+  laidRows(fresh);
   await userEvent.type(screen.getByLabelText("Ask UFO"), "hello there");
   await userEvent.click(screen.getByRole("button", { name: "Send" }));
   await screen.findByText("hello there");

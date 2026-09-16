@@ -309,6 +309,12 @@ function earlierKey(earlier: EarlierMessages | undefined, turn: string): string 
   return reply ?? woke;
 }
 
+/** The scroller finds the row a send added by counting the content's children and reads nothing
+ *  past them, so what draws under the thread stands first among them and is laid out last. */
+function Under({ children }: { children: ReactNode }) {
+  return <div className="order-last mt-6xl flex flex-col gap-6xl empty:hidden">{children}</div>;
+}
+
 export function MessageLog({
   messages,
   earlier,
@@ -451,7 +457,12 @@ export function MessageLog({
   };
   return (
     <>
-      <MessageScrollerContent className={className} aria-busy={live !== null}>
+      <MessageScrollerContent
+        className={className}
+        spacerClassName="order-last"
+        aria-busy={live !== null}
+      >
+        {rows.length ? <Under>{children}</Under> : null}
         {earlier &&
         (earlier.pages.length > 0 || earlier.more || earlier.loading || earlier.failed) ? (
           <EarlierRow earlier={earlier} />
@@ -482,7 +493,7 @@ export function MessageLog({
             bubble(row.message, row.key, index === rows.length - 1)
           ),
         )}
-        {children}
+        {rows.length ? null : children}
       </MessageScrollerContent>
       {opened ? (
         <OpenedFile
