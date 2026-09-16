@@ -46,7 +46,6 @@ from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ValidationError
@@ -100,7 +99,6 @@ SURFACE_UFO = "ufo"
 SOURCE = "ufo cli"
 PROMPT = ">"
 RESUMED_NOTE = "the service restarted; this turn resumed"
-SOURCES_NOTE = "Sources: {named}"
 POLL_SECONDS = 1
 LISTEN_SECONDS = 2
 MAX_MESSAGE_BYTES = 40_000
@@ -369,18 +367,8 @@ def directives_for(
             said = frame.text and (comments or not frame.is_comment)
             return (directive("say", frame.text),) if said else ()
         case Sources():
-            return (directive("note", _sources_note(frame)),) if frame.items else ()
+            return ()
     raise ValueError(f"unmapped live frame {type(frame).__name__}")
-
-
-def _sources_note(frame: Sources) -> str:
-    named = tuple(
-        dict.fromkeys(
-            (urlsplit(item.url).hostname or item.url) if item.url else item.title
-            for item in frame.items
-        )
-    )
-    return SOURCES_NOTE.format(named=", ".join(named))
 
 
 def _subagent_note(frame: SubagentActivity) -> tuple[bytes, ...]:

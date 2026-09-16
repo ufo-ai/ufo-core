@@ -151,7 +151,7 @@ def test_frame_map_covers_every_live_frame() -> None:
             SourceRef(kind="workspace", title="Order form", ref="page/2f1c", provider="notion"),
         )
     )
-    assert directives_for(consulted, False) == (b"note\tSources: northwind.example, Order form\n",)
+    assert directives_for(consulted, False) == ()
     assert directives_for(Sources(items=()), False) == ()
     run = SubagentActivity(
         turn_id=UUID(int=1),
