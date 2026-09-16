@@ -1843,6 +1843,8 @@ async def test_ungranted_member_reaches_the_main_agent_and_nothing_else(
             "email": "outsider@example.com",
             "admin": False,
             "workspace_id": str(workspace_id),
+            "name": "outsider",
+            "photo_url": None,
         },
         "surfaces": dict.fromkeys(web_surface.PORTAL_SURFACES, True)
         | {"app-store": False, "apps": False, "team": False},
@@ -1939,6 +1941,8 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         "email": "admin@example.com",
         "admin": True,
         "workspace_id": str(workspace_id),
+        "name": "admin",
+        "photo_url": None,
     }
     assert [(a["name"], a["main"]) for a in admin_view.json()["agents"]] == [
         ("assistant", True),
@@ -1984,6 +1988,8 @@ async def test_agents_index_filters_by_grant_and_widens_for_admins(
         "email": "member@example.com",
         "admin": False,
         "workspace_id": str(workspace_id),
+        "name": "member",
+        "photo_url": None,
     }
     assert [(a["id"], a["mine"]) for a in member_view.json()["agents"]] == [
         (str(agent_id), False),
@@ -12743,6 +12749,151 @@ async def test_team_view_lists_the_roster_for_every_member(
     assert anonymous.status_code == 401
 
 
+def test_a_speaker_is_named_by_the_display_half_of_what_a_surface_reported() -> None:
+    """Slack reports `Rae Whitlock (rae@example.com)`, and the name is the half a header draws. A
+    surface reporting a bare address is shortened to its local part: a header reading the whole
+    address over somebody's words names them the way a machine would, and the member may hold no
+    profile name to fall back to."""
+    assert web_surface.reported_speaker_name("Rae Whitlock (rae@example.com)") == "Rae Whitlock"
+    assert web_surface.reported_speaker_name("rae@example.com") == "rae"
+    assert web_surface.reported_speaker_name("Rae Whitlock") == "Rae Whitlock"
+    assert web_surface.reported_speaker_name("@example.com") == "@example.com"
+    assert (
+        web_surface.reported_speaker_name("Rae Whitlock (rae@example.com)", "rae@example.com")
+        == "Rae Whitlock"
+    )
+
+
+def _picture(width: int, height: int, colour: tuple[int, int, int]) -> str:
+    written = BytesIO()
+    Image.new("RGB", (width, height), colour).save(written, format="PNG")
+    return base64.b64encode(written.getvalue()).decode()
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_member_names_themselves_through_the_profile_lane(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """The profile screen's own read and its one mutation: the member reads their address, the name
+    drawn for them before they choose one, and the role they cannot change here; applying the
+    `member_profile` kind through the intent lane names them, and the roster every colleague reads
+    draws the new name. Clearing it falls back to the local part of their address again."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "rae.whitlock@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+    path = "/surface/web/workspace/profile"
+
+    before = (await client.get(path, headers=cookie)).json()
+    assert {key: value for key, value in before.items() if key != "actions"} == {
+        "id": str(member_id),
+        "email": "rae.whitlock@example.com",
+        "admin": False,
+        "name": None,
+        "drawn_name": "rae.whitlock",
+        "photo_url": None,
+    }
+    assert sorted(view["name"] for view in before["actions"]) == [
+        "clear_member_photo",
+        "set_member_photo",
+    ]
+
+    named = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "member_profile",
+            "name": str(member_id),
+            "spec": {"name": "Rae Whitlock"},
+        },
+        headers=cookie,
+    )
+    assert named.json()["applied"] is True
+
+    after = (await client.get(path, headers=cookie)).json()
+    assert after["name"] == "Rae Whitlock"
+    assert after["drawn_name"] == "Rae Whitlock"
+
+    roster = (await client.get("/surface/web/workspace/team", headers=cookie)).json()
+    assert [(entry["email"], entry["name"]) for entry in roster["members"]] == [
+        ("rae.whitlock@example.com", "Rae Whitlock")
+    ]
+
+    cleared = await client.post(
+        f"/surface/web/agents/{agent_id}/intents",
+        json={
+            "verb": "apply",
+            "kind": "member_profile",
+            "name": str(member_id),
+            "spec": {"name": None},
+        },
+        headers=cookie,
+    )
+    assert cleared.json()["applied"] is True
+    assert (await client.get(path, headers=cookie)).json()["drawn_name"] == "rae.whitlock"
+
+
+@pytest.mark.usefixtures("database_url")
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_member_photo_is_served_from_the_portals_own_origin(
+    web: tuple[AsyncClient, UUID, UUID],
+    dbos_runtime: tuple[Config, GatingHub, FilesystemBlobStore, ConversationSandbox],
+) -> None:
+    """A picture set through the profile's own action comes back from this deploy, as one square
+    WebP, at an address carrying its digest — so a colleague draws a face without the browser ever
+    naming Slack or gravatar. Every member of the workspace reads it and nobody outside a session
+    does, and a browser holding it revalidates to 304."""
+    client, workspace_id, agent_id = web
+    member_id, token = await _seed_member(workspace_id, "rae.whitlock@example.com")
+    _colleague_id, colleague_token = await _seed_member(workspace_id, "cleo@example.com")
+    cookie = {"cookie": f"{SESSION_COOKIE}={token}"}
+
+    stored = await client.post(
+        f"/surface/web/agents/{agent_id}/actions/member_profile/set_member_photo",
+        json={"image": _picture(900, 300, (10, 120, 200))},
+        headers=cookie,
+    )
+    assert stored.json()["applied"] is True, stored.json()
+
+    profile = (await client.get("/surface/web/workspace/profile", headers=cookie)).json()
+    url = profile["photo_url"]
+    assert url is not None
+    assert url.startswith(f"members/{member_id}/photo?v=")
+
+    served = await client.get(f"/surface/web/{url}", headers=cookie)
+    assert served.status_code == 200
+    assert served.headers["content-type"] == "image/webp"
+    with Image.open(BytesIO(served.content)) as drawn:
+        assert drawn.format == "WEBP"
+        assert drawn.size == (256, 256)
+
+    held = await client.get(
+        f"/surface/web/{url}",
+        headers={**cookie, "if-none-match": served.headers["etag"]},
+    )
+    assert held.status_code == 304
+
+    colleague = await client.get(
+        f"/surface/web/{url}", headers={"cookie": f"{SESSION_COOKIE}={colleague_token}"}
+    )
+    assert colleague.status_code == 200
+    assert colleague.content == served.content
+
+    assert (await client.get(f"/surface/web/{url}")).status_code == 401
+
+    removed = await client.post(
+        f"/surface/web/agents/{agent_id}/actions/member_profile/clear_member_photo",
+        json={},
+        headers=cookie,
+    )
+    assert removed.json()["applied"] is True
+    assert (await client.get("/surface/web/workspace/profile", headers=cookie)).json()[
+        "photo_url"
+    ] is None
+    assert (await client.get(f"/surface/web/{url}", headers=cookie)).status_code == 404
+
+
 def _add_member(email: str, *, admin: bool) -> dict[str, object]:
     """The team panel's add as the member collection's projected `add_member` view submits it: the
     action's own input; the route's path names the collection and the action."""
@@ -13122,14 +13273,14 @@ def test_a_bubble_names_its_speaker_exactly_where_the_read_names_one() -> None:
         None,
         frozenset({theirs, mine}),
         frozenset(),
-        {theirs: "Mel Okafor (m@example.com)"},
+        {theirs: {"name": "Mel Okafor", "photo_url": None, "email": "m@example.com"}},
     )
     assert rendered == [
         {
             "role": "user",
             "text": "ship it",
             "turn": theirs,
-            "speaker": "Mel Okafor (m@example.com)",
+            "speaker": {"name": "Mel Okafor", "photo_url": None, "email": "m@example.com"},
         },
         {"role": "assistant", "text": "Shipping.", "turn": theirs},
         {"role": "user", "text": "hold on", "turn": mine},
@@ -13216,7 +13367,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
             "role": "user",
             "text": "draft the tweets",
             "markdown": True,
-            "speaker": "Sam Frost (peer@example.com)",
+            "speaker": {"name": "Sam Frost", "photo_url": None, "email": "peer@example.com"},
         },
         {"role": "assistant", "text": "Drafted."},
         {"role": "user", "text": "thanks"},
@@ -13273,7 +13424,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
         "role": "user",
         "text": "now the launch email",
         "markdown": True,
-        "speaker": "Sam Frost (peer@example.com)",
+        "speaker": {"name": "Sam Frost", "photo_url": None, "email": "peer@example.com"},
         "asked": "Announce where first?",
     }
     assert tail[1]["text"] == "and a blog post"
@@ -13332,7 +13483,7 @@ async def test_a_slack_conversation_reads_as_words_and_names_the_other_speakers(
         "role": "user",
         "text": "and a blog post",
         "markdown": True,
-        "speaker": "Mel Okafor (m@example.com)",
+        "speaker": {"name": "Mel Okafor", "photo_url": None, "email": "m@example.com"},
         "asked": "A blog post too?",
     }
     assert settled[2] == {"role": "assistant", "text": "Sent."}

@@ -43,6 +43,7 @@ from ufo_ext_slack.hooks import (
     attribute_connector_send,
     settle_connect_button,
 )
+from ufo_ext_slack.profiles import SLACK_PROFILES_JOB_SPEC
 from ufo_ext_slack.surface import (
     SLACK_BOT_TOKEN_SLOT,
     SLACK_EXTENSION,
@@ -111,6 +112,7 @@ def manifest() -> Manifest:
             ),
         ),
         tools=TOOLS,
+        jobs=(SLACK_PROFILES_JOB_SPEC,),
         hooks=(
             HookSpec(
                 event="pre_tool_use",

@@ -9,6 +9,7 @@ import { App } from "@/App";
 import { GrowingTextarea } from "@/components/ui/field";
 import { Table, Td } from "@/components/ui/table";
 import { BRAND_MARKS } from "@/lib/brandMark";
+import { MEMBER_TINTS } from "@/lib/memberFace";
 import { Notice } from "@/kernel/panel";
 import { MessageLog, TranscriptScroll } from "@/kernel/messages";
 
@@ -162,6 +163,15 @@ test("a wait carries its own floor, so it centres under a parent that states no 
   const css = packedStyles();
   expect(css).toContain("min-height:var(--size-waiting)");
   expect(css).toContain("--size-waiting:max(100%,128px)");
+});
+
+test("every member tint a fallback circle can draw is emitted, not just named", () => {
+  const css = builtStyles();
+  for (const tint of MEMBER_TINTS) {
+    for (const utility of tint.split(" ")) {
+      expect(new RegExp(`\\.${utility}\\{`).test(css)).toBe(true);
+    }
+  }
 });
 
 test("reply headings carry an emitted scale, not just declared tokens", () => {

@@ -40,11 +40,11 @@ test("the stack draws three faces and states the rest as a count", () => {
   render(<AvatarStack people={TEAM} />);
   const stack = screen.getByRole("img", { name: EVERYONE });
   expect(circlesOf(stack).length).toBe(4);
-  expect(screen.getByText("RW")).toBeTruthy();
-  expect(screen.getByText("CM")).toBeTruthy();
-  expect(screen.getByText("TF")).toBeTruthy();
+  expect(screen.getByText("R")).toBeTruthy();
+  expect(screen.getByText("C")).toBeTruthy();
+  expect(screen.getByText("T")).toBeTruthy();
   expect(screen.getByText("+2")).toBeTruthy();
-  expect(screen.queryByText("IO")).toBeNull();
+  expect(screen.queryByText("I")).toBeNull();
 });
 
 test("the overlap is the stack's own, spelled on every circle after the first", () => {
@@ -82,9 +82,9 @@ test("a company the theme carries a mark for is drawn from the theme", () => {
   expect(screen.queryByText("DV")).toBeNull();
 });
 
-test("a company the theme carries no mark for is its member's initials", () => {
+test("a company the theme carries no mark for is its member's initial", () => {
   render(<AvatarStack people={[{ name: "Dana Volk", company: "example.com" }]} />);
-  expect(screen.getByText("DV")).toBeTruthy();
+  expect(screen.getByText("D")).toBeTruthy();
   expect(document.querySelector("[data-slot=avatar-fallback] > span")).toBeNull();
 });
 
@@ -115,7 +115,7 @@ test("no picture is asked of any host, whatever a person carries", async () => {
   await new Promise((settle) => setTimeout(settle, 20));
   expect(asked).toEqual([]);
   expect(document.querySelector("img")).toBeNull();
-  expect(screen.getByText("IO")).toBeTruthy();
+  expect(screen.getByText("I")).toBeTruthy();
 });
 
 test("two members may share a name, and the stack draws both", () => {

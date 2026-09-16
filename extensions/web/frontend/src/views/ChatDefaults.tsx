@@ -2,7 +2,6 @@ import { useState } from "react";
 
 import { SILENT, Toast, type ToastState } from "@/components/ui/toast";
 import { Panel, PanelEmpty, Section, usePanelRead } from "@/kernel/panel";
-import { agentName } from "@/lib/agentName";
 import { chatSurface, useAgents, useMainAgent, useRereadAgents } from "@/lib/mainAgent";
 import type { Agent } from "@/lib/types";
 import { SpecPreferences, type SettingsPayload } from "@/views/Preferences";
@@ -27,7 +26,7 @@ function Defaults({ agent }: { agent: Agent }) {
   const [toast, setToast] = useState<ToastState>(SILENT);
   const reread = useRereadAgents();
   return (
-    <Section note={"Every chat " + agentName(agent.name) + " answers starts on these."}>
+    <Section>
       <Toast state={toast} onDone={() => setToast(SILENT)} position="surface" />
       <Panel state={state} shape="form">
         {(ready) => (

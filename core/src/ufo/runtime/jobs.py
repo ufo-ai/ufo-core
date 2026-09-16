@@ -80,6 +80,12 @@ from ufo.runtime.ext.manifest import (
     Manifest,
     PageChangeBatch,
 )
+from ufo.runtime.gravatar import (
+    GRAVATAR_JOB,
+    GRAVATAR_SCHEDULE,
+    GravatarPrefill,
+    unpictured_member_workspaces,
+)
 from ufo.runtime.indexing import OWNER_KIND_PAGE, EmbedClient, IndexBackend, IndexScope
 from ufo.runtime.kinds.provisioning import AgentProvisioning
 from ufo.runtime.media.preview_renderer import PreviewRenderer
@@ -999,6 +1005,12 @@ def core_jobs(
             handler=_census_product,
             candidates=seated_member_workspaces(),
         ),
+        JobSpec(
+            name=GRAVATAR_JOB,
+            schedule=GRAVATAR_SCHEDULE,
+            handler=GravatarPrefill().run,
+            candidates=unpictured_member_workspaces(),
+        ),
         *(
             (
                 JobSpec(
@@ -1021,6 +1033,8 @@ class _Binding:
     declared: frozenset[str]
     spec: JobSpec
     member_context_read: bool = False
+    surfaces: frozenset[str] = frozenset()
+    addressed_surfaces: frozenset[str] = frozenset()
 
 
 def bindings_from(
@@ -1029,7 +1043,7 @@ def bindings_from(
     disabled: frozenset[str] = frozenset(),
 ) -> tuple[_Binding, ...]:
     """Core jobs live in the `core` namespace with no declared slots; each extension's jobs live in
-    its own namespace with exactly the credential slots that extension declared."""
+    its own namespace with exactly the credential slots and surfaces that extension declared."""
     bindings = [
         _Binding(
             key=f"{CORE_EXTENSION}:{spec.name}",
@@ -1041,6 +1055,8 @@ def bindings_from(
     ]
     for manifest in manifests:
         declared = frozenset(slot.name for slot in manifest.credentials)
+        surfaces = frozenset(surface.name for surface in manifest.surfaces)
+        addressed = frozenset(surface.name for surface in manifest.surfaces if surface.addressed)
         bindings.extend(
             _Binding(
                 key=f"{manifest.name}:{spec.name}",
@@ -1048,6 +1064,8 @@ def bindings_from(
                 declared=declared,
                 spec=spec,
                 member_context_read=manifest.member_context_read,
+                surfaces=surfaces,
+                addressed_surfaces=addressed,
             )
             for spec in manifest.jobs
         )
@@ -1175,6 +1193,8 @@ class JobRunner:
                 if binding.spec.needs_deploy_model
                 else _background_registry(self.registry, self.background_model),
                 key,
+                surfaces=binding.surfaces,
+                addressed_surfaces=binding.addressed_surfaces,
                 probes=self.probes,
                 member_context_read=binding.member_context_read,
                 member_context_blob=self.blob,

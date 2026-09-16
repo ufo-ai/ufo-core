@@ -143,6 +143,8 @@ REQUESTER_ACTIONS = frozenset(
         "action:member:add_member",
         "action:member:grant_web_access",
         "action:member:revoke_web_access",
+        "action:member_profile:clear_member_photo",
+        "action:member_profile:set_member_photo",
         "action:page:rebuild_page_facts",
         "action:report:rebuild_report_digest",
         "action:site:deploy_website",

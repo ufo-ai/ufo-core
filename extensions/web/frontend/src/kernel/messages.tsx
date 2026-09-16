@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/attachment";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
+import { BubbleHeader } from "@/components/ui/bubble-header";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Item,
@@ -57,10 +58,10 @@ import { Lightbox } from "@/kernel/lightbox";
 import { AgentIcon } from "@/lib/agentIcon";
 import { BASE } from "@/lib/api";
 import { agentName } from "@/lib/agentName";
-import { speakerName } from "@/lib/audience";
 import { BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
 import { ConsentLink } from "@/lib/consent";
+import { FaceCircle, photoAddress } from "@/lib/memberFace";
 import type { EarlierMessages } from "@/lib/earlier";
 import { Linked, Markdown, StreamingBody } from "@/lib/markdown";
 import { modelLabel, modelMark } from "@/lib/models";
@@ -83,6 +84,7 @@ import type {
   ChatFile,
   ChatQuestion,
   SourceRef,
+  Speaker,
   SubagentRun,
 } from "@/lib/types";
 
@@ -353,16 +355,19 @@ export function MessageLog({
           <Meta>{message.text}</Meta>
         </MessageScrollerItem>
       );
-    const mine = message.role === "user";
-    const answer = mine ? null : answerOf(message.text);
-    const stamp = mine && message.at ? stampMoment(message.at) : null;
-    const meta = mine
-      ? stamp
-        ? [stamp]
-        : []
-      : message.summary
-        ? turnMeta(message.summary, message.at)
-        : [];
+    const who: Who =
+      message.role !== "user" ? "agent" : message.speaker ? "member" : "me";
+    const mine = who === "me";
+    const answer = who === "agent" ? answerOf(message.text) : null;
+    const stamp = message.role === "user" && message.at ? stampMoment(message.at) : null;
+    const meta =
+      who === "agent"
+        ? message.summary
+          ? turnMeta(message.summary, message.at)
+          : []
+        : stamp
+          ? [stamp]
+          : [];
     const standing = key === markedKey;
     return (
       <MessageScrollerItem
@@ -379,7 +384,7 @@ export function MessageLog({
           standing && letting && LETTING_GO,
         )}
       >
-        <Speech mine={mine} at={message.at}>
+        <Speech mine={mine} at={message.at} speaker={who === "member" ? message.speaker : undefined}>
           {message.subagents?.some((run) => run.running) ? (
             <Activity working={null} runs={message.subagents} />
           ) : null}
@@ -388,8 +393,6 @@ export function MessageLog({
               <AgentIcon name={UFO_MARK} className="size-(--size-icon)" />
               {SENT_BY_UFO}
             </MessageHeader>
-          ) : message.role === "user" && message.speaker ? (
-            <MessageHeader>{speakerName(message.speaker)}</MessageHeader>
           ) : null}
           {message.role === "user" ? (
             <Attached
@@ -400,7 +403,7 @@ export function MessageLog({
           ) : null}
           {(message.role === "user" && !message.text && !message.asked) ||
           answer?.kind === "silence" ? null : (
-            <Said mine={message.role === "user"}>
+            <Said who={who} speaker={who === "member" ? message.speaker : undefined}>
               {message.role === "user" && message.asked ? (
                 <div className="text-small text-ink-soft">{message.asked}</div>
               ) : null}
@@ -427,8 +430,14 @@ export function MessageLog({
             <Meta
               last={last}
               mine={mine}
-              model={mine ? null : message.summary?.model}
-              copy={mine ? message.text : answer?.kind === "words" ? answer.text : undefined}
+              model={who === "agent" ? message.summary?.model : null}
+              copy={
+                who === "agent"
+                  ? answer?.kind === "words"
+                    ? answer.text
+                    : undefined
+                  : message.text
+              }
             >
               {meta.map((part, index) => (
                 <span key={index}>{part}</span>
@@ -459,7 +468,7 @@ export function MessageLog({
             >
               <Speech mine={false}>
                 <Activity working={row.working} runs={row.waiting} sources={row.sources} />
-                <Said mine={false} entering>
+                <Said who="agent" entering>
                   <StreamingBody text={row.body} />
                 </Said>
                 {row.record.files.length ? (
@@ -490,33 +499,83 @@ type Opened = { files: ChatFile[]; at: number };
 
 /** The moment a message landed reaches the member under the pointer, never as a line of its own:
  *  a transcript reads as words rather than as a log. */
-function Speech({ mine, at, children }: { mine: boolean; at?: string; children: ReactNode }) {
+function Speech({
+  mine,
+  at,
+  speaker,
+  children,
+}: {
+  mine: boolean;
+  at?: string;
+  speaker?: Speaker;
+  children: ReactNode;
+}) {
+  const content = <MessageContent title={at ? fullMoment(at) : undefined}>{children}</MessageContent>;
+  if (!speaker) return <Message align={mine ? "end" : "start"}>{content}</Message>;
   return (
-    <Message align={mine ? "end" : "start"}>
-      <MessageContent title={at ? fullMoment(at) : undefined}>{children}</MessageContent>
+    <Message align="start">
+      <Attributed speaker={speaker}>{content}</Attributed>
     </Message>
   );
 }
 
+/** The block reserves this as padding and the face is placed into it from the bubble, so the gutter
+ *  and what hangs in it read off one expression. */
+const FACE_GUTTER = "calc(var(--size-control) + var(--spacing-sm))";
+
+/** The face answers to the bubble, not to this block: the moment line reserves a row under the
+ *  bubble whether or not it shows, and a face centred on all of that sits visibly low. */
+function Attributed({ speaker, children }: { speaker: Speaker; children: ReactNode }) {
+  return (
+    <div className="flex w-full min-w-0 flex-col gap-2xs" style={{ paddingInlineStart: FACE_GUTTER }}>
+      <BubbleHeader speaker={speaker} />
+      {children}
+    </div>
+  );
+}
+
+/** `Bubble` is the positioned box, so the face centres on the bubble's own height. */
+function SpeakerFace({ speaker }: { speaker: Speaker }) {
+  return (
+    <FaceCircle
+      name={speaker.name}
+      photo={photoAddress(speaker.photo_url)}
+      tint={speaker.email || speaker.name}
+      title={speaker.name}
+      className="absolute top-1/2 size-(--size-control) -translate-y-1/2"
+      style={{ insetInlineStart: `calc(-1 * ${FACE_GUTTER})` }}
+    />
+  );
+}
+
+/** A channel several people speak in is read by side before a name is, which is why a colleague is
+ *  not drawn as the viewer: left on the neutral fill against right on the accent. */
+type Who = "me" | "member" | "agent";
+
 function Said({
-  mine,
+  who,
+  speaker,
   entering = false,
   children,
 }: {
-  mine: boolean;
+  who: Who;
+  speaker?: Speaker;
   entering?: boolean;
   children: ReactNode;
 }) {
+  const mine = who === "me";
   return (
     <Bubble
-      variant={mine ? "default" : "ghost"}
+      variant={who === "agent" ? "ghost" : "default"}
       align={mine ? "end" : "start"}
-      data-role={mine ? "me" : "agent"}
+      data-role={who}
       className={cn(
-        mine ? "self-end *:data-[slot=bubble-content]:bg-said" : "w-full",
+        mine && "self-end *:data-[slot=bubble-content]:bg-said",
+        who === "agent" && "w-full",
         entering && "animate-appear",
       )}
     >
+      {speaker ? <SpeakerFace speaker={speaker} /> : null}
       <BubbleContent
         className={cn("wrap-anywhere leading-reading [&_a]:text-link", mine && "whitespace-pre-wrap")}
       >

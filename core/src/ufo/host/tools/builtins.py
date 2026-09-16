@@ -67,6 +67,7 @@ from ufo.harness.sandbox.session import (
 from ufo.host.kinds.artifacts import artifact_object_names
 from ufo.host.kinds.conversations import CONVERSATION_MARK_ACTIONS
 from ufo.host.kinds.credential_kind import CREDENTIAL_KIND
+from ufo.host.kinds.member_profiles import CLEAR_PHOTO_TOOL_DEF, SET_PHOTO_TOOL_DEF
 from ufo.host.kinds.members import ADD_MEMBER_TOOL_DEF
 from ufo.runtime.access.credentials import declared_slot_fingerprint
 from ufo.runtime.access.grants import installed_connect_flow
@@ -1500,6 +1501,8 @@ REQUEST_CREDENTIALS_TOOL_DEF = ToolDef(
 
 BUILTIN_ACTIONS: tuple[ToolDef, ...] = (
     ADD_MEMBER_TOOL_DEF,
+    SET_PHOTO_TOOL_DEF,
+    CLEAR_PHOTO_TOOL_DEF,
     RESTORE_APPLICATION_TOOL_DEF,
     REQUEST_CREDENTIALS_TOOL_DEF,
     *CONVERSATION_MARK_ACTIONS,

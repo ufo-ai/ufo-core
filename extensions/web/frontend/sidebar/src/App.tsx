@@ -30,7 +30,7 @@ import {
   SidebarTooltip,
   type Chord,
 } from "@/components/Sidebar";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { MemberAvatar, faceName } from "@/lib/memberFace";
 import { Skeleton } from "@/components/ui/skeleton";
 
 import { Ticker } from "@/components/ui/ticker";
@@ -219,19 +219,19 @@ function AccountRow({ member, collapsed }: { member: Member; collapsed: boolean 
               collapsed={collapsed}
               label={member.email}
               aria-label={member.email}
-              glyph={
-                <Avatar>
-                  <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
-                </Avatar>
-              }
+              glyph={<MemberAvatar face={member} />}
             >
-              <span className="min-w-0 flex-1 truncate">{member.email}</span>
+              <span className="min-w-0 flex-1 truncate">{faceName(member)}</span>
               <IconDotsVertical className={cn(GLYPH, "text-ink-soft")} aria-hidden />
             </SidebarPress>
           </DropdownMenuTrigger>
         </SidebarTooltip>
       </SidebarRow>
       <DropdownMenuContent side="top" align="start" container={host}>
+        <div className="flex flex-col p-sm">
+          <span className="truncate text-label">{faceName(member)}</span>
+          <span className="truncate text-small text-ink-soft">{member.email}</span>
+        </div>
         <AccountActs container={host} />
       </DropdownMenuContent>
     </DropdownMenu>

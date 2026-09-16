@@ -32,9 +32,33 @@ export type Agent = {
   web_audience?: string[];
 };
 
-export type Member = {
-  id?: string;
+/** Who spoke, as a transcript carries them: the name to print and, for a member of this workspace
+ *  who has one, the address their picture is served from — relative to the surface, like every
+ *  other link on the wire. A guest another organization shares a channel with holds no member row
+ *  here, so they carry the name the surface reported and no picture. */
+export type Speaker = {
+  name: string;
+  photo_url?: string | null;
+  /** What fixes the circle's colour, so a member is the same colour here as on the roster. A
+   *  guest another organization shares a channel with holds no row and so no address. */
+  email?: string | null;
+};
+
+/** What any screen needs to draw one member: the name to print, the address their colour is fixed
+ *  by, and where their picture is served from when they have one. Every producer of a member row on
+ *  the wire carries these, so a roster row, a chat list's owner and the account menu draw the same
+ *  member the same way. */
+export type MemberFace = {
+  name?: string | null;
   email: string;
+  photo_url?: string | null;
+};
+
+/** `name` is what to draw this member as — what they chose, else what Slack reported, else the
+ *  local part of their address — and `photo_url` addresses their picture on this surface where they
+ *  have one. Both are absent only on a row whose member the reader may not read. */
+export type Member = MemberFace & {
+  id?: string;
   admin: boolean;
   seated?: boolean;
   workspace_id?: string;
@@ -173,7 +197,9 @@ export type Message = {
    *  markdown rather than the characters they typed. */
   markdown?: boolean;
   at?: string;
-  speaker?: string;
+  /** Who said these words, carried only for somebody other than the viewer — the label marks
+   *  exactly what a colleague said, so the viewer's own bubbles are the unlabelled default. */
+  speaker?: Speaker;
   /** An object's fire admitted the turn these words founded — a source trigger's wake — so no
    *  member spoke them: the header says ufo sent them, and the provider's mark heads the words. */
   fired?: { provider: string | null };

@@ -47,6 +47,7 @@ INTENT_MAX_BYTES = 65_536
 INTENT_RESULT_TIMEOUT_SECONDS = 120
 ERROR_CLASS_PREFIX = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*: ")
 DELETE_ONLY_KINDS = frozenset({"credential"})
+APPLY_ONLY_KINDS = frozenset({"member_profile"})
 CONNECT_KINDS = frozenset({"connection"})
 AGENT_SPEC_REQUIRED = frozenset({"model", "internet_access_allowed", "reasoning"})
 DEEPSEEK_FLASH_MODEL = "deepseek/deepseek-v4.1-flash"
@@ -91,6 +92,7 @@ class ApplyIntent(BaseModel):
     kind: Literal[
         "agent",
         "member",
+        "member_profile",
         "scheduled_task",
         "skill",
         "connector_grant",
@@ -119,12 +121,13 @@ class ApplyIntent(BaseModel):
 
     @classmethod
     def deleting_kinds(cls) -> frozenset[str]:
-        """The kinds the lane takes a `delete` for — every kind it names. A connection is the one
-        kind whose delete is not its own creation undone: connecting goes through the provider, and
-        the delete is the disconnect. Read off the same sets the validator refuses by, so the acts
-        an object screen draws and the acts this lane admits cannot drift: a kind it only ever
-        deletes draws a delete and no create."""
-        return cls.kinds()
+        """The kinds the lane takes a `delete` for. A connection is the one kind whose delete is
+        not its own creation undone: connecting goes through the provider, and the delete is the
+        disconnect. A member profile is the one kind with no delete at all — it is emptied, and a
+        member has one for as long as they are a member. Read off the same sets the validator
+        refuses by, so the acts an object screen draws and the acts this lane admits cannot drift:
+        a kind it only ever deletes draws a delete and no create."""
+        return cls.kinds().difference(APPLY_ONLY_KINDS)
 
     @model_validator(mode="after")
     def _verb_pairs_with_its_kind(self) -> "ApplyIntent":
@@ -151,6 +154,11 @@ class ApplyIntent(BaseModel):
             raise ValueError("attach and detach pair with the connector_grant kind exactly")
         if self.verb == "detach" and self.spec is not None:
             raise ValueError("a detach intent carries no spec")
+        if self.kind == "member_profile" and self.verb != "apply":
+            raise ValueError(
+                "a member profile is named through its spec and pictured through its actions; "
+                "it is never created or deleted"
+            )
         if self.create_only and (self.verb != "apply" or self.kind != "agent"):
             raise ValueError("create_only pairs with applying the agent kind exactly")
         return self

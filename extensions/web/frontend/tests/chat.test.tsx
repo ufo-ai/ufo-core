@@ -472,11 +472,15 @@ test("a reloaded conversation draws the reply alone, with no line for the steps 
   expect(document.querySelector("[data-slot=decode-text]")).toBeNull();
 });
 
-test("a bubble another member spoke names them, and the viewer's own carries no name", async () => {
+test("a bubble another member spoke names them and draws their face", async () => {
   wire(
     transcript({
       messages: [
-        { role: "user", text: "draft the tweets", speaker: "Sam Frost (peer@example.com)" },
+        {
+          role: "user",
+          text: "draft the tweets",
+          speaker: { name: "Sam Frost", photo_url: "members/s-1/photo?v=abc" },
+        },
         { role: "assistant", text: "Drafted." },
         { role: "user", text: "thanks" },
       ],
@@ -487,8 +491,60 @@ test("a bubble another member spoke names them, and the viewer's own carries no 
   const named = (await screen.findByText("draft the tweets")).closest("[data-slot=message]");
   expect(named && within(named as HTMLElement).getByText("Sam Frost")).toBeTruthy();
   expect(screen.queryByText(/peer@example\.com/)).toBeNull();
+  const face = named!.querySelector("[data-slot=avatar]")!;
+  expect(face).not.toBeNull();
+  expect(face.className).toContain("size-(--size-control)");
+  // The face hangs off the bubble's own box, so it centres on the bubble however tall the message
+  // grows and whatever reserves a row beneath it.
+  expect(face.closest("[data-slot=bubble]")).not.toBeNull();
+  expect(face.closest("[data-slot=message-header]")).toBeNull();
+  expect(face.className).toContain("top-1/2");
+  expect(face.className).toContain("-translate-y-1/2");
   const own = screen.getByText("thanks").closest("[data-slot=message]");
   expect(own && within(own as HTMLElement).queryByText("Sam Frost")).toBeNull();
+});
+
+test("a colleague's words stand left on the neutral fill, the viewer's own right on the accent", async () => {
+  wire(
+    transcript({
+      messages: [
+        { role: "user", text: "draft the tweets", speaker: { name: "Sam Frost" } },
+        { role: "assistant", text: "Drafted." },
+        { role: "user", text: "thanks" },
+      ],
+    }),
+  );
+  open();
+
+  const theirs = (await screen.findByText("draft the tweets")).closest("[data-role=member]")!;
+  expect(theirs).not.toBeNull();
+  expect(theirs.getAttribute("data-align")).toBe("start");
+  expect(theirs.getAttribute("data-variant")).toBe("default");
+  expect(theirs.className).not.toContain("bg-said");
+  expect(theirs.closest("[data-slot=message]")!.getAttribute("data-align")).toBe("start");
+
+  const own = screen.getByText("thanks").closest("[data-role=me]")!;
+  expect(own.getAttribute("data-align")).toBe("end");
+  expect(own.getAttribute("data-variant")).toBe("default");
+  expect(own.className).toContain("*:data-[slot=bubble-content]:bg-said");
+  expect(own.closest("[data-slot=message]")!.getAttribute("data-align")).toBe("end");
+
+  const agent = screen.getByText("Drafted.").closest("[data-role=agent]")!;
+  expect(agent.getAttribute("data-align")).toBe("start");
+  expect(agent.getAttribute("data-variant")).toBe("ghost");
+  expect(agent.className).toContain("w-full");
+});
+
+test("a speaker with no picture is drawn by their initials", async () => {
+  wire(
+    transcript({
+      messages: [{ role: "user", text: "ship it", speaker: { name: "Rae Whitlock" } }],
+    }),
+  );
+  open();
+
+  const named = (await screen.findByText("ship it")).closest("[data-slot=message]");
+  expect(named && within(named as HTMLElement).getByText("R")).toBeTruthy();
 });
 
 test("a bubble an object's fire admitted says ufo sent it", async () => {

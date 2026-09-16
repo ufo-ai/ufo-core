@@ -65,6 +65,13 @@ export const CONNECTION_VIEWS: Record<ConnectionTab, PaneView> = {
 };
 
 export const WORKSPACE_VIEWS: Record<WorkspaceTab, PaneView> = {
+  profile: {
+    label: "Profile",
+    remountOnPlace: false,
+    render: placed(() =>
+      import("@/views/Profile").then((module) => ({ default: module.Profile })),
+    ),
+  },
   team: {
     label: "Team",
     remountOnPlace: true,

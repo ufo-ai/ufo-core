@@ -19,9 +19,23 @@ export function Avatar({ className, ...props }: ComponentProps<typeof AvatarPrim
   );
 }
 
-/** What the circle holds. The portal carries no photograph and no app image, so this is the whole
- *  of an avatar's content — a member's initials, an app's mark, a company's: with no image beside
- *  it the circle never enters a loading state, and Radix draws this the moment it mounts. */
+/** The picture, where the member has one. Radix holds the fallback until the bytes decode and drops
+ *  back to it if they never do, so a face that fails to load reads as initials rather than a hole.
+ *  The portal serves every one of these from its own origin — a picture derived from Slack or from
+ *  gravatar was fetched once and stored, so no page here names a picture host. */
+export function AvatarImage({ className, ...props }: ComponentProps<typeof AvatarPrimitive.Image>) {
+  return (
+    <AvatarPrimitive.Image
+      data-slot="avatar-image"
+      className={cn("size-full rounded-full object-cover", className)}
+      {...props}
+    />
+  );
+}
+
+/** What the circle holds. An app's mark and a company's carry no picture beside them, so their
+ *  circle never enters a loading state and Radix draws this the moment it mounts; a member's holds
+ *  their initials until `AvatarImage` decodes, and returns to them if it never does. */
 export function AvatarFallback({
   className,
   ...props

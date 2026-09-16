@@ -121,6 +121,9 @@ from ufo.runtime.ext.surface import (
     SourceView as SourceView,
 )
 from ufo.runtime.ext.surface import (
+    SpokenArrival as SpokenArrival,
+)
+from ufo.runtime.ext.surface import (
     SurfaceAuth as SurfaceAuth,
 )
 from ufo.runtime.ext.surface import (

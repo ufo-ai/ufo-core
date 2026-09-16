@@ -121,7 +121,7 @@ test("the sidebar names the shell's destinations and states the member at its fo
       .map((entry) => entry.getAttribute("aria-label")),
   ).toEqual(["Search", "Collapse sidebar"]);
   expect(within(head).getByRole("img", { name: "ufo" })).toBeTruthy();
-  expect(within(sidebar).getByText(MEMBER.email)).toBeTruthy();
+  expect(within(sidebar).getByText("member")).toBeTruthy();
 });
 
 test("every nav row lands on its own portal view", async () => {
@@ -230,9 +230,10 @@ test("the sidebar's foot states who is signed in and holds the account's acts in
   const sidebar = screen.getByRole("navigation", { name: "Workspace" });
   const foot = sidebar.querySelector("footer")!;
   expect(foot.querySelector("[data-slot=avatar-fallback]")!.textContent).toBe("M");
-  expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
+  expect(within(foot).getByText("member")).toBeTruthy();
 
   await userEvent.click(within(foot).getByRole("button", { name: MEMBER.email }));
+  expect(await screen.findByText(MEMBER.email)).toBeTruthy();
   expect(await screen.findByRole("menuitem", { name: "Theme" })).toBeTruthy();
   expect(screen.queryByRole("menuitem", { name: "Settings" })).toBeNull();
 

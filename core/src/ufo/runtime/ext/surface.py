@@ -128,6 +128,7 @@ from ufo.runtime.media.preview_renderer import (
     PREVIEW_KINDS,
     render_document_cover,
 )
+from ufo.runtime.member_profiles import MemberProfile, MemberProfiles, read_profiles
 from ufo.runtime.object_views import ActionView, presented_action_views
 from ufo.runtime.seats import (
     SeatEntry,
@@ -4714,6 +4715,21 @@ class SurfaceContext:
             snapshot = await Seats(self.workspace_id).snapshot(connection)
         return tuple(sorted(snapshot.members, key=lambda entry: entry.email))
 
+    async def member_profiles(
+        self, member_ids: frozenset[UUID] | None = None
+    ) -> tuple[MemberProfile, ...]:
+        """What the workspace's members are called and whether a picture stands for each, for a
+        portal read that draws them — the roster, and the speakers a transcript names. Every member
+        of a workspace already reads who their colleagues are, so this narrows to nobody; naming
+        ids narrows the query, never the authority."""
+        return await read_profiles(self.workspace_id, member_ids)
+
+    async def member_photo(self, member_id: UUID) -> bytes | None:
+        """One member's stored picture, or None where they have none. The bytes are the workspace's
+        own — the portal serves them from its own origin, which is why no page ever names the host
+        a picture was derived from."""
+        return await MemberProfiles(workspace_id=self.workspace_id, blob=self.blob).photo(member_id)
+
     async def list_sources(self, member_id: UUID) -> tuple[SourceView, ...]:
         """Every stream of every connection this member may see, ordered under its connection. The
         set is the connection listing's exactly — their own connections plus the shared ones, and no
@@ -5670,6 +5686,27 @@ class SurfaceInstallationAccess:
                 )
             ).one_or_none()
         return None if row is None else row.installation_id
+
+    async def linked_members(self, surface: str) -> dict[UUID, str]:
+        """Who this workspace's members are on one declared surface, as member id to the id that
+        surface knows them by. The link is written on first contact, so this is exactly the set a
+        surface can ask its own host about — a member who has never spoken there is absent, and a
+        surface never reads another's links."""
+        if surface not in self.declared:
+            raise UndeclaredSurface(surface)
+        async with workspace_tx() as connection:
+            rows = (
+                await connection.execute(
+                    sa.select(
+                        tables.surface_identity.c.member_id,
+                        tables.surface_identity.c.external_id,
+                    ).where(
+                        tables.surface_identity.c.workspace_id == ws_current().workspace_id,
+                        tables.surface_identity.c.surface == surface,
+                    )
+                )
+            ).all()
+        return {row.member_id: row.external_id for row in rows}
 
     async def bind(self, surface: str, installation_id: str) -> None:
         """Bind one declared surface's installation to this workspace. Reconfiguration replaces

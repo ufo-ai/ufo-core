@@ -11,7 +11,7 @@ import {
 } from "@tabler/icons-react";
 
 import logo from "@/assets/ufo-logo.svg";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { MemberAvatar, faceName } from "@/lib/memberFace";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -380,14 +380,13 @@ export function AccountMenu({ member }: { member: Member }) {
           aria-label={member.email}
           className="flex shrink-0 items-center justify-center rounded-full border-0 bg-transparent p-0 max-narrow:size-(--size-control) data-[state=open]:outline data-[state=open]:outline-edge"
         >
-          <Avatar>
-            <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
-          </Avatar>
+          <MemberAvatar face={member} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <div className="flex flex-col p-sm">
-          <span className="truncate text-label">{member.email}</span>
+          <span className="truncate text-label">{faceName(member)}</span>
+          <span className="truncate text-small text-ink-soft">{member.email}</span>
         </div>
         <AccountActs />
       </DropdownMenuContent>

@@ -102,6 +102,12 @@ from ufo.sdk.manifest import (
     WorkspaceChanges,
     raster_image_media_type,
 )
+from ufo.sdk.member_profiles import (
+    MEMBER_PROFILE_KIND,
+    PROFILE_PHOTO_MEDIA_TYPE,
+    MemberProfile,
+    profile_name,
+)
 from ufo.sdk.memory import MemoryMatch
 from ufo.sdk.models import (
     ANTHROPIC_KEY_SLOT,
@@ -145,6 +151,7 @@ from ufo.sdk.surfaces import (
     PortalKind,
     SetupState,
     SharedArtifact,
+    SpokenArrival,
     SurfaceAuth,
     SurfaceContext,
     SurfaceRoute,
@@ -240,6 +247,9 @@ MAX_INBOUND_CHARS = 200_000
 MAX_INBOUND_BYTES = 4 * MAX_INBOUND_CHARS
 MAX_REQUEST_BYTES = 25 * 1024 * 1024
 MAX_FORM_BYTES = 64 * 1024
+MEMBERS_PREFIX = "members/"
+PHOTO_VERSION_CHARS = 16
+PHOTO_CACHE = "private, no-cache"
 MAX_SECRET_BYTES = 4_096
 UPLOAD_CHUNK_BYTES = 65_536
 MAX_INBOUND_FILES = 10
@@ -1264,7 +1274,7 @@ def _comment_notice(
     else:
         speaker = next((who for who in conversation.speakers if who.email == email), None)
         sender = None if speaker is None else speaker.sender
-        author = email if sender is None else sender.removesuffix(f" ({email})")
+        author = email if sender is None else reported_speaker_name(sender, email)
     url = _chat_url(public_base_url, conversation.summary.id)
     verb = "commented" if url is None else f"[commented]({url})"
     message = text.strip()
@@ -1446,6 +1456,7 @@ async def agents_index(ctx: SurfaceContext, request: Request) -> Response:
                 "email": email,
                 "admin": audience.admin,
                 "workspace_id": str(ctx.workspace_id),
+                **_member_face(next(iter(await ctx.member_profiles(frozenset({member_id}))), None)),
             },
             "surfaces": {
                 **{name: flags[key] for name, key in PORTAL_SURFACES.items()},
@@ -2267,7 +2278,7 @@ class _TranscriptRenderer:
     turn_ids: frozenset[str]
     agent_origin: frozenset[str]
     fired: Mapping[str, str | None]
-    speakers: Mapping[str, str] | None
+    speakers: Mapping[str, dict[str, object]] | None
     questions: Mapping[str, dict[str, object]]
     asked: Mapping[str, str]
     files: Mapping[str, list[dict[str, object]]]
@@ -2412,7 +2423,7 @@ def _rendered_messages(
     subagents: SubagentRuns | None = None,
     turn_ids: frozenset[str] = frozenset(),
     agent_origin: frozenset[str] = frozenset(),
-    speakers: Mapping[str, str] | None = None,
+    speakers: Mapping[str, dict[str, object]] | None = None,
     questions: Mapping[str, dict[str, object]] | None = None,
     asked: Mapping[str, str] | None = None,
     files: Mapping[str, list[dict[str, object]]] | None = None,
@@ -2583,7 +2594,7 @@ class _TranscriptAids:
     turn_ids: frozenset[str]
     agent_origin: frozenset[str]
     fired: dict[str, str | None]
-    speakers: dict[str, str]
+    speakers: dict[str, dict[str, object]]
     asked: dict[str, str]
     asks: _Asks
     files: dict[str, list[dict[str, object]]]
@@ -2629,7 +2640,7 @@ async def _transcript_aids(
     conversation_id: UUID,
     viewer: UUID,
     agent_origin: frozenset[str],
-    speakers: dict[str, str],
+    speakers: dict[str, dict[str, object]],
     asked: dict[str, str],
     folded: dict[str, str],
     opens: frozenset[UUID],
@@ -2668,14 +2679,7 @@ async def _transcript_aids(
         turn_ids=frozenset(str(turn.id) for turn in turns),
         agent_origin=agent_origin,
         fired={str(turn.id): turn.fired_by.provider for turn in turns if turn.fired_by is not None},
-        speakers=speakers
-        | {
-            str(turn.id): turn.context.sender
-            for turn in turns
-            if turn.context is not None
-            and turn.context.sender is not None
-            and turn.speaker_member_id != viewer
-        },
+        speakers=speakers | await _turn_faces(ctx, turns, viewer),
         asked=asked
         | {
             str(turn.id): turn.context.question
@@ -2839,11 +2843,7 @@ async def _conversation_messages(
         ctx.conversation_surface(conversation_id),
     )
     slack = surface == SURFACE_SLACK
-    speakers = {
-        str(arrival.id): arrival.sender
-        for arrival in spoken
-        if arrival.sender is not None and arrival.speaker_member_id != viewer
-    }
+    speakers = await _spoken_faces(ctx, spoken, viewer)
     asked = {
         str(arrival.id): arrival.question for arrival in spoken if arrival.question is not None
     }
@@ -2888,12 +2888,20 @@ async def _conversation_messages(
         prompt["turn"] = str(detail.turn.id)
         if detail.turn.fired_by is not None:
             prompt["fired"] = {"provider": detail.turn.fired_by.provider}
-        if (
-            detail.turn.context is not None
-            and detail.turn.context.sender is not None
-            and detail.turn.speaker_member_id != viewer
-        ):
-            prompt["speaker"] = detail.turn.context.sender
+        if detail.turn.speaker_member_id != viewer:
+            spoke = _speaker_face(
+                next(
+                    iter(
+                        await ctx.member_profiles(frozenset({detail.turn.speaker_member_id}))
+                        if detail.turn.speaker_member_id is not None
+                        else ()
+                    ),
+                    None,
+                ),
+                None if detail.turn.context is None else detail.turn.context.sender,
+            )
+            if spoke is not None:
+                prompt["speaker"] = spoke
         if detail.turn.context is not None and detail.turn.context.question is not None:
             prompt["asked"] = detail.turn.context.question
         prompt["at"] = detail.turn.created_at.isoformat()
@@ -3020,11 +3028,7 @@ async def _history_messages(
         ctx.arrival_speakers(conversation_id),
         ctx.conversation_surface(conversation_id),
     )
-    speakers = {
-        str(arrival.id): arrival.sender
-        for arrival in spoken
-        if arrival.sender is not None and arrival.speaker_member_id != viewer
-    }
+    speakers = await _spoken_faces(ctx, spoken, viewer)
     asked = {
         str(arrival.id): arrival.question for arrival in spoken if arrival.question is not None
     }
@@ -4002,16 +4006,17 @@ async def workspace_credentials(ctx: SurfaceContext, request: Request) -> Respon
 
 
 async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
-    """The workspace roster: who the members are, which of them administer the workspace, and whose
-    access is live — the same rows the `member` kind lists to a member asking the main agent, so the
-    panel shows a non-admin exactly what chat would tell them. Each row names the stable member id
-    the panel's acts apply to. `can_manage` reports whether this member may add another and change a
-    role or an access state, read back from the verbs' own authority (the same `member.is_admin` row
-    their gates check), never a second copy; the verbs refuse regardless."""
+    """The workspace roster: who the members are, what each is called, which of them administer the
+    workspace, and whose access is live — the same rows the `member` kind lists to a member asking
+    the main agent, so the panel shows a non-admin exactly what chat would tell them. Each row names
+    the stable member id the panel's acts apply to. `can_manage` reports whether this member may add
+    another and change a role or an access state, read back from the verbs' own authority (the same
+    `member.is_admin` row their gates check), never a second copy; the verbs refuse regardless."""
     resolved = await _audience_for(ctx, request)
     if isinstance(resolved, Response):
         return resolved
     _member_id, _email, audience = resolved
+    drawn = {profile.id: profile for profile in await ctx.member_profiles()}
     return JSONResponse(
         {
             "members": [
@@ -4020,11 +4025,194 @@ async def workspace_team(ctx: SurfaceContext, request: Request) -> Response:
                     "email": entry.email,
                     "admin": entry.admin,
                     "seated": entry.seated,
+                    **_member_face(drawn.get(entry.id)),
                 }
                 for entry in await ctx.list_members()
             ],
             "can_manage": audience.admin,
             "actions": _action_payloads(ctx.object_actions(MEMBER_KIND, "collection")),
+        }
+    )
+
+
+def _member_face(profile: MemberProfile | None) -> dict[str, object]:
+    """What a screen draws one member as: the name to print, and the address of their picture when
+    they have one. The address carries the digest, so a replaced picture is a new URL and no
+    browser holds the old one; a member with no picture carries no address and the page draws their
+    initials."""
+    if profile is None:
+        return {"name": None, "photo_url": None}
+    return {
+        "name": profile_name(profile),
+        "photo_url": member_photo_path(profile.id, profile.photo_digest),
+    }
+
+
+REPORTED_SENDER = re.compile(r"\A(?P<name>.+) \((?P<email>[^()]+@[^()]+)\)\Z")
+
+
+def reported_speaker_name(sender: str, email: str | None = None) -> str:
+    """The display half of the line a surface reported a speaker under. Slack reports
+    `Rae Whitlock (rae@example.com)`; a surface that reports a bare name reports itself, and one
+    that reports a bare address is shortened to its local part, because a header reading
+    `rae@example.com` over somebody's words names them the way a machine would.
+
+    Read here rather than in the browser so a bubble and a notice name a speaker the same way
+    without either parsing a composite string."""
+    if email is not None:
+        return sender.removesuffix(f" ({email})")
+    found = REPORTED_SENDER.match(sender)
+    if found is not None:
+        return found.group("name")
+    local, at, _ = sender.partition("@")
+    return local if at and local else sender
+
+
+async def _spoken_faces(
+    ctx: SurfaceContext, spoken: Iterable[SpokenArrival], viewer: UUID
+) -> dict[str, dict[str, object]]:
+    """Who spoke each of a conversation's member-admitted rows, as the bubble draws them. The
+    viewer's own words are unlabelled — the label marks exactly what somebody else said — so their
+    rows are absent here, and one profile read covers every colleague the conversation names rather
+    than one per bubble."""
+    others = tuple(arrival for arrival in spoken if arrival.speaker_member_id != viewer)
+    drawn = {
+        profile.id: profile
+        for profile in await ctx.member_profiles(
+            frozenset(
+                arrival.speaker_member_id
+                for arrival in others
+                if arrival.speaker_member_id is not None
+            )
+        )
+    }
+    faced = (
+        (
+            str(arrival.id),
+            _speaker_face(
+                None if arrival.speaker_member_id is None else drawn.get(arrival.speaker_member_id),
+                arrival.sender,
+            ),
+        )
+        for arrival in others
+    )
+    return {arrival_id: face for arrival_id, face in faced if face is not None}
+
+
+async def _turn_faces(
+    ctx: SurfaceContext, turns: Iterable[Turn], viewer: UUID
+) -> dict[str, dict[str, object]]:
+    """Who spoke each turn a transcript renders, as the bubble draws them. A turn names the message
+    that founded it; `_spoken_faces` covers the messages folded into a running one, and the two maps
+    are keyed apart, so a bubble finds its speaker under whichever id the transcript referred to it
+    by."""
+    spoke = tuple(
+        turn
+        for turn in turns
+        if turn.context is not None
+        and turn.context.sender is not None
+        and turn.speaker_member_id != viewer
+    )
+    drawn = {
+        profile.id: profile
+        for profile in await ctx.member_profiles(
+            frozenset(
+                turn.speaker_member_id for turn in spoke if turn.speaker_member_id is not None
+            )
+        )
+    }
+    faced = (
+        (
+            str(turn.id),
+            _speaker_face(
+                None if turn.speaker_member_id is None else drawn.get(turn.speaker_member_id),
+                turn.context.sender,
+            ),
+        )
+        for turn in spoke
+        if turn.context is not None
+    )
+    return {turn_id: face for turn_id, face in faced if face is not None}
+
+
+def _speaker_face(profile: MemberProfile | None, sender: str | None) -> dict[str, object] | None:
+    """Who a bubble says spoke, and the picture beside the name.
+
+    The name a member chose answers first, then the name the surface reported on this very message,
+    then the local part of their address. The middle step is what keeps a Slack channel reading as
+    it always has: Slack knows a member as `Sam Frost` before this workspace holds a profile for
+    them, and dropping to `sam` because no profile exists yet would lose a name the transcript
+    already had. The picture is the member's own or none — no picture is derived per message.
+
+    A guest another organization shares a channel with holds no member row, so the reported line is
+    all there is and no picture stands for them."""
+    reported = None if sender is None else reported_speaker_name(sender)
+    if profile is not None:
+        return {
+            "name": profile.name or reported or profile_name(profile),
+            "photo_url": member_photo_path(profile.id, profile.photo_digest),
+            "email": profile.email,
+        }
+    if reported is None:
+        return None
+    return {"name": reported, "photo_url": None, "email": None}
+
+
+def member_photo_path(member_id: UUID, digest: str | None) -> str | None:
+    if digest is None:
+        return None
+    return f"{MEMBERS_PREFIX}{member_id}/photo?v={digest[:PHOTO_VERSION_CHARS]}"
+
+
+async def member_photo(ctx: SurfaceContext, request: Request) -> Response:
+    """One member's picture, served from the portal's own origin. Every workspace member reads who
+    their colleagues are, so a signed-in session reads any of them; nothing outside a session reads
+    any. The bytes were fetched or uploaded once and normalized then — the browser never reaches
+    Slack or gravatar, which is why the portal's own `img-src` still names no picture host.
+
+    The digest is the ETag, and the address carries it, so a held picture revalidates once and a
+    replaced one is a different URL entirely."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    try:
+        member_id = UUID(request.path_params["member_id"])
+    except ValueError:
+        return Response("no such member", status_code=404)
+    profile = next(iter(await ctx.member_profiles(frozenset({member_id}))), None)
+    if profile is None or profile.photo_digest is None:
+        return Response("no photo", status_code=404)
+    etag = f'"{profile.photo_digest}"'
+    headers = {"etag": etag, "cache-control": PHOTO_CACHE}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    body = await ctx.member_photo(member_id)
+    if body is None:
+        return Response("no photo", status_code=404)
+    return Response(body, media_type=PROFILE_PHOTO_MEDIA_TYPE, headers=headers)
+
+
+async def workspace_profile(ctx: SurfaceContext, request: Request) -> Response:
+    """The signed-in member's own profile screen: what they are called, their picture, and the
+    address and role they cannot change here. `name` is what they chose and `drawn_name` what the
+    product draws them as, which differ while a derived name is standing in — the screen offers the
+    chosen one for editing and prints the drawn one, and says nothing about where it came from."""
+    resolved = await _audience_for(ctx, request)
+    if isinstance(resolved, Response):
+        return resolved
+    member_id, email, audience = resolved
+    profile = next(iter(await ctx.member_profiles(frozenset({member_id}))), None)
+    if profile is None:
+        return Response("no such member", status_code=404)
+    return JSONResponse(
+        {
+            "id": str(member_id),
+            "email": email,
+            "admin": audience.admin,
+            "name": profile.name,
+            "drawn_name": profile_name(profile),
+            "photo_url": member_photo_path(profile.id, profile.photo_digest),
+            "actions": _action_payloads(ctx.object_actions(MEMBER_PROFILE_KIND, "collection")),
         }
     )
 
@@ -5774,6 +5962,8 @@ ROUTES = (
         handler=conversation_slot,
     ),
     SurfaceRoute(method="GET", path="workspace/team", handler=workspace_team),
+    SurfaceRoute(method="GET", path="workspace/profile", handler=workspace_profile),
+    SurfaceRoute(method="GET", path="members/{member_id}/photo", handler=member_photo),
     SurfaceRoute(method="GET", path="workspace/sources", handler=workspace_sources),
     SurfaceRoute(method="GET", path="workspace/surfaces", handler=workspace_surfaces),
     SurfaceRoute(method="GET", path="workspace/credentials", handler=workspace_credentials),

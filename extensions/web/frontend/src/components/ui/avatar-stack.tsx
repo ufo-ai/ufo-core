@@ -1,6 +1,7 @@
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { BRAND_MARKS, BrandMark } from "@/lib/brandMark";
 import { cn } from "@/lib/cn";
+import { FaceCircle } from "@/lib/memberFace";
 
 export type AvatarStackPerson = {
   name: string;
@@ -51,16 +52,24 @@ export function AvatarStack({ people }: { people: readonly AvatarStackPerson[] }
 
 function Face({ person, overlapped }: { person: AvatarStackPerson; overlapped: boolean }) {
   const mark = person.company ? vendoredMark(person.company) : null;
-  return (
-    <Avatar title={person.name} className={cn(CIRCLE, overlapped && OVERLAP)}>
-      <AvatarFallback aria-hidden>
-        {mark ? (
+  const circle = cn(CIRCLE, overlapped && OVERLAP);
+  if (mark) {
+    return (
+      <Avatar title={person.name} className={circle}>
+        <AvatarFallback aria-hidden>
           <BrandMark provider={mark} className="size-full rounded-full" />
-        ) : (
-          initials(person.name)
-        )}
-      </AvatarFallback>
-    </Avatar>
+        </AvatarFallback>
+      </Avatar>
+    );
+  }
+  return (
+    <FaceCircle
+      name={person.name}
+      photo={null}
+      tint={person.name}
+      title={person.name}
+      className={circle}
+    />
   );
 }
 
@@ -69,11 +78,3 @@ function vendoredMark(company: string): string | null {
   return BRAND_MARKS.has(slug) ? slug : null;
 }
 
-function initials(name: string): string {
-  const words = name.trim().split(/\s+/);
-  const ends = words.length > 1 ? [words[0], words[words.length - 1]] : words;
-  return ends
-    .map((word) => word.slice(0, 1))
-    .join("")
-    .toUpperCase();
-}

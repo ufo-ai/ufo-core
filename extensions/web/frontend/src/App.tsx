@@ -8,7 +8,7 @@ import {
   IconUsers,
 } from "@tabler/icons-react";
 
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { MemberAvatar, faceName } from "@/lib/memberFace";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -407,12 +407,10 @@ function WorkspaceSidebar({
         </li>
       </ul>
       <footer className="flex shrink-0 items-center gap-sm px-lg">
-        <Avatar>
-          <AvatarFallback>{member.email.slice(0, 1).toUpperCase()}</AvatarFallback>
-        </Avatar>
+        <MemberAvatar face={member} />
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-label">{member.email}</span>
-          <span className="text-small text-ink-soft">{member.admin ? "Admin" : "Member"}</span>
+          <span className="truncate text-label">{faceName(member)}</span>
+          <span className="truncate text-small text-ink-soft">{member.email}</span>
         </span>
         <SchemePick />
         <button

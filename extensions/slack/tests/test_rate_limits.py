@@ -146,13 +146,13 @@ async def test_the_ladder_stops_at_its_wait_budget_before_its_attempt_cap(
 async def test_a_read_the_event_ack_waits_on_takes_one_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`ingest` and `interactive` await `_slack_user`, so a 429 there answers None at once. Sleeping
+    """`ingest` and `interactive` await `slack_user`, so a 429 there answers None at once. Sleeping
     the ladder would hold the route past Slack's three-second ack and earn a redelivery."""
     slept = _recorded_sleeps(monkeypatch)
     transport, sent = _replies([LIMITED_FOR_5])
     _patch_httpx(monkeypatch, transport)
 
-    assert await slack._slack_user("xoxb-1", "U1") is None
+    assert await slack.slack_user("xoxb-1", "U1") is None
     assert len(sent) == 1
     assert slept == []
 

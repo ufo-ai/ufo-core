@@ -212,6 +212,7 @@ WORKSPACE_FACT_NAME = "sample_capability"
 WORKSPACE_FACT_KEY = "workspace_fact:held"
 WORKSPACE_FACT_LINE = "Sample: this workspace set up the sample extension's capability."
 JOB_KEY = "job:ran"
+JOB_SURFACE_KEY = "job:surface_links"
 TRAJECTORY_KEY = "job:trajectories"
 PROPOSAL_KEY = "job:proposal"
 JOB_WORKSPACE_KEY = "job:workspace_file"
@@ -392,6 +393,9 @@ async def _note(ctx: ToolContext, args: NoteInput) -> ToolResult:
 
 async def _tick(ctx: ExtensionContext) -> None:
     await ctx.store.put(JOB_KEY, {"ran": True, "home_url": ctx.home_url()})
+    linked = await ctx.installations.linked_members(SURFACE_NAME)
+    links: list[JsonValue] = [link for link in sorted(linked.values())]
+    await ctx.store.put(JOB_SURFACE_KEY, {"linked": links})
     if ctx.corpus is None:
         return
     trajectories = await ctx.trajectories()

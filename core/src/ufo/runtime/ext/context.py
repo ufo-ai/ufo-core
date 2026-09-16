@@ -74,6 +74,12 @@ from ufo.runtime.hub import LiveFrame
 from ufo.runtime.indexing import EmbedClient, IndexBackend
 from ufo.runtime.kinds.governance import Governance, prompt_digest
 from ufo.runtime.media.artifact_url import is_text_media, mint_image_preview_url
+from ufo.runtime.member_profiles import (
+    MemberProfile,
+    MemberProfiles,
+    ProfileSource,
+    read_profiles,
+)
 from ufo.runtime.search import SearchProvider
 from ufo.runtime.seats import workspace_domain
 from ufo.runtime.sources.sync import (
@@ -676,6 +682,29 @@ def seated_member_workspaces() -> WorkspaceCandidates:
         )
 
     return owner_candidates(with_a_seated_member)
+
+
+def undrawn_surface_member_workspaces(surface: str) -> WorkspaceCandidates:
+    """Workspaces where a member this surface knows is drawn by neither a name nor a picture of
+    their own, for a surface offering what its own host knows them as. The set empties as they
+    fill, so the job stops opening ticks against a workspace it has nothing left to offer."""
+
+    def with_an_undrawn_linked_member() -> sa.Select[tuple[UUID]]:
+        return (
+            sa.select(tables.surface_identity.c.workspace_id)
+            .join(tables.member, tables.member.c.id == tables.surface_identity.c.member_id)
+            .where(
+                tables.surface_identity.c.surface == surface,
+                tables.member.c.seated_at.is_not(None),
+                sa.or_(
+                    tables.member.c.display_name.is_(None),
+                    tables.member.c.photo_digest.is_(None),
+                ),
+            )
+            .distinct()
+        )
+
+    return owner_candidates(with_an_undrawn_linked_member)
 
 
 def feed_workspaces(slots: frozenset[str]) -> WorkspaceCandidates:
@@ -1299,6 +1328,49 @@ async def _member_blob_text(blob: WorkspaceBlobStore, key: str) -> str:
 
 
 @dataclass(frozen=True)
+class MemberProfileWrites:
+    """A handler's reach over what members are called and pictured. The store stays module-private
+    (`_blob`), so the only operations exposed are reading who is still undrawn and offering a name
+    or a picture for one of them — never an arbitrary blob write, and never another member's row
+    cleared.
+
+    An offer is a candidate, not a decision: core admits it only where no stronger source already
+    answered, so a job that runs every tick cannot walk over the name a member chose. The bytes are
+    whatever the source hosts; core normalizes and stores them.
+
+    The workspace is the ambient one at each call, never one bound when the context was built, so
+    the one handle serves whichever workspace the dispatcher bound for this tick."""
+
+    _blob: WorkspaceBlobStore
+
+    async def undrawn(self) -> tuple[MemberProfile, ...]:
+        """Every member of this workspace whose name or picture no member has set, so a prefill job
+        asks its source about exactly those and leaves the rest alone."""
+        return tuple(
+            profile
+            for profile in await read_profiles(ws_current().workspace_id)
+            if profile.name_source != "member" or profile.photo_source != "member"
+        )
+
+    async def suggest(
+        self,
+        member_id: UUID,
+        *,
+        source: ProfileSource,
+        name: str | None = None,
+        photo: bytes | None = None,
+    ) -> None:
+        """Offer this member a name, a picture, or both, under the source that derived them. Each
+        is admitted on its own, so a source that knows a name but hosts no picture fills one and
+        leaves the other for whoever does."""
+        profiles = MemberProfiles(workspace_id=ws_current().workspace_id, blob=self._blob)
+        if name is not None:
+            await profiles.set_name(member_id, name, source)
+        if photo is not None:
+            await profiles.set_photo(member_id, photo, source)
+
+
+@dataclass(frozen=True)
 class ExtensionContext:
     store: ScopedStore
     credentials: CredentialAccess
@@ -1324,6 +1396,7 @@ class ExtensionContext:
     member_context_read_allowed: bool = False
     member_context_member_id: UUID | None = None
     member_context_blob: WorkspaceBlobStore | None = None
+    profiles: MemberProfileWrites | None = None
     artifact_token_secret: str = ""
     own_key_slots: tuple[str, ...] = ()
     """Every key slot a model of this deploy keys from. A handler deciding what the balance gate is
@@ -2946,6 +3019,7 @@ def context_for(
         search=search,
         pages=pages,
         corpus=None if blob is None else TrajectoryCorpus(blob),
+        profiles=None if blob is None else MemberProfileWrites(blob),
         files=None if sandboxes is None else ConversationFiles(sandboxes),
         probes=probes,
         invoker=invoker,

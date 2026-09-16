@@ -53,6 +53,7 @@ from ufo.runtime.ext.manifest import (
     Manifest,
     PageChangeBatch,
 )
+from ufo.runtime.gravatar import GRAVATAR_JOB
 from ufo.runtime.indexing import OWNER_KIND_PAGE, Chunk, IndexScope, TextChunker
 from ufo.runtime.jobs import (
     CORE_EXTENSION,
@@ -5320,6 +5321,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         INDEX_REAP_JOB,
         JOB_DAY_ROLLUP_JOB,
         PRODUCT_CENSUS_JOB,
+        GRAVATAR_JOB,
     ]
     assert all(spec.schedule is not None for spec in specs)
     keys = {binding.key for binding in bindings_from((), specs)}
@@ -5331,6 +5333,7 @@ def test_source_sync_and_turn_dispatch_register_as_core_jobs(
         f"{CORE_EXTENSION}:{INDEX_REAP_JOB}",
         f"{CORE_EXTENSION}:{JOB_DAY_ROLLUP_JOB}",
         f"{CORE_EXTENSION}:{PRODUCT_CENSUS_JOB}",
+        f"{CORE_EXTENSION}:{GRAVATAR_JOB}",
     }
 
 

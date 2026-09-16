@@ -637,12 +637,18 @@ class SlackUser:
     tag and the email the DM member resolution needs. The email anchors member identity, so it is
     carried only when Slack has confirmed it (`is_email_confirmed`) — an unconfirmed address is no
     email at all. `team_id` is the Slack org the user belongs to, which is what tells a member of
-    the installed workspace from a guest another org shares a Connect channel with."""
+    the installed workspace from a guest another org shares a Connect channel with.
+
+    `image_url` is carried only for an account whose picture its own member uploaded
+    (`is_custom_image`): Slack answers a generated initials pattern for everyone else, and a
+    workspace filling its portal from Slack wants the pictures its people chose, not Slack's
+    drawing of the ones who chose none."""
 
     name: str | None
     email: str | None
     timezone: str | None
     team_id: str | None
+    image_url: str | None = None
 
 
 class SlackConversation(BaseModel):
@@ -766,7 +772,7 @@ class SlackConversationSearch:
         for user_id in {uid for ids in member_ids.values() for uid in ids}:
             if user_id == self.bot_user_id:
                 continue
-            resolved = await _slack_user(self.bot_token, user_id)
+            resolved = await slack_user(self.bot_token, user_id)
             labels[user_id] = self._label(resolved, user_id)
         people = {
             convo_id: tuple(labels[uid] for uid in ids if uid in labels)
@@ -1776,7 +1782,7 @@ async def _folds_into_live_turn(ctx: SurfaceContext, bot_token: str, inbound: In
     live = await ctx.absorbing_turn(inbound.conversation_id)
     if live is None:
         return False
-    sender = await _slack_user(bot_token, inbound.slack_user_id)
+    sender = await slack_user(bot_token, inbound.slack_user_id)
     speaker = await _resolve_member(ctx, inbound.slack_user_id, inbound.is_dm, sender)
     if speaker is None:
         return False
@@ -1811,7 +1817,7 @@ async def _admit_inbound(
     marker = mint_marker()
     names = SlackNames(bot_token)
     sender, context, source, mentioned = await asyncio.gather(
-        _slack_user(bot_token, inbound.slack_user_id),
+        slack_user(bot_token, inbound.slack_user_id),
         _ambient_context(ctx, bot_token, inbound, identity, marker),
         _slack_permalink(bot_token, inbound.queue_key.partition(":")[0], inbound.ts),
         names.of([inbound.body], [inbound.slack_user_id]),
@@ -2026,11 +2032,11 @@ async def _participating_conversation(ctx: SurfaceContext, queue_key: str) -> UU
     return conversation_id
 
 
-async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:
-    """One best-effort users.info read per inbound, feeding both the turn's <context> tag and the
-    DM member link. It shares the ambient fetch's short timeout so ingest answers inside Slack's
-    event ack; a failed read logs and returns None — the turn is admitted without sender context,
-    and only an unlinked DM (which cannot resolve its member) fails loud instead."""
+async def slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:
+    """One best-effort users.info read, feeding the turn's <context> tag, the DM member link, and
+    the profile prefill. It shares the ambient fetch's short timeout so ingest answers inside
+    Slack's event ack; a failed read logs and returns None — the turn is admitted without sender
+    context, and only an unlinked DM (which cannot resolve its member) fails loud instead."""
     try:
         async with httpx.AsyncClient(timeout=AMBIENT_FETCH_TIMEOUT_SECONDS) as client:
             payload = await _slack_ok(
@@ -2054,11 +2060,14 @@ async def _slack_user(bot_token: str, slack_user_id: str) -> SlackUser | None:
     name = user.get("real_name") or user.get("name")
     timezone = user.get("tz")
     team_id = user.get("team_id")
+    image = profile.get("image_512") if isinstance(profile, dict) else None
+    chosen = isinstance(profile, dict) and profile.get("is_custom_image") is True
     return SlackUser(
         name=name if isinstance(name, str) and name else None,
         email=email.strip() if isinstance(email, str) and email.strip() else None,
         timezone=timezone if isinstance(timezone, str) and timezone else None,
         team_id=team_id if isinstance(team_id, str) and team_id else None,
+        image_url=image if chosen and isinstance(image, str) and image else None,
     )
 
 
@@ -2182,7 +2191,7 @@ class SlackNames:
         raw: object = None
         team = ""
         if url == SLACK_USERS_INFO_URL:
-            user = await _slack_user(self.bot_token, id_)
+            user = await slack_user(self.bot_token, id_)
             raw = None if user is None else user.name
             team = "" if user is None or user.team_id is None else user.team_id
         else:
@@ -3747,7 +3756,7 @@ async def _handle_answer_submit(
         )
         return JSONResponse({"ok": True, "ignored": True})
     sender, answered_at = await asyncio.gather(
-        _slack_user(bot_token, interaction.slack_user_id),
+        slack_user(bot_token, interaction.slack_user_id),
         _slack_permalink(bot_token, interaction.channel, interaction.message_ts),
     )
     if member_id is None:

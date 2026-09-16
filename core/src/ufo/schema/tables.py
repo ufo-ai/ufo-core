@@ -40,12 +40,24 @@ member = sa.Table(
     sa.Column("is_admin", sa.Boolean, nullable=False, server_default=sa.false()),
     sa.Column("seated_at", sa.DateTime(timezone=True), nullable=True, server_default=sa.func.now()),
     sa.Column("timezone", sa.Text, nullable=True),
+    sa.Column("display_name", sa.Text, nullable=True),
+    sa.Column("display_name_source", sa.Text, nullable=True),
+    sa.Column("photo_digest", sa.Text, nullable=True),
+    sa.Column("photo_source", sa.Text, nullable=True),
     sa.Column("invited_at", sa.DateTime(timezone=True), nullable=True),
     sa.Column("invited_by", sa.Uuid, sa.ForeignKey("member.id"), nullable=True),
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     sa.UniqueConstraint("workspace_id", "email"),
     sa.UniqueConstraint("workspace_id", "id", name="member_workspace_identity"),
+    sa.CheckConstraint(
+        "display_name_source is null or display_name_source in ('member', 'slack', 'gravatar')",
+        name="member_display_name_source",
+    ),
+    sa.CheckConstraint(
+        "photo_source is null or photo_source in ('member', 'slack', 'gravatar')",
+        name="member_photo_source",
+    ),
 )
 
 sa.Index("member_email", member.c.email)

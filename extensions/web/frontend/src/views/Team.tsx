@@ -18,6 +18,7 @@ import {
 } from "@/kernel/panel";
 import { DataTable } from "@/kernel/table";
 import { postAction, postIntent } from "@/lib/api";
+import { MemberAvatar, faceName } from "@/lib/memberFace";
 import { useMainAgent } from "@/lib/mainAgent";
 import type { ActionView, Member } from "@/lib/types";
 
@@ -42,7 +43,15 @@ const MANAGED_COLUMNS = [...MEMBER_COLUMNS, ""];
 function MemberCells({ member }: { member: Member }) {
   return (
     <>
-      <Td>{member.email}</Td>
+      <Td>
+        <span className="flex min-w-0 items-center gap-sm">
+          <MemberAvatar face={member} />
+          <span className="flex min-w-0 flex-col">
+            <span className="truncate">{faceName(member)}</span>
+            <span className="truncate text-small text-ink-soft">{member.email}</span>
+          </span>
+        </span>
+      </Td>
       <TdFact>{member.admin ? "Admin" : "Member"}</TdFact>
       <TdFact>{member.seated ? "Active" : "Disabled"}</TdFact>
     </>
@@ -134,9 +143,11 @@ export function Team({
       {search ? <PageToolbar /> : null}
       <Panel state={state}>
         {({ members, can_manage }) => {
+          const wanted = query.trim().toLowerCase();
           const found = members.filter(
             (entry) =>
-              entry.email.toLowerCase().includes(query.trim().toLowerCase()) &&
+              (entry.email.toLowerCase().includes(wanted) ||
+                faceName(entry).toLowerCase().includes(wanted)) &&
               (!role || (role === ADMINS) === Boolean(entry.admin)),
           );
           return (

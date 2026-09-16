@@ -367,8 +367,8 @@ test("the sidebar's foot states who is signed in and offers the way back out", a
   const sidebar = await openWorkspaceColumn();
   const foot = sidebar.querySelector("footer")!;
   expect(foot.querySelector("[data-slot=avatar-fallback]")!.textContent).toBe("M");
+  expect(within(foot).getByText("member")).toBeTruthy();
   expect(within(foot).getByText(MEMBER.email)).toBeTruthy();
-  expect(within(foot).getByText("Member")).toBeTruthy();
 
   const went: string[] = [];
   vi.stubGlobal("location", { ...window.location, assign: (to: string) => went.push(to) });

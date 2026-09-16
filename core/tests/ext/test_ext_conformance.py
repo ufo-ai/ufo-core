@@ -1221,6 +1221,43 @@ async def test_job_fires_through_its_scoped_context(db: None) -> None:
 
 
 @pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
+async def test_a_job_reaches_the_surfaces_its_own_manifest_declares(db: None) -> None:
+    """A job is the only context built with no request and no turn behind it, so the surfaces its
+    manifest declares reach it from the binding or from nowhere. Without them every installation
+    read a job makes raises `UndeclaredSurface` on its first tick, and an extension whose whole job
+    is to ask its surface about its members never runs once."""
+    workspace_id = await _workspace()
+    await _seed_note(workspace_id)
+    member_id = uuid4()
+    async with workspace_tx() as connection:
+        await connection.execute(
+            sa.insert(tables.member).values(
+                id=member_id,
+                workspace_id=workspace_id,
+                email="linked@x.test",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+        await connection.execute(
+            sa.insert(tables.surface_identity).values(
+                workspace_id=workspace_id,
+                member_id=member_id,
+                surface=sample.SURFACE_NAME,
+                external_id="ext-job-1",
+                created_at=sa.func.now(),
+                updated_at=sa.func.now(),
+            )
+        )
+    manifest = _sample_manifest()
+    runner = JobRunner(bindings=bindings_from((manifest,), ()), manifests=(manifest,))
+    with ws(workspace_id):
+        await runner.fire(f"{manifest.name}:{sample.JOB_NAME}", workspace_id)
+        stored = await ScopedStore(extension=sample.NAME).get(sample.JOB_SURFACE_KEY)
+    assert stored == {"linked": ["ext-job-1"]}
+
+
+@pytest.mark.parametrize("database_url", ["sqlite"], indirect=True)
 async def test_onboarding_step_runs_through_its_scoped_context(db: None) -> None:
     workspace_id = await _workspace()
     manifest = _sample_manifest()

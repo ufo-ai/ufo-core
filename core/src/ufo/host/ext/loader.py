@@ -50,6 +50,7 @@ from ufo.host.kinds.credential_kind import (
     CredentialSpec,
 )
 from ufo.host.kinds.member_permissions import MEMBER_PERMISSION_OBJECT
+from ufo.host.kinds.member_profiles import MEMBER_PROFILE_OBJECT
 from ufo.host.kinds.members import MEMBER_OBJECT
 from ufo.host.kinds.surface_kind import (
     SURFACE_DESCRIPTION,
@@ -124,6 +125,7 @@ CORE_OBJECT_KINDS: tuple[BoundKind, ...] = (
     BoundKind(kind=TURN_OBJECT, extension=None, context=None),
     BoundKind(kind=MEMBER_OBJECT, extension=None, context=None),
     BoundKind(kind=MEMBER_PERMISSION_OBJECT, extension=None, context=None),
+    BoundKind(kind=MEMBER_PROFILE_OBJECT, extension=None, context=None),
     BoundKind(kind=WORKSPACE_OBJECT, extension=None, context=None),
 )
 EXTENSION_ENTRY_POINT_GROUP = "ufo.extension"

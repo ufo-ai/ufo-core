@@ -36,6 +36,9 @@ from ufo.runtime.ext.context import (
     stored_key_workspaces as stored_key_workspaces,
 )
 from ufo.runtime.ext.context import (
+    undrawn_surface_member_workspaces as undrawn_surface_member_workspaces,
+)
+from ufo.runtime.ext.context import (
     unseeded_agent_workspaces as unseeded_agent_workspaces,
 )
 from ufo.runtime.ext.context import (
