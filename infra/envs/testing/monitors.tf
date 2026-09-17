@@ -77,18 +77,18 @@ resource "datadog_monitor" "turn_dispatch_wait" {
   tags = ["env:testing", "managed-by:terraform", "team:ufo"]
 }
 
-# Postgres never sees a connection that never arrives, so no database-side metric can show this; the
-# count is taken in `db._opened`, where the wait happens.
+# Postgres never sees a connection that never arrives, so the count is taken in `db._opened`. At
+# rest a lost dial lands 1-6 times per 15-minute window; a real outage lands 900+.
 resource "datadog_monitor" "db_tx_unavailable" {
   name    = "ufo testing could not reach the database"
   type    = "query alert"
-  query   = "sum(last_15m):sum:ufo.db_tx_unavailable_total{env:testing}.as_count() >= 1"
+  query   = "sum(last_15m):sum:ufo.db_tx_unavailable_total{env:testing}.as_count() >= 10"
   message = "A transaction never opened: {{value}} in 15 minutes. This is a turn or job that ended with no answer. Read `db_pool_exhausted_total` first — it is what says whether the fleet hit its own ceiling — then RDS reachability and connection count."
 
   priority = 4
 
   monitor_thresholds {
-    critical = 1
+    critical = 10
   }
 
   require_full_window = false
